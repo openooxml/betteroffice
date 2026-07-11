@@ -1,0 +1,11 @@
+[package]
+name = "xlsx-render"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Grid layout and target-agnostic display list. Never imports canvas, DOM, or any raster backend."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+xlsx-model = { path = "../xlsx-model" }

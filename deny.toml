@@ -18,6 +18,9 @@ confidence-threshold = 0.9
 [advisories]
 version = 2
 yanked = "warn"
+ignore = [
+  { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser, transitive via rustybuzz; migration tracked to fontations" },
+]
 
 [bans]
 multiple-versions = "warn"

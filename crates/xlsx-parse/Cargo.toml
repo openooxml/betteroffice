@@ -1,0 +1,11 @@
+[package]
+name = "xlsx-parse"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Streaming SpreadsheetML parser and serializer (quick-xml) building the xlsx-model workbook."
+
+[dependencies]
+quick-xml = "0.41"
+xlsx-model = { path = "../xlsx-model" }
