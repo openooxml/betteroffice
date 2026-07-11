@@ -1,0 +1,10 @@
+[package]
+name = "ooxml-opc"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "OPC (OOXML zip) container reader/writer with zip-bomb and path-traversal guards enforced by construction."
+
+[dependencies]
+zip = { version = "8", default-features = false, features = ["deflate"] }
