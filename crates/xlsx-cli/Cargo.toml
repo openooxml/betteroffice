@@ -1,0 +1,18 @@
+[package]
+name = "xlsx-cli"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Headless server-rendering CLI for the OpenOOXML xlsx core: .xlsx -> PNG."
+
+[[bin]]
+name = "xlsx"
+path = "src/main.rs"
+
+[dependencies]
+ooxml-opc = { path = "../ooxml-opc" }
+xlsx-parse = { path = "../xlsx-parse" }
+xlsx-model = { path = "../xlsx-model" }
+xlsx-render = { path = "../xlsx-render" }
+xlsx-raster = { path = "../xlsx-raster" }
