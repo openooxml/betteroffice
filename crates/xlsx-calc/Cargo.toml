@@ -1,0 +1,10 @@
+[package]
+name = "xlsx-calc"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Formula parser, dependency graph, and recalc engine. Reads cells only through xlsx-model's CellProvider trait."
+
+[dependencies]
+xlsx-model = { path = "../xlsx-model" }
