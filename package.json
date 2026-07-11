@@ -1,0 +1,21 @@
+{
+  "name": "betteroffice",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "bun run --filter './apps/web' dev",
+    "build": "bun run --filter './apps/web' build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "preview": "bun run --filter './apps/web' preview",
+    "deploy": "bun run --filter './apps/web' deploy",
+    "cf-typegen": "bun run --filter './apps/web' cf-typegen"
+  },
+  "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git"
+  }
+}
