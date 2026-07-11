@@ -8,9 +8,10 @@ Entries are appended as new third-party material is incorporated.
 
 ## eigenpal docx editor
 
-Substantial portions of this repository derive from the eigenpal docx editor
-(upstream repository: https://github.com/sorenlouv/docx-editor), published on
-npm as the following packages (last release: 1.9.0):
+The API design and portions of the TypeScript packages in this repository
+derive from the eigenpal docx editor (upstream repository:
+https://github.com/sorenlouv/docx-editor), published on npm as the following
+packages (last release: 1.9.0):
 
 - `@eigenpal/docx-editor-core`
 - `@eigenpal/docx-editor-react`
