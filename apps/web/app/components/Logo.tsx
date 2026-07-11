@@ -1,0 +1,67 @@
+// the betteroffice mark, stroke follows currentColor
+export function Logo({
+  height = 20,
+  className,
+}: {
+  height?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      height={height}
+      width={(height / 206) * 276}
+      viewBox="0 0 276 206"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-hidden="true"
+    >
+      <path
+        d="M130.19 13.5L130.273 14.5H128.323L126.99 13.5H130.19Z"
+        stroke="currentColor"
+        strokeWidth="5"
+        strokeLinecap="round"
+      />
+      <path
+        d="M197.227 188.5L198.727 203.5H196.643L194.393 188.5H197.227Z"
+        stroke="currentColor"
+        strokeWidth="5"
+        strokeLinecap="round"
+      />
+      <mask id="bo-mask-1" fill="white">
+        <path d="M151.169 206L153.169 193L140.169 195L141.169 206H151.169Z" />
+      </mask>
+      <path
+        d="M153.169 193L172.936 196.041L177.083 169.086L150.128 173.233L153.169 193ZM151.169 206V226H168.327L170.936 209.041L151.169 206ZM141.169 206L121.251 207.811L122.905 226H141.169V206ZM140.169 195L137.128 175.233L118.549 178.091L120.251 196.811L140.169 195ZM153.169 193L133.401 189.959L131.401 202.959L151.169 206L170.936 209.041L172.936 196.041L153.169 193ZM151.169 206V186H141.169V206V226H151.169V206ZM141.169 206L161.087 204.189L160.087 193.189L140.169 195L120.251 196.811L121.251 207.811L141.169 206ZM140.169 195L143.21 214.767L156.21 212.767L153.169 193L150.128 173.233L137.128 175.233L140.169 195Z"
+        fill="currentColor"
+        mask="url(#bo-mask-1)"
+      />
+      <path d="M151.169 194.5L123.669 12" stroke="currentColor" strokeWidth="20" />
+      <path d="M132.49 100L32.4896 100" stroke="currentColor" strokeWidth="20" />
+      <path
+        d="M116.49 10H11.6688L40.4897 196H143.169"
+        stroke="currentColor"
+        strokeWidth="20"
+      />
+      <path
+        d="M263.669 196L233.669 10H122.169L148.669 196H263.669Z"
+        stroke="currentColor"
+        strokeWidth="20"
+      />
+      <mask id="bo-mask-2" fill="white">
+        <path d="M163.49 3.05176e-05H166.99L166.49 20L163.49 3.05176e-05Z" />
+      </mask>
+      <path
+        d="M166.99 3.05176e-05L171.988 0.124991L172.116 -4.99997H166.99V3.05176e-05ZM163.49 3.05176e-05V-4.99997H157.684L158.545 0.741733L163.49 3.05176e-05ZM166.49 20L161.545 20.7417L171.488 20.125L166.49 20ZM166.99 3.05176e-05V-4.99997H163.49V3.05176e-05V5.00003H166.99V3.05176e-05ZM163.49 3.05176e-05L158.545 0.741733L161.545 20.7417L166.49 20L171.434 19.2583L168.434 -0.741672L163.49 3.05176e-05ZM166.49 20L171.488 20.125L171.988 0.124991L166.99 3.05176e-05L161.991 -0.12493L161.491 19.8751L166.49 20Z"
+        fill="currentColor"
+        mask="url(#bo-mask-2)"
+      />
+      <path
+        d="M120.99 11.9502V13.5H117.99V5.09277L120.99 11.9502Z"
+        stroke="currentColor"
+        strokeWidth="5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}

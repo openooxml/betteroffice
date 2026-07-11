@@ -4,6 +4,98 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@theme {
+  --color-bg: #ffffff;
+  --color-surface: #fafafa;
+  --color-fg: #141414;
+  --color-ink: #5c5c5c;
+  --color-acc: #059669;
+  --color-dim: #8f8f8f;
+  --color-faint: #c9c9c9;
+  --color-line: rgb(0 0 0 / 0.1);
+  --color-line-soft: rgb(0 0 0 / 0.055);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: var(--color-fg);
+    color: var(--color-bg);
+  }
+
+  :focus-visible {
+    outline: 1px solid var(--color-fg);
+    outline-offset: 3px;
+    border-radius: 1px;
+  }
+
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+    font-feature-settings: "liga" 0;
+  }
+}
+
+/* registration marks on the section rails — no utility for pseudo content */
+.sec::before,
+.sec::after {
+  content: "+";
+  position: absolute;
+  top: -0.72em;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1;
+  color: var(--color-faint);
+  background: var(--color-bg);
+  padding: 2px 1px;
+  user-select: none;
+}
+
+.sec::before {
+  left: -0.34em;
+}
+
+.sec::after {
+  right: -0.34em;
+}
+
+@media (max-width: 44rem) {
+  .sec::before,
+  .sec::after {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  * {
+    transition: none !important;
+  }
+}
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -24,27 +116,6 @@
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
   --radius: 0.625rem;
-}
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
 }
 
 @theme inline {
@@ -70,13 +141,4 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-}
-
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground antialiased;
-  }
 }
