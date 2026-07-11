@@ -28,3 +28,39 @@ jobs:
 
       - name: Fail on high or critical advisories
         run: bun audit --audit-level=high
+
+  rust:
+    name: Rust gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Rust workspace
+        id: ws
+        run: echo "present=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.ws.outputs.present == 'true'
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.ws.outputs.present == 'true'
+
+      - name: Format check
+        if: steps.ws.outputs.present == 'true'
+        run: cargo fmt --check
+
+      - name: Clippy
+        if: steps.ws.outputs.present == 'true'
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        if: steps.ws.outputs.present == 'true'
+        run: cargo test
+
+      - name: License and advisory gate
+        if: steps.ws.outputs.present == 'true'
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses advisories sources
