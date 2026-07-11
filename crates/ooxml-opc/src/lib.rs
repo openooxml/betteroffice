@@ -44,7 +44,6 @@ pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             return Err(format!("unsafe zip entry path: {name}"));
         }
 
-        // one byte past the remaining budget proves a bomb without trusting size headers
         let remaining = MAX_TOTAL_UNCOMPRESSED_BYTES - total;
         let mut buf = Vec::new();
         entry
