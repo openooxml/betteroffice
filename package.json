@@ -10,6 +10,7 @@
     "deploy:docs": "bun run --filter './apps/docs' deploy",
     "build": "bun run --filter './apps/web' build",
     "typecheck": "bun run --filter '*' typecheck",
+    "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
     "preview": "bun run --filter './apps/web' preview",
     "deploy": "bun run --filter './apps/web' deploy",
     "cf-typegen": "bun run --filter './apps/web' cf-typegen"
