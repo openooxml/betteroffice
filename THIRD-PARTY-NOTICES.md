@@ -10,6 +10,7 @@ Entries are appended as new third-party material is incorporated.
 
 The API design and portions of the TypeScript packages in this repository
 derive from the eigenpal docx editor (upstream repository:
+https://github.com/eigenpal/docx-editor, mirrored at
 https://github.com/sorenlouv/docx-editor), published on npm as the following
 packages (last release: 1.9.0):
 
