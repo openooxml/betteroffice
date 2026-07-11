@@ -6,6 +6,8 @@
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",
+    "dev:docs": "bun run --filter './apps/docs' dev",
+    "deploy:docs": "bun run --filter './apps/docs' deploy",
     "build": "bun run --filter './apps/web' build",
     "typecheck": "bun run --filter '*' typecheck",
     "preview": "bun run --filter './apps/web' preview",

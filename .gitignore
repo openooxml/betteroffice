@@ -1,5 +1,6 @@
 node_modules/
 .next/
+.source/
 .open-next/
 .wrangler/
 .dev.vars
