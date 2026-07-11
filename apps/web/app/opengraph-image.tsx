@@ -4,7 +4,39 @@ export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 export const alt = "BetterOffice — The open-source office suite";
 
-// og card: logo mark, wordmark, one-liner on plain white
+// satori can't render <mask> as inline jsx, but resvg rasterizes a full svg
+// passed as a data-uri <img> — masks, dent overlay and all
+const LOGO_SVG = `<svg width="276" height="206" viewBox="0 0 276 206" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M130.19 13.5L130.273 14.5H128.323L126.99 13.5H130.19Z" stroke="black" stroke-width="5" stroke-linecap="round"/>
+<path d="M197.227 188.5L198.727 203.5H196.643L194.393 188.5H197.227Z" stroke="black" stroke-width="5" stroke-linecap="round"/>
+<mask id="path-3-inside-1_40_73" fill="white">
+<path d="M151.169 206L153.169 193L140.169 195L141.169 206H151.169Z"/>
+</mask>
+<path d="M153.169 193L172.936 196.041L177.083 169.086L150.128 173.233L153.169 193ZM151.169 206V226H168.327L170.936 209.041L151.169 206ZM141.169 206L121.251 207.811L122.905 226H141.169V206ZM140.169 195L137.128 175.233L118.549 178.091L120.251 196.811L140.169 195ZM153.169 193L133.401 189.959L131.401 202.959L151.169 206L170.936 209.041L172.936 196.041L153.169 193ZM151.169 206V186H141.169V206V226H151.169V206ZM141.169 206L161.087 204.189L160.087 193.189L140.169 195L120.251 196.811L121.251 207.811L141.169 206ZM140.169 195L143.21 214.767L156.21 212.767L153.169 193L150.128 173.233L137.128 175.233L140.169 195Z" fill="black" mask="url(#path-3-inside-1_40_73)"/>
+<path d="M151.169 194.5L139.491 117M123.669 12L134.82 86" stroke="black" stroke-width="20"/>
+<path d="M132.49 100L32.4896 100" stroke="black" stroke-width="20"/>
+<path d="M116.49 10H11.6688L40.4897 196H143.169" stroke="black" stroke-width="20"/>
+<path d="M114.669 10H233.669L263.669 196H148.669" stroke="black" stroke-width="20"/>
+<mask id="path-9-inside-2_40_73" fill="white">
+<path d="M163.49 3.05176e-05H166.99L166.49 20L163.49 3.05176e-05Z"/>
+</mask>
+<path d="M166.99 3.05176e-05L171.988 0.124991L172.116 -4.99997H166.99V3.05176e-05ZM163.49 3.05176e-05V-4.99997H157.684L158.545 0.741733L163.49 3.05176e-05ZM166.49 20L161.545 20.7417L171.488 20.125L166.49 20ZM166.99 3.05176e-05V-4.99997H163.49V3.05176e-05V5.00003H166.99V3.05176e-05ZM163.49 3.05176e-05L158.545 0.741733L161.545 20.7417L166.49 20L171.434 19.2583L168.434 -0.741672L163.49 3.05176e-05ZM166.49 20L171.488 20.125L171.988 0.124991L166.99 3.05176e-05L161.991 -0.12493L161.491 19.8751L166.49 20Z" fill="black" mask="url(#path-9-inside-2_40_73)"/>
+<path d="M120.99 11.9502V13.5H117.99V5.09277L120.99 11.9502Z" stroke="black" stroke-width="5" stroke-linecap="round"/>
+<mask id="path-12-inside-3_40_73" fill="white">
+<path d="M126.169 95L124.169 82L143.669 77.5L145.669 89.5L132.669 100.5L148.669 109.5L150.169 121.5L130.669 124.5L126.169 95Z"/>
+</mask>
+<path d="M124.169 82L119.672 62.5122L101.578 66.6877L104.401 85.0411L124.169 82ZM126.169 95L145.94 91.984L145.938 91.9714L145.936 91.9589L126.169 95ZM130.669 124.5L110.898 127.516L113.917 147.312L133.71 144.267L130.669 124.5ZM150.169 121.5L153.21 141.267L172.426 138.311L170.014 119.019L150.169 121.5ZM148.669 109.5L168.514 107.019L167.264 97.0126L158.474 92.0685L148.669 109.5ZM132.669 100.5L119.75 85.2323L97.7802 103.822L122.864 117.932L132.669 100.5ZM145.669 89.5L158.588 104.768L167.266 97.4249L165.397 86.212L145.669 89.5ZM143.669 77.5L163.397 74.212L159.9 53.2288L139.172 58.0122L143.669 77.5ZM124.169 82L104.401 85.0411L106.401 98.0411L126.169 95L145.936 91.9589L143.936 78.9589L124.169 82ZM126.169 95L106.398 98.016L110.898 127.516L130.669 124.5L150.44 121.484L145.94 91.984L126.169 95ZM130.669 124.5L133.71 144.267L153.21 141.267L150.169 121.5L147.128 101.733L127.628 104.733L130.669 124.5ZM150.169 121.5L170.014 119.019L168.514 107.019L148.669 109.5L128.823 111.981L130.323 123.981L150.169 121.5ZM148.669 109.5L158.474 92.0685L142.474 83.0685L132.669 100.5L122.864 117.932L138.864 126.932L148.669 109.5ZM132.669 100.5L145.588 115.768L158.588 104.768L145.669 89.5L132.75 74.2323L119.75 85.2323L132.669 100.5ZM145.669 89.5L165.397 86.212L163.397 74.212L143.669 77.5L123.941 80.788L125.941 92.788L145.669 89.5ZM143.669 77.5L139.172 58.0122L119.672 62.5122L124.169 82L128.666 101.488L148.166 96.9878L143.669 77.5Z" fill="black" mask="url(#path-12-inside-3_40_73)"/>
+</svg>`;
+
+const logoUri = `data:image/svg+xml,${encodeURIComponent(LOGO_SVG)}`;
+
+// abstract document rows echoing the hero's word-bar field, one emerald selection
+const ROWS: { widths: number[]; opacity: number; selected?: number[] }[] = [
+  { widths: [64, 96, 48, 110, 72, 88, 56], opacity: 0.9, selected: [3, 4] },
+  { widths: [88, 56, 120, 64, 96, 44, 76], opacity: 0.55 },
+  { widths: [52, 104, 68, 88, 48, 112], opacity: 0.3 },
+];
+
 export default function OpengraphImage() {
   return new ImageResponse(
     (
@@ -19,13 +51,74 @@ export default function OpengraphImage() {
           backgroundColor: "#ffffff",
           color: "#141414",
           fontFamily: "sans-serif",
+          position: "relative",
+          overflow: "hidden",
         }}
       >
+        <img
+          src={logoUri}
+          width={760}
+          height={567}
+          style={{
+            position: "absolute",
+            right: -170,
+            top: -80,
+            opacity: 0.045,
+            transform: "rotate(-6deg)",
+          }}
+        />
+
+        <img src={logoUri} width={150} height={112} style={{ marginBottom: 44 }} />
         <div style={{ fontSize: 84, fontWeight: 700, letterSpacing: -3 }}>
           BetterOffice
         </div>
-        <div style={{ fontSize: 34, color: "#5c5c5c", marginTop: 18 }}>
+        <div style={{ fontSize: 33, color: "#5c5c5c", marginTop: 16 }}>
           The open-source office suite — on engines built in Rust
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 16,
+            marginTop: 58,
+          }}
+        >
+          {ROWS.map((row, r) => (
+            <div
+              key={r}
+              style={{ display: "flex", gap: 12, opacity: row.opacity }}
+            >
+              {row.widths.map((w, i) => (
+                <div
+                  key={i}
+                  style={{
+                    width: w,
+                    height: 15,
+                    borderRadius: 8,
+                    backgroundColor: row.selected?.includes(i)
+                      ? "#059669"
+                      : "#e2e2e2",
+                    boxShadow: row.selected?.includes(i)
+                      ? "0 0 0 6px #d1fae5"
+                      : "none",
+                  }}
+                />
+              ))}
+              {row.selected ? (
+                <div
+                  style={{
+                    width: 4,
+                    height: 26,
+                    marginTop: -5,
+                    marginLeft: -4,
+                    borderRadius: 2,
+                    backgroundColor: "#141414",
+                  }}
+                />
+              ) : null}
+            </div>
+          ))}
         </div>
       </div>
     ),
