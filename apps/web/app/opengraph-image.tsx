@@ -30,13 +30,6 @@ const LOGO_SVG = `<svg width="276" height="206" viewBox="0 0 276 206" fill="none
 
 const logoUri = `data:image/svg+xml,${encodeURIComponent(LOGO_SVG)}`;
 
-// abstract document rows echoing the hero's word-bar field, one emerald selection
-const ROWS: { widths: number[]; opacity: number; selected?: number[] }[] = [
-  { widths: [64, 96, 48, 110, 72, 88, 56], opacity: 0.9, selected: [3, 4] },
-  { widths: [88, 56, 120, 64, 96, 44, 76], opacity: 0.55 },
-  { widths: [52, 104, 68, 88, 48, 112], opacity: 0.3 },
-];
-
 export default function OpengraphImage() {
   return new ImageResponse(
     (
@@ -74,51 +67,6 @@ export default function OpengraphImage() {
         </div>
         <div style={{ fontSize: 33, color: "#5c5c5c", marginTop: 16 }}>
           The open-source office suite — on engines built in Rust
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 16,
-            marginTop: 58,
-          }}
-        >
-          {ROWS.map((row, r) => (
-            <div
-              key={r}
-              style={{ display: "flex", gap: 12, opacity: row.opacity }}
-            >
-              {row.widths.map((w, i) => (
-                <div
-                  key={i}
-                  style={{
-                    width: w,
-                    height: 15,
-                    borderRadius: 8,
-                    backgroundColor: row.selected?.includes(i)
-                      ? "#059669"
-                      : "#e2e2e2",
-                    boxShadow: row.selected?.includes(i)
-                      ? "0 0 0 6px #d1fae5"
-                      : "none",
-                  }}
-                />
-              ))}
-              {row.selected ? (
-                <div
-                  style={{
-                    width: 4,
-                    height: 26,
-                    marginTop: -5,
-                    marginLeft: -4,
-                    borderRadius: 2,
-                    backgroundColor: "#141414",
-                  }}
-                />
-              ) : null}
-            </div>
-          ))}
         </div>
       </div>
     ),
