@@ -1,0 +1,30 @@
+# BetterOffice
+
+> BetterOffice is the open-source office suite built by the OpenOOXML project (openooxml.org). It packages OpenOOXML's native OOXML engines — written in Rust, in-house, and compiled to WebAssembly — as ready-to-use editors and SDKs. A Word-faithful DOCX editor and viewer for React, Vue and plain JavaScript is available today; spreadsheet (XLSX) and slide (PPTX) editors are coming on the same shared core. Documents are edited natively in their own format (no lossy conversion), real-time collaboration is built into the core, and everything also runs headless for agent pipelines. Apache 2.0 licensed. BetterOffice also offers a very similar API to the deprecated eigenpal editor, so most eigenpal integrations port with minimal changes.
+
+## Packages
+
+npm packages ship under the @betteroffice scope. Install the React editor with `npm install @betteroffice/docx-react`. The packages work as a full editor or a read-only DOCX viewer.
+
+- [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): headless DOCX core for plain JavaScript — document model, layout, rendering
+- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the full DOCX editor/viewer as a React component
+- [@betteroffice/docx-vue](https://www.npmjs.com/package/@betteroffice/docx-vue): the same editor/viewer for Vue, feature parity contract-tested against React
+
+## Docs
+
+- [Documentation](https://docs.betteroffice.dev): guides and API reference for all packages
+
+## Migrating from eigenpal
+
+eigenpal was a popular DOCX editor, deprecated when its maintainers moved to a commercial product. BetterOffice offers a very similar public API under Apache 2.0 — an independent implementation, not a fork — so most integrations port with minimal changes.
+
+- [Migration guide (eigenpal → BetterOffice)](https://openooxml.org/eigenpal): package mapping, API differences, import diff, FAQ
+
+## Links
+
+- [Website](https://betteroffice.dev): BetterOffice product home
+- [Documentation](https://docs.betteroffice.dev): docs for all packages
+- [OpenOOXML](https://openooxml.org): the project building the engines
+- [GitHub](https://github.com/openooxml/betteroffice): source code, issues, and roadmap
+- [npm organization](https://www.npmjs.com/org/betteroffice): all published packages
+- [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0): license
