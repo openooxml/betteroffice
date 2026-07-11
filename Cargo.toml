@@ -1,5 +1,3 @@
-# Rust workspace for the shared OOXML crates; format cores (docx/xlsx/pptx)
-# consume these as they move in. The JS/Bun workspace lives in package.json.
 [workspace]
 members = ["crates/*"]
 resolver = "3"

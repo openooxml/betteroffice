@@ -1,21 +1,13 @@
-//! OPC (OOXML package) container read/write, shared across format cores.
-//!
-//! Replaces jszip at the unzip/rezip trust boundary. The decompression budget
-//! (total inflated bytes + entry count) and path-traversal rejection are
-//! enforced here by construction, so a malicious package cannot exhaust memory
-//! or carry out-of-tree part names into a parser. These are pure functions
-//! unit-tested natively; each format's wasm boundary calls them directly.
+//! OPC (OOXML zip) container read/write shared across format cores, with
+//! decompression budget and path-traversal rejection enforced by construction.
 
 use std::io::{Cursor, Read, Write};
 
-/// A well-formed package stays far under this; a decompression bomb blows past it.
 const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
-/// No legitimate package carries this many parts.
 const MAX_ENTRY_COUNT: usize = 5000;
 
-/// Reject absolute, drive-letter, and any `..` entry name (checked on both
-/// separators, since producers may emit backslashes).
+/// Rejects absolute, drive-letter, and `..` entry names, on both separators.
 pub fn is_safe_entry_path(name: &str) -> bool {
     let normalized = name.replace('\\', "/");
     if normalized.starts_with('/') {
@@ -27,9 +19,8 @@ pub fn is_safe_entry_path(name: &str) -> bool {
     !normalized.split('/').any(|segment| segment == "..")
 }
 
-/// Extract every non-directory entry as `(path, bytes)`, enforcing the
-/// decompression budget and path-traversal guard. Reading is bounded by the
-/// remaining byte budget so a lying size header cannot force unbounded output.
+/// Extracts every non-directory entry as `(path, bytes)`, enforcing the
+/// decompression budget and traversal guard.
 pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut archive =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("bad zip: {e}"))?;
@@ -53,7 +44,7 @@ pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             return Err(format!("unsafe zip entry path: {name}"));
         }
 
-        // read at most (budget - total) + 1 bytes: one over the limit proves a bomb
+        // one byte past the remaining budget proves a bomb without trusting size headers
         let remaining = MAX_TOTAL_UNCOMPRESSED_BYTES - total;
         let mut buf = Vec::new();
         entry
@@ -73,9 +64,8 @@ pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(parts)
 }
 
-/// Write `(path, bytes)` entries into a deflated zip, in the given order.
-/// Entry names pass the same traversal guard as the read side, so a hostile
-/// part name cannot survive a round trip.
+/// Writes `(path, bytes)` entries into a deflated zip, in the given order;
+/// entry names pass the same traversal guard as the read side.
 pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
     let mut cursor = Cursor::new(Vec::new());
     {
@@ -139,8 +129,6 @@ mod tests {
 
     #[test]
     fn rejects_traversal_on_unzip() {
-        // build the zip directly, bypassing rezip_parts' write-side guard, to
-        // prove the read side rejects a traversal name a hostile producer smuggled in
         let mut cursor = Cursor::new(Vec::new());
         {
             let mut writer = zip::ZipWriter::new(&mut cursor);
