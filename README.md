@@ -1,23 +1,18 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
-    <img src=".github/assets/logo-light.svg" width="150" alt="BetterOffice">
-  </picture>
-</p>
-
-<h1 align="center">BetterOffice</h1>
-
-<p align="center">
-  The open-source office suite, built on native OOXML engines in Rust.
+  <a href="https://betteroffice.dev">
+    <img src="./.github/assets/header.svg" alt="BetterOffice: the open-source office suite, built on native OOXML engines in Rust" width="100%">
+  </a>
 </p>
 
 <p align="center">
-  <a href="https://betteroffice.dev">betteroffice.dev</a> ·
-  <a href="https://openooxml.org">openooxml.org</a> ·
-  <a href="LICENSE">Apache-2.0</a>
+  Documents, spreadsheets, and presentations — engines in Rust, editors in TypeScript, everything client-side.
 </p>
 
----
+<p align="center">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-4ade80.svg?style=flat-square" alt="license"></a>
+  <a href="https://betteroffice.dev"><img src="https://img.shields.io/badge/betteroffice.dev-0a0a0a?style=flat-square" alt="betteroffice.dev"></a>
+  <a href="https://openooxml.org"><img src="https://img.shields.io/badge/openooxml.org-0a0a0a?style=flat-square" alt="openooxml.org"></a>
+</p>
 
 ## Engines
 
