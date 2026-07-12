@@ -49,12 +49,15 @@ cla_should_skip() {
 # The leading @-mention notifies once; sticky-comment edits don't re-notify.
 cla_render_unsigned_comment() {
   local cla_url="$1" sign_phrase="$2" marker="$3" pr_author_login="$4"
+  local ccla_url="${cla_url%CLA.md}CCLA.md"
   cat <<EOF
 @${pr_author_login} thanks a lot for the contribution! Before we can merge it, we need your one-time signature on the [OpenOOXML Contributor License Agreement](${cla_url}). To sign, post a comment on this pull request with exactly:
 
 \`\`\`
 ${sign_phrase}
 \`\`\`
+
+Contributing as part of your job? Then please also have your employer sign the [Corporate CLA](${ccla_url}) — your signature covers you, theirs covers them.
 
 The check updates on its own once you have signed; you can also re-run it any time by commenting \`!cla-check\`.
 

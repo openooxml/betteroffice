@@ -129,6 +129,8 @@ case "$body" in *"I sign"*) ok=1 ;; *) ok=0 ;; esac
 assert_eq "includes the sign phrase" "1" "$ok"
 case "$body" in *'`!cla-check`'*) ok=1 ;; *) ok=0 ;; esac
 assert_eq "mentions the !cla-check keyword in a code span" "1" "$ok"
+case "$body" in *"https://e.x/CCLA.md"*) ok=1 ;; *) ok=0 ;; esac
+assert_eq "links the corporate CLA next to the individual one" "1" "$ok"
 case "$body" in *"<!-- m -->"*) ok=1 ;; *) ok=0 ;; esac
 assert_eq "includes sticky-comment marker" "1" "$ok"
 
