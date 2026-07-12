@@ -61,6 +61,12 @@ jobs:
         if: steps.pending.outputs.publishing == 'true'
         run: bun run build:packages
 
+      # changesets does not rewrite the workspace: protocol here, so pin it to
+      # concrete versions before publish (ephemeral checkout; source is unchanged).
+      - name: Pin workspace deps for publish
+        if: steps.pending.outputs.publishing == 'true'
+        run: node scripts/rewrite-workspace-deps.mjs
+
       - name: Release PR or publish
         uses: changesets/action@v1.9.0
         with:
