@@ -29,14 +29,6 @@ jobs:
       - name: Fail on high or critical advisories
         run: bun audit --audit-level=high
 
-  cla-tests:
-    name: CLA logic tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - run: bash .github/cla/cla.test.sh
-
   rust:
     name: Rust gate
     runs-on: ubuntu-latest

@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # Hermetic tests for .github/cla/cla.sh — no network, no git, no gh calls.
-# Run locally:  bash .github/cla/cla.test.sh
-# Run in CI:    same command, wired into .github/workflows/ci.yml.
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -78,19 +76,13 @@ assert_eq "second add appends carol" \
 
 echo
 echo "sign-once guarantee (the load-bearing test):"
-# Scenario: alice signed on PR #1. She opens PR #2, then later comments the
-# sign phrase again on PR #2 by mistake. The `cla_signed` gate must short-circuit
-# so we never re-append, never re-commit, never re-push.
 echo '{"signedContributors":[{"name":"alice","id":111,"signed_at":"2026-05-09T10:00:00Z","pull_request_no":1}]}' > "$SIGS"
 assert_true "returning signer recognized → caller skips append+push" \
   cla_signed 111 "$SIGS"
 
-# What if alice posts the sign phrase a SECOND time (duplicate sign)?
-# We test the gate: cla_signed returns true, so the orchestrator skips the
-# add+commit+push branch entirely.
 before_count=$(jq '.signedContributors | length' "$SIGS")
 if cla_signed 111 "$SIGS"; then
-  : # gate fired, no append happens
+  : # gate fired — no append
 else
   cla_add_signature "alice" 111 "would-not-happen" 99 "$SIGS"
 fi
@@ -100,9 +92,7 @@ assert_eq "duplicate sign comment is a no-op (count unchanged)" \
 
 echo
 echo "cla_org_member (mocked):"
-# Override the real function with a stub for hermetic testing. The stub
-# treats only "alice" and "carol" as openooxml members. Mirrors the real
-# function's contract: empty $org means "no org check, return 1."
+# hermetic stub: only alice and carol are members; empty $org returns 1
 cla_org_member() {
   [ -z "$2" ] && return 1
   case "$1" in
@@ -154,9 +144,7 @@ assert_eq "includes sticky-comment marker" "1" "$ok"
 
 echo
 echo "GraphQL PR-author extraction (regression guard):"
-# Sample response shaped exactly like cla_main's GraphQL query returns.
-# This catches the bug where field renames would silently break extraction
-# and let unsigned PRs through.
+# shaped like cla_main's query; a field rename would silently let unsigned PRs through
 gql_normal='{"data":{"repository":{"pullRequest":{"headRefOid":"abc123","author":{"login":"leandrotcawork","databaseId":99999}}}}}'
 assert_eq "headRefOid extracts" "abc123" \
   "$(echo "$gql_normal" | jq -r '.data.repository.pullRequest.headRefOid')"
@@ -165,17 +153,13 @@ assert_eq "author login extracts" "leandrotcawork" \
 assert_eq "author databaseId extracts" "99999" \
   "$(echo "$gql_normal" | jq -r '.data.repository.pullRequest.author.databaseId // empty')"
 
-# Edge case: PR from a deleted account (author is null in GraphQL).
 gql_deleted='{"data":{"repository":{"pullRequest":{"headRefOid":"def456","author":null}}}}'
 assert_eq "deleted-author login → empty" "" \
   "$(echo "$gql_deleted" | jq -r '.data.repository.pullRequest.author.login // empty')"
 assert_eq "deleted-author id → empty" "" \
   "$(echo "$gql_deleted" | jq -r '.data.repository.pullRequest.author.databaseId // empty')"
 
-# Bot-authored PR (Dependabot, Renovate, etc.). GraphQL returns Bot logins
-# without the "[bot]" suffix that REST/event payloads use, so cla_main has to
-# normalize. Verified against a real Dependabot PR (#308): GitHub returns
-# {"login":"dependabot","databaseId":49699333,"__typename":"Bot"}.
+# GraphQL returns Bot logins without the "[bot]" suffix (verified on a real dependabot PR)
 gql_bot='{"data":{"repository":{"pullRequest":{"headRefOid":"bot789","author":{"__typename":"Bot","login":"dependabot","databaseId":49699333}}}}}'
 assert_eq "bot author __typename extracts" "Bot" \
   "$(echo "$gql_bot" | jq -r '.data.repository.pullRequest.author.__typename // empty')"
@@ -184,7 +168,6 @@ assert_eq "bot author bare login (pre-normalization) extracts" "dependabot" \
 assert_eq "bot author databaseId extracts" "49699333" \
   "$(echo "$gql_bot" | jq -r '.data.repository.pullRequest.author.databaseId // empty')"
 
-# Bot-login normalization: append "[bot]" if missing so allowlist match works.
 normalize_bot_login() {
   local type="$1" login="$2"
   if [ "$type" = "Bot" ] && [[ "$login" != *"[bot]" ]]; then
