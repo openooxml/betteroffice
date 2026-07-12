@@ -1,0 +1,129 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Before explicit break",
+            "pmStart": 1,
+            "pmEnd": 22
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 23
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 12,
+            "width": 100,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "pageBreak",
+        "id": 1,
+        "pmStart": 15,
+        "pmEnd": 16
+      },
+      "measure": {
+        "kind": "pageBreak"
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "After explicit break",
+            "pmStart": 17,
+            "pmEnd": 37
+          }
+        ],
+        "attrs": {},
+        "pmStart": 17,
+        "pmEnd": 38
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 11,
+            "width": 90,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 3,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Forced onto page three",
+            "pmStart": 40,
+            "pmEnd": 62
+          }
+        ],
+        "attrs": {
+          "pageBreakBefore": true
+        },
+        "pmStart": 40,
+        "pmEnd": 63
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 20,
+            "width": 160,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

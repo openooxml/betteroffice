@@ -1,0 +1,46 @@
+{
+  "pages": [
+    {
+      "height": 1000,
+      "pageIndex": 0,
+      "primitives": [
+        {
+          "baselineY": 99.2,
+          "blockId": 0,
+          "color": "#000000",
+          "docEnd": 17,
+          "docStart": 1,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Portrait section",
+          "toLine": 1,
+          "width": 120,
+          "x": 80
+        }
+      ],
+      "width": 800
+    },
+    {
+      "height": 800,
+      "pageIndex": 1,
+      "primitives": [
+        {
+          "baselineY": 59.2,
+          "blockId": 2,
+          "color": "#000000",
+          "docEnd": 37,
+          "docStart": 20,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Landscape section",
+          "toLine": 1,
+          "width": 120,
+          "x": 120
+        }
+      ],
+      "width": 1000
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "image",
+        "id": 0,
+        "src": "anchored",
+        "width": 160,
+        "height": 160,
+        "anchor": {
+          "isAnchored": true,
+          "offsetH": 96,
+          "offsetV": 96
+        }
+      },
+      "measure": {
+        "kind": "image",
+        "width": 160,
+        "height": 160
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 1,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "wrapped",
+            "pmStart": 30,
+            "pmEnd": 37
+          }
+        ],
+        "pmStart": 30,
+        "pmEnd": 38
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 1,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          },
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 1,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          },
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 1,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24,
+            "floatSkipBefore": 40,
+            "leftOffset": 120
+          },
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 1,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          },
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 1,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          },
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 1,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 184
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "ooxml-text"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Shared OOXML text shaping, measurement, line breaking, and bidirectional text support."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+skrifa = "0.44"
+rustybuzz = "0.20"
+unicode-linebreak = "0.1"
+unicode-bidi = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

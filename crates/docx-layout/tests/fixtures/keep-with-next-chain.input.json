@@ -1,0 +1,316 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 0",
+            "pmStart": 1,
+            "pmEnd": 9
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 10
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 1,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 1",
+            "pmStart": 11,
+            "pmEnd": 19
+          }
+        ],
+        "attrs": {},
+        "pmStart": 11,
+        "pmEnd": 20
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 2",
+            "pmStart": 21,
+            "pmEnd": 29
+          }
+        ],
+        "attrs": {},
+        "pmStart": 21,
+        "pmEnd": 30
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 3,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 3",
+            "pmStart": 31,
+            "pmEnd": 39
+          }
+        ],
+        "attrs": {},
+        "pmStart": 31,
+        "pmEnd": 40
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 4,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 4",
+            "pmStart": 41,
+            "pmEnd": 49
+          }
+        ],
+        "attrs": {},
+        "pmStart": 41,
+        "pmEnd": 50
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 5,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 5",
+            "pmStart": 51,
+            "pmEnd": 59
+          }
+        ],
+        "attrs": {},
+        "pmStart": 51,
+        "pmEnd": 60
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 6,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler 6",
+            "pmStart": 61,
+            "pmEnd": 69
+          }
+        ],
+        "attrs": {},
+        "pmStart": 61,
+        "pmEnd": 70
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 80,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 7,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "KeepNext heading",
+            "pmStart": 71,
+            "pmEnd": 87
+          }
+        ],
+        "attrs": {
+          "keepNext": true
+        },
+        "pmStart": 71,
+        "pmEnd": 88
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 16,
+            "width": 120,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 8,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Following body",
+            "pmStart": 89,
+            "pmEnd": 103
+          }
+        ],
+        "attrs": {},
+        "pmStart": 89,
+        "pmEnd": 104
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 14,
+            "width": 150,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

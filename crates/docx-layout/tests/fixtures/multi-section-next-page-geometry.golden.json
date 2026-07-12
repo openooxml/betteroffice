@@ -1,0 +1,67 @@
+{
+  "pageGap": 20,
+  "pageSize": {
+    "h": 1000,
+    "w": 800
+  },
+  "pages": [
+    {
+      "fragments": [
+        {
+          "blockId": 0,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 24,
+          "kind": "paragraph",
+          "pmEnd": 18,
+          "pmStart": 1,
+          "toLine": 1,
+          "width": 640,
+          "x": 80,
+          "y": 80
+        }
+      ],
+      "margins": {
+        "bottom": 80,
+        "left": 80,
+        "right": 80,
+        "top": 80
+      },
+      "number": 1,
+      "size": {
+        "h": 1000,
+        "w": 800
+      }
+    },
+    {
+      "fragments": [
+        {
+          "blockId": 2,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 24,
+          "kind": "paragraph",
+          "pmEnd": 38,
+          "pmStart": 20,
+          "toLine": 1,
+          "width": 760,
+          "x": 120,
+          "y": 40
+        }
+      ],
+      "margins": {
+        "bottom": 40,
+        "left": 120,
+        "right": 120,
+        "top": 40
+      },
+      "number": 2,
+      "size": {
+        "h": 800,
+        "w": 1000
+      }
+    }
+  ]
+}

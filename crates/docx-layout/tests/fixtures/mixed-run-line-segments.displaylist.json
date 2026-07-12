@@ -1,0 +1,52 @@
+{
+  "pages": [
+    {
+      "height": 1056,
+      "pageIndex": 0,
+      "primitives": [
+        {
+          "baselineY": 128,
+          "blockId": 0,
+          "color": "#000000",
+          "docEnd": 7,
+          "docStart": 1,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Intro ",
+          "toLine": 2,
+          "width": 232,
+          "x": 96
+        },
+        {
+          "blockId": 0,
+          "docEnd": 9,
+          "docStart": 8,
+          "fromLine": 0,
+          "h": 40,
+          "kind": "image",
+          "relId": "inline-glyph",
+          "toLine": 2,
+          "w": 40,
+          "x": 376,
+          "y": 88
+        },
+        {
+          "baselineY": 155.2,
+          "blockId": 0,
+          "color": "#000000",
+          "docEnd": 26,
+          "docStart": 10,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "tail after break",
+          "toLine": 2,
+          "width": 180,
+          "x": 96
+        }
+      ],
+      "width": 816
+    }
+  ]
+}

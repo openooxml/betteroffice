@@ -1,0 +1,184 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "First paragraph",
+            "pmStart": 1,
+            "pmEnd": 16
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 17
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 15,
+            "width": 120,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 1,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Second paragraph",
+            "pmStart": 18,
+            "pmEnd": 34
+          }
+        ],
+        "attrs": {},
+        "pmStart": 18,
+        "pmEnd": 35
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 16,
+            "width": 130,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Third paragraph",
+            "pmStart": 36,
+            "pmEnd": 51
+          }
+        ],
+        "attrs": {},
+        "pmStart": 36,
+        "pmEnd": 52
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 15,
+            "width": 120,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  },
+  "layout": {
+    "pageGap": 20,
+    "pageSize": {
+      "h": 1056,
+      "w": 816
+    },
+    "pages": [
+      {
+        "fragments": [
+          {
+            "blockId": 0,
+            "carriedFromPrev": false,
+            "carriedToNext": false,
+            "fromLine": 0,
+            "height": 24,
+            "kind": "paragraph",
+            "pmEnd": 17,
+            "pmStart": 1,
+            "toLine": 1,
+            "width": 624,
+            "x": 96,
+            "y": 96
+          },
+          {
+            "blockId": 1,
+            "carriedFromPrev": false,
+            "carriedToNext": false,
+            "fromLine": 0,
+            "height": 24,
+            "kind": "paragraph",
+            "pmEnd": 35,
+            "pmStart": 18,
+            "toLine": 1,
+            "width": 624,
+            "x": 96,
+            "y": 120
+          },
+          {
+            "blockId": 2,
+            "carriedFromPrev": false,
+            "carriedToNext": false,
+            "fromLine": 0,
+            "height": 24,
+            "kind": "paragraph",
+            "pmEnd": 52,
+            "pmStart": 36,
+            "toLine": 1,
+            "width": 624,
+            "x": 96,
+            "y": 144
+          }
+        ],
+        "margins": {
+          "bottom": 96,
+          "footer": 96,
+          "header": 96,
+          "left": 96,
+          "right": 96,
+          "top": 96
+        },
+        "number": 1,
+        "size": {
+          "h": 1056,
+          "w": 816
+        }
+      }
+    ]
+  }
+}

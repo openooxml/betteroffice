@@ -1,0 +1,39 @@
+{
+  "pages": [
+    {
+      "height": 1056,
+      "pageIndex": 0,
+      "primitives": [
+        {
+          "baselineY": 115.2,
+          "blockId": 0,
+          "color": "#000000",
+          "docEnd": 12,
+          "docStart": 1,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Left column",
+          "toLine": 1,
+          "width": 200,
+          "x": 96
+        },
+        {
+          "baselineY": 115.2,
+          "blockId": 2,
+          "color": "#000000",
+          "docEnd": 26,
+          "docStart": 14,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Right column",
+          "toLine": 1,
+          "width": 200,
+          "x": 420
+        }
+      ],
+      "width": 816
+    }
+  ]
+}

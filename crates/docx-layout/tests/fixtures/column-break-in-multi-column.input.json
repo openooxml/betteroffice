@@ -1,0 +1,98 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Left column",
+            "pmStart": 1,
+            "pmEnd": 12
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 13
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 11,
+            "width": 200,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "columnBreak",
+        "id": 1,
+        "pmStart": 12,
+        "pmEnd": 13
+      },
+      "measure": {
+        "kind": "columnBreak"
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Right column",
+            "pmStart": 14,
+            "pmEnd": 26
+          }
+        ],
+        "attrs": {},
+        "pmStart": 14,
+        "pmEnd": 27
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 12,
+            "width": 200,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20,
+    "columns": {
+      "count": 2,
+      "gap": 24
+    }
+  }
+}
