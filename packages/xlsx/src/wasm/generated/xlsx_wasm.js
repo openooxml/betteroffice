@@ -630,7 +630,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('xlsx_wasm_bg.wasm', import.meta.url);
+        throw new Error('xlsx-wasm requires an explicit module or URL');
     }
     const imports = __wbg_get_imports();
 

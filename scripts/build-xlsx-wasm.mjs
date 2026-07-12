@@ -1,4 +1,4 @@
-import { copyFile, mkdir, rm } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -29,8 +29,16 @@ const build = spawnSync(
 if (build.status !== 0) process.exit(build.status ?? 1);
 
 await mkdir(generated, { recursive: true });
+const gluePath = resolve(output, 'xlsx_wasm.js');
+const glue = await readFile(gluePath, 'utf8');
+const fallback = "module_or_path = new URL('xlsx_wasm_bg.wasm', import.meta.url);";
+if (!glue.includes(fallback)) throw new Error('wasm-pack glue fallback changed');
+await writeFile(
+  resolve(generated, 'xlsx_wasm.js'),
+  glue.replace(fallback, "throw new Error('xlsx-wasm requires an explicit module or URL');")
+);
+
 for (const file of [
-  'xlsx_wasm.js',
   'xlsx_wasm.d.ts',
   'xlsx_wasm_bg.wasm',
   'xlsx_wasm_bg.wasm.d.ts',
