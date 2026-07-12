@@ -1,0 +1,84 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Intro ",
+            "pmStart": 1,
+            "pmEnd": 7
+          },
+          {
+            "kind": "tab",
+            "width": 48,
+            "pmStart": 7,
+            "pmEnd": 8
+          },
+          {
+            "kind": "image",
+            "src": "inline-glyph",
+            "width": 40,
+            "height": 40,
+            "pmStart": 8,
+            "pmEnd": 9
+          },
+          {
+            "kind": "lineBreak",
+            "pmStart": 9,
+            "pmEnd": 10
+          },
+          {
+            "kind": "text",
+            "text": "tail after break",
+            "pmStart": 10,
+            "pmEnd": 26
+          }
+        ],
+        "pmStart": 1,
+        "pmEnd": 27
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 3,
+            "tailChar": 0,
+            "width": 320,
+            "ascent": 32,
+            "descent": 8,
+            "lineHeight": 40
+          },
+          {
+            "headRun": 4,
+            "headChar": 0,
+            "tailRun": 4,
+            "tailChar": 16,
+            "width": 180,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 64
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

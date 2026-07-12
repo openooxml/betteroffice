@@ -1,0 +1,79 @@
+{
+  "pages": [
+    {
+      "pageIndex": 0,
+      "width": 816,
+      "height": 1056,
+      "primitives": [
+        {
+          "kind": "rect",
+          "x": 96,
+          "y": 96,
+          "w": 624,
+          "h": 20,
+          "fill": "#fff9c4",
+          "blockId": 0,
+          "docStart": 1,
+          "docEnd": 12
+        },
+        {
+          "kind": "text",
+          "text": "Hello Word",
+          "x": 96,
+          "baselineY": 110,
+          "width": 84.5,
+          "font": "700 16px Calibri, sans-serif",
+          "color": "#000000",
+          "docStart": 1,
+          "docEnd": 11,
+          "blockId": 0
+        },
+        {
+          "kind": "decoration",
+          "deco": "underline",
+          "x": 96,
+          "y": 113,
+          "w": 84.5,
+          "h": 1,
+          "color": "#000000",
+          "docStart": 1,
+          "docEnd": 11,
+          "blockId": 0
+        },
+        {
+          "kind": "text",
+          "text": " — second run",
+          "x": 180.5,
+          "baselineY": 110,
+          "width": 96.25,
+          "font": "400 16px Calibri, sans-serif",
+          "color": "#c0392b",
+          "docStart": 11,
+          "docEnd": 24,
+          "blockId": 0
+        },
+        {
+          "kind": "line",
+          "x1": 96,
+          "y1": 140,
+          "x2": 720,
+          "y2": 140,
+          "strokeWidth": 0.75,
+          "color": "#666666",
+          "role": "table-border"
+        },
+        {
+          "kind": "image",
+          "relId": "rId7",
+          "x": 96,
+          "y": 160,
+          "w": 200,
+          "h": 120,
+          "docStart": 30,
+          "docEnd": 31,
+          "blockId": 2
+        }
+      ]
+    }
+  ]
+}

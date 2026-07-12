@@ -1,0 +1,260 @@
+{
+  "pages": [
+    {
+      "footer": {
+        "height": 24,
+        "kind": "footer",
+        "primitives": [
+          {
+            "baselineY": 1003.2,
+            "blockId": 0,
+            "color": "#000000",
+            "docEnd": 18,
+            "docStart": 1,
+            "font": "400 14.667px Calibri, sans-serif",
+            "fromLine": 0,
+            "kind": "text",
+            "text": "First page footer",
+            "toLine": 1,
+            "width": 180,
+            "x": 96
+          }
+        ],
+        "rId": "rIdFtrFirst",
+        "y": 984
+      },
+      "header": {
+        "height": 48,
+        "kind": "header",
+        "primitives": [
+          {
+            "baselineY": 67.2,
+            "blockId": 0,
+            "color": "#000000",
+            "docEnd": 18,
+            "docStart": 1,
+            "font": "400 14.667px Calibri, sans-serif",
+            "fromLine": 0,
+            "kind": "text",
+            "text": "First page header",
+            "toLine": 1,
+            "width": 180,
+            "x": 96
+          },
+          {
+            "baselineY": 91.2,
+            "blockId": 1,
+            "color": "#000000",
+            "docEnd": 37,
+            "docStart": 20,
+            "font": "400 14.667px Calibri, sans-serif",
+            "fromLine": 0,
+            "kind": "text",
+            "text": "First page header",
+            "toLine": 1,
+            "width": 180,
+            "x": 96
+          }
+        ],
+        "rId": "rIdHdrFirst",
+        "y": 48
+      },
+      "height": 1056,
+      "pageIndex": 0,
+      "primitives": [
+        {
+          "baselineY": 176,
+          "blockId": 0,
+          "color": "#000000",
+          "docEnd": 13,
+          "docStart": 1,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 276,
+          "blockId": 1,
+          "color": "#000000",
+          "docEnd": 33,
+          "docStart": 21,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 376,
+          "blockId": 2,
+          "color": "#000000",
+          "docEnd": 53,
+          "docStart": 41,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 476,
+          "blockId": 3,
+          "color": "#000000",
+          "docEnd": 73,
+          "docStart": 61,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 576,
+          "blockId": 4,
+          "color": "#000000",
+          "docEnd": 93,
+          "docStart": 81,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 676,
+          "blockId": 5,
+          "color": "#000000",
+          "docEnd": 113,
+          "docStart": 101,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 776,
+          "blockId": 6,
+          "color": "#000000",
+          "docEnd": 133,
+          "docStart": 121,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 876,
+          "blockId": 7,
+          "color": "#000000",
+          "docEnd": 153,
+          "docStart": 141,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        }
+      ],
+      "width": 816
+    },
+    {
+      "footer": {
+        "height": 24,
+        "kind": "footer",
+        "primitives": [
+          {
+            "baselineY": 1003.2,
+            "blockId": 0,
+            "color": "#000000",
+            "docEnd": 15,
+            "docStart": 1,
+            "font": "400 14.667px Calibri, sans-serif",
+            "fromLine": 0,
+            "kind": "text",
+            "text": "Default footer",
+            "toLine": 1,
+            "width": 180,
+            "x": 96
+          }
+        ],
+        "rId": "rIdFtrDefault",
+        "y": 984
+      },
+      "header": {
+        "height": 24,
+        "kind": "header",
+        "primitives": [
+          {
+            "baselineY": 67.2,
+            "blockId": 0,
+            "color": "#000000",
+            "docEnd": 15,
+            "docStart": 1,
+            "font": "400 14.667px Calibri, sans-serif",
+            "fromLine": 0,
+            "kind": "text",
+            "text": "Default header",
+            "toLine": 1,
+            "width": 180,
+            "x": 96
+          }
+        ],
+        "rId": "rIdHdrDefault",
+        "y": 48
+      },
+      "height": 1056,
+      "pageIndex": 1,
+      "primitives": [
+        {
+          "baselineY": 176,
+          "blockId": 8,
+          "color": "#000000",
+          "docEnd": 173,
+          "docStart": 161,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        },
+        {
+          "baselineY": 276,
+          "blockId": 9,
+          "color": "#000000",
+          "docEnd": 193,
+          "docStart": 181,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body paragra",
+          "toLine": 1,
+          "width": 100,
+          "x": 96
+        }
+      ],
+      "width": 816
+    }
+  ]
+}

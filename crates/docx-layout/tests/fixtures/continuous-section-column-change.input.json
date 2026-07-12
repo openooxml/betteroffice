@@ -1,0 +1,262 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Single-column intro",
+            "pmStart": 1,
+            "pmEnd": 20
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 21
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 18,
+            "width": 300,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "sectionBreak",
+        "id": 1,
+        "type": "continuous",
+        "columns": {
+          "count": 2,
+          "gap": 24
+        }
+      },
+      "measure": {
+        "kind": "sectionBreak"
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Column body 0",
+            "pmStart": 30,
+            "pmEnd": 43
+          }
+        ],
+        "attrs": {},
+        "pmStart": 30,
+        "pmEnd": 44
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 13,
+            "width": 200,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 3,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Column body 1",
+            "pmStart": 42,
+            "pmEnd": 55
+          }
+        ],
+        "attrs": {},
+        "pmStart": 42,
+        "pmEnd": 56
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 13,
+            "width": 200,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 4,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Column body 2",
+            "pmStart": 54,
+            "pmEnd": 67
+          }
+        ],
+        "attrs": {},
+        "pmStart": 54,
+        "pmEnd": 68
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 13,
+            "width": 200,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 5,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Column body 3",
+            "pmStart": 66,
+            "pmEnd": 79
+          }
+        ],
+        "attrs": {},
+        "pmStart": 66,
+        "pmEnd": 80
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 13,
+            "width": 200,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 6,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Column body 4",
+            "pmStart": 78,
+            "pmEnd": 91
+          }
+        ],
+        "attrs": {},
+        "pmStart": 78,
+        "pmEnd": 92
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 13,
+            "width": 200,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 7,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Column body 5",
+            "pmStart": 90,
+            "pmEnd": 103
+          }
+        ],
+        "attrs": {},
+        "pmStart": 90,
+        "pmEnd": 104
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 13,
+            "width": 200,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

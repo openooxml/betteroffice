@@ -1,0 +1,113 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Portrait section",
+            "pmStart": 1,
+            "pmEnd": 17
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 18
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 16,
+            "width": 120,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    },
+    {
+      "block": {
+        "kind": "sectionBreak",
+        "id": 1,
+        "type": "nextPage",
+        "pageSize": {
+          "w": 800,
+          "h": 1000
+        },
+        "margins": {
+          "top": 80,
+          "right": 80,
+          "bottom": 80,
+          "left": 80
+        }
+      },
+      "measure": {
+        "kind": "sectionBreak"
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Landscape section",
+            "pmStart": 20,
+            "pmEnd": 37
+          }
+        ],
+        "attrs": {},
+        "pmStart": 20,
+        "pmEnd": 38
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 17,
+            "width": 120,
+            "ascent": 19.200000000000003,
+            "descent": 4.800000000000001,
+            "lineHeight": 24
+          }
+        ],
+        "totalHeight": 24
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 800,
+      "h": 1000
+    },
+    "margins": {
+      "top": 80,
+      "right": 80,
+      "bottom": 80,
+      "left": 80
+    },
+    "pageGap": 20,
+    "finalPageSize": {
+      "w": 1000,
+      "h": 800
+    },
+    "finalMargins": {
+      "top": 40,
+      "right": 120,
+      "bottom": 40,
+      "left": 120
+    }
+  }
+}

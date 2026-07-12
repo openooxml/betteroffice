@@ -1,0 +1,284 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 0",
+            "pmStart": 1,
+            "pmEnd": 7
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 8
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 1,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 1",
+            "pmStart": 13,
+            "pmEnd": 19
+          }
+        ],
+        "attrs": {},
+        "pmStart": 13,
+        "pmEnd": 20
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 2",
+            "pmStart": 25,
+            "pmEnd": 31
+          }
+        ],
+        "attrs": {},
+        "pmStart": 25,
+        "pmEnd": 32
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 3,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 3",
+            "pmStart": 37,
+            "pmEnd": 43
+          }
+        ],
+        "attrs": {},
+        "pmStart": 37,
+        "pmEnd": 44
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 4,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 4",
+            "pmStart": 49,
+            "pmEnd": 55
+          }
+        ],
+        "attrs": {},
+        "pmStart": 49,
+        "pmEnd": 56
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 5,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 5",
+            "pmStart": 61,
+            "pmEnd": 67
+          }
+        ],
+        "attrs": {},
+        "pmStart": 61,
+        "pmEnd": 68
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 6,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 6",
+            "pmStart": 73,
+            "pmEnd": 79
+          }
+        ],
+        "attrs": {},
+        "pmStart": 73,
+        "pmEnd": 80
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 7,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Body 7",
+            "pmStart": 85,
+            "pmEnd": 91
+          }
+        ],
+        "attrs": {},
+        "pmStart": 85,
+        "pmEnd": 92
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 8,
+            "width": 90,
+            "ascent": 80,
+            "descent": 20,
+            "lineHeight": 100
+          }
+        ],
+        "totalHeight": 100
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20,
+    "footnoteReservedHeights": {
+      "1": 200
+    }
+  }
+}

@@ -1,0 +1,130 @@
+{
+  "pages": [
+    {
+      "height": 1056,
+      "pageIndex": 0,
+      "primitives": [
+        {
+          "baselineY": 176,
+          "blockId": 0,
+          "color": "#000000",
+          "docEnd": 7,
+          "docStart": 1,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 0",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        },
+        {
+          "baselineY": 276,
+          "blockId": 1,
+          "color": "#000000",
+          "docEnd": 19,
+          "docStart": 13,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 1",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        },
+        {
+          "baselineY": 376,
+          "blockId": 2,
+          "color": "#000000",
+          "docEnd": 31,
+          "docStart": 25,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 2",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        },
+        {
+          "baselineY": 476,
+          "blockId": 3,
+          "color": "#000000",
+          "docEnd": 43,
+          "docStart": 37,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 3",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        },
+        {
+          "baselineY": 576,
+          "blockId": 4,
+          "color": "#000000",
+          "docEnd": 55,
+          "docStart": 49,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 4",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        },
+        {
+          "baselineY": 676,
+          "blockId": 5,
+          "color": "#000000",
+          "docEnd": 67,
+          "docStart": 61,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 5",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        }
+      ],
+      "width": 816
+    },
+    {
+      "height": 1056,
+      "pageIndex": 1,
+      "primitives": [
+        {
+          "baselineY": 176,
+          "blockId": 6,
+          "color": "#000000",
+          "docEnd": 79,
+          "docStart": 73,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 6",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        },
+        {
+          "baselineY": 276,
+          "blockId": 7,
+          "color": "#000000",
+          "docEnd": 91,
+          "docStart": 85,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fromLine": 0,
+          "kind": "text",
+          "text": "Body 7",
+          "toLine": 1,
+          "width": 90,
+          "x": 96
+        }
+      ],
+      "width": 816
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Filler block",
+            "pmStart": 1,
+            "pmEnd": 13
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 14
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 12,
+            "width": 200,
+            "ascent": 640,
+            "descent": 160,
+            "lineHeight": 800
+          }
+        ],
+        "totalHeight": 800
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 1,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Kept-together paragraph",
+            "pmStart": 20,
+            "pmEnd": 43
+          }
+        ],
+        "attrs": {
+          "keepLines": true
+        },
+        "pmStart": 20,
+        "pmEnd": 44
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 5,
+            "width": 300,
+            "ascent": 32,
+            "descent": 8,
+            "lineHeight": 40
+          },
+          {
+            "headRun": 0,
+            "headChar": 5,
+            "tailRun": 0,
+            "tailChar": 10,
+            "width": 300,
+            "ascent": 32,
+            "descent": 8,
+            "lineHeight": 40
+          },
+          {
+            "headRun": 0,
+            "headChar": 10,
+            "tailRun": 0,
+            "tailChar": 15,
+            "width": 300,
+            "ascent": 32,
+            "descent": 8,
+            "lineHeight": 40
+          },
+          {
+            "headRun": 0,
+            "headChar": 15,
+            "tailRun": 0,
+            "tailChar": 20,
+            "width": 300,
+            "ascent": 32,
+            "descent": 8,
+            "lineHeight": 40
+          }
+        ],
+        "totalHeight": 160
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20
+  }
+}

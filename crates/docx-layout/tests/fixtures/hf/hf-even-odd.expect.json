@@ -1,0 +1,40 @@
+{
+  "pages": [
+    {
+      "headerRId": "rIdHdrDefault",
+      "footerRId": "rIdFtrDefault",
+      "header": {
+        "y": 48,
+        "height": 24
+      },
+      "footer": {
+        "y": 984,
+        "height": 24
+      }
+    },
+    {
+      "headerRId": "rIdHdrEven",
+      "footerRId": "rIdFtrEven",
+      "header": {
+        "y": 48,
+        "height": 48
+      },
+      "footer": {
+        "y": 984,
+        "height": 24
+      }
+    },
+    {
+      "headerRId": "rIdHdrDefault",
+      "footerRId": "rIdFtrDefault",
+      "header": {
+        "y": 48,
+        "height": 24
+      },
+      "footer": {
+        "y": 984,
+        "height": 24
+      }
+    }
+  ]
+}
