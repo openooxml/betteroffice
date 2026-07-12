@@ -3,21 +3,31 @@ import { formats } from "../lib/formats";
 
 export default function Home() {
   return (
-    <div>
-      <h1 className="max-w-2xl text-3xl font-medium tracking-tight text-fg">
-        BetterOffice demos
-      </h1>
-      <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink">
-        Try the engines in your browser — Word documents, spreadsheets, and
-        slides, rendered by native OOXML engines written in Rust and compiled to
-        WebAssembly. Pick a format to start.
-      </p>
+    <>
+      <section className="relative px-8 pt-24 pb-16 max-[44rem]:px-5 max-[44rem]:pt-16 max-[44rem]:pb-12">
+        <p className="mb-6 font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-dim">
+          Browser playground
+        </p>
+        <h1 className="mb-4 text-[clamp(2.5rem,8vw,3.75rem)] leading-[1.05] font-[650] tracking-[-0.035em] text-fg">
+          Try BetterOffice
+        </h1>
+        <p className="max-w-[32rem] text-lg text-ink">
+          Open real Office files directly in your browser. Parsing, editing,
+          calculation, and rendering stay local on our Rust and WebAssembly
+          engines.
+        </p>
+      </section>
 
-      <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {formats.map((f) => (
-          <FormatCard key={f.id} format={f} />
-        ))}
-      </div>
-    </div>
+      <section className="sec relative border-t border-line-soft px-8 py-16 max-[44rem]:px-5 max-[44rem]:py-12">
+        <p className="mb-8 flex items-baseline gap-3 font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-dim">
+          <span className="text-faint">01</span> Editors
+        </p>
+        <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border border-line-soft bg-line-soft max-[44rem]:grid-cols-1">
+          {formats.map((f) => (
+            <FormatCard key={f.id} format={f} />
+          ))}
+        </div>
+      </section>
+    </>
   );
 }

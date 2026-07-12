@@ -6,20 +6,24 @@ export function FormatCard({ format }: { format: Format }) {
   return (
     <Link
       href={`/${format.id}`}
-      className="group flex flex-col justify-between rounded-lg border border-line bg-surface p-6 no-underline transition-colors hover:border-fg"
+      className="group flex min-h-52 flex-col bg-bg p-6 no-underline transition-colors hover:bg-surface"
     >
       <div>
         <div className="flex items-center justify-between">
-          <span className="font-mono text-lg text-fg">{format.name}</span>
+          <span className="font-mono text-[0.8125rem] text-fg">
+            {format.name}
+          </span>
           <StatusBadge live={live} />
         </div>
-        <p className="mt-1 font-mono text-[0.7rem] uppercase tracking-[0.16em] text-faint">
+        <p className="mt-2 font-mono text-[0.625rem] uppercase tracking-[0.14em] text-dim">
           {format.kind}
         </p>
-        <p className="mt-4 text-sm leading-relaxed text-ink">{format.tagline}</p>
+        <p className="mt-4 text-[0.8125rem] leading-relaxed text-ink">
+          {format.tagline}
+        </p>
       </div>
-      <span className="mt-8 font-mono text-xs text-ink transition-colors group-hover:text-fg">
-        {live ? "Open demo →" : "Preview →"}
+      <span className="mt-auto pt-6 font-mono text-xs text-dim transition-colors group-hover:text-fg">
+        {live ? "open demo →" : "preview →"}
       </span>
     </Link>
   );
@@ -29,13 +33,13 @@ function StatusBadge({ live }: { live: boolean }) {
   return (
     <span
       className={
-        "rounded-full border px-2 py-0.5 font-mono text-[0.625rem] uppercase tracking-[0.12em] " +
+        "inline-flex items-center gap-1.5 font-mono text-[0.625rem] uppercase tracking-[0.12em] " +
         (live
-          ? "border-acc/40 text-acc"
-          : "border-line text-faint")
+          ? "text-acc before:size-1.5 before:rounded-full before:bg-acc before:shadow-[0_0_8px_rgba(5,150,105,0.45)]"
+          : "text-dim before:size-1.5 before:rounded-full before:bg-faint")
       }
     >
-      {live ? "Live" : "Soon"}
+      {live ? "available" : "coming"}
     </span>
   );
 }

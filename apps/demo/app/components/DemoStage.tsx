@@ -4,34 +4,33 @@ import type { Format } from "../../lib/formats";
 export function DemoStage({ format }: { format: Format }) {
   const editor = format.status === "live" ? mountEditor(format.id) : null;
   return (
-    <div>
-      <div className="font-mono text-[0.7rem] uppercase tracking-[0.16em] text-faint">
+    <div className="px-8 py-16 max-[44rem]:px-5 max-[44rem]:py-12">
+      <p className="font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-dim">
         {format.kind}
-      </div>
-      <h1 className="mt-2 text-2xl font-medium tracking-tight text-fg">
-        {format.name} demo
-      </h1>
-      <p className="mt-3 max-w-lg text-sm leading-relaxed text-ink">
-        {format.tagline}
       </p>
+      <h1 className="mt-3 text-[2rem] leading-tight font-semibold tracking-[-0.03em] text-fg">
+        {format.name}
+      </h1>
+      <p className="mt-3 max-w-lg text-ink">{format.tagline}</p>
 
       {editor ?? (
-        <div className="mt-10 flex h-72 items-center justify-center rounded-lg border border-dashed border-line bg-surface">
-          <span className="font-mono text-xs text-faint">Coming soon</span>
+        <div className="mt-10 flex h-72 items-center justify-center rounded-md border border-line-soft bg-surface">
+          <span className="inline-flex items-center gap-2 font-mono text-xs text-dim before:size-1.5 before:rounded-full before:bg-faint">
+            coming soon
+          </span>
         </div>
       )}
 
       <Link
         href="/"
-        className="mt-8 inline-block font-mono text-xs text-ink no-underline transition-colors hover:text-fg"
+        className="mt-8 inline-block font-mono text-xs text-dim no-underline transition-colors hover:text-fg"
       >
-        ← All demos
+        ← all demos
       </Link>
     </div>
   );
 }
 
-// Each format's client-only editor is dynamic()-mounted here once its package lands.
 function mountEditor(_id: Format["id"]): React.ReactNode {
   return null;
 }

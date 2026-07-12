@@ -82,6 +82,9 @@ export default function RootLayout({
               aria-label="Site"
               className="flex items-center gap-6 max-[44rem]:flex-wrap max-[44rem]:justify-end max-[44rem]:gap-4"
             >
+              <a href="https://demo.betteroffice.dev" className={navLink}>
+                demos
+              </a>
               <a href="https://docs.betteroffice.dev" className={navLink}>
                 docs
               </a>

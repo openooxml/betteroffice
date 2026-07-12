@@ -1,14 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { XlsxEditor } from "@betteroffice/xlsx-react";
 import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
 import { isProposalsAvailable } from "@betteroffice/xlsx";
-import { buildTotalsEdits } from './demoAgent';
+import { Logo } from "../components/Logo";
+import { buildTotalsEdits } from "./demoAgent";
 
-const SHOWCASE = { url: '/showcase.xlsx', name: 'showcase.xlsx' };
-const SAMPLE = { url: '/sample.xlsx', name: 'sample.xlsx' };
+const SHOWCASE = { url: "/showcase.xlsx", name: "showcase.xlsx" };
+const SAMPLE = { url: "/sample.xlsx", name: "sample.xlsx" };
 
 // a styled label wrapping a hidden file input, so "Open file" reads as a button.
 function OpenFileLabel({
@@ -27,7 +29,7 @@ function OpenFileLabel({
         type="file"
         accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         onChange={(e) => onPick(e.target.files)}
-        style={{ display: 'none' }}
+        style={{ display: "none" }}
       />
       Open file
     </label>
@@ -62,7 +64,7 @@ export function XlsxDemoClient() {
     const edits = buildTotalsEdits(api.handle);
     if (edits.length === 0) return;
     try {
-      api.handle.propose('demo-agent', 'column totals', edits);
+      api.handle.propose("demo-agent", "column totals", edits);
       api.refreshProposals();
     } catch {
       // proposals not in this wasm build — nothing staged.
@@ -78,7 +80,9 @@ export function XlsxDemoClient() {
       setFile(bytes);
       setFileName(name);
     } catch (e) {
-      setError(`Could not read ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      setError(
+        `Could not read ${name}: ${e instanceof Error ? e.message : String(e)}`,
+      );
     } finally {
       setLoading(false);
     }
@@ -93,11 +97,13 @@ export function XlsxDemoClient() {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         await openBlob(await res.blob(), name);
       } catch (e) {
-        setError(`Could not load ${name}: ${e instanceof Error ? e.message : String(e)}`);
+        setError(
+          `Could not load ${name}: ${e instanceof Error ? e.message : String(e)}`,
+        );
         setLoading(false);
       }
     },
-    [openBlob]
+    [openBlob],
   );
 
   const onPick = useCallback(
@@ -107,7 +113,7 @@ export function XlsxDemoClient() {
       userActedRef.current = true;
       void openBlob(picked, picked.name);
     },
-    [openBlob]
+    [openBlob],
   );
 
   const onDrop = useCallback(
@@ -119,7 +125,7 @@ export function XlsxDemoClient() {
       userActedRef.current = true;
       void openBlob(picked, picked.name);
     },
-    [openBlob]
+    [openBlob],
   );
 
   const loadSample = useCallback(() => {
@@ -135,7 +141,7 @@ export function XlsxDemoClient() {
   const closeFile = useCallback(() => {
     userActedRef.current = true;
     setFile(undefined);
-    setFileName('');
+    setFileName("");
     setError(null);
   }, []);
 
@@ -155,21 +161,10 @@ export function XlsxDemoClient() {
     <div className="app">
       <header className="app-header">
         <div className="brand">
-          <span className="brand-mark">
-            <svg className="brand-glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <rect
-                x="3"
-                y="4"
-                width="18"
-                height="16"
-                rx="2"
-                stroke="currentColor"
-                strokeWidth="1.6"
-              />
-              <path d="M3 9h18M3 14.5h18M9 4v16M15 4v16" stroke="currentColor" strokeWidth="1.2" />
-            </svg>
-            BetterOffice XLSX
-          </span>
+          <Link href="/" className="brand-mark">
+            <Logo height={18} />
+            BetterOffice <span className="brand-context">/ xlsx</span>
+          </Link>
           <span className="brand-tagline">In-browser spreadsheet editor</span>
         </div>
 
@@ -179,21 +174,33 @@ export function XlsxDemoClient() {
 
         <div className="actions">
           <div className="action-group">
-            <OpenFileLabel className="btn" testId="file-input" onPick={onPick} />
-            <button className="btn" data-testid="load-sample" onClick={loadSample}>
+            <OpenFileLabel
+              className="btn"
+              testId="file-input"
+              onPick={onPick}
+            />
+            <button
+              className="btn"
+              data-testid="load-sample"
+              onClick={loadSample}
+            >
               Load sample
             </button>
             <button className="btn" onClick={loadShowcase}>
               Load showcase
             </button>
             {file && (
-              <button className="btn btn-ghost" onClick={closeFile} title="Close file">
+              <button
+                className="btn btn-ghost"
+                onClick={closeFile}
+                title="Close file"
+              >
                 Close
               </button>
             )}
             <a
               className="github-link"
-               href="https://github.com/openooxml/betteroffice"
+              href="https://github.com/openooxml/betteroffice"
               target="_blank"
               rel="noreferrer"
               aria-label="View on GitHub"
@@ -228,7 +235,7 @@ export function XlsxDemoClient() {
       </header>
 
       <div
-        className={`app-body${dragging && file ? ' drag' : ''}`}
+        className={`app-body${dragging && file ? " drag" : ""}`}
         data-testid="editor-drop"
         onDragOver={(e) => {
           e.preventDefault();
@@ -261,14 +268,17 @@ export function XlsxDemoClient() {
               <div className="overlay busy">Opening workbook…</div>
             ) : (
               <div className="overlay empty">
-                <div className={`dropzone${dragging ? ' drag' : ''}`}>
+                <div className={`dropzone${dragging ? " drag" : ""}`}>
                   <p className="dropzone-title">Drop an .xlsx here</p>
                   <p className="dropzone-sub">
-                    Open a file from your computer — nothing is uploaded, everything runs locally in
-                    your browser.
+                    Open a file from your computer — nothing is uploaded,
+                    everything runs locally in your browser.
                   </p>
                   <div className="dropzone-actions">
-                    <OpenFileLabel className="btn btn-primary" onPick={onPick} />
+                    <OpenFileLabel
+                      className="btn btn-primary"
+                      onPick={onPick}
+                    />
                     <button className="btn" onClick={loadSample}>
                       Load sample
                     </button>
