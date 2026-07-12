@@ -1,24 +1,74 @@
-# BetterOffice
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
+    <img src=".github/assets/logo-light.svg" width="150" alt="BetterOffice">
+  </picture>
+</p>
 
-An open-source office suite built by the [OpenOOXML](https://openooxml.org) project, on our own native OOXML engines. Live at [betteroffice.dev](https://betteroffice.dev).
+<h1 align="center">BetterOffice</h1>
+
+<p align="center">
+  The open-source office suite, built on native OOXML engines in Rust.
+</p>
+
+<p align="center">
+  <a href="https://betteroffice.dev">betteroffice.dev</a> ·
+  <a href="https://openooxml.org">openooxml.org</a> ·
+  <a href="LICENSE">Apache-2.0</a>
+</p>
+
+---
+
+## Engines
+
+The document engines are Rust crates compiled to WebAssembly for the browser and running natively on servers. Every value from a user file is treated as attacker-controlled; guards are enforced by construction at the trust boundaries.
+
+| crate | what it does |
+|---|---|
+| [`ooxml-opc`](crates/ooxml-opc) | OPC (zip) container read/write with decompression-bomb and path-traversal guards — shared by every format |
+| [`xlsx-model`](crates/xlsx-model) | workbook, cells, addresses, dates, styles, number formats |
+| [`xlsx-parse`](crates/xlsx-parse) | streaming SpreadsheetML parse and serialize |
+| [`xlsx-calc`](crates/xlsx-calc) | formula engine: parser, dependency graph, incremental recalc |
+| [`xlsx-ops`](crates/xlsx-ops) | invertible edit operations, undo, address remapping, proposals |
+| [`xlsx-render`](crates/xlsx-render) | grid geometry and display list |
+| [`xlsx-raster`](crates/xlsx-raster) | headless raster backend (tiny-skia), pixel-identical everywhere |
+| [`xlsx-wasm`](crates/xlsx-wasm) | the wasm boundary for the spreadsheet engine |
+| [`xlsx-cli`](crates/xlsx-cli) | render and inspect workbooks from the command line |
+
+The docx and pptx engines are next: the docx layout kernel and text stack move in from the [OpenOOXML docx editor](https://github.com/openooxml/docx), and pptx follows on the shared foundations.
+
+## Packages
+
+The editor packages will ship under the `@betteroffice` scope: a framework-free core per format, with thin framework adapters on top.
+
+| package | |
+|---|---|
+| `@betteroffice/docx` | word processing core |
+| `@betteroffice/docx-react` | React chrome for the docx editor |
+| `@betteroffice/xlsx` | spreadsheet core |
+| `@betteroffice/xlsx-react` | React chrome for the spreadsheet |
+| `@betteroffice/pptx` | presentation core |
+| `@betteroffice/pptx-react` | React chrome for presentations |
 
 ## Structure
 
-- `apps/web` — the betteroffice.dev web app (Next.js, deployed to Cloudflare Workers via OpenNext)
+- `crates/` — the Rust engines
+- `packages/` — the TypeScript editor packages
+- `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/docs` — documentation
 
 ## Development
 
 ```bash
 bun install
-bun run dev
+bun run dev          # web app
+bun run rust:check   # fmt + clippy + tests for the engines
 ```
 
-## Deployment
+## Contributing
 
-```bash
-bun run deploy
-```
+Contributions are welcome. We ask for a one-time signature of the [Contributor License Agreement](CLA.md) on your first pull request ([corporate version](CCLA.md)).
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+[Apache-2.0](LICENSE) — third-party attribution in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
