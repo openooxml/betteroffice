@@ -57,7 +57,15 @@ cla_render_unsigned_comment() {
 ${sign_phrase}
 \`\`\`
 
-Contributing as part of your job? Then please also have your employer sign the [Corporate CLA](${ccla_url}) — your signature covers you, theirs covers them.
+Contributing as part of your job? Then your employer can sign the [Corporate CLA](${ccla_url}) instead: an authorized representative posts a comment on this pull request in exactly this format —
+
+\`\`\`
+I have read the CCLA Document and I hereby sign the CCLA
+company: <legal entity name>
+designated: @<github-handle> @<github-handle>
+\`\`\`
+
+Everyone on the designated list is covered by the corporate signature.
 
 The check updates on its own once you have signed; you can also re-run it any time by commenting \`!cla-check\`.
 
@@ -82,26 +90,87 @@ cla_init_signatures() {
   [ -f "$signatures_file" ] || echo '{"signedContributors":[]}' > "$signatures_file"
 }
 
+cla_init_ccla() {
+  local ccla_file="$1"
+  mkdir -p "$(dirname "$ccla_file")"
+  [ -f "$ccla_file" ] || echo '{"signedEntities":[]}' > "$ccla_file"
+}
+
+# "company: Acme GmbH" line of a corporate sign comment -> "Acme GmbH"
+cla_ccla_parse_company() {
+  printf '%s\n' "$1" | tr -d '\r' | sed -n 's/^company:[[:space:]]*//p' | head -1
+}
+
+# "designated: @a, @b" line -> "a b"
+cla_ccla_parse_designated() {
+  printf '%s\n' "$1" | tr -d '\r' | sed -n 's/^designated:[[:space:]]*//p' | head -1 | tr ',@' '  ' | xargs
+}
+
+# 0 if $login is on any signed entity's designated list.
+cla_ccla_covered() {
+  local login="$1" ccla_file="$2"
+  [ -f "$ccla_file" ] || return 1
+  local count
+  count=$(jq --arg l "$login" \
+    '[.signedEntities[].designated[] | select(. == $l)] | length' "$ccla_file")
+  [ "$count" != "0" ]
+}
+
+# Always appends; rows are an amendment history, coverage is the union.
+cla_add_ccla_signature() {
+  local entity="$1" rep_login="$2" rep_id="$3" ts="$4" pr="$5" designated="$6" ccla_file="$7"
+  local designated_json
+  designated_json=$(printf '%s' "$designated" | jq -R 'split(" ") | map(select(length > 0))')
+  jq --arg entity "$entity" --arg rep "$rep_login" --argjson rep_id "$rep_id" \
+    --arg ts "$ts" --argjson pr "$pr" --argjson designated "$designated_json" \
+    '.signedEntities += [{entity: $entity, signed_by: $rep, signed_by_id: $rep_id, signed_at: $ts, pull_request_no: $pr, designated: $designated}]' \
+    "$ccla_file" > "$ccla_file.tmp"
+  mv "$ccla_file.tmp" "$ccla_file"
+}
+
 # Orchestrates the workflow; the only function with side effects. Env: REPO,
 # PR_NUMBER, EVENT_NAME, ALLOWLIST, CLA_URL, SIGN_PHRASE (+ COMMENT_USER_*).
 cla_main() {
   local signatures="signatures/v1/cla.json"
+  local ccla="signatures/v1/ccla.json"
+  local ccla_phrase='I have read the CCLA Document and I hereby sign the CCLA'
   local marker='<!-- cla-bot -->'
 
   cla_init_signatures "$signatures"
+  cla_init_ccla "$ccla"
 
+  # a bare !cla-check retrigger must not record anything, so match the body
   if [ "${EVENT_NAME:-}" = "issue_comment" ]; then
-    if cla_should_skip "$COMMENT_USER_LOGIN" "$ALLOWLIST" "${CLA_ORG:-}"; then
-      : # exempt — no signature row needed
-    elif ! cla_signed "$COMMENT_USER_ID" "$signatures"; then
-      cla_add_signature "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$signatures"
-      git config user.name "$GIT_AUTHOR_NAME"
-      git config user.email "$GIT_AUTHOR_EMAIL"
-      git add "$signatures"
-      git commit -m "Record CLA signature for @${COMMENT_USER_LOGIN} (PR #${PR_NUMBER})"
-      # the push works because the App is on the main ruleset's bypass list
-      git push origin main
+    local comment_body="${COMMENT_BODY:-}"
+    if [[ "$comment_body" == *"$ccla_phrase"* ]]; then
+      local entity designated
+      entity=$(cla_ccla_parse_company "$comment_body")
+      designated=$(cla_ccla_parse_designated "$comment_body")
+      if [ -n "$entity" ] && [ -n "$designated" ]; then
+        cla_add_ccla_signature "$entity" "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$designated" "$ccla"
+        git config user.name "$GIT_AUTHOR_NAME"
+        git config user.email "$GIT_AUTHOR_EMAIL"
+        git add "$ccla"
+        git commit -m "Record CCLA signature for ${entity} (PR #${PR_NUMBER})"
+        # the push works because the App is on the main ruleset's bypass list
+        git push origin main
+      else
+        echo "WARN: corporate sign comment missing company:/designated: lines; not recorded" >&2
+      fi
+    elif [[ "$comment_body" == *"$SIGN_PHRASE"* ]]; then
+      if cla_should_skip "$COMMENT_USER_LOGIN" "$ALLOWLIST" "${CLA_ORG:-}"; then
+        : # exempt — no signature row needed
+      elif ! cla_signed "$COMMENT_USER_ID" "$signatures"; then
+        cla_add_signature "$COMMENT_USER_LOGIN" "$COMMENT_USER_ID" \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PR_NUMBER" "$signatures"
+        git config user.name "$GIT_AUTHOR_NAME"
+        git config user.email "$GIT_AUTHOR_EMAIL"
+        git add "$signatures"
+        git commit -m "Record CLA signature for @${COMMENT_USER_LOGIN} (PR #${PR_NUMBER})"
+        # the push works because the App is on the main ruleset's bypass list
+        git push origin main
+      fi
     fi
   fi
 
@@ -144,6 +213,8 @@ cla_main() {
   if cla_should_skip "$pr_author_login" "$ALLOWLIST" "${CLA_ORG:-}"; then
     pr_author_signed=true
   elif [ -n "$pr_author_id" ] && cla_signed "$pr_author_id" "$signatures"; then
+    pr_author_signed=true
+  elif cla_ccla_covered "$pr_author_login" "$ccla"; then
     pr_author_signed=true
   fi
 

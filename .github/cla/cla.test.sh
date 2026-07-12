@@ -131,6 +131,25 @@ case "$body" in *'`!cla-check`'*) ok=1 ;; *) ok=0 ;; esac
 assert_eq "mentions the !cla-check keyword in a code span" "1" "$ok"
 case "$body" in *"https://e.x/CCLA.md"*) ok=1 ;; *) ok=0 ;; esac
 assert_eq "links the corporate CLA next to the individual one" "1" "$ok"
+case "$body" in *"I have read the CCLA Document and I hereby sign the CCLA"*) ok=1 ;; *) ok=0 ;; esac
+assert_eq "shows the corporate sign format" "1" "$ok"
+
+echo
+echo "corporate sign flow:"
+ccla_body=$'I have read the CCLA Document and I hereby sign the CCLA\r\ncompany: Acme GmbH\r\ndesignated: @alice, @bob'
+assert_eq "company parses (crlf tolerated)" "Acme GmbH" "$(cla_ccla_parse_company "$ccla_body")"
+assert_eq "designated parses, @ and commas stripped" "alice bob" "$(cla_ccla_parse_designated "$ccla_body")"
+assert_eq "missing company line -> empty" "" "$(cla_ccla_parse_company "no structured lines here")"
+
+CCLA_FILE="$TMPDIR/ccla.json"
+cla_init_ccla "$CCLA_FILE"
+assert_eq "ccla ledger initialized empty" '{"signedEntities":[]}' "$(jq -c . "$CCLA_FILE")"
+cla_add_ccla_signature "Acme GmbH" "rep" 777 "2026-07-12T10:00:00Z" 9 "alice bob" "$CCLA_FILE"
+assert_eq "entity row recorded with designated list" '["alice","bob"]' \
+  "$(jq -c '.signedEntities[0].designated' "$CCLA_FILE")"
+assert_true  "designated employee is covered"     cla_ccla_covered "alice" "$CCLA_FILE"
+assert_false "non-designated login is not covered" cla_ccla_covered "mallory" "$CCLA_FILE"
+assert_false "missing ledger file -> not covered"  cla_ccla_covered "alice" "$TMPDIR/nope.json"
 case "$body" in *"<!-- m -->"*) ok=1 ;; *) ok=0 ;; esac
 assert_eq "includes sticky-comment marker" "1" "$ok"
 

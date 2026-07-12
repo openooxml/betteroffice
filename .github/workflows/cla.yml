@@ -27,6 +27,7 @@ jobs:
        github.event.issue.pull_request != null &&
        github.event.comment.user.login != 'openooxml-bot[bot]' &&
        (contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA') ||
+        contains(github.event.comment.body, 'I have read the CCLA Document and I hereby sign the CCLA') ||
         contains(github.event.comment.body, '!cla-check')))
     steps:
       - name: Mint App installation token
@@ -52,6 +53,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           COMMENT_USER_LOGIN: ${{ github.event.comment.user.login }}
           COMMENT_USER_ID: ${{ github.event.comment.user.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
           # exempt bots, plus maintainer handles in case the org lookup fails
           ALLOWLIST: 'dependabot[bot] github-actions[bot] renovate[bot] eliahilse'
           # org members are exempt; leave empty to disable the org check
