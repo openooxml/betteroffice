@@ -1,0 +1,61 @@
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+# writes go through the App token; keep GITHUB_TOKEN read-only
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    # the bot login is hardcoded here and in GIT_AUTHOR_*; without this guard
+    # the bot's own comments would re-trigger the workflow and self-sign
+    if: |
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       github.event.comment.user.login != 'openooxml-bot[bot]' &&
+       (contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA') ||
+        contains(github.event.comment.body, '!cla-check')))
+    steps:
+      - name: Mint App installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.OPENOOXML_BOT_APP_ID }}
+          private-key: ${{ secrets.OPENOOXML_BOT_PRIVATE_KEY }}
+
+      - name: Checkout main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Process CLA
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GIT_AUTHOR_NAME: 'openooxml-bot[bot]'
+          GIT_AUTHOR_EMAIL: 'openooxml-bot[bot]@users.noreply.github.com'
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_USER_LOGIN: ${{ github.event.comment.user.login }}
+          COMMENT_USER_ID: ${{ github.event.comment.user.id }}
+          # exempt bots, plus maintainer handles in case the org lookup fails
+          ALLOWLIST: 'dependabot[bot] github-actions[bot] renovate[bot] eliahilse'
+          # org members are exempt; leave empty to disable the org check
+          CLA_ORG: 'openooxml'
+          CLA_URL: ${{ github.server_url }}/${{ github.repository }}/blob/main/CLA.md
+          SIGN_PHRASE: 'I have read the CLA Document and I hereby sign the CLA'
+        run: bash .github/cla/cla.sh
