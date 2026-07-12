@@ -9,11 +9,15 @@
     "dev:docs": "bun run --filter './apps/docs' dev",
     "dev:demo": "bun run --filter './apps/demo' dev",
     "build:xlsx": "bun run --filter '@betteroffice/xlsx' build && bun run --filter '@betteroffice/xlsx-react' build",
+    "build:packages": "bun run build:xlsx",
     "deploy:docs": "bun run --filter './apps/docs' deploy",
     "deploy:demo": "bun run --filter './apps/demo' deploy",
     "build": "bun run --filter './apps/web' build",
     "typecheck": "bun run --filter '*' typecheck",
     "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "bun run build:packages && changeset publish",
     "preview": "bun run --filter './apps/web' preview",
     "deploy": "bun run --filter './apps/web' deploy",
     "cf-typegen": "bun run --filter './apps/web' cf-typegen"
@@ -23,5 +27,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.31.0"
   }
 }
