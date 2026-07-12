@@ -21,6 +21,11 @@ The document engines are Rust crates compiled to WebAssembly for the browser and
 | crate | what it does |
 |---|---|
 | [`ooxml-opc`](crates/ooxml-opc) | OPC (zip) container read/write with decompression-bomb and path-traversal guards — shared by every format |
+| [`ooxml-text`](crates/ooxml-text) | shared font storage, shaping, bidi, line breaking, and glyph outlines |
+| [`docx-layout`](crates/docx-layout) | DOCX pagination and display-list generation |
+| [`docx-wasm`](crates/docx-wasm) | the wasm boundary for the document engine |
+| [`pptx-render`](crates/pptx-render) | PPTX composed-slide to display-list compiler |
+| [`pptx-wasm`](crates/pptx-wasm) | the wasm boundary for presentation rendering |
 | [`xlsx-model`](crates/xlsx-model) | workbook, cells, addresses, dates, styles, number formats |
 | [`xlsx-parse`](crates/xlsx-parse) | streaming SpreadsheetML parse and serialize |
 | [`xlsx-calc`](crates/xlsx-calc) | formula engine: parser, dependency graph, incremental recalc |
@@ -29,8 +34,6 @@ The document engines are Rust crates compiled to WebAssembly for the browser and
 | [`xlsx-raster`](crates/xlsx-raster) | headless raster backend (tiny-skia), pixel-identical everywhere |
 | [`xlsx-wasm`](crates/xlsx-wasm) | the wasm boundary for the spreadsheet engine |
 | [`xlsx-cli`](crates/xlsx-cli) | render and inspect workbooks from the command line |
-
-The docx and pptx engines are next: the docx layout kernel and text stack move in from the [OpenOOXML docx editor](https://github.com/openooxml/docx), and pptx follows on the shared foundations.
 
 ## Packages
 

@@ -268,6 +268,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pptx-render"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pptx-wasm"
+version = "0.0.0"
+dependencies = [
+ "pptx-render",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"

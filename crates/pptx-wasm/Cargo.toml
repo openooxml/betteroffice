@@ -1,0 +1,17 @@
+[package]
+name = "pptx-wasm"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "The wasm-bindgen boundary for PPTX display-list compilation."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3"]
+
+[dependencies]
+pptx-render = { path = "../pptx-render" }
+wasm-bindgen = "0.2"
