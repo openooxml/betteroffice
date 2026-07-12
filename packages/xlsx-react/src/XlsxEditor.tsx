@@ -14,6 +14,7 @@ import {
   cellRect,
   extendTo,
   fromTsv,
+  initWasm,
   isPngExportAvailable,
   isProposalsAvailable,
   moveFocus,
@@ -260,22 +261,39 @@ export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxE
       setError(null);
       return;
     }
+    handleRef.current = null;
+    setSheetInfo(null);
+    setSelection(null);
     let handle: WorkbookHandle | null = null;
-    try {
-      handle = openWorkbook(file);
-      handleRef.current = handle;
-      setSheetInfo(handle.sheetInfo());
-      setSelection(selectionAt({ row: 0, col: 0 }));
-      setError(null);
-      refreshProposals();
-      onReadyRef.current?.({ handle, refreshProposals });
-    } catch (e) {
-      handleRef.current = null;
-      setSheetInfo(null);
-      setSelection(null);
-      setError(e instanceof Error ? e.message : String(e));
-    }
+    let disposed = false;
+    void initWasm().then(
+      () => {
+        if (disposed) return;
+        try {
+          handle = openWorkbook(file);
+          handleRef.current = handle;
+          setSheetInfo(handle.sheetInfo());
+          setSelection(selectionAt({ row: 0, col: 0 }));
+          setError(null);
+          refreshProposals();
+          onReadyRef.current?.({ handle, refreshProposals });
+        } catch (e) {
+          handleRef.current = null;
+          setSheetInfo(null);
+          setSelection(null);
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      },
+      (e: unknown) => {
+        if (disposed) return;
+        handleRef.current = null;
+        setSheetInfo(null);
+        setSelection(null);
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    );
     return () => {
+      disposed = true;
       handle?.dispose();
       handleRef.current = null;
     };

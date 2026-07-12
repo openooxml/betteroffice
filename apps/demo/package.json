@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.0.2",
   "scripts": {
+    "build:wasm": "node ../../scripts/build-xlsx-wasm.mjs",
+    "predev": "bun run build:wasm",
     "dev": "next dev",
+    "prebuild": "bun run build:wasm",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",

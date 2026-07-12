@@ -6,6 +6,9 @@ Thanks for your interest in contributing! This guide will help you get started.
 
 - [Bun](https://bun.sh/) (v1.0+)
 - [Rust](https://rustup.rs/) (stable, with `rustfmt` and `clippy`)
+- `wasm32-unknown-unknown` (`rustup target add wasm32-unknown-unknown`)
+- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) 0.15.0
+  (`cargo install wasm-pack --version 0.15.0 --locked`)
 
 ## Development Setup
 
@@ -17,6 +20,9 @@ cd betteroffice
 # Install dependencies
 bun install
 
+# Compile the ignored XLSX wasm asset
+bun run build:xlsx-wasm
+
 # Start the web app
 bun run dev
 ```
@@ -26,7 +32,7 @@ bun run dev
 ```bash
 # TypeScript
 bun run typecheck
-bun test
+bun run test
 
 # Rust engines (fmt + clippy with -D warnings + tests)
 bun run rust:check
@@ -44,7 +50,7 @@ Contributors are required to sign our [Contributor License Agreement](CLA.md). T
 4. **Add/update tests** for your changes
 5. **Verify** everything works:
    ```bash
-   bun run typecheck && bun test && bun run rust:check
+   bun run typecheck && bun run test && bun run rust:check
    ```
 6. **Submit a PR** against `main` — the CLA bot will prompt you on your first one
 

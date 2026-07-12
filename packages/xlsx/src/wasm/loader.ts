@@ -1,15 +1,13 @@
 /**
  * Wasm loader for the xlsx-wasm core.
  *
- * The core is embedded as base64 (`generated/wasmBase64.ts`) and initialized
- * synchronously on first use — no fetch, no external asset, so it works
- * identically in the browser, bun, node, SSR, and CI (needs a CSP allowing
- * `wasm-unsafe-eval`). Callers never see the JSON-string boundary: `openWorkbook`
- * returns a typed {@link WorkbookHandle} and wasm throws surface as `Error`.
+ * Call {@link initWasm} once before opening workbooks. The default browser path
+ * streams the packaged wasm asset; non-fetch environments can pass bytes or a
+ * precompiled module. Callers never see the JSON-string boundary.
  */
 
-import { XlsxDocument, initSync } from './generated/xlsx_wasm.js';
-import { XLSX_WASM_BASE64 } from './generated/wasmBase64';
+import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
+import type { InitInput } from './generated/xlsx_wasm.js';
 import type { DisplayList } from '../display-list/types';
 
 /**
@@ -192,38 +190,30 @@ export interface WorkbookHandle {
 }
 
 let initialized = false;
+let initialization: Promise<void> | undefined;
 
-// base64 chars per chunk; a multiple of 4 so each chunk is a whole group of
-// base64 quads (4 chars -> 3 bytes) and decodes independently.
-const DECODE_CHUNK = 0x8000;
+export type WasmInitInput = InitInput | Promise<InitInput>;
 
-// decode the embedded base64 to bytes in chunks — atob on the whole ~430kb
-// string plus a single char loop is a needless call-stack/perf hazard in some
-// engines, so slice it into independently-decodable quads.
-function base64ToBytes(base64: string): Uint8Array {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (let offset = 0; offset < base64.length; offset += DECODE_CHUNK) {
-    const binary = atob(base64.slice(offset, offset + DECODE_CHUNK));
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    chunks.push(bytes);
-    total += bytes.length;
-  }
-  const out = new Uint8Array(total);
-  let pos = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, pos);
-    pos += chunk.length;
-  }
-  return out;
+/** Initialize the workbook engine. Concurrent calls share the same attempt. */
+export function initWasm(
+  input: WasmInitInput = new URL('./generated/xlsx_wasm_bg.wasm', import.meta.url)
+): Promise<void> {
+  if (initialized) return Promise.resolve();
+  if (initialization) return initialization;
+  initialization = initWasmModule({ module_or_path: input }).then(
+    () => {
+      initialized = true;
+    },
+    (error: unknown) => {
+      initialization = undefined;
+      throw toError(error);
+    }
+  );
+  return initialization;
 }
 
-// initialize the wasm module once. idempotent and cheap after the first call.
-function ensureInitialized(): void {
-  if (initialized) return;
-  initSync({ module: base64ToBytes(XLSX_WASM_BASE64) });
-  initialized = true;
+function requireInitialized(): void {
+  if (!initialized) throw new Error('xlsx wasm is not initialized; call initWasm() first');
 }
 
 // wasm rejects throw strings; normalize them (and anything else) to Error.
@@ -233,16 +223,10 @@ function toError(e: unknown): Error {
 }
 
 /**
- * Whether the embedded wasm core can initialize in this environment. Attempts
- * init (idempotent) and reports success so callers can degrade explicitly.
+ * Whether this environment exposes the WebAssembly runtime required by the core.
  */
 export function isWasmAvailable(): boolean {
-  try {
-    ensureInitialized();
-    return true;
-  } catch {
-    return false;
-  }
+  return typeof WebAssembly === 'object';
 }
 
 /**
@@ -268,7 +252,7 @@ export function isProposalsAvailable(): boolean {
  * Throws an `Error` if the bytes are not a readable workbook.
  */
 export function openWorkbook(bytes: Uint8Array): WorkbookHandle {
-  ensureInitialized();
+  requireInitialized();
   let doc: XlsxDocument;
   try {
     doc = XlsxDocument.open(bytes);
@@ -403,6 +387,6 @@ function editResult(fn: () => string): EditResult {
  * The crate version string, for asserting wasm/js parity.
  */
 export function wasmVersion(): string {
-  ensureInitialized();
+  requireInitialized();
   return XlsxDocument.version();
 }

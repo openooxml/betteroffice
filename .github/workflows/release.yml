@@ -49,13 +49,25 @@ jobs:
           count=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
           echo "publishing=$([ "$count" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.pending.outputs.publishing == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pending.outputs.publishing == 'true'
+
+      - name: Install wasm-pack
+        if: steps.pending.outputs.publishing == 'true'
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
       - name: Type check
         if: steps.pending.outputs.publishing == 'true'
         run: bun run --filter './packages/*' typecheck
 
       - name: Test
         if: steps.pending.outputs.publishing == 'true'
-        run: bun test packages
+        run: bun run test
 
       - name: Build packages
         if: steps.pending.outputs.publishing == 'true'
