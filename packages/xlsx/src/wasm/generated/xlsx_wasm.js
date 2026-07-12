@@ -1,7 +1,7 @@
 /* @ts-self-types="./xlsx_wasm.d.ts" */
 
 /**
- * a workbook handle exposed to js. wraps the pure `Session`.
+ * a workbook handle exposed to js; wraps the pure `Session`.
  */
 export class XlsxDocument {
     static __wrap(ptr) {
@@ -21,8 +21,8 @@ export class XlsxDocument {
         wasm.__wbg_xlsxdocument_free(ptr, 0);
     }
     /**
-     * accept a proposal, applying it as one agent transaction; returns the edit
-     * envelope plus `proposalId`, or a `stale: ...` error when the base moved.
+     * accept a proposal as one agent transaction; returns the edit envelope
+     * plus `proposalId`, or a `stale: ...` error when the base moved.
      * @param {string} args
      * @returns {string}
      */
@@ -208,8 +208,7 @@ export class XlsxDocument {
         return XlsxDocument.__wrap(ret[0]);
     }
     /**
-     * register an agent proposal (preview only; the workbook is untouched);
-     * returns the stored `Proposal` json.
+     * register an agent proposal (preview only); returns the stored `Proposal` json.
      * @param {string} args
      * @returns {string}
      */
@@ -306,8 +305,7 @@ export class XlsxDocument {
         }
     }
     /**
-     * render the current sheet viewport to png bytes. only exported when the
-     * `raster` feature is compiled in; the js loader feature-detects it.
+     * render the current sheet viewport to png bytes (raster feature only).
      * @param {string} viewport_json
      * @returns {Uint8Array}
      */
@@ -632,7 +630,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        throw new Error('xlsx-wasm: async init is unused; call initSync(bytes)');
+        throw new Error('xlsx-wasm requires an explicit module or URL');
     }
     const imports = __wbg_get_imports();
 

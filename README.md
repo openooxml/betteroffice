@@ -59,6 +59,7 @@ The editor packages will ship under the `@betteroffice` scope: a framework-free 
 
 ```bash
 bun install
+bun run build:xlsx-wasm # compile the ignored spreadsheet wasm asset
 bun run dev          # web app
 bun run rust:check   # fmt + clippy + tests for the engines
 ```

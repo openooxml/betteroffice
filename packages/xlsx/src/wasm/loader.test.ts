@@ -1,15 +1,14 @@
 /**
- * End-to-end proof of the wasm boundary without a browser: initSync runs in
- * bun, so opening the hand-built fixture and reading sheet info plus a display
- * list exercises decode -> init -> open -> render against foreign xml.
+ * End-to-end proof of the wasm boundary without a browser.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
   StaleProposalError,
+  initWasm,
   isPngExportAvailable,
   isProposalsAvailable,
   isWasmAvailable,
@@ -22,12 +21,15 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 // the committed, hand-built fixture (regenerate via e2e/fixtures/generate-sample.mjs).
 const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
+const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 
 function sampleBytes(): Uint8Array {
   return new Uint8Array(readFileSync(FIXTURE));
 }
 
 describe('wasm loader', () => {
+  beforeAll(() => initWasm(new Uint8Array(readFileSync(WASM))));
+
   it('reports available and a version', () => {
     expect(isWasmAvailable()).toBe(true);
     expect(wasmVersion().length).toBeGreaterThan(0);

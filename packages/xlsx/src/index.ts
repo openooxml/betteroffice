@@ -58,6 +58,7 @@ export { buildA11yGrid } from './a11y/index';
 
 export { paintDisplayList } from './render/canvas2d';
 export {
+  initWasm,
   isWasmAvailable,
   isPngExportAvailable,
   isProposalsAvailable,
@@ -66,6 +67,7 @@ export {
   StaleProposalError,
 } from './wasm/loader';
 export type {
+  WasmInitInput,
   Viewport,
   SheetInfo,
   WorkbookHandle,

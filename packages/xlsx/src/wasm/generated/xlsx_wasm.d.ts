@@ -2,15 +2,15 @@
 /* eslint-disable */
 
 /**
- * a workbook handle exposed to js. wraps the pure `Session`.
+ * a workbook handle exposed to js; wraps the pure `Session`.
  */
 export class XlsxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * accept a proposal, applying it as one agent transaction; returns the edit
-     * envelope plus `proposalId`, or a `stale: ...` error when the base moved.
+     * accept a proposal as one agent transaction; returns the edit envelope
+     * plus `proposalId`, or a `stale: ...` error when the base moved.
      */
     acceptProposalJson(args: string): string;
     /**
@@ -42,8 +42,7 @@ export class XlsxDocument {
      */
     static open(bytes: Uint8Array): XlsxDocument;
     /**
-     * register an agent proposal (preview only; the workbook is untouched);
-     * returns the stored `Proposal` json.
+     * register an agent proposal (preview only); returns the stored `Proposal` json.
      */
     proposeJson(args: string): string;
     /**
@@ -59,8 +58,7 @@ export class XlsxDocument {
      */
     rejectProposalJson(args: string): string;
     /**
-     * render the current sheet viewport to png bytes. only exported when the
-     * `raster` feature is compiled in; the js loader feature-detects it.
+     * render the current sheet viewport to png bytes (raster feature only).
      */
     renderPng(viewport_json: string): Uint8Array;
     /**

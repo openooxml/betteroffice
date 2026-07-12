@@ -8,6 +8,7 @@ target/
 .dev.vars
 .env*
 *.tsbuildinfo
+packages/xlsx/src/wasm/generated/*.wasm
 next-env.d.ts
 cloudflare-env.d.ts
 .DS_Store
