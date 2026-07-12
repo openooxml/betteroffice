@@ -38,6 +38,11 @@
   },
   "license": "Apache-2.0",
   "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/xlsx-react"
+  },
   "publishConfig": {
     "access": "public"
   }
