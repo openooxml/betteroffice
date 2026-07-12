@@ -82,7 +82,7 @@ cla_init_signatures() {
 # Orchestrates the workflow; the only function with side effects. Env: REPO,
 # PR_NUMBER, EVENT_NAME, ALLOWLIST, CLA_URL, SIGN_PHRASE (+ COMMENT_USER_*).
 cla_main() {
-  local signatures="signatures/version2/cla.json"
+  local signatures="signatures/cla.json"
   local marker='<!-- cla-bot -->'
 
   cla_init_signatures "$signatures"
