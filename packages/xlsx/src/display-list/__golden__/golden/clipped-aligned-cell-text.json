@@ -1,0 +1,72 @@
+{
+  "displayList": {
+    "commands": [
+      {
+        "align": "left",
+        "clip": {
+          "h": 20,
+          "w": 80,
+          "x": 0,
+          "y": 0
+        },
+        "color": "#000000",
+        "fontSize": 12,
+        "op": "text",
+        "text": "left",
+        "x": 2,
+        "y": 16
+      },
+      {
+        "align": "center",
+        "clip": {
+          "h": 20,
+          "w": 80,
+          "x": 80,
+          "y": 0
+        },
+        "color": "#000000",
+        "fontSize": 12,
+        "op": "text",
+        "text": "mid",
+        "x": 120,
+        "y": 16
+      },
+      {
+        "align": "right",
+        "clip": {
+          "h": 20,
+          "w": 80,
+          "x": 160,
+          "y": 0
+        },
+        "color": "#000000",
+        "fontSize": 12,
+        "op": "text",
+        "text": "right long overflow",
+        "x": 238,
+        "y": 16
+      }
+    ],
+    "height": 40,
+    "width": 240
+  },
+  "viewport": {
+    "dpr": 1,
+    "frozenCols": 0,
+    "frozenRows": 0,
+    "height": 60,
+    "scrollX": 0,
+    "scrollY": 0,
+    "width": 240
+  },
+  "visible": {
+    "cols": {
+      "first": 0,
+      "last": 2
+    },
+    "rows": {
+      "first": 0,
+      "last": 1
+    }
+  }
+}

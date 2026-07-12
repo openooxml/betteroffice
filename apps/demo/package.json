@@ -12,6 +12,8 @@
     "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts"
   },
   "dependencies": {
+    "@betteroffice/xlsx": "workspace:*",
+    "@betteroffice/xlsx-react": "workspace:*",
     "@tailwindcss/postcss": "^4.3.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

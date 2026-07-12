@@ -1,0 +1,99 @@
+{
+  "displayList": {
+    "commands": [
+      {
+        "color": "#4472c4",
+        "h": 20,
+        "op": "fillRect",
+        "w": 80,
+        "x": 0,
+        "y": 0
+      },
+      {
+        "align": "left",
+        "bold": true,
+        "clip": {
+          "h": 20,
+          "w": 80,
+          "x": 0,
+          "y": 0
+        },
+        "color": "#ffffff",
+        "fontSize": 12,
+        "op": "text",
+        "text": "Header",
+        "x": 2,
+        "y": 14
+      },
+      {
+        "align": "right",
+        "clip": {
+          "h": 20,
+          "w": 80,
+          "x": 80,
+          "y": 0
+        },
+        "color": "#000000",
+        "fontFamily": "Calibri",
+        "fontSize": 12,
+        "italic": true,
+        "op": "text",
+        "strike": true,
+        "text": "1,250.00",
+        "underline": true,
+        "x": 158,
+        "y": 14
+      },
+      {
+        "color": "#1f3864",
+        "op": "line",
+        "width": 2,
+        "x1": 0,
+        "x2": 80,
+        "y1": 20,
+        "y2": 20
+      },
+      {
+        "color": "#1f3864",
+        "op": "line",
+        "style": "dashed",
+        "width": 1,
+        "x1": 80,
+        "x2": 80,
+        "y1": 0,
+        "y2": 20
+      },
+      {
+        "color": "#1f3864",
+        "op": "line",
+        "style": "double",
+        "width": 1,
+        "x1": 0,
+        "x2": 160,
+        "y1": 40,
+        "y2": 40
+      }
+    ],
+    "height": 40,
+    "width": 160
+  },
+  "viewport": {
+    "dpr": 1,
+    "frozenCols": 0,
+    "frozenRows": 0,
+    "height": 40,
+    "scrollX": 0,
+    "scrollY": 0,
+    "width": 160
+  },
+  "visible": {
+    "cols": {
+      "first": 0,
+      "last": 1
+    },
+    "rows": {
+      "first": 0,
+      "last": 1
+    }
+  }
+}

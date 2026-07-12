@@ -21,7 +21,7 @@ export const formats: Format[] = [
     name: "Xlsx",
     kind: "Spreadsheets",
     tagline: "Cells, formulas, and rendering on a native Rust engine.",
-    status: "soon",
+    status: "live",
   },
   {
     id: "pptx",

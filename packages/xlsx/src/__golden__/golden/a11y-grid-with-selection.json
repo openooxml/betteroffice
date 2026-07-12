@@ -1,0 +1,83 @@
+{
+  "columnHeaders": [
+    {
+      "col": 0,
+      "label": "Column A",
+      "text": "A"
+    },
+    {
+      "col": 1,
+      "label": "Column B",
+      "text": "B"
+    },
+    {
+      "col": 2,
+      "label": "Column C",
+      "text": "C"
+    }
+  ],
+  "label": "Spreadsheet grid",
+  "rows": [
+    {
+      "cells": [
+        {
+          "address": "A1",
+          "col": 0,
+          "label": "A1, r0c0",
+          "row": 0,
+          "selected": false,
+          "text": "r0c0"
+        },
+        {
+          "address": "B1",
+          "col": 1,
+          "label": "B1, r0c1, selected",
+          "row": 0,
+          "selected": true,
+          "text": "r0c1"
+        },
+        {
+          "address": "C1",
+          "col": 2,
+          "label": "C1, r0c2, selected",
+          "row": 0,
+          "selected": true,
+          "text": "r0c2"
+        }
+      ],
+      "header": "Row 1",
+      "row": 0
+    },
+    {
+      "cells": [
+        {
+          "address": "A2",
+          "col": 0,
+          "label": "A2, r1c0",
+          "row": 1,
+          "selected": false,
+          "text": "r1c0"
+        },
+        {
+          "address": "B2",
+          "col": 1,
+          "label": "B2, r1c1, selected",
+          "row": 1,
+          "selected": true,
+          "text": "r1c1"
+        },
+        {
+          "address": "C2",
+          "col": 2,
+          "label": "C2, r1c2, selected",
+          "row": 1,
+          "selected": true,
+          "text": "r1c2"
+        }
+      ],
+      "header": "Row 2",
+      "row": 1
+    }
+  ],
+  "sheetName": "Sheet1"
+}

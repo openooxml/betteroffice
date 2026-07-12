@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
-import { DemoStage } from "../components/DemoStage";
-import { getFormat } from "../../lib/formats";
+import { Suspense } from "react";
+import { XlsxDemoClient } from "./XlsxDemoClient";
+import "./xlsx.css";
 
-export const metadata: Metadata = { title: "Xlsx" };
+export const metadata: Metadata = { title: "XLSX" };
 
 export default function XlsxDemo() {
-  return <DemoStage format={getFormat("xlsx")!} />;
+  return (
+    <Suspense fallback={null}>
+      <XlsxDemoClient />
+    </Suspense>
+  );
 }

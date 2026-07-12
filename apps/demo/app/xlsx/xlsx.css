@@ -1,0 +1,319 @@
+/* product-demo shell for the xlsx editor. neutral near-white palette, one accent
+   (the sample fixture's #4472c4), system font, crisp 1px borders, subtle shadows.
+   the editor component owns its own grid chrome; this only frames it. */
+
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --border: #e4e5ea;
+  --border-strong: #d5d7de;
+  --text: #1c1d22;
+  --text-muted: #6b6e7a;
+  --accent: #4472c4;
+  --accent-hover: #3a63ad;
+  --danger: #b00020;
+  --danger-bg: #fdecef;
+  --shadow: 0 1px 2px rgba(20, 22, 30, 0.06);
+  --shadow-card: 0 4px 20px rgba(20, 22, 30, 0.08);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* header bar */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  z-index: 2;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.brand-glyph {
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+  flex: none;
+}
+
+.brand-tagline {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.action-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-group + .action-group {
+  padding-left: 10px;
+  margin-left: 2px;
+  border-left: 1px solid var(--border);
+}
+
+.filename {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* buttons + file-input label share one look */
+.btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    color 0.14s ease;
+}
+
+.btn:hover {
+  background: #f2f3f6;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.btn-primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.btn-ghost:hover {
+  background: #f2f3f6;
+  color: var(--text);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn:disabled:hover {
+  background: var(--surface);
+}
+
+.github-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  color: var(--text-muted);
+  transition:
+    background 0.14s ease,
+    color 0.14s ease;
+}
+
+.github-link:hover {
+  background: #f2f3f6;
+  color: var(--text);
+}
+
+/* body: the editor fills the rest of the viewport */
+.app-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.editor-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
+/* drop-to-replace hint while a workbook is already open */
+.app-body.drag .editor-host {
+  outline: 2px dashed var(--accent);
+  outline-offset: -3px;
+}
+
+/* empty / busy states cover the (mounted) editor as an opaque overlay */
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--bg);
+  display: grid;
+  place-items: center;
+}
+
+/* file-level error banner (dismissible) */
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-bottom: 1px solid #f3c7cf;
+}
+
+.error-banner .spacer {
+  flex: 1;
+}
+
+.error-dismiss {
+  border: none;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.error-dismiss:hover {
+  background: rgba(176, 0, 32, 0.1);
+}
+
+/* empty state: a centered typographic drop-zone card */
+.empty {
+  padding: 32px;
+}
+
+.dropzone {
+  width: min(460px, 100%);
+  padding: 40px 36px;
+  text-align: center;
+  background: var(--surface);
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 14px;
+  box-shadow: var(--shadow-card);
+  transition:
+    border-color 0.14s ease,
+    background 0.14s ease;
+}
+
+.dropzone.drag {
+  border-color: var(--accent);
+  background: #f4f7fd;
+}
+
+.dropzone-title {
+  font-size: 18px;
+  font-weight: 620;
+  margin: 0 0 6px;
+}
+
+.dropzone-sub {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  margin: 0 0 22px;
+  line-height: 1.5;
+}
+
+.dropzone-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.busy {
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+
+/* narrow viewports: hide the tagline, let the editor breathe */
+@media (max-width: 720px) {
+  .brand-tagline {
+    display: none;
+  }
+  .filename {
+    display: none;
+  }
+  .app-header {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+}

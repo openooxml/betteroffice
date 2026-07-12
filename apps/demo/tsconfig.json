@@ -19,7 +19,11 @@
       }
     ],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "@betteroffice/xlsx": ["../../packages/xlsx/src/index.ts"],
+      "@betteroffice/xlsx/headless": ["../../packages/xlsx/src/headless.ts"],
+      "@betteroffice/xlsx/*": ["../../packages/xlsx/src/*"],
+      "@betteroffice/xlsx-react": ["../../packages/xlsx-react/src/index.ts"]
     }
   },
   "include": [
