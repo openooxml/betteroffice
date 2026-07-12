@@ -1,0 +1,29 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
+export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_open: (a: number, b: number) => [number, number, number];
+export const xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+export const xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
+export const xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_undoJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_version: () => [number, number];
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;

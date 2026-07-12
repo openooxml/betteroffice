@@ -27,6 +27,8 @@ const cardName =
   "flex items-center justify-between gap-3 font-mono text-[0.8125rem] text-fg";
 const cardLink =
   "inline-flex items-center gap-1 font-mono text-[0.6875rem] text-dim no-underline hover:text-fg";
+const demoLink =
+  "ml-auto inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[0.6875rem] text-ink no-underline transition-colors hover:border-dim hover:text-fg";
 const moreLink =
   "mt-6 inline-flex items-center gap-1.5 font-mono text-[0.8125rem] underline decoration-faint underline-offset-[3px] hover:decoration-fg";
 
@@ -41,7 +43,7 @@ const EDITORS = [
     name: "Spreadsheets",
     format: "xlsx",
     desc: "Calculation graph, grid rendering and number formats on the same shared core.",
-    live: false,
+    live: true,
   },
   {
     name: "Slides",
@@ -172,7 +174,7 @@ export default function Home() {
           </h2>
           <p className={`${secP} mb-6`}>
             BetterOffice packages the OpenOOXML engines as ready-to-use
-            editors. Documents are live today; spreadsheets and slides follow
+            editors. Documents and spreadsheets are live today; slides follow
             on the same foundation.
           </p>
         </Reveal>
@@ -202,6 +204,12 @@ export default function Home() {
                   <span className="rounded border border-line-soft bg-surface px-1.5 py-0.5 font-mono text-[0.7rem] whitespace-nowrap">
                     .{editor.format}
                   </span>
+                  <a
+                    href={`https://demo.betteroffice.dev/${editor.format}`}
+                    className={demoLink}
+                  >
+                    demo <ArrowUpRight size={11} strokeWidth={2} />
+                  </a>
                 </span>
               </article>
             ))}
