@@ -1,0 +1,76 @@
+name: Release
+
+# Pending changesets → open/update a "chore: release" PR (version bumps +
+# CHANGELOGs). No pending changesets → run the gate and publish to npm.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write # OIDC provenance / Trusted Publishing
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      # Node 24 ships npm >= 11.5.1, required for provenance and OIDC publishing.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Detect pending changesets
+        id: pending
+        run: |
+          count=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
+          echo "publishing=$([ "$count" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Type check
+        if: steps.pending.outputs.publishing == 'true'
+        run: bun run --filter './packages/*' typecheck
+
+      - name: Test
+        if: steps.pending.outputs.publishing == 'true'
+        run: bun test packages
+
+      - name: Build packages
+        if: steps.pending.outputs.publishing == 'true'
+        run: bun run build:packages
+
+      - name: Release PR or publish
+        uses: changesets/action@v1.9.0
+        with:
+          version: bun run version-packages
+          publish: bunx changeset publish
+          title: "chore: release"
+          commit: "chore: release"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No npm token: auth is OIDC Trusted Publishing (configured per
+          # package after the first manual publish creates it). id-token: write
+          # above authorizes the exchange and signs provenance.
+          NPM_CONFIG_PROVENANCE: "true"
