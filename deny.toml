@@ -20,6 +20,7 @@ version = 2
 yanked = "warn"
 ignore = [
   { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser, transitive via rustybuzz; migration tracked to fontations" },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz declared unmaintained; migration to harfrust tracked with the fontations move" },
 ]
 
 [bans]
