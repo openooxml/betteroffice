@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-4ade80.svg?style=flat-square" alt="license"></a>
+  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fbetteroffice.dev%2Fapi%2Fnpm-downloads&amp;style=flat-square&amp;logo=npm&amp;label=downloads&amp;color=CB3837&amp;cacheSeconds=86400" alt="npm downloads"></a>
   <a href="https://betteroffice.dev"><img src="https://img.shields.io/badge/betteroffice.dev-0a0a0a?style=flat-square" alt="betteroffice.dev"></a>
   <a href="https://openooxml.org"><img src="https://img.shields.io/badge/openooxml.org-0a0a0a?style=flat-square" alt="openooxml.org"></a>
 </p>
