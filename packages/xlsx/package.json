@@ -22,7 +22,7 @@
   ],
   "scripts": {
     "build": "bun run build:wasm && tsup",
-    "build:wasm": "node ../../scripts/build-xlsx-wasm.mjs",
+    "build:wasm": "bun ../../scripts/build-xlsx-wasm.ts",
     "typecheck": "tsc --noEmit -p ."
   },
   "devDependencies": {

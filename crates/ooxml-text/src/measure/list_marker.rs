@@ -1,16 +1,43 @@
+//! List-marker inline-width resolution — a port of
+//! `packages/core/src/layout/measure/listMarkerWidth.ts`
+//! (`getListMarkerInlineWidth` + `resolveListMarkerFont`).
+//!
+//! The painter renders the marker as an inline-block at the start of the
+//! first body line; the measurer subtracts the same footprint from the first
+//! line's available width. This module mirrors the TS rules:
+//!
+//! - No marker / hidden marker → 0. (The caller additionally zeroes the
+//!   width whenever `indent.hanging != 0`, mirroring the exact `=== 0` guard
+//!   in `measureParagraph` — hanging-marker paragraphs indent instead.)
+//! - Marker font per §17.9.6: numbering-level rPr (`listMarkerFont*`), else
+//!   the first body text run's font, else paragraph/document defaults. The
+//!   TS style carries no bold/italic → the family's regular chain.
+//! - `w:suff` (§17.9.25): `nothing` → natural width; `space` → natural + one
+//!   space glyph; `tab` (default) → grow to the closest stop past the
+//!   marker, where custom `attrs.tabs` stops (non-`clear`/`bar`) and the
+//!   `defaultTabStopTwips` grid (anchored at 0, NOT at `w:ind`) compete and
+//!   the closest wins. `>=` on the custom-stop filter is intentional (a stop
+//!   exactly at the marker's right edge is valid).
+//! - No grid at all (`defaultTabStopTwips` explicitly 0, no custom stops) →
+//!   natural width + half an em.
+
 use crate::font_store::FontStore;
 
 use super::input::{AttrsIn, MeasureInput};
 use super::tabs::twips_to_px;
 use super::{MeasureError, pt_to_px};
 
+/// TS `DEFAULT_TAB_STOP_TWIPS` (settingsParser): §17.6.13 default.
 const DEFAULT_TAB_STOP_TWIPS: f32 = 720.0;
 
+/// The marker's inline-block width in px, or 0 when nothing is rendered.
+/// Caller guarantees `hanging == 0` (the only path where TS consumes this).
 pub(super) fn list_marker_inline_width(
     store: &FontStore,
     input: &MeasureInput,
     attrs: &AttrsIn,
 ) -> Result<f32, MeasureError> {
+    // TS `!attrs?.listMarker` — empty string is falsy too.
     let marker = match attrs.list_marker.as_deref() {
         Some(m) if !m.is_empty() => m,
         _ => return Ok(0.0),
@@ -19,7 +46,8 @@ pub(super) fn list_marker_inline_width(
         return Ok(0.0);
     }
 
-    // Resolve the marker face through the paragraph fallback chain.
+    // resolveListMarkerFont: level rPr → first text run → paragraph →
+    // document defaults.
     let first_text_run = input.block.runs.iter().find(|r| r.kind == "text");
     let family = attrs
         .list_marker_font_family
@@ -37,7 +65,8 @@ pub(super) fn list_marker_inline_width(
 
     let chain = input.chain_for(family, false, false)?;
     super::prepare::validate_chain(store, &chain)?;
-    // Direction affects marker segmentation but not its width.
+    // Marker text under the paragraph's base direction (`w:bidi` → RTL);
+    // like everywhere else, direction affects segmentation, never the sum.
     let base = if attrs.bidi {
         crate::bidi::BaseDirection::Rtl
     } else {

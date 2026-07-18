@@ -1,6 +1,26 @@
 {
   "pages": [
     {
+      "columnBounds": [
+        {
+          "height": 864,
+          "width": 300,
+          "x": 96,
+          "y": 96
+        },
+        {
+          "height": 864,
+          "width": 300,
+          "x": 420,
+          "y": 96
+        }
+      ],
+      "contentBounds": {
+        "height": 864,
+        "width": 624,
+        "x": 96,
+        "y": 96
+      },
       "height": 1056,
       "pageIndex": 0,
       "primitives": [
@@ -11,6 +31,8 @@
           "docEnd": 12,
           "docStart": 1,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 13,
+          "fragmentDocStart": 1,
           "fromLine": 0,
           "kind": "text",
           "text": "Left column",
@@ -25,6 +47,8 @@
           "docEnd": 26,
           "docStart": 14,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 27,
+          "fragmentDocStart": 14,
           "fromLine": 0,
           "kind": "text",
           "text": "Right column",

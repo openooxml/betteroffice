@@ -1,0 +1,3 @@
+# wasm-pack output; vendored into packages/core/src/yrs/wasm by scripts/embed-edit-wasm.mjs
+/pkg-web
+/pkg-node

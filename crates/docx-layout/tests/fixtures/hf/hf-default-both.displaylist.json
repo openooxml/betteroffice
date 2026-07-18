@@ -1,6 +1,20 @@
 {
   "pages": [
     {
+      "columnBounds": [
+        {
+          "height": 864,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        }
+      ],
+      "contentBounds": {
+        "height": 864,
+        "width": 624,
+        "x": 96,
+        "y": 96
+      },
       "footer": {
         "height": 24,
         "kind": "footer",
@@ -12,6 +26,8 @@
             "docEnd": 15,
             "docStart": 1,
             "font": "400 14.667px Calibri, sans-serif",
+            "fragmentDocEnd": 16,
+            "fragmentDocStart": 1,
             "fromLine": 0,
             "kind": "text",
             "text": "Default footer",
@@ -34,6 +50,8 @@
             "docEnd": 15,
             "docStart": 1,
             "font": "400 14.667px Calibri, sans-serif",
+            "fragmentDocEnd": 16,
+            "fragmentDocStart": 1,
             "fromLine": 0,
             "kind": "text",
             "text": "Default header",
@@ -55,6 +73,8 @@
           "docEnd": 13,
           "docStart": 1,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 18,
+          "fragmentDocStart": 1,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -69,6 +89,8 @@
           "docEnd": 33,
           "docStart": 21,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 38,
+          "fragmentDocStart": 21,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -83,6 +105,8 @@
           "docEnd": 53,
           "docStart": 41,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 58,
+          "fragmentDocStart": 41,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -97,6 +121,8 @@
           "docEnd": 73,
           "docStart": 61,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 78,
+          "fragmentDocStart": 61,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -111,6 +137,8 @@
           "docEnd": 93,
           "docStart": 81,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 98,
+          "fragmentDocStart": 81,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -125,6 +153,8 @@
           "docEnd": 113,
           "docStart": 101,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 118,
+          "fragmentDocStart": 101,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -139,6 +169,8 @@
           "docEnd": 133,
           "docStart": 121,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 138,
+          "fragmentDocStart": 121,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -153,6 +185,8 @@
           "docEnd": 153,
           "docStart": 141,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 158,
+          "fragmentDocStart": 141,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -164,6 +198,20 @@
       "width": 816
     },
     {
+      "columnBounds": [
+        {
+          "height": 864,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        }
+      ],
+      "contentBounds": {
+        "height": 864,
+        "width": 624,
+        "x": 96,
+        "y": 96
+      },
       "footer": {
         "height": 24,
         "kind": "footer",
@@ -175,6 +223,8 @@
             "docEnd": 15,
             "docStart": 1,
             "font": "400 14.667px Calibri, sans-serif",
+            "fragmentDocEnd": 16,
+            "fragmentDocStart": 1,
             "fromLine": 0,
             "kind": "text",
             "text": "Default footer",
@@ -197,6 +247,8 @@
             "docEnd": 15,
             "docStart": 1,
             "font": "400 14.667px Calibri, sans-serif",
+            "fragmentDocEnd": 16,
+            "fragmentDocStart": 1,
             "fromLine": 0,
             "kind": "text",
             "text": "Default header",
@@ -218,6 +270,8 @@
           "docEnd": 173,
           "docStart": 161,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 178,
+          "fragmentDocStart": 161,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",
@@ -232,6 +286,8 @@
           "docEnd": 193,
           "docStart": 181,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 198,
+          "fragmentDocStart": 181,
           "fromLine": 0,
           "kind": "text",
           "text": "Body paragra",

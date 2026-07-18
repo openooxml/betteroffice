@@ -1,0 +1,119 @@
+{
+  "name": "@betteroffice/docx-react",
+  "version": "0.0.1",
+  "description": "React DOCX editor adapter for @betteroffice/docx.",
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./ui": {
+      "types": "./dist/ui.d.mts",
+      "import": "./dist/ui.mjs"
+    },
+    "./dialogs": {
+      "types": "./dist/dialogs.d.mts",
+      "import": "./dist/dialogs.mjs"
+    },
+    "./hooks": {
+      "types": "./dist/hooks.d.mts",
+      "import": "./dist/hooks.mjs"
+    },
+    "./plugin-api": {
+      "types": "./dist/plugin-api.d.mts",
+      "import": "./dist/plugin-api.mjs"
+    },
+    "./styles": {
+      "types": "./dist/styles.d.mts",
+      "import": "./dist/styles.mjs"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "typesVersions": {
+    "*": {
+      "ui": [
+        "./dist/ui.d.mts"
+      ],
+      "dialogs": [
+        "./dist/dialogs.d.mts"
+      ],
+      "hooks": [
+        "./dist/hooks.d.mts"
+      ],
+      "plugin-api": [
+        "./dist/plugin-api.d.mts"
+      ],
+      "styles": [
+        "./dist/styles.d.mts"
+      ]
+    }
+  },
+  "sideEffects": [
+    "*.css"
+  ],
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup && bun run build:css",
+    "build:css": "tailwindcss -c ./tailwind.config.js -i ./src/styles/editor.css -o ./dist/styles.css --minify",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0",
+    "react-dom": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@betteroffice/docx": "workspace:*",
+    "@betteroffice/docx-i18n": "workspace:*",
+    "@radix-ui/react-select": "^2.2.6",
+    "clsx": "^2.1.0",
+    "sonner": "^2.0.7"
+  },
+  "keywords": [
+    "docx",
+    "editor",
+    "template",
+    "word",
+    "document",
+    "react"
+  ],
+  "author": "OpenOOXML",
+  "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/docx-react"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.1",
+    "typescript": "^6.0.3",
+    "@types/bun": "^1.0.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "tailwindcss": "^3.4.1",
+    "tailwindcss-animate": "^1.0.7",
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.33",
+    "class-variance-authority": "^0.7.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "@testing-library/react": "^16.0.0",
+    "@happy-dom/global-registrator": "^20.8.3"
+  }
+}

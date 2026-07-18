@@ -1,0 +1,49 @@
+{
+  "name": "@betteroffice/docx-fonts",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Bundled open fonts for the @betteroffice/docx editor: metric-compatible Latin faces (Carlito, Caladea, Liberation) plus Noto CJK/RTL script-coverage faces, with a lazy same-origin loader.",
+  "sideEffects": false,
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "assets",
+    "LICENSES",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  },
+  "keywords": [
+    "docx",
+    "fonts",
+    "metric-compatible",
+    "carlito",
+    "caladea",
+    "liberation",
+    "noto",
+    "cjk",
+    "rtl"
+  ],
+  "author": "OpenOOXML",
+  "license": "(Apache-2.0 AND OFL-1.1)",
+  "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/fonts"
+  }
+}

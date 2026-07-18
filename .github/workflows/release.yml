@@ -99,7 +99,7 @@ jobs:
       # concrete versions before publish (ephemeral checkout; source is unchanged).
       - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
-        run: node scripts/rewrite-workspace-deps.mjs
+        run: bun scripts/rewrite-workspace-deps.ts
 
       - name: Release PR or publish
         uses: changesets/action@v1.9.0

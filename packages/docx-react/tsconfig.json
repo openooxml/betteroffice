@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "declaration": true,
+    "declarationMap": true,
+    "paths": {
+      "@/*": ["./src/*"],
+      "@betteroffice/docx": ["../docx/src/core.ts"],
+      "@betteroffice/docx/headless": ["../docx/src/headless.ts"],
+      "@betteroffice/docx/core-plugins": ["../docx/src/core-plugins/index.ts"],
+      "@betteroffice/docx/mcp": ["../docx/src/mcp/index.ts"],
+      "@betteroffice/docx/plugin-api/*": ["../docx/src/plugin-api/*"],
+      "@betteroffice/docx/*": ["../docx/src/*"],
+      "@betteroffice/docx-i18n": ["../docx-i18n/src/index.ts"],
+      "@betteroffice/drawingml": ["../drawingml/src/index.ts"],
+      "@betteroffice/drawingml/units": ["../drawingml/src/units.ts"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}

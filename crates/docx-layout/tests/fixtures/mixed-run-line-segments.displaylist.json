@@ -1,6 +1,20 @@
 {
   "pages": [
     {
+      "columnBounds": [
+        {
+          "height": 864,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        }
+      ],
+      "contentBounds": {
+        "height": 864,
+        "width": 624,
+        "x": 96,
+        "y": 96
+      },
       "height": 1056,
       "pageIndex": 0,
       "primitives": [
@@ -11,6 +25,8 @@
           "docEnd": 7,
           "docStart": 1,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 27,
+          "fragmentDocStart": 1,
           "fromLine": 0,
           "kind": "text",
           "text": "Intro ",
@@ -22,6 +38,8 @@
           "blockId": 0,
           "docEnd": 9,
           "docStart": 8,
+          "fragmentDocEnd": 27,
+          "fragmentDocStart": 1,
           "fromLine": 0,
           "h": 40,
           "kind": "image",
@@ -38,6 +56,8 @@
           "docEnd": 26,
           "docStart": 10,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 27,
+          "fragmentDocStart": 1,
           "fromLine": 0,
           "kind": "text",
           "text": "tail after break",

@@ -1,6 +1,17 @@
+//! Native golden-corpus harness — no wasm, no browser.
+//!
+//! Replays every fixture pair exported by `scripts/export-golden-fixtures.ts`
+//! through the pure engine. A scenario the engine accepts MUST reproduce the
+//! committed golden canonical layout byte-for-byte; a scenario that engages a
+//! not-yet-ported feature may report UNSUPPORTED — except the required
+//! paragraph scenarios, which must pass. Prints a one-line PASS/UNSUPPORTED
+//! table (visible via `cargo test -- --nocapture`, or on failure).
+
 use std::fs;
 use std::path::PathBuf;
 
+/// Scenarios the spine must handle (kept in sync with `SUPPORTED` in
+/// `packages/core/src/layout/pagination/__golden__/rustParity.test.ts`).
 const REQUIRED: [&str; 2] = [
     "single-page-multi-paragraph",
     "multi-page-paragraph-overflow",
@@ -10,7 +21,7 @@ const REQUIRED: [&str; 2] = [
 fn golden_corpus_byte_identity() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut names: Vec<String> = fs::read_dir(&fixtures)
-        .expect("fixtures directory exists")
+        .expect("fixtures dir exists — run `bun scripts/export-golden-fixtures.ts`")
         .filter_map(|entry| {
             let name = entry.ok()?.file_name().into_string().ok()?;
             name.strip_suffix(".input.json").map(str::to_string)

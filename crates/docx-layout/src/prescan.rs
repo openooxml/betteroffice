@@ -1,7 +1,16 @@
+//! Prescan — the pure look-ahead phase of pagination. Port of
+//! `packages/core/src/layout/pagination/prescan.ts`.
+//!
+//! Gathers per-section geometry, section break types, and the keep-with-next
+//! scan in one pass so placement reads a plan instead of recomputing
+//! look-ahead mid-flight. The keep-with-next scan comes through its feature
+//! hook (see `hooks.rs`).
+
 use crate::LayoutError;
 use crate::hooks::{self, KeepWithNextScan};
 use crate::types::{ColumnLayout, LayoutBlock, MeasuredBlock, PageMargins, SectionBreakType, Size};
 
+/// TS `SectionLayoutConfig` — page-flow geometry of a single section.
 #[derive(Debug, Clone)]
 pub struct SectionLayoutConfig {
     pub page_size: Size,
@@ -10,6 +19,7 @@ pub struct SectionLayoutConfig {
     pub columns: Option<ColumnLayout>,
 }
 
+/// TS `DEFAULT_COLUMNS` — single-column fallback.
 pub fn default_columns() -> ColumnLayout {
     ColumnLayout {
         count: 1.0,
@@ -19,6 +29,8 @@ pub fn default_columns() -> ColumnLayout {
     }
 }
 
+/// TS `collectSectionConfigs` — one config per section break plus a trailing
+/// `final_config`; `break_indices` is 1-to-1 with the inner entries.
 pub fn collect_section_configs(
     measured: &[MeasuredBlock],
     initial_config: &SectionLayoutConfig,
@@ -50,6 +62,7 @@ pub fn collect_section_configs(
     (configs, break_indices)
 }
 
+/// TS `LayoutPlan` — the look-ahead the placement walk consumes.
 pub struct LayoutPlan {
     /// One config per section break, plus a trailing final-section config.
     pub section_configs: Vec<SectionLayoutConfig>,
@@ -61,6 +74,7 @@ pub struct LayoutPlan {
     pub keep_with_next: KeepWithNextScan,
 }
 
+/// TS `prescan` — gather all pagination look-ahead into one plan.
 pub fn prescan(
     measured: &[MeasuredBlock],
     body_config: &SectionLayoutConfig,

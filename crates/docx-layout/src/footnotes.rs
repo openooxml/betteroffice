@@ -1,9 +1,86 @@
+//! Footnote layout — Rust port of
+//! `packages/core/src/layout/regions/footnoteLayout.ts`.
+//!
+//! Self-contained: all input structs are LOCAL mirrors of the TS parameter
+//! shapes (serde camelCase, unknown fields preserved via `#[serde(flatten)]`
+//! so blocks pass through `apply_footnote_presentation` losslessly). Maps are
+//! insertion-ordered (`OrderedMap`) to mirror TS `Map` iteration semantics —
+//! iteration order is load-bearing for byte-identity of reservation maps.
+//!
+//! Ported exports (TS name → Rust name, 1:1 semantics):
+//! - `FOOTNOTE_SEPARATOR_HEIGHT`, `FOOTNOTE_COLUMN_GAP_PX`,
+//!   `MAX_FOOTNOTE_LAYOUT_PASSES` — same names
+//! - `footnoteReservedHeightsEqual` → `footnote_reserved_heights_equal`
+//! - `collectFootnoteRefs` → `collect_footnote_refs`
+//! - `mapFootnotesToPages` → `map_footnotes_to_pages`
+//! - `applyFootnotePresentation` → `apply_footnote_presentation`
+//! - `distributeFootnotesIntoColumns` → `distribute_footnotes_into_columns`
+//! - `calculateFootnoteReservedHeights` → `calculate_footnote_reserved_heights`
+//! - `buildFootnoteContentMap` → `build_footnote_content_map` (the TS
+//!   `contentWidth` + `ConvertFootnoteOptions` args feed only
+//!   `convertFootnoteToContent`, which stays JS-side, so here they are folded
+//!   into the injected conversion callback)
+//! - `stabilizeFootnoteLayout` → `stabilize_footnote_layout` (the TS
+//!   `blocks`/`measures`/`layoutOpts` args feed only `layoutDocument`; here
+//!   the relayout is an injected callback standing in for
+//!   `layoutDocument(measured, { ...layoutOpts, footnoteReservedHeights })`)
+//!
+//! NOT ported — these cross the ProseMirror/Canvas/DOM seam and stay in TS:
+//! `convertFootnoteToContent` (footnoteToProseDoc → toLayoutBlocks → adapter
+//! `measureBlocks`), `MeasureBlocksFn`, `ConvertFootnoteOptions`, and
+//! `buildFootnoteRenderItems` (paint-side payload; needs `Document` +
+//! `getFootnoteText`). The Rust layout core only ever needs footnote content
+//! HEIGHTS (the `HasHeight` trait); the JS host measures and passes them in.
+//!
+//! # INTEGRATION — reserved-height feedback (hook for the place/spine side)
+//!
+//! Footnote presence reserves page height, and reserving height can move a
+//! reference to another page, so layout re-enters. The TS control flow:
+//!
+//! 1. `LayoutOptions.footnoteReservedHeights?: Map<pageNumber, px>`
+//!    (`layout/pagination/types.ts:1049`). `layoutDocument` does nothing with
+//!    it except forward it into `createPageFlow`
+//!    (`layout/pagination/index.ts:168`).
+//! 2. The ONLY in-pass consumer is page creation
+//!    (`layout/pagination/pageFlow.ts:158-169`, option declared at `:53`):
+//!    for the page being created, `pageNumber = pages.length + 1 +
+//!    pageNumberOffset`, `footnoteHeight =
+//!    footnoteReservedHeights?.get(pageNumber) ?? 0`, and the page state's
+//!    `contentLimit` becomes `(pageSize.h - margins.bottom) - footnoteHeight`
+//!    (`getContentBottom` is `pageFlow.ts:106-108`). Every subsequent
+//!    fits/overflow/break decision on that page reads the reduced limit.
+//!    When `footnoteHeight > 0` it is also stamped on the output page as
+//!    `page.footnoteReservedHeight` (`types.ts:945`). THIS is the whole hook
+//!    the Rust spine paginator must implement — it is what the golden
+//!    `footnotes-force-content-up` exercises (`__golden__/corpus.ts:260-266`
+//!    reserves `Map{1 → 200}`; the golden asserts
+//!    `"footnoteReservedHeight": 200` on page 1 and the 8th paragraph pushed
+//!    to page 2).
+//! 3. A single layout pass never recomputes reservations. The re-entry loop
+//!    lives OUTSIDE `layoutDocument`, in `stabilizeFootnoteLayout`
+//!    (`footnoteLayout.ts:555-642`, ported below): map refs → pages, compute
+//!    per-page reservations, re-run the FULL layout with them, repeat until
+//!    the reservation map reaches a fixpoint (≤ `MAX_FOOTNOTE_LAYOUT_PASSES`);
+//!    if it oscillates, a fallback loop max-merges reservations monotonically
+//!    (≤ another `MAX_FOOTNOTE_LAYOUT_PASSES`) until every page's requirement
+//!    is covered, then settles. Finally `page.footnoteIds` (and
+//!    `page.footnoteColumns` when > 1) are written onto the result pages.
+//! 4. Incremental relayout must BAIL to a full layout whenever
+//!    `footnoteReservedHeights` is non-empty — reservation couples pages
+//!    globally (`layout/pagination/incremental.ts:191`, forwarded at `:250`).
+
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value};
 
 /// Separator line height + vertical padding in pixels.
 pub const FOOTNOTE_SEPARATOR_HEIGHT: f64 = 12.0;
 
+/// Gutter between footnote columns when `w15:footnoteColumns` > 1, in pixels
+/// (~0.25in). Shared by the reserved-height/measurement path and the footnote
+/// painter so a footnote measured at column width paints into a column of
+/// exactly that width. Single-column footnotes never consult it.
 pub const FOOTNOTE_COLUMN_GAP_PX: f64 = 24.0;
 
 /// Hard cap on the multi-pass footnote layout loop. Reserving footnote space
@@ -17,6 +94,14 @@ pub const MAX_FOOTNOTE_LAYOUT_PASSES: usize = 6;
 /// specify a fontSize (avoids overriding authored sizes).
 const FOOTNOTE_FONT_SIZE_PT: f64 = 8.0;
 
+// ============================================================================
+// insertion-ordered map (mirrors TS `Map` semantics)
+// ============================================================================
+
+/// Insertion-ordered key→value map mirroring TS `Map`: `set` on an existing
+/// key updates in place (original position kept), iteration is insertion
+/// order. Reservation/page maps are tiny (one entry per page), so a Vec scan
+/// beats hashing and — unlike `HashMap` — keeps TS iteration order exactly.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrderedMap<K, V> {
     entries: Vec<(K, V)>,
@@ -48,6 +133,7 @@ impl<K: PartialEq, V> OrderedMap<K, V> {
             .map(|(_, v)| v)
     }
 
+    /// TS `Map.set`: replace in place when the key exists, append otherwise.
     pub fn set(&mut self, key: K, value: V) {
         match self.get_mut(&key) {
             Some(slot) => *slot = value,
@@ -76,6 +162,12 @@ impl<K: PartialEq, V> FromIterator<(K, V)> for OrderedMap<K, V> {
     }
 }
 
+// ============================================================================
+// local input mirrors (duck-typed like the TS structural types; unknown
+// fields survive round-trips through `rest`)
+// ============================================================================
+
+/// TS `BlockId = string | number`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockId {
@@ -106,6 +198,9 @@ pub struct Run {
     pub rest: JsonMap<String, Value>,
 }
 
+/// One flow block, duck-typed on `kind` exactly like the TS union:
+/// `runs` when `kind == "paragraph"`, `rows` when `kind == "table"`,
+/// `content` when `kind == "textBox"`. Unknown kinds pass through untouched.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutBlock {
@@ -183,6 +278,7 @@ pub struct Layout {
     pub rest: JsonMap<String, Value>,
 }
 
+/// TS `Footnote` — only `id` + `noteType` are read here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Footnote {
@@ -193,6 +289,8 @@ pub struct Footnote {
     pub rest: JsonMap<String, Value>,
 }
 
+/// TS `FootnoteContent`, minus `blocks`/`measures` — those stay JS-side with
+/// the measurement pipeline; the layout core only consumes the total height.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FootnoteContent {
@@ -203,6 +301,7 @@ pub struct FootnoteContent {
     pub rest: JsonMap<String, Value>,
 }
 
+/// Stand-in for the TS structural constraint `T extends { height: number }`.
 pub trait HasHeight {
     fn height(&self) -> f64;
 }
@@ -293,7 +392,11 @@ pub struct FootnoteRefLocation {
     pub row_index: Option<u32>,
 }
 
-/// Collect footnote references in document order.
+/// Scan FlowBlocks for runs with `footnoteRefId` set. Returns the refs in
+/// document order. Recurses into container blocks (table cells, text boxes);
+/// for refs inside a table, the OUTERMOST table's id and row index are
+/// recorded (a nested table keeps the outer context, since the outer row is
+/// what the paginator splits into per-page fragments).
 pub fn collect_footnote_refs(blocks: &[LayoutBlock]) -> Vec<FootnoteRefLocation> {
     struct TableCtx {
         table_block_id: Option<BlockId>,
@@ -310,15 +413,16 @@ pub fn collect_footnote_refs(blocks: &[LayoutBlock]) -> Vec<FootnoteRefLocation>
                 "paragraph" => {
                     let Some(runs) = &block.runs else { continue };
                     for run in runs {
-                        if run.kind == "text"
-                            && let Some(footnote_id) = run.footnote_ref_id
-                        {
-                            refs.push(FootnoteRefLocation {
-                                footnote_id,
-                                pm_pos: run.pm_start.unwrap_or(0.0),
-                                table_block_id: table_ctx.and_then(|c| c.table_block_id.clone()),
-                                row_index: table_ctx.map(|c| c.row_index),
-                            });
+                        if run.kind == "text" {
+                            if let Some(footnote_id) = run.footnote_ref_id {
+                                refs.push(FootnoteRefLocation {
+                                    footnote_id,
+                                    pm_pos: run.pm_start.unwrap_or(0.0),
+                                    table_block_id: table_ctx
+                                        .and_then(|c| c.table_block_id.clone()),
+                                    row_index: table_ctx.map(|c| c.row_index),
+                                });
+                            }
                         }
                     }
                 }
@@ -481,6 +585,7 @@ pub fn apply_footnote_presentation(
             .as_ref()
             .and_then(|runs| runs.iter().find(|r| r.kind == "text"))
             .and_then(|r| r.font_family.clone())
+            // mirror the TS truthiness check — an empty string is falsy
             .filter(|f| !f.is_empty());
         let number_run = Run {
             kind: "text".to_string(),
@@ -499,6 +604,12 @@ pub fn apply_footnote_presentation(
     out
 }
 
+/// Build footnote content for all footnotes referenced in the document.
+/// Display numbers are assigned by first-appearance order (the same way Word
+/// renders them). The conversion callback stands in for the TS
+/// `convertFootnoteToContent(footnote, displayNumber, contentWidth, options)`
+/// — `contentWidth`/`options` are captured by the closure, since the actual
+/// conversion (ProseMirror bridge + adapter measurement) stays JS-side.
 pub fn build_footnote_content_map<F>(
     footnotes: &[Footnote],
     footnote_refs: &[FootnoteRefLocation],
@@ -638,6 +749,20 @@ pub struct StabilizeFootnoteLayoutResult {
     pub converged: bool,
 }
 
+/// Run the multi-pass footnote layout loop. Reserving footnote space on a
+/// page can move a reference to another page, which changes the reservation,
+/// which can move references again. Iterate until the page→height contract is
+/// the same one used by the latest layout, or `MAX_FOOTNOTE_LAYOUT_PASSES`
+/// passes have run. Writes `page.footnote_ids` (and `page.footnote_columns`
+/// when > 1) onto each page in the returned layout.
+///
+/// `layout_with_reserved` stands in for the TS
+/// `layoutDocument(measured, { ...layoutOpts, footnoteReservedHeights })` —
+/// the spine paginator owns that call; it must reduce each page's content
+/// bottom by its reserved height (see the module INTEGRATION note).
+/// `footnote_columns` is `w15:footnoteColumns` (`None` = 1). The TS version
+/// logs a console warning when it fails to stabilize; here the caller reads
+/// `converged` instead.
 pub fn stabilize_footnote_layout<F, V>(
     mut layout_with_reserved: F,
     footnote_refs: &[FootnoteRefLocation],
@@ -732,6 +857,12 @@ where
     }
 }
 
+// ============================================================================
+// tests — ported 1:1 from
+// packages/core/src/layout/regions/__tests__/footnoteLayout.test.ts and
+// packages/core/src/layout/regions/__tests__/footnote-columns-distribute.test.ts
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -774,6 +905,8 @@ mod tests {
         }
     }
 
+    // ---- footnote layout reservation (footnoteLayout.test.ts) -------------
+
     #[test]
     fn adds_the_shared_separator_height_to_each_page_reservation() {
         let page_map: OrderedMap<u32, Vec<i64>> =
@@ -798,10 +931,16 @@ mod tests {
         );
     }
 
-    // Footnote presentation.
+    // ---- applyFootnotePresentation -----------------------------------------
 
     #[test]
     fn the_synthetic_marker_run_inherits_the_footnote_text_font() {
+        // Regression: the prepended number run carried no fontFamily, so the
+        // painter fell back to the inherited container default and the footnote
+        // number rendered in a different font than the note text. The marker
+        // must match the note's font (Word renders the number in the
+        // FootnoteText face; the FootnoteReference char style only adds
+        // superscript, not a face).
         let blocks = vec![LayoutBlock {
             kind: "paragraph".to_string(),
             id: Some(BlockId::Str("fn1".to_string())),
@@ -844,7 +983,7 @@ mod tests {
         assert_eq!(marker.font_family, None);
     }
 
-    // Footnote reference collection.
+    // ---- collectFootnoteRefs -----------------------------------------------
 
     #[test]
     fn collects_refs_from_top_level_paragraphs() {
@@ -861,6 +1000,12 @@ mod tests {
 
     #[test]
     fn recurses_into_table_cells_so_cell_authored_refs_reach_the_page_reservation_pass() {
+        // Regression: previously the collector iterated only top-level blocks
+        // and skipped `kind: "table"` entirely, so any footnote authored inside
+        // a table cell never made it into pageFootnoteMap. The body still
+        // rendered the in-line ref marker, but the per-page footnote area
+        // dropped the entry — leaving readers with a dangling superscript
+        // number.
         let nested_table = LayoutBlock {
             kind: "table".to_string(),
             id: Some(BlockId::Str("t-nested".to_string())),
@@ -930,7 +1075,7 @@ mod tests {
         assert_eq!(collect_footnote_refs(&[text_box]), vec![body_ref(9, 50.0)]);
     }
 
-    // Footnote page mapping.
+    // ---- mapFootnotesToPages -----------------------------------------------
 
     #[test]
     fn uses_split_paragraph_fragment_ranges_instead_of_the_whole_paragraph_range() {
@@ -1005,6 +1150,8 @@ mod tests {
         assert_eq!(map_footnotes_to_pages(&pages, &refs), expected);
     }
 
+    // ---- distributeFootnotesIntoColumns (footnote-columns-distribute.test.ts)
+
     #[derive(Clone, Debug, PartialEq)]
     struct Item {
         id: &'static str,
@@ -1072,7 +1219,7 @@ mod tests {
         assert_eq!(flattened, vec!["tall", "s1", "s2"]);
     }
 
-    // Reserved heights with columns.
+    // ---- calculateFootnoteReservedHeights with columns ----------------------
 
     fn columns_content_map() -> OrderedMap<i64, HeightItem> {
         [

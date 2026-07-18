@@ -1,9 +1,15 @@
 import type { Metadata } from "next";
-import { DemoStage } from "../components/DemoStage";
-import { getFormat } from "../../lib/formats";
+import { Suspense } from "react";
+import { DocxDemoClient } from "./DocxDemoClient";
+import "@betteroffice/docx-react/styles.css";
+import "./docx.css";
 
-export const metadata: Metadata = { title: "Docx" };
+export const metadata: Metadata = { title: "DOCX" };
 
 export default function DocxDemo() {
-  return <DemoStage format={getFormat("docx")!} />;
+  return (
+    <Suspense fallback={null}>
+      <DocxDemoClient />
+    </Suspense>
+  );
 }

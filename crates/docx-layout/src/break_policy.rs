@@ -1,3 +1,14 @@
+//! Port of `packages/core/src/layout/pagination/breakPolicy.ts`.
+//!
+//! Exported fns (1:1 with the TS module's exports):
+//! - `breaks_before_block`               ← `breaksBeforeBlock(block)`
+//! - `keep_with_next_group_must_advance` ← `keepWithNextGroupMustAdvance(fit)`
+//! - `KeepWithNextFit`                   ← `KeepWithNextFit` (exported type)
+//!
+//! Pre-placement break policy — the decisions the placement walk consults
+//! before a block is placed, expressed as small pure predicates. The place
+//! loop calls these through the seams in `hooks.rs`.
+
 use crate::keep_together::paragraph_breaks_before;
 use crate::types::LayoutBlock;
 
@@ -48,6 +59,8 @@ pub fn keep_with_next_group_must_advance(fit: KeepWithNextFit) -> bool {
 
     fit.page_has_content
 }
+
+// ---- tests (ported from breakPolicy.test.ts) ---------------------------------
 
 #[cfg(test)]
 mod tests {
