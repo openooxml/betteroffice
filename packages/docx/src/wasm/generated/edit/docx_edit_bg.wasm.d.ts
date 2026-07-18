@@ -43,6 +43,7 @@ export const editsession_insert_table: (a: number, b: number, c: number, d: numb
 export const editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
 export const editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
 export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];

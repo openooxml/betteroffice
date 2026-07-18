@@ -70,6 +70,7 @@ pub struct Paginator {
     column_region_top: f64,
     footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     start_page_number: u32,
+    section_index: usize,
 }
 
 impl Paginator {
@@ -102,6 +103,7 @@ impl Paginator {
             column_region_top,
             footnote_reserved_heights,
             start_page_number: 1,
+            section_index: 0,
         })
     }
 
@@ -124,6 +126,10 @@ impl Paginator {
         paginator.pending_margins = geometry.pending_margins.clone();
         paginator.start_page_number = start_page_number;
         Ok(paginator)
+    }
+
+    pub fn set_section_index(&mut self, section_index: usize) {
+        self.section_index = section_index;
     }
 
     /// Snapshot the page-to-page state. This is sound as a resume bookmark
@@ -221,6 +227,7 @@ impl Paginator {
             size: self.page_size.clone(),
             orientation: None,
             section_index: None,
+            region_section_index: self.section_index,
             header_footer_refs: None,
             footnote_ids: None,
             footnote_reserved_height: if footnote_height > 0.0 {
@@ -236,6 +243,17 @@ impl Paginator {
             } else {
                 None
             },
+            section_id: None,
+            section_page_index: None,
+            section_page_number: None,
+            page_label: None,
+            page_numbering: None,
+            header_distance: None,
+            footer_distance: None,
+            page_borders: None,
+            watermark: None,
+            vertical_align: None,
+            note_areas: None,
         };
 
         let state = FlowState {

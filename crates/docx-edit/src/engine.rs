@@ -14,6 +14,7 @@ use std::rc::Rc;
 use docx_layout::display_list::DisplayList;
 use docx_layout::hit::HitRegion;
 use docx_layout::place::LayoutCheckpoint;
+use docx_layout::regions::{DocumentRegions, RegionLayoutInput, apply_document_regions};
 use docx_layout::types::{
     BlockExtent, BlockId, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
     ParagraphExtent, Run,
@@ -60,6 +61,30 @@ struct MeasurementState {
 struct ResidentLayoutInput {
     input: LayoutInput,
     block_fingerprints: Vec<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegionLayoutOutput<'a> {
+    measured: &'a [MeasuredBlock],
+    options: &'a docx_layout::types::LayoutOptions,
+    layout: &'a Layout,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers_footers: Option<&'a serde_json::Value>,
+}
+
+fn serialize_region_layout(
+    input: &LayoutInput,
+    layout: &Layout,
+    regions: &DocumentRegions,
+) -> Result<String, String> {
+    serde_json::to_string(&RegionLayoutOutput {
+        measured: &input.measured,
+        options: &input.options,
+        layout,
+        headers_footers: regions.headers_footers.as_ref(),
+    })
+    .map_err(|error| format!("serialize: {error}"))
 }
 
 #[derive(Debug, Default)]
@@ -526,6 +551,26 @@ impl EngineSession {
                 .expect("layout retained after successful pagination"),
         )
         .map_err(|error| format!("serialize: {error}"))
+    }
+
+    /// Full-document pagination with section/page region orchestration owned
+    /// by the resident engine. The returned envelope is ready for the Rust
+    /// display-list builder without host-side layout mutation.
+    pub fn layout_document_with_regions_json(&self, input_json: &str) -> Result<String, String> {
+        let request: RegionLayoutInput =
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let (input, regions) = request.split();
+        self.layout_document_value(input)?;
+        let mut pagination = self.pagination.borrow_mut();
+        let PaginationState { input, layout, .. } = &mut *pagination;
+        let layout = layout
+            .as_mut()
+            .expect("layout retained after successful pagination");
+        apply_document_regions(layout, &regions);
+        let input = input
+            .as_ref()
+            .expect("input retained after successful pagination");
+        serialize_region_layout(input, layout, &regions)
     }
 
     /// Typed resident pagination path shared by the compatibility JSON seam
@@ -1172,6 +1217,54 @@ mod tests {
         assert_eq!(engine.stats().retained_measured_blocks, 0);
         assert_eq!(engine.stats().retained_pages, 1);
         assert_eq!(engine.stats().pagination_calls, 1);
+    }
+
+    #[test]
+    fn region_layout_operation_stamps_pages_and_returns_render_envelope() {
+        let engine = EngineSession::new(131);
+        let request = serde_json::json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageNumbering": {"start": 7, "format": "upperRoman"},
+                    "headerDistance": 24,
+                    "headerFooterRefs": {"headerDefault": "rId7"}
+                }],
+                "headersFooters": {"variants": []}
+            }
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(output["measured"], serde_json::json!([]));
+        assert_eq!(output["layout"]["pages"][0]["sectionId"], "main");
+        assert_eq!(output["layout"]["pages"][0]["sectionIndex"], 0);
+        assert_eq!(output["layout"]["pages"][0]["sectionPageIndex"], 0);
+        assert_eq!(output["layout"]["pages"][0]["sectionPageNumber"], 7);
+        assert_eq!(output["layout"]["pages"][0]["pageLabel"], "VII");
+        assert_eq!(
+            output["layout"]["pages"][0]["headerDistance"].as_f64(),
+            Some(24.0)
+        );
+        assert_eq!(
+            output["layout"]["pages"][0]["headerFooterRefs"]["headerDefault"],
+            "rId7"
+        );
+        assert_eq!(
+            output["headersFooters"],
+            serde_json::json!({"variants": []})
+        );
+        assert_eq!(engine.stats().retained_pages, 1);
     }
 
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {

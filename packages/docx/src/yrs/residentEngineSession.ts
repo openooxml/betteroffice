@@ -12,6 +12,7 @@ export type ResidentEngineSession = Pick<
   | 'clearFonts'
   | 'destroy'
   | 'layoutDocumentJson'
+  | 'layoutDocumentWithRegionsJson'
   | 'loadState'
   | 'measureParagraphJson'
   | 'onUpdate'
@@ -49,6 +50,7 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     clearFonts: () => session.clear_measure_fonts(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
+    layoutDocumentWithRegionsJson: (input) => session.layout_document_with_regions_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     applyInput: (text, expectedFrameEpoch) => {

@@ -205,6 +205,10 @@ export class EditSession {
      */
     layout_document_json(input: string): string;
     /**
+     * Paginate and compose section/page regions inside the resident engine.
+     */
+    layout_document_with_regions_json(input: string): string;
+    /**
      * Every tracked-change run/paragraph-mark revision across all stories,
      * in deterministic story/position order.
      */
@@ -601,6 +605,7 @@ export interface InitOutput {
     readonly editsession_insert_text: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];

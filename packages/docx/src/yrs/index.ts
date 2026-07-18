@@ -568,6 +568,8 @@ export interface YrsSession {
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
   layoutDocumentJson(input: string): string;
+  /** Paginate and compose section/page regions in the resident engine. */
+  layoutDocumentWithRegionsJson(input: string): string;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -961,6 +963,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     layoutDocumentJson: (input) => {
       const output = session.layout_document_json(input);
+      residentLayoutInput = input;
+      residentLayoutRevision += 1;
+      return output;
+    },
+    layoutDocumentWithRegionsJson: (input) => {
+      const output = session.layout_document_with_regions_json(input);
       residentLayoutInput = input;
       residentLayoutRevision += 1;
       return output;

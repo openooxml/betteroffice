@@ -63,6 +63,7 @@ pub mod page_flow;
 pub mod paragraph_spacing;
 pub mod place;
 pub mod prescan;
+pub mod regions;
 pub mod resolve_lines;
 pub mod types;
 

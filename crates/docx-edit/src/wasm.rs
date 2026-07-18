@@ -975,6 +975,13 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Paginate and compose section/page regions inside the resident engine.
+    pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Build display primitives against the same resident font store used by
     /// this session's measurement path.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
