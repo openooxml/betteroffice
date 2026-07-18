@@ -2,6 +2,8 @@
 
 use wasm_bindgen::prelude::*;
 
+pub use pptx_edit::wasm::PptxDocument;
+
 #[wasm_bindgen(js_name = parsePptxJson)]
 pub fn parse_pptx_json(data: &[u8]) -> Result<String, JsValue> {
     let package = pptx_parse::parse_pptx(data).map_err(js_error)?;

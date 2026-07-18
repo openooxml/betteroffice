@@ -633,6 +633,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pptx-edit"
+version = "0.0.0"
+dependencies = [
+ "js-sys",
+ "ooxml-drawingml",
+ "pptx-parse",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "wasm-bindgen",
+ "yrs",
+]
+
+[[package]]
 name = "pptx-parse"
 version = "0.0.0"
 dependencies = [
@@ -655,6 +670,7 @@ dependencies = [
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
+ "pptx-edit",
  "pptx-parse",
  "pptx-render",
  "serde_json",
