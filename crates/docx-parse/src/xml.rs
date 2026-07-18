@@ -688,6 +688,9 @@ fn decode_element(
             .decode(attribute.key.as_ref())
             .map_err(|error| malformed(reader, part, error))?
             .into_owned();
+        // Deliberately NOT decoded_and_normalized_value(): normalization folds
+        // whitespace in attribute values, which would break byte-faithful round-trips.
+        #[allow(deprecated)]
         let value = attribute
             .decode_and_unescape_value(reader.decoder())
             .map_err(|error| malformed(reader, part, error))?
