@@ -213,3 +213,40 @@ fn malformed_updates_and_state_vectors_leave_state_unchanged() {
     assert!(session.encode_diff_v1(&[0xff]).is_err());
     assert_eq!(session.encode_state_as_update_v1(), state);
 }
+
+#[test]
+fn explicit_text_style_converges_after_update_exchange() {
+    let left = DeckSession::open(FIXTURE, 808).unwrap();
+    let right = DeckSession::open(FIXTURE, 909).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    let story_id = first_text_story(&left);
+    let index = left.story(&story_id).unwrap().length - 1;
+    let first = right.snapshot().unwrap().slides[0].clone();
+    left.insert_text(
+        &EditCtx::local("left"),
+        &story_id,
+        index,
+        " styled",
+        &TextStyle {
+            bold: Some(true),
+            ..TextStyle::default()
+        },
+    )
+    .unwrap();
+    right
+        .insert_slide(
+            &EditCtx::local("right"),
+            1,
+            first.layout_part_path.as_deref(),
+        )
+        .unwrap();
+    left.apply_update_v1(&right.encode_diff_v1(&baseline).unwrap())
+        .unwrap();
+    right
+        .apply_update_v1(&left.encode_diff_v1(&baseline).unwrap())
+        .unwrap();
+    assert_eq!(
+        left.story(&story_id).unwrap(),
+        right.story(&story_id).unwrap()
+    );
+}

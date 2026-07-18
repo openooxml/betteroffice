@@ -6,6 +6,10 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import type {
+  CollaborationReplica,
+  CollaborationUpdateOrigin,
+} from '../collaboration/types';
+import type {
   DeckSnapshot,
   HistoryResult,
   HitTestResult,
@@ -19,7 +23,6 @@ import type {
   TextStyle,
   TextStylePatch,
   TransformReceipt,
-  UpdateEvent,
 } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
@@ -29,7 +32,7 @@ export interface OpenPresentationOptions {
   fonts?: ReadonlyArray<PptxFontFace>;
 }
 
-export interface PresentationHandle {
+export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
@@ -53,18 +56,17 @@ export interface PresentationHandle {
   undo(): HistoryResult;
   redo(): HistoryResult;
   encodeStateVector(): Uint8Array;
-  encodeStateAsUpdate(): Uint8Array;
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   encodeDiff(remoteStateVector: Uint8Array): Uint8Array;
   applyUpdate(update: Uint8Array): DeckSnapshot;
-  startUpdateObservation(): void;
-  drainUpdateEvent(): UpdateEvent | null;
-  clearUpdateObservation(): void;
+  onUpdate(
+    listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  ): () => void;
   dispose(): void;
 }
 
 let initialized = false;
 let initialization: Promise<void> | undefined;
-let fallbackClientId = 1;
 
 export function initWasm(
   input: WasmInitInput = new URL('./generated/pptx_wasm_bg.wasm', import.meta.url)
@@ -104,133 +106,267 @@ export function openPresentation(
   requireInitialized();
   const doc = construct(() => PptxDocument.openCollaborative(bytes, options.clientId ?? clientId()));
   const renderer = construct(() => new PptxRenderer());
-  let disposed = false;
   for (const face of options.fonts ?? []) registerFont(renderer, face);
+  const listeners = new Map<
+    number,
+    (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  >();
+  const pendingUpdates: Array<{
+    update: Uint8Array;
+    origin: CollaborationUpdateOrigin;
+  }> = [];
+  let nextListenerId = 0;
+  let disposed = false;
+  let observerInstalled = false;
+  let wasmCallDepth = 0;
+  let flushingUpdates = false;
 
-  const active = (): [PptxDocument, PptxRenderer] => {
+  const assertAlive = (): void => {
     if (disposed) throw new Error('presentation handle is disposed');
-    return [doc, renderer];
   };
 
-  return {
+  const flushUpdates = (): void => {
+    if (disposed || flushingUpdates || wasmCallDepth !== 0) return;
+    flushingUpdates = true;
+    try {
+      while (!disposed && pendingUpdates.length > 0) {
+        const event = pendingUpdates.shift();
+        if (!event) break;
+        for (const [id, listener] of [...listeners]) {
+          if (disposed) return;
+          if (listeners.get(id) !== listener) continue;
+          try {
+            listener(event.update.slice(), event.origin);
+          } catch {}
+        }
+      }
+    } finally {
+      flushingUpdates = false;
+      if (disposed) pendingUpdates.length = 0;
+    }
+  };
+
+  const drainWasmUpdates = (): void => {
+    if (!observerInstalled || disposed) return;
+    while (true) {
+      const encoded = doc.drainUpdateEvent();
+      if (encoded.byteLength === 0) return;
+      const origin = encoded[0];
+      if (origin !== 0 && origin !== 1) {
+        throw new Error(`pptx wasm returned unknown update origin ${origin}`);
+      }
+      pendingUpdates.push({
+        update: encoded.slice(1),
+        origin: origin === 0 ? 'local' : 'remote',
+      });
+    }
+  };
+
+  const wasmCall = <T,>(operation: () => T, drainUpdates = false): T => {
+    assertAlive();
+    wasmCallDepth += 1;
+    try {
+      let result: T | undefined;
+      let failure: unknown;
+      let failed = false;
+      try {
+        result = operation();
+      } catch (error) {
+        failure = error;
+        failed = true;
+      }
+      if (drainUpdates) {
+        try {
+          drainWasmUpdates();
+        } catch (error) {
+          if (!failed) {
+            failure = error;
+            failed = true;
+          }
+        }
+      }
+      if (failed) throw toError(failure);
+      return result as T;
+    } finally {
+      wasmCallDepth -= 1;
+      if (wasmCallDepth === 0) flushUpdates();
+    }
+  };
+
+  const jsonWasmCall = <T,>(operation: () => string, drainUpdates = false): T =>
+    wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
+
+  const ensureUpdateObserver = (): void => {
+    if (observerInstalled) return;
+    wasmCall(() => doc.startUpdateObservation());
+    observerInstalled = true;
+  };
+
+  const clearUnusedUpdateObserver = (): void => {
+    if (!observerInstalled || listeners.size > 0 || disposed) return;
+    pendingUpdates.length = 0;
+    wasmCall(() => doc.clearUpdateObservation());
+    observerInstalled = false;
+  };
+
+  const handle: PresentationHandle = {
     get clientId(): number {
-      return active()[0].clientId;
+      return wasmCall(() => doc.clientId);
     },
     snapshot(): DeckSnapshot {
-      return jsonCall(() => active()[0].snapshotJson());
+      return jsonWasmCall(() => doc.snapshotJson());
     },
     story(storyId: string): StorySnapshot {
-      return jsonCall(() => active()[0].storyJson(JSON.stringify({ storyId })));
+      return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
     },
     registerFont(face: PptxFontFace): number {
-      return registerFont(active()[1], face);
+      return wasmCall(() => registerFont(renderer, face));
     },
     layoutSlide(slideIndex: number): SlideDisplayList {
-      const [document, slideRenderer] = active();
-      return jsonCall(() => slideRenderer.layoutSlideJson(document, slideIndex));
+      return jsonWasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
     },
     hitTest(x: number, y: number): HitTestResult | null {
-      return jsonCall(() => active()[1].hitTestJson(x, y));
+      return jsonWasmCall(() => renderer.hitTestJson(x, y));
     },
     mediaBytes(partPath: string): Uint8Array {
-      return binaryCall(() => active()[0].mediaBytes(partPath));
+      return wasmCall(() => doc.mediaBytes(partPath).slice());
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
-      return jsonCall(() =>
-        active()[0].insertTextJson(JSON.stringify({ storyId, index, text, style }))
+      return jsonWasmCall(
+        () => doc.insertTextJson(JSON.stringify({ storyId, index, text, style })),
+        true
       );
     },
     deleteText(storyId, start, end): TextReceipt {
-      return jsonCall(() => active()[0].deleteTextJson(JSON.stringify({ storyId, start, end })));
+      return jsonWasmCall(
+        () => doc.deleteTextJson(JSON.stringify({ storyId, start, end })),
+        true
+      );
     },
     formatText(storyId, start, end, patch): TextReceipt {
-      return jsonCall(() =>
-        active()[0].formatTextJson(JSON.stringify({ storyId, start, end, patch }))
+      return jsonWasmCall(
+        () => doc.formatTextJson(JSON.stringify({ storyId, start, end, patch })),
+        true
       );
     },
     insertParagraphBreak(storyId, index): TextReceipt {
-      return jsonCall(() =>
-        active()[0].insertParagraphBreakJson(JSON.stringify({ storyId, index }))
+      return jsonWasmCall(
+        () => doc.insertParagraphBreakJson(JSON.stringify({ storyId, index })),
+        true
       );
     },
     insertSlide(index, layoutPartPath): SlideReceipt {
-      return jsonCall(() =>
-        active()[0].insertSlideJson(
-          JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })
-        )
+      return jsonWasmCall(
+        () =>
+          doc.insertSlideJson(JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })),
+        true
       );
     },
     deleteSlide(slideId): SlideReceipt {
-      return jsonCall(() => active()[0].deleteSlideJson(JSON.stringify({ slideId })));
+      return jsonWasmCall(() => doc.deleteSlideJson(JSON.stringify({ slideId })), true);
     },
     moveSlide(slideId, toIndex): SlideReceipt {
-      return jsonCall(() => active()[0].moveSlideJson(JSON.stringify({ slideId, toIndex })));
+      return jsonWasmCall(
+        () => doc.moveSlideJson(JSON.stringify({ slideId, toIndex })),
+        true
+      );
     },
     addTextBox(slideId, draft): ShapeReceipt {
-      return jsonCall(() => active()[0].addTextBoxJson(JSON.stringify({ slideId, draft })));
+      return jsonWasmCall(() => doc.addTextBoxJson(JSON.stringify({ slideId, draft })), true);
     },
     removeShape(slideId, shapeId): ShapeReceipt {
-      return jsonCall(() => active()[0].removeShapeJson(JSON.stringify({ slideId, shapeId })));
+      return jsonWasmCall(
+        () => doc.removeShapeJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
     },
     moveShape(slideId, shapeId, x, y): TransformReceipt {
-      return jsonCall(() =>
-        active()[0].moveShapeJson(JSON.stringify({ slideId, shapeId, x, y }))
+      return jsonWasmCall(
+        () => doc.moveShapeJson(JSON.stringify({ slideId, shapeId, x, y })),
+        true
       );
     },
     resizeShape(slideId, shapeId, width, height): TransformReceipt {
-      return jsonCall(() =>
-        active()[0].resizeShapeJson(JSON.stringify({ slideId, shapeId, width, height }))
+      return jsonWasmCall(
+        () => doc.resizeShapeJson(JSON.stringify({ slideId, shapeId, width, height })),
+        true
       );
     },
     canUndo(): boolean {
-      return active()[0].canUndo();
+      return wasmCall(() => doc.canUndo());
     },
     canRedo(): boolean {
-      return active()[0].canRedo();
+      return wasmCall(() => doc.canRedo());
     },
     undo(): HistoryResult {
-      return jsonCall(() => active()[0].undoJson());
+      return jsonWasmCall(() => doc.undoJson(), true);
     },
     redo(): HistoryResult {
-      return jsonCall(() => active()[0].redoJson());
+      return jsonWasmCall(() => doc.redoJson(), true);
     },
     encodeStateVector(): Uint8Array {
-      return binaryCall(() => active()[0].encodeStateVector());
+      return wasmCall(() => doc.encodeStateVector().slice());
     },
-    encodeStateAsUpdate(): Uint8Array {
-      return binaryCall(() => active()[0].encodeStateAsUpdate());
+    encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
+      return wasmCall(() =>
+        remoteStateVector === undefined
+          ? doc.encodeStateAsUpdate().slice()
+          : doc.encodeDiff(remoteStateVector.slice()).slice()
+      );
     },
     encodeDiff(remoteStateVector): Uint8Array {
-      return binaryCall(() => active()[0].encodeDiff(remoteStateVector));
+      return wasmCall(() => doc.encodeDiff(remoteStateVector.slice()).slice());
     },
     applyUpdate(update): DeckSnapshot {
-      return jsonCall(() => active()[0].applyUpdateJson(update));
+      return jsonWasmCall(() => doc.applyUpdateJson(update.slice()), true);
     },
-    startUpdateObservation(): void {
+    onUpdate(listener): () => void {
+      assertAlive();
+      if (typeof listener !== 'function') throw new TypeError('update listener must be a function');
+      const id = nextListenerId++;
+      listeners.set(id, listener);
       try {
-        active()[0].startUpdateObservation();
+        ensureUpdateObserver();
       } catch (error) {
-        throw toError(error);
+        listeners.delete(id);
+        throw error;
       }
-    },
-    drainUpdateEvent(): UpdateEvent | null {
-      const encoded = binaryCall(() => active()[0].drainUpdateEvent());
-      if (encoded.length === 0) return null;
-      return {
-        origin: encoded[0] === 0 ? 'local' : 'remote',
-        update: encoded.slice(1),
+      let subscribed = true;
+      return () => {
+        if (!subscribed) return;
+        subscribed = false;
+        listeners.delete(id);
+        clearUnusedUpdateObserver();
       };
-    },
-    clearUpdateObservation(): void {
-      active()[0].clearUpdateObservation();
     },
     dispose(): void {
       if (disposed) return;
       disposed = true;
-      renderer.free();
-      doc.free();
+      listeners.clear();
+      pendingUpdates.length = 0;
+      let disposalError: unknown;
+      if (observerInstalled) {
+        try {
+          doc.clearUpdateObservation();
+        } catch (error) {
+          disposalError = error;
+        }
+        observerInstalled = false;
+      }
+      try {
+        renderer.free();
+      } catch (error) {
+        disposalError ??= error;
+      }
+      try {
+        doc.free();
+      } catch (error) {
+        disposalError ??= error;
+      }
+      if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  return handle;
 }
 
 function registerFont(renderer: PptxRenderer, face: PptxFontFace): number {
@@ -246,14 +382,17 @@ function requireInitialized(): void {
 }
 
 function clientId(): number {
-  if (typeof globalThis.crypto?.getRandomValues === 'function') {
-    const values = new Uint32Array(2);
-    globalThis.crypto.getRandomValues(values);
-    const value = values[0] * 0x100000 + (values[1] & 0xfffff);
-    if (value > 0) return value;
+  const random = globalThis.crypto;
+  if (!random || typeof random.getRandomValues !== 'function') {
+    throw new Error('crypto.getRandomValues is required to generate a collaboration client ID');
   }
-  fallbackClientId = (fallbackClientId % 0x7ffffffe) + 1;
-  return fallbackClientId;
+  const values = new Uint32Array(2);
+  let value: number;
+  do {
+    random.getRandomValues(values);
+    value = (values[0] & 0x1fffff) * 0x1_0000_0000 + values[1];
+  } while (value === 0);
+  return value;
 }
 
 function construct<T>(operation: () => T): T {
@@ -274,14 +413,6 @@ function jsonCall<T>(operation: () => string): T {
 
 function call<T>(operation: () => string): T {
   return jsonCall(operation);
-}
-
-function binaryCall(operation: () => Uint8Array): Uint8Array {
-  try {
-    return operation();
-  } catch (error) {
-    throw toError(error);
-  }
 }
 
 function toError(error: unknown): Error {

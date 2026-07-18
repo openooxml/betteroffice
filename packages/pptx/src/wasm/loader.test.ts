@@ -29,7 +29,8 @@ describe('PPTX wasm boundary', () => {
     const story = firstStory(snapshot.slides.flatMap((slide) => slide.shapes));
     const insertion = story.length - 1;
 
-    handle.startUpdateObservation();
+    const events: Array<{ origin: string; update: Uint8Array }> = [];
+    const unsubscribe = handle.onUpdate((update, origin) => events.push({ origin, update }));
     const receipt = handle.insertText(story.id, insertion, ' edited', {
       bold: true,
       fontSizePt: 28,
@@ -49,15 +50,14 @@ describe('PPTX wasm boundary', () => {
     const line = textBox!.lines[0];
     expect(handle.hitTest(line.x, line.y + line.height / 2)?.kind).toBe('text');
 
-    const event = handle.drainUpdateEvent();
-    expect(event?.origin).toBe('local');
-    expect(event?.update.length).toBeGreaterThan(0);
+    expect(events[0]?.origin).toBe('local');
+    expect(events[0]?.update.length).toBeGreaterThan(0);
     expect(handle.canUndo()).toBe(true);
     expect(handle.undo().applied).toBe(true);
     expect(handle.story(story.id).paragraphs.some((paragraph) =>
       paragraph.runs.some((run) => run.text.includes('edited'))
     )).toBe(false);
-    handle.clearUpdateObservation();
+    unsubscribe();
   });
 });
 

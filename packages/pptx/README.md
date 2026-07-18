@@ -33,6 +33,24 @@ display-list emission stay in Rust. The package decodes the typed boundary and
 replays the resulting primitives on canvas. Font bytes are supplied by the host
 and registered with the Rust shaper through `openPresentation`.
 
+## Collaboration
+
+`PresentationHandle` is a collaboration replica. Pair it with
+`CollaborationProvider` and a transport implementing the small
+`CollaborationTransport` interface. The provider speaks the standard Yjs sync-v1
+wire protocol, performs state-vector handshakes, forwards only local updates,
+and bounds frames and pending backpressure bytes.
+
+```ts
+import { CollaborationProvider } from '@betteroffice/pptx';
+
+const provider = new CollaborationProvider(deck, transport);
+deck.onUpdate((_update, origin) => {
+  if (origin === 'remote') repaint();
+});
+provider.connect();
+```
+
 ## Development
 
 The generated `.wasm` binary is intentionally not committed. From the repository

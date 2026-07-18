@@ -142,6 +142,7 @@ export function PptxEditor({
     let disposed = false;
     let handle: PresentationHandle | null = null;
     let browserFaces: FontFace[] = [];
+    let unsubscribeUpdates = () => {};
     handleRef.current?.dispose();
     handleRef.current = null;
     modelRef.current = null;
@@ -161,6 +162,9 @@ export function PptxEditor({
         try {
           handle = openPresentation(file, { clientId, fonts });
           handleRef.current = handle;
+          unsubscribeUpdates = handle.onUpdate((_update, origin) => {
+            if (origin === 'remote') refreshAt(undefined, true, true);
+          });
           refreshAt(0);
           setLoading(false);
           onReadyRef.current?.({ handle, refresh });
@@ -177,6 +181,7 @@ export function PptxEditor({
     );
     return () => {
       disposed = true;
+      unsubscribeUpdates();
       handle?.dispose();
       if (handleRef.current === handle) handleRef.current = null;
       removeBrowserFonts(browserFaces);

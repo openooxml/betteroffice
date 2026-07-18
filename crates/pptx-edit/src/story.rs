@@ -30,7 +30,7 @@ pub(crate) fn seed_story(
             if !run.text.is_empty() {
                 let style = style_from_run_properties(&run.properties, theme);
                 let index = story.len(txn);
-                story.insert_with_attributes(txn, index, &run.text, attrs_from_style(&style));
+                insert_styled_text(&story, txn, index, &run.text, &style);
             }
         }
         let bullet_json = paragraph
@@ -62,7 +62,7 @@ pub(crate) fn seed_plain_story(
 ) -> TextRef {
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     if !text.is_empty() {
-        story.insert_with_attributes(txn, 0, text, attrs_from_style(style));
+        insert_styled_text(&story, txn, 0, text, style);
     }
     append_pilcrow(&story, txn, paragraph_id, None, 0, None);
     story
@@ -115,7 +115,7 @@ impl DeckSession {
             });
         }
         if !text.is_empty() {
-            story.insert_with_attributes(&mut txn, index, text, attrs_from_style(style));
+            insert_styled_text(&story, &mut txn, index, text, style);
         }
         let length = text.encode_utf16().count() as u32;
         Ok(TextReceipt {
@@ -319,34 +319,68 @@ fn text_in_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> 
     output
 }
 
-fn attrs_from_style(style: &TextStyle) -> Attrs {
+fn insert_styled_text(
+    story: &TextRef,
+    txn: &mut TransactionMut<'_>,
+    index: u32,
+    text: &str,
+    style: &TextStyle,
+) {
+    story.insert(txn, index, text);
+    let length = text.encode_utf16().count() as u32;
+    for (key, value) in style_values(style) {
+        story.format(txn, index, length, Attrs::from([(Arc::from(key), value)]));
+    }
+}
+
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 6] {
+    [
+        ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
+        ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
+        (
+            "fontSize",
+            style.font_size_pt.map(Any::Number).unwrap_or(Any::Null),
+        ),
+        (
+            "color",
+            style.color.as_deref().map(Any::from).unwrap_or(Any::Null),
+        ),
+        (
+            "fontFamily",
+            style
+                .font_family
+                .as_deref()
+                .map(Any::from)
+                .unwrap_or(Any::Null),
+        ),
+        (
+            "underline",
+            style
+                .underline
+                .as_deref()
+                .map(Any::from)
+                .unwrap_or(Any::Null),
+        ),
+    ]
+}
+
+fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
     let mut attrs = Attrs::default();
-    insert_option(&mut attrs, "bold", style.bold.map(Any::Bool));
-    insert_option(&mut attrs, "italic", style.italic.map(Any::Bool));
-    insert_option(&mut attrs, "fontSize", style.font_size_pt.map(Any::Number));
-    insert_option(&mut attrs, "color", style.color.as_deref().map(Any::from));
+    insert_option(&mut attrs, "bold", patch.bold.map(Any::Bool));
+    insert_option(&mut attrs, "italic", patch.italic.map(Any::Bool));
+    insert_option(&mut attrs, "fontSize", patch.font_size_pt.map(Any::Number));
+    insert_option(&mut attrs, "color", patch.color.as_deref().map(Any::from));
     insert_option(
         &mut attrs,
         "fontFamily",
-        style.font_family.as_deref().map(Any::from),
+        patch.font_family.as_deref().map(Any::from),
     );
     insert_option(
         &mut attrs,
         "underline",
-        style.underline.as_deref().map(Any::from),
+        patch.underline.as_deref().map(Any::from),
     );
     attrs
-}
-
-fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
-    attrs_from_style(&TextStyle {
-        bold: patch.bold,
-        italic: patch.italic,
-        font_size_pt: patch.font_size_pt,
-        color: patch.color.clone(),
-        font_family: patch.font_family.clone(),
-        underline: patch.underline.clone(),
-    })
 }
 
 fn insert_option(attrs: &mut Attrs, key: &str, value: Option<Any>) {

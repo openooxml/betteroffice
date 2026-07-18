@@ -1,5 +1,18 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export { CollaborationError, CollaborationProvider } from './collaboration';
+export type {
+  CollaborationErrorCode,
+  CollaborationErrorListener,
+  CollaborationProviderOptions,
+  CollaborationReplica,
+  CollaborationStatus,
+  CollaborationStatusChange,
+  CollaborationStatusListener,
+  CollaborationTransport,
+  CollaborationTransportEvent,
+  CollaborationUpdateOrigin,
+} from './collaboration';
 export {
   initWasm,
   inspectPresentation,
