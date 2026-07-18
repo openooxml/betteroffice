@@ -9,11 +9,11 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
-import { pixelsToEmu } from '../docx/imageParser';
+import { pixelsToEmu } from '../utils/units';
 import {
   applyContentControlValue,
   type ContentControlValue,
-} from '../agent/contentControlValues';
+} from './contentControlValues';
 import { sdtAttrsToProps } from '../types/sdtAttributes';
 import {
   paragraphAttrsToFormatting,

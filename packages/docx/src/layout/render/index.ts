@@ -63,11 +63,6 @@ export {
   type PageCanvasBuffer,
 } from './canvasBackend';
 
-// harvestGeometry.ts / diffGeometry.ts remain as internal test infrastructure
-// (the mirror-vs-display-list geometry unit gate) but are not part of the
-// public render surface — the Rust display-list determinism goldens are the
-// standing regression oracle.
-
 export {
   fontSizePxFromShorthand,
   glyphRunRect,

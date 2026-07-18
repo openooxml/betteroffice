@@ -20,11 +20,6 @@
 import type { LayoutBlock, TableBlock } from '../pagination/types';
 import { MIN_WRAP_SEGMENT_WIDTH } from '../measure/floatingZones';
 import { resolveTableTotalWidthPx } from '../pagination/tableWidthUtils';
-export { resolveFloatingTablePlacement } from '../pagination/floatingTablePlacement';
-export type {
-  FloatingTablePlacement,
-  FloatingTablePlacementInput,
-} from '../pagination/floatingTablePlacement';
 
 /**
  * True when a floating table is effectively full-width — it leaves less than

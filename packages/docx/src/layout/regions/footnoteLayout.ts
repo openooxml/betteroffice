@@ -34,7 +34,20 @@ import type {
   Theme,
 } from '../../types/document';
 import type { FootnoteRenderItem } from '../pagination/types';
-import { getFootnoteText } from '../../docx/footnoteParser';
+
+function getFootnoteText(footnote: Footnote): string {
+  return footnote.content
+    .filter((block) => block.type === 'paragraph')
+    .map((paragraph) =>
+      paragraph.content
+        .filter((item) => item.type === 'run')
+        .flatMap((run) => run.content)
+        .filter((content) => content.type === 'text')
+        .map((content) => content.text)
+        .join('')
+    )
+    .join('\n');
+}
 
 /** Separator line height + vertical padding in pixels. */
 export const FOOTNOTE_SEPARATOR_HEIGHT = 12;

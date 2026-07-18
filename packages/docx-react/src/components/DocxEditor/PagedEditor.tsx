@@ -123,15 +123,6 @@ import { YrsPositionProjection } from './internals/yrsPositionProjection';
 
 export { DEFAULT_PAGE_WIDTH };
 
-interface YrsRebuildCounter {
-  fullDocReplaces: number;
-}
-
-declare global {
-  // eslint-disable-next-line no-var
-  var __yrsRebuilds: YrsRebuildCounter | undefined;
-}
-
 function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsInlineFormatDelta {
   if (!formatting) return {};
   const delta: YrsInlineFormatDelta = {};
@@ -280,12 +271,9 @@ export interface PagedEditorProps {
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
-  applyResidentInput?: (text: string, perfKeystroke?: number) => Promise<boolean>;
+  applyResidentInput?: (text: string) => Promise<boolean>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
-  applyResidentDelete?: (
-    direction: 'backward' | 'forward',
-    perfKeystroke?: number
-  ) => Promise<boolean>;
+  applyResidentDelete?: (direction: 'backward' | 'forward') => Promise<boolean>;
   /** Set of resolved comment IDs — hides highlight for these comments */
   resolvedCommentIds?: Set<number>;
   /** Suggestion mode active state */
@@ -488,15 +476,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     /** Viewport wrapper: sync minHeight/marginBottom in layout pipeline before scroll restore. */
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
-
-    // Standard input is yrs-authoritative: the hidden textarea captures
-    // keyboard/IME and writes straight to yrs.
-    useEffect(() => {
-      globalThis.__yrsRebuilds = { fullDocReplaces: 0 };
-      return () => {
-        globalThis.__yrsRebuilds = undefined;
-      };
-    }, []);
 
     const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
@@ -782,9 +761,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
-          const counter = globalThis.__yrsInput ?? { ops: 0 };
-          counter.ops += 1;
-          globalThis.__yrsInput = counter;
           yrsCore.publishDirectInput();
         }
         handleYrsStateChange(displaySelection, docChanged);
@@ -1112,9 +1088,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
 
           if (docChanged) {
-            const counter = globalThis.__yrsInput ?? { ops: 0 };
-            counter.ops += 1;
-            globalThis.__yrsInput = counter;
             yrsCore.publishDirectInput();
           }
           handleYrsStateChange(

@@ -163,10 +163,10 @@ export interface SdtProperties {
   /**
    * The original `<w:sdtPr>` serialized verbatim as an XML string, captured
    * at parse time. Replayed unchanged on save so the properties block
-   * round-trips losslessly. Stored as a string (not an `XmlElement`) so the
-   * types layer stays free of the parser/`xml-js` dependency. Absent for
-   * SDTs created programmatically — the serializer then synthesizes a
-   * minimal, sequence-valid `w:sdtPr` from the modeled fields.
+   * round-trips losslessly. Stored as a string so the types layer stays free
+   * of parser-specific node types. Absent for SDTs created programmatically —
+   * the serializer then synthesizes a minimal, sequence-valid `w:sdtPr` from
+   * the modeled fields.
    */
   rawPropertiesXml?: string;
   /** The original `<w:sdtEndPr>` serialized verbatim, if present. */

@@ -4,8 +4,7 @@
  * `getBoundingClientRect` on mirror nodes returns the rects the canvas
  * painted. The mirror is invisible (opacity 0) and inert to the pointer
  * (pointer-events none) but deliberately NOT aria-hidden — it is the
- * accessible content of the canvas, and the assertion surface the e2e suite
- * resolves selectors against. Rebuilt whenever the page's display list
+ * accessible content of the canvas. Rebuilt whenever the page's display list
  * changes — the same trigger that re-rasters the canvas.
  *
  * Focus never lands here: the hidden ProseMirror remains the editing surface.

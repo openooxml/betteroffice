@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { parseDocx } from '@betteroffice/docx/docx';
-import { DocumentAgent } from '@betteroffice/docx/agent';
 import {
   loadDocumentFonts,
   getRenderableDocumentFonts,
@@ -15,10 +14,9 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 
 /**
- * Document lifecycle: load buffer / pre-parsed doc, keep the agent in
- * sync with the latest doc, react to `documentBuffer` / `document` prop
- * changes, and extract any baked-in comments from the document model on
- * initial load.
+ * Document lifecycle: load buffer / pre-parsed doc, react to
+ * `documentBuffer` / `document` prop changes, and extract any baked-in
+ * comments from the document model on initial load.
  *
  * State reset across the editor on a fresh load is heavy (~10 distinct
  * state setters across multiple hooks), so the parent assembles a
@@ -29,7 +27,6 @@ export function useDocumentLoader({
   initialDocument,
   externalContent,
   history,
-  agentRef,
   pagedEditorRef,
   setLoadingState,
   setComments,
@@ -44,7 +41,6 @@ export function useDocumentLoader({
   initialDocument: Document | null | undefined;
   externalContent: boolean | undefined;
   history: UseHistoryReturn<Document | null>;
-  agentRef: React.RefObject<DocumentAgent | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   // The full EditorState shape lives in the parent; we only need to flip
   // `isLoading` and `parseError`, so the parent exposes a focused callback.
@@ -130,15 +126,6 @@ export function useDocumentLoader({
     loadBuffer(documentBuffer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentBuffer, initialDocument, externalContent]);
-
-  // Keep the DocumentAgent in sync with the latest history state.
-  useEffect(() => {
-    if (history.state) {
-      agentRef.current = new DocumentAgent(history.state);
-    } else {
-      agentRef.current = null;
-    }
-  }, [history.state, agentRef]);
 
   // Extract any baked-in comments from the document model on first load.
   // Bumps the shared comment/revision ID counter above all loaded IDs so new

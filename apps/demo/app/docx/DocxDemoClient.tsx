@@ -61,7 +61,7 @@ export function DocxDemoClient() {
   }, []);
 
   return (
-    <div className="docx-app">
+    <div className="demo-shell docx-app">
       <header className="app-header">
         <div className="brand">
           <Link href="/" className="brand-mark">

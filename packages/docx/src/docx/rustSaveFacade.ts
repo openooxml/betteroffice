@@ -1,7 +1,6 @@
 /** Typed TypeScript boundary for the S13 Rust package writer. */
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
-import { sha256Hex } from './canonical/documentCanonical';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
@@ -23,6 +22,11 @@ export interface RustSelectiveSave {
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 /** Encode the public Document through the inverse allowlisted package wire. */

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from 'react';
-import type { ContentControlInfo } from '@betteroffice/docx/agent';
 import type { YrsContentControlValue } from '@betteroffice/docx/yrs';
 
 const WIDGET_SELECTOR = '.layout-sdt-widget, .layout-inline-sdt-widget';
@@ -25,7 +24,6 @@ type Popup =
 
 export interface ContentControlWidgetsProps {
   containerRef: RefObject<HTMLElement | null>;
-  getControls: () => ContentControlInfo[];
   applyYrsValue: (pos: number, value: YrsContentControlValue, embedId?: string) => boolean;
 }
 
@@ -43,15 +41,6 @@ function targetFromTrigger(trigger: HTMLElement): ControlTarget {
     ...(trigger.dataset.sdtTag ? { tag: trigger.dataset.sdtTag } : {}),
     ...(Number.isFinite(rawId) ? { id: rawId } : {}),
   };
-}
-
-function controlForTarget(
-  controls: readonly ContentControlInfo[],
-  target: ControlTarget
-): ContentControlInfo | undefined {
-  if (target.tag) return controls.find((control) => control.tag === target.tag);
-  if (target.id !== undefined) return controls.find((control) => control.id === target.id);
-  return undefined;
 }
 
 function triggerListItems(trigger: HTMLElement): Array<{ displayText: string; value: string }> {
@@ -77,7 +66,6 @@ function triggerListItems(trigger: HTMLElement): Array<{ displayText: string; va
 
 export function ContentControlWidgets({
   containerRef,
-  getControls,
   applyYrsValue,
 }: ContentControlWidgetsProps): React.ReactElement | null {
   const [popup, setPopup] = useState<Popup | null>(null);
@@ -104,17 +92,15 @@ export function ContentControlWidgets({
       const kind = trigger.dataset.sdtWidget;
       if (!kind) return;
       const target = targetFromTrigger(trigger);
-      const control = controlForTarget(getControls(), target);
       if (kind === 'checkbox') {
-        const ariaChecked = trigger.getAttribute('aria-checked');
-        const checked = ariaChecked == null ? control?.checked === true : ariaChecked === 'true';
+        const checked = trigger.getAttribute('aria-checked') === 'true';
         apply(target, { kind: 'checkbox', checked: !checked });
       } else if (kind === 'dropdown') {
         setPopup({
           kind: 'dropdown',
           target,
-          items: control?.listItems ?? triggerListItems(trigger),
-          current: control?.text ?? trigger.dataset.sdtValue ?? '',
+          items: triggerListItems(trigger),
+          current: trigger.dataset.sdtValue ?? '',
           rect: trigger.getBoundingClientRect(),
         });
       } else if (kind === 'date') {
@@ -158,7 +144,7 @@ export function ContentControlWidgets({
       container.removeEventListener('click', onClick);
       container.removeEventListener('keydown', onKeyDown);
     };
-  }, [apply, containerRef, getControls]);
+  }, [apply, containerRef]);
 
   useEffect(() => {
     if (!popup) return;

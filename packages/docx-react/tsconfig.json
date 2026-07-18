@@ -18,11 +18,11 @@
     "noFallthroughCasesInSwitch": true,
     "declaration": true,
     "declarationMap": true,
+    "types": ["node"],
     "paths": {
       "@/*": ["./src/*"],
       "@betteroffice/docx": ["../docx/src/core.ts"],
       "@betteroffice/docx/headless": ["../docx/src/headless.ts"],
-      "@betteroffice/docx/core-plugins": ["../docx/src/core-plugins/index.ts"],
       "@betteroffice/docx/mcp": ["../docx/src/mcp/index.ts"],
       "@betteroffice/docx/plugin-api/*": ["../docx/src/plugin-api/*"],
       "@betteroffice/docx/*": ["../docx/src/*"],

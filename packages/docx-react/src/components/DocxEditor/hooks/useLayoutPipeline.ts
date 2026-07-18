@@ -44,7 +44,6 @@ import {
   restoreScrollSnapshot,
   type DisplayListScrollAnchor,
 } from '../internals/scrollRestore';
-import { tracePerfSync } from '../internals/perfTrace';
 
 export interface UseLayoutPipelineOptions {
   document: Document | null;
@@ -225,15 +224,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       // Steps 1-3 (PM doc → blocks → measure → HF resolve → margin extend →
       // layout → footnote items) are the shared compute pass, lifted to
       // `@betteroffice/docx/editor`. Paint + scroll/events stay here.
-      const tracedPaginationSource: LayoutPaginationSource = {
-        isReady: () => paginationSource.isReady(),
-        whenReady: () => paginationSource.whenReady(),
-        paginate: (measured, options) =>
-          tracePerfSync('paginate', () => paginationSource.paginate(measured, options), {
-            calls: 1,
-            detail: `${measured.length} blocks`,
-          }),
-      };
       const computeInputs = {
         state: null,
         document,
@@ -259,13 +249,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           inputBlocks: LayoutBlock[],
           inputWidth: number | number[],
           pageGeometry?: FloatPageGeometry
-        ) =>
-          tracePerfSync(
-            'measure',
-            () => measureBlocksImpl(inputBlocks, inputWidth, pageGeometry),
-            { calls: 1, detail: `${inputBlocks.length} blocks` }
-          ),
-        paginationSource: tracedPaginationSource,
+        ) => measureBlocksImpl(inputBlocks, inputWidth, pageGeometry),
+        paginationSource,
       };
 
       // Step 4+: paint + scroll/events with the computed values.

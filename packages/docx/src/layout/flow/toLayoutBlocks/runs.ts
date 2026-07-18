@@ -42,7 +42,7 @@ import type {
 import type { ShapeFillPaint } from '../../../types/content/shape';
 import { resolveColor, resolveHighlightToCss } from '../../../utils/colorResolver';
 import { emuToPixels, halfPointsToPixels, halfPointsToPoints } from '../../../utils/units';
-import { resolveColorValueToHex } from '../../../docx/drawingUtils';
+import { resolveColorValueToHex } from '@betteroffice/drawingml';
 import { presetGeometryToPath } from '@betteroffice/drawingml';
 import type { PresetGeometryPathCommand } from '@betteroffice/drawingml';
 import { twipsToPixels, constrainImageToPage, nextBlockId } from './shared';

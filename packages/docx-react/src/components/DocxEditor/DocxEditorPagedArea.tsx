@@ -176,11 +176,8 @@ export function DocxEditorPagedArea({
   onTotalPagesChange: (totalPages: number) => void;
   /** Layout of each pass, surfaced for the experimental canvas renderer. */
   onLayoutComputed?: (layout: Layout | null) => void;
-  applyResidentInput?: (text: string, perfKeystroke?: number) => Promise<boolean>;
-  applyResidentDelete?: (
-    direction: 'backward' | 'forward',
-    perfKeystroke?: number
-  ) => Promise<boolean>;
+  applyResidentInput?: (text: string) => Promise<boolean>;
+  applyResidentDelete?: (direction: 'backward' | 'forward') => Promise<boolean>;
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */

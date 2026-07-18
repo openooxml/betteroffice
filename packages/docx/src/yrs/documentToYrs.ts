@@ -10,9 +10,9 @@
 
 /* eslint-disable max-lines -- the complete load projection is intentionally co-located */
 
-import { emuToPixels } from '../docx/imageParser';
+import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
-import { resolveColorValueToHex } from '../docx/drawingUtils';
+import { resolveColorValueToHex } from '@betteroffice/drawingml';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import type {

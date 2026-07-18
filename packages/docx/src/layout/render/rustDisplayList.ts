@@ -427,26 +427,6 @@ export function encodeDisplayListFrameExtras(inputs: DisplayListBuildInputs): st
 // collected with their measure objects; no lifecycle management needed.
 const measureFragmentCache = new WeakMap<object, string>();
 
-interface PerfTraceRecorder {
-  record(
-    stage: string,
-    durationMs: number,
-    metadata?: { inputBytes?: number; outputBytes?: number; calls?: number; detail?: string }
-  ): void;
-}
-
-function perfTraceRecorder(): PerfTraceRecorder | undefined {
-  return (
-    globalThis as typeof globalThis & {
-      __perfTrace?: PerfTraceRecorder;
-    }
-  ).__perfTrace;
-}
-
-function utf8Length(json: string, enabled: boolean): number {
-  return enabled ? new TextEncoder().encode(json).byteLength : 0;
-}
-
 /**
  * Build a DisplayList for a computed layout through the Rust engine. Throws
  * when the wasm module fails to load or the builder rejects the input — the
@@ -462,8 +442,6 @@ export async function buildRustDisplayList(
   } catch (error) {
     throw new RustDisplayListSourceError('load', error);
   }
-  const trace = perfTraceRecorder();
-  const started = trace ? performance.now() : 0;
   let inputJson: string;
   let json: string;
   try {
@@ -476,14 +454,7 @@ export async function buildRustDisplayList(
     // Rust serializes the display contract in camelCase. Parsing without a
     // field-picking reviver is intentional: additive primitive metadata remains
     // present for downstream canvas and accessibility consumers.
-    const displayList = JSON.parse(json) as DisplayList;
-    trace?.record('displayList', performance.now() - started, {
-      inputBytes: utf8Length(inputJson, true),
-      outputBytes: utf8Length(json, true),
-      calls: 1,
-      detail: `${inputs.measured.length} blocks`,
-    });
-    return displayList;
+    return JSON.parse(json) as DisplayList;
   } catch (error) {
     throw new RustDisplayListSourceError('parse', error);
   }
@@ -512,8 +483,6 @@ export async function buildRustDisplayFrame(
     };
   }
 
-  const trace = perfTraceRecorder();
-  const started = trace ? performance.now() : 0;
   const inputJson = encodeDisplayListFrameExtras(inputs);
   let encoded: Uint8Array;
   try {
@@ -533,11 +502,5 @@ export async function buildRustDisplayFrame(
   } catch (error) {
     throw new RustDisplayListSourceError('apply', error);
   }
-  trace?.record('displayList', performance.now() - started, {
-    inputBytes: utf8Length(inputJson, true),
-    outputBytes: encoded.byteLength,
-    calls: 1,
-    detail: `${inputs.measured.length} blocks; ${frame.damagedPageIds.size}/${frame.pages.length} pages`,
-  });
   return { displayList: frame.displayList, frame, transport: 'frame-delta-v1' };
 }

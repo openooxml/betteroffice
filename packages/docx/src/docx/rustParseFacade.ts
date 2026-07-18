@@ -99,18 +99,9 @@ export function decodeS9Envelope(json: string, originalBuffer: ArrayBuffer): Rus
 
 function decodeS9Document(value: unknown, originalBuffer: ArrayBuffer): Document {
   const wireDocument = objectAt(value, 'wire.document');
-  exactKeys(wireDocument, ['package', 'templateVariables', 'warnings'], 'wire.document', [
-    'templateVariables',
-    'warnings',
-  ]);
+  exactKeys(wireDocument, ['package', 'warnings'], 'wire.document', ['warnings']);
   const pkg = decodeS9Package(wireDocument.package);
   const document: Document = { package: pkg, originalBuffer };
-  if (wireDocument.templateVariables !== undefined) {
-    document.templateVariables = stringArrayAt(
-      wireDocument.templateVariables,
-      'wire.document.templateVariables'
-    );
-  }
   if (wireDocument.warnings !== undefined) {
     document.warnings = stringArrayAt(wireDocument.warnings, 'wire.document.warnings');
   }

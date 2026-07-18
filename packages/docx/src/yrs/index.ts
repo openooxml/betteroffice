@@ -814,45 +814,6 @@ export interface CreateYrsSessionOptions {
   clientId?: number;
 }
 
-interface PerfTraceRecorder {
-  record(
-    stage: string,
-    durationMs: number,
-    metadata?: {
-      bytes?: number;
-      inputBytes?: number;
-      outputBytes?: number;
-      calls?: number;
-      detail?: string;
-    }
-  ): void;
-}
-
-function perfTraceRecorder(): PerfTraceRecorder | undefined {
-  return (
-    globalThis as typeof globalThis & {
-      __perfTrace?: PerfTraceRecorder;
-    }
-  ).__perfTrace;
-}
-
-function perfTraceNow(): number {
-  return perfTraceRecorder() ? performance.now() : 0;
-}
-
-function jsonByteLength(json: string): number {
-  return perfTraceRecorder() ? new TextEncoder().encode(json).byteLength : 0;
-}
-
-function recordPerfTrace(
-  stage: string,
-  started: number,
-  metadata: Parameters<PerfTraceRecorder['record']>[2]
-): void {
-  if (started === 0) return;
-  perfTraceRecorder()?.record(stage, performance.now() - started, metadata);
-}
-
 function randomClientId(): number {
   if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     const buffer = new Uint32Array(1);
@@ -1084,14 +1045,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      const started = perfTraceNow();
-      const json = session.selection();
-      cachedSelection = JSON.parse(json) as YrsSelection | null;
-      recordPerfTrace('selectionReads', started, {
-        bytes: jsonByteLength(json),
-        calls: 1,
-        detail: 'stickySelectionMiss',
-      });
+      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
     },
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
@@ -1486,7 +1440,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (cachedSelectionContext?.key === key) {
         return JSON.parse(cachedSelectionContext.json) as YrsSelectionContext;
       }
-      const started = perfTraceNow();
       const json = session.selection_context(
         range.story,
         range.start.paraId,
@@ -1496,7 +1449,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
       const context = JSON.parse(json) as YrsSelectionContext;
       cachedSelectionContext = { key, json };
-      recordPerfTrace('selectionContext', started, { bytes: jsonByteLength(json), calls: 1 });
       return context;
     },
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
@@ -1506,15 +1458,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {
-      const started = perfTraceNow();
       const json = session.yrs_blocks_for_story(story, JSON.stringify(env));
       const blocks = JSON.parse(json) as unknown[];
       residentRenderInputs.set(story, structuredClone(env));
-      recordPerfTrace('storyBlocks', started, {
-        bytes: jsonByteLength(json),
-        calls: 1,
-        detail: story,
-      });
       return blocks;
     },
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],

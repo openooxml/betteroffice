@@ -3,8 +3,7 @@
 // data-block-id, data-comment-id, revision attrs, .layout-page-content,
 // .layout-run-text, .layout-table-cut-border) so selection mapping, comment
 // anchors, and the Playwright suite resolve against it under the canvas
-// renderer — and it doubles as the assertion surface for the
-// mirror-vs-display-list geometry unit gate (harvestGeometry/diffGeometry).
+// renderer.
 //
 // it is also the accessible content of the canvas renderer (the design's
 // phase-1 gate): real text nodes in reading order, paragraph/table ARIA

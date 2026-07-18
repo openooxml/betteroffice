@@ -42,7 +42,6 @@ import {
   yrsSelectionNearTable,
   yrsTableSelectionRange,
 } from './yrsCommands';
-import { beginPerfKeystroke, tracePerfAsync, tracePerfSync } from './internals/perfTrace';
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -100,22 +99,10 @@ export interface YrsInputProps {
   ): void;
   onDirectInput(): void;
   /** One-owner body text path; false until the resident frame is initialized. */
-  applyResidentInput?(text: string, perfKeystroke?: number | readonly number[]): Promise<boolean>;
+  applyResidentInput?(text: string): Promise<boolean>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
-  applyResidentDelete?(
-    direction: 'backward' | 'forward',
-    perfKeystroke?: number | readonly number[]
-  ): Promise<boolean>;
+  applyResidentDelete?(direction: 'backward' | 'forward'): Promise<boolean>;
   onFocusChange?(focused: boolean): void;
-}
-
-interface YrsInputCounter {
-  ops: number;
-}
-
-declare global {
-  // eslint-disable-next-line no-var
-  var __yrsInput: YrsInputCounter | undefined;
 }
 
 const BASE_STYLE: CSSProperties = {
@@ -213,7 +200,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const compositionCommitRef = useRef('');
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const inputOperationQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const pendingResidentTextRef = useRef<{ text: string; keystrokes: number[] } | null>(null);
+  const pendingResidentTextRef = useRef<{ text: string } | null>(null);
   const [positionStyle, setPositionStyle] = useState<CSSProperties>({ left: 0, top: 0, height: 1 });
   const [selectionEpoch, setSelectionEpoch] = useState(0);
 
@@ -284,20 +271,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [emitSelection, session]
   );
 
-  const bumpOp = useCallback((): void => {
-    const counter = globalThis.__yrsInput ?? { ops: 0 };
-    counter.ops += 1;
-    globalThis.__yrsInput = counter;
-  }, []);
-
   const finishMutation = useCallback(
     (residentLayoutReady = false): void => {
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
-      bumpOp();
       onDirectInput();
       emitSelection(true, residentLayoutReady);
     },
-    [bumpOp, emitSelection, onDirectInput]
+    [emitSelection, onDirectInput]
   );
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
@@ -366,8 +346,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const insertText = useCallback(
     (text: string): void => {
       if (!session || readOnly || text.length === 0) return;
-      const perfKeystroke = beginPerfKeystroke('insertText');
-      const applyText = async (inputText: string, perfKeystrokes: readonly number[]) => {
+      const applyText = async (inputText: string) => {
         const current = ensureSelection();
         const map = current ? inputPositionMap(current.anchor.story) : null;
         if (!current || !map) return;
@@ -391,16 +370,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             if (piece || (i === 0 && hasSelection)) {
               const insertedAt = caret;
               if (i === 0 && hasSelection) {
-                tracePerfSync(
-                  'yrsOp',
-                  () => session.replaceRange(selectedRange, piece, suggestingAuthor()),
-                  { calls: 1, detail: 'replaceRange' }
-                );
+                session.replaceRange(selectedRange, piece, suggestingAuthor());
               } else {
-                tracePerfSync('yrsOp', () => session.insertText(caret, piece, suggestingAuthor()), {
-                  calls: 1,
-                  detail: 'insertText',
-                });
+                session.insertText(caret, piece, suggestingAuthor());
               }
               caret = { ...caret, offset: caret.offset + piece.length };
               const insertedStored = storedFormattingByParagraphRef.current.get(
@@ -436,13 +408,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           !inputText.includes('\n') &&
           applyResidentInput
         ) {
-          const lastPerfKeystroke = perfKeystrokes[perfKeystrokes.length - 1];
-          const applied = await tracePerfAsync(
-            'yrsOp',
-            () => applyResidentInput(inputText, perfKeystrokes),
-            { calls: 1, detail: 'applyInput' },
-            lastPerfKeystroke
-          );
+          const applied = await applyResidentInput(inputText);
           if (applied) finishMutation(true);
           else commitCompatibilityInput();
           return;
@@ -460,22 +426,21 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         // Seal any earlier text batch so a synchronous structural operation
         // remains an ordering barrier for later input.
         pendingResidentTextRef.current = null;
-        enqueueInputOperation(() => applyText(text, [perfKeystroke]));
+        enqueueInputOperation(() => applyText(text));
         return;
       }
 
       const pending = pendingResidentTextRef.current;
       if (pending) {
         pending.text += text;
-        pending.keystrokes.push(perfKeystroke);
         return;
       }
 
-      const batch = { text, keystrokes: [perfKeystroke] };
+      const batch = { text };
       pendingResidentTextRef.current = batch;
       enqueueInputOperation(async () => {
         if (pendingResidentTextRef.current === batch) pendingResidentTextRef.current = null;
-        await applyText(batch.text, batch.keystrokes);
+        await applyText(batch.text);
       });
     },
     [
@@ -493,7 +458,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
-      const perfKeystroke = beginPerfKeystroke(`deleteContent${direction}`);
       enqueueInputOperation(async () => {
         if (!session || readOnly) return;
         if (deleteSelected()) {
@@ -514,12 +478,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             ? caret.offset > 0 || index > 0
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (hasTarget && activeStory === 'body' && !isSuggesting && applyResidentDelete) {
-          const applied = await tracePerfAsync(
-            'yrsOp',
-            () => applyResidentDelete(direction, perfKeystroke),
-            { calls: 1, detail: 'applyDelete' },
-            perfKeystroke
-          );
+          const applied = await applyResidentDelete(direction);
           if (applied) {
             finishMutation(true);
             return;
@@ -1077,10 +1036,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   useEffect(() => {
     if (!enabled) return;
     storedFormattingByParagraphRef.current.clear();
-    globalThis.__yrsInput = { ops: 0 };
-    return () => {
-      globalThis.__yrsInput = undefined;
-    };
   }, [enabled, session]);
 
   useEffect(() => {
