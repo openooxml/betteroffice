@@ -199,15 +199,12 @@ fn visible_anchors<'a>(
     rows: &'a std::ops::Range<u32>,
     cols: &'a std::ops::Range<u32>,
 ) -> impl Iterator<Item = (CellRef, &'a xlsx_model::Cell)> {
-    sheet.iter_cells().filter(move |(at, _)| {
-        if !rows.contains(&at.row) || !cols.contains(&at.col) {
-            return false;
-        }
-        match covering_merge(&sheet.merges, *at) {
+    sheet.iter_cells_in_rect(rows.clone(), cols.clone()).filter(
+        move |(at, _)| match covering_merge(&sheet.merges, *at) {
             Some(m) => m.start == *at,
             None => true,
-        }
-    })
+        },
+    )
 }
 
 /// the merge (if any) that covers a cell.

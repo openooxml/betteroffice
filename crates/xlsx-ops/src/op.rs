@@ -105,6 +105,12 @@ pub enum Op {
         sheet: SheetId,
         name: String,
     },
+    #[doc(hidden)]
+    RestoreSheet {
+        sheet: SheetId,
+        name: String,
+        formulas: Vec<(SheetId, CellRef, CellState)>,
+    },
 }
 
 /// who authored a transaction.

@@ -66,6 +66,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = calculationStatusJson)]
+    pub fn calculation_status_json(&self) -> Result<String, JsValue> {
+        self.session
+            .calculation_status_json()
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// switch the active sheet by index.
     #[wasm_bindgen(js_name = setActiveSheet)]
     pub fn set_active_sheet(&mut self, index: u32) -> Result<(), JsValue> {

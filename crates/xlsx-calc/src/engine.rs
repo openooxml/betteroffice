@@ -2,10 +2,11 @@
 //! could have changed, in dependency order, and report what moved.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
 
-use crate::eval::{EvalContext, evaluate};
+use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
 use crate::parser::parse_formula;
 
@@ -14,6 +15,7 @@ use crate::parser::parse_formula;
 pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
+    pub limited_cells: Vec<(SheetId, CellRef)>,
 }
 
 /// normalized cell identity (avoids `$`-anchor `Hash`/`Eq` mismatches).
@@ -92,10 +94,16 @@ fn run_recalc(
     now_serial: Option<f64>,
 ) -> RecalcResult {
     let (order, cycle) = topo_order(graph, &recompute);
+    let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
 
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
+    let mut limited_cells = Vec::new();
     for u in &order {
-        if let Some(value) = eval_node(wb, *u, now_serial)
+        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget));
+        if limited {
+            limited_cells.push((u.0, cell_of(*u)));
+        }
+        if let Some(value) = value
             && write_if_changed(wb, *u, value)
         {
             changed.push((u.0, cell_of(*u)));
@@ -114,6 +122,7 @@ fn run_recalc(
     RecalcResult {
         changed,
         cycle_cells,
+        limited_cells,
     }
 }
 
@@ -173,12 +182,29 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
 
 /// evaluate one formula node; `None` when the cell has no formula or it no
 /// longer parses (cached value left untouched).
-fn eval_node(wb: &Workbook, u: Key, now_serial: Option<f64>) -> Option<CellValue> {
-    let src = wb.formula(u.0, cell_of(u))?.to_string();
-    let expr = parse_formula(&src).ok()?;
-    let mut ctx = EvalContext::new(wb, u.0);
+fn eval_node(
+    wb: &Workbook,
+    u: Key,
+    now_serial: Option<f64>,
+    budget: Rc<EvaluationBudget>,
+) -> (Option<CellValue>, bool) {
+    let Some(src) = wb.formula(u.0, cell_of(u)).map(str::to_string) else {
+        return (None, false);
+    };
+    let Ok(expr) = parse_formula(&src) else {
+        return (None, false);
+    };
+    let mut ctx = EvalContext::with_budget(wb, u.0, budget);
     ctx.now_serial = now_serial;
-    Some(evaluate(&expr, &ctx))
+    let value = evaluate(&expr, &ctx);
+    if !ctx.has_unhandled_budget_error() {
+        return (Some(value), ctx.exhausted());
+    }
+    if matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
+        (Some(value), true)
+    } else {
+        (None, true)
+    }
 }
 
 /// write `value` only if it differs from the stored value; returns whether
@@ -305,7 +331,7 @@ mod tests {
         wb.sheets.push(Sheet::new("Data"));
         let (s1, s2) = (SheetId(0), SheetId(1));
         put_num(&mut wb, s1, "A1", 7.0);
-        put_formula(&mut wb, s2, "A1", "Sheet1!A1 * 2");
+        put_formula(&mut wb, s2, "A1", "sheet1!A1 * 2");
         let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s2, "A1"), num(14.0));
 
@@ -426,6 +452,64 @@ mod tests {
         let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "A1"), num(2.0));
         assert_eq!(r.changed, vec![(s, a1("A1"))]);
+    }
+
+    #[test]
+    fn exhausted_formula_budget_preserves_cached_value() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.sheets.push(Sheet::new("Formula"));
+        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+            a1("A1"),
+            Cell {
+                value: num(123.0),
+                formula: Some("SUM(Data!A1:XFD1048576)".into()),
+                style: None,
+            },
+        );
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, SheetId(1), "A1"), num(123.0));
+        assert!(result.changed.is_empty());
+        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+    }
+
+    #[test]
+    fn handled_budget_error_updates_the_cached_value() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.sheets.push(Sheet::new("Formula"));
+        put_formula(
+            &mut wb,
+            SheetId(1),
+            "A1",
+            "IFERROR(SUM(Data!A1:XFD1048576),42)",
+        );
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, SheetId(1), "A1"), num(42.0));
+        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
+    }
+
+    #[test]
+    fn handled_budget_error_can_produce_an_explicit_num_error() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.sheets.push(Sheet::new("Formula"));
+        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+            a1("A1"),
+            Cell {
+                value: num(123.0),
+                formula: Some("IFERROR(SUM(Data!A1:XFD1048576),#NUM!)".into()),
+                style: None,
+            },
+        );
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, SheetId(1), "A1"),
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Num
+            }
+        );
+        assert_eq!(result.limited_cells, vec![(SheetId(1), a1("A1"))]);
     }
 
     #[test]

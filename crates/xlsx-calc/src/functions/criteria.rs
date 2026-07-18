@@ -1,7 +1,7 @@
 //! excel criteria strings shared by the *IF / *IFS family: optional comparison
 //! operator prefix, numeric or case-insensitive text compare, `*`/`?`/`~` wildcards.
 
-use xlsx_model::CellValue;
+use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, evaluate, parse_num};
 use crate::parser::Expr;
@@ -229,19 +229,32 @@ pub(crate) fn collect_pairs(
 }
 
 /// flat row-major indices where every criterion matches its aligned cell.
-pub(crate) fn matching_indices(pairs: &[(Area, Criterion)], ctx: &EvalContext<'_>) -> Vec<usize> {
-    let (rows, cols) = match pairs.first() {
-        Some((a, _)) => (a.rows, a.cols),
-        None => return Vec::new(),
+pub(crate) fn matching_indices(
+    pairs: &[(Area, Criterion)],
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<usize>, ErrorValue> {
+    let cols = match pairs.first() {
+        Some((a, _)) => a.cols,
+        None => return Ok(Vec::new()),
     };
-    (0..rows * cols)
-        .filter(|&i| {
-            let (r, c) = (i / cols, i % cols);
-            pairs
-                .iter()
-                .all(|(area, crit)| crit.matches(&area.get(ctx, r, c)))
-        })
-        .collect()
+    let count = pairs[0].0.cell_count().ok_or(ErrorValue::Num)?;
+    let cols = u64::try_from(cols).map_err(|_| ErrorValue::Num)?;
+    let mut matching = Vec::new();
+    for index in 0..count {
+        let row = usize::try_from(index / cols).map_err(|_| ErrorValue::Num)?;
+        let col = usize::try_from(index % cols).map_err(|_| ErrorValue::Num)?;
+        let mut matches = true;
+        for (area, criterion) in pairs {
+            if !criterion.matches(&area.get(ctx, row, col)?) {
+                matches = false;
+                break;
+            }
+        }
+        if matches {
+            matching.push(usize::try_from(index).map_err(|_| ErrorValue::Num)?);
+        }
+    }
+    Ok(matching)
 }
 
 #[cfg(test)]

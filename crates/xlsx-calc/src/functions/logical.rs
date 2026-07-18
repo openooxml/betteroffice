@@ -29,8 +29,12 @@ pub(crate) fn iferror(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
+    let checkpoint = ctx.budget_error_checkpoint();
     match evaluate(&args[0], ctx) {
-        CellValue::Error { .. } => evaluate(&args[1], ctx),
+        CellValue::Error { .. } => {
+            ctx.handle_budget_errors_since(checkpoint);
+            evaluate(&args[1], ctx)
+        }
         v => v,
     }
 }

@@ -17,6 +17,7 @@ export class XlsxDocument {
      * apply a raw op list as one user transaction; returns `SheetInfo` json.
      */
     applyOpsJson(transaction_json: string): string;
+    calculationStatusJson(): string;
     /**
      * the editable representation of one cell.
      */
@@ -94,6 +95,7 @@ export interface InitOutput {
     readonly __wbg_xlsxdocument_free: (a: number, b: number) => void;
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];

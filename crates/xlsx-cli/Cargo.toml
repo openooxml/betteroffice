@@ -11,8 +11,9 @@ name = "xlsx"
 path = "src/main.rs"
 
 [dependencies]
+betteroffice-xlsx = { path = "../betteroffice-xlsx", features = ["raster"] }
+
+[dev-dependencies]
 ooxml-opc = { path = "../ooxml-opc" }
 xlsx-parse = { path = "../xlsx-parse" }
 xlsx-model = { path = "../xlsx-model" }
-xlsx-render = { path = "../xlsx-render" }
-xlsx-raster = { path = "../xlsx-raster" }

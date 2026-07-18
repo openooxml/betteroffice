@@ -74,6 +74,7 @@ export type {
   CellEdit,
   CellInputEdit,
   EditResult,
+  CalculationStatus,
   Proposal,
   ProposalCell,
   ProposalEdit,

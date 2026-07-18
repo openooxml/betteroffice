@@ -53,7 +53,7 @@ impl DepGraph {
             .sheets
             .iter()
             .enumerate()
-            .map(|(i, s)| (s.name.clone(), SheetId(i as u32)))
+            .map(|(i, s)| (s.name.to_lowercase(), SheetId(i as u32)))
             .collect();
         let mut g = DepGraph {
             names,
@@ -154,15 +154,25 @@ impl DepGraph {
     /// sheet, unknown sheet names drop the edge.
     fn resolve_edges(&self, owner: SheetId, expr: &Expr) -> Vec<(SheetId, CellRange)> {
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         for (sheet, range) in references(expr) {
             let sid = match sheet {
                 None => owner,
-                Some(name) => match self.names.get(&name) {
+                Some(name) => match self.names.get(&name.to_lowercase()) {
                     Some(id) => *id,
                     None => continue,
                 },
             };
-            out.push((sid, range));
+            let key = (
+                sid,
+                range.start.row,
+                range.start.col,
+                range.end.row,
+                range.end.col,
+            );
+            if seen.insert(key) {
+                out.push((sid, range));
+            }
         }
         out
     }
@@ -302,5 +312,22 @@ mod tests {
             .set_cell(a1("B1"), formula_cell("$A$1 + 1"));
         let g = DepGraph::build(&wb);
         assert_eq!(deps_a1(&g, "Sheet1", "A1", &wb), vec!["Sheet1!B1"]);
+    }
+
+    #[test]
+    fn resolved_sheet_aliases_deduplicate() {
+        let mut wb = wb2();
+        wb.sheet_mut(SheetId(0))
+            .unwrap()
+            .set_cell(a1("C1"), formula_cell("A1+$A$1+sheet1!A1"));
+        let graph = DepGraph::build(&wb);
+        assert_eq!(
+            graph
+                .deps
+                .get(&NodeKey::new(SheetId(0), a1("C1")))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

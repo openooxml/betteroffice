@@ -1,0 +1,25 @@
+[package]
+name = "betteroffice-xlsx"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Typed XLSX editor, calculation, rendering, and serialization facade."
+homepage = "https://betteroffice.dev"
+repository = "https://github.com/openooxml/betteroffice"
+readme = "README.md"
+keywords = ["xlsx", "spreadsheet", "ooxml", "excel"]
+categories = ["parser-implementations", "rendering"]
+
+[features]
+default = ["raster"]
+raster = ["dep:xlsx-raster"]
+
+[dependencies]
+ooxml-opc = { path = "../ooxml-opc" }
+xlsx-model = { path = "../xlsx-model" }
+xlsx-parse = { path = "../xlsx-parse" }
+xlsx-calc = { path = "../xlsx-calc" }
+xlsx-ops = { path = "../xlsx-ops" }
+xlsx-render = { path = "../xlsx-render" }
+xlsx-raster = { path = "../xlsx-raster", optional = true }
