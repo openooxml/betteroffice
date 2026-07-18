@@ -128,6 +128,10 @@ pub struct HeadersFootersIn {
     #[serde(default)]
     even_and_odd_headers: Option<bool>,
     #[serde(default)]
+    title_page_sections: Vec<usize>,
+    #[serde(default)]
+    even_and_odd_sections: Vec<usize>,
+    #[serde(default)]
     header_distance: Option<f64>,
     #[serde(default)]
     footer_distance: Option<f64>,
@@ -144,6 +148,8 @@ struct HfVariantIn {
     kind: HfKind,
     #[serde(rename = "type", default)]
     hf_type: HfType,
+    #[serde(default)]
+    section_index: Option<usize>,
     #[serde(default)]
     measured: Vec<MeasuredBlockIn>,
     /// HeaderFooterContent.height (total in-flow stack)
@@ -190,20 +196,65 @@ enum HfType {
 
 /// which variant paints on this page — exact port of getHeaderForPage /
 /// getFooterForPage (headerFooterParser.ts:493-538); `page_number` is 1-based
-fn resolve_variant(hf: &HeadersFootersIn, kind: HfKind, page_number: u64) -> Option<&HfVariantIn> {
+fn resolve_variant<'a>(
+    hf: &'a HeadersFootersIn,
+    page: &PageIn,
+    kind: HfKind,
+    page_number: u64,
+) -> Option<&'a HfVariantIn> {
+    let section_index = page.section_index.map(|value| value as usize);
     // "later ones overwrite" (headerFooterMapToTypeMap's Map.set) -> rfind
     let get = |t: HfType| {
-        hf.variants
-            .iter()
-            .rfind(|v| v.kind == kind && v.hf_type == t)
+        hf.variants.iter().rfind(|v| {
+            v.kind == kind
+                && v.hf_type == t
+                && (v.section_index.is_none() || v.section_index == section_index)
+        })
     };
-    if page_number == 1 && hf.title_pg == Some(true) {
+    let title_page = section_index.is_some_and(|index| hf.title_page_sections.contains(&index))
+        || hf.title_pg == Some(true);
+    let even_and_odd = section_index.is_some_and(|index| hf.even_and_odd_sections.contains(&index))
+        || hf.even_and_odd_headers == Some(true);
+    let first_page = page
+        .section_page_index
+        .unwrap_or(page_number.saturating_sub(1))
+        == 0;
+    let selected_type = if first_page && title_page {
+        HfType::First
+    } else if even_and_odd && page_number.is_multiple_of(2) {
+        HfType::Even
+    } else {
+        HfType::Default
+    };
+    if let Some(refs) = &page.header_footer_refs {
+        let r_id = match (kind, selected_type) {
+            (HfKind::Header, HfType::Default) => refs.header_default.as_deref(),
+            (HfKind::Header, HfType::First) => refs.header_first.as_deref(),
+            (HfKind::Header, HfType::Even) => refs.header_even.as_deref(),
+            (HfKind::Footer, HfType::Default) => refs.footer_default.as_deref(),
+            (HfKind::Footer, HfType::First) => refs.footer_first.as_deref(),
+            (HfKind::Footer, HfType::Even) => refs.footer_even.as_deref(),
+        };
+        if let Some(r_id) = r_id
+            && let Some(variant) = hf.variants.iter().rfind(|variant| {
+                variant.kind == kind
+                    && variant.r_id == r_id
+                    && (variant.section_index.is_none() || variant.section_index == section_index)
+            })
+        {
+            return Some(variant);
+        }
+        if selected_type == HfType::First {
+            return None;
+        }
+    }
+    if first_page && title_page {
         // `titlePg` selects a distinct story. Word treats an absent first-page
         // relationship as an intentionally blank band; falling through here
         // would incorrectly repeat the default header/footer on page one.
         return get(HfType::First);
     }
-    if hf.even_and_odd_headers == Some(true)
+    if even_and_odd
         && page_number.is_multiple_of(2)
         && let Some(v) = get(HfType::Even)
     {
@@ -221,6 +272,7 @@ mod tests {
             r_id: r_id.to_owned(),
             kind,
             hf_type,
+            section_index: None,
             measured: Vec::new(),
             height: None,
             flow_height: None,
@@ -234,6 +286,8 @@ mod tests {
         HeadersFootersIn {
             title_pg: Some(title_pg),
             even_and_odd_headers: None,
+            title_page_sections: Vec::new(),
+            even_and_odd_sections: Vec::new(),
             header_distance: None,
             footer_distance: None,
             watermark: None,
@@ -248,9 +302,10 @@ mod tests {
             vec![variant(HfKind::Header, HfType::Default, "default-header")],
         );
 
-        assert!(resolve_variant(&hf, HfKind::Header, 1).is_none());
+        let page = PageIn::default();
+        assert!(resolve_variant(&hf, &page, HfKind::Header, 1).is_none());
         assert_eq!(
-            resolve_variant(&hf, HfKind::Header, 2).map(|v| v.r_id.as_str()),
+            resolve_variant(&hf, &page, HfKind::Header, 2).map(|v| v.r_id.as_str()),
             Some("default-header")
         );
     }
@@ -266,8 +321,28 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_variant(&hf, HfKind::Header, 1).map(|v| v.r_id.as_str()),
+            resolve_variant(&hf, &PageIn::default(), HfKind::Header, 1).map(|v| v.r_id.as_str()),
             Some("first-header")
+        );
+    }
+
+    #[test]
+    fn page_relationship_selects_the_matching_section_variant() {
+        let mut first = variant(HfKind::Header, HfType::Default, "section-zero");
+        first.section_index = Some(0);
+        let mut second = variant(HfKind::Header, HfType::Default, "section-one");
+        second.section_index = Some(1);
+        let hf = envelope(false, vec![first, second]);
+        let mut page = PageIn::default();
+        page.section_index = Some(1);
+        page.header_footer_refs = Some(crate::display_list::PageHeaderFooterRefsIn {
+            header_default: Some("section-one".to_owned()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            resolve_variant(&hf, &page, HfKind::Header, 2).map(|value| value.r_id.as_str()),
+            Some("section-one")
         );
     }
 }
@@ -300,7 +375,7 @@ pub(crate) fn compose_page_regions<'a>(
     shape: Option<&'a ShapeFonts<'a>>,
 ) -> (Option<HfRegion>, Option<HfRegion>) {
     let page_number = page.number.unwrap_or(page_index as u64 + 1);
-    let header = resolve_variant(hf, HfKind::Header, page_number).map(|v| {
+    let header = resolve_variant(hf, page, HfKind::Header, page_number).map(|v| {
         compose_region(
             v,
             HfKind::Header,
@@ -312,7 +387,7 @@ pub(crate) fn compose_page_regions<'a>(
             shape,
         )
     });
-    let footer = resolve_variant(hf, HfKind::Footer, page_number).map(|v| {
+    let footer = resolve_variant(hf, page, HfKind::Footer, page_number).map(|v| {
         compose_region(
             v,
             HfKind::Footer,

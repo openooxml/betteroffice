@@ -34,7 +34,8 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 /// the same Office default palette as the TypeScript color resolver. `numeric_ids` is the explicit
 /// coexistence adapter for the current numeric layout contract: callers that mirror a PM document
 /// should map yrs' client-scoped IDs to the PM revision/comment IDs here.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
     pub theme_colors: BTreeMap<String, String>,
     pub default_tab_stop_twips: Option<f64>,

@@ -206,10 +206,9 @@ pub fn create_section_layout_tracker(
 /// Ingest a section break: schedule its geometry for the next boundary and
 /// report what the paginator must do now. TS `applySectionBreak`.
 ///
-/// Block-level column parsing is not wired up yet, so every break carries the
-/// single-column default. Page-starting breaks always schedule that default;
-/// a continuous break only opens a column region when the default differs from
-/// the inForce columns.
+/// Absent block-level columns resolve to the single-column default. A
+/// continuous break opens a column region only when its layout differs from
+/// the in-force columns.
 pub fn apply_section_break(
     block: &SectionBreakBlock,
     tracker: &SectionLayoutTracker,
@@ -236,7 +235,7 @@ pub fn apply_section_break(
         updated.queued.margins = Some(schedule_margins(updated.queued.margins.as_ref(), margins));
     }
 
-    let incoming_columns = SINGLE_COLUMN;
+    let incoming_columns = block.columns.clone().unwrap_or(SINGLE_COLUMN);
 
     let starts_on_new_page = matches!(
         break_kind,
@@ -565,25 +564,43 @@ mod tests {
 
     #[test]
     fn continuous_break_with_column_change_opens_region() {
-        // inForce is two columns; the (hardcoded single-column) incoming layout
-        // differs, so a continuous break opens a new column region.
-        let tracker = create_section_layout_tracker(
-            &margins(96.0, 96.0, 96.0, 96.0),
-            &Size {
-                w: 816.0,
-                h: 1056.0,
+        let tracker = base_tracker();
+        let columns = ColumnLayout {
+            count: 2.0,
+            gap: 20.0,
+            equal_width: Some(true),
+            separator: Some(true),
+        };
+        let result = apply_section_break(
+            &SectionBreakBlock {
+                columns: Some(columns.clone()),
+                ..empty_break()
             },
-            Some(&ColumnLayout {
-                count: 2.0,
-                gap: 20.0,
-                equal_width: None,
-                separator: None,
-            }),
+            &tracker,
         );
-        let result = apply_section_break(&empty_break(), &tracker);
         assert!(!result.outcome.break_to_new_page);
         assert!(result.outcome.open_column_region);
-        assert_eq!(result.tracker.queued.columns, Some(SINGLE_COLUMN));
+        assert_eq!(result.tracker.queued.columns, Some(columns));
+    }
+
+    #[test]
+    fn next_page_break_queues_authored_columns() {
+        let tracker = base_tracker();
+        let columns = ColumnLayout {
+            count: 2.0,
+            gap: 20.0,
+            equal_width: Some(false),
+            separator: Some(true),
+        };
+        let result = apply_section_break(
+            &SectionBreakBlock {
+                break_type: Some(SectionBreakType::NextPage),
+                columns: Some(columns.clone()),
+                ..empty_break()
+            },
+            &tracker,
+        );
+        assert_eq!(result.tracker.queued.columns, Some(columns));
     }
 
     #[test]

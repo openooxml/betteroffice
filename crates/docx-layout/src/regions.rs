@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::footnotes::NoteLayoutInput;
-use crate::types::{HeaderFooterRefs, Input, Layout, NoteAreaContract};
+use crate::measure_blocks::MeasurementConfig;
+use crate::types::{
+    ColumnLayout, HeaderFooterRefs, Input, Layout, LayoutBlock, NoteAreaContract, PageMargins, Size,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +22,8 @@ pub struct DocumentRegions {
     pub watermark: Option<Value>,
     #[serde(default)]
     pub note_settings: NoteSettings,
+    #[serde(default)]
+    pub even_and_odd_headers: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -26,6 +31,12 @@ pub struct DocumentRegions {
 pub struct RegionSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<Size>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margins: Option<PageMargins>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<ColumnLayout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_footer_refs: Option<HeaderFooterRefs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42,6 +53,10 @@ pub struct RegionSection {
     pub vertical_align: Option<String>,
     #[serde(default)]
     pub note_settings: NoteSettings,
+    #[serde(default)]
+    pub title_pg: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_and_odd_headers: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,6 +148,7 @@ pub struct PageNumbering {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
     pub measured: Vec<crate::types::MeasuredBlock>,
     #[serde(default)]
@@ -141,10 +157,22 @@ pub struct RegionLayoutInput {
     pub regions: DocumentRegions,
     #[serde(default)]
     pub notes: NoteLayoutInput,
+    #[serde(default)]
+    pub measurement: MeasurementConfig,
+    #[serde(default)]
+    pub render_env: Value,
 }
 
 impl RegionLayoutInput {
-    pub fn split(self) -> (Input, DocumentRegions, NoteLayoutInput) {
+    pub fn split(
+        self,
+    ) -> (
+        Input,
+        DocumentRegions,
+        NoteLayoutInput,
+        MeasurementConfig,
+        Value,
+    ) {
         (
             Input {
                 measured: self.measured,
@@ -152,7 +180,51 @@ impl RegionLayoutInput {
             },
             self.regions,
             self.notes,
+            self.measurement,
+            self.render_env,
         )
+    }
+}
+
+pub fn apply_section_geometry(input: &mut Input, regions: &DocumentRegions) {
+    let Some(first) = regions.sections.first() else {
+        return;
+    };
+    if first.page_size.is_some() {
+        input.options.page_size.clone_from(&first.page_size);
+    }
+    if first.margins.is_some() {
+        input.options.margins.clone_from(&first.margins);
+    }
+    if first.columns.is_some() {
+        input.options.columns.clone_from(&first.columns);
+    }
+    if let Some(last) = regions.sections.last() {
+        if last.page_size.is_some() {
+            input.options.final_page_size.clone_from(&last.page_size);
+        }
+        if last.margins.is_some() {
+            input.options.final_margins.clone_from(&last.margins);
+        }
+    }
+    let mut section_index = 0;
+    for measured in &mut input.measured {
+        let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
+            continue;
+        };
+        let Some(section) = regions.sections.get(section_index) else {
+            break;
+        };
+        if section.page_size.is_some() {
+            section_break.page_size.clone_from(&section.page_size);
+        }
+        if section.margins.is_some() {
+            section_break.margins.clone_from(&section.margins);
+        }
+        if section.columns.is_some() {
+            section_break.columns.clone_from(&section.columns);
+        }
+        section_index += 1;
     }
 }
 
@@ -174,7 +246,7 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                 .section_id
                 .clone()
                 .or_else(|| Some(section_index.to_string()));
-            page.header_footer_refs = section.header_footer_refs.clone();
+            page.header_footer_refs = effective_header_footer_refs(regions, section_index);
             page.header_distance = section.header_distance;
             page.footer_distance = section.footer_distance;
             page.page_borders = section.page_borders.clone();
@@ -208,6 +280,54 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
             }
         }
     }
+}
+
+pub fn effective_header_footer_refs(
+    regions: &DocumentRegions,
+    section_index: usize,
+) -> Option<HeaderFooterRefs> {
+    let mut effective = HeaderFooterRefs {
+        header_default: None,
+        header_first: None,
+        header_even: None,
+        footer_default: None,
+        footer_first: None,
+        footer_even: None,
+    };
+    for section in regions.sections.iter().take(section_index + 1) {
+        let Some(authored) = &section.header_footer_refs else {
+            continue;
+        };
+        if authored.header_default.is_some() {
+            effective
+                .header_default
+                .clone_from(&authored.header_default);
+        }
+        if authored.header_first.is_some() {
+            effective.header_first.clone_from(&authored.header_first);
+        }
+        if authored.header_even.is_some() {
+            effective.header_even.clone_from(&authored.header_even);
+        }
+        if authored.footer_default.is_some() {
+            effective
+                .footer_default
+                .clone_from(&authored.footer_default);
+        }
+        if authored.footer_first.is_some() {
+            effective.footer_first.clone_from(&authored.footer_first);
+        }
+        if authored.footer_even.is_some() {
+            effective.footer_even.clone_from(&authored.footer_even);
+        }
+    }
+    (effective.header_default.is_some()
+        || effective.header_first.is_some()
+        || effective.header_even.is_some()
+        || effective.footer_default.is_some()
+        || effective.footer_first.is_some()
+        || effective.footer_even.is_some())
+    .then_some(effective)
 }
 
 pub(crate) fn format_number(number: i64, format: &str) -> String {
@@ -286,6 +406,8 @@ fn ordinal(number: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
     use crate::types::{Layout, Page, PageMargins, Size};
 
@@ -373,5 +495,77 @@ mod tests {
         assert_eq!(layout.pages[2].section_page_index, Some(0));
         assert_eq!(layout.pages[2].page_label.as_deref(), Some("a"));
         assert_eq!(layout.pages[2].footer_distance, Some(18.0));
+    }
+
+    #[test]
+    fn section_geometry_populates_options_and_breaks() {
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "measured": [{
+                "block": {"kind": "sectionBreak", "id": "break", "type": "nextPage"},
+                "measure": {"kind": "sectionBreak"}
+            }],
+            "options": {},
+            "regions": {
+                "sections": [
+                    {
+                        "pageSize": {"w": 300, "h": 400},
+                        "margins": {"top": 10, "right": 20, "bottom": 30, "left": 40},
+                        "columns": {"count": 2, "gap": 12}
+                    },
+                    {
+                        "pageSize": {"w": 500, "h": 600},
+                        "margins": {"top": 50, "right": 60, "bottom": 70, "left": 80}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let (mut input, regions, _, _, _) = request.split();
+
+        apply_section_geometry(&mut input, &regions);
+
+        assert_eq!(input.options.page_size.as_ref().unwrap().w, 300.0);
+        assert_eq!(input.options.final_page_size.as_ref().unwrap().w, 500.0);
+        let LayoutBlock::SectionBreak(section_break) = &input.measured[0].block else {
+            panic!("section break expected");
+        };
+        assert_eq!(section_break.columns.as_ref().unwrap().count, 2.0);
+        assert_eq!(section_break.margins.as_ref().unwrap().top, 10.0);
+    }
+
+    #[test]
+    fn header_footer_relationships_inherit_per_type() {
+        let regions = DocumentRegions {
+            sections: vec![
+                RegionSection {
+                    header_footer_refs: Some(HeaderFooterRefs {
+                        header_default: Some("header-a".to_owned()),
+                        header_first: None,
+                        header_even: None,
+                        footer_default: Some("footer-a".to_owned()),
+                        footer_first: None,
+                        footer_even: None,
+                    }),
+                    ..RegionSection::default()
+                },
+                RegionSection {
+                    header_footer_refs: Some(HeaderFooterRefs {
+                        header_default: None,
+                        header_first: None,
+                        header_even: Some("header-even-b".to_owned()),
+                        footer_default: None,
+                        footer_first: None,
+                        footer_even: None,
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+
+        let effective = effective_header_footer_refs(&regions, 1).unwrap();
+        assert_eq!(effective.header_default.as_deref(), Some("header-a"));
+        assert_eq!(effective.header_even.as_deref(), Some("header-even-b"));
+        assert_eq!(effective.footer_default.as_deref(), Some("footer-a"));
     }
 }

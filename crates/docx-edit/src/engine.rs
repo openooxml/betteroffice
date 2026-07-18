@@ -16,9 +16,17 @@ use docx_layout::footnotes::{
     OrderedMap, assign_note_presentations, attach_note_areas, build_note_presentations,
     collect_note_refs, map_notes_to_pages, stabilize_note_layout, stamp_note_pages,
 };
+use docx_layout::header_footer::{
+    HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
+    HeaderFooterVariant, extend_body_margins, measure_header_footer,
+    resolve_header_footer_field_widths,
+};
 use docx_layout::hit::HitRegion;
 use docx_layout::place::LayoutCheckpoint;
-use docx_layout::regions::{DocumentRegions, RegionLayoutInput, apply_document_regions};
+use docx_layout::regions::{
+    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
+    effective_header_footer_refs,
+};
 use docx_layout::types::{
     BlockExtent, BlockId, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
     ParagraphExtent, Run,
@@ -81,14 +89,14 @@ struct RegionLayoutOutput<'a> {
 fn serialize_region_layout(
     input: &LayoutInput,
     layout: &Layout,
-    regions: &DocumentRegions,
+    headers_footers: Option<&serde_json::Value>,
     notes_converged: bool,
 ) -> Result<String, String> {
     serde_json::to_string(&RegionLayoutOutput {
         measured: &input.measured,
         options: &input.options,
         layout,
-        headers_footers: regions.headers_footers.as_ref(),
+        headers_footers,
         notes_converged,
     })
     .map_err(|error| format!("serialize: {error}"))
@@ -107,6 +115,69 @@ fn layout_error_message(error: docx_layout::LayoutError) -> String {
     match error {
         docx_layout::LayoutError::Unsupported(_) => "UNSUPPORTED".to_owned(),
         docx_layout::LayoutError::Invalid(reason) => reason,
+    }
+}
+
+fn extend_input_for_header_footer(
+    input: &mut LayoutInput,
+    regions: &DocumentRegions,
+    variants: &[HeaderFooterVariant],
+) {
+    if regions.sections.is_empty() {
+        return;
+    }
+    let fallback_size = input
+        .options
+        .page_size
+        .clone()
+        .unwrap_or(docx_layout::types::Size {
+            w: 816.0,
+            h: 1056.0,
+        });
+    let fallback_margins =
+        docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    let extended: Vec<_> = regions
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(section_index, section)| {
+            let page_size = section
+                .page_size
+                .clone()
+                .unwrap_or_else(|| fallback_size.clone());
+            let margins = docx_layout::section_breaks::resolve_page_margins(
+                section.margins.as_ref().or(Some(&fallback_margins)),
+            );
+            let header_height = variants
+                .iter()
+                .filter(|variant| {
+                    variant.section_index == section_index
+                        && variant.kind == HeaderFooterKind::Header
+                })
+                .map(|variant| variant.flow_height)
+                .fold(0.0_f64, f64::max);
+            let footer_height = variants
+                .iter()
+                .filter(|variant| {
+                    variant.section_index == section_index
+                        && variant.kind == HeaderFooterKind::Footer
+                })
+                .map(|variant| variant.flow_height)
+                .fold(0.0_f64, f64::max);
+            extend_body_margins(&page_size, &margins, header_height, footer_height)
+        })
+        .collect();
+    input.options.margins = extended.first().cloned();
+    input.options.final_margins = extended.last().cloned();
+    let mut section_index = 0;
+    for measured in &mut input.measured {
+        let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
+            continue;
+        };
+        if let Some(margins) = extended.get(section_index) {
+            section_break.margins = Some(margins.clone());
+        }
+        section_index += 1;
     }
 }
 
@@ -582,7 +653,15 @@ impl EngineSession {
     pub fn layout_document_with_regions_json(&self, input_json: &str) -> Result<String, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (mut input, regions, mut notes) = request.split();
+        let (mut input, regions, mut notes, measurement, render_env) = request.split();
+        apply_section_geometry(&mut input, &regions);
+        let mut measured_headers_footers = if render_env.is_null() {
+            None
+        } else {
+            let render_env: RenderEnv = serde_json::from_value(render_env)
+                .map_err(|error| format!("parse render environment: {error}"))?;
+            self.measure_header_footer_payload(&mut input, &regions, &measurement, &render_env)?
+        };
         self.layout_document_value(input.clone())?;
         let mut initial_layout = self
             .pagination
@@ -631,7 +710,138 @@ impl EngineSession {
         let input = input
             .as_ref()
             .expect("input retained after successful pagination");
-        serialize_region_layout(input, layout, &regions, notes_converged)
+        let measured_headers_footers = measured_headers_footers
+            .as_mut()
+            .map(|payload| {
+                resolve_header_footer_field_widths(payload, layout, &measurement)?;
+                serde_json::to_value(payload)
+                    .map_err(|error| format!("serialize headers/footers: {error}"))
+            })
+            .transpose()?;
+        let headers_footers = measured_headers_footers
+            .as_ref()
+            .or(regions.headers_footers.as_ref());
+        serialize_region_layout(input, layout, headers_footers, notes_converged)
+    }
+
+    fn measure_header_footer_payload(
+        &self,
+        input: &mut LayoutInput,
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        render_env: &RenderEnv,
+    ) -> Result<Option<HeaderFooterPayload>, String> {
+        let mut variants = Vec::new();
+        for section_index in 0..regions.sections.len() {
+            let Some(refs) = effective_header_footer_refs(regions, section_index) else {
+                continue;
+            };
+            let section = &regions.sections[section_index];
+            let page_size = section
+                .page_size
+                .clone()
+                .or_else(|| input.options.page_size.clone())
+                .unwrap_or(docx_layout::types::Size {
+                    w: 816.0,
+                    h: 1056.0,
+                });
+            let margins = docx_layout::section_breaks::resolve_page_margins(
+                section.margins.as_ref().or(input.options.margins.as_ref()),
+            );
+            let content_width = (page_size.w - margins.left - margins.right).max(1.0);
+            let descriptors = [
+                (
+                    HeaderFooterKind::Header,
+                    HeaderFooterType::Default,
+                    refs.header_default.clone().or_else(|| {
+                        (!section.title_pg)
+                            .then_some(refs.header_first.clone())
+                            .flatten()
+                    }),
+                ),
+                (
+                    HeaderFooterKind::Header,
+                    HeaderFooterType::First,
+                    section.title_pg.then_some(refs.header_first).flatten(),
+                ),
+                (
+                    HeaderFooterKind::Header,
+                    HeaderFooterType::Even,
+                    refs.header_even,
+                ),
+                (
+                    HeaderFooterKind::Footer,
+                    HeaderFooterType::Default,
+                    refs.footer_default.clone().or_else(|| {
+                        (!section.title_pg)
+                            .then_some(refs.footer_first.clone())
+                            .flatten()
+                    }),
+                ),
+                (
+                    HeaderFooterKind::Footer,
+                    HeaderFooterType::First,
+                    section.title_pg.then_some(refs.footer_first).flatten(),
+                ),
+                (
+                    HeaderFooterKind::Footer,
+                    HeaderFooterType::Even,
+                    refs.footer_even,
+                ),
+            ];
+            for (kind, hf_type, r_id) in descriptors {
+                let Some(r_id) = r_id else {
+                    continue;
+                };
+                let blocks = self
+                    .with_lowered_story(&format!("hf:{r_id}"), render_env, <[LayoutBlock]>::to_vec)
+                    .map_err(|error| error.to_string())?;
+                let metrics = HeaderFooterMetrics {
+                    kind,
+                    page_size: &page_size,
+                    margins: &margins,
+                };
+                if let Some(variant) = measure_header_footer(
+                    r_id,
+                    kind,
+                    hf_type,
+                    section_index,
+                    blocks,
+                    content_width,
+                    metrics,
+                    measurement,
+                )? {
+                    variants.push(variant);
+                }
+            }
+        }
+        if variants.is_empty() && regions.watermark.is_none() {
+            return Ok(None);
+        }
+        extend_input_for_header_footer(input, regions, &variants);
+        Ok(Some(HeaderFooterPayload {
+            title_pg: false,
+            even_and_odd_headers: regions.even_and_odd_headers,
+            title_page_sections: regions
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| section.title_pg.then_some(index))
+                .collect(),
+            even_and_odd_sections: regions
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| {
+                    section
+                        .even_and_odd_headers
+                        .unwrap_or(regions.even_and_odd_headers)
+                        .then_some(index)
+                })
+                .collect(),
+            variants,
+            watermark: regions.watermark.clone(),
+        }))
     }
 
     /// Typed resident pagination path shared by the compatibility JSON seam
@@ -1395,6 +1605,81 @@ mod tests {
         assert_eq!(page["noteAreas"][0]["columns"], 2);
         assert_eq!(page["noteAreas"][0]["notes"][0]["displayLabel"], "III");
         assert_eq!(engine.stats().pagination_calls, 2);
+    }
+
+    #[test]
+    fn region_layout_operation_measures_header_story_and_extends_margin() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(133);
+        engine
+            .doc()
+            .create_story("hf:rId1", "Header", "Normal", "left")
+            .unwrap();
+        let request = serde_json::json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {
+                    "top": 20,
+                    "right": 20,
+                    "bottom": 20,
+                    "left": 20,
+                    "header": 5,
+                    "footer": 5
+                }
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {
+                        "top": 20,
+                        "right": 20,
+                        "bottom": 20,
+                        "left": 20,
+                        "header": 5,
+                        "footer": 5
+                    },
+                    "headerFooterRefs": {"headerFirst": "rId1"}
+                }]
+            },
+            "measurement": {
+                "fontChains": {"liberation sans|0|0": [font_id]},
+                "defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["headersFooters"]["variants"][0]["rId"], "rId1");
+        assert_eq!(value["headersFooters"]["variants"][0]["type"], "default");
+        assert_eq!(
+            value["headersFooters"]["variants"][0]["measured"][0]["block"]["kind"],
+            "paragraph"
+        );
+        assert!(value["options"]["margins"]["top"].as_f64().unwrap() > 20.0);
+        assert_eq!(
+            value["layout"]["pages"][0]["headerFooterRefs"]["headerFirst"],
+            "rId1"
+        );
+
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["header"]["rId"], "rId1");
+        assert!(
+            !display["pages"][0]["header"]["primitives"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {
