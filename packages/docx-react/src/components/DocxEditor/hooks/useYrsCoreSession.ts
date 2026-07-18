@@ -30,6 +30,7 @@ export function useYrsCoreSession(
   collaboration?: DocxEditorCollaborationOptions
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
+  const collaborationInitialUpdate = collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
   const facadeRef = useRef<YrsFacadeModule | null>(null);
   const documentRef = useRef(document);
@@ -54,7 +55,8 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        yrs.documentToYrs(next, seedDocument);
+        if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
+        else yrs.documentToYrs(next, seedDocument);
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
@@ -71,7 +73,7 @@ export function useYrsCoreSession(
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
     };
-  }, [enabled, seedDocument, collaborationClientId]);
+  }, [enabled, seedDocument, collaborationClientId, collaborationInitialUpdate]);
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;

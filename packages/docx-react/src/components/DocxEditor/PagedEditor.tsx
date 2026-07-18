@@ -745,6 +745,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
     );
 
+    useEffect(() => {
+      const session = yrsCore.session;
+      if (!session) return;
+      return session.onUpdate((_update, origin) => {
+        if (origin === 'remote') syncYrsInputState(true);
+      });
+    }, [syncYrsInputState, yrsCore.session]);
+
     const applyYrsFormatting = useCallback(
       (action: FormattingAction): boolean => {
         if (!yrsCore.session) return false;

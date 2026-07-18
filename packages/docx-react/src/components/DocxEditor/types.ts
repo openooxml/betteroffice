@@ -7,6 +7,8 @@ import type { CollaborationReplica } from '@betteroffice/docx/collaboration';
 
 export interface DocxEditorCollaborationOptions {
   clientId?: number;
+  /** Shared Yrs state used instead of importing the source DOCX. */
+  initialUpdate?: Uint8Array;
   onReplica?: (replica: CollaborationReplica | null) => void;
 }
 

@@ -47,7 +47,9 @@ provider.connect();
 `createWorkerCollaborationReplica`, or the value published by the React
 editor's `collaboration.onReplica` callback. The provider speaks Yjs sync-v1;
 room routing, authentication, awareness, and reconnection policy remain
-transport concerns.
+transport concerns. Pass a persisted Yrs update as `collaboration.initialUpdate`
+when a React editor joins an existing room so it hydrates the shared history
+instead of independently importing the same DOCX.
 
 ## Development
 
