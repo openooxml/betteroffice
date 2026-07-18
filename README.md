@@ -5,52 +5,25 @@
 </p>
 
 <p align="center">
-  Documents, spreadsheets, and presentations — engines in Rust, editors in TypeScript, everything client-side.
+  Rust-native OOXML engines with collaboration and agent editing at the core.<br>
+  WebAssembly for browsers. Headless APIs for servers. Native Rust where you need it.
 </p>
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-4ade80.svg?style=flat-square" alt="license"></a>
   <a href="https://www.npmjs.com/org/betteroffice"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fbetteroffice.dev%2Fapi%2Fnpm-downloads&amp;style=flat-square&amp;logo=npm&amp;label=downloads&amp;color=CB3837&amp;cacheSeconds=86400" alt="npm downloads"></a>
+  <a href="https://crates.io/search?q=betteroffice"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fbetteroffice.dev%2Fapi%2Fcrates-downloads%3Fv%3D1&amp;style=flat-square&amp;logo=rust&amp;label=downloads&amp;color=CE412B&amp;cacheSeconds=86400" alt="crates.io downloads"></a>
   <a href="https://betteroffice.dev"><img src="https://img.shields.io/badge/betteroffice.dev-0a0a0a?style=flat-square" alt="betteroffice.dev"></a>
   <a href="https://openooxml.org"><img src="https://img.shields.io/badge/openooxml.org-0a0a0a?style=flat-square" alt="openooxml.org"></a>
 </p>
 
-## Engines
-
-The document engines are Rust crates compiled to WebAssembly for the browser and running natively on servers. Every value from a user file is treated as attacker-controlled; guards are enforced by construction at the trust boundaries.
-
-Rust consumers should use `betteroffice-xlsx`; the lower-level `betteroffice-xlsx-*` crates are its engine components.
-
-| crate | what it does |
-|---|---|
-| [`betteroffice-opc`](crates/ooxml-opc) | OPC (zip) container read/write with decompression-bomb and path-traversal guards — shared by every format |
-| [`ooxml-text`](crates/ooxml-text) | shared font storage, shaping, bidi, line breaking, and glyph outlines |
-| [`docx-layout`](crates/docx-layout) | DOCX pagination and display-list generation |
-| [`docx-wasm`](crates/docx-wasm) | the wasm boundary for the document engine |
-| [`pptx-render`](crates/pptx-render) | PPTX composed-slide to display-list compiler |
-| [`pptx-wasm`](crates/pptx-wasm) | the wasm boundary for presentation rendering |
-| [`betteroffice-xlsx`](crates/betteroffice-xlsx) | typed XLSX editor, calculation, rendering, and save facade for Rust |
-| [`betteroffice-xlsx-model`](crates/xlsx-model) | workbook, cells, addresses, dates, styles, number formats |
-| [`betteroffice-xlsx-parse`](crates/xlsx-parse) | streaming SpreadsheetML parse and serialize |
-| [`betteroffice-xlsx-calc`](crates/xlsx-calc) | formula engine: parser, dependency graph, incremental recalc |
-| [`betteroffice-xlsx-ops`](crates/xlsx-ops) | invertible edit operations, undo, address remapping, proposals |
-| [`betteroffice-xlsx-render`](crates/xlsx-render) | grid geometry and display list |
-| [`betteroffice-xlsx-raster`](crates/xlsx-raster) | headless raster backend (tiny-skia), pixel-identical everywhere |
-| [`xlsx-wasm`](crates/xlsx-wasm) | the wasm boundary for the spreadsheet engine |
-| [`xlsx-cli`](crates/xlsx-cli) | render and inspect workbooks from the command line |
-
 ## Packages
 
-The editor packages will ship under the `@betteroffice` scope: a framework-free core per format, with thin framework adapters on top.
-
-| package | |
+| package | what it does |
 |---|---|
-| `@betteroffice/docx` | word processing core |
-| `@betteroffice/docx-react` | React chrome for the docx editor |
-| `@betteroffice/xlsx` | spreadsheet core |
-| `@betteroffice/xlsx-react` | React chrome for the spreadsheet |
-| `@betteroffice/pptx` | presentation core |
-| `@betteroffice/pptx-react` | React chrome for presentations |
+| [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
+| [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
+| [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | drop-in React spreadsheet editor |
 
 ## Structure
 
