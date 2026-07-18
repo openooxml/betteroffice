@@ -99,6 +99,6 @@ jobs:
 
       - name: License and advisory gate
         if: steps.ws.outputs.present == 'true'
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@v2.0.20
         with:
           command: check bans licenses advisories sources
