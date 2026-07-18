@@ -25,6 +25,11 @@ impl UndoStack {
         !self.redo.is_empty()
     }
 
+    pub fn clear(&mut self) {
+        self.undo.clear();
+        self.redo.clear();
+    }
+
     /// apply a transaction's ops and record its inverse for undo; clears the
     /// redo stack.
     pub fn commit(&mut self, wb: &mut Workbook, tx: &Transaction) -> Result<(), OpError> {

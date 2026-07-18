@@ -1,5 +1,17 @@
 use xlsx_model::{CellRange, CellRef, SheetId};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateOrigin {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateEvent {
+    pub update: Vec<u8>,
+    pub origin: UpdateOrigin,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CalculationOptions {
     pub now_serial: Option<f64>,

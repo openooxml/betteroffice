@@ -39,4 +39,31 @@ package exports onto your own `<canvas>` 2D context — `paintDisplayList`,
 `cellAtPoint` / `cellRect` / `rangeRect` (hit-testing), the `viewport` math,
 `buildA11yGrid`, and `toTsv` / `fromTsv` (clipboard).
 
+## Collaboration
+
+Open a collaborative replica, then connect it to any reliable binary transport:
+
+```ts
+import { initWasm, openWorkbook } from "@betteroffice/xlsx";
+import {
+  CollaborationProvider,
+  type CollaborationTransport,
+} from "@betteroffice/xlsx/collaboration";
+
+await initWasm();
+const workbook = openWorkbook(bytes, { collaborative: true });
+const transport: CollaborationTransport = createTransport();
+const provider = new CollaborationProvider(workbook, transport);
+provider.connect();
+```
+
+The provider speaks the Yjs sync-v1 protocol used by y-websocket. WebSocket room
+routing, authentication, WebRTC signaling, reconnection policy, and awareness
+remain transport concerns; document updates flow directly between the connection
+and the Rust/WASM Yrs replica without a second JavaScript `Y.Doc`.
+
+Collaborative sessions currently support cell content, formulas, styles, column
+widths, and row heights. Structural edits and inverse-op undo are rejected until
+they have stable axis identities and a Yrs-aware undo manager.
+
 Docs: https://betteroffice.dev · Apache-2.0.

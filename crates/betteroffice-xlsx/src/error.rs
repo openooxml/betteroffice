@@ -6,6 +6,26 @@ use crate::{CellAddress, CellRef, SheetId};
 #[non_exhaustive]
 pub enum Error {
     Package(String),
+    CollaborativeState(String),
+    InvalidClientId {
+        client_id: u64,
+        max: u64,
+    },
+    ClientIdConflict(u64),
+    InvalidStateVector(String),
+    InvalidUpdate(String),
+    CollaborationDataTooLarge {
+        bytes: usize,
+        max: usize,
+    },
+    CollaborationPendingUpdatesTooMany {
+        updates: usize,
+        max: usize,
+    },
+    NotCollaborative,
+    CollaborativeUndoUnavailable,
+    CollaborativeStructureOperation,
+    CollaborativeStructureChanged,
     Spreadsheet(xlsx_parse::ParseError),
     Operation(xlsx_ops::OpError),
     NoSheets,
@@ -43,6 +63,38 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Package(error) => f.write_str(error),
+            Self::CollaborativeState(error) => {
+                write!(f, "invalid collaborative workbook state: {error}")
+            }
+            Self::InvalidClientId { client_id, max } => {
+                write!(f, "collaboration client ID {client_id} exceeds {max}")
+            }
+            Self::ClientIdConflict(client_id) => write!(
+                f,
+                "collaboration client ID {client_id} conflicts with the workbook bootstrap ID"
+            ),
+            Self::InvalidStateVector(error) => write!(f, "invalid Yrs v1 state vector: {error}"),
+            Self::InvalidUpdate(error) => write!(f, "invalid Yrs v1 update: {error}"),
+            Self::CollaborationDataTooLarge { bytes, max } => write!(
+                f,
+                "collaboration payload is {bytes} bytes, exceeds the {max}-byte limit"
+            ),
+            Self::CollaborationPendingUpdatesTooMany { updates, max } => write!(
+                f,
+                "collaboration has {updates} unresolved updates, exceeds the {max}-update limit"
+            ),
+            Self::NotCollaborative => {
+                f.write_str("remote updates require a collaborative workbook")
+            }
+            Self::CollaborativeUndoUnavailable => {
+                f.write_str("undo and redo are unavailable in collaborative mode")
+            }
+            Self::CollaborativeStructureOperation => {
+                f.write_str("structural operations are unavailable in collaborative mode")
+            }
+            Self::CollaborativeStructureChanged => {
+                f.write_str("remote update changes the frozen workbook structure")
+            }
             Self::Spreadsheet(error) => error.fmt(f),
             Self::Operation(error) => error.fmt(f),
             Self::NoSheets => f.write_str("workbook has no sheets"),

@@ -56,6 +56,11 @@ export interface XlsxEditorApi {
   refreshProposals: () => void;
 }
 
+export interface XlsxEditorCollaborationOptions {
+  /** Peer-unique Yrs client ID. Generated securely when omitted. */
+  clientId?: number;
+}
+
 /**
  * Props for {@link XlsxEditor}.
  */
@@ -66,6 +71,8 @@ export interface XlsxEditorProps {
   fileName?: string;
   /** Receive saved bytes instead of triggering a browser download. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Open a network-ready Yrs replica and repaint when peer updates arrive. */
+  collaboration?: XlsxEditorCollaborationOptions;
   /**
    * Called when a workbook opens, with a handle to stage agent proposals and a
    * way to refresh the panel afterward. Enables demo/host agents without
@@ -193,7 +200,16 @@ const visuallyHidden: React.CSSProperties = {
 /**
  * The xlsx editor React component.
  */
-export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxEditorProps) {
+export function XlsxEditor({
+  file,
+  fileName,
+  onSave,
+  collaboration,
+  onReady,
+  className,
+}: XlsxEditorProps) {
+  const collaborationEnabled = collaboration !== undefined;
+  const collaborationClientId = collaboration?.clientId;
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
@@ -265,13 +281,29 @@ export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxE
     setSheetInfo(null);
     setSelection(null);
     let handle: WorkbookHandle | null = null;
+    let unsubscribeUpdates = () => {};
     let disposed = false;
     void initWasm().then(
       () => {
         if (disposed) return;
         try {
-          handle = openWorkbook(file);
+          handle = openWorkbook(file, {
+            collaborative: collaborationEnabled,
+            clientId: collaborationClientId,
+          });
           handleRef.current = handle;
+          unsubscribeUpdates = handle.onUpdate((_update, origin) => {
+            if (disposed || origin !== 'remote' || !handle) return;
+            try {
+              setSheetInfo(handle.sheetInfo());
+              setRevision((current) => current + 1);
+              setStaleFor({});
+              refreshProposals();
+              setError(null);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : String(e));
+            }
+          });
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
           setError(null);
@@ -294,10 +326,11 @@ export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxE
     );
     return () => {
       disposed = true;
+      unsubscribeUpdates();
       handle?.dispose();
       handleRef.current = null;
     };
-  }, [file, refreshProposals]);
+  }, [file, collaborationEnabled, collaborationClientId, refreshProposals]);
 
   // paint the current scroll window into the canvas and publish the frame for
   // overlays + a11y. reads refs so it stays identity-stable across renders.
@@ -531,23 +564,23 @@ export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxE
 
   const undo = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle) return;
+    if (!handle || collaborationEnabled) return;
     try {
       applyResult(handle.undo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [applyResult]);
+  }, [applyResult, collaborationEnabled]);
 
   const redo = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle) return;
+    if (!handle || collaborationEnabled) return;
     try {
       applyResult(handle.redo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [applyResult]);
+  }, [applyResult, collaborationEnabled]);
 
   // accept a proposal (optionally forcing past drift): apply it, drop any stale
   // warning, refresh the list, repaint, and return focus to the grid.
@@ -822,7 +855,7 @@ export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxE
         <button
           data-testid="xlsx-undo"
           onClick={undo}
-          disabled={!sheetInfo}
+          disabled={!sheetInfo || collaborationEnabled}
           aria-label={en.toolbar.undo}
           title={en.toolbar.undo}
           style={{ padding: '4px 10px' }}
@@ -832,7 +865,7 @@ export function XlsxEditor({ file, fileName, onSave, onReady, className }: XlsxE
         <button
           data-testid="xlsx-redo"
           onClick={redo}
-          disabled={!sheetInfo}
+          disabled={!sheetInfo || collaborationEnabled}
           aria-label={en.toolbar.redo}
           title={en.toolbar.redo}
           style={{ padding: '4px 10px' }}

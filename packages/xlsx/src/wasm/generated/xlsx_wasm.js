@@ -72,6 +72,30 @@ export class XlsxDocument {
         }
     }
     /**
+     * @param {Uint8Array} update
+     * @returns {string}
+     */
+    applyUpdateJson(update) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(update, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.xlsxdocument_applyUpdateJson(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * @returns {string}
      */
     calculationStatusJson() {
@@ -118,6 +142,19 @@ export class XlsxDocument {
         }
     }
     /**
+     * Stop observation and discard queued events.
+     */
+    clearUpdateObservation() {
+        wasm.xlsxdocument_clearUpdateObservation(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    get clientId() {
+        const ret = wasm.xlsxdocument_clientId(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * serialized `DisplayList` for a serialized `Viewport`.
      * @param {string} viewport_json
      * @returns {string}
@@ -141,6 +178,16 @@ export class XlsxDocument {
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
+    }
+    /**
+     * Poll one event: origin byte (`0` local, `1` remote), then update; empty means none.
+     * @returns {Uint8Array}
+     */
+    drainUpdateEvent() {
+        const ret = wasm.xlsxdocument_drainUpdateEvent(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
     }
     /**
      * enter one cell edit; returns updated `SheetInfo` json.
@@ -193,6 +240,39 @@ export class XlsxDocument {
         }
     }
     /**
+     * @param {Uint8Array} remote_state_vector
+     * @returns {Uint8Array}
+     */
+    encodeDiff(remote_state_vector) {
+        const ptr0 = passArray8ToWasm0(remote_state_vector, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xlsxdocument_encodeDiff(this.__wbg_ptr, ptr0, len0);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v2;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    encodeStateAsUpdate() {
+        const ret = wasm.xlsxdocument_encodeStateAsUpdate(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    encodeStateVector() {
+        const ret = wasm.xlsxdocument_encodeStateVector(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
      * the pending proposals: `{"proposals":[...]}`.
      * @returns {string}
      */
@@ -223,6 +303,21 @@ export class XlsxDocument {
         const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.xlsxdocument_open(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return XlsxDocument.__wrap(ret[0]);
+    }
+    /**
+     * Open a replica with a positive, safe-integer client ID.
+     * @param {Uint8Array} bytes
+     * @param {number} client_id
+     * @returns {XlsxDocument}
+     */
+    static openCollaborative(bytes, client_id) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.xlsxdocument_openCollaborative(ptr0, len0, client_id);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -403,6 +498,15 @@ export class XlsxDocument {
         }
     }
     /**
+     * Start queuing origin-prefixed Yrs update events for polling.
+     */
+    startUpdateObservation() {
+        const ret = wasm.xlsxdocument_startUpdateObservation(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * undo the last transaction; returns `{"applied":bool,"sheetInfo":{...}}`.
      * @returns {string}
      */
@@ -486,6 +590,9 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
+        __wbg_getRandomValues_3f44b700395062e5: function() { return handleError(function (arg0, arg1) {
+            globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
+        }, arguments); },
         __wbg_get_78f252d074a84d0b: function() { return handleError(function (arg0, arg1) {
             const ret = Reflect.get(arg0, arg1);
             return ret;

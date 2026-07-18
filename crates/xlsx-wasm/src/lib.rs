@@ -1,8 +1,14 @@
-//! the single wasm-bindgen boundary: coarse json-string calls only. every
-//! exported method is a one-line wrapper over a pure `Session` method in `core.rs`.
+//! the single wasm-bindgen boundary: coarse json-string calls over the pure
+//! `Session` methods in `core.rs`.
 
 mod core;
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use betteroffice_xlsx::{
+    MAX_COLLABORATION_CLIENT_ID, UpdateEvent, UpdateOrigin, UpdateSubscription,
+};
 use wasm_bindgen::prelude::*;
 
 use crate::core::Session;
@@ -21,6 +27,12 @@ fn now_serial() -> Option<f64> {
 #[wasm_bindgen]
 pub struct XlsxDocument {
     session: Session,
+    update_observer: Option<UpdateObserver>,
+}
+
+struct UpdateObserver {
+    pending: Arc<Mutex<VecDeque<UpdateEvent>>>,
+    _subscription: UpdateSubscription,
 }
 
 #[wasm_bindgen]
@@ -28,8 +40,105 @@ impl XlsxDocument {
     /// open a workbook from raw `.xlsx` bytes.
     pub fn open(bytes: &[u8]) -> Result<XlsxDocument, JsValue> {
         Session::open(bytes, now_serial())
-            .map(|session| XlsxDocument { session })
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
             .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Open a replica with a positive, safe-integer client ID.
+    #[wasm_bindgen(js_name = openCollaborative)]
+    pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<XlsxDocument, JsValue> {
+        let client_id = parse_client_id(client_id)?;
+        Session::open_collaborative(bytes, client_id, now_serial())
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(getter, js_name = clientId)]
+    pub fn client_id(&self) -> f64 {
+        self.session.client_id() as f64
+    }
+
+    #[wasm_bindgen(js_name = encodeStateVector)]
+    pub fn encode_state_vector(&self) -> Vec<u8> {
+        self.session.encode_state_vector()
+    }
+
+    #[wasm_bindgen(js_name = encodeStateAsUpdate)]
+    pub fn encode_state_as_update(&self) -> Vec<u8> {
+        self.session.encode_state_as_update()
+    }
+
+    #[wasm_bindgen(js_name = encodeDiff)]
+    pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>, JsValue> {
+        self.session
+            .encode_diff(remote_state_vector)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = applyUpdateJson)]
+    pub fn apply_update_json(&mut self, update: &[u8]) -> Result<String, JsValue> {
+        self.session
+            .apply_update_json(update, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Start queuing origin-prefixed Yrs update events for polling.
+    #[wasm_bindgen(js_name = startUpdateObservation)]
+    pub fn start_update_observation(&mut self) -> Result<(), JsValue> {
+        if self.update_observer.is_some() {
+            return Ok(());
+        }
+        let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let observed = Arc::clone(&pending);
+        let subscription = self
+            .session
+            .observe_update_v1(move |event| {
+                observed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push_back(event);
+            })
+            .map_err(|e| JsValue::from_str(&e))?;
+        self.update_observer = Some(UpdateObserver {
+            pending,
+            _subscription: subscription,
+        });
+        Ok(())
+    }
+
+    /// Stop observation and discard queued events.
+    #[wasm_bindgen(js_name = clearUpdateObservation)]
+    pub fn clear_update_observation(&mut self) {
+        self.update_observer = None;
+    }
+
+    /// Poll one event: origin byte (`0` local, `1` remote), then update; empty means none.
+    #[wasm_bindgen(js_name = drainUpdateEvent)]
+    pub fn drain_update_event(&self) -> Vec<u8> {
+        let Some(observer) = &self.update_observer else {
+            return Vec::new();
+        };
+        let event = observer
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front();
+        let Some(event) = event else {
+            return Vec::new();
+        };
+        let mut encoded = Vec::with_capacity(event.update.len() + 1);
+        encoded.push(match event.origin {
+            UpdateOrigin::Local => 0,
+            UpdateOrigin::Remote => 1,
+        });
+        encoded.extend_from_slice(&event.update);
+        encoded
     }
 
     /// serialized `DisplayList` for a serialized `Viewport`.
@@ -180,4 +289,17 @@ impl XlsxDocument {
     pub fn version() -> String {
         Session::version().to_string()
     }
+}
+
+fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
+    if !client_id.is_finite()
+        || client_id.fract() != 0.0
+        || client_id < 1.0
+        || client_id > MAX_COLLABORATION_CLIENT_ID as f64
+    {
+        return Err(JsValue::from_str(
+            "client ID must be a nonzero integer no greater than Number.MAX_SAFE_INTEGER",
+        ));
+    }
+    Ok(client_id as u64)
 }
