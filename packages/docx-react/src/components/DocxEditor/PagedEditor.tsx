@@ -119,6 +119,7 @@ import {
   type YrsEditorCommand,
 } from './yrsCommands';
 import { YrsPositionProjection } from './internals/yrsPositionProjection';
+import type { DocxEditorCollaborationOptions } from './types';
 
 export { DEFAULT_PAGE_WIDTH };
 
@@ -162,6 +163,8 @@ export interface PagedEditorProps {
   document: Document | null;
   /** Source document used only when seeding a replacement yrs session. */
   yrsSeedDocument?: Document | null;
+  /** Collaboration identity and replica lifecycle callback. */
+  collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
   styles?: StyleDefinitions | null;
   /** Theme for styling. */
@@ -399,6 +402,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       document,
       yrsSeedDocument = document,
+      collaboration,
       styles,
       theme: _theme,
       headerContent,
@@ -474,7 +478,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
-    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument);
+    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument, collaboration);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {

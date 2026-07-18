@@ -110,6 +110,7 @@ export class EditSession {
      * Clear this editing wasm's resident measurement fonts.
      */
     clear_measure_fonts(): void;
+    clear_update_event_observation(): void;
     /**
      * Drops the update observer registered by [`EditSession::set_update_observer`].
      */
@@ -156,10 +157,13 @@ export class EditSession {
      * Region-scoped range geometry without a display-list JSON round trip.
      */
     display_range_rects_region_json(region: string, r_id: string, from: number, to: number): string;
+    drain_update_event(): Uint8Array;
+    encode_diff(remote_state_vector: Uint8Array): Uint8Array;
     /**
      * Full document state as one yrs v1 update (Yjs wire format).
      */
     encode_state(): Uint8Array;
+    encode_state_vector(): Uint8Array;
     /**
      * Applies a set-valued, tri-state inline formatting delta over
      * `[start, end)` in one transaction. Omitted fields are kept and `null`
@@ -390,6 +394,7 @@ export class EditSession {
      * `{"firstParaId","secondParaId","revisionId": string|null}`.
      */
     split_paragraph(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
+    start_update_event_observation(): void;
     /**
      * The story's `canonical-stream-v1` FNV-1a checksum as a decimal string
      * (u64 exceeds JS safe-integer range). The coexistence watchdog compares
@@ -582,6 +587,7 @@ export interface InitOutput {
     readonly editsession_clear_content_control_value: (a: number, b: number, c: number) => [number, number];
     readonly editsession_clear_formatting: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly editsession_clear_measure_fonts: (a: number) => void;
+    readonly editsession_clear_update_event_observation: (a: number) => void;
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
     readonly editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -593,7 +599,10 @@ export interface InitOutput {
     readonly editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_drain_update_event: (a: number) => [number, number];
+    readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
+    readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
@@ -641,6 +650,7 @@ export interface InitOutput {
     readonly editsession_set_update_observer: (a: number, b: any) => [number, number];
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+    readonly editsession_start_update_event_observation: (a: number) => [number, number];
     readonly editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_ids: (a: number) => [number, number];
     readonly editsession_story_len: (a: number, b: number, c: number) => [number, number, number];

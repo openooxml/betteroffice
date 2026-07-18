@@ -3,6 +3,12 @@ import type {
   ParagraphFormatting,
   TextFormatting,
 } from '@betteroffice/docx/types/document';
+import type { CollaborationReplica } from '@betteroffice/docx/collaboration';
+
+export interface DocxEditorCollaborationOptions {
+  clientId?: number;
+  onReplica?: (replica: CollaborationReplica | null) => void;
+}
 
 /** Framework-neutral selection state published by the Yrs-backed editor. */
 export interface SelectionState {

@@ -7,6 +7,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
+import type { DocxEditorCollaborationOptions } from '../types';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -25,8 +26,10 @@ export interface YrsCoreSession {
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
-  seedDocument: Document | null
+  seedDocument: Document | null,
+  collaboration?: DocxEditorCollaborationOptions
 ): YrsCoreSession {
+  const collaborationClientId = collaboration?.clientId;
   const sessionRef = useRef<YrsSession | null>(null);
   const facadeRef = useRef<YrsFacadeModule | null>(null);
   const documentRef = useRef(document);
@@ -46,7 +49,7 @@ export function useYrsCoreSession(
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
-        const next = await yrs.createYrsSession();
+        const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (cancelled) {
           next.destroy();
           return;
@@ -68,7 +71,14 @@ export function useYrsCoreSession(
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
     };
-  }, [enabled, seedDocument]);
+  }, [enabled, seedDocument, collaborationClientId]);
+
+  useEffect(() => {
+    const onReplica = collaboration?.onReplica;
+    if (!onReplica || !session) return;
+    onReplica(session);
+    return () => onReplica(null);
+  }, [collaboration?.onReplica, session]);
 
   const storyBlocks = useCallback((storyId: string, env: YrsRenderEnv): LayoutBlock[] | null => {
     if (!enabledRef.current) return null;

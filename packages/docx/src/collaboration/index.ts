@@ -1,5 +1,10 @@
 export { CollaborationProvider } from './provider';
 export {
+  createDirectCollaborationReplica,
+  createWorkerCollaborationReplica,
+  type WorkerCollaborationTarget,
+} from './replica';
+export {
   CollaborationError,
   type CollaborationErrorCode,
   type CollaborationErrorListener,

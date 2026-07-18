@@ -23,7 +23,11 @@ import {
 
 import { cn } from '../lib/utils';
 import { type SelectionFormatting } from './Toolbar';
-import type { SelectionState, TableContextInfo } from './DocxEditor/types';
+import type {
+  DocxEditorCollaborationOptions,
+  SelectionState,
+  TableContextInfo,
+} from './DocxEditor/types';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -98,6 +102,8 @@ import type { RenderedDomContext } from '../plugin-api/types';
 // TYPES
 // ============================================================================
 
+export type { DocxEditorCollaborationOptions } from './DocxEditor/types';
+
 /**
  * DocxEditor props
  */
@@ -108,6 +114,8 @@ export interface DocxEditorProps {
   document?: Document | null;
   /** Callback when document is saved */
   onSave?: (buffer: ArrayBuffer) => void;
+  /** Configure the Yrs collaboration replica used by the editor. */
+  collaboration?: DocxEditorCollaborationOptions;
   /**
    * Callback when a DOCX file is selected through `File > Open` or Cmd/Ctrl+O.
    * Pass it to route the picked file through your own import pipeline. Omit it
@@ -540,6 +548,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     documentBuffer,
     document: initialDocument,
     onSave,
+    collaboration,
     onOpen,
     author = 'User',
     onChange,
@@ -1755,6 +1764,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           >
             <DocxEditorPagedArea
               yrsSeedDocument={yrsSeedDocument}
+              collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
               editorContentRef={editorContentRef}

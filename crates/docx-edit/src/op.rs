@@ -136,6 +136,7 @@ impl From<EditError> for OpError {
                 Self::CannotMergeFinalParagraph(format!("{story}:{index}"))
             }
             EditError::InvalidComment(message) => Self::InvalidComment(message),
+            EditError::InvalidStateVector(message) => Self::InvalidUpdate(message),
             EditError::InvalidUpdate(message) => Self::InvalidUpdate(message),
             EditError::ReservedParagraphKey(key) => Self::ReservedKey(key),
         }

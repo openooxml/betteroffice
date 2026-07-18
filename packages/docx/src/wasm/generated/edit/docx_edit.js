@@ -374,6 +374,9 @@ export class EditSession {
     clear_measure_fonts() {
         wasm.editsession_clear_measure_fonts(this.__wbg_ptr);
     }
+    clear_update_event_observation() {
+        wasm.editsession_clear_update_event_observation(this.__wbg_ptr);
+    }
     /**
      * Drops the update observer registered by [`EditSession::set_update_observer`].
      */
@@ -638,11 +641,44 @@ export class EditSession {
         }
     }
     /**
+     * @returns {Uint8Array}
+     */
+    drain_update_event() {
+        const ret = wasm.editsession_drain_update_event(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @param {Uint8Array} remote_state_vector
+     * @returns {Uint8Array}
+     */
+    encode_diff(remote_state_vector) {
+        const ptr0 = passArray8ToWasm0(remote_state_vector, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.editsession_encode_diff(this.__wbg_ptr, ptr0, len0);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v2;
+    }
+    /**
      * Full document state as one yrs v1 update (Yjs wire format).
      * @returns {Uint8Array}
      */
     encode_state() {
         const ret = wasm.editsession_encode_state(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    encode_state_vector() {
+        const ret = wasm.editsession_encode_state_vector(this.__wbg_ptr);
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
@@ -1808,6 +1844,12 @@ export class EditSession {
             wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
         }
     }
+    start_update_event_observation() {
+        const ret = wasm.editsession_start_update_event_observation(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
     /**
      * The story's `canonical-stream-v1` FNV-1a checksum as a decimal string
      * (u64 exceeds JS safe-integer range). The coexistence watchdog compares
@@ -2385,8 +2427,8 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_call_a6e5c5dce5018821: function() { return handleError(function (arg0, arg1, arg2) {
-            const ret = arg0.call(arg1, arg2);
+        __wbg_call_e3b662382210db98: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            const ret = arg0.call(arg1, arg2, arg3);
             return ret;
         }, arguments); },
         __wbg_getRandomValues_3f44b700395062e5: function() { return handleError(function (arg0, arg1) {
@@ -2400,7 +2442,12 @@ function __wbg_get_imports() {
             const ret = performance.now();
             return ret;
         },
-        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+        __wbindgen_cast_0000000000000001: function(arg0) {
+            // Cast intrinsic for `F64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return ret;

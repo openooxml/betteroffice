@@ -1,4 +1,5 @@
 import type { YrsEngineApplyProfile, YrsLoc, YrsSession } from './index';
+import type { CollaborationUpdateOrigin } from '../collaboration/types';
 import { createEditSession, preloadEditWasm } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
@@ -26,7 +27,9 @@ export type ResidentEngineSession = Pick<
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
   await preloadEditWasm();
   const session = createEditSession(randomClientId());
-  const listeners = new Set<(update: Uint8Array) => void>();
+  const listeners = new Set<
+    (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  >();
   let observing = false;
   let destroyed = false;
   let undoStory: string | null = null;
@@ -40,8 +43,11 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
 
   const ensureObserver = (): void => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array) => {
-      for (const listener of [...listeners]) listener(update);
+    session.set_update_observer((update: Uint8Array, origin: number) => {
+      if (origin !== 0 && origin !== 1) return;
+      for (const listener of [...listeners]) {
+        listener(update, origin === 0 ? 'local' : 'remote');
+      }
     });
     observing = true;
   };
