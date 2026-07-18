@@ -58,10 +58,10 @@ impl ThemeColorScheme {
 
     pub fn get(&self, slot: &str) -> Option<&str> {
         match slot {
-            "dk1" => Some(&self.dk1),
-            "lt1" => Some(&self.lt1),
-            "dk2" => Some(&self.dk2),
-            "lt2" => Some(&self.lt2),
+            "dk1" | "text1" => Some(&self.dk1),
+            "lt1" | "background1" => Some(&self.lt1),
+            "dk2" | "text2" => Some(&self.dk2),
+            "lt2" | "background2" => Some(&self.lt2),
             "accent1" => Some(&self.accent1),
             "accent2" => Some(&self.accent2),
             "accent3" => Some(&self.accent3),

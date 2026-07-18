@@ -150,6 +150,17 @@ impl PptxDocument {
         json(self.session.story(&args.story_id).map_err(js_error)?)
     }
 
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, part_path: &str) -> Result<Vec<u8>, JsValue> {
+        self.session
+            .package()
+            .media
+            .iter()
+            .find(|media| media.part_path == part_path)
+            .map(|media| media.bytes.clone())
+            .ok_or_else(|| JsValue::from_str("media part was not found"))
+    }
+
     #[wasm_bindgen(js_name = encodeStateVector)]
     pub fn encode_state_vector(&self) -> Vec<u8> {
         self.session.encode_state_vector_v1()
@@ -388,6 +399,12 @@ impl PptxDocument {
 
     pub fn version() -> String {
         env!("CARGO_PKG_VERSION").to_owned()
+    }
+}
+
+impl PptxDocument {
+    pub fn session(&self) -> &DeckSession {
+        &self.session
     }
 }
 

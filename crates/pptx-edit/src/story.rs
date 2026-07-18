@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ooxml_drawingml::resolve_color_value_to_hex;
+use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
 use pptx_parse::{RunProperties, TextBody};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -18,6 +18,7 @@ pub(crate) fn seed_story(
     txn: &mut TransactionMut<'_>,
     story_id: &str,
     body: &TextBody,
+    theme: Option<&Theme>,
 ) -> EditResult<()> {
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     if body.paragraphs.is_empty() {
@@ -27,7 +28,7 @@ pub(crate) fn seed_story(
     for (paragraph_index, paragraph) in body.paragraphs.iter().enumerate() {
         for run in &paragraph.runs {
             if !run.text.is_empty() {
-                let style = style_from_run_properties(&run.properties);
+                let style = style_from_run_properties(&run.properties, theme);
                 let index = story.len(txn);
                 story.insert_with_attributes(txn, index, &run.text, attrs_from_style(&style));
             }
@@ -354,12 +355,12 @@ fn insert_option(attrs: &mut Attrs, key: &str, value: Option<Any>) {
     }
 }
 
-fn style_from_run_properties(properties: &RunProperties) -> TextStyle {
+fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         bold: properties.bold,
         italic: properties.italic,
         font_size_pt: properties.font_size_pt,
-        color: resolve_color_value_to_hex(properties.color.as_ref()),
+        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
     }

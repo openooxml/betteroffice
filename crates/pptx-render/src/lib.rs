@@ -1,8 +1,10 @@
 //! PPTX display-list compiler.
 
 mod display_list;
+mod layout;
 
 pub use display_list::*;
+pub use layout::*;
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -155,14 +157,17 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                 text,
             } => {
                 let transform = transform(&base);
+                let path = geometry_path(&geometry, &adjust_values);
                 primitives.push(Primitive::Shape {
                     object_id: base.id,
+                    shape_id: None,
                     name: base.name,
                     x: base.rect.x,
                     y: base.rect.y,
                     w: base.rect.w,
                     h: base.rect.h,
                     geometry,
+                    path,
                     adjust_values,
                     fill,
                     stroke: stroke.map(Into::into),
@@ -180,6 +185,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                 let transform = transform(&base);
                 primitives.push(Primitive::Image {
                     object_id: base.id,
+                    shape_id: None,
                     name: base.name,
                     x: base.rect.x,
                     y: base.rect.y,
@@ -213,6 +219,19 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
     }
 }
 
+fn geometry_path(
+    geometry: &str,
+    adjust_values: &BTreeMap<String, f32>,
+) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    let adjustments = adjust_values
+        .iter()
+        .map(|(key, value)| (key.clone(), f64::from(*value)))
+        .collect();
+    ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments)
+        .or_else(|| ooxml_drawingml::preset_geometry_to_path("rect", &Default::default()))
+        .unwrap_or_default()
+}
+
 fn transform(base: &ShapeBase) -> Transform {
     Transform {
         rotation_deg: base.rotation_deg,
@@ -225,6 +244,7 @@ fn placeholder(base: ShapeBase, label: Option<&str>) -> Primitive {
     let transform = transform(&base);
     Primitive::Placeholder {
         object_id: base.id,
+        shape_id: None,
         name: base.name,
         x: base.rect.x,
         y: base.rect.y,
@@ -243,6 +263,8 @@ fn text_primitive(
 ) -> Primitive {
     Primitive::TextBox {
         object_id,
+        shape_id: None,
+        story_id: None,
         x: rect.x,
         y: rect.y,
         w: rect.w,
@@ -278,6 +300,8 @@ fn text_primitive(
                     .collect(),
             })
             .collect(),
+        lines: Vec::new(),
+        overflow: false,
         transform,
     }
 }

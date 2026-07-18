@@ -4,8 +4,13 @@ version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "PPTX composed-slide to target-neutral display-list compiler."
+description = "Rust-owned PPTX slide layout and display-list compiler."
 
 [dependencies]
+ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
+ooxml-text = { path = "../ooxml-text", version = "=0.0.0" }
+pptx-edit = { path = "../pptx-edit", version = "=0.0.0" }
+pptx-parse = { path = "../pptx-parse", version = "=0.0.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"

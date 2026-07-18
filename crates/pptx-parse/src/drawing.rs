@@ -366,7 +366,11 @@ fn parse_gradient_fill(element: &XmlElement) -> ShapeFill {
         .flat_map(|list| list.children_named("gs"))
         .filter_map(|stop| {
             Some(GradientStop {
-                position: stop.attribute("pos")?.parse().ok()?,
+                position: stop
+                    .attribute("pos")?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && (0.0..=100_000.0).contains(value))?,
                 color: parse_color_container(stop)?,
             })
         })
@@ -529,12 +533,37 @@ pub(crate) fn parse_text_body(
         vertical: body_properties
             .and_then(|value| value.attribute("vert"))
             .map(str::to_owned),
+        autofit: body_properties.and_then(parse_text_autofit),
         inset_left: numeric_attribute(body_properties, "lIns"),
         inset_top: numeric_attribute(body_properties, "tIns"),
         inset_right: numeric_attribute(body_properties, "rIns"),
         inset_bottom: numeric_attribute(body_properties, "bIns"),
         paragraphs,
     })
+}
+
+fn parse_text_autofit(body_properties: &XmlElement) -> Option<TextAutofit> {
+    if body_properties.child("noAutofit").is_some() {
+        return Some(TextAutofit::None);
+    }
+    if body_properties.child("spAutoFit").is_some() {
+        return Some(TextAutofit::Shape);
+    }
+    body_properties
+        .child("normAutofit")
+        .map(|autofit| TextAutofit::Normal {
+            font_scale: percentage_attribute(autofit, "fontScale"),
+            line_space_reduction: percentage_attribute(autofit, "lnSpcReduction"),
+        })
+}
+
+fn percentage_attribute(element: &XmlElement, name: &str) -> Option<f64> {
+    element
+        .attribute(name)?
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && (0.0..=100_000.0).contains(value))
+        .map(|value| value / 100_000.0)
 }
 
 fn parse_text_paragraph(
@@ -683,7 +712,7 @@ mod tests {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
-            br#"<p:sld><p:cSld name="Test"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="roundRect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr><p:txBody><a:bodyPr anchor="ctr"/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            br#"<p:sld><p:cSld name="Test"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="roundRect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr><p:txBody><a:bodyPr anchor="ctr"><a:normAutofit fontScale="85000" lnSpcReduction="12000"/></a:bodyPr><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
             "ppt/slides/slide1.xml",
             &mut budget,
         )
@@ -694,6 +723,13 @@ mod tests {
         };
         assert_eq!(shape.geometry, "roundRect");
         assert_eq!(shape.base.transform.width, 3);
+        assert_eq!(
+            shape.text.as_ref().unwrap().autofit,
+            Some(TextAutofit::Normal {
+                font_scale: Some(0.85),
+                line_space_reduction: Some(0.12),
+            })
+        );
         assert_eq!(
             shape.text.as_ref().unwrap().paragraphs[0].runs[0].text,
             "Hello"

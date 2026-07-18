@@ -1,3 +1,4 @@
+use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -77,12 +78,15 @@ pub struct Transform {
 pub enum Primitive {
     Shape {
         object_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_id: Option<String>,
         name: String,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         geometry: String,
+        path: Vec<GeometryPathCommand>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         adjust_values: BTreeMap<String, f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +98,8 @@ pub enum Primitive {
     },
     Image {
         object_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_id: Option<String>,
         name: String,
         x: f32,
         y: f32,
@@ -108,17 +114,27 @@ pub enum Primitive {
     },
     TextBox {
         object_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        story_id: Option<String>,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         anchor: TextAnchor,
         paragraphs: Vec<TextParagraph>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lines: Vec<PositionedTextLine>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        overflow: bool,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
     },
     Placeholder {
         object_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_id: Option<String>,
         name: String,
         x: f32,
         y: f32,
@@ -172,6 +188,56 @@ pub struct TextRun {
     pub color: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionedTextLine {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub baseline: f32,
+    pub start: u32,
+    pub end: u32,
+    pub runs: Vec<PositionedTextRun>,
+    pub caret_stops: Vec<CaretStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaretStop {
+    pub position: u32,
+    pub x: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionedTextRun {
+    pub text: String,
+    pub start: u32,
+    pub end: u32,
+    pub x: f32,
+    pub width: f32,
+    pub font_id: u32,
+    pub font_family: String,
+    pub font_size_px: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub color: String,
+    pub glyphs: Vec<PositionedGlyph>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionedGlyph {
+    pub glyph_id: u32,
+    pub cluster: u32,
+    pub x: f32,
+    pub advance: f32,
+    pub x_offset: f32,
+    pub y_offset: f32,
+}
+
 impl Transform {
     pub fn is_identity(&self) -> bool {
         self.rotation_deg == 0.0 && !self.flip_h && !self.flip_v
@@ -199,6 +265,7 @@ mod tests {
             background: None,
             primitives: vec![Primitive::Placeholder {
                 object_id: 1,
+                shape_id: None,
                 name: "chart".into(),
                 x: 0.0,
                 y: 0.0,

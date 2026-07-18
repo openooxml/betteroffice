@@ -662,8 +662,13 @@ dependencies = [
 name = "pptx-render"
 version = "0.0.0"
 dependencies = [
+ "ooxml-drawingml",
+ "ooxml-text",
+ "pptx-edit",
+ "pptx-parse",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

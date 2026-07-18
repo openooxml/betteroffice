@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ooxml_drawingml::ShapeFill;
-use pptx_parse::{PptxPackage, ShapeNode};
+use ooxml_drawingml::{ShapeFill, Theme};
+use pptx_parse::{PptxPackage, ShapeNode, Slide};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -18,6 +18,7 @@ use crate::{
 
 const SCHEMA_VERSION: f64 = 1.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
+const MAX_SHAPE_DEPTH: usize = 128;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
     let mut txn = doc.transact_mut_with("pptx:bootstrap");
@@ -36,6 +37,7 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
     let stories = txn.get_or_insert_map(STORIES);
 
     for (slide_index, slide) in package.slides.iter().enumerate() {
+        let theme = slide_theme(package, slide);
         let reference = &package.presentation.slides[slide_index];
         let slide_id = format!("slide:{slide_index}:{}", reference.id);
         order.push_back(&mut txn, slide_id.as_str());
@@ -57,6 +59,7 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
                 &slide_id,
                 &shape_index.to_string(),
                 shape,
+                theme,
             )?;
             shape_order.push_back(&mut txn, shape_id.as_str());
         }
@@ -71,6 +74,7 @@ fn seed_shape(
     slide_id: &str,
     path: &str,
     shape: &ShapeNode,
+    theme: Option<&Theme>,
 ) -> EditResult<String> {
     let shape_id = format!("{slide_id}:shape:{path}");
     let shape_map = shapes.insert(txn, shape_id.as_str(), MapPrelim::default());
@@ -107,7 +111,7 @@ fn seed_shape(
             insert_json(&shape_map, txn, "outlineJson", shape.outline.as_ref())?;
             if let Some(body) = &shape.text {
                 let story_id = format!("story:{shape_id}:0");
-                seed_story(stories, txn, &story_id, body)?;
+                seed_story(stories, txn, &story_id, body, theme)?;
                 text_story_ids.push(story_id);
             }
         }
@@ -128,7 +132,7 @@ fn seed_shape(
                 for (row_index, row) in rows.iter().enumerate() {
                     for (cell_index, body) in row.iter().enumerate() {
                         let story_id = format!("story:{shape_id}:table:{row_index}:{cell_index}");
-                        seed_story(stories, txn, &story_id, body)?;
+                        seed_story(stories, txn, &story_id, body, theme)?;
                         text_story_ids.push(story_id);
                     }
                 }
@@ -145,6 +149,7 @@ fn seed_shape(
                     slide_id,
                     &format!("{path}.{child_index}"),
                     child,
+                    theme,
                 )?);
             }
         }
@@ -152,6 +157,38 @@ fn seed_shape(
     shape_map.insert(txn, "textStories", string_array(&text_story_ids));
     shape_map.insert(txn, "children", string_array(&child_ids));
     Ok(shape_id)
+}
+
+fn slide_theme<'a>(package: &'a PptxPackage, slide: &Slide) -> Option<&'a Theme> {
+    let layout = slide.layout_part_path.as_deref().and_then(|path| {
+        package
+            .layouts
+            .iter()
+            .find(|layout| layout.part_path == path)
+    });
+    let master = layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .masters
+                .iter()
+                .find(|master| master.part_path == path)
+        })
+        .or_else(|| {
+            layout.and_then(|layout| {
+                package.masters.iter().find(|master| {
+                    master
+                        .layout_part_paths
+                        .iter()
+                        .any(|path| path == &layout.part_path)
+                })
+            })
+        });
+    master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .map(|part| &part.theme)
+        .or_else(|| package.themes.first().map(|part| &part.theme))
 }
 
 fn insert_json<T: serde::Serialize>(
@@ -456,6 +493,11 @@ fn snapshot_shape<T: ReadTxn>(
     shape_id: &str,
     visiting: &mut HashSet<String>,
 ) -> EditResult<ShapeSnapshot> {
+    if visiting.len() >= MAX_SHAPE_DEPTH {
+        return Err(EditError::InvalidState(format!(
+            "shape nesting exceeds {MAX_SHAPE_DEPTH} levels"
+        )));
+    }
     if !visiting.insert(shape_id.to_owned()) {
         return Err(EditError::InvalidState(format!(
             "shape cycle at {shape_id}"

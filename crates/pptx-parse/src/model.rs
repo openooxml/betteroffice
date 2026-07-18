@@ -244,11 +244,27 @@ pub struct GroupShape {
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
+    pub autofit: Option<TextAutofit>,
     pub inset_left: Option<i64>,
     pub inset_top: Option<i64>,
     pub inset_right: Option<i64>,
     pub inset_bottom: Option<i64>,
     pub paragraphs: Vec<TextParagraph>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TextAutofit {
+    None,
+    Shape,
+    Normal {
+        font_scale: Option<f64>,
+        line_space_reduction: Option<f64>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
