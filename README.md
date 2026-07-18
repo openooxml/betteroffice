@@ -21,6 +21,9 @@
 
 | package | what it does |
 |---|---|
+| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
+| [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | drop-in React .docx editor |
+| [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n) | locale strings for the docx editor |
 | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
 | [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
 | [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | drop-in React spreadsheet editor |
@@ -37,6 +40,7 @@
 ```bash
 bun install
 bun run build:xlsx-wasm # compile the ignored spreadsheet wasm asset
+bun run build:docx-wasm # compile the ignored document wasm assets
 bun run dev          # web app
 bun run rust:check   # fmt + clippy + tests for the engines
 ```
