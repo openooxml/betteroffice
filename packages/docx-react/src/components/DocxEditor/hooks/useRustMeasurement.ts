@@ -100,14 +100,18 @@ export function useRustMeasurement(
       }
       const key = JSON.stringify(requirements);
       if (!requirementWarmupsRef.current.has(key)) {
-        const warmup = source
+        const settled = source
           .prepareFontRequirements(requirements)
-          .then(() => {
-            if (sourceRef.current === source) runLayoutPipelineRef.current?.();
-          })
-          .catch(() => {})
-          .finally(() => requirementWarmupsRef.current.delete(key));
-        requirementWarmupsRef.current.set(key, warmup);
+          .then(
+            () => undefined,
+            () => undefined
+          )
+          .finally(() => {
+            if (sourceRef.current !== source) return;
+            requirementWarmupsRef.current.delete(key);
+            runLayoutPipelineRef.current?.();
+          });
+        requirementWarmupsRef.current.set(key, settled);
       }
       return null;
     },

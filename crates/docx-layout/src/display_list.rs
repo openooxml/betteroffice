@@ -10050,20 +10050,10 @@ fn normalize_js_integral_numbers(value: &mut Value) {
             }
         }
         Value::Object(fields) => {
-            for (key, value) in fields {
-                if is_integral_contract_field(key) {
-                    normalize_integral_field(value);
-                } else {
-                    normalize_js_integral_numbers(value);
-                }
+            for value in fields.values_mut() {
+                normalize_js_integral_numbers(value);
             }
         }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-}
-
-fn normalize_integral_field(value: &mut Value) {
-    match value {
         Value::Number(number) if !number.is_i64() && !number.is_u64() => {
             let Some(float) = number.as_f64() else {
                 return;
@@ -10076,30 +10066,8 @@ fn normalize_integral_field(value: &mut Value) {
                 *number = Number::from(float as i64);
             }
         }
-        Value::Array(values) => {
-            for value in values {
-                normalize_integral_field(value);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Object(_) => {}
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
-}
-
-fn is_integral_contract_field(key: &str) -> bool {
-    matches!(
-        key,
-        "pmStart"
-            | "pmEnd"
-            | "docStart"
-            | "docEnd"
-            | "fragmentDocStart"
-            | "fragmentDocEnd"
-            | "footnoteRefId"
-            | "endnoteRefId"
-            | "commentIds"
-            | "changeRevisionId"
-            | "zIndex"
-    )
 }
 
 #[cfg(test)]
@@ -10111,13 +10079,17 @@ mod batch_f_tests {
         let mut value = serde_json::json!({
             "pmStart": 16.0,
             "fractional": 16.25,
-            "nested": [3.0, -4.0]
+            "nested": [3.0, -4.0],
+            "fontChains": { "calibri|0|0": [1.0] }
         });
         normalize_js_integral_numbers(&mut value);
         assert!(value["pmStart"].as_i64().is_some());
         assert_eq!(value["fractional"].as_f64(), Some(16.25));
-        assert_eq!(value["nested"][0].as_f64(), Some(3.0));
-        assert_eq!(value["nested"][1].as_f64(), Some(-4.0));
+        assert_eq!(value["nested"][0].as_i64(), Some(3));
+        assert_eq!(value["nested"][1].as_i64(), Some(-4));
+        let chains: HashMap<String, Vec<u32>> =
+            serde_json::from_value(value["fontChains"].clone()).unwrap();
+        assert_eq!(chains["calibri|0|0"], vec![1]);
     }
     use serde_json::json;
 
