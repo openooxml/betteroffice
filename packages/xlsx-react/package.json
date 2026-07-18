@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/xlsx-react",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "React chrome for the BetterOffice xlsx editor.",
   "type": "module",
   "sideEffects": false,

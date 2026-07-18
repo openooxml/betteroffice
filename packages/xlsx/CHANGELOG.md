@@ -1,5 +1,11 @@
 # @betteroffice/xlsx
 
+## 0.0.5
+
+### Patch Changes
+
+- e8678aa: Route workbook sessions through the shared Rust facade and harden editing, calculation, and rendering limits.
+
 ## 0.0.4
 
 ### Patch Changes

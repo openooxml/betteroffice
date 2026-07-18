@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/xlsx",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Framework-free core for the BetterOffice xlsx editor: display list, viewport math, wasm loader.",
   "type": "module",
   "sideEffects": false,
