@@ -49,6 +49,7 @@ import {
   blockSdtStoryId,
   dropNulls,
   footnoteStoryId,
+  endnoteStoryId,
   headerFooterStoryId,
   paraAttrsToPpr,
   tableAttrsToGrid,
@@ -1542,7 +1543,7 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
 /**
  * Seeds every yrs-owned editable story directly from a parsed Document.
  *
- * Stories are `body`, `hf:{rId}`, `fn:{id}`, and recursively generated table
+ * Stories are `body`, `hf:{rId}`, `fn:{id}`, `en:{id}`, and recursively generated table
  * cell / block-SDT stories. The target session must not already contain any of
  * those story ids.
  *
@@ -1576,6 +1577,13 @@ export function documentToYrs(session: YrsSession, document: Document): void {
   }
   for (const note of document.package.footnotes ?? []) {
     visitStory(context, footnoteStoryId(note.id), note.content, {
+      includePageBreaks: false,
+      appendBodyTail: false,
+      seedComments: true,
+    });
+  }
+  for (const note of document.package.endnotes ?? []) {
+    visitStory(context, endnoteStoryId(note.id), note.content, {
       includePageBreaks: false,
       appendBodyTail: false,
       seedComments: true,

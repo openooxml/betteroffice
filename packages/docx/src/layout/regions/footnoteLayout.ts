@@ -395,9 +395,8 @@ export function convertFootnoteToContent(
   options: ConvertFootnoteOptions,
   presentation?: { noteKind?: NoteKind; displayLabel?: string; anchor?: FootnoteContent['anchor'] }
 ): FootnoteContent {
-  const footnoteStoryId = footnote.type === 'footnote' ? `fn:${footnote.id}` : null;
-  const rawBlocks =
-    (footnoteStoryId ? options.yrsStoryBlocks?.(footnoteStoryId) : null) ?? [];
+  const noteStoryId = `${footnote.type === 'footnote' ? 'fn' : 'en'}:${footnote.id}`;
+  const rawBlocks = options.yrsStoryBlocks?.(noteStoryId) ?? [];
   const displayLabel = presentation?.displayLabel ?? String(displayNumber);
   const blocks = applyFootnotePresentation(rawBlocks, displayNumber, displayLabel);
 

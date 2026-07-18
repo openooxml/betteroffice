@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 // ---------------------------------------------------------------------------
 
 /// TS `BlockId = string | number` — passed through verbatim to fragments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockId {
     Num(f64),

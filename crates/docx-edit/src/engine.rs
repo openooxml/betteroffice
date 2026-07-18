@@ -8,10 +8,14 @@
 //! same document/render generation.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use docx_layout::display_list::DisplayList;
+use docx_layout::footnotes::{
+    OrderedMap, assign_note_presentations, attach_note_areas, build_note_presentations,
+    collect_note_refs, map_notes_to_pages, stabilize_note_layout, stamp_note_pages,
+};
 use docx_layout::hit::HitRegion;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{DocumentRegions, RegionLayoutInput, apply_document_regions};
@@ -71,20 +75,39 @@ struct RegionLayoutOutput<'a> {
     layout: &'a Layout,
     #[serde(skip_serializing_if = "Option::is_none")]
     headers_footers: Option<&'a serde_json::Value>,
+    notes_converged: bool,
 }
 
 fn serialize_region_layout(
     input: &LayoutInput,
     layout: &Layout,
     regions: &DocumentRegions,
+    notes_converged: bool,
 ) -> Result<String, String> {
     serde_json::to_string(&RegionLayoutOutput {
         measured: &input.measured,
         options: &input.options,
         layout,
         headers_footers: regions.headers_footers.as_ref(),
+        notes_converged,
     })
     .map_err(|error| format!("serialize: {error}"))
+}
+
+fn reservation_options(reserved: &OrderedMap<u32, f64>) -> Option<BTreeMap<String, f64>> {
+    (!reserved.is_empty()).then(|| {
+        reserved
+            .iter()
+            .map(|(page, height)| (page.to_string(), *height))
+            .collect()
+    })
+}
+
+fn layout_error_message(error: docx_layout::LayoutError) -> String {
+    match error {
+        docx_layout::LayoutError::Unsupported(_) => "UNSUPPORTED".to_owned(),
+        docx_layout::LayoutError::Invalid(reason) => reason,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -559,18 +582,56 @@ impl EngineSession {
     pub fn layout_document_with_regions_json(&self, input_json: &str) -> Result<String, String> {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (input, regions) = request.split();
-        self.layout_document_value(input)?;
+        let (mut input, regions, mut notes) = request.split();
+        self.layout_document_value(input.clone())?;
+        let mut initial_layout = self
+            .pagination
+            .borrow()
+            .layout
+            .clone()
+            .expect("layout retained after successful pagination");
+        apply_document_regions(&mut initial_layout, &regions);
+        let refs = input
+            .measured
+            .iter()
+            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
+            .collect::<Vec<_>>();
+        let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
+        assign_note_presentations(&mut notes.contents, &presentations);
+        let base_input = input.clone();
+        let stabilized = stabilize_note_layout(
+            |reserved| {
+                let mut pass = base_input.clone();
+                pass.options.footnote_reserved_heights = reservation_options(reserved);
+                let mut layout = docx_layout::place::layout_document(&mut pass)?;
+                apply_document_regions(&mut layout, &regions);
+                Ok(layout)
+            },
+            &refs,
+            &notes.contents,
+            initial_layout,
+            &regions,
+        )
+        .map_err(layout_error_message)?;
+        let notes_converged = stabilized.converged;
+        if !stabilized.reserved_heights.is_empty() {
+            input.options.footnote_reserved_heights =
+                reservation_options(&stabilized.reserved_heights);
+            self.layout_document_value(input)?;
+        }
         let mut pagination = self.pagination.borrow_mut();
         let PaginationState { input, layout, .. } = &mut *pagination;
         let layout = layout
             .as_mut()
             .expect("layout retained after successful pagination");
         apply_document_regions(layout, &regions);
+        let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
+        stamp_note_pages(layout, &page_note_map, &regions);
+        attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
         let input = input
             .as_ref()
             .expect("input retained after successful pagination");
-        serialize_region_layout(input, layout, &regions)
+        serialize_region_layout(input, layout, &regions, notes_converged)
     }
 
     /// Typed resident pagination path shared by the compatibility JSON seam
@@ -1265,6 +1326,75 @@ mod tests {
             serde_json::json!({"variants": []})
         );
         assert_eq!(engine.stats().retained_pages, 1);
+    }
+
+    #[test]
+    fn region_layout_operation_stabilizes_and_emits_note_areas() {
+        let engine = EngineSession::new(132);
+        let request = serde_json::json!({
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "p1",
+                    "runs": [{
+                        "kind": "text",
+                        "text": "x",
+                        "pmStart": 1,
+                        "pmEnd": 2,
+                        "footnoteRefId": 7
+                    }],
+                    "pmStart": 0,
+                    "pmEnd": 2
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "lines": [{
+                        "headRun": 0,
+                        "headChar": 0,
+                        "tailRun": 0,
+                        "tailChar": 1,
+                        "width": 10,
+                        "ascent": 8,
+                        "descent": 2,
+                        "lineHeight": 20
+                    }],
+                    "totalHeight": 20
+                }
+            }],
+            "options": {
+                "pageSize": {"w": 200, "h": 120},
+                "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}
+            },
+            "regions": {
+                "noteSettings": {
+                    "footnote": {"numFmt": "upperRoman", "numStart": 3}
+                },
+                "sections": [{
+                    "sectionId": "main",
+                    "noteSettings": {"footnoteColumns": 2}
+                }]
+            },
+            "notes": {
+                "contents": [{"id": 7, "height": 20}]
+            }
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let page = &output["layout"]["pages"][0];
+
+        assert_eq!(output["notesConverged"], true);
+        assert_eq!(page["footnoteIds"], serde_json::json!([7.0]));
+        assert_eq!(page["footnoteReservedHeight"], 32.0);
+        assert_eq!(page["footnoteColumns"], 2.0);
+        assert_eq!(page["noteAreas"][0]["kind"], "footnote");
+        assert_eq!(page["noteAreas"][0]["columns"], 2);
+        assert_eq!(page["noteAreas"][0]["notes"][0]["displayLabel"], "III");
+        assert_eq!(engine.stats().pagination_calls, 2);
     }
 
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {

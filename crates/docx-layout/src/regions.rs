@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::footnotes::NoteLayoutInput;
 use crate::types::{HeaderFooterRefs, Input, Layout, NoteAreaContract};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -16,6 +17,8 @@ pub struct DocumentRegions {
     pub note_areas: Option<Vec<NoteAreaContract>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watermark: Option<Value>,
+    #[serde(default)]
+    pub note_settings: NoteSettings,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,6 +40,88 @@ pub struct RegionSection {
     pub watermark: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_align: Option<String>,
+    #[serde(default)]
+    pub note_settings: NoteSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteSettings {
+    #[serde(default)]
+    pub footnote: NoteProperties,
+    #[serde(default)]
+    pub endnote: NoteProperties,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footnote_columns: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_fmt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_restart: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_number_format: Option<String>,
+}
+
+impl NoteProperties {
+    pub fn overlay(&mut self, authored: &Self) {
+        if authored.position.is_some() {
+            self.position.clone_from(&authored.position);
+        }
+        if authored.num_fmt.is_some() {
+            self.num_fmt.clone_from(&authored.num_fmt);
+        }
+        if authored.num_start.is_some() {
+            self.num_start = authored.num_start;
+        }
+        if authored.num_restart.is_some() {
+            self.num_restart.clone_from(&authored.num_restart);
+        }
+        if authored.custom_number_format.is_some() {
+            self.custom_number_format
+                .clone_from(&authored.custom_number_format);
+        }
+    }
+}
+
+impl DocumentRegions {
+    pub fn note_properties(&self, section_index: usize, kind: &str) -> NoteProperties {
+        let mut properties = if kind == "endnote" {
+            self.note_settings.endnote.clone()
+        } else {
+            self.note_settings.footnote.clone()
+        };
+        if let Some(section) = self
+            .sections
+            .get(section_index)
+            .or_else(|| self.sections.last())
+        {
+            let authored = if kind == "endnote" {
+                &section.note_settings.endnote
+            } else {
+                &section.note_settings.footnote
+            };
+            properties.overlay(authored);
+        }
+        properties
+    }
+
+    pub fn footnote_columns(&self, section_index: usize) -> u64 {
+        self.sections
+            .get(section_index)
+            .or_else(|| self.sections.last())
+            .and_then(|section| section.note_settings.footnote_columns)
+            .or(self.note_settings.footnote_columns)
+            .unwrap_or(1)
+            .max(1)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,16 +139,19 @@ pub struct RegionLayoutInput {
     pub options: crate::types::LayoutOptions,
     #[serde(default)]
     pub regions: DocumentRegions,
+    #[serde(default)]
+    pub notes: NoteLayoutInput,
 }
 
 impl RegionLayoutInput {
-    pub fn split(self) -> (Input, DocumentRegions) {
+    pub fn split(self) -> (Input, DocumentRegions, NoteLayoutInput) {
         (
             Input {
                 measured: self.measured,
                 options: self.options,
             },
             self.regions,
+            self.notes,
         )
     }
 }
@@ -99,7 +187,7 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                 let number = numbering.start.unwrap_or(1) + page.section_page_index.unwrap_or(0);
                 page.section_page_number = Some(number);
                 page.page_label = Some(format_number(
-                    number,
+                    number as i64,
                     numbering.format.as_deref().unwrap_or("decimal"),
                 ));
                 page.page_numbering = serde_json::to_value(numbering).ok();
@@ -122,7 +210,7 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
     }
 }
 
-fn format_number(number: u64, format: &str) -> String {
+pub(crate) fn format_number(number: i64, format: &str) -> String {
     match format {
         "decimalZero" => format!("{number:02}"),
         "decimalZero3" => format!("{number:03}"),
@@ -141,7 +229,7 @@ fn format_number(number: u64, format: &str) -> String {
     }
 }
 
-fn roman(number: u64) -> String {
+fn roman(number: i64) -> String {
     if !(1..=3999).contains(&number) {
         return number.to_string();
     }
@@ -170,7 +258,7 @@ fn roman(number: u64) -> String {
     output
 }
 
-fn letters(mut number: u64) -> String {
+fn letters(mut number: i64) -> String {
     if number == 0 {
         return String::new();
     }
@@ -182,7 +270,7 @@ fn letters(mut number: u64) -> String {
     output.into_iter().rev().collect()
 }
 
-fn ordinal(number: u64) -> String {
+fn ordinal(number: i64) -> String {
     let suffix = if (11..=13).contains(&(number % 100)) {
         "th"
     } else {

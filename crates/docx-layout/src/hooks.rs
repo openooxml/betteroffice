@@ -489,23 +489,3 @@ pub fn layout_floating_table(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// footnotes (layout/regions/footnoteLayout.ts)
-// ---------------------------------------------------------------------------
-
-/// HOOK for the footnote pipeline in
-/// `packages/core/src/layout/regions/footnoteLayout.ts`
-/// (`stabilizeFootnoteLayout`, `calculateFootnoteReservedHeights`, ...).
-///
-/// NOTE: the pure layout core only consumes the RESULT of that pipeline —
-/// `options.footnoteReservedHeights`, honored by `page_flow.rs` exactly like
-/// `pageFlow.ts` does. The stabilization loop itself runs upstream of the
-/// seam in TS, so this hook has no call site in the spine yet; it exists so
-/// the footnote port lands against a named seam.
-#[allow(dead_code)]
-pub fn stabilize_footnote_layout() -> Result<(), LayoutError> {
-    Err(unsupported(
-        "footnoteLayout.stabilizeFootnoteLayout (layout/regions/footnoteLayout.ts)",
-    ))
-}

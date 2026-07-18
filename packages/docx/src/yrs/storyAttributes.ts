@@ -97,3 +97,7 @@ export function headerFooterStoryId(rId: string): string {
 export function footnoteStoryId(id: string | number): string {
   return `fn:${id}`;
 }
+
+export function endnoteStoryId(id: string | number): string {
+  return `en:${id}`;
+}
