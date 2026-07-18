@@ -7365,10 +7365,7 @@ fn emit_shape_fragment(
 
 fn shape_fill_color(fill: Option<&ShapeFillIn>) -> Option<String> {
     let fill = fill?;
-    if fill.kind.as_deref() == Some("none") {
-        return None;
-    }
-    Some(fill.color.clone().unwrap_or_else(|| "#ffffff".to_string()))
+    ooxml_drawingml::resolve_shape_fill_color(fill.kind.as_deref(), fill.color.as_deref())
 }
 
 fn shape_fill_paint(fill: Option<&ShapeFillIn>) -> Option<Value> {
