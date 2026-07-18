@@ -22,14 +22,14 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "zip",
 ]
 
 [[package]]
 name = "betteroffice-xlsx"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
@@ -42,21 +42,21 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-calc"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "betteroffice-xlsx-model",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-ops"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-parse"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "betteroffice-xlsx-model",
  "quick-xml",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-raster"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "betteroffice-xlsx-render",
  "rustybuzz",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-render"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "betteroffice-xlsx-model",
  "serde",
