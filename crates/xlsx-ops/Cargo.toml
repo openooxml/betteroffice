@@ -1,15 +1,20 @@
 [package]
-name = "xlsx-ops"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-xlsx-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Invertible op log: undo/redo, provenance-tagged proposals, address remapping, collab-ready serialization."
+
+[lib]
+name = "xlsx_ops"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-xlsx-model = { path = "../xlsx-model" }
-xlsx-calc = { path = "../xlsx-calc" }
+xlsx-model.workspace = true
+xlsx-calc.workspace = true
 
 [dev-dependencies]
 serde_json = "1"

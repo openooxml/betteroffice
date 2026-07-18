@@ -1,10 +1,15 @@
 [package]
-name = "xlsx-calc"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
-description = "Formula parser, dependency graph, and recalc engine. Reads cells only through xlsx-model's CellProvider trait."
+name = "betteroffice-xlsx-calc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Formula parser, dependency graph, and recalc engine for BetterOffice XLSX workbooks."
+
+[lib]
+name = "xlsx_calc"
 
 [dependencies]
-xlsx-model = { path = "../xlsx-model" }
+xlsx-model.workspace = true

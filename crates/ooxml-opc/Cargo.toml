@@ -1,10 +1,15 @@
 [package]
-name = "ooxml-opc"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-opc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "OPC (OOXML zip) container reader/writer with zip-bomb and path-traversal guards enforced by construction."
+
+[lib]
+name = "ooxml_opc"
 
 [dependencies]
 zip = { version = "8", default-features = false, features = ["deflate"] }

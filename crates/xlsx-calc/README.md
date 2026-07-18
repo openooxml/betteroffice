@@ -1,9 +1,8 @@
-# xlsx-calc
+# betteroffice-xlsx-calc
 
 The formula engine: lexer → parser → `Expr` AST → tree-walking evaluator, plus
-per-formula reference extraction and (from the graph work) dependency tracking.
-It reads cells exclusively through `xlsx_model::CellProvider` — see
-`docs/decisions/0001-formula-engine.md`.
+per-formula reference extraction and dependency tracking. It reads cells
+exclusively through `xlsx_model::CellProvider`.
 
 Written spec-first from ECMA-376 Part 1 §18.17 and public Excel function
 semantics. No GPL/AGPL or proprietary spreadsheet source was consulted.

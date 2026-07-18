@@ -35,7 +35,7 @@ file serves as the copy of the license for this derivation.
 `crates/xlsx-raster/assets/Carlito-Regular.ttf` is vendored unmodified from
 the google/fonts repository, `ofl/carlito` (https://github.com/google/fonts);
 upstream project https://github.com/googlefonts/carlito. The bytes are
-compiled into the `xlsx-raster` crate via `include_bytes!`.
+compiled into the `betteroffice-xlsx-raster` crate via `include_bytes!`.
 
 Copyright 2013 The Carlito Project Authors, with Reserved Font Name "Carlito".
 

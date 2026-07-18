@@ -1,10 +1,15 @@
 [package]
-name = "xlsx-model"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-xlsx-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Workbook, worksheet, and cell model for SpreadsheetML: address types, values, styles. Framework- and IO-free."
+
+[lib]
+name = "xlsx_model"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
