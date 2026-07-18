@@ -1,3 +1,19 @@
+//! Header/footer band gates, replaying the fixtures exported by
+//! `scripts/export-hf-fixtures.ts` (tests/fixtures/hf/):
+//! 1. per-page rId mapping — default / first-page (titlePg) / even-odd rules
+//!    must match the executed TS rules (getHeaderForPage / getFooterForPage);
+//! 2. band geometry — HfRegion y/height must equal the values harvested from
+//!    the REAL DOM painter (renderPage under happy-dom) on identical input;
+//! 3. determinism snapshots — byte-identical run-over-run, pinned by
+//!    committed `<name>.displaylist.json` files. Regenerate deliberately:
+//!    DL_SNAPSHOT_UPDATE=1 cargo test -p docx-layout
+//! 4. region-aware hit-testing — a point inside a band resolves within that
+//!    band's HF PM doc and identifies the region + rId.
+//!
+//! An envelope WITHOUT the headersFooters payload emits no header/footer
+//! keys at all — pinned here and, transitively, by the untouched body
+//! display-list snapshots in display_list.rs.
+
 use docx_layout::display_list::{DisplayList, HfKind, build_display_list_json};
 use docx_layout::hit::{HitRegion, hit_test, hit_test_regions, range_rects, range_rects_in_region};
 
@@ -10,8 +26,9 @@ fn fixture_path(name: &str, suffix: &str) -> std::path::PathBuf {
 }
 
 fn read(name: &str, suffix: &str) -> String {
-    std::fs::read_to_string(fixture_path(name, suffix))
-        .unwrap_or_else(|_| panic!("missing {name}.{suffix}.json"))
+    std::fs::read_to_string(fixture_path(name, suffix)).unwrap_or_else(|_| {
+        panic!("missing {name}.{suffix}.json; run `bun scripts/export-hf-fixtures.ts`")
+    })
 }
 
 fn build(name: &str) -> DisplayList {
@@ -24,7 +41,7 @@ fn approx(a: f64, b: f64) {
 }
 
 #[test]
-fn hf_regions_match_expected_mapping_and_geometry() {
+fn hf_regions_match_executed_ts_mapping_and_geometry() {
     for name in SCENARIOS {
         let dl = build(name);
         let expect: serde_json::Value = serde_json::from_str(&read(name, "expect")).unwrap();
@@ -139,6 +156,7 @@ fn hit_test_regions_resolves_bands_and_body() {
         .expect("footer band with content resolves a position");
     assert!((1..=15).contains(&pos), "footer pos out of HF span: {pos}");
 
+    // body click resolves like the legacy body-only hit test
     let hit = hit_test_regions(&dl, 0, 100.0, 150.0).unwrap();
     assert_eq!(hit.region, HitRegion::Body);
     assert_eq!(hit.r_id, None);

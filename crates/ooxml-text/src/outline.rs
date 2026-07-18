@@ -1,3 +1,28 @@
+//! Glyph outline extraction — the font-unit path the canvas renderer turns
+//! into `Path2D`s.
+//!
+//! This closes the loop the [`crate::font_store`] docs anticipated: metrics,
+//! shaping, and rasterization all read the same bytes through skrifa, so the
+//! glyph a run measured with is the glyph it paints with (WYSIWYG by
+//! construction — see `openspec/changes/rust-canvas-engine/design.md`, "Glyph
+//! rendering").
+//!
+//! Coordinates are emitted in **font design units** at [`Size::unscaled`]
+//! (unscaled, y-UP per the font convention, relative to the glyph origin).
+//! The canvas scales by `size/upem` and flips y at draw time — nothing here
+//! bakes in a pixel size, matching the design-space metrics
+//! [`crate::FontStore`] already reports.
+//!
+//! Curve kind is passed through verbatim: TrueType (`glyf`) fonts feed the pen
+//! quadratics ([`PathCmd::QuadTo`]); CFF/CFF2 fonts feed it cubics
+//! ([`PathCmd::CubicTo`]). We never convert between them — the canvas backend
+//! handles both directly, so there is no precision loss from an intermediate
+//! representation.
+//!
+//! Font bytes are attacker-controlled (embedded DOCX fonts), so the whole path
+//! is panic-free: unknown fonts, out-of-range glyph ids, and any draw failure
+//! surface as [`FontError`], never a panic or `unwrap`.
+
 use serde::Serialize;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
@@ -5,6 +30,14 @@ use skrifa::{FontRef, GlyphId, MetadataProvider};
 
 use crate::font_store::{FontError, FontId, FontStore};
 
+/// One command of a glyph outline, in **font design units** (unscaled,
+/// relative to the glyph origin, y-UP per the font convention). The canvas
+/// scales by `size/upem` and flips y at draw time.
+///
+/// Serializes to the pinned wire shape the TS canvas backend parses: an
+/// internally tagged object with `"t"` ∈ `"M" | "L" | "Q" | "C" | "Z"` and the
+/// coordinate fields named exactly as below, e.g. `{"t":"Q","cx":..,"cy":..,
+/// "x":..,"y":..}`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "t")]
 pub enum PathCmd {
@@ -33,8 +66,13 @@ pub enum PathCmd {
     Close,
 }
 
+/// A glyph outline in font design units, plus the `upem` needed to scale it.
+///
+/// `cmds` is empty for a blank glyph (e.g. the space) — a valid outline the
+/// canvas simply skips filling.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GlyphOutline {
+    /// Units per em of the source font — the divisor the canvas scales by.
     pub upem: u16,
     /// Path commands in draw order, or empty for a blank glyph.
     pub cmds: Vec<PathCmd>,
@@ -114,6 +152,10 @@ impl FontStore {
         })
     }
 
+    /// [`FontStore::outline_glyph`] serialized to the pinned JSON wire shape
+    /// (see [`PathCmd`]). The wasm facade in `docx-layout` calls this; the
+    /// canvas caches the result per `(fontId, glyphId)` and scales by
+    /// `size/upem`.
     pub fn outline_glyph_json(&self, id: FontId, glyph_id: u16) -> Result<String, FontError> {
         let outline = self.outline_glyph(id, glyph_id)?;
         // Our own well-formed struct (finite font-unit floats); a serializer
@@ -144,6 +186,7 @@ mod tests {
             .glyph_id(id, 'A')
             .expect("known font")
             .expect("cmap covers 'A'");
+        // Sanity-check the fixture's cmap matches the roadmap's referenced gid.
         assert_eq!(gid, 36, "LiberationSans 'A' glyph id");
 
         let outline = store.outline_glyph(id, gid).expect("outline 'A'");

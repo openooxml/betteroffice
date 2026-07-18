@@ -1,0 +1,365 @@
+{
+  "name": "@betteroffice/docx",
+  "version": "0.0.1",
+  "sideEffects": [
+    "**/residentEngineWorker.*"
+  ],
+  "description": "Framework-agnostic core for DOCX parsing, editing, and rendering",
+  "main": "./dist/core.mjs",
+  "module": "./dist/core.mjs",
+  "types": "./dist/core.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/core.d.mts",
+      "import": "./dist/core.mjs"
+    },
+    "./headless": {
+      "types": "./dist/headless.d.mts",
+      "import": "./dist/headless.mjs"
+    },
+    "./core-plugins": {
+      "types": "./dist/core-plugins.d.mts",
+      "import": "./dist/core-plugins.mjs"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.mts",
+      "import": "./dist/mcp.mjs"
+    },
+    "./docx": {
+      "types": "./dist/docx/index.d.mts",
+      "import": "./dist/docx/index.mjs"
+    },
+    "./docx/wrapTypes": {
+      "types": "./dist/docx/wrapTypes.d.mts",
+      "import": "./dist/docx/wrapTypes.mjs"
+    },
+    "./docx/serializer": {
+      "types": "./dist/docx/serializer/index.d.mts",
+      "import": "./dist/docx/serializer/index.mjs"
+    },
+    "./agent": {
+      "types": "./dist/agent/index.d.mts",
+      "import": "./dist/agent/index.mjs"
+    },
+    "./styles": {
+      "types": "./dist/styles/index.d.mts",
+      "import": "./dist/styles/index.mjs"
+    },
+    "./layout/pagination": {
+      "types": "./dist/layout/pagination/index.d.mts",
+      "import": "./dist/layout/pagination/index.mjs"
+    },
+    "./layout/render": {
+      "types": "./dist/layout/render/index.d.mts",
+      "import": "./dist/layout/render/index.mjs"
+    },
+    "./layout": {
+      "types": "./dist/layout/index.d.mts",
+      "import": "./dist/layout/index.mjs"
+    },
+    "./plugin-api": {
+      "types": "./dist/plugin-api/index.d.mts",
+      "import": "./dist/plugin-api/index.mjs"
+    },
+    "./plugin-api/RenderedDomContext": {
+      "types": "./dist/plugin-api/RenderedDomContext.d.mts",
+      "import": "./dist/plugin-api/RenderedDomContext.mjs"
+    },
+    "./plugin-api/resolveItemPositions": {
+      "types": "./dist/plugin-api/resolveItemPositions.d.mts",
+      "import": "./dist/plugin-api/resolveItemPositions.mjs"
+    },
+    "./plugin-api/types": {
+      "types": "./dist/plugin-api/types.d.mts",
+      "import": "./dist/plugin-api/types.mjs"
+    },
+    "./types/document": {
+      "types": "./dist/types/document.d.mts",
+      "import": "./dist/types/document.mjs"
+    },
+    "./types/content": {
+      "types": "./dist/types/content.d.mts",
+      "import": "./dist/types/content.mjs"
+    },
+    "./types/agentApi": {
+      "types": "./dist/types/agentApi.d.mts",
+      "import": "./dist/types/agentApi.mjs"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.mts",
+      "import": "./dist/utils/index.mjs"
+    },
+    "./utils/cardStyles": {
+      "types": "./dist/utils/cardStyles.d.mts",
+      "import": "./dist/utils/cardStyles.mjs"
+    },
+    "./utils/comments": {
+      "types": "./dist/utils/comments.d.mts",
+      "import": "./dist/utils/comments.mjs"
+    },
+    "./utils/stylePreview": {
+      "types": "./dist/utils/stylePreview.d.mts",
+      "import": "./dist/utils/stylePreview.mjs"
+    },
+    "./utils/findReplace": {
+      "types": "./dist/utils/findReplace.d.mts",
+      "import": "./dist/utils/findReplace.mjs"
+    },
+    "./utils/findVerticalScrollParent": {
+      "types": "./dist/utils/findVerticalScrollParent.d.mts",
+      "import": "./dist/utils/findVerticalScrollParent.mjs"
+    },
+    "./utils/fontOptions": {
+      "types": "./dist/utils/fontOptions.d.mts",
+      "import": "./dist/utils/fontOptions.mjs"
+    },
+    "./utils/headingCollector": {
+      "types": "./dist/utils/headingCollector.d.mts",
+      "import": "./dist/utils/headingCollector.mjs"
+    },
+    "./utils/highlightColors": {
+      "types": "./dist/utils/highlightColors.d.mts",
+      "import": "./dist/utils/highlightColors.mjs"
+    },
+    "./utils/listState": {
+      "types": "./dist/utils/listState.d.mts",
+      "import": "./dist/utils/listState.mjs"
+    },
+    "./utils/reportIssue": {
+      "types": "./dist/utils/reportIssue.d.mts",
+      "import": "./dist/utils/reportIssue.mjs"
+    },
+    "./utils/sidebarConstants": {
+      "types": "./dist/utils/sidebarConstants.d.mts",
+      "import": "./dist/utils/sidebarConstants.mjs"
+    },
+    "./utils/textSelection": {
+      "types": "./dist/utils/textSelection.d.mts",
+      "import": "./dist/utils/textSelection.mjs"
+    },
+    "./utils/units": {
+      "types": "./dist/utils/units.d.mts",
+      "import": "./dist/utils/units.mjs"
+    },
+    "./utils/autoScroll": {
+      "types": "./dist/utils/autoScroll.d.mts",
+      "import": "./dist/utils/autoScroll.mjs"
+    },
+    "./yrs": {
+      "types": "./dist/yrs/index.d.mts",
+      "import": "./dist/yrs/index.mjs"
+    },
+    "./docx/parser": {
+      "types": "./dist/docx/parser.d.mts",
+      "import": "./dist/docx/parser.mjs"
+    },
+    "./docx/rezip": {
+      "types": "./dist/docx/rezip.d.mts",
+      "import": "./dist/docx/rezip.mjs"
+    },
+    "./layout/measure": {
+      "types": "./dist/layout/measure/index.d.mts",
+      "import": "./dist/layout/measure/index.mjs"
+    },
+    "./layout/flow": {
+      "types": "./dist/layout/flow/index.d.mts",
+      "import": "./dist/layout/flow/index.mjs"
+    },
+    "./layout/pagination/types": {
+      "types": "./dist/layout/pagination/types.d.mts",
+      "import": "./dist/layout/pagination/types.mjs"
+    },
+    "./managers/AutoSaveManager": {
+      "types": "./dist/managers/AutoSaveManager.d.mts",
+      "import": "./dist/managers/AutoSaveManager.mjs"
+    },
+    "./managers/TableSelectionManager": {
+      "types": "./dist/managers/TableSelectionManager.d.mts",
+      "import": "./dist/managers/TableSelectionManager.mjs"
+    },
+    "./managers/types": {
+      "types": "./dist/managers/types.d.mts",
+      "import": "./dist/managers/types.mjs"
+    },
+    "./editor": {
+      "types": "./dist/editor/index.d.mts",
+      "import": "./dist/editor/index.mjs"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "headless": [
+        "./dist/headless.d.mts"
+      ],
+      "core-plugins": [
+        "./dist/core-plugins.d.mts"
+      ],
+      "mcp": [
+        "./dist/mcp.d.mts"
+      ],
+      "docx": [
+        "./dist/docx/index.d.mts"
+      ],
+      "docx/wrapTypes": [
+        "./dist/docx/wrapTypes.d.mts"
+      ],
+      "docx/serializer": [
+        "./dist/docx/serializer/index.d.mts"
+      ],
+      "agent": [
+        "./dist/agent/index.d.mts"
+      ],
+      "styles": [
+        "./dist/styles/index.d.mts"
+      ],
+      "layout/pagination": [
+        "./dist/layout/pagination/index.d.mts"
+      ],
+      "layout/render": [
+        "./dist/layout/render/index.d.mts"
+      ],
+      "layout": [
+        "./dist/layout/index.d.mts"
+      ],
+      "plugin-api": [
+        "./dist/plugin-api/index.d.mts"
+      ],
+      "plugin-api/RenderedDomContext": [
+        "./dist/plugin-api/RenderedDomContext.d.mts"
+      ],
+      "plugin-api/resolveItemPositions": [
+        "./dist/plugin-api/resolveItemPositions.d.mts"
+      ],
+      "plugin-api/types": [
+        "./dist/plugin-api/types.d.mts"
+      ],
+      "types/document": [
+        "./dist/types/document.d.mts"
+      ],
+      "types/content": [
+        "./dist/types/content.d.mts"
+      ],
+      "types/agentApi": [
+        "./dist/types/agentApi.d.mts"
+      ],
+      "utils": [
+        "./dist/utils/index.d.mts"
+      ],
+      "utils/cardStyles": [
+        "./dist/utils/cardStyles.d.mts"
+      ],
+      "utils/comments": [
+        "./dist/utils/comments.d.mts"
+      ],
+      "utils/stylePreview": [
+        "./dist/utils/stylePreview.d.mts"
+      ],
+      "utils/findReplace": [
+        "./dist/utils/findReplace.d.mts"
+      ],
+      "utils/findVerticalScrollParent": [
+        "./dist/utils/findVerticalScrollParent.d.mts"
+      ],
+      "utils/fontOptions": [
+        "./dist/utils/fontOptions.d.mts"
+      ],
+      "utils/headingCollector": [
+        "./dist/utils/headingCollector.d.mts"
+      ],
+      "utils/highlightColors": [
+        "./dist/utils/highlightColors.d.mts"
+      ],
+      "utils/listState": [
+        "./dist/utils/listState.d.mts"
+      ],
+      "utils/reportIssue": [
+        "./dist/utils/reportIssue.d.mts"
+      ],
+      "utils/sidebarConstants": [
+        "./dist/utils/sidebarConstants.d.mts"
+      ],
+      "utils/textSelection": [
+        "./dist/utils/textSelection.d.mts"
+      ],
+      "utils/units": [
+        "./dist/utils/units.d.mts"
+      ],
+      "utils/autoScroll": [
+        "./dist/utils/autoScroll.d.mts"
+      ],
+      "docx/parser": [
+        "./dist/docx/parser.d.mts"
+      ],
+      "docx/rezip": [
+        "./dist/docx/rezip.d.mts"
+      ],
+      "layout/measure": [
+        "./dist/layout/measure/index.d.mts"
+      ],
+      "layout/flow": [
+        "./dist/layout/flow/index.d.mts"
+      ],
+      "layout/pagination/types": [
+        "./dist/layout/pagination/types.d.mts"
+      ],
+      "yrs": [
+        "./dist/yrs/index.d.mts"
+      ],
+      "managers/AutoSaveManager": [
+        "./dist/managers/AutoSaveManager.d.mts"
+      ],
+      "managers/TableSelectionManager": [
+        "./dist/managers/TableSelectionManager.d.mts"
+      ],
+      "managers/types": [
+        "./dist/managers/types.d.mts"
+      ],
+      "editor": [
+        "./dist/editor/index.d.mts"
+      ]
+    }
+  },
+  "bin": {
+    "docx-editor-mcp": "./dist/mcp-cli.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun ../../scripts/build-docx-wasm.ts && NODE_OPTIONS=--max-old-space-size=8192 tsup && bun scripts/copy-assets.ts",
+    "typecheck": "tsc --noEmit",
+    "build:wasm": "bun ../../scripts/build-docx-wasm.ts"
+  },
+  "dependencies": {
+    "docxtemplater": "^3.50.0",
+    "dompurify": "^3.2.0",
+    "pizzip": "^3.1.7",
+    "xml-js": "^1.6.11"
+  },
+  "devDependencies": {
+    "@betteroffice/drawingml": "workspace:*",
+    "jszip": "^3.10.1",
+    "tsup": "^8.0.1",
+    "typescript": "^6.0.3",
+    "@types/bun": "^1.0.0",
+    "@types/node": "^26.0.0"
+  },
+  "keywords": [
+    "docx",
+    "editor",
+    "template",
+    "word",
+    "document"
+  ],
+  "author": "OpenOOXML",
+  "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/docx"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

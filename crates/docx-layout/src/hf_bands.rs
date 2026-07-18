@@ -1,15 +1,123 @@
+//! Header/footer band composition for the display-list builder.
+//!
+//! Ports the DOM painter's header/footer path: which HF variant paints on
+//! which page (`getHeaderForPage` / `getFooterForPage`,
+//! `packages/core/src/docx/headerFooterParser.ts:493-538`), the band geometry
+//! (`renderPage.ts:853-978`), and the vertical block stacking inside the band
+//! (`renderHeaderFooterContent`,
+//! `packages/core/src/layout/paint/renderPage/headerFooter.ts:217-505`).
+//! Content inside a band re-uses the body builder's paragraph/table emitters,
+//! so run positioning, decorations, PAGE/NUMPAGES fields and doc-position
+//! attrs behave identically to body content — but the emitted `docStart` /
+//! `docEnd` values refer to the HF ProseMirror doc identified by the region's
+//! `rId`, not the body doc.
+//!
+//! # Input envelope
+//!
+//! The builder's `{ measured, options, layout }` envelope gains one optional,
+//! backward-compatible field (absent ⇒ byte-identical output):
+//!
+//! ```jsonc
+//! {
+//!   "measured": [...], "options": {...}, "layout": {...},
+//!   "headersFooters": {
+//!     // section flags, straight off SectionProperties / settings.xml
+//!     "titlePg": false,            // w:titlePg — different first page
+//!     "evenAndOddHeaders": false,  // w:evenAndOddHeaders (settings.xml)
+//!     // optional px overrides (computeLayout's headerDistancePx /
+//!     // footerDistancePx, i.e. w:pgMar w:header / w:footer of the section);
+//!     // per-page fallback: layout.pages[i].margins.header|footer ?? 48
+//!     "headerDistance": 48,
+//!     "footerDistance": 48,
+//!     // one entry per HF part in play. Assemble from HeaderFooterContent
+//!     // (convertHeaderFooterPmDocToContent output) like so:
+//!     //   measured  = toMeasuredBlocks(content.blocks, content.measures)
+//!     //   height / flowHeight / visualTop / visualBottom = same-named
+//!     //   HeaderFooterContent fields (pass them through verbatim)
+//!     "variants": [
+//!       {
+//!         "rId": "rId6",            // relationship id of the header1.xml part
+//!         "kind": "header",         // 'header' | 'footer'
+//!         "type": "default",        // 'default' | 'first' | 'even'
+//!         "measured": [ /* MeasuredBlock[] — SAME schema as body `measured` */ ],
+//!         "height": 24,             // HeaderFooterContent.height
+//!         "flowHeight": 24,         // optional; fallback: height
+//!         "visualTop": 0,           // optional; fallback: 0
+//!         "visualBottom": 24,       // optional; fallback: height
+//!         // optional (F2): per-page resolved widths of PAGE/NUMPAGES field
+//!         // runs, so a centered/right field line re-centers per page. One
+//!         // entry per field run; `perPage` is indexed by layout page index.
+//!         "fieldWidths": [
+//!           { "pmStart": 12, "fallbackWidth": 6, "perPage": [6, 6, 6] }
+//!         ]
+//!       }
+//!     ]
+//!   }
+//! }
+//! ```
+//!
+//! # Per-page variant mapping (port of getHeaderForPage, 1-based page number)
+//!
+//! 1. first page (`page.number == 1`) and `titlePg` ⇒ the `first` variant;
+//!    when that selected variant is absent the story is intentionally blank
+//!    (it must not fall through to `default`);
+//! 2. `evenAndOddHeaders` and even page number ⇒ the `even` variant if present;
+//! 3. otherwise the `default` variant.
+//!
+//! When several variants share a (kind, type) the LAST one wins, mirroring
+//! `headerFooterMapToTypeMap`'s `Map.set` overwrite. No matching variant ⇒ no
+//! region on that page.
+//!
+//! # Band geometry (port of renderPage.ts:853-978)
+//!
+//! Header (distances resolve as `headerDistance ?? page.margins.header ?? 48`):
+//! - `region.y      = headerDistance + visualTop`
+//! - `region.height = max(flowHeight - min(0, visualTop), 24)`
+//! - content flow origin: `x = margins.left`, `y = headerDistance` (the DOM
+//!   band sits at `headerDistance + visualTop` with its content offset by
+//!   `-visualTop`, renderPage.ts:879+902)
+//!
+//! Footer (bottom-anchored; `footerDistance ?? page.margins.footer ?? 48`):
+//! - `actual = max(visualBottom - visualTop, 24)`
+//! - `region.height = max(flowHeight - min(0, visualTop), 24)`
+//! - `region.y      = page.h - footerDistance - region.height`
+//! - content flow origin `y = page.h - footerDistance - actual - visualTop`
+//!   (band top at renderPage.ts:940 plus the content offset at :967)
+//!
+//! # Block stacking inside the band (port of renderHeaderFooterContent)
+//!
+//! A flow cursor starts at 0 (band-local):
+//! - paragraph: paints at `cursor + (attrs.spacing.before ?? 0)`
+//!   (headerFooter.ts:323) as a whole-paragraph fragment (lines 0..len, no
+//!   split); cursor advances by `measure.totalHeight` (:351), which already
+//!   includes before/after spacing.
+//! - table (inline): whole-table fragment at `cursor` (rows 0..len, no clip);
+//!   cursor advances by `measure.totalHeight` (:389-392).
+//! - table (floating, `<w:tblpPr>`): paints at the resolved HF-relative
+//!   `(tblpX, tblpY)` anchor and does NOT advance the cursor (:353-365).
+//! - image block: image primitive at `cursor` sized by its measure; cursor
+//!   advances by `measure.height` (:394-417).
+//! - text boxes / breaks / unknown kinds: emit nothing and do not advance
+//!   (v0 boundary; the DOM painter stacks inline text boxes — HF fixtures
+//!   avoid them until the textBox port lands).
+//! - floating image *runs* inside paragraphs are skipped by the shared line
+//!   emitter, same as the body v0 boundary.
+
 use serde::Deserialize;
 
 use crate::display_list::{
     BlockIn, BlockRef, FieldWidthEntry, FieldWidthMap, FloatingTablePositionIn, HfKind, HfRegion,
     MeasureIn, MeasuredBlockIn, PageIn, ParagraphFragmentIn, Primitive, RenderCtx, ShapeFonts,
     TableFragmentIn, WatermarkIn, capped_alt_text, emit_paragraph_fragment, emit_table_fragment,
-    px, rotation_degrees, sanitized_href,
+    px, rotation_degrees, sanitized_href, table_total_width,
 };
 use crate::display_list::{Crop, ImagePrimitive};
 
+/// Word's default `w:header` / `w:footer` distance (0.5in = 48px), the same
+/// fallback as renderPage.ts:855/919.
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
 
+/// minimum interactive band height (renderPage.ts:871/935)
 const MIN_BAND_HEIGHT_PX: f64 = 24.0;
 
 #[derive(Deserialize)]
@@ -48,12 +156,15 @@ struct HfVariantIn {
     visual_top: Option<f64>,
     #[serde(default)]
     visual_bottom: Option<f64>,
-    /// Per-page widths for dynamic page-number fields.
+    /// per-page resolved widths of PAGE/NUMPAGES field runs in this HF part, so
+    /// a centered/right field line re-centers per page (F2). Absent ⇒ the fields
+    /// ride the once-measured fallback width, byte-identical to before.
     #[serde(default)]
     field_widths: Vec<FieldWidthsIn>,
 }
 
-/// Per-field widths for one header or footer variant.
+/// per-field-run entry of an HF variant's `fieldWidths` (F2); see
+/// [`crate::display_list::FieldWidthEntry`] for the geometry these feed.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FieldWidthsIn {
@@ -77,7 +188,10 @@ enum HfType {
     Even,
 }
 
+/// which variant paints on this page — exact port of getHeaderForPage /
+/// getFooterForPage (headerFooterParser.ts:493-538); `page_number` is 1-based
 fn resolve_variant(hf: &HeadersFootersIn, kind: HfKind, page_number: u64) -> Option<&HfVariantIn> {
+    // "later ones overwrite" (headerFooterMapToTypeMap's Map.set) -> rfind
     let get = |t: HfType| {
         hf.variants
             .iter()
@@ -98,7 +212,68 @@ fn resolve_variant(hf: &HeadersFootersIn, kind: HfKind, page_number: u64) -> Opt
     get(HfType::Default)
 }
 
-/// Sum measured block heights.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn variant(kind: HfKind, hf_type: HfType, r_id: &str) -> HfVariantIn {
+        HfVariantIn {
+            r_id: r_id.to_owned(),
+            kind,
+            hf_type,
+            measured: Vec::new(),
+            height: None,
+            flow_height: None,
+            visual_top: None,
+            visual_bottom: None,
+            field_widths: Vec::new(),
+        }
+    }
+
+    fn envelope(title_pg: bool, variants: Vec<HfVariantIn>) -> HeadersFootersIn {
+        HeadersFootersIn {
+            title_pg: Some(title_pg),
+            even_and_odd_headers: None,
+            header_distance: None,
+            footer_distance: None,
+            watermark: None,
+            variants,
+        }
+    }
+
+    #[test]
+    fn title_page_without_first_variant_is_blank() {
+        let hf = envelope(
+            true,
+            vec![variant(HfKind::Header, HfType::Default, "default-header")],
+        );
+
+        assert!(resolve_variant(&hf, HfKind::Header, 1).is_none());
+        assert_eq!(
+            resolve_variant(&hf, HfKind::Header, 2).map(|v| v.r_id.as_str()),
+            Some("default-header")
+        );
+    }
+
+    #[test]
+    fn title_page_uses_first_variant_when_present() {
+        let hf = envelope(
+            true,
+            vec![
+                variant(HfKind::Header, HfType::Default, "default-header"),
+                variant(HfKind::Header, HfType::First, "first-header"),
+            ],
+        );
+
+        assert_eq!(
+            resolve_variant(&hf, HfKind::Header, 1).map(|v| v.r_id.as_str()),
+            Some("first-header")
+        );
+    }
+}
+
+/// stacked in-flow height fallback when the payload omits `height` — the sum
+/// convertHeaderFooterPmDocToContent computes from the measures
 fn stacked_height(measured: &[MeasuredBlockIn]) -> f64 {
     measured
         .iter()
@@ -114,6 +289,9 @@ fn stacked_height(measured: &[MeasuredBlockIn]) -> f64 {
         .sum()
 }
 
+/// resolve both regions for one page. `page_number` follows the layout's own
+/// 1-based `Page.number` (fallback index+1), the value the DOM painter feeds
+/// its per-page selection and PAGE fields.
 pub(crate) fn compose_page_regions<'a>(
     hf: &HeadersFootersIn,
     page: &PageIn,
@@ -149,7 +327,8 @@ pub(crate) fn compose_page_regions<'a>(
     (header, footer)
 }
 
-/// Build the dynamic field-width map for one variant.
+/// per-page PAGE/NUMPAGES field-width map for one variant (F2); `None` when the
+/// variant supplied none, so the fields ride the char-distributed pool.
 fn field_width_map(v: &HfVariantIn) -> Option<FieldWidthMap> {
     if v.field_widths.is_empty() {
         return None;
@@ -170,6 +349,10 @@ fn field_width_map(v: &HfVariantIn) -> Option<FieldWidthMap> {
     )
 }
 
+/// Port of `resolveHeaderFooterFloatingTablePosition` from
+/// `renderPage/headerFooter.ts`: return offsets relative to the HF content
+/// container's flow origin. The caller adds those to the page-coordinate flow
+/// origin used by the display-list region.
 fn resolve_hf_floating_table_position(
     floating: &FloatingTablePositionIn,
     page: &PageIn,
@@ -193,6 +376,8 @@ fn resolve_hf_floating_table_position(
     (left, top)
 }
 
+/// band geometry + content stacking for one resolved variant (formulas in the
+/// module header, ported from renderPage.ts:853-978 and headerFooter.ts)
 #[allow(clippy::too_many_arguments)]
 fn compose_region(
     v: &HfVariantIn,
@@ -204,6 +389,7 @@ fn compose_region(
     total_pages: u64,
     shape: Option<&ShapeFonts<'_>>,
 ) -> HfRegion {
+    // per-variant field widths (F2), borrowed by this region's RenderCtx
     let field_widths = field_width_map(v);
     let ctx = RenderCtx {
         page_number,
@@ -268,6 +454,8 @@ fn compose_region(
                     carried_to_next: None,
                 };
                 emit_paragraph_fragment(
+                    // HF paragraphs surface as mirror paragraph wrappers inside
+                    // the header/footer region — stamp the line range
                     &mut prims, &frag, block, measure, ctx, frag.x, frag.y, None, None, true, true,
                 );
                 cursor += measure.total_height;
@@ -284,6 +472,7 @@ fn compose_region(
                     block_id: block.id.clone(),
                     x,
                     y,
+                    width: table_total_width(measure),
                     height: measure.total_height,
                     row_start: 0,
                     row_end: block.rows.len(),
@@ -331,65 +520,5 @@ fn compose_region(
         y: px(band_y),
         height: px(band_h),
         primitives: prims,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn variant(kind: HfKind, hf_type: HfType, r_id: &str) -> HfVariantIn {
-        HfVariantIn {
-            r_id: r_id.to_owned(),
-            kind,
-            hf_type,
-            measured: Vec::new(),
-            height: None,
-            flow_height: None,
-            visual_top: None,
-            visual_bottom: None,
-            field_widths: Vec::new(),
-        }
-    }
-
-    fn envelope(title_pg: bool, variants: Vec<HfVariantIn>) -> HeadersFootersIn {
-        HeadersFootersIn {
-            title_pg: Some(title_pg),
-            even_and_odd_headers: None,
-            header_distance: None,
-            footer_distance: None,
-            watermark: None,
-            variants,
-        }
-    }
-
-    #[test]
-    fn title_page_without_first_variant_is_blank() {
-        let hf = envelope(
-            true,
-            vec![variant(HfKind::Header, HfType::Default, "default-header")],
-        );
-
-        assert!(resolve_variant(&hf, HfKind::Header, 1).is_none());
-        assert_eq!(
-            resolve_variant(&hf, HfKind::Header, 2).map(|v| v.r_id.as_str()),
-            Some("default-header")
-        );
-    }
-
-    #[test]
-    fn title_page_uses_first_variant_when_present() {
-        let hf = envelope(
-            true,
-            vec![
-                variant(HfKind::Header, HfType::Default, "default-header"),
-                variant(HfKind::Header, HfType::First, "first-header"),
-            ],
-        );
-
-        assert_eq!(
-            resolve_variant(&hf, HfKind::Header, 1).map(|v| v.r_id.as_str()),
-            Some("first-header")
-        );
     }
 }

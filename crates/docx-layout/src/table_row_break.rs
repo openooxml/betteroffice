@@ -1,3 +1,19 @@
+//! Port of `packages/core/src/layout/pagination/tableRowBreak.ts`.
+//!
+//! Table row-break geometry. Word lets a table row break across a page
+//! boundary; this module computes, per row, the set of safe break offsets
+//! (the y of every line bottom across the row's content, including
+//! vertically-merged cells that span into the row) so the paginator can snap
+//! a break to the deepest whole line that still fits.
+//!
+//! Exported fns (1:1 with the TS module):
+//! - `build_table_row_break_info` ← `buildTableRowBreakInfo(block, measure)`
+//! - `snap_row_break` ← `snapRowBreak(info, rowIndex, fromOffset, maxSlice)`
+//!
+//! Consumes the spine's types (`types.rs`) directly. The place-loop
+//! (`layout_table` in `hooks.rs`) uses this to fill `TableFragment`
+//! rowStart/rowEnd + clipTop/clipBottom for mid-content row splits.
+
 use serde::Serialize;
 
 use crate::cell_layout::layout_cell_content;
@@ -16,6 +32,8 @@ pub struct TableRowBreakInfo {
     pub break_offsets: Vec<Vec<f64>>,
 }
 
+/// SameValueZero membership insert (mirrors the JS `Set<number>`): NaN equals
+/// NaN, +0 equals -0.
 fn add_unique(offsets: &mut Vec<f64>, value: f64) {
     let same = |a: f64, b: f64| a == b || (a.is_nan() && b.is_nan());
     if !offsets.iter().any(|&existing| same(existing, value)) {
@@ -71,6 +89,10 @@ fn cell_unbreakable_ranges(
 /// a break is allowed to snap to.
 pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> TableRowBreakInfo {
     let row_count = measure.rows.len();
+    // True (unrounded) cumulative row offsets — the paginator splits against
+    // exact measured heights. The painter has a sibling `buildRowYPositions`
+    // that rounds to whole pixels for crisp borders; keep the two SEPARATE
+    // (don't "dedupe") or you break either break-offset alignment or crispness.
     let mut row_tops: Vec<f64> = Vec::with_capacity(row_count + 1);
     let mut acc = 0.0f64;
     for r in 0..row_count {
@@ -79,15 +101,21 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
     }
     row_tops.push(acc);
 
+    // Use the shared grid resolution so "which cells cover row r" matches the
+    // measurer and painter. A cell starting in row `sr` with rowSpan covers
+    // rows [sr, sr + rowSpan); a merged cell spills its line bottoms into the
+    // rows below its restart row.
     let resolved = resolve_cell_grid(block);
     let mut break_offsets: Vec<Vec<f64>> = Vec::with_capacity(row_count);
     for r in 0..row_count {
         let row_height = measure.rows[r].height;
         let mut offsets: Vec<f64> = Vec::new();
         let mut unbreakable_ranges: Vec<(f64, f64)> = Vec::new();
-        add_unique(&mut offsets, row_height);
+        add_unique(&mut offsets, row_height); // a row boundary is always a clean break
 
         for g in &resolved {
+            // i64 arithmetic so a (theoretical) rowSpan of 0 mirrors the TS
+            // `g.rowIndex + g.rowSpan - 1 < r` instead of underflowing.
             if g.row_index > r || (g.row_index + g.row_span) as i64 - 1 < r as i64 {
                 continue;
             }
@@ -105,6 +133,7 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
             else {
                 continue;
             };
+            // OOXML/TableNormal default top padding is 0 (matches measureTable).
             let pad_top = source_cell.padding.as_ref().map(|p| p.top).unwrap_or(0.0);
             let layout = layout_cell_content(
                 Some(&source_cell.blocks),
@@ -173,6 +202,12 @@ pub fn snap_row_break(
     best
 }
 
+// The TS module has no unit-test sibling — its only coverage is
+// pagination/integration/table-row-break.test.ts, which drives the whole
+// place loop (layoutDocument). These tests exercise the same 3-row
+// merged-cell table geometry directly against buildTableRowBreakInfo /
+// snapRowBreak; every expected value is verified against the TS
+// implementation (bun run on identical input).
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,7 +2,17 @@
   "$schema": "https://unpkg.com/@changesets/config@3.1.3/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [["@betteroffice/xlsx", "@betteroffice/xlsx-react"]],
+  "fixed": [
+    [
+      "@betteroffice/xlsx",
+      "@betteroffice/xlsx-react"
+    ],
+    [
+      "@betteroffice/docx",
+      "@betteroffice/docx-react",
+      "@betteroffice/docx-i18n"
+    ]
+  ],
   "linked": [],
   "access": "public",
   "baseBranch": "main",

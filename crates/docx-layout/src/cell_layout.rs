@@ -1,7 +1,21 @@
+//! Port of `packages/core/src/layout/pagination/cellBlockLayout.ts`.
+//!
+//! Vertical layout of a table cell's stacked blocks — single source of truth
+//! for where the lines of a cell's content sit. Adjacent paragraphs'
+//! before/after spacing collapses to the larger of the two; a paragraph's
+//! lines stack from its content top with no before/after between them.
+//!
+//! Exported fns (1:1 with the TS module):
+//! - `layout_cell_content` ← `layoutCellContent(blocks, blockMeasures, startY)`
+//!
+//! Consumes the spine's types (`types.rs`) directly, same as the TS module
+//! consumes `pagination/types.ts`.
+
 use serde::Serialize;
 
 use crate::types::{BlockExtent, LayoutBlock};
 
+/// Mirror of the TS `CellContentLayout` result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellContentLayout {
@@ -14,6 +28,9 @@ pub struct CellContentLayout {
     pub content_height: f64,
 }
 
+/// TS `'totalHeight' in measure && typeof measure.totalHeight === 'number'` —
+/// of the extent union only paragraph and table extents carry a numeric
+/// `totalHeight`.
 fn extent_total_height(measure: &BlockExtent) -> Option<f64> {
     match measure {
         BlockExtent::Paragraph(p) => Some(p.total_height),
@@ -63,6 +80,7 @@ pub fn layout_cell_content(
         }
     }
 
+    // The painter renders the final block's trailing space-after as paddingBottom.
     CellContentLayout {
         line_tops,
         flat_bottoms,
@@ -70,6 +88,8 @@ pub fn layout_cell_content(
     }
 }
 
+// Ported from packages/core/src/layout/pagination/__tests__/cellBlockLayout.test.ts
+// — every case preserved. Fixtures are built through serde like real inputs.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +144,7 @@ mod tests {
                 SP + LINE + SP + LINE + SP + LINE,
             ]
         );
+        // content height includes the trailing after (painter paddingBottom)
         assert_eq!(
             layout.content_height,
             SP + LINE + SP + LINE + SP + LINE + SP
@@ -151,7 +172,7 @@ mod tests {
         let layout = layout_cell_content(Some(&blocks), Some(&measures), 0.0);
         // paragraph line bottom at 8+20=28; nested table atomic: gap = prevAfter(8) + 50
         assert_eq!(layout.line_tops[0], vec![SP]);
-        assert_eq!(layout.line_tops[1], Vec::<f64>::new());
+        assert_eq!(layout.line_tops[1], Vec::<f64>::new()); // atomic block has no per-line tops
         assert_eq!(layout.flat_bottoms, vec![SP + LINE, SP + LINE + SP + 50.0]);
         assert_eq!(layout.content_height, SP + LINE + SP + 50.0);
     }

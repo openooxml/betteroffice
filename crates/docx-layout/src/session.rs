@@ -1,3 +1,25 @@
+//! Stateful display-list session handles: parse a [`DisplayList`] ONCE, then run
+//! many hit-test / range-rect queries against it by handle with zero
+//! re-serialization.
+//!
+//! Every interactive query (a click, a drag-mousemove) otherwise re-sends the
+//! whole display-list JSON and Rust re-parses it. [`open_display_list`] parses
+//! and stores the [`DisplayList`] behind a small monotonic handle; the by-handle
+//! query entry points ([`hit_test_regions_by_handle`], [`range_rects_by_handle`])
+//! source the parsed list from the handle map and reuse the exact hit/range
+//! logic the JSON-arg exports call, so results are byte-identical — this is pure
+//! perf. [`close_display_list`] drops a handle.
+//!
+//! Lifecycle / memory: the caller (the TS `createDisplayListQueries` facade)
+//! opens one handle per display-list build and closes it on dispose/replacement,
+//! so at most one handle is live per editor at steady state. As a backstop
+//! against a leaked handle (a facade that forgot to close, or a JS
+//! FinalizationRegistry that has not run yet), the map is capped at
+//! [`MAX_SESSIONS`]: opening past the cap evicts the oldest handle, so the store
+//! can never grow unbounded. WASM is single-threaded, so a `thread_local`
+//! doubles as the module-global store; native tests get an isolated store per
+//! test thread.
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -80,6 +102,9 @@ pub fn close_display_list(handle: u32) {
     SESSIONS.with(|s| s.borrow_mut().close(handle));
 }
 
+/// Region-aware hit test against a stored display list — the by-handle twin of
+/// [`crate::hit::hit_test_regions_json`]. `Err` when the handle is unknown
+/// (closed or evicted); the caller falls back to the JSON-arg export.
 pub fn hit_test_regions_by_handle(
     handle: u32,
     page_index: usize,
@@ -98,6 +123,8 @@ pub fn hit_test_regions_by_handle(
     })
 }
 
+/// Range rects against a stored display list — the by-handle twin of
+/// [`crate::hit::range_rects_json`]. `Err` on an unknown handle.
 pub fn range_rects_by_handle(handle: u32, from: i64, to: i64) -> Result<String, String> {
     SESSIONS.with(|s| {
         let sessions = s.borrow();
@@ -108,6 +135,10 @@ pub fn range_rects_by_handle(handle: u32, from: i64, to: i64) -> Result<String, 
     })
 }
 
+/// Region-aware range rects against a stored display list — the by-handle twin
+/// of [`crate::hit::range_rects_region_json`]. `region` is
+/// `"body" | "header" | "footer"`; `r_id` scopes header/footer to one HF part
+/// (empty ⇒ match any). `Err` on an unknown handle or an unparseable region.
 pub fn range_rects_region_by_handle(
     handle: u32,
     region: &str,

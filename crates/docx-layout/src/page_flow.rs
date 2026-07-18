@@ -1,6 +1,34 @@
+//! Page-flow state machine — port of
+//! `packages/core/src/layout/pagination/pageFlow.ts` (`createPageFlow`).
+//!
+//! Tracks the page being built, the pen position, and available space, and
+//! creates new pages/columns when content doesn't fit. All numeric behavior is
+//! f64, in the same operation order as the TS closure. Two deliberate
+//! omissions, both output-invariant:
+//! - checkpoint capture (`setOnNewPage` / `snapshotGeometry`): resume
+//!   bookmarks are derived data, omitted from golden serialization, and the
+//!   `resume` option is only exercised by incremental pagination which stays
+//!   on the TS side for now;
+//! - the oversized-fragment `console.warn` (log only).
+
 use crate::LayoutError;
 use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
 
+/// Complete page-to-page geometry needed to restart placement at a clean
+/// page boundary. Cursor/spacing state is intentionally absent: checkpoints
+/// are captured only at column zero on a pristine page, where both are fixed
+/// by the page geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageFlowGeometry {
+    pub page_size: Size,
+    pub margins: PageMargins,
+    pub columns: ColumnLayout,
+    pub pending_page_size: Option<Size>,
+    pub pending_margins: Option<PageMargins>,
+}
+
+/// TS `PageFlow` — current state of a page being laid out. `page_index`
+/// replaces the TS object reference into `pages`.
 #[derive(Debug, Clone)]
 pub struct FlowState {
     pub page_index: usize,
@@ -16,6 +44,7 @@ pub struct FlowState {
     pub deferred_spacing: f64,
 }
 
+/// TS `calculateColumnWidth`.
 fn calculate_column_width(
     page_width: f64,
     left_margin: f64,
@@ -27,6 +56,8 @@ fn calculate_column_width(
     (content_width - total_gaps) / columns.count
 }
 
+/// TS `createPageFlow` return value, as a struct. Methods mirror the closure's
+/// functions one-to-one.
 pub struct Paginator {
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
@@ -38,9 +69,12 @@ pub struct Paginator {
     column_width: f64,
     column_region_top: f64,
     footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
+    start_page_number: u32,
 }
 
 impl Paginator {
+    /// Construct with the initial section geometry (TS `createPageFlow`
+    /// body up to the content-area guard).
     pub fn new(
         page_size: Size,
         margins: PageMargins,
@@ -67,25 +101,90 @@ impl Paginator {
             column_width,
             column_region_top,
             footnote_reserved_heights,
+            start_page_number: 1,
         })
+    }
+
+    /// Restore a paginator at a clean page start. The first lazily-created
+    /// page uses `start_page_number`; no prefix pages are copied into this
+    /// instance, so callers can splice the resulting suffix onto retained
+    /// pages without walking them again.
+    pub fn resume(
+        geometry: &PageFlowGeometry,
+        start_page_number: u32,
+        footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
+    ) -> Result<Self, LayoutError> {
+        let mut paginator = Self::new(
+            geometry.page_size.clone(),
+            geometry.margins.clone(),
+            geometry.columns.clone(),
+            footnote_reserved_heights,
+        )?;
+        paginator.pending_page_size = geometry.pending_page_size.clone();
+        paginator.pending_margins = geometry.pending_margins.clone();
+        paginator.start_page_number = start_page_number;
+        Ok(paginator)
+    }
+
+    /// Snapshot the page-to-page state. This is sound as a resume bookmark
+    /// only when [`Self::clean_page_start`] returns a page.
+    pub fn snapshot_geometry(&self) -> PageFlowGeometry {
+        PageFlowGeometry {
+            page_size: self.page_size.clone(),
+            margins: self.margins.clone(),
+            columns: self.columns.clone(),
+            pending_page_size: self.pending_page_size.clone(),
+            pending_margins: self.pending_margins.clone(),
+        }
+    }
+
+    /// Ensure a current page exists and return its local index and number when
+    /// placement is exactly at a resumable page start.
+    pub fn clean_page_start(&mut self) -> Option<(usize, u32, PageFlowGeometry)> {
+        let state_index = self.get_current();
+        let state = &self.states[state_index];
+        let page = &self.pages[state.page_index];
+        (state.column_index == 0
+            && state.pen_y == state.content_top
+            && state.deferred_spacing == 0.0
+            && page.fragments.is_empty())
+        .then(|| (state.page_index, page.number, self.snapshot_geometry()))
+    }
+
+    /// Fragment counts used by the placement walk to recognize a block that
+    /// was moved wholesale onto a newly-created clean page.
+    pub fn page_fragment_counts(&self) -> Vec<usize> {
+        self.pages.iter().map(|page| page.fragments.len()).collect()
+    }
+
+    /// Geometry of the current page after it was created during placement.
+    /// Checkpoint discovery only calls this for the current page.
+    pub fn current_page_start(&self) -> Option<(usize, u32, PageFlowGeometry)> {
+        let state = self.states.last()?;
+        let page = self.pages.get(state.page_index)?;
+        Some((state.page_index, page.number, self.snapshot_geometry()))
     }
 
     fn get_content_bottom(&self) -> f64 {
         self.page_size.h - self.margins.bottom
     }
 
+    /// TS `getContentWidth` — content width for the active section.
     pub fn get_content_width(&self) -> f64 {
         self.page_size.w - self.margins.left - self.margins.right
     }
 
+    /// Current column width (TS `columnWidth` getter).
     pub fn column_width(&self) -> f64 {
         self.column_width
     }
 
+    /// TS `getColumnX`.
     pub fn get_column_x(&self, column_index: usize) -> f64 {
         self.margins.left + column_index as f64 * (self.column_width + self.columns.gap)
     }
 
+    /// TS `createNewPage`. Returns the new state's index.
     fn create_new_page(&mut self) -> usize {
         // apply any geometry queued by a continuous section break before
         // computing the new page's size / margins
@@ -103,7 +202,7 @@ impl Paginator {
                 &self.columns,
             );
         }
-        let page_number = self.pages.len() as u32 + 1;
+        let page_number = self.start_page_number + self.pages.len() as u32;
         let content_top = self.margins.top;
         let content_limit = self.get_content_bottom();
 
@@ -157,6 +256,8 @@ impl Paginator {
         self.states.len() - 1
     }
 
+    /// TS `getCurrentState` — index of the current state, creating page 1 if
+    /// none exists.
     pub fn get_current(&mut self) -> usize {
         if self.states.is_empty() {
             return self.create_new_page();
@@ -179,6 +280,7 @@ impl Paginator {
         s.content_limit - s.pen_y
     }
 
+    /// TS `getAvailableHeight()` on the current state.
     pub fn get_available_height(&mut self) -> f64 {
         let idx = self.get_current();
         self.available_height_of(idx)
@@ -188,6 +290,7 @@ impl Paginator {
         self.available_height_of(idx) >= height
     }
 
+    /// TS `advanceColumn` — next column, or a new page when columns are spent.
     fn advance_column(&mut self, idx: usize) -> usize {
         if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
             let region_top = self.column_region_top;
@@ -200,6 +303,8 @@ impl Paginator {
         self.create_new_page()
     }
 
+    /// TS `ensureFits` — advance column/page until `height` fits; oversized
+    /// fragments are placed with overflow rather than looping forever.
     pub fn ensure_fits(&mut self, height: f64) -> usize {
         let mut idx = self.get_current();
         let safe_height = if height.is_finite() && height > 0.0 {
@@ -224,6 +329,9 @@ impl Paginator {
         idx
     }
 
+    /// TS `addFragment` — position the fragment at the cursor (collapsing
+    /// adjacent spacing to the larger of the two), push it, advance the pen.
+    /// Returns `(x, y)`.
     pub fn add_fragment(
         &mut self,
         mut fragment: Fragment,
@@ -231,6 +339,9 @@ impl Paginator {
         space_before: f64,
         space_after: f64,
     ) -> (f64, f64) {
+        // Word collapses spaceAfter / next.spaceBefore to the larger of the
+        // two (CSS-style margin-collapse), not the sum. NOTE: read from the
+        // CURRENT state before ensureFits, exactly like the TS.
         let cur = self.get_current();
         let effective_space_before = space_before.max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
@@ -255,6 +366,7 @@ impl Paginator {
         (x, y)
     }
 
+    /// TS `forcePageBreak` — idempotent on a pristine page.
     pub fn force_page_break(&mut self) -> usize {
         if let Some(idx) = self.states.len().checked_sub(1) {
             let current = &self.states[idx];
@@ -273,11 +385,15 @@ impl Paginator {
         self.create_new_page()
     }
 
+    /// TS `forceColumnBreak`.
     pub fn force_column_break(&mut self) -> usize {
         let idx = self.get_current();
         self.advance_column(idx)
     }
 
+    /// TS `updateColumns` — swap the column layout mid-document. The new
+    /// column region starts at the current pen so continuous breaks keep the
+    /// band below existing content.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
         self.columns = new_columns;
         self.column_width = calculate_column_width(
@@ -299,6 +415,8 @@ impl Paginator {
         self.states[idx].column_index = 0;
     }
 
+    /// TS `updatePageLayout` — swap (or queue, for continuous breaks) the page
+    /// geometry used by subsequently created pages.
     pub fn update_page_layout(
         &mut self,
         new_page_size: Option<Size>,
@@ -337,17 +455,24 @@ impl Paginator {
         Ok(())
     }
 
+    /// Push a fragment straight onto the current page without moving the pen
+    /// (TS sites do `state.page.fragments.push(fragment)` for anchored /
+    /// floating content).
     pub fn push_fragment_direct(&mut self, fragment: Fragment) {
         let idx = self.get_current();
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
     }
 
+    /// Raise the current pen to `y` (TS sites assign `state.penY` directly).
+    #[allow(dead_code)] // reached once the floating-table hook is swapped in
     pub fn set_pen_y(&mut self, idx: usize, y: f64) {
         self.states[idx].pen_y = y;
     }
 }
 
+/// The section-break slice of the paginator (`sectionBreaks.ts` calls exactly
+/// these four `pageFlow.ts` methods).
 impl crate::section_breaks::SectionBreakPaginator for Paginator {
     fn update_page_layout(
         &mut self,
@@ -383,6 +508,9 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
     }
 }
 
+/// The column-balancing slice of the paginator (`columnBalancing.ts` reads
+/// `columns` and the current state's `penY`/`contentLimit`, and writes
+/// `contentLimit` back).
 impl crate::column_balancing::ColumnBalancePaginator for Paginator {
     fn columns(&self) -> ColumnLayout {
         self.columns.clone()

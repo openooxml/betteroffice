@@ -12,9 +12,9 @@ export const formats: Format[] = [
   {
     id: "docx",
     name: "Docx",
-    kind: "Word documents",
-    tagline: "Word-faithful editing, rendered on our Rust engine to canvas.",
-    status: "soon",
+    kind: ".docx documents",
+    tagline: "Faithful .docx editing, rendered on our Rust engine to canvas.",
+    status: "live",
   },
   {
     id: "xlsx",
