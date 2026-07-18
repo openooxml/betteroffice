@@ -171,9 +171,7 @@ pub fn rezip_docx(entries: JsValue) -> Result<Vec<u8>, JsValue> {
         let arr = Uint8Array::new(&value);
         collected.push((name, arr.to_vec()));
     }
-    rezip_parts(&collected)
-        .map(|bytes| bytes)
-        .map_err(|e| JsValue::from_str(&e))
+    rezip_parts(&collected).map_err(|e| JsValue::from_str(&e))
 }
 
 #[cfg(test)]

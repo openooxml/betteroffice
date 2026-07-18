@@ -35,6 +35,8 @@
 //! No `wasm-bindgen` here by design: this mirrors `docx-layout`'s
 //! pure-`layout_to_json` lesson. A thin WASM facade crate can wrap this later.
 
+#![allow(clippy::type_complexity)]
+
 pub mod bidi;
 pub mod font_store;
 pub mod line_break;

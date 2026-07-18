@@ -111,8 +111,7 @@ pub fn write_docx_s13(
     original_docx: &[u8],
 ) -> Result<Vec<u8>, ParseError> {
     request.determinism.validate()?;
-    let original_parts =
-        ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
+    let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
     let mut package = Package::new(original_parts);
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
 
