@@ -12,7 +12,6 @@
 
 import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
-import { resolveColorValueToHex } from '@betteroffice/drawingml';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
 import { createStyleResolver, type StyleResolver } from '../styles';
 import type {
@@ -42,7 +41,6 @@ import type {
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
-import { documentShapeToLayoutBlock } from '../layout/shapeBlocks';
 import type { YrsRawOp, YrsSession } from './index';
 import {
   blockSdtAttrsToPayload,
@@ -432,61 +430,7 @@ function imagePayload(image: Image): Attrs {
 }
 
 function shapePayload(shape: Shape): Attrs {
-  const width = shape.size?.width ? emuToPixels(shape.size.width) : 100;
-  const height = shape.size?.height ? emuToPixels(shape.size.height) : 80;
-  let fillColor: string | undefined;
-  let fillType = 'solid';
-  let gradientType: string | undefined;
-  let gradientAngle: number | undefined;
-  let gradientStops: string | undefined;
-  if (shape.fill) {
-    fillType = shape.fill.type;
-    fillColor = resolveColorValueToHex(shape.fill.color);
-    if (shape.fill.type === 'gradient' && shape.fill.gradient) {
-      gradientType = shape.fill.gradient.type;
-      gradientAngle = shape.fill.gradient.angle;
-      gradientStops = JSON.stringify(
-        shape.fill.gradient.stops.map((stop) => ({
-          position: stop.position,
-          color: resolveColorValueToHex(stop.color) ?? '#000000',
-        }))
-      );
-    }
-  }
-  const transforms: string[] = [];
-  if (shape.transform?.rotation) transforms.push(`rotate(${shape.transform.rotation}deg)`);
-  if (shape.transform?.flipH) transforms.push('scaleX(-1)');
-  if (shape.transform?.flipV) transforms.push('scaleY(-1)');
-  const outlineWidth = shape.outline?.width
-    ? Math.round((shape.outline.width / 914400) * 96 * 100) / 100
-    : 1;
-  return dropNulls({
-    layoutBlockJson: JSON.stringify(documentShapeToLayoutBlock(shape)),
-    shapeType: shape.shapeType || 'rect',
-    geometryPath: shape.geometryPath ?? null,
-    shapeId: shape.id ?? null,
-    children: shape.children?.length ? JSON.stringify(shape.children) : null,
-    width,
-    height,
-    fillPaint: shape.fillPaint ?? null,
-    fillColor: fillColor ?? null,
-    fillType,
-    gradientType: gradientType ?? null,
-    gradientAngle: gradientAngle ?? null,
-    gradientStops: gradientStops ?? null,
-    outlineWidth,
-    outlineColor: resolveColorValueToHex(shape.outline?.color) ?? '#000000',
-    outlineStyle: shape.outline?.style || 'solid',
-    transform: transforms.length > 0 ? transforms.join(' ') : null,
-    rotation: shape.transform?.rotation ?? null,
-    flipH: shape.transform?.flipH ?? false,
-    flipV: shape.transform?.flipV ?? false,
-    displayMode: 'inline',
-    wrapType: 'inline',
-    behindDoc: false,
-    decorative: false,
-    hidden: false,
-  }) as Attrs;
+  return { shapeJson: JSON.stringify(shape) };
 }
 
 function chartPayload(chart: Chart): Attrs {
@@ -631,9 +575,7 @@ function runContentToUnits(
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image))];
     case 'shape':
-      return content.shape.textBody?.content.length
-        ? []
-        : [embedUnit('shape', shapePayload(content.shape))];
+      return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':
       return [embedUnit('chart', chartPayload(content.chart))];
     case 'footnoteRef':

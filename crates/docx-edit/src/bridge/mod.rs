@@ -25,6 +25,8 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 
+mod shapes;
+
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 
 /// Pre-flattened document values needed while lowering a story.
@@ -1074,14 +1076,10 @@ fn lower_shape_block<T: ReadTxn>(
     env: &RenderEnv,
 ) -> Option<ShapeBlock> {
     let values = shared_values(shape, txn);
-    if let Some(mut block) = map_string(&values, "layoutBlockJson")
-        .and_then(|value| serde_json::from_str::<ShapeBlock>(&value).ok())
+    if let Some(block) = map_string(&values, "shapeJson")
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .and_then(|value| shapes::lower_shape_json(&value, pm_start, env))
     {
-        (block.width, block.height) = constrain_to_page(block.width, block.height, env);
-        block.doc_start = Some(pm_start as f64);
-        block.doc_end = Some((pm_start + 1) as f64);
-        block.pm_start = Some(pm_start as f64);
-        block.pm_end = Some((pm_start + 1) as f64);
         return Some(block);
     }
     let shape_type = map_string(&values, "shapeType").unwrap_or_else(|| "rect".to_owned());
@@ -3497,6 +3495,56 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn native_shape_embed_lowers_raw_document_payload() {
+        let doc = EditingDoc::new(44);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        let shape = json!({
+            "type": "shape",
+            "shapeType": "diamond",
+            "size": {"width": 914400, "height": 457200},
+            "fill": {"type": "solid", "color": {"rgb": "336699"}},
+            "textBody": {"content": [{
+                "content": [{
+                    "type": "run",
+                    "content": [{"type": "text", "text": "Native"}]
+                }]
+            }]}
+        });
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 0, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "pilcrow".to_owned(),
+                    payload: vec![("paraId".to_owned(), Any::from("shape-anchor"))],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(value[0]["kind"], "shape");
+        assert_eq!(value[0]["shapeType"], "diamond");
+        assert_eq!(value[0]["fill"]["color"], "#336699");
+        assert_eq!(value[0]["innerText"][0]["runs"][0]["text"], "Native");
+        assert_eq!(value[0]["pmStart"], 1.0);
+        assert_eq!(value[0]["pmEnd"], 2.0);
     }
 
     #[test]
