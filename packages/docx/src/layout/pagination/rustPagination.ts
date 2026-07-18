@@ -147,7 +147,6 @@ export function createRustPaginationSource(
   opts: RustPaginationSourceOptions = {}
 ): RustPaginationSource {
   let engine: RustLayoutEngine | null = opts.engine ?? null;
-  let loggedActive = false;
   const stats: RustPaginationStats = { rustPaginated: 0, engineErrors: 0 };
 
   const ready: Promise<void> = engine
@@ -188,11 +187,6 @@ export function createRustPaginationSource(
         throw error instanceof Error ? error : new Error(String(error));
       }
       stats.rustPaginated++;
-      if (!loggedActive) {
-        loggedActive = true;
-        // eslint-disable-next-line no-console -- one-time readiness signal (e2e reads it)
-        console.debug('[rustPagination] rust engine active (first rust-paginated layout pass)');
-      }
       return layout;
     },
   };

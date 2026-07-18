@@ -297,12 +297,12 @@ export interface DocxPackage {
  * Top-level parsed DOCX document — the result of `parseDocx(buffer)`.
  *
  * Wraps the unzipped DOCX package (`document.xml`, `styles.xml`, etc.),
- * the original buffer for round-trip saves, and any template variables /
- * parse warnings detected during ingestion.
+ * the original buffer for round-trip saves and parse warnings detected during
+ * ingestion.
  *
  * @example
  * ```ts
- * import { parseDocx } from '@betteroffice/docx/headless';
+ * import { parseDocx } from '@betteroffice/docx/docx';
  * const doc = await parseDocx(buffer);
  * console.log(doc.package.document.content.length);
  * ```
@@ -314,8 +314,6 @@ export interface Document {
   package: DocxPackage;
   /** Original DOCX buffer. Kept for round-trip saves that preserve untouched parts. */
   originalBuffer?: ArrayBuffer;
-  /** Detected docxtemplater variables (e.g. `{name}`, `{address}`). Populated when the document is recognized as a template. */
-  templateVariables?: string[];
   /** Non-fatal parser diagnostics — malformed parts, unsupported features, fallbacks. */
   warnings?: string[];
 }

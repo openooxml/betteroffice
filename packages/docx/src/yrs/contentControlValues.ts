@@ -12,18 +12,7 @@
  * same capture-and-replay contract used everywhere else for SDTs.
  */
 
-import type { Document, BlockContent, SdtProperties, Run, InlineSdt } from '../types/document';
-import {
-  ContentControlLockedError,
-  ContentControlBoundError,
-  isContentLocked,
-  isDataBound,
-  clearShowingPlaceholderXml,
-  applyControlMutation,
-  type ContentControlFilter,
-  type BlockControlOp,
-  type InlineControlOp,
-} from './contentControls';
+import type { BlockContent, SdtProperties, Run } from '../types/document';
 
 /** A typed value to apply to a content control. */
 export type ContentControlValue =
@@ -146,6 +135,13 @@ function paragraph(text: string, font?: string): BlockContent {
   return { type: 'paragraph', content: [run] };
 }
 
+function clearShowingPlaceholderXml(raw: string | undefined): string | undefined {
+  if (!raw) return raw;
+  return raw
+    .replace(/<w:showingPlcHdr\b[^>]*\/>/g, '')
+    .replace(/<w:showingPlcHdr\b[^>]*>[\s\S]*?<\/w:showingPlcHdr>/g, '');
+}
+
 /** Clear a control's placeholder state (real content is being written). */
 function withoutPlaceholder(props: SdtProperties, nextRaw: string): SdtProperties {
   const cleaned = clearShowingPlaceholderXml(nextRaw);
@@ -266,63 +262,4 @@ export function applyContentControlValue(
       };
     }
   }
-}
-
-/**
- * Set a typed value (dropdown selection / checkbox / date) on the first control
- * matching `filter` — **block-level OR inline** (inline includes controls inside
- * table cells, and with `includeHeadersFooters: true`, headers/footers) — returning a new
- * {@link Document}. Updates both the visible content and the structured raw
- * state (dropdown `w:lastValue`, `w14:checked`, `w:date/@w:fullDate`), so the
- * result round-trips and Word shows the new value.
- *
- * Pass `{ all: true }` to set the value on **every** control matching `filter`
- * (a value shared across duplicated controls) instead of just the first.
- *
- * Throws `ContentControlNotFoundError` if nothing matches,
- * {@link ContentControlLockedError} if content-locked,
- * {@link ContentControlBoundError} if data-bound (the store would override the
- * write), and {@link ContentControlValueError} if the value doesn't fit the
- * control type. The lock/bound guards are overridable with `{ force: true }`.
- */
-export function setContentControlValue(
-  doc: Document,
-  filter: ContentControlFilter,
-  value: ContentControlValue,
-  options: { force?: boolean; includeHeadersFooters?: boolean; all?: boolean } = {}
-): Document {
-  const guard = (props: SdtProperties): void => {
-    if (!options.force && isContentLocked(props.lock)) {
-      throw new ContentControlLockedError(props.lock, 'edit');
-    }
-    if (!options.force && isDataBound(props)) {
-      throw new ContentControlBoundError();
-    }
-  };
-  const blockOp: BlockControlOp = (control) => {
-    guard(control.properties);
-    const { properties, content } = applyContentControlValue(control.properties, value);
-    return [{ ...control, properties, content }];
-  };
-  const inlineOp: InlineControlOp = (control) => {
-    guard(control.properties);
-    // The typed setters render their display value as a single paragraph of
-    // runs; lift those runs into the inline control's inline content (mirroring
-    // how setContentControlContent fills an inline control).
-    const { properties, content } = applyContentControlValue(control.properties, value);
-    const display = content[0];
-    const inlineContent = (
-      display && display.type === 'paragraph' ? display.content : []
-    ) as InlineSdt['content'];
-    return [{ ...control, properties, content: inlineContent }];
-  };
-  return applyControlMutation(
-    doc,
-    filter,
-    blockOp,
-    inlineOp,
-    options.includeHeadersFooters ?? false,
-    undefined,
-    options.all ?? false
-  );
 }

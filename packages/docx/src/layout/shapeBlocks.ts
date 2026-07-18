@@ -1,6 +1,4 @@
-import { presetGeometryToPath } from '@betteroffice/drawingml';
-
-import { resolveColorValueToHex } from '../docx/drawingUtils';
+import { presetGeometryToPath, resolveColorValueToHex } from '@betteroffice/drawingml';
 import type {
   Paragraph,
   ParagraphContent,

@@ -22,8 +22,7 @@ const utf8Encoder = new TextEncoder();
 // round-trips a part unchanged (the default TextDecoder would strip it).
 const utf8Decoder = new TextDecoder('utf-8', { ignoreBOM: true });
 
-// normalize part content to bytes. strings become utf-8 with no BOM, matching
-// how jszip previously encoded xml part strings.
+// normalize part content to bytes. strings become utf-8 with no BOM.
 export function toBytes(content: string | Uint8Array | ArrayBuffer): Uint8Array {
   if (typeof content === 'string') return utf8Encoder.encode(content);
   if (content instanceof Uint8Array) return content;

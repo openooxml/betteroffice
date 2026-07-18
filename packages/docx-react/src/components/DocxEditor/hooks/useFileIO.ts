@@ -1,7 +1,11 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import { DocumentAgent } from '@betteroffice/docx/agent';
-import { injectReplyRangeMarkers, injectTCReplyRangeMarkers } from '@betteroffice/docx/docx';
+import {
+  createDocx,
+  injectReplyRangeMarkers,
+  injectTCReplyRangeMarkers,
+  repackDocx,
+} from '@betteroffice/docx/docx';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
@@ -104,7 +108,6 @@ function printDisplayListPages(
  * Image insertion targets the authoritative body Yrs selection.
  */
 export function useFileIO({
-  agentRef,
   pagedEditorRef,
   displayList,
   resolveImage,
@@ -118,7 +121,6 @@ export function useFileIO({
   loadBuffer,
   focusActiveEditor,
 }: {
-  agentRef: React.RefObject<DocumentAgent | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   displayList: DisplayList | null;
   resolveImage: ImageResolver;
@@ -136,32 +138,24 @@ export function useFileIO({
   const docxInputRef = useRef<HTMLInputElement>(null);
 
   const handleSave = useCallback(
-    async (_options?: { selective?: boolean }): Promise<ArrayBuffer | null> => {
-      if (!agentRef.current) return null;
-
+    async (): Promise<ArrayBuffer | null> => {
       try {
-        const agentDoc = agentRef.current.getDocument();
-        const editor = pagedEditorRef.current;
-
-        // Project every Yrs-owned story exactly once. The document agent keeps
-        // the original ZIP package while the live model supplies its contents.
-        const editorDoc = editor?.getDocument();
-        if (editorDoc?.package?.document) {
-          agentDoc.package = editorDoc.package;
-        }
+        const document = pagedEditorRef.current?.getDocument();
+        if (!document) return null;
 
         // Sync React comments state (including new replies) back to the document model
-        agentDoc.package.document.comments = comments;
+        document.package.document.comments = comments;
 
         // Inject commentRangeStart/End for reply comments that share the parent's range.
         // Pages/Word require every comment (including replies) to have range markers in document.xml.
-        injectReplyRangeMarkers(agentDoc.package.document.content, comments);
+        injectReplyRangeMarkers(document.package.document.content, comments);
         // Also inject range markers for comments that reply to tracked changes.
-        injectTCReplyRangeMarkers(agentDoc.package.document.content, comments);
+        injectTCReplyRangeMarkers(document.package.document.content, comments);
 
-        // Yrs owns all stories, so PM paragraph-diff metadata can no longer
-        // drive selective serialization. Repack from the projected Document.
-        const buffer = await agentRef.current.toBuffer();
+        const buffer = document.originalBuffer
+          ? await repackDocx(document)
+          : await createDocx(document);
+        document.originalBuffer = buffer;
 
         onSave?.(buffer);
         return buffer;
@@ -170,7 +164,7 @@ export function useFileIO({
         return null;
       }
     },
-    [agentRef, pagedEditorRef, comments, onSave, onError]
+    [pagedEditorRef, comments, onSave, onError]
   );
 
   const handleDirectPrint = useCallback(() => {

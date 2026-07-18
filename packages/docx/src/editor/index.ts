@@ -7,6 +7,3 @@
 
 export { computeLayout, getLayoutKernelInputs } from './computeLayout';
 export type { ComputeLayoutInputs, LayoutComputation, MeasureBlocksFn } from './computeLayout';
-export { createLayoutScheduler } from './layoutScheduler';
-export type { LayoutScheduler } from './layoutScheduler';
-export { stripScrollFlag } from './scrollFlag';

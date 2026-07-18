@@ -22,9 +22,6 @@ export * from './measuredBlock';
 export { collectSectionConfigs } from './sectionConfigs';
 export type { SectionLayoutConfig } from './sectionConfigs';
 
-// Layout checkpoints — optional derived data riding on `Layout.checkpoints`.
-export type { LayoutCheckpoint, PageFlowGeometry, PageSectionState } from './checkpoints';
-
 // The mandatory Rust pagination source (wasm docx-layout seam).
 export {
   createRustPaginationSource,
@@ -37,7 +34,6 @@ export {
 } from './rustPagination';
 
 export type { FootnoteContent } from './types';
-export { findPageIndexContainingPmPos } from './findPageIndexContainingPmPos';
 export {
   isFloatingTextBoxBlock,
   floatingTextBoxWrapsText,

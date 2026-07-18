@@ -4,10 +4,9 @@ import { mergeFontFamily } from './fontFamilyMerge';
 /**
  * Merge two `TextFormatting` objects (source overrides target).
  *
- * Used everywhere OOXML rPr inheritance is resolved — basedOn chains in
- * `styleParser`, paragraph-style merge in `styleResolver`, and pPr/rPr
- * onto style rPr in `toProseDoc`. Keeping one implementation prevents the
- * three diverging again (#391, #394).
+ * Used everywhere OOXML rPr inheritance is resolved — parsed basedOn chains,
+ * paragraph-style merge in `styleResolver`, and pPr/rPr projection onto style
+ * rPr. Keeping one implementation prevents those paths diverging again.
  *
  * Merge rules per ECMA-376 §17.3.2:
  * - `fontFamily` — per-slot merge (§17.3.2.27): each ascii/hAnsi/eastAsia/cs

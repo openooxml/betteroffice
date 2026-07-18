@@ -26,7 +26,6 @@ import {
 } from '@betteroffice/docx/yrs';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { RustFontChainsProvider } from './useRustMeasurement';
-import { getPerfTrace } from '../internals/perfTrace';
 
 // provider for the canvas renderer's display list: returns the injected value
 // when the host supplies one, otherwise the demo fixture. consumers only ever
@@ -45,12 +44,9 @@ export interface UseRustDisplayListResult {
   /** Binary retained-frame state; null on the compatibility JSON path. */
   frame: RetainedFrame | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
-  applyInput(text: string, perfKeystroke?: number | readonly number[]): Promise<boolean>;
+  applyInput(text: string): Promise<boolean>;
   /** Apply one collapsed deletion/paragraph merge through the resident engine. */
-  applyDelete(
-    direction: 'backward' | 'forward',
-    perfKeystroke?: number | readonly number[]
-  ): Promise<boolean>;
+  applyDelete(direction: 'backward' | 'forward'): Promise<boolean>;
   /** True once the dedicated worker owns resident frame production. */
   workerActive: boolean;
   attachOffscreenCanvases(
@@ -132,122 +128,35 @@ export function useRustDisplayList(
   );
 
   const applyResidentInput = useCallback(
-    (
-      operation: ResidentInputOperation,
-      perfInput?: number | readonly number[]
-    ): Promise<boolean> => {
-      const perfKeystrokes: readonly number[] =
-        typeof perfInput === 'number' ? [perfInput] : (perfInput ?? []);
-      const perfKeystroke = perfKeystrokes[perfKeystrokes.length - 1];
-      const inputBytes =
-        operation.kind === 'insert' ? new TextEncoder().encode(operation.text).byteLength : 0;
-      const operationDetail = operation.kind === 'insert' ? 'applyInput' : 'applyDelete';
+    (operation: ResidentInputOperation): Promise<boolean> => {
       const run = async (): Promise<boolean> => {
         const worker = workerRef.current;
         const currentFrame = frameRef.current;
         if (!worker || !worker.client.isReady() || !currentFrame) return false;
         const selection = worker.engine.selection();
         if (!selection) return false;
-        const trace = getPerfTrace();
-        const started = trace ? performance.now() : 0;
         const result =
           operation.kind === 'insert'
             ? await worker.client.applyInput(
                 operation.text,
                 selection,
                 currentFrame.frameEpoch,
-                Boolean(trace)
+                false
               )
             : await worker.client.applyDelete(
                 operation.direction,
                 selection,
                 currentFrame.frameEpoch,
-                Boolean(trace)
+                false
               );
         if (!result.applied) return false;
-        const received = trace ? performance.now() : 0;
-        recordPerf(trace, perfKeystroke, 'engineWorker', result.engineMs, {
-          calls: 1,
-          detail: operationDetail,
-        });
-        if (result.engineProfile) {
-          recordPerf(trace, perfKeystroke, 'engineSelection', result.engineProfile.selectionMs, {
-            calls: 1,
-          });
-          recordPerf(trace, perfKeystroke, 'engineWorkerTotal', result.workerTotalMs, {
-            calls: 1,
-            detail: 'request through worker replay',
-          });
-          recordPerf(trace, perfKeystroke, 'engineEdit', result.engineProfile.editMs, { calls: 1 });
-          recordPerf(trace, perfKeystroke, 'engineLower', result.engineProfile.lowerMs, {
-            calls: 1,
-          });
-          recordPerf(trace, perfKeystroke, 'engineMeasure', result.engineProfile.measureMs, {
-            calls: 1,
-          });
-          recordPerf(trace, perfKeystroke, 'enginePaginate', result.engineProfile.paginateMs, {
-            calls: 1,
-          });
-          recordPerf(
-            trace,
-            perfKeystroke,
-            'engineDisplayInput',
-            result.engineProfile.displayInputMs,
-            { calls: 1 }
-          );
-          recordPerf(
-            trace,
-            perfKeystroke,
-            'engineDisplayBuild',
-            result.engineProfile.displayBuildMs,
-            { calls: 1 }
-          );
-          recordPerf(
-            trace,
-            perfKeystroke,
-            'engineDisplayFinalize',
-            result.engineProfile.displayFinalizeMs,
-            { calls: 1 }
-          );
-          recordPerf(trace, perfKeystroke, 'engineDisplay', result.engineProfile.displayMs, {
-            calls: 1,
-          });
-          recordPerf(trace, perfKeystroke, 'engineEncode', result.engineProfile.encodeMs, {
-            calls: 1,
-          });
-        }
-        recordPerf(trace, perfKeystroke, 'workerRoundtrip', received - started, {
-          inputBytes,
-          outputBytes: result.frame.byteLength,
-          calls: 1,
-          detail: 'transferable FrameDelta',
-        });
-        const decodeStarted = trace ? performance.now() : 0;
         const delta = decodeFrameDelta(result.frame);
-        trace?.recordFrameDelta(delta.full);
         const nextFrame = applyFrameDeltaOwned(currentFrame, delta);
-        recordPerf(trace, perfKeystroke, 'deltaDecode', performance.now() - decodeStarted, {
-          inputBytes: result.frame.byteLength,
-          calls: 1,
-          detail: `${nextFrame.damagedPageIds.size}/${nextFrame.pages.length} pages`,
-        });
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update, 'body');
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
-        }
-        recordPerf(trace, perfKeystroke, 'displayList', performance.now() - started, {
-          inputBytes,
-          outputBytes: result.frame.byteLength,
-          calls: 1,
-          detail: `${operationDetail}; ${nextFrame.damagedPageIds.size}/${nextFrame.pages.length} pages`,
-        });
-        if (result.replayedPages > 0) {
-          recordPerf(trace, perfKeystroke, 'canvasReplay', result.replayMs, {
-            calls: result.replayedPages,
-            detail: `${result.replayedPages}/${nextFrame.pages.length} pages; worker`,
-          });
         }
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -257,13 +166,6 @@ export function useRustDisplayList(
         setDisplayList(nextFrame.displayList);
         setError(null);
         setLoading(false);
-        for (const keystroke of perfKeystrokes) {
-          recordPerf(trace, keystroke, 'inputAck', 0, {
-            calls: 1,
-            detail:
-              operation.kind === 'insert' ? `${operation.text.length} chars` : operation.direction,
-          });
-        }
         return true;
       };
       const pending = workerInputQueueRef.current.then(run, run);
@@ -290,14 +192,13 @@ export function useRustDisplayList(
   );
 
   const applyInput = useCallback(
-    (text: string, perfInput?: number | readonly number[]) =>
-      applyResidentInput({ kind: 'insert', text }, perfInput),
+    (text: string) => applyResidentInput({ kind: 'insert', text }),
     [applyResidentInput]
   );
 
   const applyDelete = useCallback(
-    (direction: 'backward' | 'forward', perfInput?: number | readonly number[]) =>
-      applyResidentInput({ kind: 'delete', direction }, perfInput),
+    (direction: 'backward' | 'forward') =>
+      applyResidentInput({ kind: 'delete', direction }),
     [applyResidentInput]
   );
 
@@ -400,7 +301,6 @@ export function useRustDisplayList(
           .then((result) => {
             const previous = bootstrapping ? null : frameRef.current;
             const delta = decodeFrameDelta(result.frame);
-            getPerfTrace()?.recordFrameDelta(delta.full);
             const nextFrame = applyFrameDelta(previous, delta);
             return { displayList: nextFrame.displayList, frame: nextFrame };
           })
@@ -455,18 +355,6 @@ function isWorkerHostEngine(
   );
 }
 
-function recordPerf(
-  trace: ReturnType<typeof getPerfTrace>,
-  keystroke: number | undefined,
-  stage: Parameters<NonNullable<ReturnType<typeof getPerfTrace>>['record']>[0],
-  durationMs: number,
-  metadata: Parameters<NonNullable<ReturnType<typeof getPerfTrace>>['record']>[2]
-): void {
-  if (!trace) return;
-  if (keystroke !== undefined) trace.recordForKeystroke(keystroke, stage, durationMs, metadata);
-  else trace.record(stage, durationMs, metadata);
-}
-
 // memoized per display list: one query facade (and one JSON stringify inside
 // it) per build, shared by pointer routing, selection overlay, and sidebar
 // anchors. Null while the canvas is off or before the first build lands.
@@ -509,12 +397,9 @@ export interface UseCanvasRendererResult {
   /** Glyph outlines sourced from the same resident font store as measurement. */
   glyphOutlineProvider: GlyphOutlineProvider | null;
   /** One-call ordinary text insertion; false until resident state is ready. */
-  applyInput(text: string, perfKeystroke?: number | readonly number[]): Promise<boolean>;
+  applyInput(text: string): Promise<boolean>;
   /** One-call ordinary deletion/merge; false until resident state is ready. */
-  applyDelete(
-    direction: 'backward' | 'forward',
-    perfKeystroke?: number | readonly number[]
-  ): Promise<boolean>;
+  applyDelete(direction: 'backward' | 'forward'): Promise<boolean>;
   /** OffscreenCanvas replay bridge; null keeps DOM-canvas replay. */
   offscreenReplay: {
     attach(
@@ -603,15 +488,7 @@ export function useCanvasRenderer(
   // CanvasPagesView.
   const offscreenAllowed = (() => {
     if (typeof window === 'undefined') return false;
-    const params = new URLSearchParams(window.location.search);
-    const override = params.get('offscreenReplay');
-    if (override === '0') return false;
-    // Several canvas parity gates intentionally inspect pixels through the
-    // element's 2D context, which the platform permanently disables after
-    // transferControlToOffscreen(). Keep that diagnostic surface readable;
-    // the dedicated `offscreenReplay=1` E2E gate exercises the transferred
-    // production surface itself.
-    return params.get('e2e') !== '1' || override === '1';
+    return new URLSearchParams(window.location.search).get('offscreenReplay') !== '0';
   })();
   const offscreenReplay = useMemo(
     () =>

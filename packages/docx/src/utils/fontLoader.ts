@@ -482,8 +482,7 @@ async function waitForFontAvailable(fontFamily: string, timeout: number): Promis
 // Probe scratchpad. The probe runs once per family per document load, so a
 // fresh canvas per call is pure waste — one shared context suffices, and the
 // fallback-font widths ('72px sans-serif' over a fixed string) are session
-// constants worth memoizing. Reset by __resetFontLoaderState (tests swap the
-// global document, which would otherwise leave a stale context behind).
+// constants worth memoizing.
 let probeContext: CanvasRenderingContext2D | null | undefined;
 const fallbackWidthCache = new Map<string, number>();
 const PROBE_TEXT = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -859,30 +858,6 @@ export async function loadFontWithMapping(fontFamily: string): Promise<boolean> 
 
   // No mapping needed, load directly
   return loadFont(googleFont);
-}
-
-/**
- * Test-only: reset every piece of module-level loader state. fontLoader is a
- * module singleton, and `bun test` runs all files in one process — without a
- * reset, family names cached by one test file leak into every later one.
- *
- * Not re-exported from the package entry; import from this module directly.
- *
- * @internal
- */
-export function __resetFontLoaderState(): void {
-  loadedFonts.clear();
-  loadingFonts.clear();
-  loadedFaces.clear();
-  loadingFaces.clear();
-  loadCallbacks.clear();
-  errorCallbacks.clear();
-  registeredFamilies.clear();
-  probeSatisfied.clear();
-  fallbackWidthCache.clear();
-  probeContext = undefined;
-  googleFontsEnabled = true;
-  isLoadingAny = false;
 }
 
 /**
