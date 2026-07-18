@@ -18,9 +18,9 @@ wasm-bindgen = "0.2"
 js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-betteroffice-xlsx = { path = "../betteroffice-xlsx", default-features = false }
+betteroffice-xlsx = { workspace = true, default-features = false }
 
 [dev-dependencies]
-ooxml-opc = { path = "../ooxml-opc" }
-xlsx-model = { path = "../xlsx-model" }
-xlsx-parse = { path = "../xlsx-parse" }
+ooxml-opc.workspace = true
+xlsx-model.workspace = true
+xlsx-parse.workspace = true

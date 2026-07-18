@@ -15,7 +15,7 @@ wasm-opt = ["-O3"]
 [dependencies]
 docx-layout = { path = "../docx-layout" }
 js-sys = "0.3"
-ooxml-opc = { path = "../ooxml-opc" }
+ooxml-opc.workspace = true
 ooxml-text = { path = "../ooxml-text" }
 wasm-bindgen = "0.2"
 

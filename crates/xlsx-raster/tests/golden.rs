@@ -1,5 +1,5 @@
 //! png golden harness: scenarios are byte-compared against committed pngs.
-//! regenerate deliberately with `GOLDEN_UPDATE=1 cargo test -p xlsx-raster`.
+//! regenerate deliberately with `GOLDEN_UPDATE=1 cargo test -p betteroffice-xlsx-raster`.
 
 use std::path::PathBuf;
 
@@ -209,14 +209,14 @@ fn check(name: &str, dl: &DisplayList) {
     }
     let expected = std::fs::read(&path).unwrap_or_else(|_| {
         panic!(
-            "missing golden {}: regenerate with `GOLDEN_UPDATE=1 cargo test -p xlsx-raster`",
+            "missing golden {}: regenerate with `GOLDEN_UPDATE=1 cargo test -p betteroffice-xlsx-raster`",
             path.display()
         )
     });
     assert!(
         actual == expected,
         "golden mismatch for {name}: if intended, regenerate with \
-         `GOLDEN_UPDATE=1 cargo test -p xlsx-raster`"
+         `GOLDEN_UPDATE=1 cargo test -p betteroffice-xlsx-raster`"
     );
 }
 

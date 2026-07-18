@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": ["apps/*", "packages/*", "crates"],
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",
     "dev:docs": "bun run --filter './apps/docs' dev",
@@ -18,8 +18,10 @@
     "typecheck": "bun run --filter '*' typecheck",
     "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
     "changeset": "changeset",
-    "version-packages": "changeset version",
-    "release": "bun run build:packages && changeset publish",
+    "version-packages": "node scripts/version-packages.mjs",
+    "publish:crates": "node scripts/publish-crates.mjs",
+    "publish:packages": "bun run publish:crates && node scripts/rewrite-workspace-deps.mjs && changeset publish",
+    "release": "bun run build:packages && bun run publish:packages",
     "preview": "bun run --filter './apps/web' preview",
     "deploy": "bun run --filter './apps/web' deploy",
     "cf-typegen": "bun run --filter './apps/web' cf-typegen"

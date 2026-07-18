@@ -1,7 +1,7 @@
 name: Release
 
 # Pending changesets → open/update a "chore: release" PR (version bumps +
-# CHANGELOGs). No pending changesets → run the gate and publish to npm.
+# CHANGELOGs). No pending changesets → run the gate and publish packages.
 on:
   push:
     branches: [main]
@@ -13,9 +13,10 @@ concurrency:
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: write
       pull-requests: write
@@ -50,12 +51,10 @@ jobs:
           echo "publishing=$([ "$count" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.pending.outputs.publishing == 'true'
         with:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
-        if: steps.pending.outputs.publishing == 'true'
 
       - name: Install wasm-pack
         if: steps.pending.outputs.publishing == 'true'
@@ -73,9 +72,32 @@ jobs:
         if: steps.pending.outputs.publishing == 'true'
         run: bun run build:packages
 
+      - name: Detect crates.io bootstrap token
+        id: crates-bootstrap
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Authenticate to crates.io
+        id: crates-auth
+        if: steps.pending.outputs.publishing == 'true' && steps.crates-bootstrap.outputs.enabled != 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish Rust crates
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.crates-auth.outputs.token }}
+        run: bun run publish:crates
+
       # changesets does not rewrite the workspace: protocol here, so pin it to
       # concrete versions before publish (ephemeral checkout; source is unchanged).
-      - name: Pin workspace deps for publish
+      - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
         run: node scripts/rewrite-workspace-deps.mjs
 

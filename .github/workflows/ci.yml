@@ -93,6 +93,10 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo test
 
+      - name: Package publishable crates
+        if: steps.ws.outputs.present == 'true'
+        run: node scripts/publish-crates.mjs --dry-run
+
       - name: License and advisory gate
         if: steps.ws.outputs.present == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.0.20

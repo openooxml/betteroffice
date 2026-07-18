@@ -1,12 +1,17 @@
 [package]
-name = "xlsx-raster"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-xlsx-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Server-side raster backend (tiny-skia) for the display list. Never part of the wasm build."
+
+[lib]
+name = "xlsx_raster"
 
 [dependencies]
 tiny-skia = "0.11"
 rustybuzz = "0.20"
-xlsx-render = { path = "../xlsx-render" }
+xlsx-render.workspace = true

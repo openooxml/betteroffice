@@ -1,11 +1,16 @@
 [package]
-name = "xlsx-parse"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
-description = "Streaming SpreadsheetML parser and serializer (quick-xml) building the xlsx-model workbook."
+name = "betteroffice-xlsx-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Streaming SpreadsheetML parser and serializer building the BetterOffice workbook model."
+
+[lib]
+name = "xlsx_parse"
 
 [dependencies]
 quick-xml = "0.41"
-xlsx-model = { path = "../xlsx-model" }
+xlsx-model.workspace = true
