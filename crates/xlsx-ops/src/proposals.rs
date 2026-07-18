@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::CellState;
+
 /// one cell edit inside a proposal. `input` is the raw editor string re-applied
 /// on accept and stays off the wire; `old_text`/`new_text` are display texts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13,6 +15,8 @@ pub struct ProposedEdit {
     pub col: u32,
     #[serde(skip)]
     pub input: String,
+    #[serde(skip)]
+    pub old_state: CellState,
     pub a1: String,
     pub old_text: String,
     pub new_text: String,
@@ -67,6 +71,10 @@ impl ProposalSet {
         self.proposals.retain(|p| p.id != id);
         before != self.proposals.len()
     }
+
+    pub fn clear(&mut self) {
+        self.proposals.clear();
+    }
 }
 
 #[cfg(test)]
@@ -79,6 +87,7 @@ mod tests {
             row: 0,
             col: 0,
             input: new.to_string(),
+            old_state: CellState::default(),
             a1: a1.to_string(),
             old_text: old.to_string(),
             new_text: new.to_string(),

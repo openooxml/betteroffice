@@ -2,6 +2,7 @@
 //! equivalent ast.
 
 use crate::parser::{BinaryOp, Expr, UnaryOp};
+use xlsx_model::CellRef;
 
 // mirrors the parser's precedence table so parens are emitted only where
 // re-parsing would otherwise change the tree
@@ -41,7 +42,9 @@ fn sheet_prefix(sheet: &Option<String>) -> String {
         Some(name) => {
             let simple = !name.is_empty()
                 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && !name.chars().next().is_some_and(|c| c.is_ascii_digit());
+                && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && CellRef::parse_a1(name).is_err()
+                && !is_r1c1_reference(name);
             if simple {
                 format!("{name}!")
             } else {
@@ -49,6 +52,18 @@ fn sheet_prefix(sheet: &Option<String>) -> String {
             }
         }
     }
+}
+
+fn is_r1c1_reference(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if matches!(upper.as_str(), "R" | "C") {
+        return true;
+    }
+    let Some(rest) = upper.strip_prefix('R') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    rest.as_bytes().get(digits) == Some(&b'C')
 }
 
 impl Expr {
@@ -132,5 +147,21 @@ mod tests {
         assert_eq!(ast.to_formula(), "(1+2)*3");
         let ast = parse_formula("1+(2*3)").unwrap();
         assert_eq!(ast.to_formula(), "1+2*3");
+    }
+
+    #[test]
+    fn quotes_cell_like_sheet_names() {
+        assert_eq!(parse_formula("'A1'!B2").unwrap().to_formula(), "'A1'!B2");
+        assert_eq!(
+            parse_formula("'R1C1'!B2").unwrap().to_formula(),
+            "'R1C1'!B2"
+        );
+        assert_eq!(parse_formula("'R'!B2").unwrap().to_formula(), "'R'!B2");
+        assert_eq!(parse_formula("'C'!B2").unwrap().to_formula(), "'C'!B2");
+        assert_eq!(parse_formula("'R4C'!B2").unwrap().to_formula(), "'R4C'!B2");
+        assert_eq!(
+            parse_formula("'R1C1b'!B2").unwrap().to_formula(),
+            "'R1C1b'!B2"
+        );
     }
 }

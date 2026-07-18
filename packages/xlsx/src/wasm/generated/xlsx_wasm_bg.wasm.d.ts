@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const __wbg_xlsxdocument_free: (a: number, b: number) => void;
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];

@@ -1,6 +1,8 @@
 //! dependency extraction: the set of cells/ranges a formula reads.
 
-use xlsx_model::CellRange;
+use std::collections::HashSet;
+
+use xlsx_model::{CellRange, CellRef};
 
 use crate::parser::Expr;
 
@@ -8,15 +10,21 @@ use crate::parser::Expr;
 /// `sheet` is `None` for unqualified refs. order-preserving, de-duplicated.
 pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
     let mut out = Vec::new();
-    walk(expr, &mut out);
+    let mut seen = HashSet::new();
+    walk(expr, &mut out, &mut seen);
     out
 }
 
-fn walk(expr: &Expr, out: &mut Vec<(Option<String>, CellRange)>) {
+fn walk(
+    expr: &Expr,
+    out: &mut Vec<(Option<String>, CellRange)>,
+    seen: &mut HashSet<(Option<String>, CellRange)>,
+) {
     match expr {
         Expr::Ref { sheet, cell } => {
             push_unique(
                 out,
+                seen,
                 sheet.clone(),
                 CellRange {
                     start: *cell,
@@ -25,16 +33,16 @@ fn walk(expr: &Expr, out: &mut Vec<(Option<String>, CellRange)>) {
             );
         }
         Expr::Range { sheet, range } => {
-            push_unique(out, sheet.clone(), *range);
+            push_unique(out, seen, sheet.clone(), *range);
         }
-        Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, out),
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, out, seen),
         Expr::Binary { lhs, rhs, .. } => {
-            walk(lhs, out);
-            walk(rhs, out);
+            walk(lhs, out, seen);
+            walk(rhs, out, seen);
         }
         Expr::FuncCall { args, .. } => {
             for arg in args {
-                walk(arg, out);
+                walk(arg, out, seen);
             }
         }
         Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => {}
@@ -43,11 +51,16 @@ fn walk(expr: &Expr, out: &mut Vec<(Option<String>, CellRange)>) {
 
 fn push_unique(
     out: &mut Vec<(Option<String>, CellRange)>,
+    seen: &mut HashSet<(Option<String>, CellRange)>,
     sheet: Option<String>,
     range: CellRange,
 ) {
+    let range = CellRange::new(
+        CellRef::new(range.start.row, range.start.col),
+        CellRef::new(range.end.row, range.end.col),
+    );
     let entry = (sheet, range);
-    if !out.contains(&entry) {
+    if seen.insert(entry.clone()) {
         out.push(entry);
     }
 }
@@ -79,7 +92,7 @@ mod tests {
 
     #[test]
     fn dedups_repeated_refs() {
-        assert_eq!(refs("A1 + A1 * A1"), vec!["A1"]);
+        assert_eq!(refs("A1 + $A1 * A$1 + $A$1"), vec!["A1"]);
     }
 
     #[test]

@@ -56,25 +56,40 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
     if index as usize > depth {
         return err(ErrorValue::Ref);
     }
-    let key = |i: usize| {
-        if vertical {
+    let mut found = None;
+    for i in 0..lines {
+        let key = if vertical {
             area.get(ctx, i, 0)
         } else {
             area.get(ctx, 0, i)
+        };
+        let key = match key {
+            Ok(key) => key,
+            Err(error) => return err(error),
+        };
+        let ordering = cmp_values(&key, &target);
+        if approximate {
+            if ordering != Ordering::Greater {
+                found = Some(i);
+            } else {
+                break;
+            }
+        } else if ordering == Ordering::Equal {
+            found = Some(i);
+            break;
         }
-    };
-    let found = if approximate {
-        approximate_row(lines, &target, key)
-    } else {
-        (0..lines).find(|&i| cmp_values(&key(i), &target) == Ordering::Equal)
-    };
+    }
     match found {
         Some(i) => {
             let off = index as usize - 1;
-            if vertical {
+            let value = if vertical {
                 area.get(ctx, i, off)
             } else {
                 area.get(ctx, off, i)
+            };
+            match value {
+                Ok(value) => value,
+                Err(error) => err(error),
             }
         }
         None => err(ErrorValue::NA),
@@ -104,7 +119,10 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
-    let values = area.values(ctx);
+    let values = match area.values(ctx) {
+        Ok(values) => values,
+        Err(error) => return err(error),
+    };
     let pos = match match_type {
         0 => values
             .iter()
@@ -159,7 +177,10 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if row < 1 || col < 1 || row as usize > area.rows || col as usize > area.cols {
         return err(ErrorValue::Ref);
     }
-    area.get(ctx, row as usize - 1, col as usize - 1)
+    match area.get(ctx, row as usize - 1, col as usize - 1) {
+        Ok(value) => value,
+        Err(error) => err(error),
+    }
 }
 
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match
@@ -180,23 +201,35 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Some(a) => a,
         None => return err(ErrorValue::Value),
     };
-    let keys = lookup.values(ctx);
-    let results = result.values(ctx);
-    if keys.len() != results.len() {
+    if lookup.cell_count() != result.cell_count() {
         return err(ErrorValue::Value);
     }
-    match keys
-        .iter()
-        .position(|v| cmp_values(v, &target) == Ordering::Equal)
-    {
-        Some(i) => results[i].clone(),
-        None => {
-            if args.len() >= 4 {
-                evaluate(&args[3], ctx)
-            } else {
-                err(ErrorValue::NA)
-            }
+    let count = lookup.cell_count().unwrap_or(0);
+    let cols = u64::try_from(lookup.cols).unwrap_or(0);
+    for index in 0..count {
+        let row = match usize::try_from(index / cols) {
+            Ok(row) => row,
+            Err(_) => return err(ErrorValue::Num),
+        };
+        let col = match usize::try_from(index % cols) {
+            Ok(col) => col,
+            Err(_) => return err(ErrorValue::Num),
+        };
+        let key = match lookup.get(ctx, row, col) {
+            Ok(key) => key,
+            Err(error) => return err(error),
+        };
+        if cmp_values(&key, &target) == Ordering::Equal {
+            return match result.get(ctx, row, col) {
+                Ok(value) => value,
+                Err(error) => err(error),
+            };
         }
+    }
+    if args.len() >= 4 {
+        evaluate(&args[3], ctx)
+    } else {
+        err(ErrorValue::NA)
     }
 }
 

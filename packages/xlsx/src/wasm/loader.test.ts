@@ -43,6 +43,7 @@ describe('wasm loader', () => {
       expect(info.activeSheet).toBe(0);
       expect(info.contentWidth).toBeGreaterThan(0);
       expect(info.contentHeight).toBeGreaterThan(0);
+      expect(handle.calculationStatus()).toEqual({ limitedCells: [] });
     } finally {
       handle.dispose();
     }

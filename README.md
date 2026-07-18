@@ -19,6 +19,8 @@
 
 The document engines are Rust crates compiled to WebAssembly for the browser and running natively on servers. Every value from a user file is treated as attacker-controlled; guards are enforced by construction at the trust boundaries.
 
+Rust consumers should use `betteroffice-xlsx`; the lower-level `xlsx-*` crates are its engine components.
+
 | crate | what it does |
 |---|---|
 | [`ooxml-opc`](crates/ooxml-opc) | OPC (zip) container read/write with decompression-bomb and path-traversal guards — shared by every format |
@@ -27,6 +29,7 @@ The document engines are Rust crates compiled to WebAssembly for the browser and
 | [`docx-wasm`](crates/docx-wasm) | the wasm boundary for the document engine |
 | [`pptx-render`](crates/pptx-render) | PPTX composed-slide to display-list compiler |
 | [`pptx-wasm`](crates/pptx-wasm) | the wasm boundary for presentation rendering |
+| [`betteroffice-xlsx`](crates/betteroffice-xlsx) | typed XLSX editor, calculation, rendering, and save facade for Rust |
 | [`xlsx-model`](crates/xlsx-model) | workbook, cells, addresses, dates, styles, number formats |
 | [`xlsx-parse`](crates/xlsx-parse) | streaming SpreadsheetML parse and serialize |
 | [`xlsx-calc`](crates/xlsx-calc) | formula engine: parser, dependency graph, incremental recalc |

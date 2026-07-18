@@ -36,20 +36,22 @@ impl UndoStack {
 
     /// reverse the most recent transaction, returning the ops applied.
     pub fn undo(&mut self, wb: &mut Workbook) -> Result<Option<Vec<Op>>, OpError> {
-        let Some(ops) = self.undo.pop() else {
+        let Some(ops) = self.undo.last().cloned() else {
             return Ok(None);
         };
         let redo_inverse = apply_ops(wb, &ops)?;
+        self.undo.pop();
         self.redo.push(redo_inverse);
         Ok(Some(ops))
     }
 
     /// re-apply the most recently undone transaction.
     pub fn redo(&mut self, wb: &mut Workbook) -> Result<Option<Vec<Op>>, OpError> {
-        let Some(ops) = self.redo.pop() else {
+        let Some(ops) = self.redo.last().cloned() else {
             return Ok(None);
         };
         let undo_inverse = apply_ops(wb, &ops)?;
+        self.redo.pop();
         self.undo.push(undo_inverse);
         Ok(Some(ops))
     }
@@ -146,5 +148,24 @@ mod tests {
         let mut stack = UndoStack::new();
         assert_eq!(stack.undo(&mut wb).unwrap(), None);
         assert_eq!(stack.redo(&mut wb).unwrap(), None);
+    }
+
+    #[test]
+    fn failed_undo_keeps_history_and_workbook_state() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        let before = wb.clone();
+        let mut stack = UndoStack::new();
+        stack.undo.push(vec![
+            set("A1", 1.0),
+            Op::SetCell {
+                sheet: SheetId(9),
+                at: r("A1"),
+                cell: CellState::default(),
+            },
+        ]);
+        assert!(stack.undo(&mut wb).is_err());
+        assert!(stack.can_undo());
+        assert_eq!(wb, before);
     }
 }

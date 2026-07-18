@@ -4,8 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use betteroffice_xlsx::CellRange;
 use xlsx_cli::{RenderOptions, load_workbook, render, resolve_sheet, sheet_summaries};
-use xlsx_model::CellRange;
 
 const USAGE: &str = "\
 xlsx — headless renderer for OpenOOXML spreadsheets
@@ -132,7 +132,7 @@ fn cmd_info(args: &[String]) -> Result<(), String> {
     let bytes = std::fs::read(&input).map_err(|e| format!("reading {}: {e}", input.display()))?;
     let wb = load_workbook(&bytes)?;
 
-    println!("{}: {} sheet(s)", input.display(), wb.sheets.len());
+    println!("{}: {} sheet(s)", input.display(), wb.sheet_count());
     for s in sheet_summaries(&wb) {
         let range = s.used_range.as_deref().unwrap_or("(empty)");
         println!(

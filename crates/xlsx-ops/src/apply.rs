@@ -8,7 +8,7 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workbook};
 
 use crate::op::{CellState, Op};
-use crate::remap::remap_formulas;
+use crate::remap::{remap_formulas, rename_sheet_references};
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
 /// order, restores the prior workbook state.
@@ -19,6 +19,7 @@ pub struct InvertedOp(pub Vec<Op>);
 pub enum OpError {
     SheetNotFound(SheetId),
     SheetIndexOutOfRange(usize),
+    FormulaNotRewritable { sheet: SheetId, cell: CellRef },
 }
 
 impl fmt::Display for OpError {
@@ -26,6 +27,12 @@ impl fmt::Display for OpError {
         match self {
             OpError::SheetNotFound(id) => write!(f, "sheet {} not found", id.0),
             OpError::SheetIndexOutOfRange(i) => write!(f, "sheet index {i} out of range"),
+            OpError::FormulaNotRewritable { sheet, cell } => write!(
+                f,
+                "formula at sheet {}, {} cannot be safely rewritten",
+                sheet.0,
+                cell.to_a1()
+            ),
         }
     }
 }
@@ -110,11 +117,48 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         }
         Op::RemoveSheet { index } => remove_sheet(wb, *index),
         Op::RenameSheet { sheet, name } => {
-            let s = sheet_mut(wb, *sheet)?;
-            let old = std::mem::replace(&mut s.name, name.clone());
-            Ok(InvertedOp(vec![Op::RenameSheet {
+            let old = wb
+                .sheet(*sheet)
+                .ok_or(OpError::SheetNotFound(*sheet))?
+                .name
+                .clone();
+            let formulas = rename_sheet_references(wb, &old, name)?;
+            sheet_mut(wb, *sheet)?.name = name.clone();
+            Ok(InvertedOp(vec![Op::RestoreSheet {
                 sheet: *sheet,
                 name: old,
+                formulas,
+            }]))
+        }
+        Op::RestoreSheet {
+            sheet,
+            name,
+            formulas,
+        } => {
+            let old_name = wb
+                .sheet(*sheet)
+                .ok_or(OpError::SheetNotFound(*sheet))?
+                .name
+                .clone();
+            let mut old_formulas = Vec::with_capacity(formulas.len());
+            for (formula_sheet, cell, _) in formulas {
+                let sheet_ref = wb
+                    .sheet(*formula_sheet)
+                    .ok_or(OpError::SheetNotFound(*formula_sheet))?;
+                let state = sheet_ref
+                    .cell(*cell)
+                    .map(CellState::from)
+                    .unwrap_or_default();
+                old_formulas.push((*formula_sheet, *cell, state));
+            }
+            sheet_mut(wb, *sheet)?.name = name.clone();
+            for (formula_sheet, cell, state) in formulas {
+                sheet_mut(wb, *formula_sheet)?.set_cell(*cell, state.clone().into());
+            }
+            Ok(InvertedOp(vec![Op::RestoreSheet {
+                sheet: *sheet,
+                name: old_name,
+                formulas: old_formulas,
             }]))
         }
         Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
@@ -127,6 +171,13 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    let mut next = wb.clone();
+    let inverse = apply_ops_in_place(&mut next, ops)?;
+    *wb = next;
+    Ok(inverse)
+}
+
+fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut per_op: Vec<Vec<Op>> = Vec::with_capacity(ops.len());
     for op in ops {
         per_op.push(apply(wb, op)?.0);
@@ -204,7 +255,7 @@ fn insert_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
-    let restores = remap_formulas(wb, op);
+    let restores = remap_formulas(wb, op)?;
     let s = sheet_mut(wb, sheet)?;
     let dropped = shift_cells(s, op);
     shift_row_heights_up(s, at, count);
@@ -229,7 +280,7 @@ fn delete_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
-    let restores = remap_formulas(wb, op);
+    let restores = remap_formulas(wb, op)?;
     let s = sheet_mut(wb, sheet)?;
     let deleted = shift_cells(s, op);
     let dropped_heights = shift_row_heights_down(s, at, count);
@@ -264,7 +315,7 @@ fn insert_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
-    let restores = remap_formulas(wb, op);
+    let restores = remap_formulas(wb, op)?;
     let s = sheet_mut(wb, sheet)?;
     let dropped = shift_cells(s, op);
     shift_col_widths_up(s, at, count);
@@ -289,7 +340,7 @@ fn delete_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
-    let restores = remap_formulas(wb, op);
+    let restores = remap_formulas(wb, op)?;
     let s = sheet_mut(wb, sheet)?;
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
@@ -741,19 +792,96 @@ mod tests {
     #[test]
     fn rename_sheet_round_trip() {
         let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Formula"));
+        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+            r("A1"),
+            Cell {
+                formula: Some("Future!A1+Sheet1!A1".into()),
+                ..Cell::default()
+            },
+        );
         let inv = apply(
             &mut wb,
             &Op::RenameSheet {
                 sheet: SheetId(0),
-                name: "Renamed".into(),
+                name: "Future".into(),
             },
         )
         .unwrap();
-        assert_eq!(wb.sheets[0].name, "Renamed");
-        for iop in &inv.0 {
-            apply(&mut wb, iop).unwrap();
-        }
+        assert_eq!(wb.sheets[0].name, "Future");
+        assert_eq!(wb.formula(SheetId(1), r("A1")), Some("Future!A1+Future!A1"));
+        let redo = apply_ops(&mut wb, &inv.0).unwrap();
         assert_eq!(wb.sheets[0].name, "Sheet1");
+        assert_eq!(wb.formula(SheetId(1), r("A1")), Some("Future!A1+Sheet1!A1"));
+        apply_ops(&mut wb, &redo).unwrap();
+        assert_eq!(wb.sheets[0].name, "Future");
+        assert_eq!(wb.formula(SheetId(1), r("A1")), Some("Future!A1+Future!A1"));
+    }
+
+    #[test]
+    fn rename_undo_does_not_change_destination_only_references() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Formula"));
+        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+            r("A1"),
+            Cell {
+                formula: Some("Future!A1".into()),
+                ..Cell::default()
+            },
+        );
+        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+            r("A2"),
+            Cell {
+                formula: Some("Sheet1!A1".into()),
+                ..Cell::default()
+            },
+        );
+
+        let inverse = apply(
+            &mut wb,
+            &Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Future".into(),
+            },
+        )
+        .unwrap();
+        match &inverse.0[0] {
+            Op::RestoreSheet { formulas, .. } => assert_eq!(formulas.len(), 1),
+            other => panic!("expected restore sheet inverse, got {other:?}"),
+        }
+        apply_ops(&mut wb, &inverse.0).unwrap();
+
+        assert_eq!(wb.formula(SheetId(1), r("A1")), Some("Future!A1"));
+        assert_eq!(wb.formula(SheetId(1), r("A2")), Some("Sheet1!A1"));
+    }
+
+    #[test]
+    fn rename_history_stays_constant_across_undo_redo() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Formula"));
+        wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+            r("A1"),
+            Cell {
+                formula: Some("Sheet1!A1".into()),
+                ..Cell::default()
+            },
+        );
+        let inverse = apply(
+            &mut wb,
+            &Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Future".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(inverse.0.len(), 1);
+        let json = serde_json::to_string(&inverse.0).unwrap();
+        let decoded: Vec<Op> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, inverse.0);
+        let redo = apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(redo.len(), 1);
+        let undo = apply_ops(&mut wb, &redo).unwrap();
+        assert_eq!(undo.len(), 1);
     }
 
     #[test]
@@ -768,5 +896,32 @@ mod tests {
             },
         );
         assert_eq!(err.unwrap_err(), OpError::SheetNotFound(SheetId(3)));
+    }
+
+    #[test]
+    fn apply_ops_is_atomic_when_formula_rewriting_fails() {
+        let mut wb = wb_one_sheet();
+        let before = wb.clone();
+        let error = apply_ops(
+            &mut wb,
+            &[
+                Op::SetCell {
+                    sheet: SheetId(0),
+                    at: r("A1"),
+                    cell: CellState {
+                        formula: Some("SUM(".into()),
+                        ..CellState::default()
+                    },
+                },
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(error, OpError::FormulaNotRewritable { .. }));
+        assert_eq!(wb, before);
     }
 }

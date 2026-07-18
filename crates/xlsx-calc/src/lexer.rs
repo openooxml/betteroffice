@@ -5,6 +5,9 @@ use std::fmt;
 
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
+pub const MAX_TOKENS: usize = 10_000;
+pub const MAX_FORMULA_BYTES: usize = 32_768;
+
 /// a positioned lexer/parser error, the single error type of `parse_formula`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -85,6 +88,12 @@ pub enum TokKind {
 
 /// tokenize a formula source string.
 pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
+    if input.len() > MAX_FORMULA_BYTES {
+        return Err(ParseError::new(
+            MAX_FORMULA_BYTES,
+            "formula length exceeded cap",
+        ));
+    }
     Lexer { input, pos: 0 }.run()
 }
 
@@ -153,6 +162,9 @@ impl Lexer<'_> {
                 start,
                 end: self.pos,
             });
+            if out.len() > MAX_TOKENS {
+                return Err(ParseError::new(start, "formula token count exceeded cap"));
+            }
         }
         Ok(out)
     }
@@ -220,9 +232,13 @@ impl Lexer<'_> {
             }
         }
         let text = &self.input[start..self.pos];
-        text.parse::<f64>()
-            .map(TokKind::Num)
-            .map_err(|_| ParseError::new(start, format!("malformed number {text:?}")))
+        let value = text
+            .parse::<f64>()
+            .map_err(|_| ParseError::new(start, format!("malformed number {text:?}")))?;
+        if !value.is_finite() {
+            return Err(ParseError::new(start, "number is outside the finite range"));
+        }
+        Ok(TokKind::Num(value))
     }
 
     fn lex_string(&mut self) -> Result<TokKind, ParseError> {
@@ -479,5 +495,28 @@ mod tests {
     #[test]
     fn rejects_unexpected_char() {
         assert!(lex("1 ~ 2").is_err());
+    }
+
+    #[test]
+    fn rejects_excessive_token_count() {
+        let formula = "%".repeat(MAX_TOKENS + 1);
+        let error = lex(&formula).unwrap_err();
+        assert!(error.message.contains("token count"));
+    }
+
+    #[test]
+    fn accepts_exact_token_limit() {
+        assert_eq!(lex(&"%".repeat(MAX_TOKENS)).unwrap().len(), MAX_TOKENS);
+    }
+
+    #[test]
+    fn rejects_excessive_formula_length() {
+        let error = lex(&"x".repeat(MAX_FORMULA_BYTES + 1)).unwrap_err();
+        assert!(error.message.contains("length"));
+    }
+
+    #[test]
+    fn rejects_non_finite_number_literals() {
+        assert!(lex("1e999").unwrap_err().message.contains("finite"));
     }
 }

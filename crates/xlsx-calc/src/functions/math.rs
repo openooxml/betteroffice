@@ -75,10 +75,16 @@ fn sum_matching(
 ) -> CellValue {
     let cols = pairs[0].0.cols;
     let mut total = 0.0;
-    for i in criteria::matching_indices(pairs, ctx) {
+    let indices = match criteria::matching_indices(pairs, ctx) {
+        Ok(indices) => indices,
+        Err(error) => return err(error),
+    };
+    for i in indices {
         let (r, c) = (i / cols, i % cols);
-        if let CellValue::Number { value } = value_area.get(ctx, r, c) {
-            total += value;
+        match value_area.get(ctx, r, c) {
+            Ok(CellValue::Number { value }) => total += value,
+            Ok(_) => {}
+            Err(error) => return err(error),
         }
     }
     num(total)
@@ -94,8 +100,12 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                let mut col = Vec::with_capacity(area.len());
-                for v in area.values(ctx) {
+                let values = match area.values(ctx) {
+                    Ok(values) => values,
+                    Err(error) => return err(error),
+                };
+                let mut col = Vec::with_capacity(values.len());
+                for v in values {
                     match v {
                         CellValue::Number { value } => col.push(value),
                         CellValue::Error { value } => return err(value),

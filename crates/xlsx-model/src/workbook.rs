@@ -1,6 +1,7 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use crate::addr::{CellRange, CellRef, ColId, RowId, SheetId};
 use crate::date::DateSystem;
@@ -52,6 +53,20 @@ impl Sheet {
             .map(|(&(row, col), cell)| (CellRef::new(row, col), cell))
     }
 
+    pub fn iter_cells_in_rect(
+        &self,
+        rows: Range<RowId>,
+        cols: Range<ColId>,
+    ) -> impl Iterator<Item = (CellRef, &Cell)> {
+        let start_col = cols.start;
+        let end_col = cols.end.max(start_col);
+        rows.flat_map(move |row| {
+            self.cells
+                .range((row, start_col)..(row, end_col))
+                .map(|(&(row, col), cell)| (CellRef::new(row, col), cell))
+        })
+    }
+
     pub fn used_range(&self) -> Option<CellRange> {
         let mut it = self.cells.keys();
         let &(r0, c0) = it.next()?;
@@ -89,10 +104,11 @@ impl Workbook {
     }
 
     pub fn sheet_by_name(&self, name: &str) -> Option<(SheetId, &Sheet)> {
+        let name = name.to_lowercase();
         self.sheets
             .iter()
             .enumerate()
-            .find(|(_, s)| s.name == name)
+            .find(|(_, sheet)| sheet.name.to_lowercase() == name)
             .map(|(i, s)| (SheetId(i as u32), s))
     }
 }
@@ -169,6 +185,7 @@ mod tests {
         );
 
         let id = wb.sheet_id("Data").unwrap();
+        assert_eq!(wb.sheet_id("data"), Some(id));
         assert_eq!(wb.value(id, a1), CellValue::Number { value: 42.0 });
         assert_eq!(wb.formula(id, a1), Some("40+2"));
         assert_eq!(
@@ -176,5 +193,27 @@ mod tests {
             CellValue::Empty
         );
         assert!(wb.sheet_id("Nope").is_none());
+    }
+
+    #[test]
+    fn iterates_only_cells_in_rectangle() {
+        let mut sheet = Sheet::new("Data");
+        for address in ["A1", "B2", "C3", "Z100"] {
+            sheet.set_cell(
+                CellRef::parse_a1(address).unwrap(),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    ..Cell::default()
+                },
+            );
+        }
+        let cells: Vec<_> = sheet
+            .iter_cells_in_rect(0..3, 0..2)
+            .map(|(cell, _)| cell.to_a1())
+            .collect();
+        assert_eq!(cells, vec!["A1", "B2"]);
+        let mut reversed = 1..2;
+        std::mem::swap(&mut reversed.start, &mut reversed.end);
+        assert_eq!(sheet.iter_cells_in_rect(0..3, reversed).count(), 0);
     }
 }

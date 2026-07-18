@@ -4,7 +4,8 @@
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
-    EvalContext, boolean, err, evaluate, num, parse_num, range_values, text, to_number, to_text,
+    EvalContext, MAX_CELL_TEXT_CHARS, boolean, err, evaluate, num, parse_num, range_values, text,
+    to_number, to_text,
 };
 use crate::parser::Expr;
 
@@ -99,9 +100,12 @@ pub(crate) fn mid(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let chars: Vec<char> = s.chars().collect();
-    let from = (start as usize - 1).min(chars.len());
-    let to = (from + count as usize).min(chars.len());
-    text(chars[from..to].iter().collect::<String>())
+    let from = usize::try_from(start - 1)
+        .unwrap_or(usize::MAX)
+        .min(chars.len());
+    let count = usize::try_from(count).unwrap_or(usize::MAX);
+    let to = from.saturating_add(count).min(chars.len());
+    limited_text(chars[from..to].iter().collect())
 }
 
 /// FIND(find_text, within_text, [start]): case-sensitive; 1-based; not found
@@ -134,37 +138,40 @@ pub(crate) fn substitute(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Err(e) => return err(e),
     };
     if old.is_empty() {
-        return text(s);
+        return limited_text(s);
     }
     let instance = if args.len() == 4 {
         match nth_int(args, ctx, 3) {
-            Ok(n) if n >= 1 => Some(n as usize),
+            Ok(n) if n >= 1 => Some(usize::try_from(n).unwrap_or(usize::MAX)),
             Ok(_) => return err(ErrorValue::Value),
             Err(e) => return err(e),
         }
     } else {
         None
     };
-    match instance {
-        None => text(s.replace(&old, &new)),
-        Some(target) => {
-            let mut out = String::new();
-            let mut rest = s.as_str();
-            let mut seen = 0;
-            while let Some(pos) = rest.find(&old) {
-                seen += 1;
-                out.push_str(&rest[..pos]);
-                if seen == target {
-                    out.push_str(&new);
-                } else {
-                    out.push_str(&old);
-                }
-                rest = &rest[pos + old.len()..];
-            }
-            out.push_str(rest);
-            text(out)
+    let mut out = String::new();
+    let mut chars = 0;
+    let mut rest = s.as_str();
+    let mut seen = 0;
+    while let Some(pos) = rest.find(&old) {
+        seen += 1;
+        if !append_limited(&mut out, &rest[..pos], &mut chars) {
+            return err(ErrorValue::Value);
         }
+        let replacement = if instance.is_none() || instance == Some(seen) {
+            &new
+        } else {
+            &old
+        };
+        if !append_limited(&mut out, replacement, &mut chars) {
+            return err(ErrorValue::Value);
+        }
+        rest = &rest[pos + old.len()..];
     }
+    if !append_limited(&mut out, rest, &mut chars) {
+        return err(ErrorValue::Value);
+    }
+    text(out)
 }
 
 /// REPLACE(old_text, start, num_chars, new_text): positional replacement.
@@ -192,11 +199,21 @@ pub(crate) fn replace(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let chars: Vec<char> = s.chars().collect();
-    let from = (start as usize - 1).min(chars.len());
-    let to = (from + count as usize).min(chars.len());
-    let mut out: String = chars[..from].iter().collect();
-    out.push_str(&new);
-    out.extend(chars[to..].iter());
+    let from = usize::try_from(start - 1)
+        .unwrap_or(usize::MAX)
+        .min(chars.len());
+    let count = usize::try_from(count).unwrap_or(usize::MAX);
+    let to = from.saturating_add(count).min(chars.len());
+    let mut out = String::new();
+    let mut output_chars = 0;
+    let prefix: String = chars[..from].iter().collect();
+    let suffix: String = chars[to..].iter().collect();
+    if !append_limited(&mut out, &prefix, &mut output_chars)
+        || !append_limited(&mut out, &new, &mut output_chars)
+        || !append_limited(&mut out, &suffix, &mut output_chars)
+    {
+        return err(ErrorValue::Value);
+    }
     text(out)
 }
 
@@ -211,7 +228,19 @@ pub(crate) fn rept(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     match nth_int(args, ctx, 1) {
         Ok(n) if n < 0 => err(ErrorValue::Value),
-        Ok(n) => text(s.repeat(n as usize)),
+        Ok(_) if s.is_empty() => text(""),
+        Ok(n) => {
+            let Ok(count) = usize::try_from(n) else {
+                return err(ErrorValue::Value);
+            };
+            let Some(chars) = s.chars().count().checked_mul(count) else {
+                return err(ErrorValue::Value);
+            };
+            if chars > MAX_CELL_TEXT_CHARS || s.len().checked_mul(count).is_none() {
+                return err(ErrorValue::Value);
+            }
+            text(s.repeat(count))
+        }
         Err(e) => err(e),
     }
 }
@@ -327,7 +356,7 @@ pub(crate) fn text_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return text("");
     }
     let formatted = numfmt::format_value(&value, &format, DateSystem::V1900);
-    text(formatted.text)
+    limited_text(formatted.text)
 }
 
 /// TEXTJOIN(delimiter, ignore_empty, text1, ...): join, optionally skipping
@@ -344,7 +373,9 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(b) => b,
         Err(e) => return err(e),
     };
-    let mut parts = Vec::new();
+    let mut output = String::new();
+    let mut output_chars = 0;
+    let mut first = true;
     for arg in &args[2..] {
         let values = match arg {
             Expr::Range { sheet, range } => match range_values(sheet, range, ctx) {
@@ -360,17 +391,26 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 continue;
             }
             match to_text(&v) {
-                Ok(s) => parts.push(s),
+                Ok(s) => {
+                    if !first && !append_limited(&mut output, &delim, &mut output_chars) {
+                        return err(ErrorValue::Value);
+                    }
+                    if !append_limited(&mut output, &s, &mut output_chars) {
+                        return err(ErrorValue::Value);
+                    }
+                    first = false;
+                }
                 Err(e) => return err(e),
             }
         }
     }
-    text(parts.join(&delim))
+    text(output)
 }
 
 /// CONCAT / CONCATENATE: join every argument (ranges flattened, row-major).
 pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut out = String::new();
+    let mut output_chars = 0;
     for arg in args {
         let values = match arg {
             Expr::Range { sheet, range } => match range_values(sheet, range, ctx) {
@@ -381,7 +421,8 @@ pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         };
         for v in values {
             match to_text(&v) {
-                Ok(s) => out.push_str(&s),
+                Ok(s) if append_limited(&mut out, &s, &mut output_chars) => {}
+                Ok(_) => return err(ErrorValue::Value),
                 Err(e) => return err(e),
             }
         }
@@ -397,12 +438,17 @@ fn one_text(args: &[Expr], ctx: &EvalContext<'_>) -> Result<String, ErrorValue> 
 }
 
 fn nth_text(args: &[Expr], ctx: &EvalContext<'_>, i: usize) -> Result<String, ErrorValue> {
-    to_text(&evaluate(&args[i], ctx))
+    let value = to_text(&evaluate(&args[i], ctx))?;
+    if value.chars().count() > MAX_CELL_TEXT_CHARS {
+        Err(ErrorValue::Value)
+    } else {
+        Ok(value)
+    }
 }
 
 fn map_text(args: &[Expr], ctx: &EvalContext<'_>, f: fn(&str) -> String) -> CellValue {
     match one_text(args, ctx) {
-        Ok(s) => text(f(&s)),
+        Ok(s) => limited_text(f(&s)),
         Err(e) => err(e),
     }
 }
@@ -418,7 +464,7 @@ fn take_end(args: &[Expr], ctx: &EvalContext<'_>, from_left: bool) -> CellValue 
     let count = if args.len() == 2 {
         match nth_int(args, ctx, 1) {
             Ok(n) if n < 0 => return err(ErrorValue::Value),
-            Ok(n) => n as usize,
+            Ok(n) => usize::try_from(n).unwrap_or(usize::MAX),
             Err(e) => return err(e),
         }
     } else {
@@ -431,7 +477,7 @@ fn take_end(args: &[Expr], ctx: &EvalContext<'_>, from_left: bool) -> CellValue 
     } else {
         &chars[chars.len() - take..]
     };
-    text(slice.iter().collect::<String>())
+    limited_text(slice.iter().collect())
 }
 
 fn locate(args: &[Expr], ctx: &EvalContext<'_>, case_sensitive: bool) -> CellValue {
@@ -448,7 +494,7 @@ fn locate(args: &[Expr], ctx: &EvalContext<'_>, case_sensitive: bool) -> CellVal
     };
     let start = if args.len() == 3 {
         match nth_int(args, ctx, 2) {
-            Ok(n) if n >= 1 => n as usize,
+            Ok(n) if n >= 1 => usize::try_from(n).unwrap_or(usize::MAX),
             Ok(_) => return err(ErrorValue::Value),
             Err(e) => return err(e),
         }
@@ -502,4 +548,24 @@ fn parse_numeric_text(s: &str) -> Option<f64> {
         return parse_num(body).map(|n| n / 100.0);
     }
     parse_num(trimmed)
+}
+
+fn limited_text(value: String) -> CellValue {
+    if value.chars().count() > MAX_CELL_TEXT_CHARS {
+        err(ErrorValue::Value)
+    } else {
+        text(value)
+    }
+}
+
+fn append_limited(output: &mut String, value: &str, chars: &mut usize) -> bool {
+    let Some(next) = chars.checked_add(value.chars().count()) else {
+        return false;
+    };
+    if next > MAX_CELL_TEXT_CHARS {
+        return false;
+    }
+    output.push_str(value);
+    *chars = next;
+    true
 }

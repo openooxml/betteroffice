@@ -1,6 +1,8 @@
 //! statistical functions. numeric aggregations ignore text/bool/blank inside
 //! references, coerce literal arguments, propagate errors.
 
+use std::collections::HashMap;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, err, evaluate, num};
@@ -37,7 +39,7 @@ pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => err(ErrorValue::Num),
         Ok(mut nums) => {
-            nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            nums.sort_by(f64::total_cmp);
             let n = nums.len();
             if n % 2 == 1 {
                 num(nums[n / 2])
@@ -56,16 +58,26 @@ pub(crate) fn mode(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(n) => n,
         Err(e) => return err(e),
     };
-    // (value, count, first_index)
-    let mut best: Option<(f64, usize, usize)> = None;
+    let mut counts: HashMap<u64, (f64, usize, usize)> = HashMap::new();
     for (i, &x) in nums.iter().enumerate() {
-        let count = nums.iter().filter(|&&y| y == x).count();
+        if !x.is_finite() {
+            return err(ErrorValue::Num);
+        }
+        let key = if x == 0.0 { 0 } else { x.to_bits() };
+        counts
+            .entry(key)
+            .and_modify(|(_, count, _)| *count += 1)
+            .or_insert((x, 1, i));
+    }
+    let mut best: Option<(f64, usize, usize)> = None;
+    for (_, (value, count, first)) in counts {
         if count < 2 {
             continue;
         }
         match best {
-            Some((_, bc, bi)) if bc > count || (bc == count && bi <= i) => {}
-            _ => best = Some((x, count, i)),
+            Some((_, best_count, best_first))
+                if best_count > count || (best_count == count && best_first <= first) => {}
+            _ => best = Some((value, count, first)),
         }
     }
     match best {
@@ -122,8 +134,11 @@ pub(crate) fn rank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         false
     };
-    let nums: Vec<f64> = area
-        .values(ctx)
+    let values = match area.values(ctx) {
+        Ok(values) => values,
+        Err(error) => return err(error),
+    };
+    let nums: Vec<f64> = values
         .into_iter()
         .filter_map(|v| match v {
             CellValue::Number { value } => Some(value),
@@ -146,8 +161,11 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                count += area
-                    .values(ctx)
+                let values = match area.values(ctx) {
+                    Ok(values) => values,
+                    Err(error) => return err(error),
+                };
+                count += values
                     .iter()
                     .filter(|v| matches!(v, CellValue::Number { .. }))
                     .count() as i64;
@@ -168,8 +186,11 @@ pub(crate) fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                count += area
-                    .values(ctx)
+                let values = match area.values(ctx) {
+                    Ok(values) => values,
+                    Err(error) => return err(error),
+                };
+                count += values
                     .iter()
                     .filter(|v| !matches!(v, CellValue::Empty))
                     .count() as i64;
@@ -193,8 +214,11 @@ pub(crate) fn countblank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Some(a) => a,
         None => return err(ErrorValue::Value),
     };
-    let n = area
-        .values(ctx)
+    let values = match area.values(ctx) {
+        Ok(values) => values,
+        Err(error) => return err(error),
+    };
+    let n = values
         .iter()
         .filter(|v| {
             matches!(v, CellValue::Empty)
@@ -214,12 +238,18 @@ pub(crate) fn countif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
     let pairs = [(area, criterion)];
-    num(criteria::matching_indices(&pairs, ctx).len() as f64)
+    match criteria::matching_indices(&pairs, ctx) {
+        Ok(indices) => num(indices.len() as f64),
+        Err(error) => err(error),
+    }
 }
 
 pub(crate) fn countifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match criteria::collect_pairs(args, ctx) {
-        Some(pairs) => num(criteria::matching_indices(&pairs, ctx).len() as f64),
+        Some(pairs) => match criteria::matching_indices(&pairs, ctx) {
+            Ok(indices) => num(indices.len() as f64),
+            Err(error) => err(error),
+        },
         None => err(ErrorValue::Value),
     }
 }
@@ -260,7 +290,10 @@ pub(crate) fn averageifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 }
 
 fn average_of(pairs: &[(Area, Criterion)], value_area: &Area, ctx: &EvalContext<'_>) -> CellValue {
-    let nums = matching_numbers(pairs, value_area, ctx);
+    let nums = match matching_numbers(pairs, value_area, ctx) {
+        Ok(nums) => nums,
+        Err(error) => return err(error),
+    };
     if nums.is_empty() {
         err(ErrorValue::Div0)
     } else {
@@ -272,18 +305,24 @@ fn matching_numbers(
     pairs: &[(Area, Criterion)],
     value_area: &Area,
     ctx: &EvalContext<'_>,
-) -> Vec<f64> {
+) -> Result<Vec<f64>, ErrorValue> {
     let cols = pairs[0].0.cols;
-    criteria::matching_indices(pairs, ctx)
+    criteria::matching_indices(pairs, ctx)?
         .into_iter()
-        .filter_map(|i| {
+        .map(|i| {
             let (r, c) = (i / cols, i % cols);
-            match value_area.get(ctx, r, c) {
-                CellValue::Number { value } => Some(value),
-                _ => None,
-            }
+            value_area.get(ctx, r, c)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|values| {
+            values
+                .into_iter()
+                .filter_map(|value| match value {
+                    CellValue::Number { value } => Some(value),
+                    _ => None,
+                })
+                .collect()
+        })
 }
 
 /// sample (n-1) or population (n) variance; too few values -> #DIV/0!.
@@ -315,7 +354,7 @@ fn nth_order(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue {
     if k < 1 || k as usize > nums.len() {
         return err(ErrorValue::Num);
     }
-    nums.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    nums.sort_by(f64::total_cmp);
     let idx = if largest {
         nums.len() - k as usize
     } else {

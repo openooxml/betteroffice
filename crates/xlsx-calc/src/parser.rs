@@ -79,7 +79,18 @@ pub fn parse_formula(src: &str) -> Result<Expr, ParseError> {
     if let Some(tok) = p.peek() {
         return Err(ParseError::new(tok.start, "unexpected trailing token"));
     }
-    Ok(expr)
+    Ok(expr.expr)
+}
+
+struct ParsedExpr {
+    expr: Expr,
+    depth: usize,
+}
+
+impl ParsedExpr {
+    fn leaf(expr: Expr) -> Self {
+        Self { expr, depth: 1 }
+    }
 }
 
 struct Parser<'a> {
@@ -116,7 +127,7 @@ impl Parser<'_> {
         }
     }
 
-    fn expr_bp(&mut self, min_bp: u8, depth: usize) -> Result<Expr, ParseError> {
+    fn expr_bp(&mut self, min_bp: u8, depth: usize) -> Result<ParsedExpr, ParseError> {
         if depth > MAX_DEPTH {
             return Err(ParseError::new(self.here(), "formula nesting too deep"));
         }
@@ -127,31 +138,46 @@ impl Parser<'_> {
             }
             self.advance();
             let rhs = self.expr_bp(r_bp, depth + 1)?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+            let ast_depth = lhs.depth.max(rhs.depth) + 1;
+            self.validate_ast_depth(ast_depth)?;
+            lhs = ParsedExpr {
+                expr: Expr::Binary {
+                    op,
+                    lhs: Box::new(lhs.expr),
+                    rhs: Box::new(rhs.expr),
+                },
+                depth: ast_depth,
             };
         }
         Ok(lhs)
     }
 
-    fn prefix(&mut self, depth: usize) -> Result<Expr, ParseError> {
+    fn prefix(&mut self, depth: usize) -> Result<ParsedExpr, ParseError> {
         match self.peek().map(|t| &t.kind) {
             Some(TokKind::Minus) => {
                 self.advance();
                 let expr = self.expr_bp(UNARY_BP, depth + 1)?;
-                Ok(Expr::Unary {
-                    op: UnaryOp::Neg,
-                    expr: Box::new(expr),
+                let ast_depth = expr.depth + 1;
+                self.validate_ast_depth(ast_depth)?;
+                Ok(ParsedExpr {
+                    expr: Expr::Unary {
+                        op: UnaryOp::Neg,
+                        expr: Box::new(expr.expr),
+                    },
+                    depth: ast_depth,
                 })
             }
             Some(TokKind::Plus) => {
                 self.advance();
                 let expr = self.expr_bp(UNARY_BP, depth + 1)?;
-                Ok(Expr::Unary {
-                    op: UnaryOp::Plus,
-                    expr: Box::new(expr),
+                let ast_depth = expr.depth + 1;
+                self.validate_ast_depth(ast_depth)?;
+                Ok(ParsedExpr {
+                    expr: Expr::Unary {
+                        op: UnaryOp::Plus,
+                        expr: Box::new(expr.expr),
+                    },
+                    depth: ast_depth,
                 })
             }
             _ => self.postfix(depth),
@@ -159,27 +185,32 @@ impl Parser<'_> {
     }
 
     /// an atom followed by any number of `%` postfixes.
-    fn postfix(&mut self, depth: usize) -> Result<Expr, ParseError> {
+    fn postfix(&mut self, depth: usize) -> Result<ParsedExpr, ParseError> {
         let mut expr = self.atom(depth)?;
         while matches!(self.peek().map(|t| &t.kind), Some(TokKind::Percent)) {
             self.advance();
-            expr = Expr::Percent(Box::new(expr));
+            let ast_depth = expr.depth + 1;
+            self.validate_ast_depth(ast_depth)?;
+            expr = ParsedExpr {
+                expr: Expr::Percent(Box::new(expr.expr)),
+                depth: ast_depth,
+            };
         }
         Ok(expr)
     }
 
-    fn atom(&mut self, depth: usize) -> Result<Expr, ParseError> {
+    fn atom(&mut self, depth: usize) -> Result<ParsedExpr, ParseError> {
         let pos = self.here();
         let Some(tok) = self.advance() else {
             return Err(ParseError::new(pos, "unexpected end of formula"));
         };
         match tok.kind.clone() {
-            TokKind::Num(n) => Ok(Expr::Number(n)),
-            TokKind::Str(s) => Ok(Expr::Text(s)),
-            TokKind::Bool(b) => Ok(Expr::Bool(b)),
-            TokKind::ErrLit(e) => Ok(Expr::Error(e)),
-            TokKind::Ref { sheet, cell } => Ok(Expr::Ref { sheet, cell }),
-            TokKind::Range { sheet, range } => Ok(Expr::Range { sheet, range }),
+            TokKind::Num(n) => Ok(ParsedExpr::leaf(Expr::Number(n))),
+            TokKind::Str(s) => Ok(ParsedExpr::leaf(Expr::Text(s))),
+            TokKind::Bool(b) => Ok(ParsedExpr::leaf(Expr::Bool(b))),
+            TokKind::ErrLit(e) => Ok(ParsedExpr::leaf(Expr::Error(e))),
+            TokKind::Ref { sheet, cell } => Ok(ParsedExpr::leaf(Expr::Ref { sheet, cell })),
+            TokKind::Range { sheet, range } => Ok(ParsedExpr::leaf(Expr::Range { sheet, range })),
             TokKind::LParen => {
                 let inner = self.expr_bp(0, depth + 1)?;
                 self.expect(&TokKind::RParen, "')'")?;
@@ -191,12 +222,15 @@ impl Parser<'_> {
     }
 
     /// a bare name must be a function call; defined names are not supported.
-    fn func_call(&mut self, name: String, depth: usize) -> Result<Expr, ParseError> {
+    fn func_call(&mut self, name: String, depth: usize) -> Result<ParsedExpr, ParseError> {
         self.expect(&TokKind::LParen, "'(' after function name")?;
         let mut args = Vec::new();
         if matches!(self.peek().map(|t| &t.kind), Some(TokKind::RParen)) {
             self.advance();
-            return Ok(Expr::FuncCall { name, args });
+            return Ok(ParsedExpr::leaf(Expr::FuncCall {
+                name,
+                args: Vec::new(),
+            }));
         }
         loop {
             args.push(self.expr_bp(0, depth + 1)?);
@@ -211,7 +245,23 @@ impl Parser<'_> {
                 _ => return Err(ParseError::new(self.here(), "expected ',' or ')'")),
             }
         }
-        Ok(Expr::FuncCall { name, args })
+        let ast_depth = args.iter().map(|arg| arg.depth).max().unwrap_or(0) + 1;
+        self.validate_ast_depth(ast_depth)?;
+        Ok(ParsedExpr {
+            expr: Expr::FuncCall {
+                name,
+                args: args.into_iter().map(|arg| arg.expr).collect(),
+            },
+            depth: ast_depth,
+        })
+    }
+
+    fn validate_ast_depth(&self, depth: usize) -> Result<(), ParseError> {
+        if depth > MAX_DEPTH {
+            Err(ParseError::new(self.here(), "formula nesting too deep"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -361,5 +411,29 @@ mod tests {
         let src = format!("{}1{}", "(".repeat(200), ")".repeat(200));
         let err = parse_formula(&src).unwrap_err();
         assert!(err.message.contains("too deep"));
+    }
+
+    #[test]
+    fn rejects_deep_postfix_chain() {
+        let src = format!("1{}", "%".repeat(MAX_DEPTH + 1));
+        assert!(
+            parse_formula(&src)
+                .unwrap_err()
+                .message
+                .contains("too deep")
+        );
+    }
+
+    #[test]
+    fn rejects_deep_left_associative_chain() {
+        let src = std::iter::repeat_n("1", MAX_DEPTH + 1)
+            .collect::<Vec<_>>()
+            .join("+");
+        assert!(
+            parse_formula(&src)
+                .unwrap_err()
+                .message
+                .contains("too deep")
+        );
     }
 }

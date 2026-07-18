@@ -3,10 +3,12 @@
 
 use std::collections::HashMap;
 
+use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
 use xlsx_model::{CellRange, CellRef, ErrorValue, SheetId, Workbook};
 
+use crate::apply::OpError;
 use crate::apply::remap_ref;
 use crate::op::{CellState, Op};
 
@@ -33,15 +35,15 @@ fn structural_target(op: &Op) -> Option<SheetId> {
 
 /// rewrite every workbook formula affected by `op`, in place, returning the
 /// inverse `SetCell` ops that restore the rewritten formulas.
-pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Vec<Op> {
+pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpError> {
     let Some(target) = structural_target(op) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let names: HashMap<String, SheetId> = wb
         .sheets
         .iter()
         .enumerate()
-        .map(|(i, s)| (s.name.clone(), SheetId(i as u32)))
+        .map(|(i, s)| (s.name.to_lowercase(), SheetId(i as u32)))
         .collect();
 
     let mut restores: Vec<Op> = Vec::new();
@@ -54,18 +56,20 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Vec<Op> {
             let Some(src) = &c.formula else {
                 continue;
             };
-            let Ok(expr) = parse_formula(src) else {
-                continue;
-            };
+            let expr = parse_formula(src)
+                .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?;
             let mut changed = false;
             let new_expr = transform(&expr, op, &matches, &mut changed);
             if changed {
+                let formula = new_expr.to_formula();
+                parse_formula(&formula)
+                    .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?;
                 restores.push(Op::SetCell {
                     sheet: owner,
                     at: cell,
                     cell: CellState::from(c),
                 });
-                edits.push((owner, cell, new_expr.to_formula()));
+                edits.push((owner, cell, formula));
             }
         }
     }
@@ -77,7 +81,252 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Vec<Op> {
             s.set_cell(at, cell);
         }
     }
-    restores
+    Ok(restores)
+}
+
+pub(crate) fn rename_sheet_references(
+    wb: &mut Workbook,
+    old_name: &str,
+    new_name: &str,
+) -> Result<Vec<(SheetId, CellRef, CellState)>, OpError> {
+    let mut restores = Vec::new();
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        let owner = SheetId(index as u32);
+        for (cell, stored) in sheet.iter_cells() {
+            let Some(source) = &stored.formula else {
+                continue;
+            };
+            let rewritten = rename_formula_sheet(source, old_name, new_name);
+            if rewritten != *source {
+                if rewritten.len() > MAX_FORMULA_BYTES {
+                    return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
+                }
+                restores.push((owner, cell, CellState::from(stored)));
+                edits.push((owner, cell, rewritten));
+            }
+        }
+    }
+    for (sheet, cell, formula) in edits {
+        let stored = wb
+            .sheet_mut(sheet)
+            .and_then(|sheet| sheet.cell(cell).cloned());
+        if let Some(mut stored) = stored {
+            stored.formula = Some(formula);
+            wb.sheet_mut(sheet)
+                .expect("sheet exists")
+                .set_cell(cell, stored);
+        }
+    }
+    Ok(restores)
+}
+
+fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
+    if old_name == new_name {
+        return source.to_string();
+    }
+    let bytes = source.as_bytes();
+    let mut replacements = Vec::new();
+    let mut index = 0;
+    let mut bracket_depth = 0_u32;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = skip_string(source, index);
+            continue;
+        }
+        if bytes[index] == b'[' {
+            bracket_depth = bracket_depth.saturating_add(1);
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b']' {
+            bracket_depth = bracket_depth.saturating_sub(1);
+            index += 1;
+            continue;
+        }
+        if bracket_depth != 0 {
+            index += source[index..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+            continue;
+        }
+        let Some(first) = parse_sheet_token(source, index) else {
+            index += source[index..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+            continue;
+        };
+        let external = first.start > 0 && bytes[first.start - 1] == b']';
+        if bytes.get(first.end) == Some(&b'!') {
+            if !external && sheet_names_equal(&first.name, old_name) {
+                replacements.push((first.start, first.end));
+            }
+            index = first.end + 1;
+            continue;
+        }
+        if bytes.get(first.end) == Some(&b':')
+            && let Some(second) = parse_sheet_token(source, first.end + 1)
+            && bytes.get(second.end) == Some(&b'!')
+        {
+            if !external && sheet_names_equal(&first.name, old_name) {
+                replacements.push((first.start, first.end));
+            }
+            if !external && sheet_names_equal(&second.name, old_name) {
+                replacements.push((second.start, second.end));
+            }
+            index = second.end + 1;
+            continue;
+        }
+        index = first.end;
+    }
+    if replacements.is_empty() {
+        return source.to_string();
+    }
+    let replacement = sheet_token(new_name);
+    let mut output = String::with_capacity(source.len());
+    let mut copied_until = 0;
+    for (start, end) in replacements {
+        output.push_str(&source[copied_until..start]);
+        output.push_str(&replacement);
+        copied_until = end;
+    }
+    output.push_str(&source[copied_until..]);
+    output
+}
+
+struct ParsedSheetToken {
+    start: usize,
+    end: usize,
+    name: String,
+}
+
+fn parse_sheet_token(source: &str, start: usize) -> Option<ParsedSheetToken> {
+    let bytes = source.as_bytes();
+    if bytes.get(start) == Some(&b'\'') {
+        let mut index = start + 1;
+        let mut name = String::new();
+        while index < bytes.len() {
+            if bytes[index] == b'\'' {
+                if bytes.get(index + 1) == Some(&b'\'') {
+                    name.push('\'');
+                    index += 2;
+                } else {
+                    return Some(ParsedSheetToken {
+                        start,
+                        end: index + 1,
+                        name,
+                    });
+                }
+            } else {
+                let character = source[index..].chars().next()?;
+                name.push(character);
+                index += character.len_utf8();
+            }
+        }
+        return None;
+    }
+    let first = source[start..].chars().next()?;
+    if !is_unquoted_sheet_char(first) {
+        return None;
+    }
+    let mut end = start;
+    while end < bytes.len() {
+        let character = source[end..].chars().next()?;
+        if !is_unquoted_sheet_char(character) {
+            break;
+        }
+        end += character.len_utf8();
+    }
+    Some(ParsedSheetToken {
+        start,
+        end,
+        name: source[start..end].to_string(),
+    })
+}
+
+fn skip_string(source: &str, start: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index += 1;
+            if bytes.get(index) == Some(&b'"') {
+                index += 1;
+            } else {
+                break;
+            }
+        } else {
+            index += source[index..]
+                .chars()
+                .next()
+                .map(char::len_utf8)
+                .unwrap_or(1);
+        }
+    }
+    index
+}
+
+fn sheet_names_equal(left: &str, right: &str) -> bool {
+    left.to_lowercase() == right.to_lowercase()
+}
+
+fn is_unquoted_sheet_char(character: char) -> bool {
+    !character.is_whitespace()
+        && !matches!(
+            character,
+            '"' | '\''
+                | '!'
+                | ':'
+                | '+'
+                | '-'
+                | '*'
+                | '/'
+                | '^'
+                | '&'
+                | '='
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | ','
+                | '%'
+                | '['
+                | ']'
+        )
+}
+
+fn sheet_token(name: &str) -> String {
+    let simple = !name.is_empty()
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        && !name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        && CellRef::parse_a1(name).is_err()
+        && !is_r1c1_reference(name);
+    if simple {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+fn is_r1c1_reference(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if matches!(upper.as_str(), "R" | "C") {
+        return true;
+    }
+    let Some(rest) = upper.strip_prefix('R') else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    rest.as_bytes().get(digits) == Some(&b'C')
 }
 
 /// whether a reference read from `owner` points at the edited sheet `target`.
@@ -90,7 +339,7 @@ fn resolves_to_target(
 ) -> bool {
     let resolved = match ref_sheet {
         None => Some(owner),
-        Some(name) => names.get(name).copied(),
+        Some(name) => names.get(&name.to_lowercase()).copied(),
     };
     resolved == Some(target)
 }
@@ -276,7 +525,7 @@ mod tests {
             at: 2,
             count: 3,
         };
-        let inv = remap_formulas(&mut w, &op);
+        let inv = remap_formulas(&mut w, &op).unwrap();
         assert_eq!(formula(&w, SheetId(0), "B1").as_deref(), Some("A8+1"));
         assert_eq!(inv.len(), 1);
     }
@@ -290,7 +539,7 @@ mod tests {
             at: 2,
             count: 1,
         };
-        remap_formulas(&mut w, &op);
+        remap_formulas(&mut w, &op).unwrap();
         assert_eq!(formula(&w, SheetId(0), "C1").as_deref(), Some("SUM(A1:A9)"));
     }
 
@@ -303,7 +552,7 @@ mod tests {
             at: 4,
             count: 1,
         };
-        remap_formulas(&mut w, &op);
+        remap_formulas(&mut w, &op).unwrap();
         assert_eq!(formula(&w, SheetId(0), "B1").as_deref(), Some("#REF!*2"));
     }
 
@@ -316,7 +565,7 @@ mod tests {
             at: 4,
             count: 3,
         };
-        remap_formulas(&mut w, &op);
+        remap_formulas(&mut w, &op).unwrap();
         assert_eq!(formula(&w, SheetId(0), "B1").as_deref(), Some("SUM(#REF!)"));
     }
 
@@ -329,7 +578,7 @@ mod tests {
             at: 0,
             count: 2,
         };
-        remap_formulas(&mut w, &op);
+        remap_formulas(&mut w, &op).unwrap();
         assert_eq!(formula(&w, SheetId(0), "B1").as_deref(), Some("$A$7+1"));
     }
 
@@ -342,10 +591,29 @@ mod tests {
             at: 0,
             count: 1,
         };
-        remap_formulas(&mut w, &op);
+        remap_formulas(&mut w, &op).unwrap();
         assert_eq!(
             formula(&w, SheetId(1), "A1").as_deref(),
             Some("Sheet1!A4+1")
+        );
+    }
+
+    #[test]
+    fn structural_rewrite_keeps_cell_like_sheet_name_quoted() {
+        let mut workbook = wb(&["A1", "Formula"]);
+        set_formula(&mut workbook, SheetId(1), "A1", "'A1'!A1");
+        remap_formulas(
+            &mut workbook,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            formula(&workbook, SheetId(1), "A1").as_deref(),
+            Some("'A1'!A2")
         );
     }
 
@@ -358,13 +626,13 @@ mod tests {
             at: 0,
             count: 1,
         };
-        let inv = remap_formulas(&mut w, &op);
+        let inv = remap_formulas(&mut w, &op).unwrap();
         assert_eq!(formula(&w, SheetId(1), "A1").as_deref(), Some("A5+1"));
         assert!(inv.is_empty(), "no formula changed, no inverse");
     }
 
     #[test]
-    fn unparseable_formula_left_verbatim() {
+    fn unparseable_formula_rejects_structural_rewrite() {
         let mut w = wb(&["Sheet1"]);
         set_formula(&mut w, SheetId(0), "B1", "SUM(");
         let op = Op::InsertRows {
@@ -372,9 +640,66 @@ mod tests {
             at: 0,
             count: 1,
         };
-        let inv = remap_formulas(&mut w, &op);
+        let error = remap_formulas(&mut w, &op).unwrap_err();
         assert_eq!(formula(&w, SheetId(0), "B1").as_deref(), Some("SUM("));
-        assert!(inv.is_empty());
+        assert_eq!(
+            error,
+            OpError::FormulaNotRewritable {
+                sheet: SheetId(0),
+                cell: r("B1")
+            }
+        );
+    }
+
+    #[test]
+    fn rename_preserves_formula_source_and_unsupported_syntax() {
+        let source = " SUM( Sheet1!A:A , \"Sheet1!A1\", 'SHEET1'!B2 ) ";
+        assert_eq!(
+            rename_formula_sheet(source, "Sheet1", "New Name"),
+            " SUM( 'New Name'!A:A , \"Sheet1!A1\", 'New Name'!B2 ) "
+        );
+    }
+
+    #[test]
+    fn rename_escapes_quotes_in_new_sheet_name() {
+        assert_eq!(
+            rename_formula_sheet("Sheet1!A1", "Sheet1", "Owner's Data"),
+            "'Owner''s Data'!A1"
+        );
+    }
+
+    #[test]
+    fn rename_handles_3d_refs_without_touching_external_or_structured_refs() {
+        let source = "Sheet1:Sheet3!A1+[Book.xlsx]Sheet1!A1+Table1[Sheet1!Column]+Sheet1!A1";
+        assert_eq!(
+            rename_formula_sheet(source, "Sheet1", "Renamed"),
+            "Renamed:Sheet3!A1+[Book.xlsx]Sheet1!A1+Table1[Sheet1!Column]+Renamed!A1"
+        );
+    }
+
+    #[test]
+    fn rename_rejects_formula_growth_past_the_length_cap() {
+        let mut workbook = wb(&["S", "Formula"]);
+        set_formula(&mut workbook, SheetId(1), "A1", "S!A1");
+        let original = workbook.clone();
+        let error = rename_sheet_references(&mut workbook, "S", &"x".repeat(MAX_FORMULA_BYTES))
+            .unwrap_err();
+        assert!(matches!(error, OpError::FormulaNotRewritable { .. }));
+        assert_eq!(workbook, original);
+    }
+
+    #[test]
+    fn rename_quotes_cell_like_names_and_matches_unicode_sources() {
+        assert_eq!(rename_formula_sheet("S!A1", "S", "A1"), "'A1'!A1");
+        assert_eq!(
+            rename_formula_sheet("École1!A1", "École1", "Classe"),
+            "Classe!A1"
+        );
+        assert_eq!(
+            rename_formula_sheet("Sheet😀!A1", "Sheet😀", "Renamed"),
+            "Renamed!A1"
+        );
+        assert_eq!(rename_formula_sheet("S!A1", "S", "R4C"), "'R4C'!A1");
     }
 
     #[test]

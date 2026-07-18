@@ -45,6 +45,11 @@ export interface EditResult {
   applied: boolean;
   sheetInfo: SheetInfo;
   changed?: string[];
+  limitedCells?: string[];
+}
+
+export interface CalculationStatus {
+  limitedCells: string[];
 }
 
 /**
@@ -135,6 +140,7 @@ function staleErrorFrom(message: string): StaleProposalError {
  */
 export interface WorkbookHandle {
   sheetInfo(): SheetInfo;
+  calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
   setActiveSheet(index: number): void;
   /**
@@ -266,6 +272,11 @@ export function openWorkbook(bytes: Uint8Array): WorkbookHandle {
       } catch (e) {
         throw toError(e);
       }
+    },
+    calculationStatus(): CalculationStatus {
+      const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
+      if (typeof fn !== 'function') return { limitedCells: [] };
+      return call<CalculationStatus>(() => fn.call(doc));
     },
     displayList(viewport: Viewport): DisplayList {
       try {
