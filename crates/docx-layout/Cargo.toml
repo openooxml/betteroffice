@@ -4,9 +4,26 @@ version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
-description = "DOCX pagination and target-agnostic display-list generation."
+description = "The pure layout-core (pagination) in Rust, compiled to WASM. A twin of the TypeScript layoutCore behind the same MeasuredBlock[] -> Layout contract; ports incrementally, one block kind at a time, gated by the golden corpus."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# wasm-pack runs a wasm-opt post-pass after rustc/LLVM codegen. Pin it to -O3
+# (speed) here so the layout wasm — the per-keystroke display-list hot path — is
+# optimized for latency rather than the size-leaning default. This is read only
+# for this crate's `wasm-pack build`, so the container build is unaffected. See
+# scripts/embed-layout-wasm.mjs, which drives the build.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O3']
 
 [dependencies]
 ooxml-text = { path = "../ooxml-text" }
+wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+# the glyph-run emission tests build an explicit FontStore (register the
+# Liberation fixture) and drive build_display_list_json_with_fonts directly
+ooxml-text = { path = "../ooxml-text" }

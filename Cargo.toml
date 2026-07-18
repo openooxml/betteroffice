@@ -22,3 +22,9 @@ xlsx-raster = { package = "betteroffice-xlsx-raster", path = "crates/xlsx-raster
 [profile.release]
 opt-level = "s"
 lto = true
+
+[profile.release.package.docx-layout]
+opt-level = 3
+
+[profile.release.package.docx-parse]
+opt-level = 3

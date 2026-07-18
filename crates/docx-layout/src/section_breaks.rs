@@ -1,3 +1,29 @@
+//! Section geometry across section breaks.
+//!
+//! 1:1 port of `packages/core/src/layout/pagination/sectionBreaks.ts`.
+//! Exported fns (TS → Rust):
+//! - `createSectionLayoutTracker` → [`create_section_layout_tracker`]
+//! - `applySectionBreak` → [`apply_section_break`]
+//! - `promoteQueuedGeometry` → [`promote_queued_geometry`]
+//! - `resolveNextMargins` → [`resolve_next_margins`]
+//! - `resolveNextPageSize` → [`resolve_next_page_size`]
+//! - `resolveNextColumns` → [`resolve_next_columns`]
+//! - `resolvePageMargins` → [`resolve_page_margins`]
+//! - `handleSectionBreak` → [`handle_section_break`]
+//!
+//! Consumes the spine types (`types.rs` / `prescan.rs`).
+//! [`SectionBreakPaginator`] mirrors exactly the slice of `pageFlow.ts`
+//! `Paginator` this module calls; the spine's paginator implements it in
+//! `page_flow.rs`. TS `Partial<PageMargins>` (the queued-margin schedule) is
+//! mirrored by [`PartialPageMargins`].
+//! NOTE: `sectionBreaks.ts` does not import `layout/regions/sectionGeometry.ts`,
+//! so no `section_geometry.rs` counterpart is required.
+//!
+//! Numeric parity: all values are f64; `Math.round` / `Math.max` are mirrored
+//! by [`js_math_round`] / [`js_max`] (JS ties-toward-+infinity rounding and
+//! NaN-propagating max), so behavior matches the TS engine bit-for-bit.
+#![allow(dead_code)] // tracker half is a parity export; the place loop calls handle_section_break
+
 use crate::LayoutError;
 use crate::prescan::{SectionLayoutConfig, default_columns};
 use crate::types::{ColumnLayout, PageMargins, SectionBreakBlock, SectionBreakType, Size};
@@ -7,8 +33,12 @@ const SINGLE_COLUMN: ColumnLayout = ColumnLayout {
     gap: 0.0,
     equal_width: None,
     separator: None,
+    columns: None,
 };
 
+/// TS `Partial<PageMargins>` — the margin fields a section break has
+/// scheduled. `None` = key absent (JS spread semantics: absent keys carry the
+/// other side's value forward).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartialPageMargins {
     pub top: Option<f64>,
@@ -19,6 +49,7 @@ pub struct PartialPageMargins {
     pub footer: Option<f64>,
 }
 
+/// Fully-resolved geometry for a page/region. TS `SectionGeometry`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectionGeometry {
     pub margins: PageMargins,
@@ -27,6 +58,9 @@ pub struct SectionGeometry {
     pub orientation: Option<String>,
 }
 
+/// Geometry a section break has queued for the next page/region. A `None`
+/// field (or absent margin key) means "carry the inForce value forward".
+/// TS `QueuedGeometry`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueuedGeometry {
     pub margins: Option<PartialPageMargins>,
@@ -35,6 +69,7 @@ pub struct QueuedGeometry {
     pub orientation: Option<String>,
 }
 
+/// The paginator's view of section geometry. TS `SectionLayoutTracker`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectionLayoutTracker {
     pub in_force: SectionGeometry,
@@ -47,36 +82,51 @@ pub enum PageParity {
     Odd,
 }
 
+/// What the paginator must do at a section break. TS `SectionBreakOutcome`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectionBreakOutcome {
     /// Move to a new page before continuing.
     pub break_to_new_page: bool,
+    /// When breaking, the page number parity the new page must satisfy.
     pub page_parity: Option<PageParity>,
     /// Begin a new column region on the current page (continuous column change).
     pub open_column_region: bool,
 }
 
+/// TS `applySectionBreak` returns `{ outcome, tracker }`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApplySectionBreakResult {
     pub outcome: SectionBreakOutcome,
     pub tracker: SectionLayoutTracker,
 }
 
+/// The slice of `pageFlow.ts` `Paginator` that `handleSectionBreak` calls.
+/// The spine's paginator implements this in `page_flow.rs`.
 pub trait SectionBreakPaginator {
+    /// Mirrors `Paginator.updatePageLayout(pageSize?, margins?, applyImmediately = true)`.
+    /// The TS function throws when the new geometry yields no content area;
+    /// the Rust twin surfaces that as `LayoutError::Invalid`.
     fn update_page_layout(
         &mut self,
         page_size: Option<&Size>,
         margins: Option<&PageMargins>,
         apply_immediately: bool,
     ) -> Result<(), LayoutError>;
+    /// Mirrors `Paginator.forcePageBreak()`; returns `state.page.number`
+    /// (always an integer in the TS engine — `pages.length + 1 + offset`).
     fn force_page_break(&mut self) -> u32;
     /// Create a new page even when the current page is pristine.
     fn insert_blank_page(&mut self) -> u32;
+    /// Mirrors `Paginator.getCurrentState().page.size` (`getCurrentState`
+    /// lazily creates page 1, hence `&mut`).
     fn current_page_size(&mut self) -> Size;
+    /// Mirrors `Paginator.updateColumns(columns)`.
     fn update_columns(&mut self, columns: &ColumnLayout);
 }
 
-fn round_ties_positive(x: f64) -> f64 {
+// JS Math.round: nearest integer, ties toward +infinity (Rust's f64::round
+// ties away from zero, which differs for negative halves).
+fn js_math_round(x: f64) -> f64 {
     if !x.is_finite() || x == 0.0 {
         return x;
     }
@@ -84,7 +134,8 @@ fn round_ties_positive(x: f64) -> f64 {
     if x - f >= 0.5 { f + 1.0 } else { f }
 }
 
-fn max_propagating_nan(a: f64, b: f64) -> f64 {
+// JS Math.max(a, b): NaN-propagating (Rust's f64::max ignores NaN).
+fn js_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
     } else {
@@ -101,24 +152,29 @@ fn empty_queue() -> QueuedGeometry {
     }
 }
 
+// fold provided margin fields (clamped to a non-negative distance) onto any
+// already-scheduled fields — TS `scheduleMargins` (iterates MARGIN_KEYS:
+// top, right, bottom, left, header, footer; the four body margins are always
+// numbers on the spine type, header/footer only when present)
 fn schedule_margins(
     current: Option<&PartialPageMargins>,
     incoming: &PageMargins,
 ) -> PartialPageMargins {
     let mut merged = current.cloned().unwrap_or_default();
-    merged.top = Some(max_propagating_nan(0.0, incoming.top));
-    merged.right = Some(max_propagating_nan(0.0, incoming.right));
-    merged.bottom = Some(max_propagating_nan(0.0, incoming.bottom));
-    merged.left = Some(max_propagating_nan(0.0, incoming.left));
+    merged.top = Some(js_max(0.0, incoming.top));
+    merged.right = Some(js_max(0.0, incoming.right));
+    merged.bottom = Some(js_max(0.0, incoming.bottom));
+    merged.left = Some(js_max(0.0, incoming.left));
     if let Some(v) = incoming.header {
-        merged.header = Some(max_propagating_nan(0.0, v));
+        merged.header = Some(js_max(0.0, v));
     }
     if let Some(v) = incoming.footer {
-        merged.footer = Some(max_propagating_nan(0.0, v));
+        merged.footer = Some(js_max(0.0, v));
     }
     merged
 }
 
+// JS spread `{ ...base, ...over }` for margins: keys present on `over` win.
 fn overlay_margins(base: &PageMargins, over: &PartialPageMargins) -> PageMargins {
     PageMargins {
         top: over.top.unwrap_or(base.top),
@@ -130,6 +186,8 @@ fn overlay_margins(base: &PageMargins, over: &PartialPageMargins) -> PageMargins
     }
 }
 
+/// Seed the tracker from document defaults. Absent columns mean a single
+/// full-width column. TS `createSectionLayoutTracker`.
 pub fn create_section_layout_tracker(
     margins: &PageMargins,
     page_size: &Size,
@@ -146,13 +204,25 @@ pub fn create_section_layout_tracker(
     }
 }
 
+/// Ingest a section break: schedule its geometry for the next boundary and
+/// report what the paginator must do now. TS `applySectionBreak`.
+///
+/// Absent block-level columns resolve to the single-column default. A
+/// continuous break opens a column region only when its layout differs from
+/// the in-force columns.
 pub fn apply_section_break(
     block: &SectionBreakBlock,
     tracker: &SectionLayoutTracker,
 ) -> ApplySectionBreakResult {
+    // deep copy so callers never observe mutation of the tracker they passed
+    // in — TS `copyTracker`
     let mut updated = tracker.clone();
     let break_kind = block.break_type.unwrap_or(SectionBreakType::Continuous);
 
+    // stash whatever geometry the break declares; anything it omits stays None
+    // in queued so the inForce value carries forward at the boundary.
+    // (TS `if (block.orientation)` is a truthiness check — an empty string is
+    // skipped like an absent one.)
     if block.orientation.as_deref().is_some_and(|s| !s.is_empty()) {
         updated.queued.orientation = block.orientation.clone();
     }
@@ -166,7 +236,7 @@ pub fn apply_section_break(
         updated.queued.margins = Some(schedule_margins(updated.queued.margins.as_ref(), margins));
     }
 
-    let incoming_columns = SINGLE_COLUMN;
+    let incoming_columns = block.columns.clone().unwrap_or(SINGLE_COLUMN);
 
     let starts_on_new_page = matches!(
         break_kind,
@@ -216,6 +286,8 @@ pub fn apply_section_break(
     }
 }
 
+/// At a page/region boundary, fold every scheduled value into the inForce
+/// geometry and clear the schedule. TS `promoteQueuedGeometry`.
 pub fn promote_queued_geometry(tracker: &SectionLayoutTracker) -> SectionLayoutTracker {
     let mut in_force = tracker.in_force.clone();
     let queued = &tracker.queued;
@@ -239,6 +311,8 @@ pub fn promote_queued_geometry(tracker: &SectionLayoutTracker) -> SectionLayoutT
     }
 }
 
+/// Margins the next page/region will use: scheduled fields over inForce ones.
+/// TS `resolveNextMargins`.
 pub fn resolve_next_margins(tracker: &SectionLayoutTracker) -> PageMargins {
     overlay_margins(
         &tracker.in_force.margins,
@@ -250,6 +324,7 @@ pub fn resolve_next_margins(tracker: &SectionLayoutTracker) -> PageMargins {
     )
 }
 
+/// Page size the next page/region will use. TS `resolveNextPageSize`.
 pub fn resolve_next_page_size(tracker: &SectionLayoutTracker) -> Size {
     tracker
         .queued
@@ -258,6 +333,7 @@ pub fn resolve_next_page_size(tracker: &SectionLayoutTracker) -> Size {
         .unwrap_or_else(|| tracker.in_force.page_size.clone())
 }
 
+/// Columns the next page/region will use. TS `resolveNextColumns`.
 pub fn resolve_next_columns(tracker: &SectionLayoutTracker) -> ColumnLayout {
     tracker
         .queued
@@ -266,8 +342,12 @@ pub fn resolve_next_columns(tracker: &SectionLayoutTracker) -> ColumnLayout {
         .unwrap_or_else(|| tracker.in_force.columns.clone())
 }
 
+// one inch at 96 dpi on every side — TS `DEFAULT_MARGINS`
 const DEFAULT_MARGIN_PX: f64 = 96.0;
 
+/// Fill any missing body margin with the one-inch default; header/footer
+/// distances default to the resolved top/bottom body margins.
+/// TS `resolvePageMargins`.
 pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
     let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top);
     let right = requested.map_or(DEFAULT_MARGIN_PX, |m| m.right);
@@ -283,6 +363,13 @@ pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
     }
 }
 
+/// Handle a section break block. TS `handleSectionBreak`.
+///
+/// * `_block` — the section break block (current section's properties)
+/// * `paginator` — the paginator instance
+/// * `next_section_config` — page layout for the NEXT section
+/// * `next_section_type` — break type of the NEXT section (how it starts
+///   relative to current)
 pub fn handle_section_break<P: SectionBreakPaginator>(
     _block: &SectionBreakBlock,
     paginator: &mut P,
@@ -305,7 +392,7 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
             paginator.update_page_layout(page_size, margins, true)?;
             let page_number = paginator.force_page_break();
             // If landed on odd page, add another page
-            if !page_number.is_multiple_of(2) {
+            if page_number % 2 != 0 {
                 paginator.insert_blank_page();
             }
         }
@@ -314,22 +401,30 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
             paginator.update_page_layout(page_size, margins, true)?;
             let page_number = paginator.force_page_break();
             // If landed on even page, add another page
-            if page_number.is_multiple_of(2) {
+            if page_number % 2 == 0 {
                 paginator.insert_blank_page();
             }
         }
 
         SectionBreakType::Continuous => {
+            // ECMA-376 §17.6.22: a `continuous` break normally keeps the current
+            // page geometry and defers the new size/margins to the next natural
+            // page break. BUT a continuous break that changes page size or
+            // orientation cannot share a physical sheet with the preceding
+            // section, so Word and LibreOffice promote it to a page break. Match
+            // that: if the next section's page size differs from the current
+            // page's, force the break. (The TS null-check on `nextSize` is moot
+            // here — the spine's SectionLayoutConfig always carries a size.)
             let current_size = paginator.current_page_size();
             let next_size = &next_section_config.page_size;
-            let page_size_changes = round_ties_positive(next_size.w)
-                != round_ties_positive(current_size.w)
-                || round_ties_positive(next_size.h) != round_ties_positive(current_size.h);
+            let page_size_changes = js_math_round(next_size.w) != js_math_round(current_size.w)
+                || js_math_round(next_size.h) != js_math_round(current_size.h);
             if page_size_changes {
                 paginator.update_page_layout(page_size, margins, true)?;
                 paginator.force_page_break();
             } else {
-                paginator.update_page_layout(page_size, margins, false)?;
+                paginator
+                    .update_page_layout(page_size, margins, /* apply_immediately */ false)?;
             }
         }
     }
@@ -434,7 +529,7 @@ mod tests {
             })
         );
         assert_eq!(result.tracker.queued.columns, Some(SINGLE_COLUMN));
-        // Active geometry remains unchanged until promotion.
+        // inForce untouched until promotion
         assert_eq!(result.tracker.in_force, tracker.in_force);
     }
 
@@ -470,25 +565,45 @@ mod tests {
 
     #[test]
     fn continuous_break_with_column_change_opens_region() {
-        // Active geometry has two columns; incoming geometry has one.
-        // differs, so a continuous break opens a new column region.
-        let tracker = create_section_layout_tracker(
-            &margins(96.0, 96.0, 96.0, 96.0),
-            &Size {
-                w: 816.0,
-                h: 1056.0,
+        let tracker = base_tracker();
+        let columns = ColumnLayout {
+            count: 2.0,
+            gap: 20.0,
+            equal_width: Some(true),
+            separator: Some(true),
+            columns: None,
+        };
+        let result = apply_section_break(
+            &SectionBreakBlock {
+                columns: Some(columns.clone()),
+                ..empty_break()
             },
-            Some(&ColumnLayout {
-                count: 2.0,
-                gap: 20.0,
-                equal_width: None,
-                separator: None,
-            }),
+            &tracker,
         );
-        let result = apply_section_break(&empty_break(), &tracker);
         assert!(!result.outcome.break_to_new_page);
         assert!(result.outcome.open_column_region);
-        assert_eq!(result.tracker.queued.columns, Some(SINGLE_COLUMN));
+        assert_eq!(result.tracker.queued.columns, Some(columns));
+    }
+
+    #[test]
+    fn next_page_break_queues_authored_columns() {
+        let tracker = base_tracker();
+        let columns = ColumnLayout {
+            count: 2.0,
+            gap: 20.0,
+            equal_width: Some(false),
+            separator: Some(true),
+            columns: None,
+        };
+        let result = apply_section_break(
+            &SectionBreakBlock {
+                break_type: Some(SectionBreakType::NextPage),
+                columns: Some(columns.clone()),
+                ..empty_break()
+            },
+            &tracker,
+        );
+        assert_eq!(result.tracker.queued.columns, Some(columns));
     }
 
     #[test]
@@ -501,7 +616,7 @@ mod tests {
             },
             &tracker,
         );
-        // Negative distances clamp to zero.
+        // negative distances clamp to 0 (Math.max(0, value))
         assert_eq!(
             first.tracker.queued.margins.as_ref().unwrap().top,
             Some(0.0)
@@ -552,7 +667,7 @@ mod tests {
             }
         );
         assert_eq!(promoted.in_force.orientation, Some("landscape".to_string()));
-        // Scheduled margins preserve unspecified active values.
+        // scheduled margins overlay the inForce ones; absent keys carry forward
         assert_eq!(promoted.in_force.margins.top, 50.0);
         assert_eq!(promoted.in_force.margins.bottom, 96.0);
         assert_eq!(promoted.in_force.margins.header, None);
@@ -609,15 +724,21 @@ mod tests {
     }
 
     #[test]
-    fn round_ties_positive_handles_negative_halves() {
-        assert_eq!(round_ties_positive(0.5), 1.0);
-        assert_eq!(round_ties_positive(-0.5), 0.0);
-        assert_eq!(round_ties_positive(-1.5), -1.0);
-        assert_eq!(round_ties_positive(2.4), 2.0);
-        assert_eq!(round_ties_positive(816.0), 816.0);
+    fn js_math_round_matches_js_semantics() {
+        assert_eq!(js_math_round(0.5), 1.0);
+        assert_eq!(js_math_round(-0.5), 0.0); // JS: -0, ties toward +infinity
+        assert_eq!(js_math_round(-1.5), -1.0);
+        assert_eq!(js_math_round(2.4), 2.0);
+        assert_eq!(js_math_round(816.0), 816.0);
         // spec edge: closest double below 0.5 must not round up
-        assert_eq!(round_ties_positive(0.49999999999999994), 0.0);
+        assert_eq!(js_math_round(0.49999999999999994), 0.0);
     }
+
+    // ---- handle_section_break against a recording paginator ---------------
+    // Module-level port of
+    // packages/core/src/layout/pagination/__tests__/continuous-section-geometry.test.ts
+    // (the TS tests drive layoutDocument; here the same section-break decisions
+    // are asserted at the handleSectionBreak seam).
 
     #[derive(Debug, PartialEq)]
     enum Call {
@@ -727,6 +848,10 @@ mod tests {
         }
     }
 
+    // TS: "current page keeps OLD section geometry; only the next created page
+    // picks up the new size" / "next overflow page uses the continuous
+    // section's page size" — a continuous break with an UNCHANGED page size
+    // defers the swap (applyImmediately = false) and does not break the page.
     #[test]
     fn continuous_break_same_size_defers_geometry_without_breaking() {
         let mut paginator = MockPaginator::new(PORTRAIT, 1);
@@ -755,6 +880,9 @@ mod tests {
         assert_eq!(paginator.current_page_size(), PORTRAIT);
     }
 
+    // TS: "continuous break that changes orientation is promoted to a page
+    // break (Word/LibreOffice)" — portrait A → landscape B → portrait C, each
+    // orientation change forces a page.
     #[test]
     fn continuous_break_with_size_change_is_promoted_to_page_break() {
         let mut paginator = MockPaginator::new(PORTRAIT, 1);
@@ -787,7 +915,8 @@ mod tests {
         assert_eq!(paginator.current_page_size(), PORTRAIT);
     }
 
-    // Equal rounded sizes do not promote a continuous break.
+    // Sub-pixel size difference rounds equal (Math.round on both sides), so a
+    // continuous break must NOT be promoted.
     #[test]
     fn continuous_break_rounds_sizes_before_comparing() {
         let mut paginator = MockPaginator::new(PORTRAIT, 1);
@@ -903,6 +1032,9 @@ mod tests {
         assert_eq!(paginator.page_number, 3);
     }
 
+    // TS: "balances a terminal continuous multi-column text section..." — the
+    // section-break half of that scenario: a continuous break carrying a
+    // two-column config keeps the page and applies the columns.
     #[test]
     fn continuous_break_applies_next_section_columns() {
         let mut paginator = MockPaginator::new(Size { w: 500.0, h: 500.0 }, 1);
@@ -916,6 +1048,7 @@ mod tests {
                     gap: 20.0,
                     equal_width: None,
                     separator: None,
+                    columns: None,
                 }),
             ),
             Some(SectionBreakType::Continuous),

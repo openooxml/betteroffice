@@ -1,0 +1,31 @@
+[package]
+name = "docx-edit"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Pilcrow-stream yrs editing foundation for collaborative DOCX documents."
+
+[lib]
+# cdylib feeds the wasm-bindgen boundary (feature = "wasm"); rlib keeps the
+# native unit tests and in-workspace crate consumers unchanged.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The JS/wasm session boundary (src/wasm.rs). Off by default so native builds
+# and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
+# `--features wasm` (driven by scripts/embed-edit-wasm.mjs).
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+
+[dependencies]
+# 0.27.3 is the newest crates.io release. The repository's minimumReleaseAge is a Bun/npm
+# policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
+docx-layout = { path = "../docx-layout" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+yrs = "0.27.3"
+unicode-segmentation = "1.12"
+# serde_json is a non-optional dep above (the render bridge needs it in native
+# builds too), so the `wasm` feature does not re-declare it as `dep:serde_json`.
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }

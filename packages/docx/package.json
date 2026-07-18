@@ -1,0 +1,228 @@
+{
+  "name": "@betteroffice/docx",
+  "version": "0.0.1",
+  "sideEffects": [
+    "**/residentEngineWorker.*"
+  ],
+  "description": "Framework-agnostic core for DOCX parsing, editing, and rendering",
+  "main": "./dist/core.mjs",
+  "module": "./dist/core.mjs",
+  "types": "./dist/core.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/core.d.mts",
+      "import": "./dist/core.mjs"
+    },
+    "./docx": {
+      "types": "./dist/docx/index.d.mts",
+      "import": "./dist/docx/index.mjs"
+    },
+    "./docx/wrapTypes": {
+      "types": "./dist/docx/wrapTypes.d.mts",
+      "import": "./dist/docx/wrapTypes.mjs"
+    },
+    "./styles": {
+      "types": "./dist/styles/index.d.mts",
+      "import": "./dist/styles/index.mjs"
+    },
+    "./layout/pagination": {
+      "types": "./dist/layout/pagination/index.d.mts",
+      "import": "./dist/layout/pagination/index.mjs"
+    },
+    "./layout/render": {
+      "types": "./dist/layout/render/index.d.mts",
+      "import": "./dist/layout/render/index.mjs"
+    },
+    "./layout": {
+      "types": "./dist/layout/index.d.mts",
+      "import": "./dist/layout/index.mjs"
+    },
+    "./plugin-api": {
+      "types": "./dist/plugin-api/index.d.mts",
+      "import": "./dist/plugin-api/index.mjs"
+    },
+    "./plugin-api/RenderedDomContext": {
+      "types": "./dist/plugin-api/RenderedDomContext.d.mts",
+      "import": "./dist/plugin-api/RenderedDomContext.mjs"
+    },
+    "./plugin-api/resolveItemPositions": {
+      "types": "./dist/plugin-api/resolveItemPositions.d.mts",
+      "import": "./dist/plugin-api/resolveItemPositions.mjs"
+    },
+    "./types/document": {
+      "types": "./dist/types/document.d.mts",
+      "import": "./dist/types/document.mjs"
+    },
+    "./types/content": {
+      "types": "./dist/types/content.d.mts",
+      "import": "./dist/types/content.mjs"
+    },
+    "./utils": {
+      "types": "./dist/utils/index.d.mts",
+      "import": "./dist/utils/index.mjs"
+    },
+    "./utils/cardStyles": {
+      "types": "./dist/utils/cardStyles.d.mts",
+      "import": "./dist/utils/cardStyles.mjs"
+    },
+    "./utils/comments": {
+      "types": "./dist/utils/comments.d.mts",
+      "import": "./dist/utils/comments.mjs"
+    },
+    "./utils/stylePreview": {
+      "types": "./dist/utils/stylePreview.d.mts",
+      "import": "./dist/utils/stylePreview.mjs"
+    },
+    "./utils/findReplace": {
+      "types": "./dist/utils/findReplace.d.mts",
+      "import": "./dist/utils/findReplace.mjs"
+    },
+    "./utils/findVerticalScrollParent": {
+      "types": "./dist/utils/findVerticalScrollParent.d.mts",
+      "import": "./dist/utils/findVerticalScrollParent.mjs"
+    },
+    "./utils/fontOptions": {
+      "types": "./dist/utils/fontOptions.d.mts",
+      "import": "./dist/utils/fontOptions.mjs"
+    },
+    "./utils/listState": {
+      "types": "./dist/utils/listState.d.mts",
+      "import": "./dist/utils/listState.mjs"
+    },
+    "./utils/reportIssue": {
+      "types": "./dist/utils/reportIssue.d.mts",
+      "import": "./dist/utils/reportIssue.mjs"
+    },
+    "./utils/sidebarConstants": {
+      "types": "./dist/utils/sidebarConstants.d.mts",
+      "import": "./dist/utils/sidebarConstants.mjs"
+    },
+    "./utils/units": {
+      "types": "./dist/utils/units.d.mts",
+      "import": "./dist/utils/units.mjs"
+    },
+    "./utils/autoScroll": {
+      "types": "./dist/utils/autoScroll.d.mts",
+      "import": "./dist/utils/autoScroll.mjs"
+    },
+    "./yrs": {
+      "types": "./dist/yrs/index.d.mts",
+      "import": "./dist/yrs/index.mjs"
+    },
+    "./editor": {
+      "types": "./dist/editor/index.d.mts",
+      "import": "./dist/editor/index.mjs"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "docx": [
+        "./dist/docx/index.d.mts"
+      ],
+      "docx/wrapTypes": [
+        "./dist/docx/wrapTypes.d.mts"
+      ],
+      "styles": [
+        "./dist/styles/index.d.mts"
+      ],
+      "layout/pagination": [
+        "./dist/layout/pagination/index.d.mts"
+      ],
+      "layout/render": [
+        "./dist/layout/render/index.d.mts"
+      ],
+      "layout": [
+        "./dist/layout/index.d.mts"
+      ],
+      "plugin-api": [
+        "./dist/plugin-api/index.d.mts"
+      ],
+      "plugin-api/RenderedDomContext": [
+        "./dist/plugin-api/RenderedDomContext.d.mts"
+      ],
+      "plugin-api/resolveItemPositions": [
+        "./dist/plugin-api/resolveItemPositions.d.mts"
+      ],
+      "types/document": [
+        "./dist/types/document.d.mts"
+      ],
+      "types/content": [
+        "./dist/types/content.d.mts"
+      ],
+      "utils": [
+        "./dist/utils/index.d.mts"
+      ],
+      "utils/cardStyles": [
+        "./dist/utils/cardStyles.d.mts"
+      ],
+      "utils/comments": [
+        "./dist/utils/comments.d.mts"
+      ],
+      "utils/stylePreview": [
+        "./dist/utils/stylePreview.d.mts"
+      ],
+      "utils/findReplace": [
+        "./dist/utils/findReplace.d.mts"
+      ],
+      "utils/findVerticalScrollParent": [
+        "./dist/utils/findVerticalScrollParent.d.mts"
+      ],
+      "utils/fontOptions": [
+        "./dist/utils/fontOptions.d.mts"
+      ],
+      "utils/listState": [
+        "./dist/utils/listState.d.mts"
+      ],
+      "utils/reportIssue": [
+        "./dist/utils/reportIssue.d.mts"
+      ],
+      "utils/sidebarConstants": [
+        "./dist/utils/sidebarConstants.d.mts"
+      ],
+      "utils/units": [
+        "./dist/utils/units.d.mts"
+      ],
+      "utils/autoScroll": [
+        "./dist/utils/autoScroll.d.mts"
+      ],
+      "yrs": [
+        "./dist/yrs/index.d.mts"
+      ],
+      "editor": [
+        "./dist/editor/index.d.mts"
+      ]
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun ../../scripts/build-docx-wasm.ts && NODE_OPTIONS=--max-old-space-size=8192 tsup && bun scripts/copy-assets.ts",
+    "typecheck": "tsc --noEmit",
+    "build:wasm": "bun ../../scripts/build-docx-wasm.ts"
+  },
+  "devDependencies": {
+    "@betteroffice/drawingml": "workspace:*",
+    "tsup": "^8.0.1",
+    "typescript": "^6.0.3",
+    "@types/bun": "^1.0.0",
+    "@types/node": "^26.0.0"
+  },
+  "keywords": [
+    "docx",
+    "editor",
+    "word",
+    "document"
+  ],
+  "author": "OpenOOXML",
+  "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/docx"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

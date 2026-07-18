@@ -6,7 +6,7 @@
 //! [`shape_with_direction`]. Bidi reordering happens above this layer using
 //! [`crate::bidi`] runs, so text handed in here is a single directional run.
 
-use crate::font_store::{FontError, FontId, FontStore};
+use crate::font_store::{FontError, FontId, FontStore, MAX_CACHED_SHAPE_TEXT_BYTES, ShapeCacheKey};
 use std::str::FromStr;
 
 /// One positioned glyph produced by shaping.
@@ -88,6 +88,24 @@ pub fn shape_with_properties(
     direction: ShapeDirection,
     language: Option<&str>,
 ) -> Result<Vec<ShapedGlyph>, FontError> {
+    let cache_key = (text.len() <= MAX_CACHED_SHAPE_TEXT_BYTES).then(|| ShapeCacheKey {
+        font,
+        text: text.to_owned(),
+        size_bits: size.to_bits(),
+        features: features
+            .iter()
+            .map(|feature| (feature.tag, feature.value))
+            .collect(),
+        direction: match direction {
+            ShapeDirection::Auto => 0,
+            ShapeDirection::Ltr => 1,
+            ShapeDirection::Rtl => 2,
+        },
+        language: language.map(ToOwned::to_owned),
+    });
+    if let Some(glyphs) = cache_key.as_ref().and_then(|key| store.cached_shape(key)) {
+        return Ok(glyphs);
+    }
     let bytes = store.font_bytes(font)?;
     let face = rustybuzz::Face::from_slice(bytes, 0)
         .ok_or_else(|| FontError::Parse("rustybuzz rejected font bytes".to_string()))?;
@@ -118,7 +136,7 @@ pub fn shape_with_properties(
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
 
-    Ok(glyphs
+    let glyphs: Vec<_> = glyphs
         .glyph_infos()
         .iter()
         .zip(glyphs.glyph_positions())
@@ -129,5 +147,78 @@ pub fn shape_with_properties(
             x_offset: pos.x_offset as f32 * scale,
             y_offset: pos.y_offset as f32 * scale,
         })
-        .collect())
+        .collect();
+    if let Some(cache_key) = cache_key {
+        store.cache_shape(cache_key, &glyphs);
+    }
+    Ok(glyphs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn repeated_exact_shapes_reuse_a_bounded_resident_entry() {
+        let mut store = FontStore::new();
+        let font = store.register(LIBERATION_SANS.to_vec()).unwrap();
+        let first = shape_with_properties(
+            &store,
+            font,
+            "resident shaping",
+            16.0,
+            &[],
+            ShapeDirection::Ltr,
+            Some("en-US"),
+        )
+        .unwrap();
+        assert_eq!(store.shape_cache_len(), 0);
+        let second = shape_with_properties(
+            &store,
+            font,
+            "resident shaping",
+            16.0,
+            &[],
+            ShapeDirection::Ltr,
+            Some("en-US"),
+        )
+        .unwrap();
+        assert_eq!(second, first);
+        assert_eq!(store.shape_cache_len(), 1);
+        let third = shape_with_properties(
+            &store,
+            font,
+            "resident shaping",
+            16.0,
+            &[],
+            ShapeDirection::Ltr,
+            Some("en-US"),
+        )
+        .unwrap();
+        assert_eq!(third, first);
+        assert_eq!(store.shape_cache_len(), 1);
+
+        shape_with_direction(
+            &store,
+            font,
+            "resident shaping",
+            16.0,
+            &[],
+            ShapeDirection::Rtl,
+        )
+        .unwrap();
+        assert_eq!(store.shape_cache_len(), 1);
+        shape_with_direction(
+            &store,
+            font,
+            "resident shaping",
+            16.0,
+            &[],
+            ShapeDirection::Rtl,
+        )
+        .unwrap();
+        assert_eq!(store.shape_cache_len(), 2);
+    }
 }

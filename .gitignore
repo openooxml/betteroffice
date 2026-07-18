@@ -12,3 +12,5 @@ packages/xlsx/src/wasm/generated/*.wasm
 next-env.d.ts
 cloudflare-env.d.ts
 .DS_Store
+packages/docx/src/wasm/generated/**/*.wasm
+screenshots/

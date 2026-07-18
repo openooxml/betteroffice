@@ -1,6 +1,20 @@
 {
   "pages": [
     {
+      "columnBounds": [
+        {
+          "height": 864,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        }
+      ],
+      "contentBounds": {
+        "height": 864,
+        "width": 624,
+        "x": 96,
+        "y": 96
+      },
       "height": 1056,
       "pageIndex": 0,
       "primitives": [
@@ -11,6 +25,8 @@
           "docEnd": 12,
           "docStart": 1,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 13,
+          "fragmentDocStart": 1,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 0",
@@ -25,6 +41,8 @@
           "docEnd": 27,
           "docStart": 16,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 28,
+          "fragmentDocStart": 16,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 1",
@@ -39,6 +57,8 @@
           "docEnd": 42,
           "docStart": 31,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 43,
+          "fragmentDocStart": 31,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 2",
@@ -53,6 +73,8 @@
           "docEnd": 57,
           "docStart": 46,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 58,
+          "fragmentDocStart": 46,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 3",
@@ -67,6 +89,8 @@
           "docEnd": 72,
           "docStart": 61,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 73,
+          "fragmentDocStart": 61,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 4",
@@ -81,6 +105,8 @@
           "docEnd": 87,
           "docStart": 76,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 88,
+          "fragmentDocStart": 76,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 5",
@@ -95,6 +121,8 @@
           "docEnd": 102,
           "docStart": 91,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 103,
+          "fragmentDocStart": 91,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 6",
@@ -109,6 +137,8 @@
           "docEnd": 117,
           "docStart": 106,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 118,
+          "fragmentDocStart": 106,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 7",
@@ -120,6 +150,20 @@
       "width": 816
     },
     {
+      "columnBounds": [
+        {
+          "height": 864,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        }
+      ],
+      "contentBounds": {
+        "height": 864,
+        "width": 624,
+        "x": 96,
+        "y": 96
+      },
       "height": 1056,
       "pageIndex": 1,
       "primitives": [
@@ -130,6 +174,8 @@
           "docEnd": 132,
           "docStart": 121,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 133,
+          "fragmentDocStart": 121,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 8",
@@ -144,6 +190,8 @@
           "docEnd": 147,
           "docStart": 136,
           "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 148,
+          "fragmentDocStart": 136,
           "fromLine": 0,
           "kind": "text",
           "text": "Paragraph 9",

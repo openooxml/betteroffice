@@ -1,6 +1,34 @@
+//! Display-list hit-testing: point -> PM position and PM range -> rects.
+//!
+//! Behavioral port of the painted-DOM resolvers (`clickToPositionDom` /
+//! `getSelectionRectsFromDom` in `packages/core/src/layout/geometry`): a click
+//! first tries a direct hit on a text primitive's box, then snaps to the
+//! nearest line by vertical center distance and the nearest primitive on it,
+//! choosing docStart or docEnd by which side the pointer is on. Range rects
+//! emit one rect per overlapped text primitive (proportional sub-span), a
+//! 4px sliver for blank-line markers, and the full box for images — the same
+//! shapes the DOM version reads off `span[data-doc-start]` elements.
+//!
+//! Region awareness: [`hit_test_regions`] first tests the page's HF bands
+//! (`DisplayPage.header` / `.footer`) and resolves within the winning band's
+//! primitives, identifying the region and its `rId` so callers can route the
+//! click to that HF PM doc; [`range_rects_in_region`] mirrors that scoping for
+//! selection geometry — given a region + rId it resolves the from/to inside
+//! that HF band (the same HF doc is painted on every page carrying the part,
+//! so it emits one rect-set per such page). [`range_rects`] is the body-only
+//! convenience wrapper.
+//!
+//! Text primitives carry no explicit line box, so vertical bands derive from
+//! the CSS font shorthand's px size: ascent ≈ 1.0em above the baseline,
+//! descent ≈ 0.25em below. Character positions interpolate proportionally
+//! over the run width (the v0 display list distributes advances the same way,
+//! so hit-testing and painting agree by construction).
+
 use crate::display_list::{DisplayList, HfRegion, Primitive};
 use serde::Serialize;
 
+/// vertical slack when matching a pointer to a span's band, mirrors the ±4px
+/// tolerance in the DOM HF fallback resolver
 const BAND_SLACK: f64 = 4.0;
 
 /// width of the selection sliver drawn for a blank line (BLANK_LINE_SELECTION_WIDTH_PX)
@@ -18,7 +46,11 @@ fn font_px(font: &str) -> f64 {
     14.666667 // 11pt default
 }
 
-/// Positioned text geometry used for hit testing.
+/// a positioned text-bearing primitive (a `TextRunPrimitive` or a
+/// `GlyphRunPrimitive`) flattened to the geometry the resolvers need. Both
+/// resolve through the same proportional-over-width model so hit geometry is
+/// invariant to whether the run painted via `fillText` or shaped glyphs — the
+/// display-list flag flips rendering, never caret placement.
 struct TextHit<'a> {
     text: &'a str,
     x: f64,
@@ -35,7 +67,7 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
         match p {
             Primitive::Text(t) => {
                 let (Some(ds), Some(de)) = (t.attrs.doc_start, t.attrs.doc_end) else {
-                    continue;
+                    continue; // unpositioned re-paints (vmerge continuations) never win a hit
                 };
                 let fp = font_px(&t.font);
                 let baseline = t.baseline_y.as_f64().unwrap_or(0.0);
@@ -57,8 +89,12 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
                     continue;
                 }
                 let fp = g.size;
-                // Marks sit above the baseline, and the trailing edge includes
-                // the final glyph advance.
+                // baseline / extent are derived from the real glyph geometry:
+                // each PlacedGlyph carries its pen advance, so the run's left edge
+                // is the min glyph x and its right edge is the trailing glyph's
+                // `x + advance` (F3 — no more uniform trailing-advance estimate
+                // that drifted ~3px on mixed-font lines). Marks sit above the
+                // baseline (smaller y), so the max glyph y is the base baseline.
                 let baseline = g
                     .glyphs
                     .iter()
@@ -87,6 +123,8 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
     out
 }
 
+/// interpolate a character boundary inside a run: equal per-char advances over
+/// the run width (the deterministic stand-in for the DOM's per-glyph bisection)
 fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
     let chars = hit.text.chars().count() as i64;
     let span = hit.doc_end - hit.doc_start;
@@ -96,9 +134,14 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
     }
     let ratio = ((x - hit.x) / hit.width).clamp(0.0, 1.0);
     let unit = (ratio * units as f64).round() as i64;
+    // map char index to PM offset (1:1 for text runs; clamp into the span)
     (hit.doc_start + unit).min(hit.doc_end)
 }
 
+/// PM position under a page-local point, or None when the page has no
+/// positioned content. Ports the clickToPositionDom resolution order:
+/// direct span hit -> image hit -> nearest line -> nearest span on it.
+/// Body-only; region-aware callers use [`hit_test_regions`].
 pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i64> {
     let page = dl.pages.get(page_index)?;
     resolve_point(&page.primitives, x, y)
@@ -109,6 +152,7 @@ pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i
 fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
     let hits = text_hits(prims);
 
+    // 1. direct hit on a text primitive's box (paint order = DOM order)
     for h in &hits {
         if h.width <= 0.0 {
             continue;
@@ -195,6 +239,9 @@ pub enum HitRegion {
     Footer,
 }
 
+/// parse the region discriminant used at the JSON/wasm boundary
+/// (`"body" | "header" | "footer"`), the string twin of [`HitRegion`]'s serde
+/// rename. Shared by the JSON-arg and session-handle range-rect exports.
 pub(crate) fn parse_region(region: &str) -> Result<HitRegion, String> {
     match region {
         "body" => Ok(HitRegion::Body),
@@ -204,7 +251,12 @@ pub(crate) fn parse_region(region: &str) -> Result<HitRegion, String> {
     }
 }
 
-/// Resolve a point against header, footer, and body regions.
+/// a point inside an HF band's box resolves within that band (`pos` may be
+/// None when the band has no positioned content — the region identification
+/// alone is what routes the click into HF editing); everything else falls
+/// through to the body resolver. Band membership is the vertical
+/// `[y, y+height]` test on the region's box, the display-list analogue of the
+/// painted `.layout-page-header` / `.layout-page-footer` hosts.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
     let page = dl.pages.get(page_index)?;
 
@@ -314,10 +366,30 @@ fn collect_range_rects(
     }
 }
 
+/// highlight rectangles for a PM range in the BODY doc across all pages (port of
+/// getSelectionRectsFromDom). The `from`/`to` refer to the body PM doc; HF
+/// regions (a different PM doc) are never consulted. Region-aware callers use
+/// [`range_rects_in_region`].
 pub fn range_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
     range_rects_in_region(dl, HitRegion::Body, None, from, to)
 }
 
+/// highlight rectangles for a PM range resolved inside a specific page region —
+/// the selection-geometry twin of [`hit_test_regions`]'s scoping.
+///
+/// For [`HitRegion::Body`] this is exactly [`range_rects`] (`r_id` is ignored —
+/// the body has one PM doc). For [`HitRegion::Header`] / [`HitRegion::Footer`]
+/// the `from`/`to` refer to the header/footer ProseMirror doc identified by
+/// `r_id`, so only bands whose `rId` matches are consulted — the display-list
+/// analogue of scoping selection to `.layout-page-header` /
+/// `.layout-page-footer` for the active HF part. The SAME HF doc is painted on
+/// every page carrying the part, so a match emits one rect-set per such page
+/// (each stamped with its own `page_index`); the caller renders the page it is
+/// editing, exactly as the DOM HF overlay picks the nearest painted host.
+///
+/// `r_id = None` matches any band of the region kind — reserved for callers that
+/// don't disambiguate variants; passing the active part's rId is preferred so a
+/// first-page vs default variant on another page never contributes stray rects.
 pub fn range_rects_in_region(
     dl: &DisplayList,
     region: HitRegion,
@@ -353,6 +425,10 @@ pub fn range_rects_in_region(
 
     rects
 }
+
+// ---------------------------------------------------------------------------
+// JSON boundary (native-testable; the wasm exports in lib.rs wrap these)
+// ---------------------------------------------------------------------------
 
 /// `hit_test` over serialized inputs; returns `"null"` or the position as JSON
 pub fn hit_test_json(

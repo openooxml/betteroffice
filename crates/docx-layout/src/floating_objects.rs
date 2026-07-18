@@ -1,10 +1,61 @@
+//! Registry of float exclusion zones — Rust port of the pagination-side
+//! floating-object geometry.
+//!
+//! TS source: `packages/core/src/layout/pagination/floatingObjects.ts`
+//!
+//! Exported symbols (1:1 with the TS module):
+//! - `MIN_WRAP_SEGMENT_WIDTH` (const)
+//! - `BlockedRegion`, `Rect`, `Clearance`, `WrapSide` (parameter shapes)
+//! - `FreeSpan`
+//! - `FloatRegionRegistry` with `set_layout_context`, `clear`,
+//!   `register_floating_object`, `resolve_free_span`, `zones_for_page`
+//! - `create_float_region_registry`
+//!
+//! Anchored (floating) images carve horizontal space out of the lines they
+//! overlap; paragraph layout asks this registry, per line, how much width
+//! remains and where the line starts.
+//!
+//! INTEGRATION
+//! ===========
+//! The measurement side stays in TypeScript for now. Before the JSON seam,
+//! `measureBlocksWithFloats` (`packages/core/src/layout/measure/measureBlocksPipeline.ts`)
+//! pre-scans the block list, extracts `FloatingImageZone`s
+//! (`{ leftMargin, rightMargin, topY, bottomY, segments?, fullWidthBlock? }`,
+//! content-area coordinates relative to the anchor block) from anchored
+//! images, floating tables, and floating text boxes, groups co-located floats
+//! (paragraph-relative zones merge when Y ranges overlap AND anchors are
+//! within 4 blocks; margin/page-relative zones group by identical `topY`;
+//! page-pinned full-width bands re-anchor to block 0), and threads the active
+//! zones plus cumulative Y into each `measureBlock` call. Consequently the
+//! measured-block input JSON arrives with float effects ALREADY BAKED INTO
+//! THE LINE MEASURES — per-line widths/offsets reflect the exclusion zones;
+//! no `FloatingImageZone` data crosses the seam.
+//!
+//! What this module needs at pagination time is the page-space claim of each
+//! float: `BlockedRegion { id, pageNumber, rect, clearance, wrapSide }`. The
+//! integrator registers those from anchored-object placement inside the place
+//! loop (rect in page coordinates, clearance = the wp:effectExtent-style wrap
+//! distances, wrapSide from the wrap mode) and calls `resolve_free_span` per
+//! line / `zones_for_page` when composing a page. `mod` is declared but not
+//! yet wired into the spine (`lib.rs` / `place.rs`); the integrator swaps
+//! these into place-loop hooks later.
+//!
+//! Numeric fidelity: all math is f64 with JS `Math.min`/`Math.max` semantics
+//! (NaN-propagating, -0-aware) and the exact TS iteration order.
+//!
+//! Note on tests: the TS module has no dedicated unit-test file (repo tests
+//! only re-import `MIN_WRAP_SEGMENT_WIDTH` through `floatingZones.ts`), so
+//! the `#[cfg(test)]` suite below mirrors the TS implementation semantics
+//! branch by branch instead of porting an existing spec.
+
 use serde::{Deserialize, Serialize};
 
 /// A text segment beside a float narrower than this (px) is not worth
 /// wrapping into.
 pub const MIN_WRAP_SEGMENT_WIDTH: f64 = 24.0;
 
-fn min_propagating_nan(a: f64, b: f64) -> f64 {
+/// JS `Math.min`: NaN-propagating, and `Math.min(0, -0) === -0`.
+fn js_min(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
     } else if a < b {
@@ -18,7 +69,8 @@ fn min_propagating_nan(a: f64, b: f64) -> f64 {
     }
 }
 
-fn max_propagating_nan(a: f64, b: f64) -> f64 {
+/// JS `Math.max`: NaN-propagating, and `Math.max(-0, 0) === 0`.
+fn js_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
     } else if a > b {
@@ -167,18 +219,18 @@ impl FloatRegionRegistry {
             if zone.wrap_side == WrapSide::Left || zone.wrap_side == WrapSide::Both {
                 // text runs on the left of the float, ending before its cleared edge
                 let fence = float_left - zone.clearance.left;
-                text_end = min_propagating_nan(text_end, fence);
+                text_end = js_min(text_end, fence);
             }
 
             if zone.wrap_side == WrapSide::Right || zone.wrap_side == WrapSide::Both {
                 // text runs on the right of the float, starting past its cleared edge
                 let fence = float_right + zone.clearance.right;
-                text_start = max_propagating_nan(text_start, fence);
+                text_start = js_max(text_start, fence);
             }
         }
 
         FreeSpan {
-            span: max_propagating_nan(0.0, text_end - text_start),
+            span: js_max(0.0, text_end - text_start),
             shift_x: text_start,
         }
     }
@@ -234,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn min_wrap_segment_width_is_stable() {
+    fn min_wrap_segment_width_matches_ts() {
         assert_eq!(MIN_WRAP_SEGMENT_WIDTH, 24.0);
     }
 
@@ -538,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_region_deserializes_from_camel_case_json() {
+    fn blocked_region_deserializes_from_ts_camel_case_json() {
         let json = r#"{
             "id": "img1",
             "pageNumber": 1,
@@ -562,12 +614,12 @@ mod tests {
     }
 
     #[test]
-    fn min_and_max_propagate_nan() {
-        assert!(min_propagating_nan(1.0, f64::NAN).is_nan());
-        assert!(max_propagating_nan(f64::NAN, 1.0).is_nan());
-        assert!(min_propagating_nan(0.0, -0.0).is_sign_negative());
-        assert!(max_propagating_nan(-0.0, 0.0).is_sign_positive());
-        assert_eq!(min_propagating_nan(2.0, 3.0), 2.0);
-        assert_eq!(max_propagating_nan(2.0, 3.0), 3.0);
+    fn js_min_max_mirror_math_semantics() {
+        assert!(js_min(1.0, f64::NAN).is_nan());
+        assert!(js_max(f64::NAN, 1.0).is_nan());
+        assert!(js_min(0.0, -0.0).is_sign_negative());
+        assert!(js_max(-0.0, 0.0).is_sign_positive());
+        assert_eq!(js_min(2.0, 3.0), 2.0);
+        assert_eq!(js_max(2.0, 3.0), 3.0);
     }
 }
