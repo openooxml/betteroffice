@@ -1,0 +1,14 @@
+[package]
+name = "pptx-parse"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Bounded PresentationML parsing and byte-preserving PPTX package serialization."
+
+[dependencies]
+ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
+ooxml-opc.workspace = true
+quick-xml = { version = "0.41", features = ["encoding"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

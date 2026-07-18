@@ -633,6 +633,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pptx-parse"
+version = "0.0.0"
+dependencies = [
+ "betteroffice-opc",
+ "ooxml-drawingml",
+ "quick-xml",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "pptx-render"
 version = "0.0.0"
 dependencies = [
@@ -644,7 +655,9 @@ dependencies = [
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
+ "pptx-parse",
  "pptx-render",
+ "serde_json",
  "wasm-bindgen",
 ]
 
