@@ -29,8 +29,6 @@ const cardLink =
   "inline-flex items-center gap-1 font-mono text-[0.6875rem] text-dim no-underline hover:text-fg";
 const demoLink =
   "ml-auto inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[0.6875rem] text-ink no-underline transition-colors hover:border-dim hover:text-fg";
-const moreLink =
-  "mt-6 inline-flex items-center gap-1.5 font-mono text-[0.8125rem] underline decoration-faint underline-offset-[3px] hover:decoration-fg";
 
 const EDITORS = [
   {
@@ -48,7 +46,7 @@ const EDITORS = [
   {
     name: "Slides",
     format: "pptx",
-    desc: "Slide model, masters and transitions on the same shared core.",
+    desc: "Slide model and masters on the same shared core — in development.",
     live: false,
   },
 ];
@@ -56,15 +54,19 @@ const EDITORS = [
 const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "The headless core for plain JavaScript — document model, layout, rendering.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The full DOCX editor as a React component — or a read-only viewer. Toolbar, pages, comments, everything.",
+    desc: "The full DOCX editor as a React component — toolbar, pages, comments, tracked changes.",
   },
   {
-    name: "@betteroffice/docx-vue",
-    desc: "The same editor and viewer for Vue — feature parity with React is contract-tested.",
+    name: "@betteroffice/xlsx",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
+  },
+  {
+    name: "@betteroffice/xlsx-react",
+    desc: "The spreadsheet editor as a drop-in React component.",
   },
 ];
 
@@ -83,11 +85,11 @@ const CAPABILITIES = [
   },
   {
     name: "Real-time collaboration",
-    desc: "Multiplayer editing is built into the core. Concurrent edits merge natively.",
+    desc: "The document is a CRDT — concurrent edits merge in the engine, not on a server.",
   },
   {
     name: "Agent-ready",
-    desc: "Runs headless too — parse, edit and render documents inside agent pipelines.",
+    desc: "Runs headless too — parse, edit and render documents server-side or inside agent pipelines.",
   },
   {
     name: "Apache 2.0",
@@ -104,7 +106,7 @@ const JSON_LD = {
   applicationCategory: "BusinessApplication",
   operatingSystem: "Web",
   description:
-    "The open-source office suite by the OpenOOXML project. A Word-faithful DOCX editor and viewer for React, Vue and JavaScript, on native OOXML engines written in Rust.",
+    "The open-source office suite by the OpenOOXML project. Word-faithful DOCX and XLSX editors for React and JavaScript with real-time collaboration, on native OOXML engines written in Rust.",
   offers: {
     "@type": "Offer",
     price: "0",
@@ -140,17 +142,24 @@ export default function Home() {
         </FadeIn>
         <FadeIn delay={0.16} className="relative z-1">
           <p className="mb-10 max-w-[30rem] text-lg text-ink">
-            The open-source office suite. Word-faithful document editing on
-            engines we build ourselves — by the OpenOOXML project.
+            The open-source office suite. Word-faithful editing and
+            real-time collaboration on engines we build ourselves — running
+            entirely in your browser, by the OpenOOXML project.
           </p>
         </FadeIn>
         <FadeIn delay={0.24} className="relative z-1">
           <div className="flex flex-wrap gap-3">
             <a
-              href={DOCS}
+              href="https://demo.betteroffice.dev"
               className={`${btn} border-fg bg-fg text-bg hover:border-[#333333] hover:bg-[#333333]`}
             >
-              Documentation <ArrowRight size={14} strokeWidth={2} />
+              Try the demo <ArrowRight size={14} strokeWidth={2} />
+            </a>
+            <a
+              href={DOCS}
+              className={`${btn} border-line text-ink hover:border-dim hover:text-fg`}
+            >
+              Documentation <ArrowUpRight size={14} strokeWidth={2} />
             </a>
             <a
               href={REPO}
@@ -298,31 +307,45 @@ export default function Home() {
         </Reveal>
       </section>
 
-      <section className={sec} aria-labelledby="migrate">
+      <section className={sec} aria-labelledby="collaboration">
         <Reveal>
           <p className={secLabel}>
-            <span className="text-faint">04</span> Compatibility
+            <span className="text-faint">04</span> Collaboration
           </p>
-          <h2 id="migrate" className={secH2}>
-            Coming from eigenpal?
+          <h2 id="collaboration" className={secH2}>
+            People and agents, one document
           </h2>
           <p className={`${secP} mb-6`}>
-            BetterOffice offers a{" "}
-            <strong className="font-medium text-fg">very similar API</strong>{" "}
-            to the deprecated eigenpal editor — most integrations port with
-            minimal changes. The migration guide covers the package mapping
-            and the few differences.
+            The document itself is a CRDT: every editor — every person, every
+            AI agent — is a peer on the same data structure, and concurrent
+            edits merge in the engine. Agents don&apos;t get a sidebar; they
+            get a cursor, with the same undo and the same tracked-changes
+            attribution as any co-author.
           </p>
         </Reveal>
         <Reveal delay={0.1}>
-          <a
-            href="https://openooxml.org/eigenpal"
-            target="_blank"
-            rel="noopener"
-            className={moreLink}
-          >
-            Migration guide <ArrowRight size={13} strokeWidth={2} />
-          </a>
+          <ul className={`${grid} list-none`}>
+            <li className="bg-bg px-5 py-4.5">
+              <span className="mb-1 block font-mono text-xs text-fg">
+                People
+              </span>
+              <span className="text-[0.8125rem] text-ink">
+                Live co-editing over any WebSocket relay. Offline edits
+                converge on reconnect — merging is the data structure, not a
+                server feature.
+              </span>
+            </li>
+            <li className="bg-bg px-5 py-4.5">
+              <span className="mb-1 block font-mono text-xs text-fg">
+                Agents
+              </span>
+              <span className="text-[0.8125rem] text-ink">
+                An agent edits through the same operations as a person, and
+                human review is suggesting mode — accept or reject tracked
+                changes, not a diff dialog.
+              </span>
+            </li>
+          </ul>
         </Reveal>
       </section>
     </>
