@@ -1,6 +1,57 @@
 const CACHE_CONTROL =
   "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800";
 
+export function officialPackageNames(
+  packageAccess: Record<string, string>,
+): string[] {
+  return Object.keys(packageAccess).filter((name) =>
+    name.startsWith("@betteroffice/"),
+  );
+}
+
+/**
+ * Sum last-month downloads across packages, tolerating per-package failures:
+ * freshly published packages 404 on the stats API for up to a day, and one
+ * flaky fetch must not turn the whole badge into "unavailable". `resolved`
+ * reports how many packages produced a valid count.
+ */
+export async function monthlyDownloads(
+  packageNames: string[],
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ downloads: number; resolved: number }> {
+  const results = await Promise.allSettled(
+    packageNames.map(async (packageName) => {
+      const response = await fetchImpl(
+        `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(packageName)}`,
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `npm downloads request failed for ${packageName}: ${response.status}`,
+        );
+      }
+
+      const data = (await response.json()) as { downloads?: number };
+
+      if (!Number.isSafeInteger(data.downloads)) {
+        throw new Error(`Invalid npm download count for ${packageName}`);
+      }
+
+      return data.downloads as number;
+    }),
+  );
+
+  let downloads = 0;
+  let resolved = 0;
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      downloads += result.value;
+      resolved += 1;
+    }
+  }
+  return { downloads, resolved };
+}
+
 export async function GET() {
   try {
     const packagesResponse = await fetch(
@@ -15,36 +66,17 @@ export async function GET() {
       string,
       string
     >;
-    const packageNames = Object.keys(packageAccess).filter((name) =>
-      name.startsWith("@betteroffice/"),
-    );
+    const packageNames = officialPackageNames(packageAccess);
 
     if (packageNames.length === 0) {
       throw new Error("No public @betteroffice packages found");
     }
 
-    const counts = await Promise.all(
-      packageNames.map(async (packageName) => {
-        const response = await fetch(
-          `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(packageName)}`,
-        );
+    const { downloads, resolved } = await monthlyDownloads(packageNames);
 
-        if (!response.ok) {
-          throw new Error(
-            `npm downloads request failed for ${packageName}: ${response.status}`,
-          );
-        }
-
-        const data = (await response.json()) as { downloads: number };
-
-        if (!Number.isSafeInteger(data.downloads)) {
-          throw new Error(`Invalid npm download count for ${packageName}`);
-        }
-
-        return data.downloads;
-      }),
-    );
-    const downloads = counts.reduce((total, count) => total + count, 0);
+    if (resolved === 0) {
+      throw new Error("No package download counts resolved");
+    }
 
     return Response.json(
       {
