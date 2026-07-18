@@ -176,6 +176,7 @@ mod tests {
                     gap: 20.0,
                     equal_width: None,
                     separator: None,
+                    columns: None,
                 },
                 pen_y,
                 content_limit,

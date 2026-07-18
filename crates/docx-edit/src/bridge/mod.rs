@@ -1982,6 +1982,22 @@ fn section_break_block(
             ),
             equal_width: Some(map_bool(sect_pr, "equalWidth").unwrap_or(true)),
             separator: map_bool(sect_pr, "separator"),
+            columns: sect_pr
+                .get("columns")
+                .and_then(|value| match value {
+                    Any::Array(columns) => Some(columns),
+                    _ => None,
+                })
+                .map(|columns| {
+                    columns
+                        .iter()
+                        .filter_map(any_map)
+                        .map(|column| docx_layout::types::ColumnDefinition {
+                            width: map_number(column, "width").map(twips_to_pixels),
+                            space: map_number(column, "space").map(twips_to_pixels),
+                        })
+                        .collect()
+                }),
         });
     }
 

@@ -24,6 +24,8 @@ pub struct DocumentRegions {
     pub note_settings: NoteSettings,
     #[serde(default)]
     pub even_and_odd_headers: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<AuthoredRegionSettings>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -57,6 +59,94 @@ pub struct RegionSection {
     pub title_pg: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub even_and_odd_headers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<AuthoredSectionProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_start: Option<crate::types::SectionBreakType>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthoredRegionSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footnote_pr: Option<NoteProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endnote_pr: Option<NoteProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_and_odd_headers: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthoredSectionProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_height: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_top: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_right: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_bottom: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_left: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_distance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer_distance: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gutter: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_count: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_space: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equal_width: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<AuthoredColumn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footnote_columns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_start: Option<crate::types::SectionBreakType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_align: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_references: Option<Vec<AuthoredHeaderFooterReference>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer_references: Option<Vec<AuthoredHeaderFooterReference>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_pg: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub even_and_odd_headers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_numbering: Option<PageNumbering>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_borders: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footnote_pr: Option<NoteProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endnote_pr: Option<NoteProperties>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthoredColumn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthoredHeaderFooterReference {
+    pub r#type: String,
+    #[serde(rename = "rId")]
+    pub r_id: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -107,6 +197,23 @@ impl NoteProperties {
 }
 
 impl DocumentRegions {
+    pub fn normalize_authored(&mut self) {
+        if let Some(settings) = &self.settings {
+            if let Some(footnote) = &settings.footnote_pr {
+                self.note_settings.footnote.overlay(footnote);
+            }
+            if let Some(endnote) = &settings.endnote_pr {
+                self.note_settings.endnote.overlay(endnote);
+            }
+            if let Some(even_and_odd_headers) = settings.even_and_odd_headers {
+                self.even_and_odd_headers = even_and_odd_headers;
+            }
+        }
+        for section in &mut self.sections {
+            section.normalize_authored();
+        }
+    }
+
     pub fn note_properties(&self, section_index: usize, kind: &str) -> NoteProperties {
         let mut properties = if kind == "endnote" {
             self.note_settings.endnote.clone()
@@ -139,6 +246,106 @@ impl DocumentRegions {
     }
 }
 
+impl RegionSection {
+    fn normalize_authored(&mut self) {
+        let Some(properties) = self.properties.as_ref() else {
+            return;
+        };
+        let page_width = properties.page_width.filter(|value| *value != 0.0);
+        let page_height = properties.page_height.filter(|value| *value != 0.0);
+        self.page_size = Some(Size {
+            w: page_width.map_or(816.0, twips_to_pixels),
+            h: page_height.map_or(1056.0, twips_to_pixels),
+        });
+        let gutter = properties.gutter.map_or(0.0, twips_to_pixels);
+        self.margins = Some(PageMargins {
+            top: properties.margin_top.map_or(96.0, twips_to_pixels),
+            right: properties.margin_right.map_or(96.0, twips_to_pixels),
+            bottom: properties.margin_bottom.map_or(96.0, twips_to_pixels),
+            left: properties.margin_left.map_or(96.0, twips_to_pixels) + gutter,
+            header: Some(properties.header_distance.map_or(48.0, twips_to_pixels)),
+            footer: Some(properties.footer_distance.map_or(48.0, twips_to_pixels)),
+        });
+        let count = properties.column_count.unwrap_or_else(|| {
+            properties
+                .columns
+                .as_ref()
+                .map_or(1.0, |columns| columns.len() as f64)
+        });
+        self.columns = (count > 1.0).then(|| ColumnLayout {
+            count,
+            gap: twips_to_pixels(properties.column_space.unwrap_or(720.0)),
+            equal_width: Some(properties.equal_width.unwrap_or(true)),
+            separator: properties.separator,
+            columns: properties.columns.as_ref().map(|columns| {
+                columns
+                    .iter()
+                    .take(count as usize)
+                    .map(|column| crate::types::ColumnDefinition {
+                        width: column.width.map(twips_to_pixels),
+                        space: column.space.map(twips_to_pixels),
+                    })
+                    .collect()
+            }),
+        });
+        self.header_distance = properties.header_distance.map(twips_to_pixels);
+        self.footer_distance = properties.footer_distance.map(twips_to_pixels);
+        self.page_borders.clone_from(&properties.page_borders);
+        self.watermark.clone_from(&properties.watermark);
+        self.vertical_align.clone_from(&properties.vertical_align);
+        self.page_numbering.clone_from(&properties.page_numbering);
+        self.title_pg = properties.title_pg.unwrap_or(false);
+        self.even_and_odd_headers = properties.even_and_odd_headers;
+        self.section_start = properties.section_start;
+        self.note_settings.footnote_columns = properties.footnote_columns;
+        if let Some(footnote) = &properties.footnote_pr {
+            self.note_settings.footnote.overlay(footnote);
+        }
+        if let Some(endnote) = &properties.endnote_pr {
+            self.note_settings.endnote.overlay(endnote);
+        }
+        self.header_footer_refs = authored_header_footer_refs(properties);
+    }
+}
+
+fn authored_header_footer_refs(properties: &AuthoredSectionProperties) -> Option<HeaderFooterRefs> {
+    let mut refs = HeaderFooterRefs {
+        header_default: None,
+        header_first: None,
+        header_even: None,
+        footer_default: None,
+        footer_first: None,
+        footer_even: None,
+    };
+    for reference in properties.header_references.iter().flatten() {
+        match reference.r#type.as_str() {
+            "default" => refs.header_default = Some(reference.r_id.clone()),
+            "first" => refs.header_first = Some(reference.r_id.clone()),
+            "even" => refs.header_even = Some(reference.r_id.clone()),
+            _ => {}
+        }
+    }
+    for reference in properties.footer_references.iter().flatten() {
+        match reference.r#type.as_str() {
+            "default" => refs.footer_default = Some(reference.r_id.clone()),
+            "first" => refs.footer_first = Some(reference.r_id.clone()),
+            "even" => refs.footer_even = Some(reference.r_id.clone()),
+            _ => {}
+        }
+    }
+    (refs.header_default.is_some()
+        || refs.header_first.is_some()
+        || refs.header_even.is_some()
+        || refs.footer_default.is_some()
+        || refs.footer_first.is_some()
+        || refs.footer_even.is_some())
+    .then_some(refs)
+}
+
+fn twips_to_pixels(twips: f64) -> f64 {
+    (twips / 1440.0 * 96.0).round()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageNumbering {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,7 +357,10 @@ pub struct PageNumbering {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionLayoutInput {
+    #[serde(default)]
     pub measured: Vec<crate::types::MeasuredBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_story: Option<String>,
     #[serde(default)]
     pub options: crate::types::LayoutOptions,
     #[serde(default)]
@@ -165,14 +375,16 @@ pub struct RegionLayoutInput {
 
 impl RegionLayoutInput {
     pub fn split(
-        self,
+        mut self,
     ) -> (
         Input,
         DocumentRegions,
         NoteLayoutInput,
         MeasurementConfig,
         Value,
+        Option<String>,
     ) {
+        self.regions.normalize_authored();
         (
             Input {
                 measured: self.measured,
@@ -182,34 +394,47 @@ impl RegionLayoutInput {
             self.notes,
             self.measurement,
             self.render_env,
+            self.body_story,
         )
     }
 }
 
 pub fn apply_section_geometry(input: &mut Input, regions: &DocumentRegions) {
+    apply_section_geometry_to_blocks(&mut input.measured, &mut input.options, regions);
+}
+
+pub fn apply_section_geometry_to_blocks<T>(
+    blocks: &mut [T],
+    options: &mut crate::types::LayoutOptions,
+    regions: &DocumentRegions,
+) where
+    T: RegionBlock,
+{
     let Some(first) = regions.sections.first() else {
         return;
     };
     if first.page_size.is_some() {
-        input.options.page_size.clone_from(&first.page_size);
+        options.page_size.clone_from(&first.page_size);
     }
     if first.margins.is_some() {
-        input.options.margins.clone_from(&first.margins);
+        options.margins.clone_from(&first.margins);
     }
     if first.columns.is_some() {
-        input.options.columns.clone_from(&first.columns);
+        options.columns.clone_from(&first.columns);
     }
     if let Some(last) = regions.sections.last() {
         if last.page_size.is_some() {
-            input.options.final_page_size.clone_from(&last.page_size);
+            options.final_page_size.clone_from(&last.page_size);
         }
         if last.margins.is_some() {
-            input.options.final_margins.clone_from(&last.margins);
+            options.final_margins.clone_from(&last.margins);
         }
+        options.columns.clone_from(&last.columns);
+        options.body_break_type = last.section_start;
     }
     let mut section_index = 0;
-    for measured in &mut input.measured {
-        let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
+    for item in blocks {
+        let LayoutBlock::SectionBreak(section_break) = item.block_mut() else {
             continue;
         };
         let Some(section) = regions.sections.get(section_index) else {
@@ -225,6 +450,22 @@ pub fn apply_section_geometry(input: &mut Input, regions: &DocumentRegions) {
             section_break.columns.clone_from(&section.columns);
         }
         section_index += 1;
+    }
+}
+
+pub trait RegionBlock {
+    fn block_mut(&mut self) -> &mut LayoutBlock;
+}
+
+impl RegionBlock for crate::types::MeasuredBlock {
+    fn block_mut(&mut self) -> &mut LayoutBlock {
+        &mut self.block
+    }
+}
+
+impl RegionBlock for LayoutBlock {
+    fn block_mut(&mut self) -> &mut LayoutBlock {
+        self
     }
 }
 
@@ -520,7 +761,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let (mut input, regions, _, _, _) = request.split();
+        let (mut input, regions, _, _, _, _) = request.split();
 
         apply_section_geometry(&mut input, &regions);
 
@@ -567,5 +808,69 @@ mod tests {
         assert_eq!(effective.header_default.as_deref(), Some("header-a"));
         assert_eq!(effective.header_even.as_deref(), Some("header-even-b"));
         assert_eq!(effective.footer_default.as_deref(), Some("footer-a"));
+    }
+
+    #[test]
+    fn authored_section_properties_normalize_to_engine_geometry() {
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "bodyStory": "body",
+            "regions": {
+                "settings": {
+                    "evenAndOddHeaders": true,
+                    "footnotePr": {"numFmt": "upperRoman", "numStart": 3}
+                },
+                "sections": [{
+                    "sectionId": "main",
+                    "properties": {
+                        "pageWidth": 12240,
+                        "pageHeight": 15840,
+                        "marginTop": 0,
+                        "marginRight": 1440,
+                        "marginBottom": 1440,
+                        "marginLeft": 720,
+                        "gutter": 360,
+                        "headerDistance": 0,
+                        "columnCount": 2,
+                        "columnSpace": 360,
+                        "equalWidth": false,
+                        "columns": [{"width": 3600, "space": 360}, {"width": 7200}],
+                        "headerReferences": [{"type": "default", "rId": "rId1"}],
+                        "footnoteColumns": 2,
+                        "sectionStart": "oddPage"
+                    }
+                }]
+            },
+            "renderEnv": {}
+        }))
+        .unwrap();
+
+        let (_, regions, _, _, _, _) = request.split();
+        let section = &regions.sections[0];
+
+        assert_eq!(section.page_size.as_ref().unwrap().w, 816.0);
+        assert_eq!(section.margins.as_ref().unwrap().top, 0.0);
+        assert_eq!(section.margins.as_ref().unwrap().left, 72.0);
+        assert_eq!(section.margins.as_ref().unwrap().header, Some(0.0));
+        assert_eq!(section.columns.as_ref().unwrap().gap, 24.0);
+        assert_eq!(
+            section.columns.as_ref().unwrap().columns.as_ref().unwrap()[0].width,
+            Some(240.0)
+        );
+        assert_eq!(
+            section
+                .header_footer_refs
+                .as_ref()
+                .unwrap()
+                .header_default
+                .as_deref(),
+            Some("rId1")
+        );
+        assert_eq!(section.note_settings.footnote_columns, Some(2));
+        assert_eq!(
+            section.section_start,
+            Some(crate::types::SectionBreakType::OddPage)
+        );
+        assert!(regions.even_and_odd_headers);
+        assert_eq!(regions.note_settings.footnote.num_start, Some(3));
     }
 }

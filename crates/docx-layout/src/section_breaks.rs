@@ -33,6 +33,7 @@ const SINGLE_COLUMN: ColumnLayout = ColumnLayout {
     gap: 0.0,
     equal_width: None,
     separator: None,
+    columns: None,
 };
 
 /// TS `Partial<PageMargins>` — the margin fields a section break has
@@ -570,6 +571,7 @@ mod tests {
             gap: 20.0,
             equal_width: Some(true),
             separator: Some(true),
+            columns: None,
         };
         let result = apply_section_break(
             &SectionBreakBlock {
@@ -591,6 +593,7 @@ mod tests {
             gap: 20.0,
             equal_width: Some(false),
             separator: Some(true),
+            columns: None,
         };
         let result = apply_section_break(
             &SectionBreakBlock {
@@ -1045,6 +1048,7 @@ mod tests {
                     gap: 20.0,
                     equal_width: None,
                     separator: None,
+                    columns: None,
                 }),
             ),
             Some(SectionBreakType::Continuous),

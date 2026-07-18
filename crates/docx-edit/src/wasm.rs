@@ -975,6 +975,12 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    pub fn layout_font_requirements_json(&self, input: &str) -> Result<String, JsValue> {
+        self.engine
+            .layout_font_requirements_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Paginate and compose section/page regions inside the resident engine.
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
@@ -2561,11 +2567,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Lowers a story straight to the renderer's `LayoutBlock[]` (JSON) — the
-    /// yrs-authoritative render path (the eventual replacement for the TS
-    /// `toLayoutBlocks(pmDoc)`). Errors with an unsupported-embed message on any
-    /// non-native content (e.g. an opaque page-break blob) until that class is
-    /// promoted to native; the host falls back to the PM render path there.
+    /// Lowers a story through the resident Rust bridge. Errors with an
+    /// unsupported-embed message on any non-native content until that class is
+    /// promoted to native.
     /// `env_json` carries theme colors, the default tab stop, and list numeric
     /// ids (see [`parse_render_env`]).
     pub fn yrs_blocks_for_story(&self, story: &str, env_json: &str) -> Result<String, JsValue> {

@@ -397,6 +397,7 @@ export interface YrsResidentWorkerSnapshot {
   renderInputs: Array<{ story: string; env: YrsRenderEnv }>;
   measureInputs: string[];
   layoutInput: string;
+  layoutWithRegions: boolean;
   layoutRevision: number;
 }
 
@@ -568,6 +569,8 @@ export interface YrsSession {
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
   layoutDocumentJson(input: string): string;
+  /** Return the compact font requirements for resident region layout. */
+  layoutFontRequirementsJson(input: string): string;
   /** Paginate and compose section/page regions in the resident engine. */
   layoutDocumentWithRegionsJson(input: string): string;
   /** Build display primitives against the session's resident font store. */
@@ -786,10 +789,9 @@ export interface YrsSession {
    */
   storyChecksum(story: string): bigint;
   /**
-   * Lowers a story straight to the renderer's `LayoutBlock[]` — the
-   * yrs-authoritative render path (the eventual replacement for
-   * `toLayoutBlocks(pmDoc)`). Throws with an unsupported-embed message on any
-   * non-native content (opaque blobs) until that class is promoted to native.
+   * Lowers a story through the resident Rust bridge. Throws with an
+   * unsupported-embed message on any non-native content (opaque blobs) until
+   * that class is promoted to native.
    * The return is the layout pipeline's `LayoutBlock[]` (kept as `unknown[]` to
    * keep this facade decoupled from the layout types).
    */
@@ -864,6 +866,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
   let residentLayoutInput: string | null = null;
+  let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
   let ownsResidentFontStore = false;
 
@@ -964,12 +967,15 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     layoutDocumentJson: (input) => {
       const output = session.layout_document_json(input);
       residentLayoutInput = input;
+      residentLayoutWithRegions = false;
       residentLayoutRevision += 1;
       return output;
     },
+    layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsJson: (input) => {
       const output = session.layout_document_with_regions_json(input);
       residentLayoutInput = input;
+      residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
       return output;
     },
@@ -1001,7 +1007,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return { frame, profile };
     },
     residentWorkerSnapshot: () => {
-      if (!residentLayoutInput || residentRenderInputs.size === 0) return null;
+      if (!residentLayoutInput) return null;
+      if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
       const selectionJson = session.selection();
       return {
         clientId,
@@ -1014,6 +1021,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         })),
         measureInputs: [...residentMeasureInputs.values()],
         layoutInput: residentLayoutInput,
+        layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
       };
     },

@@ -8,32 +8,12 @@
  * @public
  */
 
-// Float-zone geometry (pure math shared by measurement and pagination)
-export {
-  clampFloatingWrapMargins,
-  rectsToFloatingZones,
-  getFloatingMargins,
-  type FloatingImageZone,
-  type FloatingExclusionRect,
-  type FloatingLineSegmentZone,
-} from './floatingZones';
-
-export {
-  measureBlocksWithFloats,
-  type MeasureBlockFn,
-  type FloatPageGeometry,
-} from './measureBlocksPipeline';
-
-// The Rust measurement source (wasm docx-text engine) — the sole path
 export {
   createRustMeasureSource,
   getRustTextEngine,
-  type FontStyle,
   type RustMeasureSource,
-  type RustMeasureStats,
   type RustTextEngine,
+  type ResidentFontRequirement,
+  type ResidentMeasurementConfig,
 } from './rustMeasureSource';
 export type { BundledFontProvider, EmbeddedFaceInput, FontScript } from './fontRegistry';
-
-// Paragraph identity hash (the Rust measure memo's key)
-export { hashParagraphBlock } from './paragraphHash';

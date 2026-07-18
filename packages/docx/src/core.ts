@@ -186,38 +186,6 @@ export type {
   ErrorManagerSnapshot,
 } from './managers';
 
-// ============================================================================
-// LAYOUT BRIDGE (Adapter Authoring)
-// ============================================================================
-//
-// Helpers shared by the React + Vue adapters and available to third-party
-// adapter authors. The full pipeline (page mapping, content conversion,
-// multi-pass convergence) lives in core so every adapter calls the same
-// code and stays in lockstep on layout behaviour.
-
-export {
-  collectFootnoteRefs,
-  mapFootnotesToPages,
-  calculateFootnoteReservedHeights,
-  buildFootnoteContentMap,
-  buildFootnoteRenderItems,
-  footnoteReservedHeightsEqual,
-  stabilizeFootnoteLayout,
-  convertHeaderFooterToContent,
-  FOOTNOTE_SEPARATOR_HEIGHT,
-  MAX_FOOTNOTE_LAYOUT_PASSES,
-} from './layout';
-
-export type {
-  FootnoteRefLocation,
-  MeasureBlocksFn,
-  ConvertFootnoteOptions,
-  StabilizeFootnoteLayoutArgs,
-  StabilizeFootnoteLayoutResult,
-  HeaderFooterMetrics,
-  ConvertHeaderFooterOptions,
-} from './layout';
-
 export type {
   LayoutBlock,
   Layout,

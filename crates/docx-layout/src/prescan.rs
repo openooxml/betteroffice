@@ -26,6 +26,7 @@ pub fn default_columns() -> ColumnLayout {
         gap: 0.0,
         equal_width: None,
         separator: None,
+        columns: None,
     }
 }
 

@@ -329,7 +329,7 @@ export function loadRustDisplayListQueryEngine(): Promise<RustDisplayListQueryEn
  * sub-object of each MeasuredBlock across passes.
  *
  * Why this is a per-keystroke win: on every layout pass the paginator rebuilds
- * the block objects fresh from the PM doc (`toLayoutBlocks`), so the `block`
+ * the block objects fresh from the resident engine, so the `block`
  * side of each MeasuredBlock has no reference stability and re-serializes every
  * pass. The `measure` side does NOT — the paragraph measure cache is keyed by a
  * content hash (see `layout/measure/cache.ts`), so an *unchanged* paragraph

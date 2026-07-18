@@ -89,7 +89,6 @@ import {
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import { useYrsCoreSession } from './hooks/useYrsCoreSession';
-import { useRustPagination } from './hooks/useRustPagination';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi } from './hooks/usePagedScrollApi';
@@ -402,8 +401,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsSeedDocument = document,
       styles,
       theme: _theme,
-      sectionProperties,
-      finalSectionProperties,
       headerContent,
       footerContent,
       firstPageHeaderContent,
@@ -489,15 +486,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         numericIds: {},
       };
     }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop]);
-    const yrsBodyBlocks = useCallback(
-      (layoutEnv: { pageContentHeight: number }) =>
-        yrsCore.bodyBlocks({ ...yrsRenderEnv, ...layoutEnv }),
-      [yrsCore.bodyBlocks, yrsRenderEnv]
-    );
-    const yrsStoryBlocks = useCallback(
-      (storyId: string) => yrsCore.storyBlocks(storyId, yrsRenderEnv),
-      [yrsCore.storyBlocks, yrsRenderEnv]
-    );
     const activeYrsRootStory = hfEditMode && hfEditRId ? `hf:${hfEditRId}` : 'body';
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
@@ -565,9 +553,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // hook; engine-ready and fonts-ready re-layouts reach back through its
     // runLayoutPipelineRef, and deferLayoutPass gates provisional passes.
     const {
-      measureBlocksImpl,
-      notifyBlocks: notifyRustMeasurementBlocks,
       deferLayoutPass,
+      residentMeasurementConfig,
       runLayoutPipelineRef,
     } = useRustMeasurement({
       document,
@@ -576,10 +563,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       textEngine: yrsCore.session,
     });
 
-    // The mandatory Rust pagination source — the sole pagination engine.
-    // Readiness gating lives in useLayoutPipeline (defer-and-rerun).
-    const paginationSource = useRustPagination(yrsCore.session);
-
     // Layout pipeline — owns layout/blocks/measures state, the rAF-coalesced
     // scheduler, scroll-restore plumbing, and the page-count
     // notifier.
@@ -587,23 +570,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]
     );
-    const { layout, blocks, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
+    const { layout, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
       document,
-      styles,
-      theme: _theme,
-      sectionProperties,
-      finalSectionProperties,
-      headerContent,
-      footerContent,
-      firstPageHeaderContent,
-      firstPageFooterContent,
-      yrsBodyBlocks,
-      yrsStoryBlocks,
+      session: yrsCore.session,
+      renderEnv: yrsRenderEnv,
       pageGap,
       zoom,
-      measureBlocksImpl,
       deferLayoutPass,
-      paginationSource,
+      residentMeasurementConfig,
       displayListQueries,
       interactionPageHostRef: canvasHostRef,
       pagesContainerRef,
@@ -616,8 +590,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
-    // Feed each pass's blocks so the hook warms font chains (no-op when off).
-    useEffect(() => notifyRustMeasurementBlocks(blocks), [blocks, notifyRustMeasurementBlocks]);
 
     // Selection overlay — caret, range rects, image overlay info, plus the
     // ResizeObserver + post-layout recompute that keep geometry fresh.

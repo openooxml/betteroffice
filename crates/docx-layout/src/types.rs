@@ -68,6 +68,8 @@ pub struct ColumnLayout {
     pub equal_width: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<ColumnDefinition>>,
 }
 
 /// TS `SectionBreakBlock['type']` / `LayoutOptions['bodyBreakType']`.

@@ -208,6 +208,7 @@ export class EditSession {
      * Paginate and compose section/page regions inside the resident engine.
      */
     layout_document_with_regions_json(input: string): string;
+    layout_font_requirements_json(input: string): string;
     /**
      * Every tracked-change run/paragraph-mark revision across all stories,
      * in deterministic story/position order.
@@ -440,11 +441,9 @@ export class EditSession {
      */
     undo_depth(): number;
     /**
-     * Lowers a story straight to the renderer's `LayoutBlock[]` (JSON) — the
-     * yrs-authoritative render path (the eventual replacement for the TS
-     * `toLayoutBlocks(pmDoc)`). Errors with an unsupported-embed message on any
-     * non-native content (e.g. an opaque page-break blob) until that class is
-     * promoted to native; the host falls back to the PM render path there.
+     * Lowers a story through the resident Rust bridge. Errors with an
+     * unsupported-embed message on any non-native content until that class is
+     * promoted to native.
      * `env_json` carries theme colors, the default tab stop, and list numeric
      * ids (see [`parse_render_env`]).
      */
@@ -606,6 +605,7 @@ export interface InitOutput {
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];

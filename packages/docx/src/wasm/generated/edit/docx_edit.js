@@ -950,6 +950,30 @@ export class EditSession {
         }
     }
     /**
+     * @param {string} input
+     * @returns {string}
+     */
+    layout_font_requirements_json(input) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(input, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.editsession_layout_font_requirements_json(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * Every tracked-change run/paragraph-mark revision across all stories,
      * in deterministic story/position order.
      * @returns {string}
@@ -1936,11 +1960,9 @@ export class EditSession {
         return ret >>> 0;
     }
     /**
-     * Lowers a story straight to the renderer's `LayoutBlock[]` (JSON) — the
-     * yrs-authoritative render path (the eventual replacement for the TS
-     * `toLayoutBlocks(pmDoc)`). Errors with an unsupported-embed message on any
-     * non-native content (e.g. an opaque page-break blob) until that class is
-     * promoted to native; the host falls back to the PM render path there.
+     * Lowers a story through the resident Rust bridge. Errors with an
+     * unsupported-embed message on any non-native content until that class is
+     * promoted to native.
      * `env_json` carries theme colors, the default tab stop, and list numeric
      * ids (see [`parse_render_env`]).
      * @param {string} story
