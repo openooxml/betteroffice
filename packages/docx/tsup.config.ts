@@ -32,6 +32,7 @@ export default defineConfig([
       // Its embedded wasm stays out of every other entry: the facade reaches
       // ./wasm only via dynamic import, and hosts load the facade lazily.
       'yrs/index': 'src/yrs/index.ts',
+      'collaboration/index': 'src/collaboration/index.ts',
       // Dedicated browser worker loaded relative to the yrs facade bundle.
       'yrs/residentEngineWorker': 'src/yrs/residentEngineWorker.ts',
       // The four wasm loaders are ROOT-NAMED entries on purpose: their

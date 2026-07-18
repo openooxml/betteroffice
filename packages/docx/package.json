@@ -109,6 +109,10 @@
       "types": "./dist/yrs/index.d.mts",
       "import": "./dist/yrs/index.mjs"
     },
+    "./collaboration": {
+      "types": "./dist/collaboration/index.d.mts",
+      "import": "./dist/collaboration/index.mjs"
+    },
     "./editor": {
       "types": "./dist/editor/index.d.mts",
       "import": "./dist/editor/index.mjs"
@@ -187,6 +191,9 @@
       ],
       "yrs": [
         "./dist/yrs/index.d.mts"
+      ],
+      "collaboration": [
+        "./dist/collaboration/index.d.mts"
       ],
       "editor": [
         "./dist/editor/index.d.mts"
