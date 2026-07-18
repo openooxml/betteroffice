@@ -204,7 +204,7 @@
   "devDependencies": {
     "@betteroffice/drawingml": "workspace:*",
     "tsup": "^8.0.1",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "@types/bun": "^1.0.0",
     "@types/node": "^26.0.0"
   },
