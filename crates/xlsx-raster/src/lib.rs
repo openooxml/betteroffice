@@ -72,7 +72,19 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
         }
     }
 
-    pixmap.encode_png().map_err(|e| e.to_string())
+    let pixels = pixmap.take_demultiplied();
+    let mut data = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut data, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer
+            .write_image_data(&pixels)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(data)
 }
 
 /// paint a line honoring its dash/double style; `double` approximates excel's
