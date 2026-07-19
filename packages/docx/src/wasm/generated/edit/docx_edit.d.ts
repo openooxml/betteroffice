@@ -563,6 +563,14 @@ export function range_rects_region_json(display_list: string, region: string, r_
  */
 export function register_measure_font(bytes: Uint8Array): number;
 
+/**
+ * wasm wrapper over [`session::update_display_list`]: apply a page-delta
+ * update to a stored display list so an incremental rebuild re-parses only
+ * its changed pages. `Err` closes the handle first, so the caller's fallback
+ * (a fresh [`open_display_list`]) can never race a half-updated list.
+ */
+export function update_display_list(handle: number, update: string): void;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -674,6 +682,7 @@ export interface InitOutput {
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
+    readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly close_display_list: (a: number) => void;
     readonly clear_measure_fonts: () => void;
     readonly __wbindgen_exn_store: (a: number) => void;

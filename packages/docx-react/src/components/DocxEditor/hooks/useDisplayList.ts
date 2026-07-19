@@ -397,10 +397,17 @@ export function useDisplayListQueries(
     engine.displayRangeRectsRegionJson
       ? (engine as ResidentDisplayListQueryEngine)
       : undefined;
-  return useMemo(
-    () => (displayList ? createDisplayListQueries(displayList, residentQueries) : null),
-    [displayList, residentQueries]
-  );
+  // The previous facade seeds handle adoption: consecutive builds patch only
+  // changed pages into the Rust query store instead of re-serializing the
+  // whole display list per build.
+  const previousRef = useRef<DisplayListQueries | null>(null);
+  return useMemo(() => {
+    const next = displayList
+      ? createDisplayListQueries(displayList, residentQueries, previousRef.current)
+      : null;
+    previousRef.current = next;
+    return next;
+  }, [displayList, residentQueries]);
 }
 
 export interface UseCanvasRendererResult {

@@ -2421,6 +2421,23 @@ export function register_measure_font(bytes) {
     }
     return ret[0] >>> 0;
 }
+
+/**
+ * wasm wrapper over [`session::update_display_list`]: apply a page-delta
+ * update to a stored display list so an incremental rebuild re-parses only
+ * its changed pages. `Err` closes the handle first, so the caller's fallback
+ * (a fresh [`open_display_list`]) can never race a half-updated list.
+ * @param {number} handle
+ * @param {string} update
+ */
+export function update_display_list(handle, update) {
+    const ptr0 = passStringToWasm0(update, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.update_display_list(handle, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,

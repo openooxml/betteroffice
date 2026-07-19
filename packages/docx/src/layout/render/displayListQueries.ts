@@ -32,6 +32,7 @@
  */
 
 import type { DisplayList, DisplayPrimitive } from './displayList';
+import { displayPageRevision } from './frameDelta';
 import { displayPrimitiveRect, type GeoRect } from './displayListGeometry';
 import {
   findImagePrimitiveAtPoint,
@@ -220,13 +221,67 @@ const handleFinalizers: HandleFinalizationRegistry | null = (() => {
 })();
 
 /**
+ * Internal handoff state for handle adoption between consecutive facades.
+ * Keyed weakly so a dropped facade can never leak its list.
+ */
+interface FacadeDeltaSeed {
+  list: DisplayList;
+  /** Per-page in-place mutation revisions captured at facade creation. The
+   * owned frame-delta path patches positions through the SAME page objects,
+   * so identity alone cannot prove a page still matches the parsed store. */
+  pageRevisions: number[];
+  engine(): RustDisplayListQueryEngine | null;
+  /** Relinquish the live handle (the donor's queries fall back to JSON-arg). */
+  takeHandle(): number | null;
+}
+
+const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
+
+/**
+ * Page-delta between two display lists, exploiting the retained-frame
+ * invariant that unchanged pages keep object identity across builds. A page
+ * is reusable only when both its identity and its in-place mutation revision
+ * are unchanged since the donor parsed it. Returns null when nothing is
+ * reusable (a full open costs the same).
+ */
+function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): string | null {
+  const previousIndex = new Map<unknown, number>();
+  seed.list.pages.forEach((page, index) => previousIndex.set(page, index));
+  const reuse: Array<[number, number]> = [];
+  const replace: Array<[number, unknown]> = [];
+  next.pages.forEach((page, index) => {
+    const from = previousIndex.get(page);
+    if (from !== undefined && displayPageRevision(page) === seed.pageRevisions[from]) {
+      reuse.push([index, from]);
+      previousIndex.delete(page);
+    } else {
+      replace.push([index, page]);
+    }
+  });
+  if (reuse.length === 0) return null;
+  return JSON.stringify({
+    total: next.pages.length,
+    ...(next.contractVersion !== undefined ? { contractVersion: next.contractVersion } : {}),
+    reuse,
+    replace,
+  });
+}
+
+/**
  * Build a query facade for one display list. The optional `engine` makes the
  * facade synchronous and deterministic in tests; without it the shared wasm
  * module is loaded lazily and queries no-op (`null`/`[]`) until it resolves.
+ *
+ * `previous` (the facade this build replaces) enables handle adoption: instead
+ * of re-serializing and re-parsing the WHOLE list into the Rust store, the new
+ * facade takes over the previous parsed list and patches only the pages that
+ * changed. The donor facade's remaining queries degrade to its own JSON-arg
+ * path (same stale-list semantics it always had after replacement).
  */
 export function createDisplayListQueries(
   list: DisplayList,
-  engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine
+  engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine,
+  previous?: DisplayListQueries | null
 ): DisplayListQueries {
   let json: string | null = null;
   const getJson = (): string => (json ??= JSON.stringify(list));
@@ -265,11 +320,40 @@ export function createDisplayListQueries(
     }
   };
 
+  // adopt the previous facade's parsed list when only some pages changed:
+  // ships a page-delta into the Rust store instead of the whole list
+  const adoptHandle = (): boolean => {
+    if (!previous || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
+    const seed = facadeDeltaSeeds.get(previous);
+    if (!seed || seed.engine() !== eng) return false;
+    const update = buildDisplayListUpdateJson(seed, list);
+    if (!update) return false;
+    const adopted = seed.takeHandle();
+    if (adopted === null) return false;
+    try {
+      eng.updateDisplayList(adopted, update);
+      handle = adopted;
+      return true;
+    } catch (error) {
+      // the Rust side closes the handle on a failed update; close defensively
+      // anyway (idempotent) in case the failure happened before wasm ran, then
+      // fall through to a fresh full open
+      try {
+        eng.closeDisplayList?.(adopted);
+      } catch {
+        // the capped store reclaims it eventually
+      }
+      console.warn('[CanvasRenderer] display-list delta update failed; reopening', error);
+      return false;
+    }
+  };
+
   // open exactly one handle once the engine is known to support sessions; a
   // failure leaves `handle` null so queries take the JSON-arg path
   const openHandle = (): void => {
     if (disposed || handle !== null || !eng) return;
     if (!eng.hasDisplayListSession?.() || !eng.openDisplayList) return;
+    if (adoptHandle()) return;
     try {
       handle = eng.openDisplayList(getJson());
     } catch (error) {
@@ -762,6 +846,22 @@ export function createDisplayListQueries(
   // value is `closeHandle` (a thunk over `handle`/`eng`, never over `queries`),
   // so registering cannot keep `queries` alive.
   handleFinalizers?.register(queries, closeHandle, finalizerToken);
+
+  facadeDeltaSeeds.set(queries, {
+    list,
+    pageRevisions: list.pages.map(displayPageRevision),
+    engine: () => eng,
+    takeHandle: () => {
+      const transferred = handle;
+      if (transferred !== null) {
+        // ownership moves to the adopting facade: neither dispose() nor the
+        // finalizer may close it here anymore
+        handle = null;
+        handleFinalizers?.unregister(finalizerToken);
+      }
+      return transferred;
+    },
+  });
 
   return queries;
 }
