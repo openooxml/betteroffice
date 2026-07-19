@@ -1,0 +1,37 @@
+{
+  "_lang": "en",
+  "toolbar": {
+    "label": "Presentation formatting toolbar",
+    "historyLabel": "History",
+    "undo": "Undo",
+    "redo": "Redo",
+    "textFormattingLabel": "Text formatting",
+    "bold": "Bold",
+    "italic": "Italic",
+    "fontSize": "Font size",
+    "textColor": "Text color",
+    "slidesLabel": "Slides",
+    "addSlide": "Add slide",
+    "deleteSlide": "Delete slide",
+    "objectsLabel": "Objects",
+    "addTextBox": "Add text box"
+  },
+  "slides": {
+    "panelLabel": "Slides",
+    "fallbackTitle": "Slide {number}",
+    "canvasLabel": "Slide {current} of {total}",
+    "canvasLabelWithSelection": "Slide {current} of {total}; selected object {name}"
+  },
+  "editor": {
+    "appLabel": "Presentation slide editor",
+    "opening": "Opening presentation…",
+    "noSlides": "No slides",
+    "openPrompt": "Open a PPTX file"
+  },
+  "objects": {
+    "defaultTextBoxName": "Text Box"
+  },
+  "errors": {
+    "decodeSlideImage": "could not decode slide image"
+  }
+}

@@ -9,3 +9,4 @@ export type {
   XlsxEditorApi,
   XlsxEditorCollaborationOptions,
 } from './XlsxEditor';
+export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';

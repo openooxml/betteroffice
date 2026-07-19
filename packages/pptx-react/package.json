@@ -34,7 +34,8 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
-    "@betteroffice/pptx": "workspace:*"
+    "@betteroffice/pptx": "workspace:*",
+    "@betteroffice/pptx-i18n": "workspace:*"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",

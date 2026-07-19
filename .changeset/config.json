@@ -5,11 +5,13 @@
   "fixed": [
     [
       "@betteroffice/pptx",
-      "@betteroffice/pptx-react"
+      "@betteroffice/pptx-react",
+      "@betteroffice/pptx-i18n"
     ],
     [
       "@betteroffice/xlsx",
-      "@betteroffice/xlsx-react"
+      "@betteroffice/xlsx-react",
+      "@betteroffice/xlsx-i18n"
     ],
     [
       "@betteroffice/docx",

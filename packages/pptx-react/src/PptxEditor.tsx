@@ -16,6 +16,8 @@ import type {
   TextStylePatch,
 } from '@betteroffice/pptx';
 import type { CollaborationReplica } from '@betteroffice/pptx/collaboration';
+import type { Translations } from '@betteroffice/pptx-i18n';
+import { LocaleProvider, useTranslation } from './i18n';
 import {
   useCallback,
   useEffect,
@@ -66,6 +68,7 @@ export interface PptxEditorProps {
   fonts: ReadonlyArray<PptxFontFace>;
   clientId?: number;
   collaboration?: PptxEditorCollaborationOptions;
+  i18n?: Translations;
   className?: string;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
@@ -169,6 +172,17 @@ function PptxToolbarIcon({ name }: { name: PptxToolbarIconName }) {
 }
 
 export function PptxEditor({
+  i18n,
+  ...props
+}: PptxEditorProps) {
+  return (
+    <LocaleProvider i18n={i18n}>
+      <PptxEditorContent {...props} />
+    </LocaleProvider>
+  );
+}
+
+function PptxEditorContent({
   file,
   fonts,
   clientId,
@@ -177,7 +191,9 @@ export function PptxEditor({
   onReady,
   onChange,
   onError,
-}: PptxEditorProps) {
+}: Omit<PptxEditorProps, 'i18n'>) {
+  const { t } = useTranslation();
+  const decodeImageError = t('errors.decodeSlideImage');
   const collaborationClientId = collaboration?.clientId ?? clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const collaborationOnReplica = collaboration?.onReplica;
@@ -378,14 +394,15 @@ export function PptxEditor({
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
     void paintSlide(ctx, frame, dpr, scale, {
-      resolveImage: (assetId) => resolveImage(assetId, handleRef, imageCacheRef),
+      resolveImage: (assetId) =>
+        resolveImage(assetId, handleRef, imageCacheRef, decodeImageError),
     }).catch((value: unknown) => {
       if (!cancelled) reportError(value);
     });
     return () => {
       cancelled = true;
     };
-  }, [model?.frame, reportError, scale]);
+  }, [decodeImageError, model?.frame, reportError, scale]);
 
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
@@ -812,7 +829,7 @@ export function PptxEditor({
     if (!slide) return;
     try {
       const receipt = handle.addTextBox(slide.id, {
-        name: 'Text Box',
+        name: t('objects.defaultTextBoxName'),
         rect: {
           x: Math.round(current.snapshot.widthEmu * 0.15),
           y: Math.round(current.snapshot.heightEmu * 0.25),
@@ -866,14 +883,14 @@ export function PptxEditor({
   return (
     <div className={className} style={styles.root}>
       <div style={styles.toolbarShell}>
-        <div style={styles.toolbar} role="group" aria-label="Presentation formatting toolbar">
-          <div style={styles.toolbarGroup} role="group" aria-label="History">
+        <div style={styles.toolbar} role="group" aria-label={t('toolbar.label')}>
+          <div style={styles.toolbarGroup} role="group" aria-label={t('toolbar.historyLabel')}>
             <button
               type="button"
               style={toolbarButton(handleRef.current?.canUndo() ?? false)}
               disabled={!handleRef.current?.canUndo()}
-              aria-label="Undo"
-              title="Undo"
+              aria-label={t('toolbar.undo')}
+              title={t('toolbar.undo')}
               onClick={() => history('undo')}
             >
               <PptxToolbarIcon name="undo" />
@@ -882,20 +899,24 @@ export function PptxEditor({
               type="button"
               style={toolbarButton(handleRef.current?.canRedo() ?? false)}
               disabled={!handleRef.current?.canRedo()}
-              aria-label="Redo"
-              title="Redo"
+              aria-label={t('toolbar.redo')}
+              title={t('toolbar.redo')}
               onClick={() => history('redo')}
             >
               <PptxToolbarIcon name="redo" />
             </button>
           </div>
           <span style={styles.divider} aria-hidden="true" />
-          <div style={styles.toolbarGroup} role="group" aria-label="Text formatting">
+          <div
+            style={styles.toolbarGroup}
+            role="group"
+            aria-label={t('toolbar.textFormattingLabel')}
+          >
             <button
               type="button"
               aria-pressed={textStyle.bold}
-              aria-label="Bold"
-              title="Bold"
+              aria-label={t('toolbar.bold')}
+              title={t('toolbar.bold')}
               style={formatButton(textStyle.bold)}
               onClick={() => applyFormatting({ bold: !textStyle.bold })}
             >
@@ -904,16 +925,16 @@ export function PptxEditor({
             <button
               type="button"
               aria-pressed={textStyle.italic}
-              aria-label="Italic"
-              title="Italic"
+              aria-label={t('toolbar.italic')}
+              title={t('toolbar.italic')}
               style={{ ...formatButton(textStyle.italic), fontStyle: 'italic' }}
               onClick={() => applyFormatting({ italic: !textStyle.italic })}
             >
               I
             </button>
             <input
-              aria-label="Font size"
-              title="Font size"
+              aria-label={t('toolbar.fontSize')}
+              title={t('toolbar.fontSize')}
               type="number"
               min={6}
               max={400}
@@ -925,8 +946,8 @@ export function PptxEditor({
               }}
             />
             <input
-              aria-label="Text color"
-              title="Text color"
+              aria-label={t('toolbar.textColor')}
+              title={t('toolbar.textColor')}
               type="color"
               value={textStyle.color}
               style={styles.colorInput}
@@ -936,12 +957,12 @@ export function PptxEditor({
             />
           </div>
           <span style={styles.divider} aria-hidden="true" />
-          <div style={styles.toolbarGroup} role="group" aria-label="Slides">
+          <div style={styles.toolbarGroup} role="group" aria-label={t('toolbar.slidesLabel')}>
             <button
               type="button"
               style={toolbarButton(true)}
-              aria-label="Add slide"
-              title="Add slide"
+              aria-label={t('toolbar.addSlide')}
+              title={t('toolbar.addSlide')}
               onClick={addSlide}
             >
               <PptxToolbarIcon name="addSlide" />
@@ -950,21 +971,21 @@ export function PptxEditor({
               type="button"
               style={toolbarButton(slideCount > 1)}
               disabled={slideCount <= 1}
-              aria-label="Delete slide"
-              title="Delete slide"
+              aria-label={t('toolbar.deleteSlide')}
+              title={t('toolbar.deleteSlide')}
               onClick={deleteSlide}
             >
               <PptxToolbarIcon name="deleteSlide" />
             </button>
           </div>
           <span style={styles.divider} aria-hidden="true" />
-          <div style={styles.toolbarGroup} role="group" aria-label="Objects">
+          <div style={styles.toolbarGroup} role="group" aria-label={t('toolbar.objectsLabel')}>
             <button
               type="button"
               style={toolbarButton(slideCount > 0)}
               disabled={slideCount === 0}
-              aria-label="Add text box"
-              title="Add text box"
+              aria-label={t('toolbar.addTextBox')}
+              title={t('toolbar.addTextBox')}
               onClick={addTextBox}
             >
               <PptxToolbarIcon name="textBox" />
@@ -973,7 +994,7 @@ export function PptxEditor({
         </div>
       </div>
       <div style={styles.workspace}>
-        <aside style={styles.slideStrip} aria-label="Slides">
+        <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
           {model?.snapshot.slides.map((slide, index) => (
             <button
               type="button"
@@ -987,10 +1008,15 @@ export function PptxEditor({
                 {model.thumbnails.get(slide.id) ? (
                   <SlideThumbnail
                     frame={model.thumbnails.get(slide.id)!}
-                    resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef)}
+                    resolveImage={(assetId) =>
+                      resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
+                    }
                   />
                 ) : (
-                  <span style={styles.slideTitle}>{slideTitle(slide.shapes) || `Slide ${index + 1}`}</span>
+                  <span style={styles.slideTitle}>
+                    {slideTitle(slide.shapes) ||
+                      t('slides.fallbackTitle', { number: index + 1 })}
+                  </span>
                 )}
               </span>
             </button>
@@ -1001,7 +1027,7 @@ export function PptxEditor({
           style={styles.stage}
           tabIndex={0}
           role="application"
-          aria-label="Presentation slide editor"
+          aria-label={t('editor.appLabel')}
           onKeyDown={keyDown}
         >
           <div ref={canvasHostRef} style={styles.canvasHost}>
@@ -1025,9 +1051,18 @@ export function PptxEditor({
                   onPointerCancel={cancelPointerGesture}
                   onLostPointerCapture={cancelPointerGesture}
                   onDoubleClick={pointerDoubleClick}
-                  aria-label={`Slide ${currentSlide + 1} of ${slideCount}${
-                    selectedShape ? `; selected object ${selectedShape.name}` : ''
-                  }`}
+                  aria-label={
+                    selectedShape
+                      ? t('slides.canvasLabelWithSelection', {
+                          current: currentSlide + 1,
+                          total: slideCount,
+                          name: selectedShape.name,
+                        })
+                      : t('slides.canvasLabel', {
+                          current: currentSlide + 1,
+                          total: slideCount,
+                        })
+                  }
                 />
                 <canvas ref={overlayCanvasRef} style={styles.canvasOverlay} aria-hidden="true" />
                 {selectedShapeBounds ? (
@@ -1045,7 +1080,11 @@ export function PptxEditor({
               </div>
             ) : (
               <div style={styles.empty}>
-                {loading ? 'Opening presentation…' : file ? 'No slides' : 'Open a PPTX file'}
+                {loading
+                  ? t('editor.opening')
+                  : file
+                    ? t('editor.noSlides')
+                    : t('editor.openPrompt')}
               </div>
             )}
           </div>
@@ -1155,16 +1194,20 @@ function removeBrowserFonts(fonts: FontFace[]): void {
 function resolveImage(
   assetId: string,
   handleRef: { current: PresentationHandle | null },
-  cacheRef: { current: Map<string, Promise<CanvasImageSource | null>> }
+  cacheRef: { current: Map<string, Promise<CanvasImageSource | null>> },
+  errorMessage: string
 ): Promise<CanvasImageSource | null> {
   const cached = cacheRef.current.get(assetId);
   if (cached) return cached;
-  const pending = decodeImage(handleRef.current?.mediaBytes(assetId));
+  const pending = decodeImage(handleRef.current?.mediaBytes(assetId), errorMessage);
   cacheRef.current.set(assetId, pending);
   return pending;
 }
 
-async function decodeImage(bytes: Uint8Array | undefined): Promise<CanvasImageSource | null> {
+async function decodeImage(
+  bytes: Uint8Array | undefined,
+  errorMessage: string
+): Promise<CanvasImageSource | null> {
   if (!bytes) return null;
   const blob = new Blob([bytes.slice()]);
   if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
@@ -1173,7 +1216,7 @@ async function decodeImage(bytes: Uint8Array | undefined): Promise<CanvasImageSo
     return await new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image();
       image.onload = () => resolve(image);
-      image.onerror = () => reject(new Error('could not decode slide image'));
+      image.onerror = () => reject(new Error(errorMessage));
       image.src = url;
     });
   } finally {

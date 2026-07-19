@@ -7,7 +7,7 @@
 
 import type { Proposal } from '@betteroffice/xlsx';
 import type { CSSProperties } from 'react';
-import { en } from '../i18n';
+import { useTranslation } from '../i18n';
 import { proposalColor } from './palette';
 
 /**
@@ -22,16 +22,6 @@ export interface ProposalsPanelProps {
   style?: CSSProperties;
 }
 
-const t = en.proposals;
-
-function fill(template: string, vars: Record<string, string | number>): string {
-  return template.replace(/\{(\w+)\}/g, (_, key) => String(vars[key] ?? ''));
-}
-
-function cellCountLabel(count: number): string {
-  return count === 1 ? t.cellCountOne : fill(t.cellCount, { count });
-}
-
 /**
  * The list of pending proposals with review controls.
  */
@@ -42,11 +32,12 @@ export function ProposalsPanel({
   onReject,
   style,
 }: ProposalsPanelProps) {
+  const { t } = useTranslation();
   return (
     <div
       data-testid="xlsx-proposals-panel"
       role="region"
-      aria-label={t.panelLabel}
+      aria-label={t('proposals.panelLabel')}
       style={{
         position: 'absolute',
         top: '100%',
@@ -67,7 +58,9 @@ export function ProposalsPanel({
       }}
     >
       {proposals.length === 0 ? (
-        <div style={{ padding: 12, color: '#707070', textAlign: 'center' }}>{t.empty}</div>
+        <div style={{ padding: 12, color: '#707070', textAlign: 'center' }}>
+          {t('proposals.empty')}
+        </div>
       ) : (
         proposals.map((proposal) => {
           const color = proposalColor(proposal.agentId);
@@ -90,7 +83,7 @@ export function ProposalsPanel({
               >
                 <strong style={{ color }}>{proposal.agentId}</strong>
                 <span style={{ color: '#707070', fontSize: 12 }}>
-                  {cellCountLabel(proposal.cells.length)}
+                  {t('proposals.cellCount', { count: proposal.cells.length })}
                 </span>
               </div>
               {proposal.note && (
@@ -104,7 +97,8 @@ export function ProposalsPanel({
                     style={{ fontVariantNumeric: 'tabular-nums', lineHeight: 1.5 }}
                   >
                     <strong data-testid="xlsx-proposal-cell-a1">{cell.a1}</strong>:{' '}
-                    <span style={{ color: '#909090' }}>{cell.oldText || '∅'}</span> {t.changeArrow}{' '}
+                    <span style={{ color: '#909090' }}>{cell.oldText || '∅'}</span>{' '}
+                    {t('proposals.changeArrow')}{' '}
                     <span data-testid="xlsx-proposal-cell-new" style={{ color }}>
                       {cell.newText}
                     </span>
@@ -124,7 +118,7 @@ export function ProposalsPanel({
                     fontSize: 12,
                   }}
                 >
-                  {fill(t.staleWarning, { cells: stale.join(', ') })}
+                  {t('proposals.staleWarning', { cells: stale.join(', ') })}
                 </div>
               )}
               <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
@@ -133,7 +127,7 @@ export function ProposalsPanel({
                   onClick={() => onAccept(proposal.id)}
                   style={{ padding: '3px 10px', cursor: 'pointer' }}
                 >
-                  {t.accept}
+                  {t('proposals.accept')}
                 </button>
                 {stale && stale.length > 0 && (
                   <button
@@ -141,7 +135,7 @@ export function ProposalsPanel({
                     onClick={() => onAccept(proposal.id, true)}
                     style={{ padding: '3px 10px', cursor: 'pointer', color: '#b45309' }}
                   >
-                    {t.forceApply}
+                    {t('proposals.forceApply')}
                   </button>
                 )}
                 <button
@@ -149,7 +143,7 @@ export function ProposalsPanel({
                   onClick={() => onReject(proposal.id)}
                   style={{ padding: '3px 10px', cursor: 'pointer' }}
                 >
-                  {t.reject}
+                  {t('proposals.reject')}
                 </button>
               </div>
             </div>
