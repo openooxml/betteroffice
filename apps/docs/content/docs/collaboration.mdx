@@ -1,0 +1,88 @@
+---
+title: Collaboration
+description: Connect DOCX, XLSX, and PPTX editors through a shared sync-v1 relay
+---
+
+BetterOffice exposes the same collaboration boundary for DOCX, XLSX, and PPTX:
+an editor-owned Yrs replica, a sync-v1 provider, and a caller-owned binary
+transport. The backend routes frames by room and never parses Office files.
+
+## Architecture
+
+1. The editor publishes its replica through `collaboration.onReplica`.
+2. The format provider converts replica updates to Yjs sync-v1 frames.
+3. Your transport moves those frames between peers in the same document room.
+
+Use a distinct room ID for every document and format. Updates from different
+documents or formats are not interoperable.
+
+## Deploy the Cloudflare relay
+
+The [reference relay](https://github.com/openooxml/betteroffice/tree/main/apps/relay)
+uses one Durable Object per room. It accepts WebSockets at `/room/:roomId`,
+replays retained frames to new peers, and broadcasts new binary frames. Its
+[`wrangler.jsonc`](https://github.com/openooxml/betteroffice/blob/main/apps/relay/wrangler.jsonc)
+contains the required `ROOMS` binding and SQLite migration.
+
+From a BetterOffice checkout:
+
+```bash
+bun install
+bun run --filter @betteroffice/collaboration-relay dev
+bun run --filter @betteroffice/collaboration-relay deploy
+```
+
+Point your browser transport at the deployed Worker origin. The complete demo
+adapter is [`createRoomTransport`](https://github.com/openooxml/betteroffice/blob/main/apps/demo/app/collab/createRoomTransport.ts);
+it handles WebSocket reconnects, binary ownership, and backpressure. If you write
+your own adapter, implement the `CollaborationTransport` exported by the format
+package. A `false` return from `send` means the adapter must emit `drain` when it
+can accept another frame.
+
+## Connect an editor
+
+The provider import differs by format; the transport contract does not.
+
+| Format | Provider import |
+| --- | --- |
+| DOCX | `@betteroffice/docx/collaboration` |
+| XLSX | `@betteroffice/xlsx/collaboration` |
+| PPTX | `@betteroffice/pptx` |
+
+Create the provider when the editor publishes its replica:
+
+```ts
+const onReplica = (replica) => {
+  provider?.destroy();
+  transport?.disconnect();
+  if (!replica) return;
+
+  transport = createRoomTransport(relayOrigin, roomId);
+  provider = new CollaborationProvider(replica, transport);
+  provider.connect();
+};
+```
+
+Pass the same collaboration shape to any React editor:
+
+```tsx
+const collaboration = { clientId, initialUpdate, onReplica };
+
+<DocxEditor documentBuffer={docxBytes} collaboration={collaboration} />
+<XlsxEditor file={xlsxBytes} collaboration={collaboration} />
+<PptxEditor file={pptxBytes} fonts={fonts} collaboration={collaboration} />
+```
+
+`clientId` must be unique per open peer. `initialUpdate` must represent the
+shared starting state for that document. The demo generates these states with
+[`build-collaboration-seeds.ts`](https://github.com/openooxml/betteroffice/blob/main/apps/demo/scripts/build-collaboration-seeds.ts).
+
+Call `provider.destroy()` and disconnect the transport when the editor unmounts
+or changes rooms.
+
+## Production boundary
+
+The reference relay is intentionally small. Add authentication before resolving
+a room, authorize each room ID, enforce connection and storage quotas, and define
+a snapshot or compaction policy for long-lived documents. The included relay
+retains at most 512 frames or 16 MiB per room.
