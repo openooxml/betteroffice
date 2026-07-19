@@ -1,19 +1,24 @@
 [package]
-name = "docx-parse"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-docx-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Safe DOCX XML parsing, typed relationship models, and the versioned Rust/TypeScript equivalence contract."
+keywords = ["docx", "word", "ooxml", "wordprocessingml"]
+categories = ["parser-implementations", "encoding"]
 
 [lib]
+name = "docx_parse"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 base64 = "0.22"
 ooxml-opc.workspace = true
 indexmap = { version = "2", features = ["serde"] }
-ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
+ooxml-drawingml.workspace = true
 quick-xml = { version = "0.41", features = ["encoding"] }
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }

@@ -13,8 +13,8 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ["-O3"]
 
 [dependencies]
-pptx-edit = { path = "../pptx-edit", version = "=0.0.0", features = ["wasm"] }
-pptx-parse = { path = "../pptx-parse", version = "=0.0.0" }
-pptx-render = { path = "../pptx-render", version = "=0.0.0" }
+pptx-edit = { workspace = true, features = ["wasm"] }
+pptx-parse.workspace = true
+pptx-render.workspace = true
 serde_json = "1"
 wasm-bindgen = "0.2"

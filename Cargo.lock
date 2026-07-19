@@ -67,12 +67,73 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "betteroffice-docx"
 version = "0.0.1"
 dependencies = [
+ "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
  "betteroffice-opc",
- "docx-edit",
- "docx-layout",
- "docx-parse",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "betteroffice-docx-edit"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-docx-layout",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "unicode-segmentation",
+ "wasm-bindgen",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-docx-layout"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "betteroffice-docx-parse"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "indexmap",
+ "quick-xml",
+ "ryu-js",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "betteroffice-drawingml"
+version = "0.0.1"
+dependencies = [
+ "indexmap",
+ "serde",
+]
+
+[[package]]
+name = "betteroffice-ooxml-text"
+version = "0.0.1"
+dependencies = [
+ "rustybuzz",
+ "serde",
+ "serde_json",
+ "skrifa",
+ "unicode-bidi",
+ "unicode-linebreak",
 ]
 
 [[package]]
@@ -90,20 +151,59 @@ dependencies = [
 name = "betteroffice-pptx"
 version = "0.0.1"
 dependencies = [
- "pptx-edit",
- "pptx-parse",
- "pptx-render",
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
+]
+
+[[package]]
+name = "betteroffice-pptx-edit"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-pptx-parse",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "wasm-bindgen",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-pptx-parse"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "quick-xml",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-pptx-render"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
 name = "betteroffice-redact"
 version = "0.0.1"
 dependencies = [
+ "betteroffice-docx-parse",
  "betteroffice-opc",
+ "betteroffice-pptx-parse",
  "betteroffice-xlsx-parse",
- "docx-parse",
  "image",
- "pptx-parse",
  "quick-xml",
  "thiserror",
 ]
@@ -351,47 +451,6 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
-]
-
-[[package]]
-name = "docx-edit"
-version = "0.0.0"
-dependencies = [
- "docx-layout",
- "js-sys",
- "serde",
- "serde_json",
- "unicode-segmentation",
- "wasm-bindgen",
- "yrs",
-]
-
-[[package]]
-name = "docx-layout"
-version = "0.0.0"
-dependencies = [
- "ooxml-drawingml",
- "ooxml-text",
- "serde",
- "serde_json",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "docx-parse"
-version = "0.0.0"
-dependencies = [
- "base64",
- "betteroffice-opc",
- "indexmap",
- "ooxml-drawingml",
- "quick-xml",
- "ryu-js",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -730,26 +789,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
-name = "ooxml-drawingml"
-version = "0.0.0"
-dependencies = [
- "indexmap",
- "serde",
-]
-
-[[package]]
-name = "ooxml-text"
-version = "0.0.0"
-dependencies = [
- "rustybuzz",
- "serde",
- "serde_json",
- "skrifa",
- "unicode-bidi",
- "unicode-linebreak",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,51 +846,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "pptx-edit"
-version = "0.0.0"
-dependencies = [
- "js-sys",
- "ooxml-drawingml",
- "pptx-parse",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "wasm-bindgen",
- "yrs",
-]
-
-[[package]]
-name = "pptx-parse"
-version = "0.0.0"
-dependencies = [
- "betteroffice-opc",
- "ooxml-drawingml",
- "quick-xml",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "pptx-render"
-version = "0.0.0"
-dependencies = [
- "ooxml-drawingml",
- "ooxml-text",
- "pptx-edit",
- "pptx-parse",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "pptx-wasm"
 version = "0.0.0"
 dependencies = [
- "pptx-edit",
- "pptx-parse",
- "pptx-render",
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
  "serde_json",
  "wasm-bindgen",
 ]

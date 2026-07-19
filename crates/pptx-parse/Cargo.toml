@@ -1,13 +1,20 @@
 [package]
-name = "pptx-parse"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-pptx-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Bounded PresentationML parsing and byte-preserving PPTX package serialization."
+keywords = ["pptx", "powerpoint", "ooxml", "presentationml"]
+categories = ["parser-implementations", "encoding"]
+
+[lib]
+name = "pptx_parse"
 
 [dependencies]
-ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
+ooxml-drawingml.workspace = true
 ooxml-opc.workspace = true
 quick-xml = { version = "0.41", features = ["encoding"] }
 serde = { version = "1", features = ["derive"] }
