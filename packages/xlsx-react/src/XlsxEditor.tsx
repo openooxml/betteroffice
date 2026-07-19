@@ -98,6 +98,7 @@ interface EditState {
 const COL_W = 96;
 const ROW_H = 24;
 const BRAND = '#217346';
+const DEFAULT_XLSX_TOOLBAR_HEIGHT = 46;
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 // a placeholder grid frame so the shell paints something real when no file is
@@ -203,6 +204,161 @@ const visuallyHidden: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
+const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
+  shell: {
+    flex: '0 0 auto',
+    minHeight: DEFAULT_XLSX_TOOLBAR_HEIGHT,
+    padding: '4px 0 5px',
+    borderBottom: '1px solid #e2e8f0',
+    background: '#ffffff',
+    color: '#0f172a',
+    boxSizing: 'border-box',
+  },
+  rail: {
+    display: 'flex',
+    alignItems: 'center',
+    minHeight: 36,
+    margin: '0 8px',
+    padding: '4px 8px',
+    borderRadius: 999,
+    background: '#f1f5f9',
+    boxSizing: 'border-box',
+    overflowX: 'auto',
+    overflowY: 'hidden',
+  },
+  group: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 1,
+    padding: '0 6px',
+    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
+    flex: '0 0 auto',
+  },
+  formulaGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    flex: '1 1 320px',
+    minWidth: 240,
+    padding: '0 6px',
+    borderRight: '1px solid rgba(226, 232, 240, 0.9)',
+  },
+  nameBox: {
+    appearance: 'none',
+    width: 64,
+    height: 28,
+    flex: '0 0 auto',
+    boxSizing: 'border-box',
+    border: '1px solid #e2e8f0',
+    borderRadius: 6,
+    background: '#f8fafc',
+    color: '#0f172a',
+    font: '600 12px ui-monospace, SFMono-Regular, Menlo, monospace',
+    textAlign: 'center',
+    outlineColor: '#2563eb',
+  },
+  formulaMark: {
+    display: 'grid',
+    placeItems: 'center',
+    width: 20,
+    height: 28,
+    flex: '0 0 auto',
+    color: '#64748b',
+    font: 'italic 700 12px Georgia, serif',
+    userSelect: 'none',
+  },
+  formulaInput: {
+    appearance: 'none',
+    flex: '1 1 260px',
+    minWidth: 140,
+    height: 28,
+    boxSizing: 'border-box',
+    border: '1px solid #e2e8f0',
+    borderRadius: 6,
+    padding: '0 8px',
+    background: '#ffffff',
+    color: '#0f172a',
+    font: '13px ui-sans-serif, system-ui, sans-serif',
+    outlineColor: '#2563eb',
+  },
+  proposals: {
+    marginLeft: 'auto',
+    paddingLeft: 6,
+    flex: '0 0 auto',
+  },
+  count: {
+    display: 'inline-grid',
+    placeItems: 'center',
+    minWidth: 15,
+    height: 15,
+    marginLeft: -3,
+    padding: '0 4px',
+    borderRadius: 8,
+    background: '#0f172a',
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: 700,
+    lineHeight: 1,
+    boxSizing: 'border-box',
+  },
+};
+
+function xlsxToolbarButton(enabled: boolean, active = false): React.CSSProperties {
+  return {
+    appearance: 'none',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    width: 28,
+    height: 28,
+    padding: 0,
+    border: 0,
+    borderRadius: 6,
+    background: active ? '#0f172a' : 'transparent',
+    color: enabled ? (active ? '#ffffff' : '#64748b') : '#94a3b8',
+    cursor: enabled ? 'pointer' : 'default',
+    opacity: enabled ? 1 : 0.32,
+  };
+}
+
+type XlsxToolbarIconName = 'save' | 'image' | 'undo' | 'redo' | 'proposals';
+
+function XlsxToolbarIcon({ name }: { name: XlsxToolbarIconName }) {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+      style={{ flex: '0 0 auto' }}
+    >
+      {name === 'save' && <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 19h14" />}
+      {name === 'image' && (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <circle cx="8.5" cy="9.5" r="1.25" />
+          <path d="m6 17 4.5-4.5 3.25 3.25L16 13.5l2 2" />
+        </>
+      )}
+      {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
+      {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
+      {name === 'proposals' && (
+        <>
+          <path d="m12 3 1.25 3.75L17 8l-3.75 1.25L12 13l-1.25-3.75L7 8l3.75-1.25L12 3Z" />
+          <path d="m18 14 .75 2.25L21 17l-2.25.75L18 20l-.75-2.25L15 17l2.25-.75L18 14Z" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 /**
  * The xlsx editor React component.
  */
@@ -218,6 +374,7 @@ export function XlsxEditor({
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const collaborationOnReplica = collaboration?.onReplica;
+  const toolbarRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
@@ -238,6 +395,7 @@ export function XlsxEditor({
   const [editing, setEditing] = useState<EditState | null>(null);
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
+  const [toolbarHeight, setToolbarHeight] = useState(DEFAULT_XLSX_TOOLBAR_HEIGHT);
   const [revision, setRevision] = useState(0);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
@@ -256,6 +414,16 @@ export function XlsxEditor({
   // whether the embedded core exposes the proposals api; gates all proposal
   // chrome so the editor degrades cleanly against an older module.
   const proposalsAvailable = useMemo(() => isProposalsAvailable(), []);
+
+  useEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar) return;
+    const updateHeight = () => setToolbarHeight(toolbar.offsetHeight);
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, []);
 
   // re-read the pending proposal list from the handle. safe to call against an
   // old core (the loader returns an empty list).
@@ -861,126 +1029,144 @@ export function XlsxEditor({
         flexDirection: 'column',
         width: '100%',
         height: '100%',
+        minWidth: 0,
+        color: '#202124',
+        background: '#ffffff',
+        fontFamily: 'ui-sans-serif, system-ui, sans-serif',
       }}
     >
       <div
+        ref={toolbarRef}
         data-testid="xlsx-toolbar"
-        style={{
-          display: 'flex',
-          gap: 6,
-          alignItems: 'center',
-          padding: '4px 6px',
-          borderBottom: '1px solid #e0e0e0',
-          background: '#fafafa',
-        }}
+        style={xlsxToolbarStyles.shell}
       >
-        <button
-          data-testid="xlsx-save"
-          onClick={save}
-          disabled={!sheetInfo}
-          style={{ padding: '4px 12px', cursor: sheetInfo ? 'pointer' : 'default' }}
-        >
-          {en.toolbar.save}
-        </button>
-        <button
-          data-testid="xlsx-export-png"
-          onClick={exportPng}
-          disabled={!sheetInfo || !pngExportAvailable}
-          title={en.toolbar.exportPng}
-          style={{
-            padding: '4px 12px',
-            cursor: sheetInfo && pngExportAvailable ? 'pointer' : 'default',
-          }}
-        >
-          {en.toolbar.exportPng}
-        </button>
-        <button
-          data-testid="xlsx-undo"
-          onClick={undo}
-          disabled={!sheetInfo || collaborationEnabled}
-          aria-label={en.toolbar.undo}
-          title={en.toolbar.undo}
-          style={{ padding: '4px 10px' }}
-        >
-          ↶
-        </button>
-        <button
-          data-testid="xlsx-redo"
-          onClick={redo}
-          disabled={!sheetInfo || collaborationEnabled}
-          aria-label={en.toolbar.redo}
-          title={en.toolbar.redo}
-          style={{ padding: '4px 10px' }}
-        >
-          ↷
-        </button>
-        <input
-          data-testid="xlsx-name-box"
-          readOnly
-          value={focusedCell?.a1 ?? ''}
-          placeholder={en.toolbar.nameBoxPlaceholder}
-          aria-label={en.toolbar.nameBoxPlaceholder}
-          style={{ width: 72, textAlign: 'center' }}
-        />
-        <input
-          data-testid="xlsx-formula-input"
-          value={formulaValue}
-          placeholder={en.toolbar.formulaPlaceholder}
-          aria-label={en.toolbar.formulaPlaceholder}
-          disabled={!sheetInfo}
-          onChange={(e) => setFormulaDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              commitFormula(e.shiftKey ? 'up' : 'down');
-              focusContainer();
-              e.preventDefault();
-            } else if (e.key === 'Escape') {
-              setFormulaDraft(null);
-              focusContainer();
-              e.preventDefault();
-            }
-          }}
-          onBlur={() => commitFormula()}
-          style={{ flex: 1, minWidth: 0 }}
-        />
-        {proposalsAvailable && (
-          <div style={{ position: 'relative' }}>
+        <div style={xlsxToolbarStyles.rail} role="group" aria-label="Spreadsheet actions">
+          <div
+            style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
+            role="group"
+            aria-label="File actions"
+          >
             <button
-              data-testid="xlsx-proposals-button"
-              onClick={() => setProposalsPanelOpen((open) => !open)}
+              type="button"
+              data-testid="xlsx-save"
+              onClick={save}
               disabled={!sheetInfo}
-              aria-expanded={proposalsPanelOpen}
-              aria-label={en.proposals.panelLabel}
-              style={{ padding: '4px 12px', cursor: sheetInfo ? 'pointer' : 'default' }}
+              aria-label={en.toolbar.save}
+              title={en.toolbar.save}
+              style={xlsxToolbarButton(Boolean(sheetInfo))}
             >
-              {en.proposals.toolbarButton}
-              {proposals.length > 0 && (
-                <span
-                  data-testid="xlsx-proposals-count"
-                  style={{
-                    marginLeft: 6,
-                    padding: '0 6px',
-                    borderRadius: 8,
-                    background: BRAND,
-                    color: '#ffffff',
-                    fontSize: 12,
-                  }}
-                >
-                  {proposals.length}
-                </span>
-              )}
+              <XlsxToolbarIcon name="save" />
             </button>
-            {proposalsPanelOpen && (
-              <ProposalsPanel
-                proposals={proposals}
-                staleFor={staleFor}
-                onAccept={acceptProposal}
-                onReject={rejectProposal}
-              />
-            )}
+            <button
+              type="button"
+              data-testid="xlsx-export-png"
+              onClick={exportPng}
+              disabled={!sheetInfo || !pngExportAvailable}
+              aria-label={en.toolbar.exportPng}
+              title={en.toolbar.exportPng}
+              style={xlsxToolbarButton(Boolean(sheetInfo && pngExportAvailable))}
+            >
+              <XlsxToolbarIcon name="image" />
+            </button>
           </div>
-        )}
+          <div style={xlsxToolbarStyles.group} role="group" aria-label="History">
+            <button
+              type="button"
+              data-testid="xlsx-undo"
+              onClick={undo}
+              disabled={!sheetInfo || collaborationEnabled}
+              aria-label={en.toolbar.undo}
+              title={en.toolbar.undo}
+              style={xlsxToolbarButton(Boolean(sheetInfo && !collaborationEnabled))}
+            >
+              <XlsxToolbarIcon name="undo" />
+            </button>
+            <button
+              type="button"
+              data-testid="xlsx-redo"
+              onClick={redo}
+              disabled={!sheetInfo || collaborationEnabled}
+              aria-label={en.toolbar.redo}
+              title={en.toolbar.redo}
+              style={xlsxToolbarButton(Boolean(sheetInfo && !collaborationEnabled))}
+            >
+              <XlsxToolbarIcon name="redo" />
+            </button>
+          </div>
+          <div style={xlsxToolbarStyles.formulaGroup} role="group" aria-label="Formula bar">
+            <input
+              data-testid="xlsx-name-box"
+              readOnly
+              value={focusedCell?.a1 ?? ''}
+              placeholder={en.toolbar.nameBoxPlaceholder}
+              aria-label={en.toolbar.nameBoxPlaceholder}
+              style={xlsxToolbarStyles.nameBox}
+            />
+            <span style={xlsxToolbarStyles.formulaMark} aria-hidden="true">
+              fx
+            </span>
+            <input
+              data-testid="xlsx-formula-input"
+              value={formulaValue}
+              placeholder={en.toolbar.formulaPlaceholder}
+              aria-label={en.toolbar.formulaPlaceholder}
+              disabled={!sheetInfo}
+              onChange={(e) => setFormulaDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  commitFormula(e.shiftKey ? 'up' : 'down');
+                  focusContainer();
+                  e.preventDefault();
+                } else if (e.key === 'Escape') {
+                  setFormulaDraft(null);
+                  focusContainer();
+                  e.preventDefault();
+                }
+              }}
+              onBlur={() => commitFormula()}
+              style={xlsxToolbarStyles.formulaInput}
+            />
+          </div>
+          {proposalsAvailable && (
+            <div style={xlsxToolbarStyles.proposals}>
+              <button
+                type="button"
+                data-testid="xlsx-proposals-button"
+                onClick={() => setProposalsPanelOpen((open) => !open)}
+                disabled={!sheetInfo}
+                aria-expanded={proposalsPanelOpen}
+                aria-label={en.proposals.panelLabel}
+                title={en.proposals.panelLabel}
+                style={{
+                  ...xlsxToolbarButton(Boolean(sheetInfo), proposalsPanelOpen),
+                  width: proposals.length > 0 ? 42 : 28,
+                }}
+              >
+                <XlsxToolbarIcon name="proposals" />
+                {proposals.length > 0 && (
+                  <span data-testid="xlsx-proposals-count" style={xlsxToolbarStyles.count}>
+                    {proposals.length}
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+      {proposalsAvailable && proposalsPanelOpen && (
+        <ProposalsPanel
+          proposals={proposals}
+          staleFor={staleFor}
+          onAccept={acceptProposal}
+          onReject={rejectProposal}
+          style={{
+            top: toolbarHeight + 4,
+            right: 8,
+            width: 'min(320px, calc(100% - 16px))',
+            maxHeight: `min(420px, calc(100% - ${toolbarHeight + 12}px))`,
+          }}
+        />
+      )}
 
       <div
         ref={scrollRef}
