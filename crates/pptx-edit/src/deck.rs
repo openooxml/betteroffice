@@ -244,7 +244,13 @@ impl DeckSession {
         let order = required_order(&txn)?;
         let index = array_index(&order, &txn, slide_id)
             .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+        let slides = required_map(&txn, SLIDES)?;
+        let slide = slide_ref(&txn, slide_id)?;
+        let shape_order = slide_shape_order(&slide, &txn)?;
+        let shape_ids = string_array_ref(&shape_order, &txn);
+        remove_shape_entries(&mut txn, &shape_ids)?;
         order.remove(&mut txn, index);
+        slides.remove(&mut txn, slide_id);
         Ok(SlideReceipt {
             slide_id: slide_id.to_owned(),
             from_index: Some(index),
@@ -348,6 +354,7 @@ impl DeckSession {
         let order = slide_shape_order(&slide, &txn)?;
         let index = array_index(&order, &txn, shape_id)
             .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
+        remove_shape_entries(&mut txn, &[shape_id.to_owned()])?;
         order.remove(&mut txn, index);
         Ok(ShapeReceipt {
             slide_id: slide_id.to_owned(),
@@ -596,6 +603,69 @@ fn require_shape_membership<T: ReadTxn>(txn: &T, slide_id: &str, shape_id: &str)
     }
 }
 
+fn remove_shape_entries(txn: &mut TransactionMut<'_>, root_shape_ids: &[String]) -> EditResult<()> {
+    let shapes = required_map(txn, SHAPES)?;
+    let stories = required_map(txn, STORIES)?;
+    let mut entries = ShapeEntries::default();
+    for shape_id in root_shape_ids {
+        collect_shape_entries(&shapes, txn, shape_id, &mut HashSet::new(), &mut entries)?;
+    }
+    for story_id in entries.story_ids {
+        stories.remove(txn, &story_id);
+    }
+    for shape_id in entries.shape_ids {
+        shapes.remove(txn, &shape_id);
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ShapeEntries {
+    shape_ids: Vec<String>,
+    seen_shape_ids: HashSet<String>,
+    story_ids: Vec<String>,
+    seen_story_ids: HashSet<String>,
+}
+
+fn collect_shape_entries<T: ReadTxn>(
+    shapes: &MapRef,
+    txn: &T,
+    shape_id: &str,
+    visiting: &mut HashSet<String>,
+    entries: &mut ShapeEntries,
+) -> EditResult<()> {
+    if visiting.len() >= MAX_SHAPE_DEPTH {
+        return Err(EditError::InvalidState(format!(
+            "shape nesting exceeds {MAX_SHAPE_DEPTH} levels"
+        )));
+    }
+    if !visiting.insert(shape_id.to_owned()) {
+        return Err(EditError::InvalidState(format!(
+            "shape cycle at {shape_id}"
+        )));
+    }
+    if entries.seen_shape_ids.contains(shape_id) {
+        visiting.remove(shape_id);
+        return Ok(());
+    }
+    let shape = shapes
+        .get(txn, shape_id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
+    for story_id in map_string_array(&shape, txn, "textStories")? {
+        if entries.seen_story_ids.insert(story_id.clone()) {
+            entries.story_ids.push(story_id);
+        }
+    }
+    for child_id in map_string_array(&shape, txn, "children")? {
+        collect_shape_entries(shapes, txn, &child_id, visiting, entries)?;
+    }
+    visiting.remove(shape_id);
+    entries.seen_shape_ids.insert(shape_id.to_owned());
+    entries.shape_ids.push(shape_id.to_owned());
+    Ok(())
+}
+
 fn array_index<T: ReadTxn>(array: &ArrayRef, txn: &T, value: &str) -> Option<u32> {
     array
         .iter(txn)
@@ -721,4 +791,97 @@ fn optional_json<T: DeserializeOwned, R: ReadTxn>(
             serde_json::from_str(&json).map_err(|error| EditError::InvalidState(error.to_string()))
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TextStyle;
+
+    const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+
+    #[test]
+    fn delete_operations_remove_owned_map_entries() {
+        let session = DeckSession::open(FIXTURE, 101).unwrap();
+        let context = EditCtx::local("test");
+        let baseline = map_lengths(&session);
+
+        for cycle in 0..3 {
+            let index = session.snapshot().unwrap().slides.len() as u32;
+            let slide = session.insert_slide(&context, index, None).unwrap();
+            let first = session
+                .add_text_box(&context, &slide.slide_id, &draft(cycle, 0))
+                .unwrap();
+            session
+                .add_text_box(&context, &slide.slide_id, &draft(cycle, 1))
+                .unwrap();
+            assert_eq!(map_lengths(&session), add_lengths(baseline, (1, 2, 2)));
+
+            session
+                .remove_shape(&context, &slide.slide_id, &first.shape_id)
+                .unwrap();
+            assert_eq!(map_lengths(&session), add_lengths(baseline, (1, 1, 1)));
+
+            session.delete_slide(&context, &slide.slide_id).unwrap();
+            assert_eq!(map_lengths(&session), baseline);
+        }
+    }
+
+    #[test]
+    fn deleting_seeded_slide_cascades_descendant_entries() {
+        let session = DeckSession::open(FIXTURE, 202).unwrap();
+        let slide = session.snapshot().unwrap().slides[0].clone();
+        let before = map_lengths(&session);
+        let owned = slide.shapes.iter().fold((0, 0), |total, shape| {
+            let next = shape_entry_lengths(shape);
+            (total.0 + next.0, total.1 + next.1)
+        });
+
+        session
+            .delete_slide(&EditCtx::local("test"), &slide.id)
+            .unwrap();
+
+        assert!(owned.0 > slide.shapes.len() as u32);
+        assert_eq!(
+            map_lengths(&session),
+            (before.0 - 1, before.1 - owned.0, before.2 - owned.1)
+        );
+    }
+
+    fn draft(cycle: u32, index: u32) -> ShapeDraft {
+        ShapeDraft {
+            name: format!("Shape {cycle}:{index}"),
+            rect: ShapeRect {
+                x: 100_000,
+                y: 100_000,
+                width: 1_000_000,
+                height: 500_000,
+            },
+            text: "Text".to_owned(),
+            style: TextStyle::default(),
+        }
+    }
+
+    fn map_lengths(session: &DeckSession) -> (u32, u32, u32) {
+        let txn = session.doc.transact();
+        (
+            required_map(&txn, SLIDES).unwrap().len(&txn),
+            required_map(&txn, SHAPES).unwrap().len(&txn),
+            required_map(&txn, STORIES).unwrap().len(&txn),
+        )
+    }
+
+    fn shape_entry_lengths(shape: &ShapeSnapshot) -> (u32, u32) {
+        shape.children.iter().fold(
+            (1, shape.text_stories.len() as u32),
+            |(shape_count, story_count), child| {
+                let child_counts = shape_entry_lengths(child);
+                (shape_count + child_counts.0, story_count + child_counts.1)
+            },
+        )
+    }
+
+    fn add_lengths(left: (u32, u32, u32), right: (u32, u32, u32)) -> (u32, u32, u32) {
+        (left.0 + right.0, left.1 + right.1, left.2 + right.2)
+    }
 }
