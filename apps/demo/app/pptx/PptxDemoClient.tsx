@@ -2,14 +2,25 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import type { PptxFontFace } from "@betteroffice/pptx";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  CollaborationProvider,
+  type PptxFontFace,
+} from "@betteroffice/pptx";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
   resolveMetricCompatFace,
 } from "@betteroffice/docx-fonts";
 import { Logo } from "../components/Logo";
+import {
+  CollaborationControls,
+  COLLAB_RELAY_ORIGIN,
+  useCollabRoom,
+  useDemoRoom,
+  type CollaborationReplica,
+  type CollaborationTransport,
+} from "../collab";
 
 const PptxEditor = dynamic(
   () => import("@betteroffice/pptx-react").then((module) => module.PptxEditor),
@@ -24,17 +35,29 @@ const SHOWCASE = {
 type DemoAssets = {
   file: Uint8Array;
   fonts: PptxFontFace[];
+  seed: Uint8Array;
 };
 
 export function PptxDemoClient() {
   const [assets, setAssets] = useState<DemoAssets | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const room = useDemoRoom();
+  const createProvider = useCallback(
+    (replica: CollaborationReplica, transport: CollaborationTransport) =>
+      new CollaborationProvider(replica, transport),
+    [],
+  );
+  const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([loadPresentation(), loadPresentationFonts()]).then(
-      ([file, fonts]) => {
-        if (!cancelled) setAssets({ file, fonts });
+    Promise.all([
+      loadPresentation(),
+      loadPresentationFonts(),
+      loadCollaborationSeed(),
+    ]).then(
+      ([file, fonts, seed]) => {
+        if (!cancelled) setAssets({ file, fonts, seed });
       },
       (value: unknown) => {
         if (!cancelled) {
@@ -46,6 +69,18 @@ export function PptxDemoClient() {
       cancelled = true;
     };
   }, []);
+
+  const collaboration = useMemo(
+    () =>
+      room && assets && collab.clientId
+        ? {
+            clientId: collab.clientId,
+            initialUpdate: assets.seed,
+            onReplica: collab.onReplica,
+          }
+        : undefined,
+    [assets, collab.clientId, collab.onReplica, room],
+  );
 
   return (
     <div className="demo-shell pptx-app">
@@ -63,6 +98,12 @@ export function PptxDemoClient() {
         {assets && <span className="filename">{SHOWCASE.name}</span>}
 
         <div className="actions">
+          <CollaborationControls
+            status={collab.status}
+            synced={collab.synced}
+            peerCount={collab.peerCount}
+            error={collab.error}
+          />
           <a
             className="github-link"
             href="https://github.com/openooxml/betteroffice"
@@ -89,7 +130,11 @@ export function PptxDemoClient() {
             Failed to load the demo presentation: {error}
           </p>
         ) : assets ? (
-          <PptxEditor file={assets.file} fonts={assets.fonts} />
+          <PptxEditor
+            file={assets.file}
+            fonts={assets.fonts}
+            collaboration={collaboration}
+          />
         ) : (
           <p className="stage-message">Loading presentation…</p>
         )}
@@ -100,6 +145,12 @@ export function PptxDemoClient() {
 
 async function loadPresentation(): Promise<Uint8Array> {
   const response = await fetch(SHOWCASE.url);
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function loadCollaborationSeed(): Promise<Uint8Array> {
+  const response = await fetch("/seeds/pptx.bin");
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return new Uint8Array(await response.arrayBuffer());
 }
