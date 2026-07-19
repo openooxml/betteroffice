@@ -15,6 +15,7 @@ import type {
   TextStyle,
   TextStylePatch,
 } from '@betteroffice/pptx';
+import type { CollaborationReplica } from '@betteroffice/pptx/collaboration';
 import {
   useCallback,
   useEffect,
@@ -41,11 +42,18 @@ export interface PptxEditorApi {
   refresh: () => void;
 }
 
+export interface PptxEditorCollaborationOptions {
+  clientId: number;
+  initialUpdate?: Uint8Array;
+  onReplica?: (replica: CollaborationReplica | null) => void;
+}
+
 export interface PptxEditorProps {
   file?: Uint8Array;
   /** Font faces; equivalent inline arrays do not reopen the presentation. */
   fonts: ReadonlyArray<PptxFontFace>;
   clientId?: number;
+  collaboration?: PptxEditorCollaborationOptions;
   className?: string;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
@@ -70,11 +78,15 @@ export function PptxEditor({
   file,
   fonts,
   clientId,
+  collaboration,
   className,
   onReady,
   onChange,
   onError,
 }: PptxEditorProps) {
+  const collaborationClientId = collaboration?.clientId ?? clientId;
+  const collaborationInitialUpdate = collaboration?.initialUpdate;
+  const collaborationOnReplica = collaboration?.onReplica;
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
   const onReadyRef = useRef(onReady);
@@ -91,6 +103,8 @@ export function PptxEditor({
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [collaborationReplica, setCollaborationReplica] =
+    useState<CollaborationReplica | null>(null);
 
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -147,6 +161,7 @@ export function PptxEditor({
     let unsubscribeUpdates = () => {};
     handleRef.current?.dispose();
     handleRef.current = null;
+    setCollaborationReplica(null);
     modelRef.current = null;
     setModel(null);
     setSelection(null);
@@ -162,13 +177,18 @@ export function PptxEditor({
           return;
         }
         try {
-          handle = openPresentation(file, { clientId, fonts: stableFonts });
+          handle = openPresentation(file, {
+            clientId: collaborationClientId,
+            fonts: stableFonts,
+            initialUpdate: collaborationInitialUpdate,
+          });
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (origin === 'remote') refreshAt(undefined, true, true);
           });
           refreshAt(0);
           setLoading(false);
+          setCollaborationReplica(handle);
           onReadyRef.current?.({ handle, refresh });
         } catch (value) {
           setLoading(false);
@@ -188,7 +208,21 @@ export function PptxEditor({
       if (handleRef.current === handle) handleRef.current = null;
       removeBrowserFonts(browserFaces);
     };
-  }, [clientId, file, stableFonts, refresh, refreshAt, reportError]);
+  }, [
+    collaborationClientId,
+    collaborationInitialUpdate,
+    file,
+    stableFonts,
+    refresh,
+    refreshAt,
+    reportError,
+  ]);
+
+  useEffect(() => {
+    if (!collaborationOnReplica || !collaborationReplica) return;
+    collaborationOnReplica(collaborationReplica);
+    return () => collaborationOnReplica(null);
+  }, [collaborationOnReplica, collaborationReplica]);
 
   useEffect(() => {
     const host = canvasHostRef.current;

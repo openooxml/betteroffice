@@ -6,6 +6,7 @@ import { initWasm, openPresentation } from '../index';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
+let fixture: Uint8Array;
 
 beforeAll(async () => {
   const [wasm, pptx, font] = await Promise.all([
@@ -14,6 +15,7 @@ beforeAll(async () => {
     readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')),
   ]);
   await initWasm(wasm);
+  fixture = pptx;
   handle = openPresentation(pptx, {
     clientId: 9001,
     fonts: [{ family: 'Liberation Sans', bytes: font }],
@@ -23,6 +25,28 @@ beforeAll(async () => {
 afterAll(() => handle.dispose());
 
 describe('PPTX wasm boundary', () => {
+  test('opens shared updates without parsing the file bytes', () => {
+    const source = openPresentation(fixture, { clientId: 9002 });
+    const seed = source.encodeStateAsUpdate();
+    const left = openPresentation(Uint8Array.of(0xff), {
+      clientId: 9003,
+      initialUpdate: seed,
+    });
+    const right = openPresentation(Uint8Array.of(0xff), {
+      clientId: 9004,
+      initialUpdate: seed,
+    });
+
+    expect(left.snapshot()).toEqual(source.snapshot());
+    expect([...left.encodeStateAsUpdate()]).toEqual([...seed]);
+    expect([...right.encodeStateAsUpdate()]).toEqual([...seed]);
+    expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
+
+    source.dispose();
+    left.dispose();
+    right.dispose();
+  });
+
   test('opens, edits, reflows, hit-tests, and observes a local update', () => {
     const snapshot = handle.snapshot();
     expect(snapshot.slides.length).toBe(3);

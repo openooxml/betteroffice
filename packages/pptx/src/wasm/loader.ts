@@ -30,6 +30,7 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  initialUpdate?: Uint8Array;
 }
 
 export interface PresentationHandle extends CollaborationReplica {
@@ -104,7 +105,15 @@ export function openPresentation(
   options: OpenPresentationOptions = {}
 ): PresentationHandle {
   requireInitialized();
-  const doc = construct(() => PptxDocument.openCollaborative(bytes, options.clientId ?? clientId()));
+  const collaborationClientId = options.clientId ?? clientId();
+  const doc = construct(() =>
+    options.initialUpdate === undefined
+      ? PptxDocument.openCollaborative(bytes, collaborationClientId)
+      : PptxDocument.openCollaborativeFromUpdate(
+          options.initialUpdate.slice(),
+          collaborationClientId
+        )
+  );
   const renderer = construct(() => new PptxRenderer());
   for (const face of options.fonts ?? []) registerFont(renderer, face);
   const listeners = new Map<
