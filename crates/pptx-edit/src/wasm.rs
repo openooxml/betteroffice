@@ -134,6 +134,20 @@ impl PptxDocument {
             .map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = openCollaborativeFromUpdate)]
+    pub fn open_collaborative_from_update(
+        update: &[u8],
+        client_id: f64,
+    ) -> Result<PptxDocument, JsValue> {
+        let client_id = parse_client_id(client_id)?;
+        DeckSession::open_from_update(update, client_id)
+            .map(|session| Self {
+                session,
+                update_observer: None,
+            })
+            .map_err(js_error)
+    }
+
     #[wasm_bindgen(getter, js_name = clientId)]
     pub fn client_id(&self) -> f64 {
         self.session.client_id() as f64

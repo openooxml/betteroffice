@@ -49,9 +49,7 @@ pub struct DeckSession {
 
 impl DeckSession {
     pub fn open(bytes: &[u8], client_id: u64) -> EditResult<Self> {
-        if client_id == 0 || client_id > MAX_SAFE_CLIENT_ID {
-            return Err(EditError::InvalidClientId(client_id));
-        }
+        validate_client_id(client_id)?;
         let package =
             pptx_parse::parse_pptx(bytes).map_err(|error| EditError::Parse(error.to_string()))?;
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
@@ -63,6 +61,27 @@ impl DeckSession {
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, &baseline)?;
         deck::validate_doc(&doc)?;
+        let undo = DeckUndoManager::new(&doc, client_id)?;
+        Ok(Self {
+            doc,
+            client_id,
+            id_counter: AtomicU64::new(0),
+            package: Arc::new(package),
+            undo: RefCell::new(undo),
+        })
+    }
+
+    pub fn open_from_update(update: &[u8], client_id: u64) -> EditResult<Self> {
+        validate_client_id(client_id)?;
+        if update.len() > MAX_UPDATE_BYTES {
+            return Err(EditError::InvalidUpdate(format!(
+                "update exceeds {MAX_UPDATE_BYTES} bytes"
+            )));
+        }
+        let doc = doc_with_client_id(client_id);
+        hydrate_doc(&doc, update)?;
+        deck::validate_doc(&doc)?;
+        let package = deck::package_from_doc(&doc)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
         Ok(Self {
             doc,
@@ -186,6 +205,13 @@ fn doc_with_client_id(client_id: u64) -> Doc {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
     Doc::with_options(options)
+}
+
+fn validate_client_id(client_id: u64) -> EditResult<()> {
+    if client_id == 0 || client_id > MAX_SAFE_CLIENT_ID {
+        return Err(EditError::InvalidClientId(client_id));
+    }
+    Ok(())
 }
 
 fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {

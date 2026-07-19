@@ -353,6 +353,20 @@ export class PptxDocument {
         return PptxDocument.__wrap(ret[0]);
     }
     /**
+     * @param {Uint8Array} update
+     * @param {number} client_id
+     * @returns {PptxDocument}
+     */
+    static openCollaborativeFromUpdate(update, client_id) {
+        const ptr0 = passArray8ToWasm0(update, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.pptxdocument_openCollaborativeFromUpdate(ptr0, len0, client_id);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return PptxDocument.__wrap(ret[0]);
+    }
+    /**
      * @returns {string}
      */
     redoJson() {

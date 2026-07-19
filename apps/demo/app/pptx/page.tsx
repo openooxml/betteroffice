@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import { PptxDemoClient } from "./PptxDemoClient";
+import "../collab/collab.css";
 import "./pptx.css";
 
 export const metadata: Metadata = { title: "PPTX" };

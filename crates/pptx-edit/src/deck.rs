@@ -21,6 +21,8 @@ const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
+    let package_json =
+        serde_json::to_vec(package).map_err(|error| EditError::Json(error.to_string()))?;
     let mut txn = doc.transact_mut_with("pptx:bootstrap");
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
@@ -30,6 +32,11 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
         &mut txn,
         "heightEmu",
         package.presentation.height_emu as f64,
+    );
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
     );
     let order = txn.get_or_insert_array(SLIDE_ORDER);
     let slides = txn.get_or_insert_map(SLIDES);
@@ -437,6 +444,7 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     if map_string(&meta, &txn, "fingerprint").is_none() {
         return Err(EditError::InvalidState("missing fingerprint".to_owned()));
     }
+    package_from_meta(&meta, &txn)?;
     let stories = required_map(&txn, STORIES)?;
     for (story_id, value) in stories.iter(&txn) {
         let story = value
@@ -445,6 +453,19 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
         validate_story(&story, &txn, story_id)?;
     }
     Ok(())
+}
+
+pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    package_from_meta(&meta, &txn)
+}
+
+fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPackage> {
+    let Some(Out::Any(Any::Buffer(bytes))) = meta.get(txn, "packageJson") else {
+        return Err(EditError::InvalidState("missing package data".to_owned()));
+    };
+    serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
 }
 
 fn snapshot_doc(doc: &Doc) -> EditResult<DeckSnapshot> {

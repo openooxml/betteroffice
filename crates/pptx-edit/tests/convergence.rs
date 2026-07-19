@@ -18,6 +18,25 @@ fn first_text_story(session: &DeckSession) -> String {
 }
 
 #[test]
+fn shared_update_opens_byte_identical_state_for_distinct_clients() {
+    let source = DeckSession::open(FIXTURE, 101).unwrap();
+    let seed = source.encode_state_as_update_v1();
+    let left = DeckSession::open_from_update(&seed, 202).unwrap();
+    let right = DeckSession::open_from_update(&seed, 303).unwrap();
+
+    assert_eq!(left.client_id(), 202);
+    assert_eq!(right.client_id(), 303);
+    assert_eq!(left.snapshot().unwrap(), source.snapshot().unwrap());
+    assert_eq!(
+        left.encode_state_vector_v1(),
+        right.encode_state_vector_v1()
+    );
+    assert_eq!(left.encode_state_as_update_v1(), seed);
+    assert_eq!(right.encode_state_as_update_v1(), seed);
+    assert_eq!(left.package().media, source.package().media);
+}
+
+#[test]
 fn two_sessions_converge_after_text_slide_and_shape_edits() {
     let left = DeckSession::open(FIXTURE, 101).unwrap();
     let right = DeckSession::open(FIXTURE, 202).unwrap();
