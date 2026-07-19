@@ -9,6 +9,9 @@
     "binding": "ASSETS"
   },
   "routes": [{ "pattern": "betteroffice.dev", "custom_domain": true }],
+  "kv_namespaces": [
+    { "binding": "STATS_KV", "id": "3a3fa53e215b41f5838b5494f8be7aae" }
+  ],
   "observability": {
     "enabled": true
   }

@@ -10,11 +10,11 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-4ade80.svg?style=flat-square" alt="license"></a>
-  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fbetteroffice.dev%2Fapi%2Fnpm-downloads%3Fv%3D2&amp;style=flat-square&amp;logo=npm&amp;label=downloads&amp;color=CB3837&amp;cacheSeconds=86400" alt="npm downloads"></a>
-  <a href="https://crates.io/search?q=betteroffice"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fbetteroffice.dev%2Fapi%2Fcrates-downloads%3Fv%3D1&amp;style=flat-square&amp;logo=rust&amp;label=downloads&amp;color=CE412B&amp;cacheSeconds=86400" alt="crates.io downloads"></a>
-  <a href="https://betteroffice.dev"><img src="https://img.shields.io/badge/betteroffice.dev-0a0a0a?style=flat-square" alt="betteroffice.dev"></a>
-  <a href="https://openooxml.org"><img src="https://img.shields.io/badge/openooxml.org-0a0a0a?style=flat-square" alt="openooxml.org"></a>
+  <a href="./LICENSE"><img src="https://betteroffice.dev/api/badge?label=license&amp;message=Apache-2.0&amp;color=4ade80" alt="license"></a>
+  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads"></a>
+  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads"></a>
+  <a href="https://betteroffice.dev"><img src="https://betteroffice.dev/api/badge?label=&amp;message=betteroffice.dev&amp;color=0a0a0a" alt="betteroffice.dev"></a>
+  <a href="https://openooxml.org"><img src="https://betteroffice.dev/api/badge?label=&amp;message=openooxml.org&amp;color=0a0a0a" alt="openooxml.org"></a>
 </p>
 
 ## Packages
