@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { BundledFontProvider } from "@betteroffice/docx-react";
+import { CollaborationProvider } from "@betteroffice/docx/collaboration";
 import {
   loadBundledFontBytes,
   resolveLastResortFace,
@@ -11,6 +12,14 @@ import {
   resolveScriptFallbackFace,
 } from "@betteroffice/docx-fonts";
 import { Logo } from "../components/Logo";
+import {
+  CollaborationControls,
+  COLLAB_RELAY_ORIGIN,
+  useCollabRoom,
+  useDemoRoom,
+  type CollaborationReplica,
+  type CollaborationTransport,
+} from "../collab";
 
 // The editor is browser-only (canvas + wasm + worker); keep it out of SSR.
 const DocxEditor = dynamic(
@@ -22,6 +31,18 @@ const SHOWCASE = { url: "/betteroffice-demo.docx", name: "betteroffice-demo.docx
 
 export function DocxDemoClient() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
+  const [seed, setSeed] = useState<Uint8Array | null>(null);
+  const room = useDemoRoom();
+  const createProvider = useCallback(
+    (replica: CollaborationReplica, transport: CollaborationTransport) =>
+      new CollaborationProvider(replica, transport),
+    [],
+  );
+  const collab = useCollabRoom(
+    COLLAB_RELAY_ORIGIN,
+    room,
+    createProvider,
+  );
   // Bundled metric-compatible faces (Carlito↔Calibri, Liberation↔Arial, …) so
   // the Rust measurement engine gets real bytes for documents that embed none.
   const measurementFontProvider = useMemo<BundledFontProvider>(
@@ -44,13 +65,25 @@ export function DocxDemoClient() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(SHOWCASE.url)
-      .then((res) => {
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        return res.arrayBuffer();
+    Promise.all([fetch(SHOWCASE.url), fetch("/seeds/docx.bin")])
+      .then(async ([documentResponse, seedResponse]) => {
+        if (!documentResponse.ok) {
+          throw new Error(
+            `${documentResponse.status} ${documentResponse.statusText}`,
+          );
+        }
+        if (!seedResponse.ok) {
+          throw new Error(`${seedResponse.status} ${seedResponse.statusText}`);
+        }
+        return Promise.all([
+          documentResponse.arrayBuffer(),
+          seedResponse.arrayBuffer(),
+        ]);
       })
-      .then((bytes) => {
-        if (!cancelled) setBuffer(bytes);
+      .then(([documentBytes, seedBytes]) => {
+        if (cancelled) return;
+        setBuffer(documentBytes);
+        setSeed(new Uint8Array(seedBytes));
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -59,6 +92,18 @@ export function DocxDemoClient() {
       cancelled = true;
     };
   }, []);
+
+  const collaboration = useMemo(
+    () =>
+      room && seed && collab.clientId
+        ? {
+            clientId: collab.clientId,
+            initialUpdate: seed,
+            onReplica: collab.onReplica,
+          }
+        : undefined,
+    [collab.clientId, collab.onReplica, room, seed],
+  );
 
   return (
     <div className="demo-shell docx-app">
@@ -76,6 +121,12 @@ export function DocxDemoClient() {
         {buffer && <span className="filename">{SHOWCASE.name}</span>}
 
         <div className="actions">
+          <CollaborationControls
+            status={collab.status}
+            synced={collab.synced}
+            peerCount={collab.peerCount}
+            error={collab.error}
+          />
           <a
             className="github-link"
             href="https://github.com/openooxml/betteroffice"
@@ -104,6 +155,7 @@ export function DocxDemoClient() {
         ) : buffer ? (
           <DocxEditor
             documentBuffer={buffer}
+            collaboration={collaboration}
             measurementFontProvider={measurementFontProvider}
             showToolbar
             showRuler
