@@ -14,7 +14,7 @@
     "dev:demo": "bun run --filter './apps/demo' dev",
     "pretest": "bun run build:pptx-wasm",
     "build:pptx-wasm": "bun scripts/build-pptx-wasm.ts",
-    "build:pptx": "bun run --filter '@betteroffice/pptx' build && bun run --filter '@betteroffice/pptx-react' build",
+    "build:pptx": "bun run --filter '@betteroffice/pptx-i18n' build && bun run --filter '@betteroffice/pptx' build && bun run --filter '@betteroffice/pptx-react' build",
     "build:xlsx-wasm": "bun scripts/build-xlsx-wasm.ts",
     "build:xlsx": "bun run --filter '@betteroffice/xlsx-i18n' build && bun run --filter '@betteroffice/xlsx' build && bun run --filter '@betteroffice/xlsx-react' build",
     "build:packages": "bun run build:xlsx && bun run build:docx && bun run build:pptx",

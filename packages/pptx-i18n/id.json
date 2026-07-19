@@ -1,0 +1,37 @@
+{
+  "_lang": "id",
+  "toolbar": {
+    "label": null,
+    "historyLabel": null,
+    "undo": null,
+    "redo": null,
+    "textFormattingLabel": null,
+    "bold": null,
+    "italic": null,
+    "fontSize": null,
+    "textColor": null,
+    "slidesLabel": null,
+    "addSlide": null,
+    "deleteSlide": null,
+    "objectsLabel": null,
+    "addTextBox": null
+  },
+  "slides": {
+    "panelLabel": null,
+    "fallbackTitle": null,
+    "canvasLabel": null,
+    "canvasLabelWithSelection": null
+  },
+  "editor": {
+    "appLabel": null,
+    "opening": null,
+    "noSlides": null,
+    "openPrompt": null
+  },
+  "objects": {
+    "defaultTextBoxName": null
+  },
+  "errors": {
+    "decodeSlideImage": null
+  }
+}

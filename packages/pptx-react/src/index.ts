@@ -5,3 +5,4 @@ export type {
   PptxEditorProps,
   PptxTextSelection,
 } from './PptxEditor';
+export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n';
