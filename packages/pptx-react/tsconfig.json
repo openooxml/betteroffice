@@ -17,6 +17,7 @@
     "noFallthroughCasesInSwitch": true,
     "declaration": true,
     "declarationMap": true,
+    "types": ["bun"],
     "paths": {
       "@betteroffice/pptx": ["../pptx/src/index.ts"],
       "@betteroffice/pptx/*": ["../pptx/src/*"]

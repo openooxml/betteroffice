@@ -1795,7 +1795,7 @@ mod tests {
     fn renderer() -> SlideRenderer {
         let mut renderer = SlideRenderer::new();
         for bold in [false, true] {
-            renderer.register_font("Inter", bold, false, FONT).unwrap();
+            renderer.register_font("Arial", bold, false, FONT).unwrap();
         }
         renderer
     }

@@ -27,8 +27,20 @@ import type {
   CSSProperties,
   ChangeEvent,
   KeyboardEvent,
+  MouseEvent as ReactMouseEvent,
   PointerEvent,
 } from 'react';
+import {
+  canMoveShape,
+  findShape,
+  findTopLevelShape,
+  frameBoundsForShape,
+  movedShapePosition,
+  passedDragThreshold,
+  slidePoint,
+  textPositionAtPoint,
+} from './interactions';
+import type { FrameBounds, SlidePoint } from './interactions';
 
 export interface PptxTextSelection {
   shapeId: string;
@@ -65,6 +77,47 @@ interface EditorModel {
   slideIndex: number;
   frame: SlideDisplayList | null;
   thumbnails: Map<string, SlideDisplayList>;
+}
+
+interface PptxShapeSelection {
+  slideId: string;
+  shapeId: string;
+}
+
+type PointerGesture =
+  | {
+      kind: 'text';
+      pointerId: number;
+      slideId: string;
+      shapeId: string;
+      storyId: string;
+      anchor: number;
+    }
+  | {
+      kind: 'shape';
+      pointerId: number;
+      slideId: string;
+      shapeId: string;
+      startClientX: number;
+      startClientY: number;
+      start: SlidePoint;
+      last: SlidePoint;
+      dragThreshold: number;
+      repeatedClick: boolean;
+      dragging: boolean;
+    };
+
+interface ShapeDragPreview {
+  shapeId: string;
+  delta: SlidePoint;
+}
+
+interface RecentShapeClick {
+  slideId: string;
+  shapeId: string;
+  clientX: number;
+  clientY: number;
+  timeStamp: number;
 }
 
 const initialStyle: Required<Pick<TextStyle, 'bold' | 'italic' | 'fontSizePt' | 'color'>> = {
@@ -136,10 +189,15 @@ export function PptxEditor({
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const pointerGestureRef = useRef<PointerGesture | null>(null);
+  const recentShapeClickRef = useRef<RecentShapeClick | null>(null);
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
+  const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
+  const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
   const [textStyle, setTextStyle] = useState(initialStyle);
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const [error, setError] = useState<string | null>(null);
@@ -178,6 +236,28 @@ export function PptxEditor({
         const frame = snapshot.slides.length > 0 ? handle.layoutSlide(index) : null;
         if (frame) thumbnails.set(snapshot.slides[index].id, frame);
         const next = { snapshot, slideIndex: index, frame, thumbnails };
+        const activeSlide = snapshot.slides[index];
+        setSelection((current) =>
+          current && activeSlide && findShape(activeSlide.shapes, current.shapeId) ? current : null
+        );
+        setShapeSelection((current) =>
+          current &&
+          activeSlide?.id === current.slideId &&
+          findShape(activeSlide.shapes, current.shapeId)
+            ? current
+            : null
+        );
+        const gesture = pointerGestureRef.current;
+        if (
+          gesture &&
+          (!activeSlide ||
+            activeSlide.id !== gesture.slideId ||
+            !findShape(activeSlide.shapes, gesture.shapeId))
+        ) {
+          pointerGestureRef.current = null;
+          recentShapeClickRef.current = null;
+          setDragPreview(null);
+        }
         modelRef.current = next;
         setModel(next);
         setError(null);
@@ -206,6 +286,10 @@ export function PptxEditor({
     modelRef.current = null;
     setModel(null);
     setSelection(null);
+    setShapeSelection(null);
+    setDragPreview(null);
+    pointerGestureRef.current = null;
+    recentShapeClickRef.current = null;
     setError(null);
     imageCacheRef.current.clear();
     if (!file) return;
@@ -295,59 +379,294 @@ export function PptxEditor({
     let cancelled = false;
     void paintSlide(ctx, frame, dpr, scale, {
       resolveImage: (assetId) => resolveImage(assetId, handleRef, imageCacheRef),
-    }).then(
-      () => {
-        if (!cancelled) paintSelection(ctx, frame, selection, dpr, scale);
-      },
-      (value: unknown) => {
-        if (!cancelled) reportError(value);
-      }
-    );
+    }).catch((value: unknown) => {
+      if (!cancelled) reportError(value);
+    });
     return () => {
       cancelled = true;
     };
-  }, [model?.frame, reportError, scale, selection]);
+  }, [model?.frame, reportError, scale]);
+
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current;
+    const frame = model?.frame;
+    if (!canvas || !frame) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    sizeCanvasForSlide(canvas, frame, dpr, scale);
+    paintSelection(ctx, frame, selection, dpr, scale);
+  }, [model?.frame, scale, selection]);
+
+  const selectedShape = useMemo(() => {
+    if (!model?.frame || !shapeSelection) return null;
+    const slide = model.snapshot.slides[model.slideIndex];
+    if (!slide || slide.id !== shapeSelection.slideId) return null;
+    return findShape(slide.shapes, shapeSelection.shapeId);
+  }, [model, shapeSelection]);
+
+  const selectedShapeBounds = useMemo<FrameBounds | null>(
+    () =>
+      model?.frame && selectedShape
+        ? frameBoundsForShape(model.snapshot, model.frame, selectedShape)
+        : null,
+    [model, selectedShape]
+  );
 
   const selectSlide = (index: number) => {
     setSelection(null);
+    setShapeSelection(null);
+    setDragPreview(null);
+    pointerGestureRef.current = null;
+    recentShapeClickRef.current = null;
     refreshAt(index);
     stageRef.current?.focus();
   };
 
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (!event.isPrimary || event.button !== 0) return;
     const handle = handleRef.current;
     const current = modelRef.current;
-    const canvas = canvasRef.current;
-    if (!handle || !current?.frame || !canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) * current.frame.width) / rect.width;
-    const y = ((event.clientY - rect.top) * current.frame.height) / rect.height;
+    if (!handle || !current?.frame) return;
+    const point = slidePoint(
+      event.currentTarget.getBoundingClientRect(),
+      current.frame,
+      event.clientX,
+      event.clientY
+    );
+    if (!point) return;
     try {
       handle.layoutSlide(current.slideIndex);
-      const hit = handle.hitTest(x, y);
-      if (hit?.kind === 'text') {
-        try {
-          handle.story(hit.storyId);
-          setSelection({
-            shapeId: hit.shapeId,
-            storyId: hit.storyId,
-            anchor: hit.position,
-            focus: hit.position,
-          });
-        } catch {
+      const hit = handle.hitTest(point.x, point.y);
+      const slide = current.snapshot.slides[current.slideIndex];
+      if (
+        slide &&
+        selection &&
+        hit?.kind === 'text' &&
+        hit.shapeId === selection.shapeId &&
+        hit.storyId === selection.storyId
+      ) {
+        handle.story(hit.storyId);
+        const anchor = event.shiftKey ? selection.anchor : hit.position;
+        setSelection({
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor,
+          focus: hit.position,
+        });
+        setShapeSelection(null);
+        setDragPreview(null);
+        recentShapeClickRef.current = null;
+        pointerGestureRef.current = {
+          kind: 'text',
+          pointerId: event.pointerId,
+          slideId: slide.id,
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } else if (slide && hit) {
+        const shape = findTopLevelShape(slide, hit.shapeId);
+        if (shape) {
           setSelection(null);
+          setShapeSelection({ slideId: slide.id, shapeId: shape.id });
+          setDragPreview(null);
+          const recentClick = recentShapeClickRef.current;
+          const repeatedClick =
+            recentClick?.slideId === slide.id &&
+            recentClick.shapeId === shape.id &&
+            event.timeStamp - recentClick.timeStamp <= 600 &&
+            Math.hypot(
+              event.clientX - recentClick.clientX,
+              event.clientY - recentClick.clientY
+            ) <= 6;
+          recentShapeClickRef.current = null;
+          if (canMoveShape(shape)) {
+            pointerGestureRef.current = {
+              kind: 'shape',
+              pointerId: event.pointerId,
+              slideId: slide.id,
+              shapeId: shape.id,
+              startClientX: event.clientX,
+              startClientY: event.clientY,
+              start: point,
+              last: point,
+              dragThreshold: repeatedClick ? 8 : 4,
+              repeatedClick,
+              dragging: false,
+            };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          } else {
+            pointerGestureRef.current = null;
+          }
+        } else {
+          setSelection(null);
+          setShapeSelection(null);
+          recentShapeClickRef.current = null;
+          pointerGestureRef.current = null;
         }
       } else {
         setSelection(null);
+        setShapeSelection(null);
+        setDragPreview(null);
+        recentShapeClickRef.current = null;
+        pointerGestureRef.current = null;
       }
       stageRef.current?.focus();
+      event.preventDefault();
     } catch (value) {
       reportError(value);
     }
   };
 
+  const pointerDoubleClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
+    if (event.button !== 0) return;
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    if (!handle || !current?.frame) return;
+    const point = slidePoint(
+      event.currentTarget.getBoundingClientRect(),
+      current.frame,
+      event.clientX,
+      event.clientY
+    );
+    if (!point) return;
+    try {
+      handle.layoutSlide(current.slideIndex);
+      const hit = handle.hitTest(point.x, point.y);
+      if (hit?.kind === 'text') {
+        handle.story(hit.storyId);
+        setSelection({
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor: hit.position,
+          focus: hit.position,
+        });
+        setShapeSelection(null);
+        setDragPreview(null);
+        pointerGestureRef.current = null;
+        recentShapeClickRef.current = null;
+        stageRef.current?.focus();
+        event.preventDefault();
+      }
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  const updatePointerGesture = (event: PointerEvent<HTMLCanvasElement>): boolean => {
+    const gesture = pointerGestureRef.current;
+    const current = modelRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId || !current?.frame) {
+      return false;
+    }
+    const point = slidePoint(
+      event.currentTarget.getBoundingClientRect(),
+      current.frame,
+      event.clientX,
+      event.clientY
+    );
+    if (!point || current.snapshot.slides[current.slideIndex]?.id !== gesture.slideId) return false;
+    if (gesture.kind === 'text') {
+      const focus = textPositionAtPoint(
+        current.frame,
+        gesture.shapeId,
+        gesture.storyId,
+        point
+      );
+      if (focus !== null) {
+        setSelection({
+          shapeId: gesture.shapeId,
+          storyId: gesture.storyId,
+          anchor: gesture.anchor,
+          focus,
+        });
+      }
+    } else {
+      gesture.last = point;
+      if (
+        !gesture.dragging &&
+        passedDragThreshold(
+          gesture.startClientX,
+          gesture.startClientY,
+          event.clientX,
+          event.clientY,
+          gesture.dragThreshold
+        )
+      ) {
+        gesture.dragging = true;
+      }
+      if (gesture.dragging) {
+        setDragPreview({
+          shapeId: gesture.shapeId,
+          delta: { x: point.x - gesture.start.x, y: point.y - gesture.start.y },
+        });
+      }
+    }
+    return true;
+  };
+
+  const pointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (updatePointerGesture(event)) event.preventDefault();
+  };
+
+  const pointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
+    updatePointerGesture(event);
+    const gesture = pointerGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    pointerGestureRef.current = null;
+    setDragPreview(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (gesture.kind !== 'shape') return;
+    if (!gesture.dragging) {
+      recentShapeClickRef.current = gesture.repeatedClick
+        ? null
+        : {
+            slideId: gesture.slideId,
+            shapeId: gesture.shapeId,
+            clientX: event.clientX,
+            clientY: event.clientY,
+            timeStamp: event.timeStamp,
+          };
+      return;
+    }
+    recentShapeClickRef.current = null;
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    const slide = current?.snapshot.slides[current.slideIndex];
+    if (!handle || !current?.frame || slide?.id !== gesture.slideId) return;
+    const shape = findShape(slide.shapes, gesture.shapeId);
+    if (!shape) return;
+    try {
+      const position = movedShapePosition(current.snapshot, current.frame, shape, {
+        x: gesture.last.x - gesture.start.x,
+        y: gesture.last.y - gesture.start.y,
+      });
+      if (position.x !== shape.x || position.y !== shape.y) {
+        handle.moveShape(slide.id, shape.id, position.x, position.y);
+        refreshAt(undefined, true);
+      }
+      setShapeSelection({ slideId: slide.id, shapeId: shape.id });
+      event.preventDefault();
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
+  const cancelPointerGesture = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (pointerGestureRef.current?.pointerId !== event.pointerId) return;
+    pointerGestureRef.current = null;
+    setDragPreview(null);
+    recentShapeClickRef.current = null;
+  };
+
   const commit = (nextSelection: PptxTextSelection | null) => {
     setSelection(nextSelection);
+    setShapeSelection(null);
+    recentShapeClickRef.current = null;
     refreshAt(undefined, true);
   };
 
@@ -458,6 +777,10 @@ export function PptxEditor({
       const layout = current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined;
       handle.insertSlide(index, layout);
       setSelection(null);
+      setShapeSelection(null);
+      setDragPreview(null);
+      pointerGestureRef.current = null;
+      recentShapeClickRef.current = null;
       refreshAt(index, true, true);
     } catch (value) {
       reportError(value);
@@ -471,6 +794,10 @@ export function PptxEditor({
     try {
       handle.deleteSlide(current.snapshot.slides[current.slideIndex].id);
       setSelection(null);
+      setShapeSelection(null);
+      setDragPreview(null);
+      pointerGestureRef.current = null;
+      recentShapeClickRef.current = null;
       refreshAt(Math.max(0, current.slideIndex - 1), true, true);
     } catch (value) {
       reportError(value);
@@ -496,6 +823,10 @@ export function PptxEditor({
         style: textStyle,
       });
       const next = refreshAt(undefined, true);
+      setShapeSelection(null);
+      setDragPreview(null);
+      pointerGestureRef.current = null;
+      recentShapeClickRef.current = null;
       const shape = next?.snapshot.slides[next.slideIndex]?.shapes.find(
         (candidate) => candidate.id === receipt.shapeId
       );
@@ -516,6 +847,10 @@ export function PptxEditor({
       if (direction === 'undo') handle.undo();
       else handle.redo();
       setSelection(null);
+      setShapeSelection(null);
+      setDragPreview(null);
+      pointerGestureRef.current = null;
+      recentShapeClickRef.current = null;
       refreshAt(undefined, true);
     } catch (value) {
       reportError(value);
@@ -524,6 +859,9 @@ export function PptxEditor({
 
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
+  const shapeDragDelta =
+    dragPreview && dragPreview.shapeId === shapeSelection?.shapeId ? dragPreview.delta : null;
+  const selectedShapeMovable = selectedShape ? canMoveShape(selectedShape) : false;
 
   return (
     <div className={className} style={styles.root}>
@@ -668,12 +1006,43 @@ export function PptxEditor({
         >
           <div ref={canvasHostRef} style={styles.canvasHost}>
             {model?.frame ? (
-              <canvas
-                ref={canvasRef}
-                style={styles.canvas}
-                onPointerDown={pointerDown}
-                aria-label={`Slide ${currentSlide + 1} of ${slideCount}`}
-              />
+              <div
+                style={{
+                  ...styles.canvasFrame,
+                  width: model.frame.width * scale,
+                  height: model.frame.height * scale,
+                }}
+              >
+                <canvas
+                  ref={canvasRef}
+                  style={{
+                    ...styles.canvas,
+                    cursor: selection ? 'text' : selectedShapeMovable ? 'move' : 'default',
+                  }}
+                  onPointerDown={pointerDown}
+                  onPointerMove={pointerMove}
+                  onPointerUp={pointerUp}
+                  onPointerCancel={cancelPointerGesture}
+                  onLostPointerCapture={cancelPointerGesture}
+                  onDoubleClick={pointerDoubleClick}
+                  aria-label={`Slide ${currentSlide + 1} of ${slideCount}${
+                    selectedShape ? `; selected object ${selectedShape.name}` : ''
+                  }`}
+                />
+                <canvas ref={overlayCanvasRef} style={styles.canvasOverlay} aria-hidden="true" />
+                {selectedShapeBounds ? (
+                  <span
+                    style={{
+                      ...styles.shapeSelection,
+                      left: (selectedShapeBounds.x + (shapeDragDelta?.x ?? 0)) * scale,
+                      top: (selectedShapeBounds.y + (shapeDragDelta?.y ?? 0)) * scale,
+                      width: Math.max(1, selectedShapeBounds.width * scale),
+                      height: Math.max(1, selectedShapeBounds.height * scale),
+                    }}
+                    aria-hidden="true"
+                  />
+                ) : null}
+              </div>
             ) : (
               <div style={styles.empty}>
                 {loading ? 'Opening presentation…' : file ? 'No slides' : 'Open a PPTX file'}
@@ -970,7 +1339,16 @@ const styles: Record<string, CSSProperties> = {
   thumbnailCanvas: { display: 'block', maxWidth: '100%', height: 'auto' },
   stage: { position: 'relative', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
   canvasHost: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', overflow: 'auto' },
+  canvasFrame: { position: 'relative', flex: '0 0 auto' },
   canvas: { display: 'block', flex: '0 0 auto', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' },
+  canvasOverlay: { position: 'absolute', inset: 0, display: 'block', pointerEvents: 'none' },
+  shapeSelection: {
+    position: 'absolute',
+    border: '2px solid #2563eb',
+    boxSizing: 'border-box',
+    boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
+    pointerEvents: 'none',
+  },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
 };

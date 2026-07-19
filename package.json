@@ -42,6 +42,7 @@
     "url": "https://github.com/openooxml/betteroffice.git"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.0"
+    "@changesets/cli": "^2.31.0",
+    "jszip": "3.10.1"
   }
 }
