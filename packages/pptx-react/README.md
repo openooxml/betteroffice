@@ -36,6 +36,29 @@ export function Presentation({ file, fontBytes }: {
 Click text to place the Rust-computed caret, type to edit the yrs story and
 trigger Rust reflow, or use the toolbar for bold, italic, size, color, slides,
 and text boxes. `onReady` exposes the core handle and a `refresh` callback for
-collaboration transports or host-driven edits.
+host-driven edits.
+
+## Collaboration
+
+Pass a `collaboration` prop to co-edit a deck live. `onReplica` hands you the
+session; drive it with a `CollaborationProvider` over any transport. Every peer
+must boot from the same `initialUpdate` seed.
+
+```tsx
+import { CollaborationProvider } from '@betteroffice/pptx/collaboration';
+
+<PptxEditor
+  file={file}
+  collaboration={{
+    clientId,
+    initialUpdate: sharedSeed,
+    onReplica: (replica) => {
+      if (!replica) return;
+      const provider = new CollaborationProvider(replica, transport);
+      provider.connect();
+    },
+  }}
+/>;
+```
 
 Docs: https://betteroffice.dev · Apache-2.0.
