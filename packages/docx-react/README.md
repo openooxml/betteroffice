@@ -58,4 +58,29 @@ Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
 `showRuler`, `showZoomControl`, `measurementFontProvider`. The `ref` exposes
 the full editor API (selection, formatting, find/replace, comments, revisions).
 
+## Collaboration
+
+The document is a CRDT — pass a `collaboration` prop and wire a transport to
+co-edit with other people or an agent. `onReplica` hands you the session as a
+`CollaborationReplica`; drive it with a `CollaborationProvider` over any
+transport (a WebSocket relay, etc.). Every window must boot from the same shared
+state, so pass identical `initialUpdate` bytes to each peer.
+
+```tsx
+import { CollaborationProvider } from '@betteroffice/docx/collaboration';
+
+<DocxEditor
+  documentBuffer={file}
+  collaboration={{
+    clientId,
+    initialUpdate: sharedSeed, // identical bytes for every peer
+    onReplica: (replica) => {
+      if (!replica) return;
+      const provider = new CollaborationProvider(replica, transport);
+      provider.connect();
+    },
+  }}
+/>;
+```
+
 Docs: https://betteroffice.dev · Apache-2.0.

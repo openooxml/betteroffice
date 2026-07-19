@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/docx-i18n",
   "version": "0.0.1",
-  "description": "Shared UI locale strings and types for the @betteroffice/docx editor adapters (React and Vue).",
+  "description": "UI locale strings and types for the @betteroffice/docx-react editor.",
   "sideEffects": false,
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
