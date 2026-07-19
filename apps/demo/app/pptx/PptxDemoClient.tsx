@@ -118,7 +118,7 @@ async function loadPresentationFonts(): Promise<PptxFontFace[]> {
         resolveLastResortFace("Arial", bold, italic);
       const bytes = await loadBundledFontBytes(face);
       return {
-        family: "Inter",
+        family: "Arial",
         bold,
         italic,
         bytes: new Uint8Array(bytes.slice(0)),
