@@ -12,6 +12,6 @@ description = "Server-side raster backend (tiny-skia) for the display list. Neve
 name = "xlsx_raster"
 
 [dependencies]
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 rustybuzz = "0.20"
 xlsx-render.workspace = true
