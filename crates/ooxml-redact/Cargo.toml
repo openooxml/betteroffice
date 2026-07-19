@@ -1,0 +1,23 @@
+[package]
+name = "betteroffice-redact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "Structure-preserving redaction for DOCX, XLSX, and PPTX packages."
+
+[lib]
+name = "ooxml_redact"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+ooxml-opc.workspace = true
+quick-xml = "0.41"
+thiserror = "2"
+
+[dev-dependencies]
+docx-parse = { path = "../docx-parse" }
+pptx-parse = { path = "../pptx-parse" }
+xlsx-parse.workspace = true
