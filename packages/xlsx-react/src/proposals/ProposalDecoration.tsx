@@ -1,9 +1,9 @@
 /**
- * A single ghost decoration over a proposed cell: a dashed, agent-colored border
- * and the semi-transparent `newText` preview, positioned from the display-list
- * grid geometry (same source as the selection overlay). Purely visual — it is
- * `aria-hidden`, and the offscreen a11y grid announces the real committed values
- * only, never these previews. A small corner tab is the one hover target.
+ * Interaction chrome over a proposed cell: a dashed, agent-colored border with
+ * a small corner tab as the hover target. The ghost `old → new` pair itself is
+ * painted by the engine into the canvas display list, so this layer carries no
+ * text. Purely visual — it is `aria-hidden`, and the offscreen a11y grid
+ * announces the real committed values only.
  */
 
 import type { Rect } from '@betteroffice/xlsx';
@@ -14,13 +14,14 @@ import type { Rect } from '@betteroffice/xlsx';
 export interface ProposalDecorationProps {
   rect: Rect;
   color: string;
+  /** shown on the corner tab's tooltip: the proposed display text. */
   newText: string;
   /** shown on the corner tab's tooltip: which agent proposed this cell. */
   agentId: string;
 }
 
 /**
- * The ghost preview painted over one proposed cell.
+ * The border + corner-tab chrome over one proposed cell.
  */
 export function ProposalDecoration({ rect, color, newText, agentId }: ProposalDecorationProps) {
   return (
@@ -39,24 +40,6 @@ export function ProposalDecoration({ rect, color, newText, agentId }: ProposalDe
         overflow: 'hidden',
       }}
     >
-      <span
-        style={{
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          bottom: 1,
-          textAlign: 'center',
-          opacity: 0.6,
-          color,
-          font: '11px system-ui, sans-serif',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          padding: '0 2px',
-        }}
-      >
-        {newText}
-      </span>
       <span
         title={`${agentId}: ${newText}`}
         style={{

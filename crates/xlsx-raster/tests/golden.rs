@@ -30,6 +30,7 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         underline: false,
         strike: false,
         font_family: None,
+        ghost: false,
     }
 }
 
@@ -59,6 +60,7 @@ fn styled_text(
         underline,
         strike,
         font_family: None,
+        ghost: false,
     }
 }
 

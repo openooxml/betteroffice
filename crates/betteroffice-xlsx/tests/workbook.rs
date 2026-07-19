@@ -287,6 +287,77 @@ fn undo_redo_and_proposals_share_the_typed_session() {
 }
 
 #[test]
+fn pending_proposals_ghost_into_display_lists() {
+    let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
+    workbook
+        .propose(
+            ProposalRequest {
+                agent_id: "agent".into(),
+                note: None,
+                edits: vec![ProposalEditInput {
+                    sheet: SheetId(0),
+                    cell: cell("A1"),
+                    input: "30".into(),
+                }],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 240.0,
+        height: 120.0,
+    };
+    let texts = |workbook: &Workbook| -> Vec<(String, String, bool)> {
+        workbook
+            .display_list(&viewport)
+            .unwrap()
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    text,
+                    color,
+                    strike,
+                    ..
+                } => Some((text.clone(), color.clone(), *strike)),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let ghosted = texts(&workbook);
+    assert!(
+        ghosted
+            .iter()
+            .any(|(text, color, strike)| text == "10" && color == "#c62828" && *strike)
+    );
+    assert!(
+        ghosted
+            .iter()
+            .any(|(text, color, strike)| text == "30" && color == "#2e7d32" && !*strike)
+    );
+    assert!(
+        !ghosted
+            .iter()
+            .any(|(text, color, _)| text == "10" && color == "#000000")
+    );
+
+    workbook
+        .accept_proposal("p1", false, CalculationOptions::default())
+        .unwrap();
+    let committed = texts(&workbook);
+    assert!(
+        committed
+            .iter()
+            .any(|(text, color, strike)| text == "30" && color == "#000000" && !*strike)
+    );
+    assert!(!committed.iter().any(|(_, color, _)| color == "#c62828"));
+}
+
+#[test]
 fn rejects_empty_workbook_ops_atomically() {
     let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
     let result = workbook.apply_ops(

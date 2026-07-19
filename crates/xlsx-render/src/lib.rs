@@ -37,9 +37,37 @@ const TEXT_PAD_PX: f32 = 2.0;
 const ASCENT_RATIO: f32 = 0.7;
 const DESCENT_RATIO: f32 = 0.2;
 
+// ghost pair colors, matching the docx revision palette (del struck / ins).
+const GHOST_DEL_COLOR: &str = "#c62828";
+const GHOST_INS_COLOR: &str = "#2e7d32";
+// conservative per-char advance estimate as a fraction of the font size.
+const GHOST_CHAR_W_RATIO: f32 = 0.6;
+const GHOST_GAP_PX: f32 = 6.0;
+
+/// a pending edit rendered as a ghost pair in place of the cell's committed
+/// text: `old_text` struck in red, `new_text` in green.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostEdit {
+    pub row: u32,
+    pub col: u32,
+    pub old_text: String,
+    pub new_text: String,
+}
+
 /// build the display list for one viewport of one sheet. commands are emitted
 /// background -> fills -> gridlines -> borders -> text, each layer painting over the previous.
 pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) -> DisplayList {
+    build_display_list_with_ghosts(wb, sheet, viewport, &[])
+}
+
+/// like [`build_display_list`], with ghost pairs painted in place of the
+/// committed text of each ghost's cell.
+pub fn build_display_list_with_ghosts(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+) -> DisplayList {
     let mut commands = Vec::new();
 
     commands.push(DrawCmd::FillRect {
@@ -139,7 +167,13 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
         );
     }
 
+    let ghost_cells: std::collections::HashSet<(u32, u32)> =
+        ghosts.iter().map(|g| (g.row, g.col)).collect();
+
     for (at, cell) in visible_anchors(sheet_ref, &rows, &cols) {
+        if ghost_cells.contains(&(at.row, at.col)) {
+            continue;
+        }
         let Some((text, color)) = cell_display_text(styles, wb.date_system, cell) else {
             continue;
         };
@@ -181,7 +215,26 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
             underline: font.is_some_and(|f| f.underline),
             strike: font.is_some_and(|f| f.strike),
             font_family: font.and_then(|f| f.name.clone()),
+            ghost: false,
         });
+    }
+
+    for ghost in ghosts {
+        if !rows.contains(&ghost.row) || !cols.contains(&ghost.col) {
+            continue;
+        }
+        let at = CellRef::new(ghost.row, ghost.col);
+        let font = sheet_ref
+            .cell(at)
+            .and_then(|c| c.style)
+            .and_then(|s| styles.font_for(s));
+        let size = font
+            .and_then(|f| f.size_pt)
+            .map(|p| p as f32)
+            .unwrap_or(FONT_SIZE_PT);
+        let family = font.and_then(|f| f.name.clone());
+        let bx = cell_box(&geom, viewport, sheet_ref, at);
+        emit_ghost(&mut commands, ghost, bx, size, family);
     }
 
     DisplayList {
@@ -190,6 +243,150 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
         commands,
         grid,
     }
+}
+
+/// paint one ghost pair inside a cell box: old struck red, new green. both fit
+/// side by side (old left-anchored, new right-anchored) when the estimated
+/// widths allow; a tall cell stacks them on two lines; otherwise both are
+/// ellipsized into shares of the width. single-sided ghosts paint alone. the
+/// new text is flagged `ghost` so a11y recovery keeps the committed (old) text.
+fn emit_ghost(
+    commands: &mut Vec<DrawCmd>,
+    ghost: &GhostEdit,
+    (cx0, cy0, cw, ch): (f32, f32, f32, f32),
+    size: f32,
+    font_family: Option<String>,
+) {
+    let clip = Rect {
+        x: cx0,
+        y: cy0,
+        w: cw,
+        h: ch,
+    };
+    let old_cmd = |x: f32, y: f32, text: String, align: Align| DrawCmd::Text {
+        x,
+        y,
+        text,
+        font_size: size,
+        color: GHOST_DEL_COLOR.to_string(),
+        clip,
+        align,
+        bold: false,
+        italic: false,
+        underline: false,
+        strike: true,
+        font_family: font_family.clone(),
+        ghost: false,
+    };
+    let new_cmd = |x: f32, y: f32, text: String, align: Align| DrawCmd::Text {
+        x,
+        y,
+        text,
+        font_size: size,
+        color: GHOST_INS_COLOR.to_string(),
+        clip,
+        align,
+        bold: false,
+        italic: false,
+        underline: false,
+        strike: false,
+        font_family: font_family.clone(),
+        ghost: true,
+    };
+
+    let avail = cw - 2.0 * TEXT_PAD_PX;
+    let baseline = baseline_y(cy0, ch, size, None);
+    let old = ghost.old_text.as_str();
+    let new = ghost.new_text.as_str();
+    match (old.is_empty(), new.is_empty()) {
+        (true, true) => {}
+        (true, false) => commands.push(new_cmd(
+            cx0 + TEXT_PAD_PX,
+            baseline,
+            ellipsize(new, avail, size),
+            Align::Left,
+        )),
+        (false, true) => commands.push(old_cmd(
+            cx0 + TEXT_PAD_PX,
+            baseline,
+            ellipsize(old, avail, size),
+            Align::Left,
+        )),
+        (false, false) => {
+            let est_old = ghost_text_width(old, size);
+            let est_new = ghost_text_width(new, size);
+            let line_h = size * (ASCENT_RATIO + DESCENT_RATIO);
+            if est_old + GHOST_GAP_PX + est_new <= avail {
+                commands.push(old_cmd(
+                    cx0 + TEXT_PAD_PX,
+                    baseline,
+                    old.to_string(),
+                    Align::Left,
+                ));
+                commands.push(new_cmd(
+                    cx0 + cw - TEXT_PAD_PX,
+                    baseline,
+                    new.to_string(),
+                    Align::Right,
+                ));
+            } else if ch >= 2.0 * line_h + 3.0 * TEXT_PAD_PX {
+                let top = cy0 + (ch - 2.0 * line_h) / 2.0;
+                let first = top + size * ASCENT_RATIO;
+                commands.push(old_cmd(
+                    cx0 + TEXT_PAD_PX,
+                    first,
+                    ellipsize(old, avail, size),
+                    Align::Left,
+                ));
+                commands.push(new_cmd(
+                    cx0 + TEXT_PAD_PX,
+                    first + line_h,
+                    ellipsize(new, avail, size),
+                    Align::Left,
+                ));
+            } else {
+                let pair = avail - GHOST_GAP_PX;
+                let half = pair / 2.0;
+                let (old_budget, new_budget) = if est_old <= half {
+                    (est_old, pair - est_old)
+                } else if est_new <= half {
+                    (pair - est_new, est_new)
+                } else {
+                    (half, half)
+                };
+                commands.push(old_cmd(
+                    cx0 + TEXT_PAD_PX,
+                    baseline,
+                    ellipsize(old, old_budget, size),
+                    Align::Left,
+                ));
+                commands.push(new_cmd(
+                    cx0 + cw - TEXT_PAD_PX,
+                    baseline,
+                    ellipsize(new, new_budget, size),
+                    Align::Right,
+                ));
+            }
+        }
+    }
+}
+
+/// estimated advance width of `text` at `size`, deliberately generous so fit
+/// decisions err toward ellipsizing rather than overlap.
+fn ghost_text_width(text: &str, size: f32) -> f32 {
+    text.chars().count() as f32 * size * GHOST_CHAR_W_RATIO
+}
+
+/// `text` unchanged when its estimate fits `budget`, else a truncated prefix
+/// ending in `…`.
+fn ellipsize(text: &str, budget: f32, size: f32) -> String {
+    if ghost_text_width(text, size) <= budget {
+        return text.to_string();
+    }
+    let char_w = size * GHOST_CHAR_W_RATIO;
+    let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
+    let prefix: String = text.chars().take(keep).collect();
+    format!("{prefix}…")
 }
 
 /// visible cells that draw: inside the range and not a covered merge cell
@@ -489,6 +686,143 @@ mod tests {
         assert_eq!(dl.grid.row_offsets.len(), 3);
         assert!((dl.grid.col_offsets[0] - (dc * 1.0 - vp.x)).abs() < 0.01);
         assert!((dl.grid.row_offsets[0] - (dr * 2.0 - vp.y)).abs() < 0.01);
+    }
+
+    fn ghost(row: u32, col: u32, old: &str, new: &str) -> GhostEdit {
+        GhostEdit {
+            row,
+            col,
+            old_text: old.into(),
+            new_text: new.into(),
+        }
+    }
+
+    fn text_cmds(dl: &DisplayList) -> Vec<(&str, &str, bool, Align)> {
+        dl.commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text {
+                    text,
+                    color,
+                    strike,
+                    align,
+                    ..
+                } => Some((text.as_str(), color.as_str(), *strike, *align)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ghost_flags(dl: &DisplayList) -> Vec<bool> {
+        dl.commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { ghost, .. } => Some(*ghost),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ghost_pair_replaces_committed_text() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(10.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "10", "42")]);
+
+        let texts = text_cmds(&dl);
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[0], ("10", GHOST_DEL_COLOR, true, Align::Left));
+        assert_eq!(texts[1], ("42", GHOST_INS_COLOR, false, Align::Right));
+        assert_eq!(ghost_flags(&dl), vec![false, true]);
+    }
+
+    #[test]
+    fn ghost_insertion_paints_green_only() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(1, 1, "", "7")]);
+
+        let texts = text_cmds(&dl);
+        assert_eq!(texts, vec![("7", GHOST_INS_COLOR, false, Align::Left)]);
+        assert_eq!(ghost_flags(&dl), vec![true]);
+    }
+
+    #[test]
+    fn ghost_pair_ellipsizes_when_it_overflows_the_cell() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("previous long value"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[ghost(0, 0, "previous long value", "replacement long value")],
+        );
+
+        let texts = text_cmds(&dl);
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].0.ends_with('…') && texts[0].2);
+        assert!(texts[1].0.ends_with('…') && !texts[1].2);
+        assert_eq!((texts[0].3, texts[1].3), (Align::Left, Align::Right));
+    }
+
+    #[test]
+    fn tall_cell_stacks_the_ghost_pair() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.row_heights.insert(0, 34.0);
+        sheet.set_cell(CellRef::new(0, 0), text_cell("previous long value"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 80.0,
+        };
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[ghost(0, 0, "previous long value", "replacement long value")],
+        );
+
+        let baselines: Vec<f32> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { y, .. } => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(baselines.len(), 2);
+        assert!(baselines[1] > baselines[0]);
+        let texts = text_cmds(&dl);
+        assert_eq!((texts[0].3, texts[1].3), (Align::Left, Align::Left));
     }
 
     #[test]

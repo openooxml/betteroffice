@@ -82,6 +82,11 @@ export interface TextCmd {
   strike?: boolean;
   /** css/font family from the style font; the backend falls back to its default. */
   fontFamily?: string;
+  /**
+   * Preview text that is not the cell's committed value (a proposal ghost's
+   * `new` text). Painted normally, but excluded from a11y text recovery.
+   */
+  ghost?: boolean;
 }
 
 /**

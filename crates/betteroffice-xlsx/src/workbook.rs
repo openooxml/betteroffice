@@ -11,9 +11,11 @@ use xlsx_ops::{
     CellState, Op, Proposal, ProposalSet, ProposedEdit, Provenance, Transaction, UndoStack,
     cell_state_for_input_no_eval,
 };
-use xlsx_render::{DisplayList, GridGeometry, Viewport, build_display_list, display_text};
+use xlsx_render::{
+    DisplayList, GhostEdit, GridGeometry, Viewport, build_display_list_with_ghosts, display_text,
+};
 #[cfg(feature = "raster")]
-use xlsx_render::{scaled, viewport_for_range, viewport_for_used_range};
+use xlsx_render::{build_display_list, scaled, viewport_for_range, viewport_for_used_range};
 
 use crate::authority::{
     AuthorityError, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate, SyncOrigin,
@@ -826,10 +828,38 @@ impl Workbook {
         self.display_list_for(self.active_sheet, viewport)
     }
 
+    /// display list for `sheet` with ghost pairs for pending proposals; a
+    /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
         validate_display_region(sheet_ref, viewport)?;
-        Ok(build_display_list(&self.model, sheet, viewport))
+        let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
+        for proposal in self.proposals.list() {
+            for edit in &proposal.edits {
+                let at = CellRef::new(edit.row, edit.col);
+                let drifted =
+                    current_cell_state(&self.model, SheetId(edit.sheet), at) != edit.old_state;
+                if edit.sheet != sheet.0 || drifted {
+                    continue;
+                }
+                ghosts.insert(
+                    (edit.row, edit.col),
+                    GhostEdit {
+                        row: edit.row,
+                        col: edit.col,
+                        old_text: edit.old_text.clone(),
+                        new_text: edit.new_text.clone(),
+                    },
+                );
+            }
+        }
+        let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
+        Ok(build_display_list_with_ghosts(
+            &self.model,
+            sheet,
+            viewport,
+            &ghosts,
+        ))
     }
 
     #[cfg(feature = "raster")]

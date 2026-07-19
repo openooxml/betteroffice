@@ -51,6 +51,7 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 underline,
                 strike,
                 font_family: _,
+                ghost: _,
             } => {
                 font::paint_text(
                     &mut pixmap,
@@ -198,6 +199,7 @@ mod tests {
                     underline: false,
                     strike: false,
                     font_family: None,
+                    ghost: false,
                 },
             ],
             grid: xlsx_render::GridMeta::default(),

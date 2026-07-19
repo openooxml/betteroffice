@@ -664,11 +664,16 @@ function XlsxEditorContent({
     if (editing) editorInputRef.current?.focus({ preventScroll: true });
   }, [editing]);
 
-  // fold a mutation result back into state and queue a repaint.
-  const applyResult = useCallback((result: EditResult) => {
-    setSheetInfo(result.sheetInfo);
-    setRevision((r) => r + 1);
-  }, []);
+  // fold a mutation result back into state and queue a repaint. re-reads the
+  // pending proposals because structural ops and undo/redo can drop them.
+  const applyResult = useCallback(
+    (result: EditResult) => {
+      setSheetInfo(result.sheetInfo);
+      setRevision((r) => r + 1);
+      refreshProposals();
+    },
+    [refreshProposals]
+  );
 
   const limits = useCallback((): SelectionLimits => {
     return deriveLimits(frameRef.current, sheetInfo!, scrollRef.current?.clientHeight ?? 0);
@@ -1270,7 +1275,8 @@ function XlsxEditorContent({
                 }}
               />
             )}
-            {/* ghost previews for pending proposals visible in this viewport.
+            {/* border/tab chrome for pending proposals visible in this viewport;
+                the engine paints the ghost old→new pair into the canvas itself.
                 aria-hidden — the a11y grid announces real committed values only. */}
             {grid &&
               proposals.flatMap((proposal) =>

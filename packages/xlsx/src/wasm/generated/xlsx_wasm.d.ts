@@ -114,6 +114,8 @@ export class XlsxDocument {
  */
 export function rezip_docx(entries: any): Uint8Array;
 
+export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
+
 /**
  * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
  */
@@ -154,6 +156,7 @@ export interface InitOutput {
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
     readonly rezip_docx: (a: any) => [number, number, number, number];
+    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
