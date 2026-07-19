@@ -4,9 +4,10 @@
   "version": "0.0.4",
   "scripts": {
     "build:wasm": "bun ../../scripts/build-xlsx-wasm.ts && bun ../../scripts/build-docx-wasm.ts && bun ../../scripts/build-pptx-wasm.ts",
-    "predev": "bun run build:wasm",
+    "build:seeds": "bun scripts/build-collaboration-seeds.ts",
+    "predev": "bun run build:wasm && bun run build:seeds",
     "dev": "next dev",
-    "prebuild": "bun run build:wasm",
+    "prebuild": "bun run build:wasm && bun run build:seeds",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
