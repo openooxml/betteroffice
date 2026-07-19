@@ -328,8 +328,21 @@ impl EditingDoc {
         p_style: &str,
         alignment: &str,
     ) -> EditResult<ParagraphId> {
-        let story_id = story_id.into();
         let para_id = self.next_id();
+        self.create_story_with_paragraph_id(story_id, para_id, initial_text, p_style, alignment)
+    }
+
+    /// Adds a one-paragraph story with a caller-supplied paragraph ID.
+    pub fn create_story_with_paragraph_id(
+        &self,
+        story_id: impl Into<StoryId>,
+        para_id: impl Into<ParagraphId>,
+        initial_text: &str,
+        p_style: &str,
+        alignment: &str,
+    ) -> EditResult<ParagraphId> {
+        let story_id = story_id.into();
+        let para_id = para_id.into();
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let stories = txn
             .get_map(STORIES)

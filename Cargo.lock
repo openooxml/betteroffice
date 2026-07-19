@@ -64,6 +64,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "betteroffice-docx"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-opc",
+ "docx-edit",
+ "docx-layout",
+ "docx-parse",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "betteroffice-opc"
 version = "0.0.1"
 dependencies = [
@@ -71,6 +83,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "zip",
+]
+
+[[package]]
+name = "betteroffice-pptx"
+version = "0.0.1"
+dependencies = [
+ "pptx-edit",
+ "pptx-parse",
+ "pptx-render",
 ]
 
 [[package]]

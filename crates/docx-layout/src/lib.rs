@@ -104,11 +104,26 @@ impl std::fmt::Display for LayoutError {
     }
 }
 
+impl std::error::Error for LayoutError {}
+
+/// Run pagination from a typed native input.
+pub fn compute_layout_input(input: &mut types::Input) -> Result<types::Layout, LayoutError> {
+    place::layout_document(input)
+}
+
 /// Parse the `{ measured, options }` envelope and run the placement walk.
 pub fn compute_layout(input: &str) -> Result<types::Layout, LayoutError> {
     let mut parsed: types::Input =
         serde_json::from_str(input).map_err(|e| LayoutError::Invalid(format!("parse: {e}")))?;
-    place::layout_document(&mut parsed)
+    compute_layout_input(&mut parsed)
+}
+
+/// Build a body display list from typed pagination state.
+pub fn build_display_list(
+    pagination: &types::Input,
+    layout: &types::Layout,
+) -> Result<display_list::DisplayList, String> {
+    build_display_list_value_from_resident(pagination, layout, "{}")
 }
 
 /// Pure JSON boundary: `{ measured, options }` in, `Layout` JSON out. `Err`
