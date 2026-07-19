@@ -29,9 +29,13 @@ afterAll(() => {
 });
 
 describe('PPTX collaboration replica', () => {
-  test('two providers converge interleaved text, slide, and shape operations', async () => {
-    left = openPresentation(fixture, { clientId: 4101 });
-    right = openPresentation(fixture, { clientId: 4102 });
+  test('two seeded providers converge text and slide edits through the protocol', async () => {
+    const source = openPresentation(fixture, { clientId: 4100 });
+    const seed = source.encodeStateAsUpdate();
+    source.dispose();
+    left = openPresentation(fixture, { clientId: 4101, initialUpdate: seed });
+    right = openPresentation(fixture, { clientId: 4102, initialUpdate: seed });
+    expect([...left.encodeStateAsUpdate()]).toEqual([...right.encodeStateAsUpdate()]);
     const hub = new LoopbackHub();
     const leftTransport = hub.createTransport();
     const rightTransport = hub.createTransport();
@@ -68,7 +72,9 @@ describe('PPTX collaboration replica', () => {
     expect(left.story(story.id).paragraphs.some((paragraph) =>
       paragraph.runs.some((run) => run.text.includes('LEFT'))
     )).toBe(true);
+    expect(right.story(story.id)).toEqual(left.story(story.id));
     expect(left.snapshot().slides).toHaveLength(baseline.slides.length + 1);
+    expect(right.snapshot().slides).toHaveLength(baseline.slides.length + 1);
     expect(left.snapshot().slides.find((slide) => slide.id === slideId)?.shapes.some(
       (shape) => shape.name === 'Remote note'
     )).toBe(true);
