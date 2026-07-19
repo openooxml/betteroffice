@@ -1,0 +1,23 @@
+[package]
+name = "betteroffice-docx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+# Publishing is gated on the lower-level DOCX crates becoming publishable.
+publish = false
+description = "Typed native Rust facade for DOCX parsing, editing, layout, and serialization."
+readme = "README.md"
+keywords = ["docx", "word", "ooxml", "wordprocessingml"]
+categories = ["parser-implementations", "rendering"]
+
+[dependencies]
+docx-edit = { path = "../docx-edit" }
+docx-layout = { path = "../docx-layout" }
+docx-parse = { path = "../docx-parse" }
+sha2 = "0.10"
+
+[dev-dependencies]
+ooxml-opc = { package = "betteroffice-opc", path = "../ooxml-opc" }
+serde_json = "1"
