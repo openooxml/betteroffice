@@ -391,3 +391,35 @@ fn empty_shared_string_cell_does_not_leak_next_value() {
         "numeric cell value leaked: {text}"
     );
 }
+
+#[test]
+fn media_placeholder_keeps_each_format() {
+    for (format, ext) in [
+        (ImageFormat::Gif, "gif"),
+        (ImageFormat::Bmp, "bmp"),
+        (ImageFormat::Tiff, "tiff"),
+    ] {
+        let source = placeholder_image(format);
+        let mut report = RedactionReport::default();
+        let part = format!("word/media/image1.{ext}");
+        let output = media::replace_media(&part, &source, &mut report).unwrap();
+        assert_ne!(source, output, "{ext} not redacted");
+        assert_eq!(
+            image::guess_format(&output).unwrap(),
+            format,
+            "{ext} format changed"
+        );
+        assert_eq!(
+            image_dimensions(&source),
+            image_dimensions(&output),
+            "{ext} dims changed"
+        );
+    }
+}
+
+#[test]
+fn media_rejects_unencodable_formats() {
+    let mut report = RedactionReport::default();
+    let error = media::replace_media("word/media/image1.emf", b"not an image", &mut report);
+    assert!(matches!(error, Err(RedactError::Image { .. })));
+}

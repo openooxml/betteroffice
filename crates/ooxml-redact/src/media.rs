@@ -5,11 +5,6 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 use crate::{RedactError, RedactionReport};
 
 const MAX_PLACEHOLDER_PIXELS: u64 = 64 * 1024 * 1024;
-const FALLBACK_PNG: &[u8] = &[
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0,
-    0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 8, 215, 99, 168, 168, 168, 0, 0, 2, 2, 1,
-    0, 228, 51, 249, 227, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
-];
 
 pub(crate) fn is_replaceable_part(path: &str) -> bool {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension);
@@ -20,23 +15,49 @@ pub(crate) fn is_replaceable_part(path: &str) -> bool {
         || path.ends_with("/thumbnail")
 }
 
+/// Redact a media part, encoding the placeholder in the part's OWN format so the
+/// `[Content_Types].xml` declaration stays consistent. Formats that cannot be
+/// faithfully re-encoded (vector metafiles, non-image embeds) fail rather than
+/// emit format-mismatched bytes.
 pub(crate) fn replace_media(
     path: &str,
     bytes: &[u8],
     report: &mut RedactionReport,
 ) -> Result<Vec<u8>, RedactError> {
     let lower = path.to_ascii_lowercase();
-    let result = if lower.ends_with(".png") {
-        solid_image(path, bytes, ImageFormat::Png)?
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        solid_image(path, bytes, ImageFormat::Jpeg)?
-    } else if lower.ends_with(".svg") {
-        br##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#aaa"/></svg>"##.to_vec()
-    } else {
-        FALLBACK_PNG.to_vec()
+    let extension = lower.rsplit_once('.').map(|(_, ext)| ext);
+    let result = match extension {
+        Some("png") => solid_image(path, bytes, ImageFormat::Png)?,
+        Some("jpg" | "jpeg") => solid_image(path, bytes, ImageFormat::Jpeg)?,
+        Some("gif") => solid_image(path, bytes, ImageFormat::Gif)?,
+        Some("bmp") => solid_image(path, bytes, ImageFormat::Bmp)?,
+        Some("tif" | "tiff") => solid_image(path, bytes, ImageFormat::Tiff)?,
+        Some("svg") => {
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="#aaa"/></svg>"##.to_vec()
+        }
+        _ => match image::guess_format(bytes).ok().filter(is_encodable) {
+            Some(format) => solid_image(path, bytes, format)?,
+            None => {
+                return Err(RedactError::Image {
+                    part: path.to_owned(),
+                    message: "unsupported media format cannot be safely redacted".to_owned(),
+                });
+            }
+        },
     };
     report.media_parts += 1;
     Ok(result)
+}
+
+fn is_encodable(format: &ImageFormat) -> bool {
+    matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::Gif
+            | ImageFormat::Bmp
+            | ImageFormat::Tiff
+    )
 }
 
 fn solid_image(path: &str, bytes: &[u8], format: ImageFormat) -> Result<Vec<u8>, RedactError> {

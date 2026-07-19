@@ -7,10 +7,10 @@ The CLI removes sensitive content locally. `POST /upload` receives only that red
 Create the bucket once:
 
 ```sh
-bunx wrangler r2 bucket create betteroffice-redacted
+bunx wrangler r2 bucket create betteroffice-repros
 ```
 
-Then replace the `replace-with-redacted-bucket` placeholder in `wrangler.jsonc` with `betteroffice-redacted`. The binding name must remain `REDACTED_BUCKET`. Until that binding is configured, the worker builds and typechecks but returns `503` for storage routes.
+Then replace the `replace-with-redacted-bucket` placeholder in `wrangler.jsonc` with `betteroffice-repros`. The binding name must remain `REDACTED_BUCKET`. Until that binding is configured, the worker builds and typechecks but returns `503` for storage routes.
 
 ## Commands
 
