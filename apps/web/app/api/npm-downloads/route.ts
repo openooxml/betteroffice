@@ -1,5 +1,13 @@
-const CACHE_CONTROL =
-  "public, max-age=300, s-maxage=86400, stale-while-revalidate=604800";
+const TTL_SECONDS = 3600;
+const CACHE_KEY = "https://betteroffice.dev/__internal__/npm-downloads-cache";
+
+const FALLBACK_PACKAGES = [
+  "@betteroffice/docx",
+  "@betteroffice/docx-react",
+  "@betteroffice/docx-i18n",
+  "@betteroffice/xlsx",
+  "@betteroffice/xlsx-react",
+];
 
 export function officialPackageNames(
   packageAccess: Record<string, string>,
@@ -9,37 +17,55 @@ export function officialPackageNames(
   );
 }
 
+async function resolvePackageNames(fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  try {
+    const response = await fetchImpl(
+      "https://registry.npmjs.org/-/org/betteroffice/package?format=cli",
+    );
+    if (response.ok) {
+      const names = officialPackageNames(
+        (await response.json()) as Record<string, string>,
+      );
+      if (names.length > 0) return names;
+    }
+  } catch {
+    return FALLBACK_PACKAGES;
+  }
+  return FALLBACK_PACKAGES;
+}
+
 /**
- * Sum last-month downloads across packages, tolerating per-package failures:
- * freshly published packages 404 on the stats API for up to a day, and one
- * flaky fetch must not turn the whole badge into "unavailable". `resolved`
- * reports how many packages produced a valid count.
+ * Sum last-month downloads across packages, tolerating per-package failures
+ * (freshly published packages 404 on the stats API for up to a day; each
+ * package gets one retry). `resolved` counts packages that produced a value.
  */
 export async function monthlyDownloads(
   packageNames: string[],
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ downloads: number; resolved: number }> {
-  const results = await Promise.allSettled(
-    packageNames.map(async (packageName) => {
-      const response = await fetchImpl(
-        `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(packageName)}`,
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `npm downloads request failed for ${packageName}: ${response.status}`,
+  const fetchCount = async (packageName: string): Promise<number> => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await fetchImpl(
+          `https://api.npmjs.org/downloads/point/last-month/${encodeURIComponent(packageName)}`,
         );
+        if (!response.ok) {
+          throw new Error(`npm downloads request failed for ${packageName}: ${response.status}`);
+        }
+        const data = (await response.json()) as { downloads?: number };
+        if (!Number.isSafeInteger(data.downloads)) {
+          throw new Error(`Invalid npm download count for ${packageName}`);
+        }
+        return data.downloads as number;
+      } catch (error) {
+        lastError = error;
       }
+    }
+    throw lastError;
+  };
 
-      const data = (await response.json()) as { downloads?: number };
-
-      if (!Number.isSafeInteger(data.downloads)) {
-        throw new Error(`Invalid npm download count for ${packageName}`);
-      }
-
-      return data.downloads as number;
-    }),
-  );
+  const results = await Promise.allSettled(packageNames.map(fetchCount));
 
   let downloads = 0;
   let resolved = 0;
@@ -52,41 +78,46 @@ export async function monthlyDownloads(
   return { downloads, resolved };
 }
 
+function badge(downloads: number): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    label: "npm downloads",
+    message: `${downloads.toLocaleString("en-US")}/month`,
+    color: "brightgreen",
+  };
+}
+
+function edgeCache(): {
+  match(key: string): Promise<Response | undefined>;
+  put(key: string, response: Response): Promise<void>;
+} | null {
+  const caches = (globalThis as { caches?: { default?: unknown } }).caches;
+  const store = caches?.default as
+    | { match(key: string): Promise<Response | undefined>; put(key: string, response: Response): Promise<void> }
+    | undefined;
+  return store ?? null;
+}
+
 export async function GET() {
+  const cache = edgeCache();
+
+  if (cache) {
+    const hit = await cache.match(CACHE_KEY).catch(() => undefined);
+    if (hit) return hit;
+  }
+
   try {
-    const packagesResponse = await fetch(
-      "https://registry.npmjs.org/-/org/betteroffice/package?format=cli",
-    );
+    const names = await resolvePackageNames();
+    const { downloads, resolved } = await monthlyDownloads(names);
+    if (resolved === 0) throw new Error("No package download counts resolved");
 
-    if (!packagesResponse.ok) {
-      throw new Error(`npm packages request failed: ${packagesResponse.status}`);
-    }
-
-    const packageAccess = (await packagesResponse.json()) as Record<
-      string,
-      string
-    >;
-    const packageNames = officialPackageNames(packageAccess);
-
-    if (packageNames.length === 0) {
-      throw new Error("No public @betteroffice packages found");
-    }
-
-    const { downloads, resolved } = await monthlyDownloads(packageNames);
-
-    if (resolved === 0) {
-      throw new Error("No package download counts resolved");
-    }
-
-    return Response.json(
-      {
-        schemaVersion: 1,
-        label: "npm downloads",
-        message: `${downloads.toLocaleString("en-US")}/month`,
-        color: "brightgreen",
+    const response = Response.json(badge(downloads), {
+      headers: {
+        "Cache-Control": `public, max-age=${TTL_SECONDS}, s-maxage=${TTL_SECONDS}, stale-while-revalidate=86400`,
       },
-      { headers: { "Cache-Control": CACHE_CONTROL } },
-    );
+    });
+    if (cache) await cache.put(CACHE_KEY, response.clone()).catch(() => {});
+    return response;
   } catch {
     return Response.json(
       {
@@ -96,7 +127,7 @@ export async function GET() {
         color: "lightgrey",
         isError: true,
       },
-      { status: 502, headers: { "Cache-Control": "no-store" } },
+      { headers: { "Cache-Control": "public, max-age=60" } },
     );
   }
 }
