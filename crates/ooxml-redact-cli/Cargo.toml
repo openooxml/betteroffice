@@ -1,0 +1,23 @@
+[package]
+name = "betteroffice-redact-cli"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Local redaction and opt-in sharing CLI for BetterOffice OOXML repro files."
+
+[lib]
+name = "ooxml_redact_cli"
+
+[[bin]]
+name = "betteroffice-redact"
+path = "src/main.rs"
+
+[dependencies]
+ooxml-redact = { package = "betteroffice-redact", path = "../ooxml-redact" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+ooxml-opc.workspace = true
