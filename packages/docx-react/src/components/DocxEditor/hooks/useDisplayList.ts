@@ -263,7 +263,10 @@ export function useRustDisplayList(
     };
     const workerEligible =
       residentEngine !== null && workerFallbackEngineRef.current !== residentEngine;
-    const snapshot = workerEligible ? residentEngine.residentWorkerSnapshot() : null;
+    // Cheap probe only: the full snapshot (document state, font bytes) is
+    // built lazily below, and only for bootstrap/sync — steady-state frame
+    // builds never encode state or copy fonts.
+    const probe = workerEligible ? residentEngine.residentWorkerProbe() : null;
     const buildOnMainThread = () =>
       overrides?.build
         ? build(buildInputs, engine ?? undefined).then((displayList) => ({
@@ -272,7 +275,7 @@ export function useRustDisplayList(
           }))
         : buildRustDisplayFrame(buildInputs, engine ?? undefined, frameRef.current);
     let pending: Promise<{ displayList: DisplayList; frame: RetainedFrame | null }>;
-    if (!overrides?.build && snapshot && canUseResidentEngineWorker()) {
+    if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
       if (!hostEngine) throw new Error('Resident worker snapshot requires a host engine');
       const fallback = (cause: unknown) => {
@@ -304,10 +307,21 @@ export function useRustDisplayList(
         const worker = workerRef.current.client;
         const extras = encodeDisplayListFrameExtras(buildInputs);
         const bootstrapping = worker.layoutRevision() === 0;
+        // On a fresh client both hints are null, so a bootstrap snapshot is
+        // always complete; a sync snapshot ships a state diff and skips font
+        // bytes the worker already holds.
+        const buildSnapshot = () => {
+          const snapshot = hostEngine.residentWorkerSnapshot({
+            knownStateVector: worker.remoteStateVector(),
+            knownFontsRevision: worker.syncedFontsRevision(),
+          });
+          if (!snapshot) throw new Error('Resident worker snapshot was not available');
+          return snapshot;
+        };
         const workerFrame = bootstrapping
-          ? worker.bootstrap(snapshot, extras)
-          : worker.layoutRevision() !== snapshot.layoutRevision
-            ? worker.sync(snapshot, extras, frameRef.current?.frameEpoch ?? 0)
+          ? worker.bootstrap(buildSnapshot(), extras)
+          : worker.layoutRevision() !== probe.layoutRevision
+            ? worker.sync(buildSnapshot(), extras, frameRef.current?.frameEpoch ?? 0)
             : worker.buildFrame(extras, frameRef.current?.frameEpoch ?? 0);
         pending = workerFrame
           .then((result) => {
@@ -331,7 +345,7 @@ export function useRustDisplayList(
         setDisplayList(result.displayList);
         setError(null);
         setLoading(false);
-        const workerProduced = Boolean(snapshot && workerRef.current?.client.isReady());
+        const workerProduced = Boolean(probe && workerRef.current?.client.isReady());
         setWorkerActive(workerProduced);
         setWorkerSurfacesActive(workerProduced);
       })

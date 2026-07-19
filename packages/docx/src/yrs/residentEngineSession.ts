@@ -12,6 +12,7 @@ export type ResidentEngineSession = Pick<
   | 'buildDisplayListFrame'
   | 'clearFonts'
   | 'destroy'
+  | 'encodeStateVector'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsJson'
@@ -55,6 +56,7 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
   return {
     registerFont: (bytes) => session.register_measure_font(bytes),
     clearFonts: () => session.clear_measure_fonts(),
+    encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),

@@ -50,7 +50,6 @@ export const editsession_layout_document_json: (a: number, b: number, c: number)
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
-export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -95,6 +94,7 @@ export const editsession_track_undo: (a: number, b: number, c: number) => [numbe
 export const editsession_undo: (a: number) => number;
 export const editsession_undo_depth: (a: number) => number;
 export const editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_load: (a: number, b: number, c: number) => [number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

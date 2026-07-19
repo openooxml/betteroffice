@@ -25,6 +25,9 @@ let session: ResidentEngineSession | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
+// -1 = no fonts applied yet (fresh session); hydrate skips re-registration
+// when the snapshot's revision matches what this session already holds.
+let fontsRevision = -1;
 let operations = Promise.resolve();
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
@@ -166,8 +169,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   if (!session) throw new Error('Resident engine worker is not initialized');
   session.loadState(snapshot.state);
-  session.clearFonts();
-  for (const font of snapshot.fonts) session.registerFont(font);
+  if (snapshot.fontsRevision !== fontsRevision) {
+    // A mismatched revision always carries the full font set (the client only
+    // omits fonts when it knows this session's applied revision matches).
+    session.clearFonts();
+    for (const font of snapshot.fonts) session.registerFont(font);
+    fontsRevision = snapshot.fontsRevision;
+  }
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   if (snapshot.layoutWithRegions) {
@@ -192,6 +200,7 @@ function destroySession(): void {
   session = null;
   pendingUpdates = [];
   layoutRevision = 0;
+  fontsRevision = -1;
   retainedFrame = null;
   glyphCache = null;
   offscreenCanvases.clear();
@@ -223,6 +232,7 @@ async function replyFrame(
   const replayMs = performance.now() - replayStarted;
   const frame = exactBuffer(bytes);
   const updateBuffers = updates.map(exactBuffer);
+  const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
   reply(
     {
       id,
@@ -235,8 +245,9 @@ async function replyFrame(
       replayMs,
       replayedPages,
       layoutRevision,
+      ...(stateVector ? { stateVector } : {}),
     },
-    [frame, ...updateBuffers]
+    [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );
 }
 

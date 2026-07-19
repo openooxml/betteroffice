@@ -71,6 +71,9 @@ export type ResidentEngineWorkerResponse =
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;
+      /** The worker replica's yrs state vector after this operation, so the
+       * next sync can ship a diff instead of the whole document state. */
+      stateVector?: ArrayBuffer;
     }
   | {
       id: number;

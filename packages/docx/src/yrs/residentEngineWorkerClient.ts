@@ -41,6 +41,8 @@ export class ResidentEngineWorkerClient {
   private destroyed = false;
   private ready = false;
   private revision = 0;
+  private remoteVector: Uint8Array | null = null;
+  private appliedFontsRevision: number | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('./residentEngineWorker.mjs', import.meta.url), {
@@ -49,6 +51,9 @@ export class ResidentEngineWorkerClient {
     });
     this.worker.onmessage = (event: MessageEvent<ResidentEngineWorkerResponse>) => {
       const response = event.data;
+      if (response.ok && response.stateVector) {
+        this.remoteVector = new Uint8Array(response.stateVector);
+      }
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
@@ -74,10 +79,21 @@ export class ResidentEngineWorkerClient {
     return this.revision;
   }
 
+  /** The worker replica's last reported yrs state vector (null before any). */
+  remoteStateVector(): Uint8Array | null {
+    return this.remoteVector;
+  }
+
+  /** The fonts revision this worker last applied (null before bootstrap). */
+  syncedFontsRevision(): number | null {
+    return this.appliedFontsRevision;
+  }
+
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string
   ): Promise<ResidentEngineWorkerFrame> {
+    const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
       {
         type: 'bootstrap',
@@ -89,6 +105,7 @@ export class ResidentEngineWorkerClient {
       RESIDENT_ENGINE_WORKER_STARTUP_TIMEOUT_MS
     );
     const result = frameResult(response);
+    this.recordSync(response, fontsRevision);
     this.ready = true;
     this.revision = result.layoutRevision;
     return result;
@@ -99,11 +116,13 @@ export class ResidentEngineWorkerClient {
     extras: string,
     expectedFrameEpoch: number
   ): Promise<ResidentEngineWorkerFrame> {
+    const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
       { type: 'sync', snapshot, extras, expectedFrameEpoch },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
+    this.recordSync(response, fontsRevision);
     this.ready = true;
     this.revision = result.layoutRevision;
     return result;
@@ -222,6 +241,15 @@ export class ResidentEngineWorkerClient {
       this.pending.set(id, { resolve, reject, timeout });
       this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
     });
+  }
+
+  /** Record a successfully applied bootstrap/sync payload's fonts revision.
+   * The state vector is tracked centrally in `onmessage`. */
+  private recordSync(
+    _response: ResidentEngineWorkerResponse & { ok: true },
+    fontsRevision: number
+  ): void {
+    this.appliedFontsRevision = fontsRevision;
   }
 
   private failAll(error: Error): void {
