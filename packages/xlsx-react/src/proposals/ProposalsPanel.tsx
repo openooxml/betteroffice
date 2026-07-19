@@ -6,6 +6,7 @@
  */
 
 import type { Proposal } from '@betteroffice/xlsx';
+import type { CSSProperties } from 'react';
 import { en } from '../i18n';
 import { proposalColor } from './palette';
 
@@ -18,6 +19,7 @@ export interface ProposalsPanelProps {
   staleFor: Record<string, string[]>;
   onAccept: (id: string, force?: boolean) => void;
   onReject: (id: string) => void;
+  style?: CSSProperties;
 }
 
 const t = en.proposals;
@@ -33,7 +35,13 @@ function cellCountLabel(count: number): string {
 /**
  * The list of pending proposals with review controls.
  */
-export function ProposalsPanel({ proposals, staleFor, onAccept, onReject }: ProposalsPanelProps) {
+export function ProposalsPanel({
+  proposals,
+  staleFor,
+  onAccept,
+  onReject,
+  style,
+}: ProposalsPanelProps) {
   return (
     <div
       data-testid="xlsx-proposals-panel"
@@ -49,12 +57,13 @@ export function ProposalsPanel({ proposals, staleFor, onAccept, onReject }: Prop
         overflowY: 'auto',
         background: '#ffffff',
         border: '1px solid #d0d0d0',
-        borderRadius: 6,
+        borderRadius: 10,
         boxShadow: '0 6px 24px rgba(0, 0, 0, 0.16)',
         padding: 8,
         zIndex: 10,
         font: '13px system-ui, sans-serif',
         textAlign: 'left',
+        ...style,
       }}
     >
       {proposals.length === 0 ? (

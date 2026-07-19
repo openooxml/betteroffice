@@ -74,6 +74,47 @@ const initialStyle: Required<Pick<TextStyle, 'bold' | 'italic' | 'fontSizePt' | 
   color: '#111827',
 };
 
+type PptxToolbarIconName = 'undo' | 'redo' | 'addSlide' | 'deleteSlide' | 'textBox';
+
+function PptxToolbarIcon({ name }: { name: PptxToolbarIconName }) {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+      style={{ flex: '0 0 auto' }}
+    >
+      {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
+      {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
+      {name === 'addSlide' && (
+        <>
+          <rect x="3" y="5" width="14" height="14" rx="2" />
+          <path d="M7 9h6M7 13h4M20 10v6m-3-3h6" />
+        </>
+      )}
+      {name === 'deleteSlide' && (
+        <>
+          <path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7" />
+          <path d="M10 11v5m4-5v5" />
+        </>
+      )}
+      {name === 'textBox' && (
+        <>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M8 8h8m-4 0v8m-3 0h6" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 export function PptxEditor({
   file,
   fonts,
@@ -486,82 +527,112 @@ export function PptxEditor({
 
   return (
     <div className={className} style={styles.root}>
-      <div style={styles.toolbar} aria-label="Presentation formatting toolbar">
-        <button
-          type="button"
-          style={toolbarButton(handleRef.current?.canUndo() ?? false)}
-          disabled={!handleRef.current?.canUndo()}
-          onClick={() => history('undo')}
-        >
-          Undo
-        </button>
-        <button
-          type="button"
-          style={toolbarButton(handleRef.current?.canRedo() ?? false)}
-          disabled={!handleRef.current?.canRedo()}
-          onClick={() => history('redo')}
-        >
-          Redo
-        </button>
-        <span style={styles.divider} />
-        <button
-          type="button"
-          aria-pressed={textStyle.bold}
-          style={formatButton(textStyle.bold)}
-          onClick={() => applyFormatting({ bold: !textStyle.bold })}
-        >
-          B
-        </button>
-        <button
-          type="button"
-          aria-pressed={textStyle.italic}
-          style={{ ...formatButton(textStyle.italic), fontStyle: 'italic' }}
-          onClick={() => applyFormatting({ italic: !textStyle.italic })}
-        >
-          I
-        </button>
-        <label style={styles.fieldLabel}>
-          Size
-          <input
-            aria-label="Font size"
-            type="number"
-            min={6}
-            max={400}
-            value={textStyle.fontSizePt}
-            style={styles.numberInput}
-            onChange={(event: ChangeEvent<HTMLInputElement>) => {
-              const value = Number(event.target.value);
-              if (Number.isFinite(value)) applyFormatting({ fontSizePt: value });
-            }}
-          />
-        </label>
-        <label style={styles.fieldLabel}>
-          Color
-          <input
-            aria-label="Text color"
-            type="color"
-            value={textStyle.color}
-            style={styles.colorInput}
-            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              applyFormatting({ color: event.target.value })
-            }
-          />
-        </label>
-        <span style={styles.divider} />
-        <button type="button" style={toolbarButton(true)} onClick={addSlide}>
-          Add slide
-        </button>
-        <button
-          type="button"
-          style={toolbarButton(slideCount > 1)}
-          disabled={slideCount <= 1}
-          onClick={deleteSlide}
-        >
-          Delete slide
-        </button>
-        <button type="button" style={toolbarButton(slideCount > 0)} disabled={slideCount === 0} onClick={addTextBox}>
-          Add text box
-        </button>
+      <div style={styles.toolbarShell}>
+        <div style={styles.toolbar} role="group" aria-label="Presentation formatting toolbar">
+          <div style={styles.toolbarGroup} role="group" aria-label="History">
+            <button
+              type="button"
+              style={toolbarButton(handleRef.current?.canUndo() ?? false)}
+              disabled={!handleRef.current?.canUndo()}
+              aria-label="Undo"
+              title="Undo"
+              onClick={() => history('undo')}
+            >
+              <PptxToolbarIcon name="undo" />
+            </button>
+            <button
+              type="button"
+              style={toolbarButton(handleRef.current?.canRedo() ?? false)}
+              disabled={!handleRef.current?.canRedo()}
+              aria-label="Redo"
+              title="Redo"
+              onClick={() => history('redo')}
+            >
+              <PptxToolbarIcon name="redo" />
+            </button>
+          </div>
+          <span style={styles.divider} aria-hidden="true" />
+          <div style={styles.toolbarGroup} role="group" aria-label="Text formatting">
+            <button
+              type="button"
+              aria-pressed={textStyle.bold}
+              aria-label="Bold"
+              title="Bold"
+              style={formatButton(textStyle.bold)}
+              onClick={() => applyFormatting({ bold: !textStyle.bold })}
+            >
+              B
+            </button>
+            <button
+              type="button"
+              aria-pressed={textStyle.italic}
+              aria-label="Italic"
+              title="Italic"
+              style={{ ...formatButton(textStyle.italic), fontStyle: 'italic' }}
+              onClick={() => applyFormatting({ italic: !textStyle.italic })}
+            >
+              I
+            </button>
+            <input
+              aria-label="Font size"
+              title="Font size"
+              type="number"
+              min={6}
+              max={400}
+              value={textStyle.fontSizePt}
+              style={styles.numberInput}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => {
+                const value = Number(event.target.value);
+                if (Number.isFinite(value)) applyFormatting({ fontSizePt: value });
+              }}
+            />
+            <input
+              aria-label="Text color"
+              title="Text color"
+              type="color"
+              value={textStyle.color}
+              style={styles.colorInput}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                applyFormatting({ color: event.target.value })
+              }
+            />
+          </div>
+          <span style={styles.divider} aria-hidden="true" />
+          <div style={styles.toolbarGroup} role="group" aria-label="Slides">
+            <button
+              type="button"
+              style={toolbarButton(true)}
+              aria-label="Add slide"
+              title="Add slide"
+              onClick={addSlide}
+            >
+              <PptxToolbarIcon name="addSlide" />
+            </button>
+            <button
+              type="button"
+              style={toolbarButton(slideCount > 1)}
+              disabled={slideCount <= 1}
+              aria-label="Delete slide"
+              title="Delete slide"
+              onClick={deleteSlide}
+            >
+              <PptxToolbarIcon name="deleteSlide" />
+            </button>
+          </div>
+          <span style={styles.divider} aria-hidden="true" />
+          <div style={styles.toolbarGroup} role="group" aria-label="Objects">
+            <button
+              type="button"
+              style={toolbarButton(slideCount > 0)}
+              disabled={slideCount === 0}
+              aria-label="Add text box"
+              title="Add text box"
+              onClick={addTextBox}
+            >
+              <PptxToolbarIcon name="textBox" />
+            </button>
+          </div>
+        </div>
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label="Slides">
@@ -813,23 +884,66 @@ const styles: Record<string, CSSProperties> = {
     overflow: 'hidden',
     color: '#172033',
     background: '#f3f5f8',
-    fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+    fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+  },
+  toolbarShell: {
+    flex: '0 0 auto',
+    padding: '4px 0 5px',
+    background: '#ffffff',
+    borderBottom: '1px solid #e2e8f0',
   },
   toolbar: {
     display: 'flex',
     alignItems: 'center',
-    gap: 6,
-    minHeight: 48,
-    padding: '7px 12px',
-    background: '#ffffff',
-    borderBottom: '1px solid #d8dee9',
+    gap: 0,
+    minHeight: 36,
+    margin: '0 8px',
+    padding: '4px 8px',
+    background: '#f1f5f9',
+    borderRadius: 999,
     boxSizing: 'border-box',
-    flexWrap: 'wrap',
+    overflowX: 'auto',
+    overflowY: 'hidden',
   },
-  divider: { width: 1, alignSelf: 'stretch', background: '#e0e5ed', margin: '0 4px' },
-  fieldLabel: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12 },
-  numberInput: { width: 54, height: 30, border: '1px solid #ccd3df', borderRadius: 5, padding: '0 5px' },
-  colorInput: { width: 32, height: 30, padding: 2, border: '1px solid #ccd3df', borderRadius: 5, background: '#fff' },
+  toolbarGroup: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 1,
+    flex: '0 0 auto',
+  },
+  divider: {
+    width: 1,
+    height: 24,
+    margin: '0 6px',
+    background: '#e2e8f0',
+    flex: '0 0 auto',
+  },
+  numberInput: {
+    appearance: 'textfield',
+    width: 40,
+    height: 28,
+    marginLeft: 2,
+    boxSizing: 'border-box',
+    border: '1px solid #e2e8f0',
+    borderRadius: 6,
+    padding: '0 4px',
+    background: '#f8fafc',
+    color: '#0f172a',
+    font: '12px ui-sans-serif, system-ui, sans-serif',
+    textAlign: 'center',
+    outlineColor: '#2563eb',
+  },
+  colorInput: {
+    width: 28,
+    height: 28,
+    marginLeft: 2,
+    padding: 2,
+    border: '1px solid #e2e8f0',
+    borderRadius: 6,
+    background: '#f8fafc',
+    cursor: 'pointer',
+    outlineColor: '#2563eb',
+  },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   slideStrip: {
     width: 184,
@@ -863,26 +977,28 @@ const styles: Record<string, CSSProperties> = {
 
 function toolbarButton(enabled: boolean): CSSProperties {
   return {
-    height: 32,
-    padding: '0 10px',
-    border: '1px solid #ccd3df',
-    borderRadius: 5,
-    color: enabled ? '#273248' : '#9aa3b1',
-    background: '#ffffff',
+    appearance: 'none',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 28,
+    height: 28,
+    padding: 0,
+    border: 0,
+    borderRadius: 6,
+    color: enabled ? '#64748b' : '#94a3b8',
+    background: 'transparent',
     cursor: enabled ? 'pointer' : 'default',
-    fontSize: 12,
+    opacity: enabled ? 1 : 0.32,
   };
 }
 
 function formatButton(active: boolean): CSSProperties {
   return {
     ...toolbarButton(true),
-    width: 34,
-    padding: 0,
     fontWeight: 700,
-    color: active ? '#ffffff' : '#273248',
-    background: active ? '#325ee6' : '#ffffff',
-    borderColor: active ? '#325ee6' : '#ccd3df',
+    color: active ? '#ffffff' : '#64748b',
+    background: active ? '#0f172a' : 'transparent',
   };
 }
 
