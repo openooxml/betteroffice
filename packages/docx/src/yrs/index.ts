@@ -15,6 +15,10 @@
  */
 
 import type { EditSession } from './wasm/index';
+import type {
+  CollaborationReplica,
+  CollaborationUpdateOrigin,
+} from '../collaboration/types';
 
 export * from './inputPositionMap';
 export {
@@ -555,7 +559,7 @@ export type YrsCellBorders = Partial<
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
  */
-export interface YrsSession {
+export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
 
@@ -617,6 +621,10 @@ export interface YrsSession {
   loadStories(stories: readonly YrsStorySeed[]): Record<string, string[]>;
   /** Full document state as one yrs v1 update (Yjs wire format). */
   encodeState(): Uint8Array;
+  /** Current Yrs state vector in the Yjs v1 wire format. */
+  encodeStateVector(): Uint8Array;
+  /** Full state, or only the state missing from a peer vector. */
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): void;
   /** Apply a same-user worker update under the local undo origin. @internal */
@@ -625,7 +633,9 @@ export interface YrsSession {
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
    */
-  onUpdate(listener: (update: Uint8Array) => void): () => void;
+  onUpdate(
+    listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  ): () => void;
 
   // -- local input state --
 
@@ -854,9 +864,19 @@ function wireRanges(ranges: readonly YrsStoryRange[]): string {
 }
 
 function wrapSession(session: EditSession, clientId: number): YrsSession {
-  const listeners = new Set<(update: Uint8Array) => void>();
+  const listeners = new Map<
+    number,
+    (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  >();
+  const pendingUpdates: Array<{
+    update: Uint8Array;
+    origin: CollaborationUpdateOrigin;
+  }> = [];
   let observing = false;
   let destroyed = false;
+  let nextListenerId = 0;
+  let wasmCallDepth = 0;
+  let flushingUpdates = false;
   let undoStory: string | null = null;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
@@ -875,11 +895,36 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     cachedSelectionContext = null;
   };
 
+  const flushUpdates = (): void => {
+    if (destroyed || flushingUpdates || wasmCallDepth !== 0) return;
+    flushingUpdates = true;
+    try {
+      while (!destroyed && pendingUpdates.length > 0) {
+        const event = pendingUpdates.shift();
+        if (!event) break;
+        for (const [id, listener] of [...listeners]) {
+          if (destroyed) return;
+          if (listeners.get(id) !== listener) continue;
+          try {
+            listener(event.update.slice(), event.origin);
+          } catch {}
+        }
+      }
+    } finally {
+      flushingUpdates = false;
+      if (destroyed) pendingUpdates.length = 0;
+    }
+  };
+
   const mutate = <T>(operation: () => T): T => {
-    // Invalidate before entering wasm so synchronous update listeners cannot
-    // observe a cache from the pre-transaction document.
     invalidateReadCaches();
-    return operation();
+    wasmCallDepth += 1;
+    try {
+      return operation();
+    } finally {
+      wasmCallDepth -= 1;
+      if (wasmCallDepth === 0) flushUpdates();
+    }
   };
 
   const cloneSelection = (value: YrsSelection | null): YrsSelection | null =>
@@ -931,10 +976,22 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   const ensureObserver = () => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array) => {
-      for (const listener of [...listeners]) listener(update);
+    session.set_update_observer((update: Uint8Array, origin: number) => {
+      if (origin !== 0 && origin !== 1) return;
+      pendingUpdates.push({
+        update: update.slice(),
+        origin: origin === 0 ? 'local' : 'remote',
+      });
+      flushUpdates();
     });
     observing = true;
+  };
+
+  const clearUnusedObserver = (): void => {
+    if (!observing || listeners.size > 0 || destroyed) return;
+    pendingUpdates.length = 0;
+    session.clear_update_observer();
+    observing = false;
   };
 
   return {
@@ -1038,16 +1095,28 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>
       ),
     encodeState: () => session.encode_state(),
+    encodeStateVector: () => session.encode_state_vector(),
+    encodeStateAsUpdate: (remoteStateVector) =>
+      remoteStateVector === undefined
+        ? session.encode_state()
+        : session.encode_diff(remoteStateVector.slice()),
     applyUpdate: (update) => mutate(() => session.apply_update(update)),
     applyLocalUpdate: (update, story) => {
       ensureUndo(story);
       mutate(() => session.apply_local_update(update));
     },
     onUpdate: (listener) => {
-      listeners.add(listener);
+      if (destroyed) throw new Error('yrs session is destroyed');
+      if (typeof listener !== 'function') throw new TypeError('update listener must be a function');
+      const id = nextListenerId++;
+      listeners.set(id, listener);
       ensureObserver();
+      let subscribed = true;
       return () => {
-        listeners.delete(listener);
+        if (!subscribed) return;
+        subscribed = false;
+        listeners.delete(id);
+        clearUnusedObserver();
       };
     },
 
@@ -1489,6 +1558,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (destroyed) return;
       destroyed = true;
       listeners.clear();
+      pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();
     },

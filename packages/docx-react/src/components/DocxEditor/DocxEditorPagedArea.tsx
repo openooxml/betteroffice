@@ -30,6 +30,7 @@ import type { ReactSidebarItem } from '../../plugin-api/types';
 import type { RenderedDomContext } from '../../plugin-api/types';
 import type { YrsToolbarSelection } from './yrsToolbar';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
+import type { DocxEditorCollaborationOptions } from './types';
 
 /**
  * Body of the editor: the paged ProseMirror host, its sidebar overlay
@@ -49,6 +50,7 @@ export function DocxEditorPagedArea({
   // Document + section
   document,
   yrsSeedDocument,
+  collaboration,
   theme,
   initialSectionProperties,
   finalSectionProperties,
@@ -120,6 +122,7 @@ export function DocxEditorPagedArea({
   document: Document | null;
   /** Source document for replacing the yrs session on an actual load. */
   yrsSeedDocument: Document | null;
+  collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
   finalSectionProperties: SectionProperties | undefined;
@@ -359,6 +362,7 @@ export function DocxEditorPagedArea({
         ref={pagedEditorRef}
         document={document}
         yrsSeedDocument={yrsSeedDocument}
+        collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
         sectionProperties={initialSectionProperties}

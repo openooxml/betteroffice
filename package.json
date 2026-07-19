@@ -3,7 +3,11 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "workspaces": ["apps/*", "packages/*", "crates"],
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "crates"
+  ],
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",
     "dev:docs": "bun run --filter './apps/docs' dev",
@@ -14,7 +18,7 @@
     "deploy:docs": "bun run --filter './apps/docs' deploy",
     "deploy:demo": "bun run --filter './apps/demo' deploy",
     "build": "bun run --filter './apps/web' build",
-    "test": "bun run build:xlsx-wasm && bun test packages apps/web/app/api",
+    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test packages apps/web/app/api",
     "typecheck": "bun run --filter '*' typecheck",
     "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
     "changeset": "changeset",
