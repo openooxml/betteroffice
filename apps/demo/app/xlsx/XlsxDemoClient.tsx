@@ -6,7 +6,16 @@ import { useSearchParams } from "next/navigation";
 import { XlsxEditor } from "@betteroffice/xlsx-react";
 import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
 import { isProposalsAvailable } from "@betteroffice/xlsx";
+import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
 import { Logo } from "../components/Logo";
+import {
+  CollaborationControls,
+  COLLAB_RELAY_ORIGIN,
+  useCollabRoom,
+  useDemoRoom,
+  type CollaborationReplica,
+  type CollaborationTransport,
+} from "../collab";
 import { buildTotalsEdits } from "./demoAgent";
 
 const SHOWCASE = { url: "/showcase.xlsx", name: "showcase.xlsx" };
@@ -38,8 +47,17 @@ function OpenFileLabel({
 
 export function XlsxDemoClient() {
   const bootEmpty = useSearchParams().get("empty") === "1";
+  const room = useDemoRoom();
+  const createProvider = useCallback(
+    (replica: CollaborationReplica, transport: CollaborationTransport) =>
+      new CollaborationProvider(replica, transport),
+    [],
+  );
+  const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
   const [file, setFile] = useState<Uint8Array | undefined>();
+  const [seed, setSeed] = useState<Uint8Array | null>(null);
   const [fileName, setFileName] = useState(SHOWCASE.name);
+  const [collaborativeFile, setCollaborativeFile] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [ready, setReady] = useState(false);
   const [loading, setLoading] = useState(!bootEmpty);
@@ -72,30 +90,34 @@ export function XlsxDemoClient() {
   }, []);
 
   // read a blob's bytes into the editor under the given display name.
-  const openBlob = useCallback(async (blob: Blob, name: string) => {
-    setLoading(true);
-    try {
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      setError(null);
-      setFile(bytes);
-      setFileName(name);
-    } catch (e) {
-      setError(
-        `Could not read ${name}: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const openBlob = useCallback(
+    async (blob: Blob, name: string, collaborative = false) => {
+      setLoading(true);
+      try {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        setError(null);
+        setCollaborativeFile(collaborative);
+        setFile(bytes);
+        setFileName(name);
+      } catch (e) {
+        setError(
+          `Could not read ${name}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
 
   // fetch a bundled workbook by url; surface fetch failures as a page banner.
   const openUrl = useCallback(
-    async (url: string, name: string) => {
+    async (url: string, name: string, collaborative = false) => {
       setLoading(true);
       try {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        await openBlob(await res.blob(), name);
+        await openBlob(await res.blob(), name, collaborative);
       } catch (e) {
         setError(
           `Could not load ${name}: ${e instanceof Error ? e.message : String(e)}`,
@@ -111,7 +133,7 @@ export function XlsxDemoClient() {
       const picked = list?.[0];
       if (!picked) return;
       userActedRef.current = true;
-      void openBlob(picked, picked.name);
+      void openBlob(picked, picked.name, false);
     },
     [openBlob],
   );
@@ -123,25 +145,26 @@ export function XlsxDemoClient() {
       const picked = e.dataTransfer.files?.[0];
       if (!picked) return;
       userActedRef.current = true;
-      void openBlob(picked, picked.name);
+      void openBlob(picked, picked.name, false);
     },
     [openBlob],
   );
 
   const loadSample = useCallback(() => {
     userActedRef.current = true;
-    void openUrl(SAMPLE.url, SAMPLE.name);
+    void openUrl(SAMPLE.url, SAMPLE.name, false);
   }, [openUrl]);
 
   const loadShowcase = useCallback(() => {
     userActedRef.current = true;
-    void openUrl(SHOWCASE.url, SHOWCASE.name);
+    void openUrl(SHOWCASE.url, SHOWCASE.name, true);
   }, [openUrl]);
 
   const closeFile = useCallback(() => {
     userActedRef.current = true;
     setFile(undefined);
     setFileName("");
+    setCollaborativeFile(false);
     setError(null);
   }, []);
 
@@ -154,8 +177,33 @@ export function XlsxDemoClient() {
       setLoading(false);
       return;
     }
-    void openUrl(SHOWCASE.url, SHOWCASE.name);
+    void openUrl(SHOWCASE.url, SHOWCASE.name, true);
   }, [bootEmpty, openUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/seeds/xlsx.bin")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`${response.status} ${response.statusText}`);
+        }
+        return response.arrayBuffer();
+      })
+      .then((bytes) => {
+        if (!cancelled) setSeed(new Uint8Array(bytes));
+      })
+      .catch((nextError: unknown) => {
+        if (cancelled) return;
+        setError(
+          `Could not load collaboration seed: ${
+            nextError instanceof Error ? nextError.message : String(nextError)
+          }`,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="app">
@@ -173,6 +221,14 @@ export function XlsxDemoClient() {
         {file && fileName && <span className="filename">{fileName}</span>}
 
         <div className="actions">
+          {collaborativeFile && (
+            <CollaborationControls
+              status={collab.status}
+              synced={collab.synced}
+              peerCount={collab.peerCount}
+              error={collab.error}
+            />
+          )}
           <div className="action-group">
             <OpenFileLabel
               className="btn"
@@ -261,7 +317,20 @@ export function XlsxDemoClient() {
         {/* the editor stays mounted even with no file (it paints a demo frame),
             so the empty state is an overlay on top rather than an unmount. */}
         <div className="editor-host">
-          <XlsxEditor file={file} fileName={fileName} onReady={onReady} />
+          <XlsxEditor
+            file={file}
+            fileName={fileName}
+            collaboration={
+              collaborativeFile && room && seed && collab.clientId
+                ? {
+                    clientId: collab.clientId,
+                    initialUpdate: seed,
+                    onReplica: collab.onReplica,
+                  }
+                : undefined
+            }
+            onReady={onReady}
+          />
 
           {!file &&
             (loading ? (
