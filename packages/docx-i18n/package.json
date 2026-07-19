@@ -67,7 +67,9 @@
   },
   "keywords": [
     "docx",
+    "ooxml",
     "editor",
+    "react",
     "i18n",
     "locales",
     "translations"

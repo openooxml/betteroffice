@@ -1,7 +1,20 @@
 {
   "name": "@betteroffice/pptx-react",
   "version": "0.0.1",
-  "description": "React chrome for the BetterOffice PPTX editor.",
+  "description": "PowerPoint-faithful React PPTX editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "presentation",
+    "slides",
+    "ooxml",
+    "editor",
+    "viewer",
+    "react",
+    "collaborative",
+    "real-time",
+    "ai-agent"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
