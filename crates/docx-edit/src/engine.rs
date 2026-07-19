@@ -960,8 +960,7 @@ impl EngineSession {
                     .map_err(|error| format!("serialize headers/footers: {error}"))
             })
             .transpose()?;
-        let headers_footers = measured_headers_footers
-            .or_else(|| regions.headers_footers.clone());
+        let headers_footers = measured_headers_footers.or_else(|| regions.headers_footers.clone());
         let notes_clear = notes.contents.is_empty() && refs.is_empty();
         // Multi-section documents are excluded: an edit can move a section
         // boundary without changing the total page count, which changes
@@ -2440,8 +2439,11 @@ mod tests {
         })
         .to_string();
         let extras = serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string();
+        let started = std::time::Instant::now();
         engine.layout_document_with_regions_json(&request).unwrap();
+        let cold_layout = started.elapsed();
         engine.build_display_list_frame(&extras, 0).unwrap();
+        println!("cold first layout over {PARAGRAPHS} paragraphs: {cold_layout:?}");
 
         let mut epoch = engine.display.borrow().binary_frame_epoch;
         let started = std::time::Instant::now();
