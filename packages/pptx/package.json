@@ -1,7 +1,21 @@
 {
   "name": "@betteroffice/pptx",
   "version": "0.0.1",
-  "description": "Framework-free core for the BetterOffice PPTX editor: Rust/Wasm deck model, layout, and canvas replay.",
+  "description": "PowerPoint-faithful PPTX editor and viewer core — full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "presentation",
+    "slides",
+    "ooxml",
+    "office",
+    "editor",
+    "viewer",
+    "collaborative",
+    "real-time",
+    "ai-agent",
+    "wasm"
+  ],
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",

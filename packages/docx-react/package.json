@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/docx-react",
   "version": "0.0.1",
-  "description": "React DOCX editor adapter for @betteroffice/docx.",
+  "description": "Word-faithful React DOCX editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
@@ -44,11 +44,15 @@
   },
   "keywords": [
     "docx",
-    "editor",
-    "template",
     "word",
     "document",
-    "react"
+    "ooxml",
+    "editor",
+    "viewer",
+    "react",
+    "collaborative",
+    "real-time",
+    "ai-agent"
   ],
   "author": "OpenOOXML",
   "license": "Apache-2.0",
