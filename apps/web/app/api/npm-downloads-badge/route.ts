@@ -1,24 +1,32 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { flatSquareBadge } from "../../../lib/badge";
 import { monthlyDownloadsTotal } from "../../../lib/downloads";
 
 const KV_KEY = "npm-downloads";
 const REFRESH_MS = 24 * 60 * 60 * 1000;
+const NPM_RED = "#CB3837";
 
 interface CachedCount {
   downloads: number;
   at: number;
 }
 
-function payload(downloads: number, cacheSeconds: number): Response {
-  return Response.json(
-    {
-      schemaVersion: 1,
-      label: "npm downloads",
-      message: `${downloads.toLocaleString("en-US")}/month`,
-      color: "brightgreen",
+function svg(body: string, cacheSeconds: number): Response {
+  return new Response(body, {
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": `public, max-age=${cacheSeconds}, s-maxage=${cacheSeconds}`,
     },
-    { headers: { "Cache-Control": `public, max-age=${cacheSeconds}, s-maxage=${cacheSeconds}` } },
-  );
+  });
+}
+
+function downloadsBadge(downloads: number): string {
+  return flatSquareBadge({
+    label: "downloads",
+    message: `${downloads.toLocaleString("en-US")}/month`,
+    color: NPM_RED,
+    logo: "npm",
+  });
 }
 
 export async function GET() {
@@ -31,7 +39,7 @@ export async function GET() {
 
   const cached = kv ? await kv.get<CachedCount>(KV_KEY, "json").catch(() => null) : null;
   if (cached && Date.now() - cached.at < REFRESH_MS) {
-    return payload(cached.downloads, 3600);
+    return svg(downloadsBadge(cached.downloads), 3600);
   }
 
   try {
@@ -42,12 +50,12 @@ export async function GET() {
         .put(KV_KEY, JSON.stringify({ downloads, at: Date.now() } satisfies CachedCount))
         .catch(() => {});
     }
-    return payload(downloads, 3600);
+    return svg(downloadsBadge(downloads), 3600);
   } catch {
-    if (cached) return payload(cached.downloads, 3600);
-    return Response.json(
-      { schemaVersion: 1, label: "npm downloads", message: "unavailable", color: "lightgrey", isError: true },
-      { headers: { "Cache-Control": "public, max-age=60" } },
+    if (cached) return svg(downloadsBadge(cached.downloads), 3600);
+    return svg(
+      flatSquareBadge({ label: "downloads", message: "unavailable", color: "#9f9f9f" }),
+      60,
     );
   }
 }

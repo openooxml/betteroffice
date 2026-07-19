@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { monthlyDownloads, officialPackageNames } from "./route.ts";
+import { monthlyDownloads, officialPackageNames } from "../../../lib/downloads.ts";
 
 const jsonResponse = (body, ok = true, status = 200) => ({
   ok,
