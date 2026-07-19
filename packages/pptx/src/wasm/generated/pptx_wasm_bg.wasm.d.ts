@@ -30,6 +30,7 @@ export const pptxdocument_mediaBytes: (a: number, b: number, c: number) => [numb
 export const pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+export const pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number) => [number, number, number];
 export const pptxdocument_redoJson: (a: number) => [number, number, number, number];
 export const pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];

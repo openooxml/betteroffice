@@ -24,6 +24,7 @@ export class PptxDocument {
     moveShapeJson(args: string): string;
     moveSlideJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
+    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number): PptxDocument;
     redoJson(): string;
     removeShapeJson(args: string): string;
     resizeShapeJson(args: string): string;
@@ -93,6 +94,7 @@ export interface InitOutput {
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+    readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number) => [number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
