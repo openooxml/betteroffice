@@ -41,6 +41,7 @@ import type {
   SheetInfo,
   WorkbookHandle,
 } from '@betteroffice/xlsx';
+import type { CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import { en } from './i18n';
 import { ProposalDecoration } from './proposals/ProposalDecoration';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
@@ -59,6 +60,10 @@ export interface XlsxEditorApi {
 export interface XlsxEditorCollaborationOptions {
   /** Peer-unique Yrs client ID. Generated securely when omitted. */
   clientId?: number;
+  /** Shared Yrs state applied before the replica is exposed. */
+  initialUpdate?: Uint8Array;
+  /** Receive the editor-owned collaboration replica. */
+  onReplica?: (replica: CollaborationReplica | null) => void;
 }
 
 /**
@@ -211,6 +216,8 @@ export function XlsxEditor({
 }: XlsxEditorProps) {
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
+  const collaborationInitialUpdate = collaboration?.initialUpdate;
+  const collaborationOnReplica = collaboration?.onReplica;
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
@@ -234,6 +241,8 @@ export function XlsxEditor({
   const [revision, setRevision] = useState(0);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
+  const [collaborationReplica, setCollaborationReplica] =
+    useState<CollaborationReplica | null>(null);
   // a1 lists keyed by proposal id: cells that drifted since a proposal was
   // staged, surfaced when accepting it throws a StaleProposalError.
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
@@ -271,6 +280,7 @@ export function XlsxEditor({
     setProposals([]);
     setStaleFor({});
     setProposalsPanelOpen(false);
+    setCollaborationReplica(null);
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -300,6 +310,9 @@ export function XlsxEditor({
             collaborative: collaborationEnabled,
             clientId: collaborationClientId,
           });
+          if (collaborationInitialUpdate) {
+            handle.applyUpdate(collaborationInitialUpdate.slice());
+          }
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate(() => {
             if (disposed || !handle) return;
@@ -315,6 +328,7 @@ export function XlsxEditor({
           });
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
+          setCollaborationReplica(handle);
           setError(null);
           refreshProposals();
           const cleanup = onReadyRef.current?.({ handle, refreshProposals });
@@ -346,7 +360,19 @@ export function XlsxEditor({
       handle?.dispose();
       handleRef.current = null;
     };
-  }, [file, collaborationEnabled, collaborationClientId, refreshProposals]);
+  }, [
+    file,
+    collaborationEnabled,
+    collaborationClientId,
+    collaborationInitialUpdate,
+    refreshProposals,
+  ]);
+
+  useEffect(() => {
+    if (!collaborationOnReplica || !collaborationReplica) return;
+    collaborationOnReplica(collaborationReplica);
+    return () => collaborationOnReplica(null);
+  }, [collaborationOnReplica, collaborationReplica]);
 
   // paint the current scroll window into the canvas and publish the frame for
   // overlays + a11y. reads refs so it stays identity-stable across renders.
