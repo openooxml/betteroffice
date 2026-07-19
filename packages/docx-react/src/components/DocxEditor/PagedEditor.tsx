@@ -89,7 +89,6 @@ import {
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import { useYrsCoreSession } from './hooks/useYrsCoreSession';
-import { useRustPagination } from './hooks/useRustPagination';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi } from './hooks/usePagedScrollApi';
@@ -120,17 +119,9 @@ import {
   type YrsEditorCommand,
 } from './yrsCommands';
 import { YrsPositionProjection } from './internals/yrsPositionProjection';
+import type { DocxEditorCollaborationOptions } from './types';
 
 export { DEFAULT_PAGE_WIDTH };
-
-interface YrsRebuildCounter {
-  fullDocReplaces: number;
-}
-
-declare global {
-  // eslint-disable-next-line no-var
-  var __yrsRebuilds: YrsRebuildCounter | undefined;
-}
 
 function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsInlineFormatDelta {
   if (!formatting) return {};
@@ -172,6 +163,8 @@ export interface PagedEditorProps {
   document: Document | null;
   /** Source document used only when seeding a replacement yrs session. */
   yrsSeedDocument?: Document | null;
+  /** Collaboration identity and replica lifecycle callback. */
+  collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
   styles?: StyleDefinitions | null;
   /** Theme for styling. */
@@ -280,12 +273,9 @@ export interface PagedEditorProps {
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
-  applyResidentInput?: (text: string, perfKeystroke?: number) => Promise<boolean>;
+  applyResidentInput?: (text: string) => Promise<boolean>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
-  applyResidentDelete?: (
-    direction: 'backward' | 'forward',
-    perfKeystroke?: number
-  ) => Promise<boolean>;
+  applyResidentDelete?: (direction: 'backward' | 'forward') => Promise<boolean>;
   /** Set of resolved comment IDs — hides highlight for these comments */
   resolvedCommentIds?: Set<number>;
   /** Suggestion mode active state */
@@ -412,10 +402,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       document,
       yrsSeedDocument = document,
+      collaboration,
       styles,
       theme: _theme,
-      sectionProperties,
-      finalSectionProperties,
       headerContent,
       footerContent,
       firstPageHeaderContent,
@@ -489,16 +478,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
-    // Standard input is yrs-authoritative: the hidden textarea captures
-    // keyboard/IME and writes straight to yrs.
-    useEffect(() => {
-      globalThis.__yrsRebuilds = { fullDocReplaces: 0 };
-      return () => {
-        globalThis.__yrsRebuilds = undefined;
-      };
-    }, []);
-
-    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument);
+    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument, collaboration);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
@@ -510,15 +490,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         numericIds: {},
       };
     }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop]);
-    const yrsBodyBlocks = useCallback(
-      (layoutEnv: { pageContentHeight: number }) =>
-        yrsCore.bodyBlocks({ ...yrsRenderEnv, ...layoutEnv }),
-      [yrsCore.bodyBlocks, yrsRenderEnv]
-    );
-    const yrsStoryBlocks = useCallback(
-      (storyId: string) => yrsCore.storyBlocks(storyId, yrsRenderEnv),
-      [yrsCore.storyBlocks, yrsRenderEnv]
-    );
     const activeYrsRootStory = hfEditMode && hfEditRId ? `hf:${hfEditRId}` : 'body';
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
@@ -586,9 +557,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // hook; engine-ready and fonts-ready re-layouts reach back through its
     // runLayoutPipelineRef, and deferLayoutPass gates provisional passes.
     const {
-      measureBlocksImpl,
-      notifyBlocks: notifyRustMeasurementBlocks,
       deferLayoutPass,
+      residentMeasurementConfig,
       runLayoutPipelineRef,
     } = useRustMeasurement({
       document,
@@ -597,10 +567,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       textEngine: yrsCore.session,
     });
 
-    // The mandatory Rust pagination source — the sole pagination engine.
-    // Readiness gating lives in useLayoutPipeline (defer-and-rerun).
-    const paginationSource = useRustPagination(yrsCore.session);
-
     // Layout pipeline — owns layout/blocks/measures state, the rAF-coalesced
     // scheduler, scroll-restore plumbing, and the page-count
     // notifier.
@@ -608,23 +574,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]
     );
-    const { layout, blocks, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
+    const { layout, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
       document,
-      styles,
-      theme: _theme,
-      sectionProperties,
-      finalSectionProperties,
-      headerContent,
-      footerContent,
-      firstPageHeaderContent,
-      firstPageFooterContent,
-      yrsBodyBlocks,
-      yrsStoryBlocks,
+      session: yrsCore.session,
+      renderEnv: yrsRenderEnv,
       pageGap,
       zoom,
-      measureBlocksImpl,
       deferLayoutPass,
-      paginationSource,
+      residentMeasurementConfig,
       displayListQueries,
       interactionPageHostRef: canvasHostRef,
       pagesContainerRef,
@@ -637,8 +594,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
-    // Feed each pass's blocks so the hook warms font chains (no-op when off).
-    useEffect(() => notifyRustMeasurementBlocks(blocks), [blocks, notifyRustMeasurementBlocks]);
 
     // Selection overlay — caret, range rects, image overlay info, plus the
     // ResizeObserver + post-layout recompute that keep geometry fresh.
@@ -782,9 +737,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
-          const counter = globalThis.__yrsInput ?? { ops: 0 };
-          counter.ops += 1;
-          globalThis.__yrsInput = counter;
           yrsCore.publishDirectInput();
         }
         handleYrsStateChange(displaySelection, docChanged);
@@ -792,6 +744,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
     );
+
+    useEffect(() => {
+      const session = yrsCore.session;
+      if (!session) return;
+      return session.onUpdate((_update, origin) => {
+        if (origin === 'remote') syncYrsInputState(true);
+      });
+    }, [syncYrsInputState, yrsCore.session]);
 
     const applyYrsFormatting = useCallback(
       (action: FormattingAction): boolean => {
@@ -1112,9 +1072,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
 
           if (docChanged) {
-            const counter = globalThis.__yrsInput ?? { ops: 0 };
-            counter.ops += 1;
-            globalThis.__yrsInput = counter;
             yrsCore.publishDirectInput();
           }
           handleYrsStateChange(

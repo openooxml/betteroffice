@@ -250,6 +250,7 @@ pub enum EditError {
     ExpectedPilcrow { story: String, index: u32 },
     CannotMergeFinalParagraph { story: String, index: u32 },
     InvalidComment(String),
+    InvalidStateVector(String),
     InvalidUpdate(String),
     ReservedParagraphKey(String),
 }
@@ -272,6 +273,7 @@ impl fmt::Display for EditError {
                 write!(f, "cannot merge the final paragraph at {story}:{index}")
             }
             Self::InvalidComment(message) => write!(f, "invalid comment: {message}"),
+            Self::InvalidStateVector(message) => write!(f, "invalid yrs state vector: {message}"),
             Self::InvalidUpdate(message) => write!(f, "invalid yrs update: {message}"),
             Self::ReservedParagraphKey(key) => {
                 write!(f, "paragraph property {key:?} is managed by the schema")
@@ -559,6 +561,16 @@ impl EditingDoc {
         self.doc
             .transact()
             .encode_state_as_update_v1(&StateVector::default())
+    }
+
+    pub fn encode_state_vector_v1(&self) -> Vec<u8> {
+        self.doc.transact().state_vector().encode_v1()
+    }
+
+    pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
+        let state_vector = StateVector::decode_v1(remote_state_vector)
+            .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;
+        Ok(self.doc.transact().encode_diff_v1(&state_vector))
     }
 
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {
@@ -854,6 +866,36 @@ mod tests {
         assert_eq!(main.paragraphs("body").unwrap()[0].text, "before after");
         assert!(undo.undo());
         assert_eq!(main.paragraphs("body").unwrap()[0].text, "before");
+    }
+
+    #[test]
+    fn state_vector_diff_converges_and_rejects_invalid_vectors() {
+        let left = seed("before");
+        let right = EditingDoc::new(200);
+        right
+            .apply_update_v1(&left.encode_state_as_update_v1())
+            .unwrap();
+        let baseline = right.encode_state_vector_v1();
+
+        left.insert_text(
+            &local("left"),
+            Position::new("body", 6),
+            " after",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let update = left.encode_diff_v1(&baseline).unwrap();
+        right.apply_update_v1(&update).unwrap();
+
+        assert_eq!(left.paragraphs("body"), right.paragraphs("body"));
+        assert_eq!(
+            left.encode_state_vector_v1(),
+            right.encode_state_vector_v1()
+        );
+        assert!(matches!(
+            left.encode_diff_v1(&[0xff]),
+            Err(EditError::InvalidStateVector(_))
+        ));
     }
 
     #[test]

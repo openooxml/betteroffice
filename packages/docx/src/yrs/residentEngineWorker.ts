@@ -170,7 +170,11 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   for (const font of snapshot.fonts) session.registerFont(font);
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
-  session.layoutDocumentJson(snapshot.layoutInput);
+  if (snapshot.layoutWithRegions) {
+    session.layoutDocumentWithRegionsJson(snapshot.layoutInput);
+  } else {
+    session.layoutDocumentJson(snapshot.layoutInput);
+  }
   if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];

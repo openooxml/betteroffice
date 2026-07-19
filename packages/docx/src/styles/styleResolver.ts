@@ -5,7 +5,7 @@
  * Handles the cascade:
  * 1. Document defaults (docDefaults)
  * 2. Normal style (if no explicit styleId)
- * 3. Style chain (basedOn inheritance - already resolved by styleParser)
+ * 3. Style chain (basedOn inheritance resolved during parsing)
  * 4. Inline properties
  *
  * Based on ECMA-376 style cascade rules.
@@ -145,7 +145,7 @@ export class StyleResolver {
       return result;
     }
 
-    // Get the requested style (already has basedOn chain resolved by styleParser)
+    // Get the requested style with its basedOn chain already resolved.
     const style = this.stylesById.get(styleId);
     if (!style) {
       // Style not found, fall back to Normal

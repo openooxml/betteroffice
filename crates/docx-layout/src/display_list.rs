@@ -2559,7 +2559,7 @@ struct LayoutIn {
     pages: Vec<PageIn>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PageIn {
     #[serde(default)]
@@ -2574,11 +2574,13 @@ pub(crate) struct PageIn {
     #[serde(default)]
     section_id: Option<String>,
     #[serde(default)]
-    section_index: Option<u64>,
+    pub(crate) section_index: Option<u64>,
     #[serde(default)]
-    section_page_index: Option<u64>,
+    pub(crate) section_page_index: Option<u64>,
     #[serde(default)]
     section_page_number: Option<u64>,
+    #[serde(default)]
+    pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
     #[serde(default)]
     background: Option<String>,
     #[serde(default)]
@@ -2587,6 +2589,23 @@ pub(crate) struct PageIn {
     note_areas: Vec<NoteAreaIn>,
     #[serde(default)]
     fragments: Vec<FragmentIn>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PageHeaderFooterRefsIn {
+    #[serde(default)]
+    pub(crate) header_default: Option<String>,
+    #[serde(default)]
+    pub(crate) header_first: Option<String>,
+    #[serde(default)]
+    pub(crate) header_even: Option<String>,
+    #[serde(default)]
+    pub(crate) footer_default: Option<String>,
+    #[serde(default)]
+    pub(crate) footer_first: Option<String>,
+    #[serde(default)]
+    pub(crate) footer_even: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -9648,7 +9667,9 @@ pub fn build_display_list_value_with_fonts(
     input: &str,
     fonts: &ooxml_text::FontStore,
 ) -> Result<DisplayList, String> {
-    let parsed: BuildInput = serde_json::from_str(input).map_err(|e| format!("parse: {e}"))?;
+    let mut wire: Value = serde_json::from_str(input).map_err(|e| format!("parse: {e}"))?;
+    normalize_js_integral_numbers(&mut wire);
+    let parsed: BuildInput = serde_json::from_value(wire).map_err(|e| format!("parse: {e}"))?;
     Ok(build_display_list(&parsed, fonts))
 }
 
@@ -10023,17 +10044,6 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
 /// lossless integral-number canonicalization inside the Rust adapter.
 fn normalize_js_integral_numbers(value: &mut Value) {
     match value {
-        Value::Number(number) if !number.is_i64() && !number.is_u64() => {
-            let Some(float) = number.as_f64() else {
-                return;
-            };
-            if !float.is_finite() || float.fract() != 0.0 {
-                return;
-            }
-            if float >= i64::MIN as f64 && float <= i64::MAX as f64 {
-                *number = Number::from(float as i64);
-            }
-        }
         Value::Array(values) => {
             for value in values {
                 normalize_js_integral_numbers(value);
@@ -10042,6 +10052,18 @@ fn normalize_js_integral_numbers(value: &mut Value) {
         Value::Object(fields) => {
             for value in fields.values_mut() {
                 normalize_js_integral_numbers(value);
+            }
+        }
+        Value::Number(number) if !number.is_i64() && !number.is_u64() => {
+            let Some(float) = number.as_f64() else {
+                return;
+            };
+            if float.is_finite()
+                && float.fract() == 0.0
+                && float >= i64::MIN as f64
+                && float <= i64::MAX as f64
+            {
+                *number = Number::from(float as i64);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
@@ -10057,13 +10079,17 @@ mod batch_f_tests {
         let mut value = serde_json::json!({
             "pmStart": 16.0,
             "fractional": 16.25,
-            "nested": [3.0, -4.0]
+            "nested": [3.0, -4.0],
+            "fontChains": { "calibri|0|0": [1.0] }
         });
         normalize_js_integral_numbers(&mut value);
         assert!(value["pmStart"].as_i64().is_some());
         assert_eq!(value["fractional"].as_f64(), Some(16.25));
-        assert!(value["nested"][0].as_i64().is_some());
+        assert_eq!(value["nested"][0].as_i64(), Some(3));
         assert_eq!(value["nested"][1].as_i64(), Some(-4));
+        let chains: HashMap<String, Vec<u32>> =
+            serde_json::from_value(value["fontChains"].clone()).unwrap();
+        assert_eq!(chains["calibri|0|0"], vec![1]);
     }
     use serde_json::json;
 

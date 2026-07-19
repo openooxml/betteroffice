@@ -4,18 +4,14 @@
 
 ```ts
 
-import { ColorValue } from '@betteroffice/drawingml';
-import { Element as Element_2 } from 'xml-js';
-import { emuToPixels } from '@betteroffice/drawingml/units';
-import { pixelsToEmu } from '@betteroffice/drawingml/units';
-import { PresetGeometryPathCommand } from '@betteroffice/drawingml';
-import { ShapeFill } from '@betteroffice/drawingml';
-import { ShapeOutline } from '@betteroffice/drawingml';
-import { ShapeTextBody as ShapeTextBody_2 } from '@betteroffice/drawingml';
-import { ShapeType } from '@betteroffice/drawingml';
-import { Theme } from '@betteroffice/drawingml';
-import { ThemeColorSlot } from '@betteroffice/drawingml';
+// Warning: (ae-forgotten-export) The symbol "WrapType" needs to be exported by the entry point index.d.mts
+//
+// @public (undocumented)
+export type AnchorWrapType = Exclude<WrapType, 'inline'>;
 
+// Warning: (ae-forgotten-export) The symbol "Document_2" needs to be exported by the entry point index.d.mts
+// Warning: (ae-forgotten-export) The symbol "SelectiveSaveOptions" needs to be exported by the entry point index.d.mts
+//
 // @public
 export function attemptSelectiveSave(doc: Document_2, originalBuffer: ArrayBuffer, options: SelectiveSaveOptions): Promise<ArrayBuffer | null>;
 
@@ -23,448 +19,143 @@ export function attemptSelectiveSave(doc: Document_2, originalBuffer: ArrayBuffe
 export function buildPatchedDocumentXml(originalXml: string, serializedXml: string, changedIds: Set<string>): string | null;
 
 // @public
-export function calculateTabWidth(currentPosition: number, tabStops: TabStop[], pageWidth: number): number;
-
-// @public
-export function calculateTabWidthWithAlignment(currentPosition: number, tabStops: TabStop[], pageWidth: number, followingContentWidth?: number): {
+export function calculateResizedImageDimensions(handle: ImageResizeHandle, deltaX: number, deltaY: number, startWidth: number, startHeight: number, lockAspect: boolean): {
     width: number;
-    alignment: TabStopAlignment;
+    height: number;
 };
 
-// @public
-export interface ComplexFieldContext {
-    codeRuns: Run[];
-    dirty: boolean;
-    fldLock: boolean;
-    instruction: string;
-    nestingLevel: number;
-    resultRuns: Run[];
-    state: ComplexFieldState;
-}
-
-// @public
-export type ComplexFieldState = 'outside' | 'code' | 'result';
-
-// @public
-export function computeListRendering(numPr: {
-    numId?: number;
-    ilvl?: number;
-}, numbering: NumberingMap): ListRendering | null;
-
-// @public
-export function createComplexFieldContext(): ComplexFieldContext;
-
-// @public
+// @public (undocumented)
 export function createDocx(doc: Document_2): Promise<ArrayBuffer>;
 
-// @public (undocumented)
-export function createNumberingMap(definitions: NumberingDefinitions): NumberingMap;
+// @public
+export function deriveLayoutChoice(wrapType: WrapType, cssFloat?: string | null): ImageLayoutTarget | null;
+
+// Warning: (ae-forgotten-export) The symbol "Watermark" needs to be exported by the entry point index.d.mts
+//
+// @public
+export function getDocumentWatermark(doc: Document_2 | null | undefined): Watermark | undefined;
 
 // @public
-export const DEFAULT_TAB_ALIGNMENT: TabStopAlignment;
-
-// @public
-export const DEFAULT_TAB_INTERVAL_TWIPS = 720;
-
-// @public
-export const DEFAULT_TAB_LEADER: TabLeader;
-
-export { emuToPixels }
-
-// @public
-export interface EndnoteMap {
-    byId: Map<number, Endnote>;
-    endnotes: Endnote[];
-    getContinuationSeparator(): Endnote | undefined;
-    getEndnote(id: number): Endnote | undefined;
-    getNormalEndnotes(): Endnote[];
-    getSeparator(): Endnote | undefined;
-    hasEndnote(id: number): boolean;
-}
-
-// @public
-export function extractTextBoxContentElements(txbxContent: Element_2 | null): {
-    paragraphElements: Element_2[];
-    tableElements: Element_2[];
-};
-
-// @public
-export interface FieldSwitch {
-    switch: string;
-    value?: string;
-}
-
-// @public
-export interface FootnoteMap {
-    byId: Map<number, Footnote>;
-    footnotes: Footnote[];
-    getContinuationSeparator(): Footnote | undefined;
-    getFootnote(id: number): Footnote | undefined;
-    getNormalFootnotes(): Footnote[];
-    getSeparator(): Footnote | undefined;
-    hasFootnote(id: number): boolean;
-}
-
-// @public
-export function formatNumber(num: number, format: NumberFormat): string;
-
-// @public
-export function getBulletCharacter(level: ListLevel): string;
+export const IMAGE_LAYOUT_OPTIONS: readonly ImageLayoutOptionDef[];
 
 // @public (undocumented)
-export function getCachedNumberingMap(definitions: NumberingDefinitions): NumberingMap;
+export interface ImageLayoutAttrs extends Record<string, unknown> {
+    // (undocumented)
+    cssFloat: 'left' | 'right' | 'none';
+    // (undocumented)
+    displayMode: 'inline' | 'float' | 'block';
+    // (undocumented)
+    distBottom?: number;
+    // (undocumented)
+    distLeft?: number;
+    // (undocumented)
+    distRight?: number;
+    // (undocumented)
+    distTop?: number;
+    // (undocumented)
+    position?: ImageLayoutPosition;
+    // (undocumented)
+    wrapText?: 'bothSides' | 'left' | 'right' | 'largest';
+    // (undocumented)
+    wrapType: WrapType;
+}
 
-// @public
-export function getEndnoteText(endnote: Endnote): string;
+// @public (undocumented)
+export interface ImageLayoutCurrentAttrs {
+    // (undocumented)
+    cssFloat?: string | null;
+    // (undocumented)
+    position?: ImageLayoutPosition | null;
+    // (undocumented)
+    wrapType?: string | null;
+}
 
-// @public
-export function getFieldDisplayValue(field: Field): string;
+// @public (undocumented)
+export type ImageLayoutIconHint = 'inline' | 'squareLeft' | 'squareRight' | 'behind' | 'inFront';
 
-// @public
-export function getFootnoteText(footnote: Footnote): string;
+// @public (undocumented)
+export interface ImageLayoutOptionDef {
+    // (undocumented)
+    choice: ImageLayoutTarget;
+    // (undocumented)
+    i18nDescKey: string;
+    // (undocumented)
+    i18nLabelKey: string;
+    // (undocumented)
+    iconHint: ImageLayoutIconHint;
+}
 
-// @public
-export function getFormatSwitch(instruction: ParsedFieldInstruction): string | undefined;
+// @public (undocumented)
+export interface ImageLayoutPosition {
+    // (undocumented)
+    horizontal?: {
+        relativeTo?: string;
+        posOffset?: number;
+        align?: string;
+    };
+    // (undocumented)
+    vertical?: {
+        relativeTo?: string;
+        posOffset?: number;
+        align?: string;
+    };
+}
 
-// @public
-export function getHyperlinkRuns(hyperlink: Hyperlink): Run[];
+// @public (undocumented)
+export type ImageLayoutTarget = AnchorWrapType | 'squareLeft' | 'squareRight' | 'inline';
 
-// @public
-export function getHyperlinkText(hyperlink: Hyperlink): string;
+// @public (undocumented)
+export type ImageResizeHandle = 'nw' | 'ne' | 'se' | 'sw' | 'n' | 's' | 'e' | 'w';
 
-// @public
-export function getHyperlinkUrl(hyperlink: Hyperlink): string | undefined;
-
-// @public
-export function getImageHeightPx(image: Image_2): number;
-
-// @public
-export function getImageWidthPx(image: Image_2): number;
-
-// @public
-export function getLeaderCharacter(leader: TabLeader | undefined): string;
-
-// @public
-export function getNextTabStop(currentPosition: number, tabStops: TabStop[], pageWidth: number): TabStop;
-
-// @public
-export function getOutlineWidthPx(shape: Shape): number;
-
-// @public
-export function getShapeDimensionsPx(shape: Shape): {
-    width: number;
-    height: number;
-};
-
-// @public
-export function getShapeHeightPx(shape: Shape): number;
-
-// @public
-export function getShapeWidthPx(shape: Shape): number;
-
-// @public
-export function getTableColumnCount(table: Table): number;
-
-// @public
-export function getTableRowCount(table: Table): number;
-
-// @public
-export function getTextBoxContentElement(wsp: Element_2): Element_2 | null;
-
-// @public
-export function getTextBoxDimensionsPx(textBox: TextBox): {
-    width: number;
-    height: number;
-};
-
-// @public
-export function getTextBoxHeightPx(textBox: TextBox): number;
-
-// @public
-export function getTextBoxMarginsPx(textBox: TextBox): {
-    top: number;
-    bottom: number;
-    left: number;
-    right: number;
-};
-
-// @public
-export function getTextBoxOutlineWidthPx(textBox: TextBox): number;
-
-// @public
-export function getTextBoxText(textBox: TextBox): string;
-
-// @public
-export function getTextBoxWidthPx(textBox: TextBox): number;
-
-// @public
-export function getWrapDistancesPx(image: Image_2): {
-    top: number;
-    bottom: number;
-    left: number;
-    right: number;
-};
-
-// @public
-export function hasContent(hyperlink: Hyperlink): boolean;
-
-// @public
-export function hasFill(shape: Shape): boolean;
-
-// @public
-export function hasHeaderRow(table: Table): boolean;
-
-// @public
-export function hasMergeFormat(instruction: ParsedFieldInstruction): boolean;
-
-// @public
-export function hasOutline(shape: Shape): boolean;
-
-// @public
-export function hasTextBoxContent(textBox: TextBox): boolean;
-
-// @public
-export function hasTextBoxFill(textBox: TextBox): boolean;
-
-// @public
-export function hasTextBoxOutline(textBox: TextBox): boolean;
-
-// @public
-export function hasTextContent(shape: Shape): boolean;
-
-// @public
-export function hasVisibleLeader(leader: TabLeader | undefined): boolean;
-
+// Warning: (ae-forgotten-export) The symbol "BlockContent" needs to be exported by the entry point index.d.mts
+// Warning: (ae-forgotten-export) The symbol "Comment_2" needs to be exported by the entry point index.d.mts
+//
 // @public
 export function injectReplyRangeMarkers(content: BlockContent[], comments: Comment_2[]): void;
 
 // @public
 export function injectTCReplyRangeMarkers(content: BlockContent[], comments: Comment_2[]): void;
 
-// @public
-export function isBehindText(image: Image_2): boolean;
+// @public (undocumented)
+export function isImageLayoutOptionEnabled(_option: ImageLayoutOptionDef, _currentWrapType: WrapType): boolean;
 
-// @public
-export function isBulletLevel(level: ListLevel): boolean;
-
-// @public
-export function isCellMergeContinuation(cell: TableCell): boolean;
-
-// @public
-export function isCellMergeStart(cell: TableCell): boolean;
-
-// @public
-export function isDateTimeField(field: Field): boolean;
-
-// @public
-export function isDecorativeImage(image: Image_2): boolean;
-
-// @public
-export function isDocPropertyField(field: Field): boolean;
-
-// @public
-export function isExternalLink(hyperlink: Hyperlink): boolean;
-
-// @public
-export function isFloatingImage(image: Image_2): boolean;
-
-// @public
-export function isFloatingShape(shape: Shape): boolean;
-
-// @public
-export function isFloatingTextBox(textBox: TextBox): boolean;
-
-// @public
-export function isInFrontOfText(image: Image_2): boolean;
-
-// @public
-export function isInlineImage(image: Image_2): boolean;
-
-// @public
-export function isInternalLink(hyperlink: Hyperlink): boolean;
-
-// @public
-export function isKnownFieldType(type: string): type is FieldType;
-
-// @public
-export function isLineShape(shape: Shape): boolean;
-
-// @public
-export function isMergeField(field: Field): boolean;
-
-// @public
-export function isPageNumberField(field: Field): boolean;
-
-// @public
-export function isReferenceField(field: Field): boolean;
-
-// @public
-export function isSeparatorEndnote(endnote: Endnote): boolean;
-
-// @public
-export function isSeparatorFootnote(footnote: Footnote): boolean;
-
-// @public
-export function isShapeDrawing(drawingEl: Element_2): boolean;
-
-// @public
-export function isShapeTextBox(wsp: Element_2): boolean;
-
-// @public
-export function isTextBoxDrawing(drawingEl: Element_2): boolean;
-
-// @public
-export function isTextBoxShape(shape: Shape): boolean;
-
-// @public
-export function isTocField(field: Field): boolean;
-
-// @public
-export function isTotalPagesField(field: Field): boolean;
-
-// @public
-export const KNOWN_FIELD_TYPES: FieldType[];
-
-// @public
-export function mergeTabStops(styleTabs: TabStop[] | undefined, directTabs: TabStop[] | undefined): TabStop[];
-
-// @public
-export type NumberingMap = {
-    definitions: NumberingDefinitions;
-    getLevel: (numId: number, ilvl: number) => ListLevel | null;
-    getAbstract: (abstractNumId: number) => AbstractNumbering | null;
-    getInstance: (numId: number) => NumberingInstance | null;
-    hasNumbering: (numId: number) => boolean;
-};
-
-// @public
-export type ParagraphParserFn = (node: Element_2, styles: StyleMap | null, theme: Theme | null, numbering: NumberingMap | null, rels?: RelationshipMap | null) => Paragraph;
-
-// @public
-export function parseBorderSpec(element: Element_2 | null): BorderSpec | undefined;
-
-// @public
-export function parseCellMargins(marginsElement: Element_2 | null): CellMargins | undefined;
-
-// @public
-export interface ParsedFieldInstruction {
-    argument?: string;
-    raw: string;
-    switches: FieldSwitch[];
-    type: FieldType;
-}
-
-// @public
+// Warning: (ae-forgotten-export) The symbol "DocxInput" needs to be exported by the entry point index.d.mts
+// Warning: (ae-forgotten-export) The symbol "ParseOptions" needs to be exported by the entry point index.d.mts
+//
+// @public (undocumented)
 export function parseDocx(input: DocxInput, options?: ParseOptions): Promise<Document_2>;
 
-// @public
-export function parseDrawing(drawingEl: Element_2, rels: RelationshipMap | undefined, media: Map<string, MediaFile> | undefined): Image_2 | null;
-
-// @public
-export function parseEndnoteProperties(element: Element_2 | null): EndnoteProperties;
-
-// @public
-export function parseEndnotes(endnotesXml: string | null, styles?: StyleMap | null, theme?: Theme | null, numbering?: NumberingMap | null, rels?: RelationshipMap | null, media?: Map<string, MediaFile> | null, charts?: ChartPartsMap | null, smartArt?: SmartArtContext | null): EndnoteMap;
-
-// @public
-export function parseFieldInstruction(instruction: string): ParsedFieldInstruction;
-
-// @public
-export function parseFieldType(instruction: string): FieldType;
-
-// @public
-export function parseFloatingTableProperties(tblpPrElement: Element_2 | null): FloatingTableProperties | undefined;
-
-// @public
-export function parseFontTable(fontTableXml: string | null | undefined): FontTable;
-
-// @public
-export function parseFootnoteProperties(element: Element_2 | null): FootnoteProperties;
-
-// @public
-export function parseFootnotes(footnotesXml: string | null, styles?: StyleMap | null, theme?: Theme | null, numbering?: NumberingMap | null, rels?: RelationshipMap | null, media?: Map<string, MediaFile> | null, charts?: ChartPartsMap | null, smartArt?: SmartArtContext | null): FootnoteMap;
-
-// @public
-export function parseHyperlink(node: Element_2, rels: RelationshipMap | null, styles?: StyleMap | null, theme?: Theme | null, media?: Map<string, MediaFile> | null, charts?: ChartPartsMap | null, smartArt?: SmartArtContext | null): Hyperlink;
-
-// @public
-export function parseImage(node: Element_2, rels: RelationshipMap | undefined, media: Map<string, MediaFile> | undefined): Image_2 | null;
-
-// @public
-export function parseNumbering(numberingXml: string | null): NumberingMap;
-
-// @public
-export function parseShading(shdElement: Element_2 | null): ShadingProperties | undefined;
-
-// @public
-export function parseShape(node: Element_2): Shape;
-
-// @public
-export function parseShapeFromDrawing(drawingEl: Element_2): Shape | null;
-
-// @public
-export function parseSimpleField(node: Element_2, styles: StyleMap | null, theme: Theme | null): SimpleField;
-
-// @public
-export function parseTableBorders(element: Element_2 | null): TableBorders | undefined;
-
-// @public
-export function parseTableLook(lookElement: Element_2 | null): TableLook | undefined;
-
-// @public
-export function parseTableMeasurement(element: Element_2 | null): TableMeasurement | undefined;
-
-// @public
-export function parseTableProperties(tblPrElement: Element_2 | null): TableFormatting | undefined;
-
-// @public
-export function parseTabStop(tab: Element_2): TabStop | null;
-
-// @public
-export function parseTabStops(tabs: Element_2 | null): TabStop[];
-
-// @public
-export function parseTabStopsFromParagraphProperties(pPr: Element_2 | null): TabStop[] | undefined;
-
-// @public
-export function parseTextBox(drawingEl: Element_2): TextBox | null;
-
-// @public
-export function parseTextBoxContent(txbxContent: Element_2 | null, parseParagraph: ParagraphParserFn, parseTable: TableParserFn | null, styles: StyleMap | null, theme: Theme | null, numbering: NumberingMap | null, rels?: RelationshipMap | null, _media?: Map<string, MediaFile>): Paragraph[];
-
-// @public
-export function parseTextBoxFromShape(wsp: Element_2, size: ImageSize, position?: ImagePosition, wrap?: ImageWrap): TextBox | null;
-
-export { pixelsToEmu }
-
-// @public
-export function renderListMarker(lvlText: string, counters: number[], formats: NumberFormat[]): string;
-
+// Warning: (ae-forgotten-export) The symbol "RepackOptions" needs to be exported by the entry point index.d.mts
+//
 // @public
 export function repackDocx(doc: Document_2, options?: RepackOptions): Promise<ArrayBuffer>;
 
 // @public
-export function resolveFillColor(shape: Shape): string | undefined;
+export function resolveImageLayoutAttrs(target: ImageLayoutTarget, current: ImageLayoutCurrentAttrs, opts?: SetImageWrapTypeOptions): ImageLayoutAttrs;
 
 // @public
-export function resolveHyperlinkUrl(hyperlink: Hyperlink, rels: RelationshipMap): string | undefined;
+export function setDocumentWatermark(doc: Document_2, watermark: Watermark | null): Document_2;
+
+// @public (undocumented)
+export interface SetImageWrapTypeOptions {
+    // (undocumented)
+    initialPositionEmu?: {
+        horizontalEmu: number;
+        verticalEmu: number;
+    };
+}
 
 // @public
-export function resolveOutlineColor(shape: Shape): string | undefined;
+export function toolbarValueToLayoutTarget(value: string): ImageLayoutTarget | undefined;
 
-// @public
-export function resolveTextBoxFillColor(textBox: TextBox): string | undefined;
-
-// @public
-export function resolveTextBoxOutlineColor(textBox: TextBox): string | undefined;
-
-// @public
-export type TableParserFn = (node: Element_2, styles: StyleMap | null, theme: Theme | null, numbering: NumberingMap | null, rels?: RelationshipMap | null, media?: Map<string, MediaFile>) => Table;
-
-// @public
+// @public (undocumented)
 export function updateMultipleFiles(originalBuffer: ArrayBuffer, updates: Map<string, string | ArrayBuffer>, options?: RepackOptions): Promise<ArrayBuffer>;
 
+// Warning: (ae-forgotten-export) The symbol "PatchValidationResult" needs to be exported by the entry point index.d.mts
+//
 // @public
 export function validatePatchSafety(originalXml: string, serializedXml: string, changedIds: Set<string>): PatchValidationResult;
+
+// (No @packageDocumentation comment for this package)
 
 ```

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 // ---------------------------------------------------------------------------
 
 /// TS `BlockId = string | number` — passed through verbatim to fragments.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockId {
     Num(f64),
@@ -68,6 +68,8 @@ pub struct ColumnLayout {
     pub equal_width: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub separator: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<ColumnDefinition>>,
 }
 
 /// TS `SectionBreakBlock['type']` / `LayoutOptions['bodyBreakType']`.
@@ -1575,7 +1577,7 @@ impl Fragment {
 
 /// TS `Page['headerFooterRefs']`. Never set by the spine; ships for the
 /// header/footer port.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderFooterRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1603,7 +1605,9 @@ pub struct Page {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub orientation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub section_index: Option<f64>,
+    pub section_index: Option<u64>,
+    #[serde(skip)]
+    pub region_section_index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_footer_refs: Option<HeaderFooterRefs>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1614,6 +1618,28 @@ pub struct Page {
     pub footnote_columns: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<ColumnLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_numbering: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header_distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footer_distance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_borders: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical_align: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_areas: Option<Vec<NoteAreaContract>>,
 }
 
 /// TS `HeaderFooterLayout`. Never emitted by the spine; ships for the

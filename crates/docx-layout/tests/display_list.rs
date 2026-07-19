@@ -2296,7 +2296,7 @@ fn shape_picture_fill_payload_threads_to_fill_paint() {
 #[test]
 fn modern_text_effects_thread_to_text_primitives() {
     let effects = serde_json::json!({
-        "glow": { "color": "#00ff00", "radius": 4.0 },
+        "glow": { "color": "#00ff00", "radius": 4 },
         "textFill": { "kind": "solid", "color": "#ff00aa" }
     });
     let input = serde_json::json!({

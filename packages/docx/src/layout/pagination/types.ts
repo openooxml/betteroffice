@@ -1509,11 +1509,6 @@ export type Layout = {
   footers?: Record<string, HeaderFooterLayout>;
   /** Gap between pages in pixels (for rendering). */
   pageGap?: number;
-  /**
-   * Resume bookmarks for incremental pagination (derived data — omitted from
-   * golden serialization). See `checkpoints.ts`.
-   */
-  checkpoints?: import('./checkpoints').LayoutCheckpoint[];
 };
 
 // =============================================================================

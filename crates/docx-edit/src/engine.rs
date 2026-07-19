@@ -8,14 +8,28 @@
 //! same document/render generation.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use docx_layout::display_list::DisplayList;
+use docx_layout::footnotes::{
+    FOOTNOTE_COLUMN_GAP_PX, OrderedMap, apply_note_presentation, assign_note_presentations,
+    attach_note_areas, build_note_presentations, collect_note_refs, map_note_anchors_to_pages,
+    map_notes_to_pages, stabilize_note_layout, stamp_note_pages,
+};
+use docx_layout::header_footer::{
+    HeaderFooterKind, HeaderFooterMetrics, HeaderFooterPayload, HeaderFooterType,
+    HeaderFooterVariant, extend_body_margins, measure_header_footer,
+    resolve_header_footer_field_widths,
+};
 use docx_layout::hit::HitRegion;
 use docx_layout::place::LayoutCheckpoint;
+use docx_layout::regions::{
+    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
+    apply_section_geometry_to_blocks, effective_header_footer_refs,
+};
 use docx_layout::types::{
-    BlockExtent, BlockId, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
+    BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
     ParagraphExtent, Run,
 };
 use serde::Serialize;
@@ -57,9 +71,208 @@ struct MeasurementState {
 }
 
 #[derive(Debug)]
+struct ResidentRegionState {
+    request_json: String,
+    headers_footers: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
 struct ResidentLayoutInput {
     input: LayoutInput,
     block_fingerprints: Vec<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegionLayoutOutput<'a> {
+    measured: &'a [MeasuredBlock],
+    options: &'a docx_layout::types::LayoutOptions,
+    layout: &'a Layout,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers_footers: Option<&'a serde_json::Value>,
+    notes_converged: bool,
+}
+
+fn serialize_region_layout(
+    input: &LayoutInput,
+    layout: &Layout,
+    headers_footers: Option<&serde_json::Value>,
+    notes_converged: bool,
+) -> Result<String, String> {
+    serde_json::to_string(&RegionLayoutOutput {
+        measured: &input.measured,
+        options: &input.options,
+        layout,
+        headers_footers,
+        notes_converged,
+    })
+    .map_err(|error| format!("serialize: {error}"))
+}
+
+fn reservation_options(reserved: &OrderedMap<u32, f64>) -> Option<BTreeMap<String, f64>> {
+    (!reserved.is_empty()).then(|| {
+        reserved
+            .iter()
+            .map(|(page, height)| (page.to_string(), *height))
+            .collect()
+    })
+}
+
+fn layout_error_message(error: docx_layout::LayoutError) -> String {
+    match error {
+        docx_layout::LayoutError::Unsupported(_) => "UNSUPPORTED".to_owned(),
+        docx_layout::LayoutError::Invalid(reason) => reason,
+    }
+}
+
+fn column_measurement_width(
+    page_width: f64,
+    margins: &docx_layout::types::PageMargins,
+    columns: Option<&ColumnLayout>,
+) -> f64 {
+    let content_width = (page_width - margins.left - margins.right).max(1.0);
+    let Some(columns) = columns.filter(|columns| columns.count > 1.0) else {
+        return content_width;
+    };
+    if columns.equal_width == Some(false)
+        && let Some(width) = columns
+            .columns
+            .as_ref()
+            .and_then(|authored| authored.first())
+            .and_then(|column| column.width)
+            .filter(|width| width.is_finite() && *width > 0.0)
+    {
+        return width;
+    }
+    ((content_width - (columns.count - 1.0) * columns.gap) / columns.count).floor()
+}
+
+fn region_measurement_widths(
+    blocks: &[LayoutBlock],
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+) -> Vec<f64> {
+    let fallback_size = input
+        .options
+        .page_size
+        .clone()
+        .unwrap_or(docx_layout::types::Size {
+            w: 816.0,
+            h: 1056.0,
+        });
+    let fallback_margins =
+        docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    let mut section_index = 0;
+    blocks
+        .iter()
+        .map(|block| {
+            let section = regions
+                .sections
+                .get(section_index)
+                .or_else(|| regions.sections.last());
+            let size = section
+                .and_then(|section| section.page_size.as_ref())
+                .unwrap_or(&fallback_size);
+            let margins = section
+                .and_then(|section| section.margins.as_ref())
+                .unwrap_or(&fallback_margins);
+            let columns = section
+                .and_then(|section| section.columns.as_ref())
+                .or(input.options.columns.as_ref());
+            let width = column_measurement_width(size.w, margins, columns);
+            if matches!(block, LayoutBlock::SectionBreak(_)) {
+                section_index += 1;
+            }
+            width
+        })
+        .collect()
+}
+
+fn initial_float_page_geometry(
+    input: &LayoutInput,
+    regions: &DocumentRegions,
+) -> docx_layout::measure_blocks::FloatPageGeometry {
+    let section = regions.sections.first();
+    let size = section
+        .and_then(|section| section.page_size.clone())
+        .or_else(|| input.options.page_size.clone())
+        .unwrap_or(docx_layout::types::Size {
+            w: 816.0,
+            h: 1056.0,
+        });
+    let margins = docx_layout::section_breaks::resolve_page_margins(
+        section
+            .and_then(|section| section.margins.as_ref())
+            .or(input.options.margins.as_ref()),
+    );
+    docx_layout::measure_blocks::FloatPageGeometry {
+        page_height: size.h,
+        margin_top: margins.top,
+        content_height: size.h - margins.top - margins.bottom,
+    }
+}
+
+fn extend_input_for_header_footer(
+    input: &mut LayoutInput,
+    regions: &DocumentRegions,
+    variants: &[HeaderFooterVariant],
+) {
+    if regions.sections.is_empty() {
+        return;
+    }
+    let fallback_size = input
+        .options
+        .page_size
+        .clone()
+        .unwrap_or(docx_layout::types::Size {
+            w: 816.0,
+            h: 1056.0,
+        });
+    let fallback_margins =
+        docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    let extended: Vec<_> = regions
+        .sections
+        .iter()
+        .enumerate()
+        .map(|(section_index, section)| {
+            let page_size = section
+                .page_size
+                .clone()
+                .unwrap_or_else(|| fallback_size.clone());
+            let margins = docx_layout::section_breaks::resolve_page_margins(
+                section.margins.as_ref().or(Some(&fallback_margins)),
+            );
+            let header_height = variants
+                .iter()
+                .filter(|variant| {
+                    variant.section_index == section_index
+                        && variant.kind == HeaderFooterKind::Header
+                })
+                .map(|variant| variant.flow_height)
+                .fold(0.0_f64, f64::max);
+            let footer_height = variants
+                .iter()
+                .filter(|variant| {
+                    variant.section_index == section_index
+                        && variant.kind == HeaderFooterKind::Footer
+                })
+                .map(|variant| variant.flow_height)
+                .fold(0.0_f64, f64::max);
+            extend_body_margins(&page_size, &margins, header_height, footer_height)
+        })
+        .collect();
+    input.options.margins = extended.first().cloned();
+    input.options.final_margins = extended.last().cloned();
+    let mut section_index = 0;
+    for measured in &mut input.measured {
+        let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
+            continue;
+        };
+        if let Some(margins) = extended.get(section_index) {
+            section_break.margins = Some(margins.clone());
+        }
+        section_index += 1;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +368,7 @@ pub struct EngineSession {
     _doc_epoch_observer: Subscription,
     render: RefCell<RenderState>,
     measurement: RefCell<MeasurementState>,
+    regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
     display: RefCell<DisplayState>,
 }
@@ -337,6 +551,7 @@ impl EngineSession {
             _doc_epoch_observer: observer,
             render: RefCell::new(RenderState::default()),
             measurement: RefCell::new(MeasurementState::default()),
+            regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
             display: RefCell::new(DisplayState::default()),
         }
@@ -517,6 +732,7 @@ impl EngineSession {
     pub fn layout_document_json(&self, input_json: &str) -> Result<String, String> {
         let input: LayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        self.regions.borrow_mut().take();
         self.layout_document_value(input)?;
         let pagination = self.pagination.borrow();
         serde_json::to_string(
@@ -526,6 +742,355 @@ impl EngineSession {
                 .expect("layout retained after successful pagination"),
         )
         .map_err(|error| format!("serialize: {error}"))
+    }
+
+    pub fn layout_font_requirements_json(&self, input_json: &str) -> Result<String, String> {
+        let request: RegionLayoutInput =
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let (input, regions, notes, _, render_env, body_story) = request.split();
+        let mut blocks = input
+            .measured
+            .into_iter()
+            .map(|measured| measured.block)
+            .collect::<Vec<_>>();
+        if let Some(body_story) = body_story {
+            let render_env: RenderEnv = serde_json::from_value(render_env)
+                .map_err(|error| format!("parse render environment: {error}"))?;
+            let mut stories = BTreeSet::from([body_story]);
+            for section_index in 0..regions.sections.len() {
+                let Some(refs) = effective_header_footer_refs(&regions, section_index) else {
+                    continue;
+                };
+                stories.extend(
+                    [
+                        refs.header_default,
+                        refs.header_first,
+                        refs.header_even,
+                        refs.footer_default,
+                        refs.footer_first,
+                        refs.footer_even,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .map(|r_id| format!("hf:{r_id}")),
+                );
+            }
+            stories.extend(notes.contents.into_iter().map(|content| {
+                let prefix = match content.note_kind {
+                    docx_layout::footnotes::NoteKind::Footnote => "fn",
+                    docx_layout::footnotes::NoteKind::Endnote => "en",
+                };
+                format!("{prefix}:{}", content.id)
+            }));
+            for story in stories {
+                let mut story_blocks = self
+                    .with_lowered_story(&story, &render_env, <[LayoutBlock]>::to_vec)
+                    .map_err(|error| error.to_string())?;
+                blocks.append(&mut story_blocks);
+            }
+        }
+        serde_json::to_string(&docx_layout::measure_blocks::collect_font_requirements(
+            &blocks,
+        ))
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
+    /// Full-document pagination with section/page region orchestration owned
+    /// by the resident engine. The returned envelope is ready for the Rust
+    /// display-list builder without host-side layout mutation.
+    pub fn layout_document_with_regions_json(&self, input_json: &str) -> Result<String, String> {
+        let request: RegionLayoutInput =
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let (mut input, regions, mut notes, measurement, render_env, body_story) = request.split();
+        let parsed_render_env = if render_env.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value::<RenderEnv>(render_env)
+                    .map_err(|error| format!("parse render environment: {error}"))?,
+            )
+        };
+        let resident_body = body_story.is_some();
+        if let Some(story) = body_story.as_deref() {
+            let render_env = parsed_render_env
+                .as_ref()
+                .ok_or_else(|| "resident body layout requires a render environment".to_owned())?;
+            let mut blocks = self
+                .with_lowered_story(story, render_env, <[LayoutBlock]>::to_vec)
+                .map_err(|error| error.to_string())?;
+            apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
+            let widths = region_measurement_widths(&blocks, &input, &regions);
+            let geometry = initial_float_page_geometry(&input, &regions);
+            let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
+                &mut blocks,
+                &widths,
+                &measurement,
+                Some(&geometry),
+            )?;
+            input.measured = blocks
+                .into_iter()
+                .zip(measures)
+                .map(|(block, measure)| MeasuredBlock { block, measure })
+                .collect();
+        } else {
+            apply_section_geometry(&mut input, &regions);
+        }
+        let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
+            self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
+        } else {
+            None
+        };
+        self.layout_document_value(input.clone())?;
+        let mut initial_layout = self
+            .pagination
+            .borrow()
+            .layout
+            .clone()
+            .expect("layout retained after successful pagination");
+        apply_document_regions(&mut initial_layout, &regions);
+        let refs = input
+            .measured
+            .iter()
+            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
+            .collect::<Vec<_>>();
+        let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
+        assign_note_presentations(&mut notes.contents, &presentations);
+        if resident_body {
+            self.measure_resident_notes(
+                &mut notes.contents,
+                &refs,
+                &initial_layout,
+                &regions,
+                &measurement,
+                parsed_render_env
+                    .as_ref()
+                    .expect("resident body required render environment"),
+            )?;
+        }
+        let base_input = input.clone();
+        let stabilized = stabilize_note_layout(
+            |reserved| {
+                let mut pass = base_input.clone();
+                pass.options.footnote_reserved_heights = reservation_options(reserved);
+                let mut layout = docx_layout::place::layout_document(&mut pass)?;
+                apply_document_regions(&mut layout, &regions);
+                Ok(layout)
+            },
+            &refs,
+            &notes.contents,
+            initial_layout,
+            &regions,
+        )
+        .map_err(layout_error_message)?;
+        let notes_converged = stabilized.converged;
+        if !stabilized.reserved_heights.is_empty() {
+            input.options.footnote_reserved_heights =
+                reservation_options(&stabilized.reserved_heights);
+            self.layout_document_value(input)?;
+        }
+        let mut pagination = self.pagination.borrow_mut();
+        let PaginationState { input, layout, .. } = &mut *pagination;
+        let layout = layout
+            .as_mut()
+            .expect("layout retained after successful pagination");
+        apply_document_regions(layout, &regions);
+        let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
+        stamp_note_pages(layout, &page_note_map, &regions);
+        attach_note_areas(layout, &page_note_map, &notes.contents, &regions);
+        let input = input
+            .as_ref()
+            .expect("input retained after successful pagination");
+        let measured_headers_footers = measured_headers_footers
+            .as_mut()
+            .map(|payload| {
+                resolve_header_footer_field_widths(payload, layout, &measurement)?;
+                serde_json::to_value(payload)
+                    .map_err(|error| format!("serialize headers/footers: {error}"))
+            })
+            .transpose()?;
+        let headers_footers = measured_headers_footers
+            .as_ref()
+            .or(regions.headers_footers.as_ref());
+        let output = serialize_region_layout(input, layout, headers_footers, notes_converged)?;
+        self.regions.replace(Some(ResidentRegionState {
+            request_json: input_json.to_owned(),
+            headers_footers: headers_footers.cloned(),
+        }));
+        Ok(output)
+    }
+
+    fn measure_resident_notes(
+        &self,
+        contents: &mut [docx_layout::footnotes::NoteContent],
+        refs: &[docx_layout::footnotes::NoteRefLocation],
+        layout: &Layout,
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        render_env: &RenderEnv,
+    ) -> Result<(), String> {
+        let anchors = map_note_anchors_to_pages(&layout.pages, refs);
+        for content in contents {
+            let Some(page_number) = anchors
+                .iter()
+                .find_map(|(page, ids)| ids.contains(&content.map_id()).then_some(*page))
+            else {
+                continue;
+            };
+            let Some(page) = layout.pages.iter().find(|page| page.number == page_number) else {
+                continue;
+            };
+            let columns = regions.footnote_columns(page.region_section_index);
+            let content_width = page.size.w - page.margins.left - page.margins.right;
+            let width = ((content_width
+                - (columns.saturating_sub(1) as f64) * FOOTNOTE_COLUMN_GAP_PX)
+                / columns as f64)
+                .max(1.0);
+            let prefix = match content.note_kind {
+                docx_layout::footnotes::NoteKind::Footnote => "fn",
+                docx_layout::footnotes::NoteKind::Endnote => "en",
+            };
+            let mut blocks = self
+                .with_lowered_story(
+                    &format!("{prefix}:{}", content.id),
+                    render_env,
+                    <[LayoutBlock]>::to_vec,
+                )
+                .map_err(|error| error.to_string())?;
+            apply_note_presentation(
+                &mut blocks,
+                content.display_number.unwrap_or(1),
+                content.display_label.as_deref().unwrap_or("1"),
+            );
+            let measures =
+                docx_layout::measure_blocks::measure_blocks(&mut blocks, width, measurement)?;
+            content.height = measures
+                .iter()
+                .map(docx_layout::measure_blocks::extent_height)
+                .sum();
+            content.blocks = blocks;
+            content.measures = measures;
+        }
+        Ok(())
+    }
+
+    fn measure_header_footer_payload(
+        &self,
+        input: &mut LayoutInput,
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        render_env: &RenderEnv,
+    ) -> Result<Option<HeaderFooterPayload>, String> {
+        let mut variants = Vec::new();
+        for section_index in 0..regions.sections.len() {
+            let Some(refs) = effective_header_footer_refs(regions, section_index) else {
+                continue;
+            };
+            let section = &regions.sections[section_index];
+            let page_size = section
+                .page_size
+                .clone()
+                .or_else(|| input.options.page_size.clone())
+                .unwrap_or(docx_layout::types::Size {
+                    w: 816.0,
+                    h: 1056.0,
+                });
+            let margins = docx_layout::section_breaks::resolve_page_margins(
+                section.margins.as_ref().or(input.options.margins.as_ref()),
+            );
+            let content_width = (page_size.w - margins.left - margins.right).max(1.0);
+            let descriptors = [
+                (
+                    HeaderFooterKind::Header,
+                    HeaderFooterType::Default,
+                    refs.header_default.clone().or_else(|| {
+                        (!section.title_pg)
+                            .then_some(refs.header_first.clone())
+                            .flatten()
+                    }),
+                ),
+                (
+                    HeaderFooterKind::Header,
+                    HeaderFooterType::First,
+                    section.title_pg.then_some(refs.header_first).flatten(),
+                ),
+                (
+                    HeaderFooterKind::Header,
+                    HeaderFooterType::Even,
+                    refs.header_even,
+                ),
+                (
+                    HeaderFooterKind::Footer,
+                    HeaderFooterType::Default,
+                    refs.footer_default.clone().or_else(|| {
+                        (!section.title_pg)
+                            .then_some(refs.footer_first.clone())
+                            .flatten()
+                    }),
+                ),
+                (
+                    HeaderFooterKind::Footer,
+                    HeaderFooterType::First,
+                    section.title_pg.then_some(refs.footer_first).flatten(),
+                ),
+                (
+                    HeaderFooterKind::Footer,
+                    HeaderFooterType::Even,
+                    refs.footer_even,
+                ),
+            ];
+            for (kind, hf_type, r_id) in descriptors {
+                let Some(r_id) = r_id else {
+                    continue;
+                };
+                let blocks = self
+                    .with_lowered_story(&format!("hf:{r_id}"), render_env, <[LayoutBlock]>::to_vec)
+                    .map_err(|error| error.to_string())?;
+                let metrics = HeaderFooterMetrics {
+                    kind,
+                    page_size: &page_size,
+                    margins: &margins,
+                };
+                if let Some(variant) = measure_header_footer(
+                    r_id,
+                    kind,
+                    hf_type,
+                    section_index,
+                    blocks,
+                    content_width,
+                    metrics,
+                    measurement,
+                )? {
+                    variants.push(variant);
+                }
+            }
+        }
+        if variants.is_empty() && regions.watermark.is_none() {
+            return Ok(None);
+        }
+        extend_input_for_header_footer(input, regions, &variants);
+        Ok(Some(HeaderFooterPayload {
+            title_pg: false,
+            even_and_odd_headers: regions.even_and_odd_headers,
+            title_page_sections: regions
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| section.title_pg.then_some(index))
+                .collect(),
+            even_and_odd_sections: regions
+                .sections
+                .iter()
+                .enumerate()
+                .filter_map(|(index, section)| {
+                    section
+                        .even_and_odd_headers
+                        .unwrap_or(regions.even_and_odd_headers)
+                        .then_some(index)
+                })
+                .collect(),
+            variants,
+            watermark: regions.watermark.clone(),
+        }))
     }
 
     /// Typed resident pagination path shared by the compatibility JSON seam
@@ -632,21 +1197,22 @@ impl EngineSession {
         let layout_ready = pagination.input.is_some() && pagination.layout.is_some();
         drop(pagination);
         let display_ready = self.display.borrow().extras_json.is_some();
-        let measure_ready = self
-            .pagination
-            .borrow()
-            .input
-            .as_ref()
-            .and_then(|input| {
-                input.measured.iter().find(|measured| {
-                    paragraph_identity(&measured.block)
-                        .is_some_and(|(id, _)| block_key(id) == para_id)
+        let measure_ready = self.regions.borrow().is_some()
+            || self
+                .pagination
+                .borrow()
+                .input
+                .as_ref()
+                .and_then(|input| {
+                    input.measured.iter().find(|measured| {
+                        paragraph_identity(&measured.block)
+                            .is_some_and(|(id, _)| block_key(id) == para_id)
+                    })
                 })
-            })
-            .is_some_and(|measured| {
-                self.measurement_envelope_for_block(para_id, &measured.block)
-                    .is_some()
-            });
+                .is_some_and(|measured| {
+                    self.measurement_envelope_for_block(para_id, &measured.block)
+                        .is_some()
+                });
         render_ready && layout_ready && display_ready && measure_ready
     }
 
@@ -816,6 +1382,16 @@ impl EngineSession {
         story: &str,
         expected_frame_epoch: u64,
     ) -> Result<Vec<u8>, String> {
+        let region_request = self
+            .regions
+            .borrow()
+            .as_ref()
+            .map(|state| state.request_json.clone());
+        if let Some(request) = region_request {
+            self.layout_document_with_regions_json(&request)?;
+            let extras = self.resident_region_display_extras()?;
+            return self.build_display_list_frame(&extras, expected_frame_epoch);
+        }
         let resident = self.resident_layout_input(story)?;
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
         let extras = self
@@ -825,6 +1401,31 @@ impl EngineSession {
             .clone()
             .ok_or_else(|| "resident display extras are not built".to_owned())?;
         self.build_display_list_frame(&extras, expected_frame_epoch)
+    }
+
+    fn resident_region_display_extras(&self) -> Result<String, String> {
+        let extras = self
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .ok_or_else(|| "resident display extras are not built".to_owned())?;
+        let mut value: serde_json::Value = serde_json::from_str(&extras)
+            .map_err(|error| format!("parse display extras: {error}"))?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| "resident display extras must be an object".to_owned())?;
+        let headers_footers = self
+            .regions
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.headers_footers.clone());
+        if let Some(headers_footers) = headers_footers {
+            fields.insert("headersFooters".to_owned(), headers_footers);
+        } else {
+            fields.remove("headersFooters");
+        }
+        serde_json::to_string(&value).map_err(|error| format!("serialize display extras: {error}"))
     }
 
     /// Profiled twin of [`Self::apply_and_layout`]. The caller supplies a
@@ -839,6 +1440,12 @@ impl EngineSession {
     ) -> Result<(Vec<u8>, EngineApplyProfile), String> {
         let mut profile = EngineApplyProfile::default();
         let mut started = now();
+        let has_regions = self.regions.borrow().is_some();
+        if has_regions {
+            let bytes = self.apply_and_layout(story, expected_frame_epoch)?;
+            profile.paginate_ms = now() - started;
+            return Ok((bytes, profile));
+        }
         let resident = self.resident_layout_input_observed(story, &mut || {
             let finished = now();
             profile.lower_ms = finished - started;
@@ -1072,6 +1679,8 @@ impl EngineSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yrs::Any;
+    use yrs::types::Attrs;
 
     #[test]
     fn lowered_story_is_resident_and_generation_tagged() {
@@ -1172,6 +1781,438 @@ mod tests {
         assert_eq!(engine.stats().retained_measured_blocks, 0);
         assert_eq!(engine.stats().retained_pages, 1);
         assert_eq!(engine.stats().pagination_calls, 1);
+    }
+
+    #[test]
+    fn region_layout_operation_stamps_pages_and_returns_render_envelope() {
+        let engine = EngineSession::new(131);
+        let request = serde_json::json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageNumbering": {"start": 7, "format": "upperRoman"},
+                    "headerDistance": 24,
+                    "headerFooterRefs": {"headerDefault": "rId7"}
+                }],
+                "headersFooters": {"variants": []}
+            }
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(output["measured"], serde_json::json!([]));
+        assert_eq!(output["layout"]["pages"][0]["sectionId"], "main");
+        assert_eq!(output["layout"]["pages"][0]["sectionIndex"], 0);
+        assert_eq!(output["layout"]["pages"][0]["sectionPageIndex"], 0);
+        assert_eq!(output["layout"]["pages"][0]["sectionPageNumber"], 7);
+        assert_eq!(output["layout"]["pages"][0]["pageLabel"], "VII");
+        assert_eq!(
+            output["layout"]["pages"][0]["headerDistance"].as_f64(),
+            Some(24.0)
+        );
+        assert_eq!(
+            output["layout"]["pages"][0]["headerFooterRefs"]["headerDefault"],
+            "rId7"
+        );
+        assert_eq!(
+            output["headersFooters"],
+            serde_json::json!({"variants": []})
+        );
+        assert_eq!(engine.stats().retained_pages, 1);
+    }
+
+    #[test]
+    fn region_layout_operation_stabilizes_and_emits_note_areas() {
+        let engine = EngineSession::new(132);
+        let request = serde_json::json!({
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "p1",
+                    "runs": [{
+                        "kind": "text",
+                        "text": "x",
+                        "pmStart": 1,
+                        "pmEnd": 2,
+                        "footnoteRefId": 7
+                    }],
+                    "pmStart": 0,
+                    "pmEnd": 2
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "lines": [{
+                        "headRun": 0,
+                        "headChar": 0,
+                        "tailRun": 0,
+                        "tailChar": 1,
+                        "width": 10,
+                        "ascent": 8,
+                        "descent": 2,
+                        "lineHeight": 20
+                    }],
+                    "totalHeight": 20
+                }
+            }],
+            "options": {
+                "pageSize": {"w": 200, "h": 120},
+                "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}
+            },
+            "regions": {
+                "noteSettings": {
+                    "footnote": {"numFmt": "upperRoman", "numStart": 3}
+                },
+                "sections": [{
+                    "sectionId": "main",
+                    "noteSettings": {"footnoteColumns": 2}
+                }]
+            },
+            "notes": {
+                "contents": [{"id": 7, "height": 20}]
+            }
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let page = &output["layout"]["pages"][0];
+
+        assert_eq!(output["notesConverged"], true);
+        assert_eq!(page["footnoteIds"], serde_json::json!([7.0]));
+        assert_eq!(page["footnoteReservedHeight"], 32.0);
+        assert_eq!(page["footnoteColumns"], 2.0);
+        assert_eq!(page["noteAreas"][0]["kind"], "footnote");
+        assert_eq!(page["noteAreas"][0]["columns"], 2);
+        assert_eq!(page["noteAreas"][0]["notes"][0]["displayLabel"], "III");
+        assert_eq!(engine.stats().pagination_calls, 2);
+    }
+
+    #[test]
+    fn region_layout_operation_measures_header_story_and_extends_margin() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(133);
+        engine
+            .doc()
+            .create_story("hf:rId1", "Header", "Normal", "left")
+            .unwrap();
+        let request = serde_json::json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {
+                    "top": 20,
+                    "right": 20,
+                    "bottom": 20,
+                    "left": 20,
+                    "header": 5,
+                    "footer": 5
+                }
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {
+                        "top": 20,
+                        "right": 20,
+                        "bottom": 20,
+                        "left": 20,
+                        "header": 5,
+                        "footer": 5
+                    },
+                    "headerFooterRefs": {"headerFirst": "rId1"}
+                }]
+            },
+            "measurement": {
+                "fontChains": {"liberation sans|0|0": [font_id]},
+                "defaults": {"fontSize": 24, "fontFamily": "Liberation Sans"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        assert_eq!(value["headersFooters"]["variants"][0]["rId"], "rId1");
+        assert_eq!(value["headersFooters"]["variants"][0]["type"], "default");
+        assert_eq!(
+            value["headersFooters"]["variants"][0]["measured"][0]["block"]["kind"],
+            "paragraph"
+        );
+        assert!(value["options"]["margins"]["top"].as_f64().unwrap() > 20.0);
+        assert_eq!(
+            value["layout"]["pages"][0]["headerFooterRefs"]["headerFirst"],
+            "rId1"
+        );
+
+        let display: serde_json::Value =
+            serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap();
+        assert_eq!(display["pages"][0]["header"]["rId"], "rId1");
+        assert!(
+            !display["pages"][0]["header"]["primitives"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn region_layout_operation_lowers_and_measures_resident_body() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(134);
+        engine
+            .doc()
+            .create_story("body", "Resident body", "Normal", "left")
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "options": {"pageGap": 20},
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20}
+                }]
+            },
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(output["measured"][0]["block"]["kind"], "paragraph");
+        assert_eq!(
+            output["measured"][0]["block"]["runs"][0]["text"],
+            "Resident body"
+        );
+        assert!(
+            output["measured"][0]["measure"]["totalHeight"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+        assert_eq!(output["layout"]["pages"][0]["sectionId"], "main");
+        assert_eq!(engine.stats().retained_measured_blocks, 1);
+    }
+
+    #[test]
+    fn resident_region_layout_reflows_after_input_without_host_measurement() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(137);
+        engine
+            .doc()
+            .create_story("body", "Before", "Normal", "left")
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        engine
+            .build_display_list_frame(
+                &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                0,
+            )
+            .unwrap();
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        assert!(engine.can_apply_input("body", &paragraph.para_id));
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 6),
+                " after",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+
+        let frame = engine.apply_and_layout("body", 1).unwrap();
+        let pagination = engine.pagination.borrow();
+        let input = pagination.input.as_ref().unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &input.measured[0].block else {
+            panic!("paragraph expected");
+        };
+        let Run::Text(text) = &paragraph.runs[0] else {
+            panic!("text expected");
+        };
+
+        assert_eq!(text.text, "Before after");
+        assert_eq!(
+            pagination.layout.as_ref().unwrap().pages[0]
+                .section_id
+                .as_deref(),
+            Some("main")
+        );
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn region_font_preflight_returns_requirements_without_layout_blocks() {
+        let engine = EngineSession::new(136);
+        engine
+            .doc()
+            .create_story("body", "Resident body", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .create_story("hf:rId1", "Header", "Normal", "left")
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "headerFooterRefs": {"headerDefault": "rId1"}
+            }]},
+            "renderEnv": {}
+        });
+
+        let requirements: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(requirements[0]["key"], "calibri|0|0");
+        assert!(requirements[0].get("blocks").is_none());
+        assert_eq!(engine.stats().layout_epoch, 0);
+        assert_eq!(engine.stats().retained_measured_blocks, 0);
+    }
+
+    #[test]
+    fn region_layout_operation_lowers_measures_and_places_resident_note_story() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(135);
+        engine
+            .doc()
+            .create_story("body", "", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![
+                    crate::RawOp::Delete { index: 0, len: 1 },
+                    crate::RawOp::Insert {
+                        index: 0,
+                        text: "See ".to_owned(),
+                        attrs: Attrs::new(),
+                    },
+                    crate::RawOp::InsertEmbed {
+                        index: 4,
+                        kind: "noteRef".to_owned(),
+                        payload: vec![("footnoteRefId".to_owned(), Any::Number(5.0))],
+                        attrs: Attrs::new(),
+                    },
+                    crate::RawOp::InsertEmbed {
+                        index: 5,
+                        kind: "pilcrow".to_owned(),
+                        payload: vec![("paraId".to_owned(), Any::from("body-p"))],
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &crate::EditCtx::local("", "2026-07-18T00:00:00Z"),
+            )
+            .unwrap();
+        engine
+            .doc()
+            .create_story("fn:5", "Footnote text", "Normal", "left")
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "pageSize": {"w": 300, "h": 200},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                    "noteSettings": {"footnoteColumns": 2}
+                }]
+            },
+            "notes": {"contents": [{"id": 5, "height": 0}]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let note = &output["layout"]["pages"][0]["noteAreas"][0]["notes"][0];
+
+        assert_eq!(output["notesConverged"], true);
+        assert_eq!(
+            output["layout"]["pages"][0]["footnoteIds"],
+            serde_json::json!([5.0])
+        );
+        assert_eq!(note["displayLabel"], "1");
+        assert_eq!(note["blocks"][0]["runs"][0]["text"], "1  ");
+        assert!(note["height"].as_f64().unwrap() > 0.0);
+        assert!(
+            output["layout"]["pages"][0]["footnoteReservedHeight"]
+                .as_f64()
+                .unwrap()
+                > docx_layout::footnotes::FOOTNOTE_SEPARATOR_HEIGHT
+        );
     }
 
     fn paragraph_pagination_input(first_text: &str, shifted_suffix: bool) -> String {

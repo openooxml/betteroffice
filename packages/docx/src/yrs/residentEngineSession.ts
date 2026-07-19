@@ -1,4 +1,5 @@
 import type { YrsEngineApplyProfile, YrsLoc, YrsSession } from './index';
+import type { CollaborationUpdateOrigin } from '../collaboration/types';
 import { createEditSession, preloadEditWasm } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
@@ -12,6 +13,8 @@ export type ResidentEngineSession = Pick<
   | 'clearFonts'
   | 'destroy'
   | 'layoutDocumentJson'
+  | 'layoutFontRequirementsJson'
+  | 'layoutDocumentWithRegionsJson'
   | 'loadState'
   | 'measureParagraphJson'
   | 'onUpdate'
@@ -24,7 +27,9 @@ export type ResidentEngineSession = Pick<
 export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
   await preloadEditWasm();
   const session = createEditSession(randomClientId());
-  const listeners = new Set<(update: Uint8Array) => void>();
+  const listeners = new Set<
+    (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  >();
   let observing = false;
   let destroyed = false;
   let undoStory: string | null = null;
@@ -38,8 +43,11 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
 
   const ensureObserver = (): void => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array) => {
-      for (const listener of [...listeners]) listener(update);
+    session.set_update_observer((update: Uint8Array, origin: number) => {
+      if (origin !== 0 && origin !== 1) return;
+      for (const listener of [...listeners]) {
+        listener(update, origin === 0 ? 'local' : 'remote');
+      }
     });
     observing = true;
   };
@@ -49,6 +57,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     clearFonts: () => session.clear_measure_fonts(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
+    layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
+    layoutDocumentWithRegionsJson: (input) => session.layout_document_with_regions_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     applyInput: (text, expectedFrameEpoch) => {

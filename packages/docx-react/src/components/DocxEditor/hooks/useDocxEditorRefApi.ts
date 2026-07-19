@@ -8,14 +8,6 @@ import type {
   YrsSession,
   YrsStoryRange,
 } from '@betteroffice/docx/yrs';
-import { DocumentAgent } from '@betteroffice/docx/agent';
-import {
-  ContentControlNotFoundError,
-  findContentControls,
-  removeContentControl as removeContentControlFromDocument,
-  setContentControlContent as setContentControlContentInDocument,
-  setContentControlValue as setContentControlValueInDocument,
-} from '@betteroffice/docx/agent';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -138,7 +130,6 @@ function formattingDelta(marks: Parameters<DocxEditorRef['applyFormatting']>[0][
 /** Owns the public imperative surface without exposing an editor-view handle. */
 export function useDocxEditorRefApi({
   ref,
-  agentRef,
   document,
   historyStateRef,
   pagedEditorRef,
@@ -158,11 +149,10 @@ export function useDocxEditorRefApi({
   commentIdAllocator,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
-  agentRef: React.RefObject<DocumentAgent | null>;
   document: Document | null;
   historyStateRef: React.RefObject<Document | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
-  handleSave: (options?: { selective?: boolean }) => Promise<ArrayBuffer | null>;
+  handleSave: () => Promise<ArrayBuffer | null>;
   handleDirectPrint: () => void;
   zoom: number;
   setZoom: (zoom: number) => void;
@@ -182,7 +172,6 @@ export function useDocxEditorRefApi({
   useImperativeHandle(
     ref,
     () => ({
-      getAgent: () => agentRef.current,
       getDocument: () => pagedEditorRef.current?.getDocument() ?? document,
       getEditorRef: () => pagedEditorRef.current,
       save: handleSave,
@@ -392,67 +381,6 @@ export function useDocxEditorRefApi({
       },
 
       getComments: () => comments,
-
-      getContentControls: (filter) => {
-        const currentDocument = pagedEditorRef.current?.getDocument() ?? document;
-        return currentDocument ? findContentControls(currentDocument, filter ?? {}) : [];
-      },
-
-      scrollToContentControl: (filter) => {
-        const currentDocument = pagedEditorRef.current?.getDocument() ?? document;
-        const control = currentDocument ? findContentControls(currentDocument, filter)[0] : null;
-        if (!control) return false;
-        const paragraph = findContentControls(currentDocument!, filter)[0]?.path;
-        if (!paragraph) return false;
-        // Content-control paths are model indices, so use its first projected
-        // paragraph as the stable Yrs scroll target.
-        const session = pagedEditorRef.current?.getYrsSession();
-        if (!session) return false;
-        const match = bodyStoryIds(session)
-          .flatMap((story) => session.paragraphs(story))
-          .find((candidate) => candidate.text.includes(control.text.split('\n')[0] ?? ''));
-        return match ? (pagedEditorRef.current?.scrollToParaId(match.paraId) ?? false) : false;
-      },
-
-      setContentControlContent: (filter, text, options) => {
-        const currentDocument = pagedEditorRef.current?.getDocument() ?? document;
-        if (!currentDocument) return false;
-        try {
-          loadParsedDocument(
-            setContentControlContentInDocument(currentDocument, filter, text, options)
-          );
-          return true;
-        } catch (error) {
-          if (error instanceof ContentControlNotFoundError) return false;
-          throw error;
-        }
-      },
-
-      removeContentControl: (filter, options) => {
-        const currentDocument = pagedEditorRef.current?.getDocument() ?? document;
-        if (!currentDocument) return false;
-        try {
-          loadParsedDocument(removeContentControlFromDocument(currentDocument, filter, options));
-          return true;
-        } catch (error) {
-          if (error instanceof ContentControlNotFoundError) return false;
-          throw error;
-        }
-      },
-
-      setContentControlValue: (filter, value, options) => {
-        const currentDocument = pagedEditorRef.current?.getDocument() ?? document;
-        if (!currentDocument) return false;
-        try {
-          loadParsedDocument(
-            setContentControlValueInDocument(currentDocument, filter, value, options)
-          );
-          return true;
-        } catch (error) {
-          if (error instanceof ContentControlNotFoundError) return false;
-          throw error;
-        }
-      },
 
       onContentChange: (listener) => {
         contentChangeSubscribersRef.current.add(listener);

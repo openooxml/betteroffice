@@ -5,8 +5,9 @@
  * session seam land here as the tier proceeds.
  */
 
-export { computeLayout, getLayoutKernelInputs } from './computeLayout';
-export type { ComputeLayoutInputs, LayoutComputation, MeasureBlocksFn } from './computeLayout';
-export { createLayoutScheduler } from './layoutScheduler';
-export type { LayoutScheduler } from './layoutScheduler';
-export { stripScrollFlag } from './scrollFlag';
+export {
+  buildResidentRegionLayoutRequest,
+  computeLayout,
+  getLayoutKernelInputs,
+} from './computeLayout';
+export type { ComputeLayoutInputs, LayoutComputation } from './computeLayout';

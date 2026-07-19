@@ -12,8 +12,6 @@ import type { DocxInput } from '../utils/docxInput';
 import { toArrayBuffer } from '../utils/docxInput';
 import { loadEmbeddedFonts } from '../utils/embeddedFonts';
 import { loadFontsWithMapping } from '../utils/fontLoader';
-import { canonicalDeterminismFor } from './canonical/determinism';
-import { parseBackendFor } from './parseBackend';
 import { preloadOpcWasm } from './wasm';
 import { preloadParseWasm } from './parseWasm';
 import {
@@ -29,7 +27,6 @@ export interface ParseOptions {
   preloadFonts?: boolean;
   parseHeadersFooters?: boolean;
   parseNotes?: boolean;
-  detectVariables?: boolean;
 }
 
 export async function parseDocx(input: DocxInput, options: ParseOptions = {}): Promise<Document> {
@@ -38,8 +35,6 @@ export async function parseDocx(input: DocxInput, options: ParseOptions = {}): P
   await preloadOpcWasm();
   await preloadParseWasm();
   const buffer = input instanceof ArrayBuffer ? input : await toArrayBuffer(input);
-  // Keep the internal backend seam explicit even though Rust is now its only implementation.
-  parseBackendFor(options);
   const onProgress = options.onProgress ?? (() => {});
   try {
     onProgress('Extracting DOCX...', 0);
@@ -62,12 +57,10 @@ export async function parseDocx(input: DocxInput, options: ParseOptions = {}): P
 }
 
 function rustOptions(options: ParseOptions): RustS9ParseOptions {
-  const determinismSeed = canonicalDeterminismFor(options)?.seed;
   return {
     parseHeadersFooters: options.parseHeadersFooters ?? true,
     parseNotes: options.parseNotes ?? true,
-    detectVariables: options.detectVariables ?? true,
-    ...(determinismSeed ? { determinismSeed } : {}),
+    detectVariables: false,
     includeCanonical: false,
   };
 }
@@ -99,12 +92,7 @@ function emitProgress(options: ParseOptions, onProgress: ProgressCallback): void
     onProgress('Skipping footnotes/endnotes', 75);
   }
   onProgress('Parsing comments...', 75);
-  if (options.detectVariables ?? true) {
-    onProgress('Detecting template variables...', 75);
-    onProgress('Detected variables', 80);
-  } else {
-    onProgress('Skipping variable detection', 80);
-  }
+  onProgress('Parsed comments', 80);
 }
 
 async function loadHostFonts(
@@ -192,7 +180,6 @@ export async function quickParseDocx(buffer: ArrayBuffer): Promise<Document> {
     preloadFonts: false,
     parseHeadersFooters: false,
     parseNotes: false,
-    detectVariables: true,
   });
 }
 
@@ -205,12 +192,7 @@ export async function fullParseDocx(
     preloadFonts: true,
     parseHeadersFooters: true,
     parseNotes: true,
-    detectVariables: true,
   });
-}
-
-export async function getDocxVariables(buffer: ArrayBuffer): Promise<string[]> {
-  return (await quickParseDocx(buffer)).templateVariables ?? [];
 }
 
 export async function getDocxSummary(buffer: ArrayBuffer): Promise<{
@@ -221,7 +203,6 @@ export async function getDocxSummary(buffer: ArrayBuffer): Promise<{
   headerCount: number;
   footerCount: number;
   mediaCount: number;
-  variableCount: number;
 }> {
   const document = await parseDocx(buffer, { preloadFonts: false });
   const pkg = document.package;
@@ -234,6 +215,5 @@ export async function getDocxSummary(buffer: ArrayBuffer): Promise<{
     headerCount: pkg.headers?.size ?? 0,
     footerCount: pkg.footers?.size ?? 0,
     mediaCount: mediaPaths.size,
-    variableCount: document.templateVariables?.length ?? 0,
   };
 }

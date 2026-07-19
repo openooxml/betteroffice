@@ -108,8 +108,8 @@ export interface Footnote {
    * Content. Per ECMA-376 §17.11.10 footnotes can hold the same blocks as
    * the body, so the note parser reuses the body's `parseBlockContent`: the
    * full block model — paragraphs, tables, and block-level `w:sdt` content
-   * controls (as `BlockSdt`) — flows through the body pipeline
-   * (toProseDoc → toLayoutBlocks) and stays editable on round-trip.
+   * controls (as `BlockSdt`) — flows through the resident Rust layout path
+   * and stays editable on round-trip.
    */
   content: BlockContent[];
   /**

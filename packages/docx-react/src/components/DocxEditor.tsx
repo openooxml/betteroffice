@@ -23,7 +23,11 @@ import {
 
 import { cn } from '../lib/utils';
 import { type SelectionFormatting } from './Toolbar';
-import type { SelectionState, TableContextInfo } from './DocxEditor/types';
+import type {
+  DocxEditorCollaborationOptions,
+  SelectionState,
+  TableContextInfo,
+} from './DocxEditor/types';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
 import { useFileIO } from './DocxEditor/hooks/useFileIO';
@@ -78,7 +82,6 @@ import { type PrintOptions } from './ui/PrintPreview';
 // Dialog hooks and utilities (static imports — lightweight, no UI)
 import { useFindReplace } from './dialogs/FindReplaceDialog';
 import { useHyperlinkDialog } from './dialogs/HyperlinkDialog';
-import { DocumentAgent, findContentControls } from '@betteroffice/docx/agent';
 import { DefaultLoadingIndicator, DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
 import { type DocxInput } from '@betteroffice/docx/utils';
 import type { FontDefinition, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
@@ -87,11 +90,6 @@ import { useTableSelection } from '../hooks/useTableSelection';
 import { useDocumentHistory } from '../hooks/useHistory';
 
 import { createStyleResolver } from '@betteroffice/docx/styles';
-import type {
-  ContentControlFilter,
-  ContentControlInfo,
-  ContentControlValue,
-} from '@betteroffice/docx/agent';
 import { useIsDark } from './DocxEditor/hooks/useIsDark';
 
 // Paginated editor
@@ -104,6 +102,8 @@ import type { RenderedDomContext } from '../plugin-api/types';
 // TYPES
 // ============================================================================
 
+export type { DocxEditorCollaborationOptions } from './DocxEditor/types';
+
 /**
  * DocxEditor props
  */
@@ -114,6 +114,8 @@ export interface DocxEditorProps {
   document?: Document | null;
   /** Callback when document is saved */
   onSave?: (buffer: ArrayBuffer) => void;
+  /** Configure the Yrs collaboration replica used by the editor. */
+  collaboration?: DocxEditorCollaborationOptions;
   /**
    * Callback when a DOCX file is selected through `File > Open` or Cmd/Ctrl+O.
    * Pass it to route the picked file through your own import pipeline. Omit it
@@ -303,14 +305,12 @@ export interface DocxEditorProps {
  * DocxEditor ref interface
  */
 export interface DocxEditorRef {
-  /** Get the DocumentAgent for programmatic access */
-  getAgent: () => DocumentAgent | null;
   /** Get the current document */
   getDocument: () => Document | null;
   /** Get the editor ref */
   getEditorRef: () => PagedEditorRef | null;
-  /** Save the document to buffer. Pass { selective: false } to force full repack. */
-  save: (options?: { selective?: boolean }) => Promise<ArrayBuffer | null>;
+  /** Save the document to a buffer. */
+  save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
   setZoom: (zoom: number) => void;
   /** Get current zoom level */
@@ -464,45 +464,6 @@ export interface DocxEditorRef {
   } | null;
   /** Get all comments. */
   getComments: () => Comment[];
-  /**
-   * List block-level content controls (SDTs) in the live document, optionally
-   * filtered by `tag`/`alias`/`id`/`type`. Each result includes the control's
-   * text and PM position. Anchors for templates and document automation.
-   */
-  getContentControls: (filter?: ContentControlFilter) => ContentControlInfo[];
-  /** Scroll the first content control matching `filter` into view. Returns false if none. */
-  scrollToContentControl: (filter: ContentControlFilter) => boolean;
-  /**
-   * Replace the content of the first control matching `filter` with `text`
-   * (newlines become paragraphs). Returns false if no match. Throws if the
-   * control is content-locked unless `{ force: true }`.
-   */
-  setContentControlContent: (
-    filter: ContentControlFilter,
-    text: string,
-    options?: { force?: boolean }
-  ) => boolean;
-  /**
-   * Remove the first control matching `filter`. With `{ keepContent: true }`
-   * the inner blocks are unwrapped in place. Returns false if no match. Throws
-   * if the control is deletion-locked unless `{ force: true }`.
-   */
-  removeContentControl: (
-    filter: ContentControlFilter,
-    options?: { force?: boolean; keepContent?: boolean }
-  ) => boolean;
-  /**
-   * Set a typed value on the first control matching `filter`: a dropdown
-   * selection (`{ kind: 'dropdown', value }`), checkbox (`{ kind: 'checkbox',
-   * checked }`), or date (`{ kind: 'date', date }`). Updates the visible
-   * content and structured state. Returns false if no match; throws if
-   * content-locked (unless `force`) or the value doesn't fit the control type.
-   */
-  setContentControlValue: (
-    filter: ContentControlFilter,
-    value: ContentControlValue,
-    options?: { force?: boolean }
-  ) => boolean;
   /** Subscribe to document changes. Fires after every committed edit. Returns unsubscribe. */
   onContentChange: (listener: (document: Document) => void) => () => void;
   /** Subscribe to selection changes (cursor moves / selection changes). Returns unsubscribe. */
@@ -587,6 +548,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     documentBuffer,
     document: initialDocument,
     onSave,
+    collaboration,
     onOpen,
     author = 'User',
     onChange,
@@ -780,7 +742,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, []);
 
   // Refs (pagedEditorRef is declared earlier — useCommentManagement needs it)
-  const agentRef = useRef<DocumentAgent | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const editorContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -866,7 +827,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     initialDocument,
     externalContent: false,
     history,
-    agentRef,
     pagedEditorRef,
     setLoadingState: useCallback((s: { isLoading: boolean; parseError: string | null }) => {
       setState((prev) => ({ ...prev, isLoading: s.isLoading, parseError: s.parseError }));
@@ -891,7 +851,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleInsertImageClick,
     handleImageFileChange,
   } = useFileIO({
-    agentRef,
     pagedEditorRef,
     displayList: canvasRenderer.displayList,
     resolveImage: canvasRenderer.resolveImage,
@@ -1251,7 +1210,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Expose ref methods
   useDocxEditorRefApi({
     ref,
-    agentRef,
     document: history.state,
     historyStateRef,
     pagedEditorRef,
@@ -1806,6 +1764,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           >
             <DocxEditorPagedArea
               yrsSeedDocument={yrsSeedDocument}
+              collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
               editorContentRef={editorContentRef}
@@ -1877,10 +1836,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             {!readOnly && (
               <ContentControlWidgets
                 containerRef={containerRef}
-                getControls={() => {
-                  const currentDocument = pagedEditorRef.current?.getDocument() ?? history.state;
-                  return currentDocument ? findContentControls(currentDocument) : [];
-                }}
                 applyYrsValue={(pmPos, value, embedId) =>
                   pagedEditorRef.current?.applyYrsCommand({
                     type: 'contentControlValue',

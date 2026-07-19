@@ -10,46 +10,7 @@
       "types": "./dist/index.d.mts",
       "import": "./dist/index.mjs"
     },
-    "./ui": {
-      "types": "./dist/ui.d.mts",
-      "import": "./dist/ui.mjs"
-    },
-    "./dialogs": {
-      "types": "./dist/dialogs.d.mts",
-      "import": "./dist/dialogs.mjs"
-    },
-    "./hooks": {
-      "types": "./dist/hooks.d.mts",
-      "import": "./dist/hooks.mjs"
-    },
-    "./plugin-api": {
-      "types": "./dist/plugin-api.d.mts",
-      "import": "./dist/plugin-api.mjs"
-    },
-    "./styles": {
-      "types": "./dist/styles.d.mts",
-      "import": "./dist/styles.mjs"
-    },
     "./styles.css": "./dist/styles.css"
-  },
-  "typesVersions": {
-    "*": {
-      "ui": [
-        "./dist/ui.d.mts"
-      ],
-      "dialogs": [
-        "./dist/dialogs.d.mts"
-      ],
-      "hooks": [
-        "./dist/hooks.d.mts"
-      ],
-      "plugin-api": [
-        "./dist/plugin-api.d.mts"
-      ],
-      "styles": [
-        "./dist/styles.d.mts"
-      ]
-    }
   },
   "sideEffects": [
     "*.css"

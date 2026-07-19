@@ -15,6 +15,10 @@
  */
 
 import type { EditSession } from './wasm/index';
+import type {
+  CollaborationReplica,
+  CollaborationUpdateOrigin,
+} from '../collaboration/types';
 
 export * from './inputPositionMap';
 export {
@@ -397,6 +401,7 @@ export interface YrsResidentWorkerSnapshot {
   renderInputs: Array<{ story: string; env: YrsRenderEnv }>;
   measureInputs: string[];
   layoutInput: string;
+  layoutWithRegions: boolean;
   layoutRevision: number;
 }
 
@@ -554,7 +559,7 @@ export type YrsCellBorders = Partial<
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
  */
-export interface YrsSession {
+export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
 
@@ -568,6 +573,10 @@ export interface YrsSession {
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
   layoutDocumentJson(input: string): string;
+  /** Return the compact font requirements for resident region layout. */
+  layoutFontRequirementsJson(input: string): string;
+  /** Paginate and compose section/page regions in the resident engine. */
+  layoutDocumentWithRegionsJson(input: string): string;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -612,6 +621,10 @@ export interface YrsSession {
   loadStories(stories: readonly YrsStorySeed[]): Record<string, string[]>;
   /** Full document state as one yrs v1 update (Yjs wire format). */
   encodeState(): Uint8Array;
+  /** Current Yrs state vector in the Yjs v1 wire format. */
+  encodeStateVector(): Uint8Array;
+  /** Full state, or only the state missing from a peer vector. */
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): void;
   /** Apply a same-user worker update under the local undo origin. @internal */
@@ -620,7 +633,9 @@ export interface YrsSession {
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
    */
-  onUpdate(listener: (update: Uint8Array) => void): () => void;
+  onUpdate(
+    listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  ): () => void;
 
   // -- local input state --
 
@@ -784,10 +799,9 @@ export interface YrsSession {
    */
   storyChecksum(story: string): bigint;
   /**
-   * Lowers a story straight to the renderer's `LayoutBlock[]` — the
-   * yrs-authoritative render path (the eventual replacement for
-   * `toLayoutBlocks(pmDoc)`). Throws with an unsupported-embed message on any
-   * non-native content (opaque blobs) until that class is promoted to native.
+   * Lowers a story through the resident Rust bridge. Throws with an
+   * unsupported-embed message on any non-native content (opaque blobs) until
+   * that class is promoted to native.
    * The return is the layout pipeline's `LayoutBlock[]` (kept as `unknown[]` to
    * keep this facade decoupled from the layout types).
    */
@@ -812,45 +826,6 @@ export interface CreateYrsSessionOptions {
    * 32-bit id, yjs-style.
    */
   clientId?: number;
-}
-
-interface PerfTraceRecorder {
-  record(
-    stage: string,
-    durationMs: number,
-    metadata?: {
-      bytes?: number;
-      inputBytes?: number;
-      outputBytes?: number;
-      calls?: number;
-      detail?: string;
-    }
-  ): void;
-}
-
-function perfTraceRecorder(): PerfTraceRecorder | undefined {
-  return (
-    globalThis as typeof globalThis & {
-      __perfTrace?: PerfTraceRecorder;
-    }
-  ).__perfTrace;
-}
-
-function perfTraceNow(): number {
-  return perfTraceRecorder() ? performance.now() : 0;
-}
-
-function jsonByteLength(json: string): number {
-  return perfTraceRecorder() ? new TextEncoder().encode(json).byteLength : 0;
-}
-
-function recordPerfTrace(
-  stage: string,
-  started: number,
-  metadata: Parameters<PerfTraceRecorder['record']>[2]
-): void {
-  if (started === 0) return;
-  perfTraceRecorder()?.record(stage, performance.now() - started, metadata);
 }
 
 function randomClientId(): number {
@@ -889,9 +864,19 @@ function wireRanges(ranges: readonly YrsStoryRange[]): string {
 }
 
 function wrapSession(session: EditSession, clientId: number): YrsSession {
-  const listeners = new Set<(update: Uint8Array) => void>();
+  const listeners = new Map<
+    number,
+    (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
+  >();
+  const pendingUpdates: Array<{
+    update: Uint8Array;
+    origin: CollaborationUpdateOrigin;
+  }> = [];
   let observing = false;
   let destroyed = false;
+  let nextListenerId = 0;
+  let wasmCallDepth = 0;
+  let flushingUpdates = false;
   let undoStory: string | null = null;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
@@ -901,6 +886,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
   let residentLayoutInput: string | null = null;
+  let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
   let ownsResidentFontStore = false;
 
@@ -909,11 +895,36 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     cachedSelectionContext = null;
   };
 
+  const flushUpdates = (): void => {
+    if (destroyed || flushingUpdates || wasmCallDepth !== 0) return;
+    flushingUpdates = true;
+    try {
+      while (!destroyed && pendingUpdates.length > 0) {
+        const event = pendingUpdates.shift();
+        if (!event) break;
+        for (const [id, listener] of [...listeners]) {
+          if (destroyed) return;
+          if (listeners.get(id) !== listener) continue;
+          try {
+            listener(event.update.slice(), event.origin);
+          } catch {}
+        }
+      }
+    } finally {
+      flushingUpdates = false;
+      if (destroyed) pendingUpdates.length = 0;
+    }
+  };
+
   const mutate = <T>(operation: () => T): T => {
-    // Invalidate before entering wasm so synchronous update listeners cannot
-    // observe a cache from the pre-transaction document.
     invalidateReadCaches();
-    return operation();
+    wasmCallDepth += 1;
+    try {
+      return operation();
+    } finally {
+      wasmCallDepth -= 1;
+      if (wasmCallDepth === 0) flushUpdates();
+    }
   };
 
   const cloneSelection = (value: YrsSelection | null): YrsSelection | null =>
@@ -965,10 +976,22 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   const ensureObserver = () => {
     if (observing) return;
-    session.set_update_observer((update: Uint8Array) => {
-      for (const listener of [...listeners]) listener(update);
+    session.set_update_observer((update: Uint8Array, origin: number) => {
+      if (origin !== 0 && origin !== 1) return;
+      pendingUpdates.push({
+        update: update.slice(),
+        origin: origin === 0 ? 'local' : 'remote',
+      });
+      flushUpdates();
     });
     observing = true;
+  };
+
+  const clearUnusedObserver = (): void => {
+    if (!observing || listeners.size > 0 || destroyed) return;
+    pendingUpdates.length = 0;
+    session.clear_update_observer();
+    observing = false;
   };
 
   return {
@@ -1001,6 +1024,15 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     layoutDocumentJson: (input) => {
       const output = session.layout_document_json(input);
       residentLayoutInput = input;
+      residentLayoutWithRegions = false;
+      residentLayoutRevision += 1;
+      return output;
+    },
+    layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
+    layoutDocumentWithRegionsJson: (input) => {
+      const output = session.layout_document_with_regions_json(input);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
       return output;
     },
@@ -1032,7 +1064,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return { frame, profile };
     },
     residentWorkerSnapshot: () => {
-      if (!residentLayoutInput || residentRenderInputs.size === 0) return null;
+      if (!residentLayoutInput) return null;
+      if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
       const selectionJson = session.selection();
       return {
         clientId,
@@ -1045,6 +1078,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         })),
         measureInputs: [...residentMeasureInputs.values()],
         layoutInput: residentLayoutInput,
+        layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
       };
     },
@@ -1061,16 +1095,28 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>
       ),
     encodeState: () => session.encode_state(),
+    encodeStateVector: () => session.encode_state_vector(),
+    encodeStateAsUpdate: (remoteStateVector) =>
+      remoteStateVector === undefined
+        ? session.encode_state()
+        : session.encode_diff(remoteStateVector.slice()),
     applyUpdate: (update) => mutate(() => session.apply_update(update)),
     applyLocalUpdate: (update, story) => {
       ensureUndo(story);
       mutate(() => session.apply_local_update(update));
     },
     onUpdate: (listener) => {
-      listeners.add(listener);
+      if (destroyed) throw new Error('yrs session is destroyed');
+      if (typeof listener !== 'function') throw new TypeError('update listener must be a function');
+      const id = nextListenerId++;
+      listeners.set(id, listener);
       ensureObserver();
+      let subscribed = true;
       return () => {
-        listeners.delete(listener);
+        if (!subscribed) return;
+        subscribed = false;
+        listeners.delete(id);
+        clearUnusedObserver();
       };
     },
 
@@ -1084,14 +1130,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     selection: () => {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      const started = perfTraceNow();
-      const json = session.selection();
-      cachedSelection = JSON.parse(json) as YrsSelection | null;
-      recordPerfTrace('selectionReads', started, {
-        bytes: jsonByteLength(json),
-        calls: 1,
-        detail: 'stickySelectionMiss',
-      });
+      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
     },
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
@@ -1486,7 +1525,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (cachedSelectionContext?.key === key) {
         return JSON.parse(cachedSelectionContext.json) as YrsSelectionContext;
       }
-      const started = perfTraceNow();
       const json = session.selection_context(
         range.story,
         range.start.paraId,
@@ -1496,7 +1534,6 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
       const context = JSON.parse(json) as YrsSelectionContext;
       cachedSelectionContext = { key, json };
-      recordPerfTrace('selectionContext', started, { bytes: jsonByteLength(json), calls: 1 });
       return context;
     },
     listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
@@ -1506,15 +1543,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {
-      const started = perfTraceNow();
       const json = session.yrs_blocks_for_story(story, JSON.stringify(env));
       const blocks = JSON.parse(json) as unknown[];
       residentRenderInputs.set(story, structuredClone(env));
-      recordPerfTrace('storyBlocks', started, {
-        bytes: jsonByteLength(json),
-        calls: 1,
-        detail: story,
-      });
       return blocks;
     },
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
@@ -1527,6 +1558,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (destroyed) return;
       destroyed = true;
       listeners.clear();
+      pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();
     },

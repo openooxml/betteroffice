@@ -20,7 +20,8 @@
 //! live in this file (the ops track owns those).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::rc::Rc;
 
 use js_sys::{Function, Uint8Array};
 use serde::Serialize;
@@ -813,11 +814,17 @@ fn seed_paragraph(value: &Value) -> (String, String, String) {
 pub struct EditSession {
     engine: EngineSession,
     update_observer: Option<Subscription>,
+    update_event_observer: Option<UpdateEventObserver>,
     undo: RefCell<Option<DocUndoManager>>,
     undo_story: RefCell<Option<String>>,
     selection: RefCell<Option<LocalSelection>>,
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
+}
+
+struct UpdateEventObserver {
+    pending: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    _subscription: Subscription,
 }
 
 impl EditSession {
@@ -938,6 +945,7 @@ impl EditSession {
         Ok(Self {
             engine: EngineSession::new(client_id as u64),
             update_observer: None,
+            update_event_observer: None,
             undo: RefCell::new(None),
             undo_story: RefCell::new(None),
             selection: RefCell::new(None),
@@ -972,6 +980,19 @@ impl EditSession {
     pub fn layout_document_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_document_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    pub fn layout_font_requirements_json(&self, input: &str) -> Result<String, JsValue> {
+        self.engine
+            .layout_font_requirements_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Paginate and compose section/page regions inside the resident engine.
+    pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_json(input)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1367,6 +1388,17 @@ impl EditSession {
         self.engine.doc().encode_state_as_update_v1()
     }
 
+    pub fn encode_state_vector(&self) -> Vec<u8> {
+        self.engine.doc().encode_state_vector_v1()
+    }
+
+    pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>, JsValue> {
+        self.engine
+            .doc()
+            .encode_diff_v1(remote_state_vector)
+            .map_err(js_err)
+    }
+
     /// Applies a remote/incremental yrs v1 update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
@@ -1392,11 +1424,12 @@ impl EditSession {
             .engine
             .doc()
             .yrs_doc()
-            .observe_update_v1(move |_txn, event| {
+            .observe_update_v1(move |txn, event| {
                 // Uint8Array::from copies out of wasm memory — the JS side
                 // owns the bytes and may hold them across further edits.
                 let bytes = Uint8Array::from(event.update.as_slice());
-                let _ = callback.call1(&JsValue::NULL, &bytes.into());
+                let origin = if txn.origin().is_none() { 1.0 } else { 0.0 };
+                let _ = callback.call2(&JsValue::NULL, &bytes.into(), &JsValue::from_f64(origin));
             })
             .map_err(js_err)?;
         self.update_observer = Some(subscription);
@@ -1406,6 +1439,41 @@ impl EditSession {
     /// Drops the update observer registered by [`EditSession::set_update_observer`].
     pub fn clear_update_observer(&mut self) {
         self.update_observer = None;
+    }
+
+    pub fn start_update_event_observation(&mut self) -> Result<(), JsValue> {
+        if self.update_event_observer.is_some() {
+            return Ok(());
+        }
+        let pending = Rc::new(RefCell::new(VecDeque::new()));
+        let observed = Rc::clone(&pending);
+        let subscription = self
+            .engine
+            .doc()
+            .yrs_doc()
+            .observe_update_v1(move |txn, event| {
+                let mut encoded = Vec::with_capacity(event.update.len() + 1);
+                encoded.push(if txn.origin().is_none() { 1 } else { 0 });
+                encoded.extend_from_slice(&event.update);
+                observed.borrow_mut().push_back(encoded);
+            })
+            .map_err(js_err)?;
+        self.update_event_observer = Some(UpdateEventObserver {
+            pending,
+            _subscription: subscription,
+        });
+        Ok(())
+    }
+
+    pub fn drain_update_event(&self) -> Vec<u8> {
+        self.update_event_observer
+            .as_ref()
+            .and_then(|observer| observer.pending.borrow_mut().pop_front())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_update_event_observation(&mut self) {
+        self.update_event_observer = None;
     }
 
     // -- local input state (undo + awareness selection) --
@@ -2554,11 +2622,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Lowers a story straight to the renderer's `LayoutBlock[]` (JSON) — the
-    /// yrs-authoritative render path (the eventual replacement for the TS
-    /// `toLayoutBlocks(pmDoc)`). Errors with an unsupported-embed message on any
-    /// non-native content (e.g. an opaque page-break blob) until that class is
-    /// promoted to native; the host falls back to the PM render path there.
+    /// Lowers a story through the resident Rust bridge. Errors with an
+    /// unsupported-embed message on any non-native content until that class is
+    /// promoted to native.
     /// `env_json` carries theme colors, the default tab stop, and list numeric
     /// ids (see [`parse_render_env`]).
     pub fn yrs_blocks_for_story(&self, story: &str, env_json: &str) -> Result<String, JsValue> {

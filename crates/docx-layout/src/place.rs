@@ -414,6 +414,7 @@ pub fn layout_document_incremental(
         resume.page_number,
         options.footnote_reserved_heights.clone(),
     )?;
+    paginator.set_section_index(resume.section_index);
     let convergence = ConvergenceInput {
         previous_checkpoints,
         previous_fingerprints,
@@ -648,6 +649,7 @@ fn place(
                     .get(section_idx + 1)
                     .cloned()
                     .unwrap_or_else(|| initial_config.clone());
+                paginator.set_section_index(section_idx + 1);
                 hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();

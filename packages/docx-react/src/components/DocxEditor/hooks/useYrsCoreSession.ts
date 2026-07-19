@@ -7,7 +7,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { tracePerfSync } from '../internals/perfTrace';
+import type { DocxEditorCollaborationOptions } from '../types';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
 
@@ -23,28 +23,14 @@ export interface YrsCoreSession {
   publishDirectInput(): void;
 }
 
-interface YrsWatchdogGlobal {
-  divergences: number;
-  checksum: string | null;
-}
-
-interface YrsRenderGlobal {
-  fromYrs: number;
-  fallback: number;
-}
-
-declare global {
-  // eslint-disable-next-line no-var
-  var __yrsWatchdog: YrsWatchdogGlobal | undefined;
-  // eslint-disable-next-line no-var
-  var __yrsRender: YrsRenderGlobal | undefined;
-}
-
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
-  seedDocument: Document | null
+  seedDocument: Document | null,
+  collaboration?: DocxEditorCollaborationOptions
 ): YrsCoreSession {
+  const collaborationClientId = collaboration?.clientId;
+  const collaborationInitialUpdate = collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
   const facadeRef = useRef<YrsFacadeModule | null>(null);
   const documentRef = useRef(document);
@@ -61,23 +47,18 @@ export function useYrsCoreSession(
     setSession(null);
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
-    globalThis.__yrsRender = { fromYrs: 0, fallback: 0 };
-    globalThis.__yrsWatchdog = { divergences: 0, checksum: null };
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
-        const next = await yrs.createYrsSession();
+        const next = await yrs.createYrsSession({ clientId: collaborationClientId });
         if (cancelled) {
           next.destroy();
           return;
         }
-        yrs.documentToYrs(next, seedDocument);
+        if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
+        else yrs.documentToYrs(next, seedDocument);
         sessionRef.current = next;
         facadeRef.current = yrs;
-        globalThis.__yrsWatchdog = {
-          divergences: 0,
-          checksum: next.storyChecksum('body').toString(),
-        };
         setSession(next);
       })
       .catch((error) => {
@@ -91,24 +72,23 @@ export function useYrsCoreSession(
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
-      globalThis.__yrsWatchdog = undefined;
-      globalThis.__yrsRender = undefined;
     };
-  }, [enabled, seedDocument]);
+  }, [enabled, seedDocument, collaborationClientId, collaborationInitialUpdate]);
+
+  useEffect(() => {
+    const onReplica = collaboration?.onReplica;
+    if (!onReplica || !session) return;
+    onReplica(session);
+    return () => onReplica(null);
+  }, [collaboration?.onReplica, session]);
 
   const storyBlocks = useCallback((storyId: string, env: YrsRenderEnv): LayoutBlock[] | null => {
     if (!enabledRef.current) return null;
     try {
       const live = sessionRef.current;
-      if (!live || !live.storyIds().includes(storyId)) {
-        bumpRenderCounter('fallback');
-        return null;
-      }
-      const blocks = live.yrsBlocksForStory(storyId, env) as LayoutBlock[];
-      bumpRenderCounter('fromYrs');
-      return blocks;
+      if (!live || !live.storyIds().includes(storyId)) return null;
+      return live.yrsBlocksForStory(storyId, env) as LayoutBlock[];
     } catch (error) {
-      bumpRenderCounter('fallback');
       console.error(`[yrs] failed to lower story ${storyId}`, error);
       return null;
     }
@@ -125,15 +105,9 @@ export function useYrsCoreSession(
     if (!enabledRef.current || !live || !facade || !live.storyIds().includes(storyId)) return null;
     const cached = inputPositionMapsRef.current.get(storyId);
     if (cached) return cached;
-    return tracePerfSync(
-      'selectionReads',
-      () => {
-        const map = facade.createYrsInputPositionMap(storyId, live.paragraphSpans(storyId));
-        inputPositionMapsRef.current.set(storyId, map);
-        return map;
-      },
-      { calls: 1, detail: 'inputPositionMapMiss' }
-    );
+    const map = facade.createYrsInputPositionMap(storyId, live.paragraphSpans(storyId));
+    inputPositionMapsRef.current.set(storyId, map);
+    return map;
   }, []);
 
   const displayPositionToLoc = useCallback(
@@ -176,14 +150,12 @@ export function useYrsCoreSession(
 
   const publishDirectInput = useCallback((): void => {
     const live = sessionRef.current;
-    const watchdog = globalThis.__yrsWatchdog;
-    if (!live || !watchdog || !live.storyIds().includes('body')) return;
+    if (!live || !live.storyIds().includes('body')) return;
     inputPositionMapsRef.current.clear();
     const activeStory = live.selection()?.head.story ?? 'body';
     projectionStoriesRef.current.add(
       activeStory.startsWith('hf:') || activeStory.startsWith('fn:') ? activeStory : 'body'
     );
-    watchdog.checksum = live.storyChecksum('body').toString();
   }, []);
 
   return {
@@ -196,10 +168,4 @@ export function useYrsCoreSession(
     documentFromYrs,
     publishDirectInput,
   };
-}
-
-function bumpRenderCounter(key: keyof YrsRenderGlobal): void {
-  const counter = globalThis.__yrsRender ?? { fromYrs: 0, fallback: 0 };
-  counter[key] += 1;
-  globalThis.__yrsRender = counter;
 }

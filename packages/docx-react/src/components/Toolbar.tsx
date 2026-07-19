@@ -946,15 +946,4 @@ export function Toolbar(explicitProps: ToolbarProps) {
   );
 }
 
-// ============================================================================
-// RE-EXPORTED UTILITIES (from toolbarUtils.ts)
-// ============================================================================
-
-export {
-  getSelectionFormatting,
-  applyFormattingAction,
-  hasActiveFormatting,
-  mapHexToHighlightName,
-} from './toolbarUtils';
-
 export default Toolbar;

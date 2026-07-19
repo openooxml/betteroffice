@@ -16,7 +16,6 @@ import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA1
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
-import { getPerfTrace } from './internals/perfTrace';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
 // independently so hidden ProseMirror focus and IME state survive initial
@@ -71,11 +70,10 @@ export function CanvasPagedArea({
 
 // experimental canvas replay of a display list: one <canvas> per page, sized
 // for devicePixelRatio and painted by the core backend, with the a11y mirror
-// mounted 1:1 under each page canvas (the page's accessible content and the
-// e2e assertion surface). dumb glue — every layout and style decision already
-// happened upstream in the display list. the white page background is
-// document content (word-faithful), not themed ui chrome, hence the inline
-// color.
+// mounted 1:1 under each page canvas. dumb glue — every layout and style
+// decision already happened upstream in the display list. the white page
+// background is document content (word-faithful), not themed ui chrome, hence
+// the inline color.
 export function CanvasPagesView({
   displayList,
   frame,
@@ -99,7 +97,7 @@ export function CanvasPagesView({
    * Zoom level (1 = 100%). Instead of CSS-scaling the page column (which would
    * blur the rastered text), each page canvas is re-sized and re-drawn at
    * `zoom * devicePixelRatio` so glyph outlines stay crisp — see
-   * `sizeCanvasForPage`. The a11y/e2e mirror is CSS-scaled to keep its nodes 1:1
+   * `sizeCanvasForPage`. The a11y mirror is CSS-scaled to keep its nodes 1:1
    * over the enlarged canvas.
    */
   zoom?: number;
@@ -166,8 +164,6 @@ export function CanvasPagesView({
 
   useEffect(() => {
     const replayGeneration = ++replayGenerationRef.current;
-    const trace = getPerfTrace();
-    const started = trace ? performance.now() : 0;
     const dpr = window.devicePixelRatio || 1;
     if (offscreenEligible && !offscreenFailed && frame && offscreenReplay) {
       const pages: Array<{ pageId: string; canvas: OffscreenCanvas }> = [];
@@ -245,12 +241,6 @@ export function CanvasPagesView({
       for (const { canvas, buffer, page } of prepared) {
         presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
       }
-      if (trace) {
-        trace.record('canvasReplay', performance.now() - started, {
-          calls: prepared.length,
-          detail: `${prepared.length}/${displayList.pages.length} pages; atomic`,
-        });
-      }
     };
     void Promise.all(preparations).then(present, (error) => {
       if (replayGeneration === replayGenerationRef.current) {
@@ -304,13 +294,6 @@ export function CanvasPagesView({
                   else canvasesRef.current.delete(pageKey);
                 }}
                 data-page-index={page.pageIndex}
-                // header/footer band geometry (page-local px) — test-only hooks so
-                // the e2e suite can assert ink inside the bands without reaching
-                // into the display list
-                data-header-y={page.header?.y}
-                data-header-h={page.header?.height}
-                data-footer-y={page.footer?.y}
-                data-footer-h={page.footer?.height}
                 style={{
                   display: 'block',
                   background: '#ffffff',
