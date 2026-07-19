@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "betteroffice-redact",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-19",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "r2_buckets": [
+    {
+      "binding": "REDACTED_BUCKET",
+      "bucket_name": "replace-with-redacted-bucket"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

@@ -13,6 +13,10 @@ use std::io::{Cursor, Read, Write};
 use js_sys::{Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 
+mod sanitize;
+
+pub use sanitize::{sanitize_package, sanitize_package_for_format};
+
 /// A well-formed document stays far under this; a decompression bomb blows past it.
 const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -172,6 +176,11 @@ pub fn rezip_docx(entries: JsValue) -> Result<Vec<u8>, JsValue> {
         collected.push((name, arr.to_vec()));
     }
     rezip_parts(&collected).map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen(js_name = sanitizeOoxml)]
+pub fn sanitize_ooxml(data: &[u8], expected_format: &str) -> Result<Vec<u8>, JsValue> {
+    sanitize_package_for_format(data, expected_format).map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(test)]
