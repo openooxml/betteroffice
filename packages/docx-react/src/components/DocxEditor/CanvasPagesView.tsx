@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from 'react';
+import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
   presentDisplayPageBackBuffer,
   rasterizeDisplayPageToBackBuffer,
@@ -68,6 +77,40 @@ export function CanvasPagedArea({
   );
 }
 
+// Pages within this many pages of the viewport keep live bitmaps; everything
+// farther keeps its canvas ELEMENT (stable identity, exact geometry for
+// pointer routing/overlays/scroll math) but releases its backing store. Only
+// pixels are windowed — never DOM structure.
+const PAGE_WINDOW_BUFFER = 2;
+// Documents at or below this page count never window — zero behavior change
+// for ordinary documents.
+const PAGE_WINDOW_MIN_PAGES = 12;
+// A page already mounted stays mounted until it drifts one page beyond the
+// mount band, so slow scrolling at a boundary cannot thrash mount/unmount.
+const PAGE_WINDOW_HYSTERESIS = 1;
+
+interface PageWindowRange {
+  start: number;
+  end: number;
+}
+
+function nextPageWindow(
+  previous: PageWindowRange | null,
+  firstVisible: number,
+  lastVisible: number,
+  totalPages: number
+): PageWindowRange {
+  const mountStart = Math.max(0, firstVisible - PAGE_WINDOW_BUFFER);
+  const mountEnd = Math.min(totalPages - 1, lastVisible + PAGE_WINDOW_BUFFER);
+  if (!previous) return { start: mountStart, end: mountEnd };
+  const keepStart = Math.max(0, mountStart - PAGE_WINDOW_HYSTERESIS);
+  const keepEnd = Math.min(totalPages - 1, mountEnd + PAGE_WINDOW_HYSTERESIS);
+  const start = Math.min(mountStart, Math.max(previous.start, keepStart));
+  const end = Math.max(mountEnd, Math.min(previous.end, keepEnd));
+  if (start === previous.start && end === previous.end) return previous;
+  return { start, end };
+}
+
 // experimental canvas replay of a display list: one <canvas> per page, sized
 // for devicePixelRatio and painted by the core backend, with the a11y mirror
 // mounted 1:1 under each page canvas. dumb glue — every layout and style
@@ -129,6 +172,115 @@ export function CanvasPagesView({
     resolveImage?: ImageResolver;
   } | null>(null);
 
+  // ===========================================================================
+  // Page windowing: only pages near the viewport hold rastered bitmaps. Every
+  // page keeps its canvas element (stable keys and CSS-sized boxes, so scroll
+  // geometry, pointer routing, and canvas-rect overlays are untouched); an
+  // off-window page's backing store is released (attributes zeroed on the DOM
+  // path, offscreen buffer zeroed by the worker) and repainted on re-entry.
+  // The window moves only with scrolling/resize/zoom, never with document
+  // invalidation.
+  // ===========================================================================
+  const innerHostRef = useRef<HTMLDivElement | null>(null);
+  const setHostRef = useMemo(
+    () =>
+      (element: HTMLDivElement | null): void => {
+        innerHostRef.current = element;
+        if (typeof hostRef === 'function') hostRef(element);
+        else if (hostRef) (hostRef as { current: HTMLDivElement | null }).current = element;
+      },
+    [hostRef]
+  );
+  const pageWindowAllowed = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    // diagnostic escape hatch, mirroring `offscreenReplay=0`
+    return new URLSearchParams(window.location.search).get('pageWindow') !== '0';
+  }, []);
+  const windowingEnabled = pageWindowAllowed && displayList.pages.length > PAGE_WINDOW_MIN_PAGES;
+  const [pageWindow, setPageWindow] = useState<PageWindowRange | null>(null);
+  // Column-space page tops/bottoms from display-list geometry alone (no DOM
+  // reads): padding, then each page height at the current zoom plus the gap.
+  const pageOffsets = useMemo(() => {
+    const tops = new Array<number>(displayList.pages.length);
+    const bottoms = new Array<number>(displayList.pages.length);
+    let y = CANVAS_PAGES_PADDING_PX;
+    displayList.pages.forEach((page, index) => {
+      tops[index] = y;
+      bottoms[index] = y + page.height * zoom;
+      y = bottoms[index] + CANVAS_PAGE_GAP_PX;
+    });
+    return { tops, bottoms };
+  }, [displayList, zoom]);
+  useLayoutEffect(() => {
+    if (!windowingEnabled) {
+      setPageWindow(null);
+      return;
+    }
+    const host = innerHostRef.current;
+    if (!host) return;
+    const scrollParent = findVerticalScrollParentOrRoot(host);
+    const scrollTarget: EventTarget =
+      scrollParent === document.scrollingElement || scrollParent === document.documentElement
+        ? window
+        : scrollParent;
+    let rafId: number | null = null;
+    const recompute = (): void => {
+      rafId = null;
+      const column = host.firstElementChild as HTMLElement | null;
+      if (!column || !scrollParent.isConnected) {
+        // unmeasurable — fail open (all pages live) so replay is never
+        // deferred forever
+        setPageWindow(
+          (previous) => previous ?? { start: 0, end: displayList.pages.length - 1 }
+        );
+        return;
+      }
+      // client rects are viewport-relative: the visible band starts at the
+      // scroller's client top for an element scroller, at 0 for the root
+      const viewportTop = scrollTarget === window ? 0 : scrollParent.getBoundingClientRect().top;
+      const viewportHeight =
+        scrollTarget === window ? window.innerHeight : scrollParent.clientHeight;
+      const columnRect = column.getBoundingClientRect();
+      const viewTop = viewportTop - columnRect.top;
+      const viewBottom = viewTop + viewportHeight;
+      const { tops, bottoms } = pageOffsets;
+      let first = tops.length - 1;
+      for (let index = 0; index < tops.length; index += 1) {
+        if (bottoms[index] >= viewTop) {
+          first = index;
+          break;
+        }
+      }
+      let last = first;
+      for (let index = tops.length - 1; index >= first; index -= 1) {
+        if (tops[index] <= viewBottom) {
+          last = index;
+          break;
+        }
+      }
+      setPageWindow((previous) => nextPageWindow(previous, first, last, tops.length));
+    };
+    const schedule = (): void => {
+      if (rafId === null) rafId = requestAnimationFrame(recompute);
+    };
+    recompute();
+    scrollTarget.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      scrollTarget.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+    };
+  }, [windowingEnabled, pageOffsets]);
+  // Until the first measurement lands (set pre-paint by the layout effect
+  // above), the replay effect is deferred entirely — never guess a window
+  // that could blank a visible page, and never raster every page of a large
+  // document just because the window is not measured yet.
+  const windowPending = windowingEnabled && pageWindow === null;
+  const effectiveWindow: PageWindowRange | null = windowingEnabled ? pageWindow : null;
+  const pageInWindow = (index: number): boolean =>
+    effectiveWindow === null || (index >= effectiveWindow.start && index <= effectiveWindow.end);
+
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
   // SAME module the display-list builder already resolved — no extra fetch.
@@ -163,13 +315,19 @@ export function CanvasPagesView({
     };
   }, [glyphOutlineProvider]);
 
+  const windowStart = effectiveWindow?.start ?? -1;
+  const windowEnd = effectiveWindow?.end ?? -1;
   useEffect(() => {
+    // The window measurement lands pre-paint (layout effect) and re-runs this
+    // effect; rastering before it exists would process every page.
+    if (windowPending) return;
     const replayGeneration = ++replayGenerationRef.current;
     const dpr = window.devicePixelRatio || 1;
     if (offscreenEligible && !offscreenFailed && frame && offscreenReplay) {
       const pages: Array<{ pageId: string; canvas: OffscreenCanvas }> = [];
       const activePageIds: string[] = [];
       for (let index = 0; index < frame.pages.length; index += 1) {
+        if (!pageInWindow(index)) continue;
         const retainedPage = frame.pages[index];
         const page = displayList.pages[index];
         const pageId = retainedPage.pageId.toString();
@@ -191,7 +349,11 @@ export function CanvasPagesView({
       if (pages.length > 0 || signature !== offscreenSignatureRef.current) {
         offscreenSignatureRef.current = signature;
         void offscreenReplay.attach(pages, activePageIds, dpr, zoom).then((attached) => {
-          if (!attached) setOffscreenFailed(true);
+          if (!attached) {
+            // transient (no worker client yet) — clear the signature so the
+            // next pass retries instead of permanently flipping surfaces
+            offscreenSignatureRef.current = '';
+          }
         }, () => setOffscreenFailed(true));
       }
       return;
@@ -218,6 +380,17 @@ export function CanvasPagesView({
       const canvas = canvasesRef.current.get(pageKey);
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx) continue;
+      if (!pageInWindow(i)) {
+        // release the off-window bitmap; the CSS-sized element stays for
+        // geometry consumers. Dropping the presented mark makes re-entry
+        // repaint through the ordinary remount rule below.
+        if (canvas.width !== 0 || canvas.height !== 0) {
+          canvas.width = 0;
+          canvas.height = 0;
+          presentedCanvasesRef.current.delete(canvas);
+        }
+        continue;
+      }
       // A remounted canvas (surface-mode flip) has no pixels regardless of
       // the retained frame's damage set — always paint it.
       const damaged =
@@ -253,7 +426,10 @@ export function CanvasPagesView({
       }
     });
     // glyphCacheReady is a redraw trigger (the cache itself is read via ref);
-    // zoom re-runs the raster so the enlarged canvas paints at full resolution
+    // zoom re-runs the raster so the enlarged canvas paints at full resolution;
+    // windowStart/windowEnd re-run it so pages entering the window paint and
+    // the offscreen active set prunes pages that left it
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     displayList,
     frame,
@@ -263,6 +439,9 @@ export function CanvasPagesView({
     offscreenFailed,
     offscreenReplay,
     zoom,
+    windowPending,
+    windowStart,
+    windowEnd,
   ]);
 
   // The host stays a full-width, un-transformed positioned box so the
@@ -273,7 +452,7 @@ export function CanvasPagesView({
   // routing reads each canvas's live `getBoundingClientRect`, so the transform
   // is factored out for free.
   return (
-    <div ref={hostRef} className="canvas-pages" style={{ position: 'relative' }}>
+    <div ref={setHostRef} className="canvas-pages" style={{ position: 'relative' }}>
       <div
         className="canvas-pages__column"
         style={{
@@ -291,7 +470,10 @@ export function CanvasPagesView({
           const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
           return (
-            // per-page wrapper so the mirror positions 1:1 over its canvas
+            // per-page wrapper so the mirror positions 1:1 over its canvas.
+            // Every page keeps its full DOM (canvas element, a11y mirror, SDT
+            // overlay) — the page window releases only bitmap backing stores,
+            // so the accessible document and page geometry never shrink.
             <div key={surfaceKey} className="canvas-page" style={{ position: 'relative' }}>
               <canvas
                 ref={(el) => {

@@ -113,17 +113,33 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'attachCanvases') {
+    const environmentChanged =
+      offscreenCanvases.size > 0 &&
+      (offscreenDpr !== request.devicePixelRatio || offscreenZoom !== request.zoom);
+    // Pages needing pixels: freshly transferred canvases plus retained
+    // canvases re-entering the active window (their buffers were zeroed when
+    // they left it).
+    const forcedPageIds = new Set(request.pages.map((page) => page.pageId));
+    for (const pageId of request.activePageIds) {
+      if (!activeOffscreenPageIds.has(pageId)) forcedPageIds.add(pageId);
+    }
     for (const { pageId, canvas } of request.pages) offscreenCanvases.set(pageId, canvas);
     activeOffscreenPageIds = new Set(request.activePageIds);
     offscreenDpr = request.devicePixelRatio;
     offscreenZoom = request.zoom;
-    for (const pageId of offscreenCanvases.keys()) {
+    for (const [pageId, canvas] of offscreenCanvases) {
       if (!activeOffscreenPageIds.has(pageId)) {
-        offscreenCanvases.delete(pageId);
+        // out of the page window: release the bitmap but KEEP the canvas —
+        // a transferred surface can never be re-transferred, so the element
+        // must stay usable for re-entry
+        canvas.width = 0;
+        canvas.height = 0;
         offscreenBackBuffers.delete(pageId);
       }
     }
-    await replayOffscreen(true);
+    // A dpr/zoom change repaints every active page; otherwise only the forced
+    // set needs pixels — surviving active pages keep their bitmaps.
+    await replayOffscreen(environmentChanged ? true : forcedPageIds);
     reply({ id: request.id, ok: true });
     return;
   }
@@ -227,6 +243,16 @@ async function replyFrame(
       primitiveIds: page.primitiveIds.slice(),
     })),
   };
+  // Pages no longer in the document release their surfaces entirely (their
+  // elements unmounted main-side); off-window pages are only zeroed, so this
+  // is the sole place a live document's canvas reference is dropped.
+  const livePageIds = new Set(retainedFrame.pages.map((page) => page.pageId.toString()));
+  for (const pageId of offscreenCanvases.keys()) {
+    if (!livePageIds.has(pageId)) {
+      offscreenCanvases.delete(pageId);
+      offscreenBackBuffers.delete(pageId);
+    }
+  }
   const replayStarted = performance.now();
   const replayedPages = await replayOffscreen(false);
   const replayMs = performance.now() - replayStarted;
@@ -251,13 +277,15 @@ async function replyFrame(
   );
 }
 
-async function replayOffscreen(forceAll: boolean): Promise<number> {
+async function replayOffscreen(force: boolean | Set<string>): Promise<number> {
   if (!retainedFrame || offscreenCanvases.size === 0) return 0;
   if (!glyphCache && session) {
     glyphCache = new GlyphCache({
       provider: (fontId, glyphId) => session!.outlineGlyphJson(fontId, glyphId),
     });
   }
+  const forceAll = force === true;
+  const forcedPageIds = force instanceof Set ? force : null;
   const preparations: Array<
     Promise<{
       canvas: OffscreenCanvas;
@@ -267,11 +295,21 @@ async function replayOffscreen(forceAll: boolean): Promise<number> {
   > = [];
   for (let index = 0; index < retainedFrame.pages.length; index += 1) {
     const retainedPage = retainedFrame.pages[index];
-    if (!forceAll && !retainedFrame.damagedPageIds.has(retainedPage.pageId)) continue;
-    const canvas = offscreenCanvases.get(retainedPage.pageId.toString());
+    const pageIdString = retainedPage.pageId.toString();
+    // Off-window pages hold no pixels; they re-raster through the forced set
+    // when they re-enter the window.
+    if (!activeOffscreenPageIds.has(pageIdString)) continue;
+    if (
+      !forceAll &&
+      !forcedPageIds?.has(pageIdString) &&
+      !retainedFrame.damagedPageIds.has(retainedPage.pageId)
+    ) {
+      continue;
+    }
+    const canvas = offscreenCanvases.get(pageIdString);
     const page = retainedFrame.displayList.pages[index];
     if (!canvas || !page) continue;
-    const pageId = retainedPage.pageId.toString();
+    const pageId = pageIdString;
     let buffer = offscreenBackBuffers.get(pageId);
     if (!buffer) {
       buffer = new OffscreenCanvas(1, 1);

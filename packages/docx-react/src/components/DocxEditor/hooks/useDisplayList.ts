@@ -220,7 +220,11 @@ export function useRustDisplayList(
       zoom: number
     ): Promise<boolean> => {
       const worker = workerRef.current?.client;
-      if (!worker?.isReady()) return false;
+      // Queue even while the worker is mid-invalidation: requests are handled
+      // FIFO, so an attach lands after the sync that follows and the worker
+      // rasters the newly attached surfaces itself. Refusing here would strand
+      // already-transferred canvases (they cannot be re-transferred).
+      if (!worker) return false;
       await worker.attachCanvases(pages, activePageIds, devicePixelRatio, zoom);
       return true;
     },
