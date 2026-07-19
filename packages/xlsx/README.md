@@ -66,6 +66,8 @@ The provider speaks the Yjs sync-v1 protocol used by y-websocket. WebSocket room
 routing, authentication, WebRTC signaling, reconnection policy, and awareness
 remain transport concerns; document updates flow directly between the connection
 and the Rust/WASM Yrs replica without a second JavaScript `Y.Doc`.
+After a close, the transport may reopen itself or the caller may invoke
+`provider.connect()` for another connection attempt.
 Call `provider.destroy()` before discarding its transport or workbook.
 
 Collaborative sessions currently support cell content, formulas, styles, column

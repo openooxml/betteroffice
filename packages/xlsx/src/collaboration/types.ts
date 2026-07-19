@@ -18,7 +18,7 @@ export type CollaborationTransportEvent =
   | { type: 'drain' };
 
 export interface CollaborationTransport {
-  /** Starts one connection attempt; transports may also reopen while still subscribed. */
+  /** Starts one attempt; after close, reopen internally or require another provider.connect(). */
   connect(): void | Promise<void>;
   disconnect(): void | Promise<void>;
   /** Returns true only when the owned frame was accepted; false requires a later drain event. */
