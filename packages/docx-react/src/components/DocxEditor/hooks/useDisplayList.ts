@@ -49,6 +49,12 @@ export interface UseRustDisplayListResult {
   applyDelete(direction: 'backward' | 'forward'): Promise<boolean>;
   /** True once the dedicated worker owns resident frame production. */
   workerActive: boolean;
+  /**
+   * True while the worker owns the visible page surfaces. Sticky across
+   * invalidation (remote/structural updates) so the canvas keeps its last
+   * pixels instead of remounting; drops only on genuine fallback or reset.
+   */
+  workerSurfacesActive: boolean;
   attachOffscreenCanvases(
     pages: ResidentEngineOffscreenPage[],
     activePageIds: string[],
@@ -103,6 +109,7 @@ export function useRustDisplayList(
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerActive, setWorkerActive] = useState(false);
+  const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
@@ -115,6 +122,9 @@ export function useRustDisplayList(
       // (wasm-bindgen correctly rejects that unsafe alias). Selection is sent
       // with the next input request after the transaction has returned.
       workerRef.current?.client.invalidate(update, null);
+      // Only frame freshness drops here. The worker keeps the page surfaces
+      // (workerSurfacesActive) so the canvas retains its pixels until the
+      // post-sync frame lands — flipping surfaces would remount every page.
       setWorkerActive(false);
     });
   }, [residentEngine]);
@@ -227,6 +237,7 @@ export function useRustDisplayList(
       frameRef.current = null;
       setFrame(null);
       setWorkerActive(false);
+      setWorkerSurfacesActive(false);
       return;
     }
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
@@ -279,6 +290,7 @@ export function useRustDisplayList(
           workerRef.current = null;
         }
         setWorkerActive(false);
+        setWorkerSurfacesActive(false);
         return buildOnMainThread();
       };
       try {
@@ -319,7 +331,9 @@ export function useRustDisplayList(
         setDisplayList(result.displayList);
         setError(null);
         setLoading(false);
-        setWorkerActive(Boolean(snapshot && workerRef.current?.client.isReady()));
+        const workerProduced = Boolean(snapshot && workerRef.current?.client.isReady());
+        setWorkerActive(workerProduced);
+        setWorkerSurfacesActive(workerProduced);
       })
       .catch((error) => {
         if (generation !== generationRef.current) return;
@@ -339,6 +353,7 @@ export function useRustDisplayList(
     applyInput,
     applyDelete,
     workerActive,
+    workerSurfacesActive,
     attachOffscreenCanvases,
   };
 }
@@ -445,6 +460,7 @@ export function useCanvasRenderer(
     applyInput,
     applyDelete,
     workerActive,
+    workerSurfacesActive,
     attachOffscreenCanvases,
   } = useRustDisplayList(layout, undefined, fontChainsProviderRef, resolvedCommentIds, engine);
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
@@ -490,16 +506,20 @@ export function useCanvasRenderer(
     if (typeof window === 'undefined') return false;
     return new URLSearchParams(window.location.search).get('offscreenReplay') !== '0';
   })();
+  // Keyed off surface ownership, not frame freshness: an invalidated worker
+  // frame must not tear down the offscreen canvases (CanvasPagesView keys its
+  // page surfaces on this), or every remote/structural edit remounts and
+  // blanks the whole document.
   const offscreenReplay = useMemo(
     () =>
-      workerActive &&
+      workerSurfacesActive &&
       offscreenAllowed &&
       typeof OffscreenCanvas !== 'undefined' &&
       typeof HTMLCanvasElement !== 'undefined' &&
       'transferControlToOffscreen' in HTMLCanvasElement.prototype
         ? { attach: attachOffscreenCanvases }
         : null,
-    [attachOffscreenCanvases, offscreenAllowed, workerActive]
+    [attachOffscreenCanvases, offscreenAllowed, workerSurfacesActive]
   );
   return {
     displayList,

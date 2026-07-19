@@ -114,6 +114,7 @@ export function CanvasPagesView({
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
+  const presentedCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const offscreenSignatureRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
@@ -217,10 +218,13 @@ export function CanvasPagesView({
       const canvas = canvasesRef.current.get(pageKey);
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx) continue;
+      // A remounted canvas (surface-mode flip) has no pixels regardless of
+      // the retained frame's damage set — always paint it.
       const damaged =
         !frame ||
         !retainedPage ||
         rasterEnvironmentChanged ||
+        !presentedCanvasesRef.current.has(canvas) ||
         frame.damagedPageIds.has(retainedPage.pageId);
       if (!damaged) continue;
       // Raster off-DOM first. The connected canvas keeps its previous pixels
@@ -240,6 +244,7 @@ export function CanvasPagesView({
       if (replayGeneration !== replayGenerationRef.current) return;
       for (const { canvas, buffer, page } of prepared) {
         presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
+        presentedCanvasesRef.current.add(canvas);
       }
     };
     void Promise.all(preparations).then(present, (error) => {
@@ -296,6 +301,8 @@ export function CanvasPagesView({
                 data-page-index={page.pageIndex}
                 style={{
                   display: 'block',
+                  width: page.width * zoom,
+                  height: page.height * zoom,
                   background: '#ffffff',
                   boxShadow: '0 1px 3px var(--doc-shadow)',
                 }}
