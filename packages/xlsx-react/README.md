@@ -54,14 +54,19 @@ Attach a transport provider from `onReady`:
 ```tsx
 import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
 
-<XlsxEditor
-  file={file}
-  collaboration={{ clientId }}
-  onReady={({ handle }) => {
-    const provider = new CollaborationProvider(handle, transport);
-    provider.connect();
-  }}
-/>
+export function CollaborativeWorkbook() {
+  return (
+    <XlsxEditor
+      file={file}
+      collaboration={{ clientId }}
+      onReady={({ handle }) => {
+        const provider = new CollaborationProvider(handle, transport);
+        provider.connect();
+        return () => provider.destroy();
+      }}
+    />
+  );
+}
 ```
 
 Docs: https://betteroffice.dev · Apache-2.0.

@@ -76,9 +76,10 @@ export interface XlsxEditorProps {
   /**
    * Called when a workbook opens, with a handle to stage agent proposals and a
    * way to refresh the panel afterward. Enables demo/host agents without
-   * exposing the wasm object through the render tree.
+   * exposing the wasm object through the render tree. A returned cleanup runs
+   * before the workbook is replaced or disposed.
    */
-  onReady?: (api: XlsxEditorApi) => void;
+  onReady?: (api: XlsxEditorApi) => void | (() => void);
   className?: string;
 }
 
@@ -282,7 +283,15 @@ export function XlsxEditor({
     setSelection(null);
     let handle: WorkbookHandle | null = null;
     let unsubscribeUpdates = () => {};
+    let cleanupReady = () => {};
     let disposed = false;
+    const runReadyCleanup = () => {
+      const cleanup = cleanupReady;
+      cleanupReady = () => {};
+      try {
+        cleanup();
+      } catch {}
+    };
     void initWasm().then(
       () => {
         if (disposed) return;
@@ -292,8 +301,8 @@ export function XlsxEditor({
             clientId: collaborationClientId,
           });
           handleRef.current = handle;
-          unsubscribeUpdates = handle.onUpdate((_update, origin) => {
-            if (disposed || origin !== 'remote' || !handle) return;
+          unsubscribeUpdates = handle.onUpdate(() => {
+            if (disposed || !handle) return;
             try {
               setSheetInfo(handle.sheetInfo());
               setRevision((current) => current + 1);
@@ -308,8 +317,14 @@ export function XlsxEditor({
           setSelection(selectionAt({ row: 0, col: 0 }));
           setError(null);
           refreshProposals();
-          onReadyRef.current?.({ handle, refreshProposals });
+          const cleanup = onReadyRef.current?.({ handle, refreshProposals });
+          if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
+          runReadyCleanup();
+          unsubscribeUpdates();
+          unsubscribeUpdates = () => {};
+          handle?.dispose();
+          handle = null;
           handleRef.current = null;
           setSheetInfo(null);
           setSelection(null);
@@ -326,6 +341,7 @@ export function XlsxEditor({
     );
     return () => {
       disposed = true;
+      runReadyCleanup();
       unsubscribeUpdates();
       handle?.dispose();
       handleRef.current = null;

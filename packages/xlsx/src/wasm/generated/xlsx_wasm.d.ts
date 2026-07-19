@@ -132,7 +132,7 @@ export interface InitOutput {
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_drainUpdateEvent: (a: number) => [number, number];
+    readonly xlsxdocument_drainUpdateEvent: (a: number) => [number, number, number, number];
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];

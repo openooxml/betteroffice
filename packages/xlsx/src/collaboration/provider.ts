@@ -20,7 +20,7 @@ import {
   type CollaborationTransportEvent,
 } from './types';
 
-const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_FRAME_BYTES;
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -73,6 +73,8 @@ export class CollaborationProvider {
   private nextListenerId = 0;
   private queuedBytes = 0;
   private isFlushing = false;
+  private transportCleanup: Promise<void> | undefined;
+  private statusRevision = 0;
 
   constructor(
     replica: CollaborationReplica,
@@ -122,6 +124,13 @@ export class CollaborationProvider {
     if (this.isDestroyed || this.isOpen || this.connectionStatus === 'connecting') return;
 
     this.wantsConnection = true;
+    this.setStatus('connecting', false);
+    if (this.transportCleanup || this.isDestroyed || !this.wantsConnection) return;
+    this.startConnection();
+  }
+
+  private startConnection(): void {
+    if (this.isDestroyed || !this.wantsConnection || this.isOpen || this.transportCleanup) return;
     const token = this.hasTransportSubscription ? this.epoch : ++this.epoch;
     const attempt = ++this.connectAttempt;
     this.setStatus('connecting', false);
@@ -276,15 +285,31 @@ export class CollaborationProvider {
       );
     }
     if (!disconnect) return errors;
+    if (this.transportCleanup) return errors;
 
     try {
       const result = this.transport.disconnect();
       if (result) {
-        void result.catch((cause) => {
-          if (!this.isDestroyed) {
-            this.report(normalizeError('transport', 'Transport disconnect failed', cause));
-          }
-        });
+        let failed = false;
+        const cleanup = Promise.resolve(result)
+          .catch((cause) => {
+            failed = true;
+            if (!this.isDestroyed) {
+              this.report(normalizeError('transport', 'Transport disconnect failed', cause));
+            }
+          })
+          .finally(() => {
+            if (this.transportCleanup !== cleanup) return;
+            this.transportCleanup = undefined;
+            if (this.isDestroyed) return;
+            if (failed) {
+              this.wantsConnection = false;
+              this.setStatus('disconnected', false);
+            } else if (this.wantsConnection) {
+              this.startConnection();
+            }
+          });
+        this.transportCleanup = cleanup;
       }
     } catch (cause) {
       errors.push(normalizeError('transport', 'Transport disconnect failed', cause));
@@ -353,7 +378,11 @@ export class CollaborationProvider {
   private handleMessage(token: number, data: Uint8Array): void {
     let messages: ReturnType<typeof decodeMessages>;
     try {
-      messages = decodeMessages(data.slice(), this.maxFrameBytes, this.maxMessagesPerFrame);
+      if (!(data instanceof Uint8Array)) throw new TypeError('Frame must be a Uint8Array');
+      if (data.byteLength > this.maxFrameBytes) {
+        throw new RangeError(`Frame exceeds ${this.maxFrameBytes} bytes`);
+      }
+      messages = decodeMessages(data, this.maxFrameBytes, this.maxMessagesPerFrame);
     } catch (cause) {
       this.failConnection(
         token,
@@ -541,8 +570,10 @@ export class CollaborationProvider {
     if (this.connectionStatus === status && this.isSynced === synced) return;
     this.connectionStatus = status;
     this.isSynced = synced;
+    const revision = ++this.statusRevision;
     const change: CollaborationStatusChange = { status, synced };
     for (const [id, listener] of [...this.statusListeners]) {
+      if (this.statusRevision !== revision) return;
       if (this.statusListeners.get(id) !== listener) continue;
       try {
         listener(change);

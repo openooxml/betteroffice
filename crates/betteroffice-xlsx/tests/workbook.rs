@@ -8,6 +8,9 @@ use betteroffice_xlsx::{
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use yrs::Update as YrsUpdate;
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
 
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -961,6 +964,63 @@ fn concurrent_style_and_content_changes_compose() {
 }
 
 #[test]
+fn style_edits_do_not_publish_recalculated_formula_caches_as_content() {
+    let bytes = sample_xlsx();
+    for (formula_client, style_client) in [(411, 412), (422, 421)] {
+        let mut formula = Workbook::open_collaborative_recalculated(
+            &bytes,
+            formula_client,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        let mut style = Workbook::open_collaborative_recalculated(
+            &bytes,
+            style_client,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        let baseline = formula.encode_state_vector_v1();
+
+        formula
+            .edit_cell(
+                SheetId(0),
+                cell("B1"),
+                "=SUM(A1:A2)+1",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        style
+            .apply_ops(
+                vec![Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("B1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 15.0 },
+                        formula: Some("SUM(A1:A2)".into()),
+                        style: Some(0),
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+
+        let formula_update = formula.encode_diff_v1(&baseline).unwrap();
+        let style_update = style.encode_diff_v1(&baseline).unwrap();
+        formula
+            .apply_update_v1(&style_update, CalculationOptions::default())
+            .unwrap();
+        style
+            .apply_update_v1(&formula_update, CalculationOptions::default())
+            .unwrap();
+
+        assert_eq!(formula.model(), style.model());
+        let composed = formula.model().sheets[0].cell(cell("B1")).unwrap();
+        assert_eq!(composed.formula.as_deref(), Some("SUM(A1:A2)+1"));
+        assert_eq!(composed.style, Some(0));
+    }
+}
+
+#[test]
 fn remote_formulas_recalculate_locally_and_save_current_caches() {
     let bytes = sample_xlsx();
     let mut left = Workbook::open_collaborative(&bytes, 501).unwrap();
@@ -1253,6 +1313,269 @@ fn rejected_update_preserves_unrelated_valid_causal_backlog() {
             .applied
     );
     assert_eq!(target.cell(SheetId(0), cell("C3")).unwrap().input, "two");
+}
+
+#[test]
+fn independent_pending_chains_resolve_without_blocking_each_other() {
+    let bytes = sample_xlsx();
+    let mut first = Workbook::open_collaborative(&bytes, 743).unwrap();
+    let mut second = Workbook::open_collaborative(&bytes, 744).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 745).unwrap();
+    let first_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&first_updates);
+    let _first_subscription = first
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    let second_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&second_updates);
+    let _second_subscription = second
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+
+    first
+        .edit_cell(SheetId(0), cell("C4"), "one", CalculationOptions::default())
+        .unwrap();
+    first
+        .edit_cell(SheetId(0), cell("C4"), "two", CalculationOptions::default())
+        .unwrap();
+    second
+        .edit_cell(
+            SheetId(0),
+            cell("C5"),
+            "three",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    second
+        .edit_cell(
+            SheetId(0),
+            cell("C5"),
+            "four",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let first_updates = first_updates.lock().unwrap().clone();
+    let second_updates = second_updates.lock().unwrap().clone();
+
+    assert!(
+        !target
+            .apply_update_v1(&first_updates[1], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert!(
+        !target
+            .apply_update_v1(&second_updates[1], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert!(
+        target
+            .apply_update_v1(&second_updates[0], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(target.cell(SheetId(0), cell("C5")).unwrap().input, "four");
+    assert_eq!(target.cell(SheetId(0), cell("C4")).unwrap().input, "");
+
+    assert!(
+        target
+            .apply_update_v1(&first_updates[0], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(target.cell(SheetId(0), cell("C4")).unwrap().input, "two");
+}
+
+#[test]
+fn applicable_clients_in_a_partially_pending_update_are_not_blocked() {
+    let bytes = sample_xlsx();
+    let mut delayed = Workbook::open_collaborative(&bytes, 746).unwrap();
+    let mut ready = Workbook::open_collaborative(&bytes, 747).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 748).unwrap();
+    let delayed_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&delayed_updates);
+    let _delayed_subscription = delayed
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    let ready_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&ready_updates);
+    let _ready_subscription = ready
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+
+    delayed
+        .edit_cell(SheetId(0), cell("D1"), "one", CalculationOptions::default())
+        .unwrap();
+    delayed
+        .edit_cell(SheetId(0), cell("D1"), "two", CalculationOptions::default())
+        .unwrap();
+    ready
+        .edit_cell(
+            SheetId(0),
+            cell("D2"),
+            "ready",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let delayed_updates = delayed_updates.lock().unwrap().clone();
+    let ready_updates = ready_updates.lock().unwrap().clone();
+    let merged = YrsUpdate::merge_updates([
+        YrsUpdate::decode_v1(&delayed_updates[1]).unwrap(),
+        YrsUpdate::decode_v1(&ready_updates[0]).unwrap(),
+    ])
+    .encode_v1();
+
+    assert!(
+        target
+            .apply_update_v1(&merged, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(target.cell(SheetId(0), cell("D2")).unwrap().input, "ready");
+    assert_eq!(target.cell(SheetId(0), cell("D1")).unwrap().input, "");
+
+    assert!(
+        target
+            .apply_update_v1(&delayed_updates[0], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(target.cell(SheetId(0), cell("D1")).unwrap().input, "two");
+}
+
+#[test]
+fn newly_applicable_clients_in_a_buffered_merged_update_are_committed() {
+    let bytes = sample_xlsx();
+    let mut delayed = Workbook::open_collaborative(&bytes, 749).unwrap();
+    let mut ready = Workbook::open_collaborative(&bytes, 750).unwrap();
+    let mut target = Workbook::open_collaborative(&bytes, 753).unwrap();
+    let delayed_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&delayed_updates);
+    let _delayed_subscription = delayed
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    let ready_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&ready_updates);
+    let _ready_subscription = ready
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+
+    delayed
+        .edit_cell(SheetId(0), cell("D3"), "one", CalculationOptions::default())
+        .unwrap();
+    delayed
+        .edit_cell(SheetId(0), cell("D3"), "two", CalculationOptions::default())
+        .unwrap();
+    ready
+        .edit_cell(
+            SheetId(0),
+            cell("D4"),
+            "three",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    ready
+        .edit_cell(
+            SheetId(0),
+            cell("D4"),
+            "four",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let delayed_updates = delayed_updates.lock().unwrap().clone();
+    let ready_updates = ready_updates.lock().unwrap().clone();
+    let merged = YrsUpdate::merge_updates([
+        YrsUpdate::decode_v1(&delayed_updates[1]).unwrap(),
+        YrsUpdate::decode_v1(&ready_updates[1]).unwrap(),
+    ])
+    .encode_v1();
+
+    assert!(
+        !target
+            .apply_update_v1(&merged, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert!(
+        target
+            .apply_update_v1(&ready_updates[0], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(target.cell(SheetId(0), cell("D4")).unwrap().input, "four");
+    assert_eq!(target.cell(SheetId(0), cell("D3")).unwrap().input, "");
+    let mut mirror = Workbook::open_collaborative(&bytes, 759).unwrap();
+    mirror
+        .apply_update_v1(
+            &target.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(mirror.model(), target.model());
+
+    assert!(
+        target
+            .apply_update_v1(&delayed_updates[0], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(target.cell(SheetId(0), cell("D3")).unwrap().input, "two");
+}
+
+#[test]
+fn wholly_pending_updates_do_not_reemit_existing_tombstones() {
+    let bytes = sample_xlsx();
+    let mut remote = Workbook::open_collaborative(&bytes, 754).unwrap();
+    let mut local = Workbook::open_collaborative(&bytes, 755).unwrap();
+    local
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "local",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    local
+        .propose(
+            ProposalRequest {
+                agent_id: "agent".into(),
+                note: None,
+                edits: vec![ProposalEditInput {
+                    sheet: SheetId(0),
+                    cell: cell("A2"),
+                    input: "proposal".into(),
+                }],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let remote_updates = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&remote_updates);
+    let _remote_subscription = remote
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+        .unwrap();
+    remote
+        .edit_cell(SheetId(0), cell("E1"), "one", CalculationOptions::default())
+        .unwrap();
+    remote
+        .edit_cell(SheetId(0), cell("E1"), "two", CalculationOptions::default())
+        .unwrap();
+    let pending = remote_updates.lock().unwrap()[1].clone();
+    let local_events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&local_events);
+    let _local_subscription = local
+        .observe_update_v1(move |event| observed.lock().unwrap().push(event))
+        .unwrap();
+    let state = local.encode_state_as_update_v1();
+
+    let result = local
+        .apply_update_v1(&pending, CalculationOptions::default())
+        .unwrap();
+    assert!(!result.applied);
+    assert_eq!(local.encode_state_as_update_v1(), state);
+    assert_eq!(local.proposals().len(), 1);
+    assert!(local_events.lock().unwrap().is_empty());
 }
 
 #[test]

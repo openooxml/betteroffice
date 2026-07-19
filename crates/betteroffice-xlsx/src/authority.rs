@@ -8,11 +8,17 @@ use xlsx_model::{
     SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
+use yrs::block::{
+    BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
+    BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
+};
+use yrs::encoding::read::{Error as DecodeError, Read};
+use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Array, ArrayRef, BranchID, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, StateVector,
-    Subscription, Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Out, ReadTxn, StateVector,
+    Transact, TransactionMut, Update, WriteTxn,
 };
 
 const META: &str = "xlsx";
@@ -31,6 +37,10 @@ const BOOTSTRAP_ORIGIN: &str = "xlsx:bootstrap";
 const HYDRATE_ORIGIN: &str = "xlsx:hydrate";
 const REMOTE_ORIGIN: &str = "xlsx:remote";
 const MAX_SAFE_CLIENT_ID: u64 = (1_u64 << 53) - 1;
+const MAX_SAFE_CLOCK: u32 = i32::MAX as u32;
+const MAX_UPDATE_BLOCKS: usize = 1_000_000;
+const MAX_UPDATE_VALUES: usize = 1_000_000;
+const MAX_UPDATE_DELETE_RANGES: usize = 1_000_000;
 pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,7 +68,6 @@ pub(crate) enum AuthorityError {
     InvalidStateVector(String),
     InvalidUpdate(String),
     InvalidState(String),
-    Observer(String),
 }
 
 #[derive(Clone)]
@@ -111,9 +120,19 @@ struct SheetSharedTypes {
 }
 
 pub(crate) struct StagedUpdate {
+    pub(crate) commit_update: Vec<u8>,
     pub(crate) effective: bool,
     pub(crate) model: WorkbookModel,
     pub(crate) pending: bool,
+    pub(crate) state_bytes: usize,
+    pub(crate) state_vector_entries: usize,
+    pub(crate) structure: WorkbookStructure,
+    pub(crate) update: Vec<u8>,
+}
+
+pub(crate) struct StagedLocalUpdate {
+    pub(crate) state_bytes: usize,
+    pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
     pub(crate) update: Vec<u8>,
 }
@@ -199,6 +218,10 @@ impl WorkbookAuthority {
         self.doc.client_id().get()
     }
 
+    pub(crate) fn state_vector_entries(&self) -> usize {
+        self.doc.transact().state_vector().len()
+    }
+
     pub(crate) fn materialize(&self) -> Result<WorkbookModel, AuthorityError> {
         self.materialize_internal(false)
             .map(|(model, _)| model)
@@ -215,7 +238,8 @@ impl WorkbookAuthority {
         &mut self,
         ops: &[Op],
         origin: SyncOrigin,
-    ) -> Result<(), AuthorityError> {
+    ) -> Result<Option<Vec<u8>>, AuthorityError> {
+        let state_vector = self.doc.transact().state_vector();
         let mut model = self.materialize()?;
         for op in ops {
             xlsx_ops::apply(&mut model, op).map_err(|error| {
@@ -225,7 +249,9 @@ impl WorkbookAuthority {
             })?;
         }
         self.sync_model(&model, ops, origin)
-            .map_err(AuthorityError::InvalidState)
+            .map_err(AuthorityError::InvalidState)?;
+        let update = self.doc.transact().encode_diff_v1(&state_vector);
+        Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -260,13 +286,12 @@ impl WorkbookAuthority {
             .iter()
             .map(|update| decode_update_v1(update).map_err(AuthorityError::InvalidUpdate))
             .collect::<Result<Vec<_>, _>>()?;
-        let (incoming, live_update) = if updates.len() == 1 {
-            (decoded.into_iter().next().unwrap(), updates[0].to_vec())
+        let incoming = if updates.len() == 1 {
+            decoded.into_iter().next().unwrap()
         } else {
-            let update = Update::merge_updates(decoded);
-            let encoded = update.encode_v1();
-            (update, encoded)
+            Update::merge_updates(decoded)
         };
+        let before_vector = self.doc.transact().state_vector();
         let before = self.encode_state_as_update_v1();
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_doc(&staged_doc, &before).map_err(AuthorityError::InvalidState)?;
@@ -282,20 +307,98 @@ impl WorkbookAuthority {
             next_sheet_id: self.next_sheet_id,
         };
         let after = staged.encode_state_as_update_v1();
+        let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
+        let after_vector = staged.doc.transact().state_vector();
+        let state_vector_entries = after_vector.len();
         let pending = {
             let txn = staged.doc.transact();
             txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
         };
+        if pending {
+            let (current_model, current_structure) = self
+                .strict_materialize()
+                .map_err(AuthorityError::InvalidState)?;
+            if integrated.as_slice() != Update::EMPTY_V1
+                && let Ok((model, structure)) = staged.strict_materialize()
+                && (after_vector != before_vector
+                    || model != current_model
+                    || structure != current_structure)
+            {
+                return Ok(StagedUpdate {
+                    commit_update: integrated.clone(),
+                    effective: true,
+                    model,
+                    pending: true,
+                    state_bytes: after.len(),
+                    state_vector_entries,
+                    structure,
+                    update: integrated,
+                });
+            }
+            return Ok(StagedUpdate {
+                commit_update: Update::EMPTY_V1.to_vec(),
+                effective: false,
+                model: current_model,
+                pending: true,
+                state_bytes: before.len(),
+                state_vector_entries: self.state_vector_entries(),
+                structure: current_structure,
+                update: Update::EMPTY_V1.to_vec(),
+            });
+        }
         let (model, structure) = staged
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
         Ok(StagedUpdate {
+            commit_update: integrated.clone(),
             effective: before != after,
             model,
             pending,
+            state_bytes: after.len(),
+            state_vector_entries,
             structure,
-            update: live_update,
+            update: integrated,
         })
+    }
+
+    pub(crate) fn stage_local_ops_v1(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+    ) -> Result<StagedLocalUpdate, AuthorityError> {
+        let state_vector = self.doc.transact().state_vector();
+        let baseline = self.encode_state_as_update_v1();
+        let staged_doc = Doc::with_client_id(self.client_id());
+        hydrate_doc(&staged_doc, &baseline).map_err(AuthorityError::InvalidState)?;
+        let mut staged = Self {
+            doc: staged_doc,
+            base: self.base.clone(),
+            history: SheetOrderHistory::default(),
+            next_sheet_id: self.next_sheet_id,
+        };
+        let _ = staged.apply_ops(ops, origin)?;
+        let update = staged.doc.transact().encode_diff_v1(&state_vector);
+        let state = staged.encode_state_as_update_v1();
+        let state_vector_entries = staged.doc.transact().state_vector().len();
+        let structure = staged.structure()?;
+        Ok(StagedLocalUpdate {
+            state_bytes: state.len(),
+            state_vector_entries,
+            structure,
+            update,
+        })
+    }
+
+    pub(crate) fn apply_local_update_v1(
+        &self,
+        update: &[u8],
+        origin: SyncOrigin,
+    ) -> Result<(), AuthorityError> {
+        let update = decode_update_v1(update).map_err(AuthorityError::InvalidUpdate)?;
+        self.doc
+            .transact_mut_with(origin.as_str())
+            .apply_update(update)
+            .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
     }
 
     pub(crate) fn apply_update_v1(&self, update: &[u8]) -> Result<(), AuthorityError> {
@@ -304,22 +407,6 @@ impl WorkbookAuthority {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(update)
             .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
-    }
-
-    pub(crate) fn observe_update_v1<F>(&self, callback: F) -> Result<Subscription, AuthorityError>
-    where
-        F: Fn(bool, Vec<u8>) + 'static,
-    {
-        self.doc
-            .observe_update_v1(move |txn, event| {
-                let remote = txn
-                    .origin()
-                    .is_some_and(|origin| origin.as_ref() == REMOTE_ORIGIN.as_bytes());
-                let _ = catch_unwind(AssertUnwindSafe(|| {
-                    callback(remote, event.update.clone());
-                }));
-            })
-            .map_err(|error| AuthorityError::Observer(error.to_string()))
     }
 
     pub(crate) fn clear_history(&mut self) {
@@ -528,7 +615,7 @@ impl WorkbookAuthority {
             for (key, at) in authored_cells {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
-                sync_authored_cell(&sheet_map, &mut txn, sheet_model, at);
+                sync_authored_cell(&sheet_map, &mut txn, sheet_model, at)?;
             }
             for (key, col) in col_widths {
                 let (sheet_map, sheet_model) =
@@ -736,8 +823,25 @@ fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
 
 fn decode_state_vector_v1(bytes: &[u8]) -> Result<StateVector, String> {
     validate_state_vector_entry_count(bytes)?;
-    let mut decoder = DecoderV1::from(bytes);
-    let state_vector = StateVector::decode(&mut decoder).map_err(|error| error.to_string())?;
+    let mut decoder = CheckedDecoderV1::new(bytes);
+    let entries = decoder
+        .read_var_u32_checked()
+        .map_err(|error| error.to_string())?;
+    let mut state_vector = StateVector::default();
+    for _ in 0..entries {
+        let client = decoder
+            .read_var_u64_checked()
+            .map_err(|error| error.to_string())?;
+        let client = checked_client_id(client).map_err(|error| error.to_string())?;
+        if state_vector.contains_client(&client) {
+            return Err("state vector contains a duplicate client".to_string());
+        }
+        let clock = decoder
+            .read_var_u32_checked()
+            .map_err(|error| error.to_string())?;
+        checked_clock(clock).map_err(|error| error.to_string())?;
+        state_vector.set_max(client, clock);
+    }
     if !decoder
         .read_to_end()
         .map_err(|error| error.to_string())?
@@ -749,16 +853,617 @@ fn decode_state_vector_v1(bytes: &[u8]) -> Result<StateVector, String> {
 }
 
 fn decode_update_v1(bytes: &[u8]) -> Result<Update, String> {
-    let mut decoder = DecoderV1::from(bytes);
-    let update = Update::decode(&mut decoder).map_err(|error| error.to_string())?;
-    if !decoder
-        .read_to_end()
-        .map_err(|error| error.to_string())?
-        .is_empty()
-    {
-        return Err("update contains trailing bytes".to_string());
+    catch_unwind(AssertUnwindSafe(|| {
+        let mut decoder = CheckedDecoderV1::new_update(bytes);
+        let update = Update::decode(&mut decoder).map_err(|error| error.to_string())?;
+        if !decoder
+            .read_to_end()
+            .map_err(|error| error.to_string())?
+            .is_empty()
+        {
+            return Err("update contains trailing bytes".to_string());
+        }
+        Ok(update)
+    }))
+    .map_err(|_| "update decoder panicked".to_string())?
+}
+
+#[derive(Clone, Copy)]
+enum CaptureKind {
+    BlockClock,
+    BlockCount,
+    ClientCount,
+    DeleteClient,
+    DeleteClientCount,
+    DeleteRangeCount,
+    SkipLength,
+}
+
+struct VarCapture {
+    kind: CaptureKind,
+    bytes: u8,
+    shift: u32,
+    value: u64,
+}
+
+impl VarCapture {
+    fn new(kind: CaptureKind) -> Self {
+        Self {
+            kind,
+            bytes: 0,
+            shift: 0,
+            value: 0,
+        }
     }
-    Ok(update)
+}
+
+#[derive(Clone, Copy)]
+enum PendingLength {
+    Any,
+    Deleted,
+    Gc,
+    Type,
+}
+
+struct CheckedDecoderV1<'a> {
+    inner: DecoderV1<'a>,
+    remaining: usize,
+    clock: Option<u32>,
+    delete_clock: Option<u32>,
+    capture: Option<VarCapture>,
+    pending_length: Option<PendingLength>,
+    update_mode: bool,
+    update_clients_remaining: u32,
+    blocks_remaining: u32,
+    total_blocks: usize,
+    any_items_remaining: u32,
+    any_block_len: u32,
+    declared_any_items: usize,
+    decoded_any_values: usize,
+    delete_clients_remaining: u32,
+    delete_ranges_remaining: u32,
+    total_delete_ranges: usize,
+}
+
+impl<'a> CheckedDecoderV1<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            inner: DecoderV1::from(bytes),
+            remaining: bytes.len(),
+            clock: None,
+            delete_clock: None,
+            capture: None,
+            pending_length: None,
+            update_mode: false,
+            update_clients_remaining: 0,
+            blocks_remaining: 0,
+            total_blocks: 0,
+            any_items_remaining: 0,
+            any_block_len: 0,
+            declared_any_items: 0,
+            decoded_any_values: 0,
+            delete_clients_remaining: 0,
+            delete_ranges_remaining: 0,
+            total_delete_ranges: 0,
+        }
+    }
+
+    fn new_update(bytes: &'a [u8]) -> Self {
+        let mut decoder = Self::new(bytes);
+        decoder.update_mode = true;
+        decoder.capture = Some(VarCapture::new(CaptureKind::ClientCount));
+        decoder
+    }
+
+    fn begin_capture(&mut self, kind: CaptureKind) -> Result<(), DecodeError> {
+        if self.capture.is_some() {
+            return Err(decode_error("overlapping update varints"));
+        }
+        self.capture = Some(VarCapture::new(kind));
+        Ok(())
+    }
+
+    fn feed_capture(&mut self, byte: u8) -> Result<(), DecodeError> {
+        let Some(mut capture) = self.capture.take() else {
+            return Ok(());
+        };
+        capture.bytes = capture
+            .bytes
+            .checked_add(1)
+            .ok_or(DecodeError::InvalidVarInt)?;
+        let payload = u64::from(byte & 0x7f);
+        if capture.shift >= 64 || payload > (u64::MAX >> capture.shift) {
+            return Err(DecodeError::InvalidVarInt);
+        }
+        capture.value |= payload << capture.shift;
+        if byte & 0x80 != 0 {
+            if capture.shift >= 63 {
+                return Err(DecodeError::InvalidVarInt);
+            }
+            capture.shift += 7;
+            self.capture = Some(capture);
+            return Ok(());
+        }
+        if capture.bytes > 1 && payload == 0 {
+            return Err(DecodeError::InvalidVarInt);
+        }
+
+        match capture.kind {
+            CaptureKind::BlockClock => {
+                let clock = u32::try_from(capture.value).map_err(|_| DecodeError::InvalidVarInt)?;
+                checked_clock(clock)?;
+                self.clock = Some(clock);
+            }
+            CaptureKind::BlockCount => {
+                let blocks =
+                    u32::try_from(capture.value).map_err(|_| DecodeError::InvalidVarInt)?;
+                if self.update_clients_remaining == 0 || blocks == 0 {
+                    return Err(decode_error("update contains an empty client block set"));
+                }
+                let blocks = blocks as usize;
+                self.total_blocks = self
+                    .total_blocks
+                    .checked_add(blocks)
+                    .ok_or_else(|| decode_error("update block count overflow"))?;
+                if self.total_blocks > MAX_UPDATE_BLOCKS || blocks > self.remaining {
+                    return Err(decode_error("update contains too many blocks"));
+                }
+                self.blocks_remaining = blocks as u32;
+            }
+            CaptureKind::ClientCount => {
+                let clients =
+                    u32::try_from(capture.value).map_err(|_| DecodeError::InvalidVarInt)?;
+                if clients > MAX_STATE_VECTOR_ENTRIES {
+                    return Err(decode_error("update contains too many clients"));
+                }
+                self.update_clients_remaining = clients;
+                self.begin_capture(if clients == 0 {
+                    CaptureKind::DeleteClientCount
+                } else {
+                    CaptureKind::BlockCount
+                })?;
+            }
+            CaptureKind::DeleteClient => {
+                checked_client_id(capture.value)?;
+                self.begin_capture(CaptureKind::DeleteRangeCount)?;
+            }
+            CaptureKind::DeleteClientCount => {
+                let clients =
+                    u32::try_from(capture.value).map_err(|_| DecodeError::InvalidVarInt)?;
+                if clients > MAX_STATE_VECTOR_ENTRIES {
+                    return Err(decode_error("update delete set contains too many clients"));
+                }
+                self.delete_clients_remaining = clients;
+            }
+            CaptureKind::DeleteRangeCount => {
+                let ranges =
+                    u32::try_from(capture.value).map_err(|_| DecodeError::InvalidVarInt)?;
+                let total = self
+                    .total_delete_ranges
+                    .checked_add(ranges as usize)
+                    .ok_or_else(|| decode_error("update delete range count overflow"))?;
+                if total > MAX_UPDATE_DELETE_RANGES || ranges as usize > self.remaining {
+                    return Err(decode_error("update contains too many delete ranges"));
+                }
+                self.total_delete_ranges = total;
+                self.delete_ranges_remaining = ranges;
+                if ranges == 0 {
+                    self.finish_delete_client()?;
+                }
+            }
+            CaptureKind::SkipLength => {
+                let len = u32::try_from(capture.value).map_err(|_| DecodeError::InvalidVarInt)?;
+                if len == 0 {
+                    return Err(decode_error("update contains an empty skip block"));
+                }
+                self.advance_clock(len)?;
+                self.finish_block()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn advance_clock(&mut self, len: u32) -> Result<(), DecodeError> {
+        let clock = self
+            .clock
+            .ok_or_else(|| decode_error("update block is missing its initial clock"))?;
+        let next = clock
+            .checked_add(len)
+            .ok_or_else(|| decode_error("update block clock overflows u32"))?;
+        checked_clock(next)?;
+        self.clock = Some(next);
+        Ok(())
+    }
+
+    fn finish_block(&mut self) -> Result<(), DecodeError> {
+        if self.blocks_remaining == 0 {
+            return Err(decode_error("update contains more blocks than declared"));
+        }
+        self.blocks_remaining -= 1;
+        if self.blocks_remaining == 0 {
+            self.clock = None;
+            self.update_clients_remaining = self
+                .update_clients_remaining
+                .checked_sub(1)
+                .ok_or_else(|| decode_error("update client count underflow"))?;
+            self.begin_capture(if self.update_clients_remaining == 0 {
+                CaptureKind::DeleteClientCount
+            } else {
+                CaptureKind::BlockCount
+            })?;
+        }
+        Ok(())
+    }
+
+    fn finish_delete_client(&mut self) -> Result<(), DecodeError> {
+        self.delete_clients_remaining = self
+            .delete_clients_remaining
+            .checked_sub(1)
+            .ok_or_else(|| decode_error("update delete client count underflow"))?;
+        Ok(())
+    }
+
+    fn read_var_u64_checked(&mut self) -> Result<u64, DecodeError> {
+        if self.capture.is_some() {
+            return Err(decode_error(
+                "unexpected checked varint during update framing",
+            ));
+        }
+        let mut value = 0_u64;
+        let mut shift = 0_u32;
+        let mut bytes = 0_u8;
+        loop {
+            let byte = self.read_u8()?;
+            bytes += 1;
+            let payload = u64::from(byte & 0x7f);
+            if shift >= 64 || payload > (u64::MAX >> shift) {
+                return Err(DecodeError::InvalidVarInt);
+            }
+            value |= payload << shift;
+            if byte & 0x80 == 0 {
+                if bytes > 1 && payload == 0 {
+                    return Err(DecodeError::InvalidVarInt);
+                }
+                return Ok(value);
+            }
+            if shift >= 63 {
+                return Err(DecodeError::InvalidVarInt);
+            }
+            shift += 7;
+        }
+    }
+
+    fn read_var_u32_checked(&mut self) -> Result<u32, DecodeError> {
+        u32::try_from(self.read_var_u64_checked()?).map_err(|_| DecodeError::InvalidVarInt)
+    }
+
+    fn read_var_usize_checked(&mut self) -> Result<usize, DecodeError> {
+        usize::try_from(self.read_var_u64_checked()?).map_err(|_| DecodeError::InvalidVarInt)
+    }
+
+    fn read_var_i64_checked(&mut self) -> Result<i64, DecodeError> {
+        let first = self.read_u8()?;
+        let negative = first & 0x40 != 0;
+        let mut magnitude = u64::from(first & 0x3f);
+        let mut byte = first;
+        let mut shift = 6_u32;
+        while byte & 0x80 != 0 {
+            byte = self.read_u8()?;
+            let payload = u64::from(byte & 0x7f);
+            if shift >= 63 || payload > (i64::MAX as u64 >> shift) {
+                return Err(DecodeError::InvalidVarInt);
+            }
+            magnitude |= payload << shift;
+            if byte & 0x80 == 0 {
+                if payload == 0 {
+                    return Err(DecodeError::InvalidVarInt);
+                }
+                break;
+            }
+            shift += 7;
+        }
+        if negative && magnitude == 0 {
+            return Err(DecodeError::InvalidVarInt);
+        }
+        let value = i64::try_from(magnitude).map_err(|_| DecodeError::InvalidVarInt)?;
+        Ok(if negative { -value } else { value })
+    }
+
+    fn read_id(&mut self) -> Result<ID, DecodeError> {
+        let client = checked_client_id(self.read_var_u64_checked()?)?;
+        let clock = self.read_var_u32_checked()?;
+        checked_clock(clock)?;
+        Ok(ID::new(client, clock))
+    }
+
+    fn decode_any(&mut self, depth: u8) -> Result<Any, DecodeError> {
+        if depth >= 64 {
+            return Err(decode_error("update value nesting exceeds 64 levels"));
+        }
+        self.decoded_any_values = self
+            .decoded_any_values
+            .checked_add(1)
+            .ok_or_else(|| decode_error("update value count overflow"))?;
+        if self.decoded_any_values > MAX_UPDATE_VALUES {
+            return Err(decode_error("update contains too many values"));
+        }
+        Ok(match self.read_u8()? {
+            127 => Any::Undefined,
+            126 => Any::Null,
+            125 => Any::Number(self.read_var_i64_checked()? as f64),
+            124 => Any::Number(self.read_f32()? as f64),
+            123 => Any::Number(self.read_f64()?),
+            122 => Any::BigInt(self.read_i64()?),
+            121 => Any::Bool(false),
+            120 => Any::Bool(true),
+            119 => Any::String(Arc::from(self.read_string()?)),
+            118 => {
+                let len = self.read_var_usize_checked()?;
+                if len > self.remaining
+                    || len > MAX_UPDATE_VALUES.saturating_sub(self.decoded_any_values)
+                {
+                    return Err(decode_error("update map length exceeds its payload"));
+                }
+                let mut map = HashMap::new();
+                map.try_reserve(len)?;
+                for _ in 0..len {
+                    let key = self.read_string()?.to_owned();
+                    map.insert(key, self.decode_any(depth + 1)?);
+                }
+                Any::Map(Arc::new(map))
+            }
+            117 => {
+                let len = self.read_var_usize_checked()?;
+                if len > self.remaining
+                    || len > MAX_UPDATE_VALUES.saturating_sub(self.decoded_any_values)
+                {
+                    return Err(decode_error("update array length exceeds its payload"));
+                }
+                let mut values = Vec::new();
+                values.try_reserve(len)?;
+                for _ in 0..len {
+                    values.push(self.decode_any(depth + 1)?);
+                }
+                Any::Array(Arc::from(values))
+            }
+            116 => {
+                let len = self.read_var_u32_checked()? as usize;
+                Any::Buffer(Arc::from(self.read_exact(len)?))
+            }
+            _ => return Err(DecodeError::UnexpectedValue),
+        })
+    }
+}
+
+impl Read for CheckedDecoderV1<'_> {
+    fn read_exact(&mut self, len: usize) -> Result<&[u8], DecodeError> {
+        if len > self.remaining {
+            return Err(DecodeError::EndOfBuffer(len));
+        }
+        let bytes = self.inner.read_exact(len)?;
+        self.remaining -= len;
+        Ok(bytes)
+    }
+
+    fn read_u8(&mut self) -> Result<u8, DecodeError> {
+        if self.remaining == 0 {
+            return Err(DecodeError::EndOfBuffer(1));
+        }
+        let byte = self.inner.read_u8()?;
+        self.remaining -= 1;
+        self.feed_capture(byte)?;
+        Ok(byte)
+    }
+
+    fn read_string(&mut self) -> Result<&str, DecodeError> {
+        let len = self.read_var_u32_checked()? as usize;
+        let bytes = self.read_exact(len)?;
+        std::str::from_utf8(bytes).map_err(|error| decode_error(error.to_string()))
+    }
+}
+
+impl Decoder for CheckedDecoderV1<'_> {
+    fn reset_ds_cur_val(&mut self) {
+        self.delete_clock = None;
+        if self.capture.is_none()
+            && self.delete_clients_remaining > 0
+            && self.delete_ranges_remaining == 0
+        {
+            self.capture = Some(VarCapture::new(CaptureKind::DeleteClient));
+        }
+    }
+
+    fn read_ds_clock(&mut self) -> Result<u32, DecodeError> {
+        if self.delete_ranges_remaining == 0 {
+            return Err(decode_error("update contains an undeclared delete range"));
+        }
+        let clock = self.read_var_u32_checked()?;
+        checked_clock(clock)?;
+        self.delete_clock = Some(clock);
+        Ok(clock)
+    }
+
+    fn read_ds_len(&mut self) -> Result<u32, DecodeError> {
+        let len = self.read_var_u32_checked()?;
+        if len == 0 {
+            return Err(decode_error("update contains an empty delete range"));
+        }
+        let end = self
+            .delete_clock
+            .ok_or_else(|| decode_error("delete range is missing its clock"))?
+            .checked_add(len)
+            .ok_or_else(|| decode_error("delete range clock overflows u32"))?;
+        checked_clock(end)?;
+        self.delete_ranges_remaining -= 1;
+        if self.delete_ranges_remaining == 0 {
+            self.finish_delete_client()?;
+        }
+        Ok(len)
+    }
+
+    fn read_left_id(&mut self) -> Result<ID, DecodeError> {
+        self.read_id()
+    }
+
+    fn read_right_id(&mut self) -> Result<ID, DecodeError> {
+        self.read_id()
+    }
+
+    fn read_client(&mut self) -> Result<ClientID, DecodeError> {
+        if self.blocks_remaining == 0 {
+            return Err(decode_error("update client is missing its block count"));
+        }
+        let client = checked_client_id(self.read_var_u64_checked()?)?;
+        self.begin_capture(CaptureKind::BlockClock)?;
+        Ok(client)
+    }
+
+    fn read_info(&mut self) -> Result<u8, DecodeError> {
+        if self.pending_length.is_some() {
+            return Err(decode_error("update block is missing its content length"));
+        }
+        let info = self.read_u8()?;
+        if info == BLOCK_SKIP_REF_NUMBER {
+            self.begin_capture(CaptureKind::SkipLength)?;
+        } else if info == BLOCK_GC_REF_NUMBER {
+            self.pending_length = Some(PendingLength::Gc);
+        } else {
+            match info & 0x0f {
+                BLOCK_ITEM_DELETED_REF_NUMBER => {
+                    self.pending_length = Some(PendingLength::Deleted);
+                }
+                BLOCK_ITEM_TYPE_REF_NUMBER => {
+                    self.pending_length = Some(PendingLength::Type);
+                }
+                BLOCK_ITEM_ANY_REF_NUMBER => {
+                    self.pending_length = Some(PendingLength::Any);
+                }
+                _ => return Err(decode_error("update contains an unsupported block type")),
+            }
+        }
+        Ok(info)
+    }
+
+    fn read_parent_info(&mut self) -> Result<bool, DecodeError> {
+        match self.read_var_u32_checked()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(decode_error("update contains invalid parent info")),
+        }
+    }
+
+    fn read_type_ref(&mut self) -> Result<u8, DecodeError> {
+        if !matches!(self.pending_length.take(), Some(PendingLength::Type)) {
+            return Err(decode_error("update contains an unexpected shared type"));
+        }
+        let type_ref = self.read_u8()?;
+        if type_ref != TYPE_REFS_ARRAY && type_ref != TYPE_REFS_MAP {
+            return Err(decode_error("update contains an unsupported shared type"));
+        }
+        self.advance_clock(1)?;
+        self.finish_block()?;
+        Ok(type_ref)
+    }
+
+    fn read_len(&mut self) -> Result<u32, DecodeError> {
+        let len = self.read_var_u32_checked()?;
+        let pending = self
+            .pending_length
+            .take()
+            .ok_or_else(|| decode_error("update contains an unexpected block length"))?;
+        match pending {
+            PendingLength::Gc => {
+                if len == 0 {
+                    return Err(decode_error("update contains an empty GC block"));
+                }
+                self.advance_clock(len)?;
+                self.finish_block()?;
+            }
+            PendingLength::Deleted => {
+                self.advance_clock(len)?;
+                self.finish_block()?;
+            }
+            PendingLength::Any => {
+                self.declared_any_items = self
+                    .declared_any_items
+                    .checked_add(len as usize)
+                    .ok_or_else(|| decode_error("update value count overflow"))?;
+                if self.declared_any_items > MAX_UPDATE_VALUES || len as usize > self.remaining {
+                    return Err(decode_error("update contains too many values"));
+                }
+                self.any_items_remaining = len;
+                self.any_block_len = len;
+                if len == 0 {
+                    self.finish_block()?;
+                }
+            }
+            PendingLength::Type => {
+                return Err(decode_error("shared type block contains a length"));
+            }
+        }
+        Ok(len)
+    }
+
+    fn read_any(&mut self) -> Result<Any, DecodeError> {
+        if self.any_items_remaining == 0 {
+            return Err(decode_error("update contains an undeclared value"));
+        }
+        let value = self.decode_any(0)?;
+        self.any_items_remaining -= 1;
+        if self.any_items_remaining == 0 {
+            self.advance_clock(self.any_block_len)?;
+            self.any_block_len = 0;
+            self.finish_block()?;
+        }
+        Ok(value)
+    }
+
+    fn read_json(&mut self) -> Result<Any, DecodeError> {
+        Any::from_json(self.read_string()?)
+    }
+
+    fn read_key(&mut self) -> Result<Arc<str>, DecodeError> {
+        Ok(Arc::from(self.read_string()?))
+    }
+
+    fn read_to_end(&mut self) -> Result<&[u8], DecodeError> {
+        if self.update_mode
+            && (self.capture.is_some()
+                || self.update_clients_remaining != 0
+                || self.blocks_remaining != 0
+                || self.pending_length.is_some()
+                || self.any_items_remaining != 0
+                || self.delete_clients_remaining != 0
+                || self.delete_ranges_remaining != 0)
+        {
+            return Err(decode_error("update ended before its declared content"));
+        }
+        let bytes = self.inner.read_to_end()?;
+        if bytes.len() != self.remaining {
+            return Err(decode_error("update decoder length mismatch"));
+        }
+        Ok(bytes)
+    }
+}
+
+fn checked_client_id(client: u64) -> Result<ClientID, DecodeError> {
+    if client > MAX_SAFE_CLIENT_ID {
+        Err(decode_error("client ID exceeds the 53-bit Yjs limit"))
+    } else {
+        Ok(ClientID::new(client))
+    }
+}
+
+fn checked_clock(clock: u32) -> Result<(), DecodeError> {
+    if clock > MAX_SAFE_CLOCK {
+        Err(decode_error("clock exceeds the supported i32 range"))
+    } else {
+        Ok(())
+    }
+}
+
+fn decode_error(message: impl Into<String>) -> DecodeError {
+    DecodeError::Custom(message.into())
 }
 
 fn validate_state_vector_entry_count(bytes: &[u8]) -> Result<(), String> {
@@ -1016,19 +1721,39 @@ fn sync_authored_cell(
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
     at: CellRef,
-) {
+) -> Result<(), String> {
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     let styles: MapRef = sheet_map.get_or_init(txn, STYLES);
     let key = cell_key(at);
     match sheet.cell(at) {
         Some(cell) => {
-            sync_optional(&contents, txn, &key, content_to_any(cell));
+            let current = match contents.get(txn, &key) {
+                Some(Out::Any(value)) => Some(content_from_any(&value)?),
+                Some(_) => return Err(format!("cell content {key} is not an atomic value")),
+                None => None,
+            };
+            if !authored_content_equal(current.as_ref(), Some(cell)) {
+                sync_optional(&contents, txn, &key, content_to_any(cell));
+            }
             sync_optional(&styles, txn, &key, cell.style.map(Any::from));
         }
         None => {
             contents.remove(txn, &key);
             styles.remove(txn, &key);
         }
+    }
+    Ok(())
+}
+
+fn authored_content_equal(left: Option<&Cell>, right: Option<&Cell>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => match (&left.formula, &right.formula) {
+            (Some(left), Some(right)) => left == right,
+            (None, None) => left.value == right.value,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -1601,6 +2326,66 @@ mod tests {
         assert!(decode_state_vector_v1(&[1]).is_err());
         assert!(decode_state_vector_v1(&[0, 0]).is_err());
         assert!(decode_update_v1(&[0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn update_decoder_rejects_overflowing_block_and_delete_clocks() {
+        let overflowing_skip = [
+            1,
+            1,
+            1,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0x0f,
+            BLOCK_SKIP_REF_NUMBER,
+            1,
+            0,
+        ];
+        let overflowing_gc = [
+            1,
+            1,
+            1,
+            0x80,
+            0x80,
+            0x80,
+            0x80,
+            0x08,
+            BLOCK_GC_REF_NUMBER,
+            1,
+            0,
+        ];
+        let overflowing_delete = [0, 1, 1, 1, 0xff, 0xff, 0xff, 0xff, 0x0f, 1];
+        assert!(decode_update_v1(&overflowing_skip).is_err());
+        assert!(decode_update_v1(&overflowing_gc).is_err());
+        assert!(decode_update_v1(&overflowing_delete).is_err());
+    }
+
+    #[test]
+    fn checked_decoders_bound_counts_and_reject_noncanonical_ids() {
+        let too_many_blocks = [1, 0xff, 0xff, 0xff, 0xff, 0x0f];
+        let too_many_delete_ranges = [0, 1, 1, 0xff, 0xff, 0xff, 0xff, 0x0f];
+        assert!(decode_update_v1(&too_many_blocks).is_err());
+        assert!(decode_update_v1(&too_many_delete_ranges).is_err());
+        assert!(decode_state_vector_v1(&[1, 0x81, 0x80, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn checked_decoder_rejects_overlong_signed_varints() {
+        for bytes in [
+            vec![125, 0x40],
+            vec![125, 0x80, 0],
+            vec![125, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0],
+        ] {
+            assert!(CheckedDecoderV1::new(&bytes).decode_any(0).is_err());
+        }
+        assert_eq!(
+            CheckedDecoderV1::new(&[125, 0xc1, 1])
+                .decode_any(0)
+                .unwrap(),
+            Any::Number(-65.0)
+        );
     }
 
     #[test]

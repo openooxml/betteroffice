@@ -117,6 +117,7 @@ class FakeTransport implements CollaborationTransport {
   mutateRejectedFrame = false;
   connectError: unknown;
   disconnectError: unknown;
+  disconnectResult: Promise<void> | undefined;
   unsubscribeError: unknown;
   sendError: unknown;
   sent: Uint8Array[] = [];
@@ -129,9 +130,10 @@ class FakeTransport implements CollaborationTransport {
     if (this.connectError) throw this.connectError;
   }
 
-  disconnect(): void {
+  disconnect(): void | Promise<void> {
     this.disconnectCount += 1;
     if (this.disconnectError) throw this.disconnectError;
+    return this.disconnectResult;
   }
 
   send(data: Uint8Array): boolean {
@@ -579,6 +581,86 @@ describe('CollaborationProvider lifecycle', () => {
 
     transport.emit({ type: 'open' });
     expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 0, 1, 7]]);
+  });
+
+  it('waits for asynchronous teardown before reconnecting', async () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    let finishDisconnect = () => {};
+    transport.disconnectResult = new Promise<void>((resolve) => {
+      finishDisconnect = resolve;
+    });
+    const provider = new CollaborationProvider(replica, transport);
+    provider.connect();
+    transport.emit({ type: 'open' });
+
+    provider.disconnect();
+    provider.connect();
+    expect(provider.status).toBe('connecting');
+    expect(transport.connectCount).toBe(1);
+
+    finishDisconnect();
+    await transport.disconnectResult;
+    await Promise.resolve();
+    expect(transport.connectCount).toBe(2);
+  });
+
+  it('does not reconnect after asynchronous teardown fails', async () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    transport.disconnectResult = Promise.reject(new Error('still connected'));
+    const provider = new CollaborationProvider(replica, transport);
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.connect();
+    transport.emit({ type: 'open' });
+
+    provider.disconnect();
+    provider.connect();
+    await transport.disconnectResult.catch(() => {});
+    await Promise.resolve();
+
+    expect(provider.status).toBe('disconnected');
+    expect(transport.connectCount).toBe(1);
+    expect(errors[0].message).toContain('still connected');
+  });
+
+  it('does not deliver stale status after a reentrant transition', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport);
+    const statuses: string[] = [];
+    provider.onStatus(({ status }) => {
+      if (status === 'connected') provider.disconnect();
+    });
+    provider.onStatus(({ status }) => statuses.push(status));
+
+    provider.connect();
+    transport.emit({ type: 'open' });
+
+    expect(statuses).toEqual(['connecting', 'disconnected']);
+  });
+
+  it('rejects oversized inbound frames before copying them', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: 4 });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.connect();
+    transport.emit({ type: 'open' });
+    const frame = new Uint8Array(5);
+    Object.defineProperty(frame, 'slice', {
+      value: () => {
+        throw new Error('frame was copied');
+      },
+    });
+
+    transport.emit({ type: 'message', data: frame });
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('Frame exceeds 4 bytes');
+    expect(errors[0].message).not.toContain('frame was copied');
   });
 
   it('makes connect, disconnect, and destroy idempotent without disposing the replica', () => {

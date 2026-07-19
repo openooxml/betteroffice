@@ -55,12 +55,18 @@ const workbook = openWorkbook(bytes, { collaborative: true });
 const transport: CollaborationTransport = createTransport();
 const provider = new CollaborationProvider(workbook, transport);
 provider.connect();
+
+function dispose() {
+  provider.destroy();
+  workbook.dispose();
+}
 ```
 
 The provider speaks the Yjs sync-v1 protocol used by y-websocket. WebSocket room
 routing, authentication, WebRTC signaling, reconnection policy, and awareness
 remain transport concerns; document updates flow directly between the connection
 and the Rust/WASM Yrs replica without a second JavaScript `Y.Doc`.
+Call `provider.destroy()` before discarding its transport or workbook.
 
 Collaborative sessions currently support cell content, formulas, styles, column
 widths, and row heights. Structural edits and inverse-op undo are rejected until

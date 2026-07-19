@@ -186,7 +186,7 @@ impl Session {
 
     pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription, String>
     where
-        F: Fn(UpdateEvent) + 'static,
+        F: Fn(UpdateEvent) + Send + Sync + 'static,
     {
         self.workbook
             .observe_update_v1(callback)

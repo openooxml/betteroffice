@@ -7,7 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use betteroffice_xlsx::{
-    MAX_COLLABORATION_CLIENT_ID, UpdateEvent, UpdateOrigin, UpdateSubscription,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, UpdateEvent, UpdateOrigin,
+    UpdateSubscription,
 };
 use wasm_bindgen::prelude::*;
 
@@ -16,6 +17,8 @@ use crate::core::Session;
 /// days from the 1900 epoch to 1970-01-01, phantom-1900 leap day included.
 const UNIX_EPOCH_SERIAL: f64 = 25569.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
+const MAX_QUEUED_UPDATE_EVENTS: usize = 4_097;
+const MAX_QUEUED_UPDATE_BYTES: usize = MAX_COLLABORATION_BYTES * 2 + MAX_QUEUED_UPDATE_EVENTS;
 
 /// current utc time as a 1900-system serial for volatile cells; computed only
 /// at the wasm boundary so the pure core stays deterministic and native-testable.
@@ -31,8 +34,15 @@ pub struct XlsxDocument {
 }
 
 struct UpdateObserver {
-    pending: Arc<Mutex<VecDeque<UpdateEvent>>>,
+    pending: Arc<Mutex<PendingUpdateEvents>>,
     _subscription: UpdateSubscription,
+}
+
+#[derive(Default)]
+struct PendingUpdateEvents {
+    events: VecDeque<UpdateEvent>,
+    bytes: usize,
+    overflowed: bool,
 }
 
 #[wasm_bindgen]
@@ -94,15 +104,28 @@ impl XlsxDocument {
         if self.update_observer.is_some() {
             return Ok(());
         }
-        let pending = Arc::new(Mutex::new(VecDeque::new()));
+        let pending = Arc::new(Mutex::new(PendingUpdateEvents::default()));
         let observed = Arc::clone(&pending);
         let subscription = self
             .session
             .observe_update_v1(move |event| {
-                observed
+                let mut observed = observed
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push_back(event);
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if observed.overflowed {
+                    return;
+                }
+                let bytes = event.update.len().saturating_add(1);
+                if observed.events.len() >= MAX_QUEUED_UPDATE_EVENTS
+                    || bytes > MAX_QUEUED_UPDATE_BYTES.saturating_sub(observed.bytes)
+                {
+                    observed.events.clear();
+                    observed.bytes = 0;
+                    observed.overflowed = true;
+                    return;
+                }
+                observed.bytes += bytes;
+                observed.events.push_back(event);
             })
             .map_err(|e| JsValue::from_str(&e))?;
         self.update_observer = Some(UpdateObserver {
@@ -120,25 +143,34 @@ impl XlsxDocument {
 
     /// Poll one event: origin byte (`0` local, `1` remote), then update; empty means none.
     #[wasm_bindgen(js_name = drainUpdateEvent)]
-    pub fn drain_update_event(&self) -> Vec<u8> {
+    pub fn drain_update_event(&self) -> Result<Vec<u8>, JsValue> {
         let Some(observer) = &self.update_observer else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        let event = observer
+        let mut pending = observer
             .pending
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pop_front();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.overflowed {
+            pending.overflowed = false;
+            return Err(JsValue::from_str(
+                "xlsx update observation queue exceeded its limit",
+            ));
+        }
+        let event = pending.events.pop_front();
         let Some(event) = event else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
+        pending.bytes = pending
+            .bytes
+            .saturating_sub(event.update.len().saturating_add(1));
         let mut encoded = Vec::with_capacity(event.update.len() + 1);
         encoded.push(match event.origin {
             UpdateOrigin::Local => 0,
             UpdateOrigin::Remote => 1,
         });
         encoded.extend_from_slice(&event.update);
-        encoded
+        Ok(encoded)
     }
 
     /// serialized `DisplayList` for a serialized `Viewport`.
@@ -302,4 +334,17 @@ fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
         ));
     }
     Ok(client_id as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_queue_covers_the_largest_pending_resolution_burst() {
+        assert_eq!(
+            MAX_QUEUED_UPDATE_BYTES,
+            MAX_COLLABORATION_BYTES * 2 + MAX_QUEUED_UPDATE_EVENTS
+        );
+    }
 }
