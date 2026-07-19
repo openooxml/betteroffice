@@ -1,9 +1,14 @@
 import type { Metadata } from "next";
-import { DemoStage } from "../components/DemoStage";
-import { getFormat } from "../../lib/formats";
+import { Suspense } from "react";
+import { PptxDemoClient } from "./PptxDemoClient";
+import "./pptx.css";
 
-export const metadata: Metadata = { title: "Pptx" };
+export const metadata: Metadata = { title: "PPTX" };
 
 export default function PptxDemo() {
-  return <DemoStage format={getFormat("pptx")!} />;
+  return (
+    <Suspense fallback={null}>
+      <PptxDemoClient />
+    </Suspense>
+  );
 }

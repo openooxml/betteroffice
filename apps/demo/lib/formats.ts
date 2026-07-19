@@ -27,8 +27,8 @@ export const formats: Format[] = [
     id: "pptx",
     name: "Pptx",
     kind: "Slides",
-    tagline: "Presentations — on the same engine stack.",
-    status: "soon",
+    tagline: "Collaborative slides, shaped and rendered by a native Rust engine.",
+    status: "live",
   },
 ];
 
