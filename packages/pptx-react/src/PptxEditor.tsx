@@ -43,6 +43,7 @@ export interface PptxEditorApi {
 
 export interface PptxEditorProps {
   file?: Uint8Array;
+  /** Font faces; equivalent inline arrays do not reopen the presentation. */
   fonts: ReadonlyArray<PptxFontFace>;
   clientId?: number;
   className?: string;
@@ -83,6 +84,7 @@ export function PptxEditor({
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
+  const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
   const [textStyle, setTextStyle] = useState(initialStyle);
@@ -152,7 +154,7 @@ export function PptxEditor({
     imageCacheRef.current.clear();
     if (!file) return;
     setLoading(true);
-    void Promise.all([initWasm(), installBrowserFonts(fonts)]).then(
+    void Promise.all([initWasm(), installBrowserFonts(stableFonts)]).then(
       ([, installed]) => {
         browserFaces = installed;
         if (disposed) {
@@ -160,7 +162,7 @@ export function PptxEditor({
           return;
         }
         try {
-          handle = openPresentation(file, { clientId, fonts });
+          handle = openPresentation(file, { clientId, fonts: stableFonts });
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
             if (origin === 'remote') refreshAt(undefined, true, true);
@@ -186,7 +188,7 @@ export function PptxEditor({
       if (handleRef.current === handle) handleRef.current = null;
       removeBrowserFonts(browserFaces);
     };
-  }, [clientId, file, fonts, refresh, refreshAt, reportError]);
+  }, [clientId, file, stableFonts, refresh, refreshAt, reportError]);
 
   useEffect(() => {
     const host = canvasHostRef.current;
@@ -604,6 +606,36 @@ function SlideThumbnail({
 function clampSlideIndex(index: number, count: number): number {
   if (count === 0) return 0;
   return Math.max(0, Math.min(count - 1, index));
+}
+
+function useStableFontFaces(fonts: ReadonlyArray<PptxFontFace>): ReadonlyArray<PptxFontFace> {
+  const stable = useRef(fonts);
+  if (!fontFacesEqual(stable.current, fonts)) stable.current = fonts;
+  return stable.current;
+}
+
+function fontFacesEqual(
+  left: ReadonlyArray<PptxFontFace>,
+  right: ReadonlyArray<PptxFontFace>
+): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  return left.every((face, index) => fontFaceEqual(face, right[index]));
+}
+
+function fontFaceEqual(left: PptxFontFace, right: PptxFontFace): boolean {
+  return (
+    left.family === right.family &&
+    (left.bold ?? false) === (right.bold ?? false) &&
+    (left.italic ?? false) === (right.italic ?? false) &&
+    bytesEqual(left.bytes, right.bytes)
+  );
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left === right) return true;
+  if (left.byteLength !== right.byteLength) return false;
+  return left.every((byte, index) => byte === right[index]);
 }
 
 function storyText(story: StorySnapshot): string {
