@@ -37,6 +37,12 @@ jobs:
       - name: Test
         run: bun run test
 
+      - name: Check demo assets
+        run: |
+          bun scripts/create-demo-deck.ts
+          bun run --filter './apps/demo' build:seeds
+          git diff --exit-code -- apps/demo/public/betteroffice-demo.pptx apps/demo/public/seeds/pptx.bin
+
       - name: Check minimal Wasm features
         run: cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
 
