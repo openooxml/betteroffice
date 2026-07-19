@@ -49,10 +49,26 @@ pub struct DeckSession {
 
 impl DeckSession {
     pub fn open(bytes: &[u8], client_id: u64) -> EditResult<Self> {
-        validate_client_id(client_id)?;
         let package =
             pptx_parse::parse_pptx(bytes).map_err(|error| EditError::Parse(error.to_string()))?;
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+    }
+
+    /// Opens an edit session from an already parsed package.
+    pub fn from_package(package: PptxPackage, client_id: u64) -> EditResult<Self> {
+        let bytes = pptx_parse::write_pptx(&package)
+            .map_err(|error| EditError::Parse(error.to_string()))?;
+        let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+    }
+
+    fn from_package_with_fingerprint(
+        package: PptxPackage,
+        fingerprint: String,
+        client_id: u64,
+    ) -> EditResult<Self> {
+        validate_client_id(client_id)?;
         let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
         deck::seed_doc(&bootstrap, &package, &fingerprint)?;
         let baseline = bootstrap
