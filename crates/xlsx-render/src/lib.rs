@@ -42,7 +42,8 @@ const GHOST_DEL_COLOR: &str = "#c62828";
 const GHOST_INS_COLOR: &str = "#2e7d32";
 // conservative per-char advance estimate as a fraction of the font size.
 const GHOST_CHAR_W_RATIO: f32 = 0.6;
-const GHOST_GAP_PX: f32 = 6.0;
+// smallest font the ghost stack shrinks to before the bottom line clips.
+const GHOST_MIN_FONT_PX: f32 = 8.0;
 
 /// a pending edit rendered as a ghost pair in place of the cell's committed
 /// text: `old_text` struck in red, `new_text` in green.
@@ -245,11 +246,12 @@ pub fn build_display_list_with_ghosts(
     }
 }
 
-/// paint one ghost pair inside a cell box: old struck red, new green. both fit
-/// side by side (old left-anchored, new right-anchored) when the estimated
-/// widths allow; a tall cell stacks them on two lines; otherwise both are
-/// ellipsized into shares of the width. single-sided ghosts paint alone. the
-/// new text is flagged `ghost` so a11y recovery keeps the committed (old) text.
+/// paint one ghost stack inside a cell box: the new text on top in green, the
+/// old text below it struck in red, both left-aligned, full width, and
+/// ellipsized to the column. the font shrinks (to a floor) when the row is too
+/// short for two compact lines; past the floor the bottom line clips — text
+/// never overlaps. single-sided ghosts take the top slot alone. the new text
+/// is flagged `ghost` so a11y recovery keeps the committed (old) text.
 fn emit_ghost(
     commands: &mut Vec<DrawCmd>,
     ghost: &GhostEdit,
@@ -257,117 +259,60 @@ fn emit_ghost(
     size: f32,
     font_family: Option<String>,
 ) {
+    let old = ghost.old_text.as_str();
+    let new = ghost.new_text.as_str();
+    if old.is_empty() && new.is_empty() {
+        return;
+    }
+
     let clip = Rect {
         x: cx0,
         y: cy0,
         w: cw,
         h: ch,
     };
-    let old_cmd = |x: f32, y: f32, text: String, align: Align| DrawCmd::Text {
-        x,
-        y,
-        text,
-        font_size: size,
-        color: GHOST_DEL_COLOR.to_string(),
-        clip,
-        align,
-        bold: false,
-        italic: false,
-        underline: false,
-        strike: true,
-        font_family: font_family.clone(),
-        ghost: false,
-    };
-    let new_cmd = |x: f32, y: f32, text: String, align: Align| DrawCmd::Text {
-        x,
-        y,
-        text,
-        font_size: size,
-        color: GHOST_INS_COLOR.to_string(),
-        clip,
-        align,
-        bold: false,
-        italic: false,
-        underline: false,
-        strike: false,
-        font_family: font_family.clone(),
-        ghost: true,
+    let line_ratio = ASCENT_RATIO + DESCENT_RATIO;
+    let size = size.min((ch / (2.0 * line_ratio)).max(GHOST_MIN_FONT_PX));
+    let line_h = size * line_ratio;
+    let x = cx0 + TEXT_PAD_PX;
+    let avail = cw - 2.0 * TEXT_PAD_PX;
+    let top = cy0 + ((ch - 2.0 * line_h) / 2.0).max(0.0);
+    let first_baseline = top + size * ASCENT_RATIO;
+
+    let mut line = |y: f32, text: String, color: &str, strike: bool, is_preview: bool| {
+        commands.push(DrawCmd::Text {
+            x,
+            y,
+            text,
+            font_size: size,
+            color: color.to_string(),
+            clip,
+            align: Align::Left,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike,
+            font_family: font_family.clone(),
+            ghost: is_preview,
+        });
     };
 
-    let avail = cw - 2.0 * TEXT_PAD_PX;
-    let baseline = baseline_y(cy0, ch, size, None);
-    let old = ghost.old_text.as_str();
-    let new = ghost.new_text.as_str();
-    match (old.is_empty(), new.is_empty()) {
-        (true, true) => {}
-        (true, false) => commands.push(new_cmd(
-            cx0 + TEXT_PAD_PX,
-            baseline,
+    if !new.is_empty() {
+        line(
+            first_baseline,
             ellipsize(new, avail, size),
-            Align::Left,
-        )),
-        (false, true) => commands.push(old_cmd(
-            cx0 + TEXT_PAD_PX,
-            baseline,
-            ellipsize(old, avail, size),
-            Align::Left,
-        )),
-        (false, false) => {
-            let est_old = ghost_text_width(old, size);
-            let est_new = ghost_text_width(new, size);
-            let line_h = size * (ASCENT_RATIO + DESCENT_RATIO);
-            if est_old + GHOST_GAP_PX + est_new <= avail {
-                commands.push(old_cmd(
-                    cx0 + TEXT_PAD_PX,
-                    baseline,
-                    old.to_string(),
-                    Align::Left,
-                ));
-                commands.push(new_cmd(
-                    cx0 + cw - TEXT_PAD_PX,
-                    baseline,
-                    new.to_string(),
-                    Align::Right,
-                ));
-            } else if ch >= 2.0 * line_h + 3.0 * TEXT_PAD_PX {
-                let top = cy0 + (ch - 2.0 * line_h) / 2.0;
-                let first = top + size * ASCENT_RATIO;
-                commands.push(old_cmd(
-                    cx0 + TEXT_PAD_PX,
-                    first,
-                    ellipsize(old, avail, size),
-                    Align::Left,
-                ));
-                commands.push(new_cmd(
-                    cx0 + TEXT_PAD_PX,
-                    first + line_h,
-                    ellipsize(new, avail, size),
-                    Align::Left,
-                ));
-            } else {
-                let pair = avail - GHOST_GAP_PX;
-                let half = pair / 2.0;
-                let (old_budget, new_budget) = if est_old <= half {
-                    (est_old, pair - est_old)
-                } else if est_new <= half {
-                    (pair - est_new, est_new)
-                } else {
-                    (half, half)
-                };
-                commands.push(old_cmd(
-                    cx0 + TEXT_PAD_PX,
-                    baseline,
-                    ellipsize(old, old_budget, size),
-                    Align::Left,
-                ));
-                commands.push(new_cmd(
-                    cx0 + cw - TEXT_PAD_PX,
-                    baseline,
-                    ellipsize(new, new_budget, size),
-                    Align::Right,
-                ));
-            }
-        }
+            GHOST_INS_COLOR,
+            false,
+            true,
+        );
+    }
+    if !old.is_empty() {
+        let y = if new.is_empty() {
+            first_baseline
+        } else {
+            first_baseline + line_h
+        };
+        line(y, ellipsize(old, avail, size), GHOST_DEL_COLOR, true, false);
     }
 }
 
@@ -724,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn ghost_pair_replaces_committed_text() {
+    fn ghost_stack_replaces_committed_text_new_over_old() {
         let mut sheet = Sheet::new("Sheet1");
         sheet.set_cell(CellRef::new(0, 0), num_cell(10.0));
         let mut wb = Workbook::default();
@@ -740,9 +685,22 @@ mod tests {
 
         let texts = text_cmds(&dl);
         assert_eq!(texts.len(), 2);
-        assert_eq!(texts[0], ("10", GHOST_DEL_COLOR, true, Align::Left));
-        assert_eq!(texts[1], ("42", GHOST_INS_COLOR, false, Align::Right));
-        assert_eq!(ghost_flags(&dl), vec![false, true]);
+        assert_eq!(texts[0], ("42", GHOST_INS_COLOR, false, Align::Left));
+        assert_eq!(texts[1], ("10", GHOST_DEL_COLOR, true, Align::Left));
+        assert_eq!(ghost_flags(&dl), vec![true, false]);
+
+        let lines: Vec<(f32, f32)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { y, font_size, .. } => Some((*y, *font_size)),
+                _ => None,
+            })
+            .collect();
+        let row_h = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+        assert!(lines[0].0 < lines[1].0);
+        assert!(lines[1].0 + lines[1].1 * DESCENT_RATIO <= row_h + 0.01);
+        assert_eq!((lines[0].1, lines[1].1), (FONT_SIZE_PT, FONT_SIZE_PT));
     }
 
     #[test]
@@ -785,16 +743,16 @@ mod tests {
 
         let texts = text_cmds(&dl);
         assert_eq!(texts.len(), 2);
-        assert!(texts[0].0.ends_with('…') && texts[0].2);
-        assert!(texts[1].0.ends_with('…') && !texts[1].2);
-        assert_eq!((texts[0].3, texts[1].3), (Align::Left, Align::Right));
+        assert!(texts[0].0.ends_with('…') && !texts[0].2);
+        assert!(texts[1].0.ends_with('…') && texts[1].2);
+        assert_eq!((texts[0].3, texts[1].3), (Align::Left, Align::Left));
     }
 
     #[test]
-    fn tall_cell_stacks_the_ghost_pair() {
+    fn short_rows_shrink_the_ghost_font_without_overlap() {
         let mut sheet = Sheet::new("Sheet1");
-        sheet.row_heights.insert(0, 34.0);
-        sheet.set_cell(CellRef::new(0, 0), text_cell("previous long value"));
+        sheet.row_heights.insert(0, 7.5);
+        sheet.set_cell(CellRef::new(0, 0), num_cell(10.0));
         let mut wb = Workbook::default();
         wb.sheets.push(sheet);
 
@@ -804,25 +762,24 @@ mod tests {
             width: 200.0,
             height: 80.0,
         };
-        let dl = build_display_list_with_ghosts(
-            &wb,
-            SheetId(0),
-            &vp,
-            &[ghost(0, 0, "previous long value", "replacement long value")],
-        );
+        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "10", "42")]);
 
-        let baselines: Vec<f32> = dl
+        let lines: Vec<(f32, f32)> = dl
             .commands
             .iter()
             .filter_map(|c| match c {
-                DrawCmd::Text { y, .. } => Some(*y),
+                DrawCmd::Text { y, font_size, .. } => Some((*y, *font_size)),
                 _ => None,
             })
             .collect();
-        assert_eq!(baselines.len(), 2);
-        assert!(baselines[1] > baselines[0]);
-        let texts = text_cmds(&dl);
-        assert_eq!((texts[0].3, texts[1].3), (Align::Left, Align::Left));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            (lines[0].1, lines[1].1),
+            (GHOST_MIN_FONT_PX, GHOST_MIN_FONT_PX)
+        );
+        assert!(
+            lines[1].0 - lines[0].0 >= GHOST_MIN_FONT_PX * (ASCENT_RATIO + DESCENT_RATIO) - 0.01
+        );
     }
 
     #[test]

@@ -439,8 +439,10 @@ function XlsxEditorContent({
     return () => observer.disconnect();
   }, []);
 
-  // re-read the pending proposal list from the handle. safe to call against an
-  // old core (the loader returns an empty list).
+  // re-read the pending proposal list and queue a repaint — ghosts paint into
+  // the engine frame, so every lifecycle change (propose/accept/reject) must
+  // republish it. safe to call against an old core (the loader returns an
+  // empty list).
   const refreshProposals = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) {
@@ -452,6 +454,7 @@ function XlsxEditorContent({
     } catch {
       setProposals([]);
     }
+    setRevision((r) => r + 1);
   }, []);
 
   // open the workbook when the file changes; dispose it on change/unmount and
@@ -838,8 +841,8 @@ function XlsxEditorContent({
     [applyResult, refreshProposals, focusContainer]
   );
 
-  // reject a proposal: drop it and its warning, then refresh so its decorations
-  // disappear (they are driven by the pending list, not the canvas).
+  // reject a proposal: drop it and its warning, then refresh so its border
+  // chrome disappears and the canvas repaints without its ghost.
   const rejectProposal = useCallback(
     (id: string) => {
       const handle = handleRef.current;
