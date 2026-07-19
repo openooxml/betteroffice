@@ -42,7 +42,8 @@ import type {
   WorkbookHandle,
 } from '@betteroffice/xlsx';
 import type { CollaborationReplica } from '@betteroffice/xlsx/collaboration';
-import { en } from './i18n';
+import type { Translations } from '@betteroffice/xlsx-i18n';
+import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalDecoration } from './proposals/ProposalDecoration';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { proposalColor } from './proposals/palette';
@@ -78,6 +79,7 @@ export interface XlsxEditorProps {
   onSave?: (bytes: Uint8Array) => void;
   /** Open a network-ready Yrs replica and repaint when peer updates arrive. */
   collaboration?: XlsxEditorCollaborationOptions;
+  i18n?: Translations;
   /**
    * Called when a workbook opens, with a handle to stage agent proposals and a
    * way to refresh the panel afterward. Enables demo/host agents without
@@ -103,7 +105,7 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 // a placeholder grid frame so the shell paints something real when no file is
 // open. real files render through the wasm display list instead.
-function buildDemoDisplayList(width: number, height: number): DisplayList {
+function buildDemoDisplayList(width: number, height: number, cellText: string): DisplayList {
   const commands: DrawCmd[] = [
     { op: 'fillRect', x: 0, y: 0, w: width, h: height, color: '#ffffff' },
   ];
@@ -137,7 +139,7 @@ function buildDemoDisplayList(width: number, height: number): DisplayList {
     op: 'text',
     x: COL_W + 8,
     y: ROW_H + 18,
-    text: 'OpenOOXML xlsx',
+    text: cellText,
     fontSize: 14,
     color: '#202020',
     clip: { x: COL_W, y: ROW_H, w: COL_W * 3, h: ROW_H },
@@ -363,13 +365,25 @@ function XlsxToolbarIcon({ name }: { name: XlsxToolbarIconName }) {
  * The xlsx editor React component.
  */
 export function XlsxEditor({
+  i18n,
+  ...props
+}: XlsxEditorProps) {
+  return (
+    <LocaleProvider i18n={i18n}>
+      <XlsxEditorContent {...props} />
+    </LocaleProvider>
+  );
+}
+
+function XlsxEditorContent({
   file,
   fileName,
   onSave,
   collaboration,
   onReady,
   className,
-}: XlsxEditorProps) {
+}: Omit<XlsxEditorProps, 'i18n'>) {
+  const { t } = useTranslation();
   const collaborationEnabled = collaboration !== undefined;
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -567,12 +581,12 @@ export function XlsxEditor({
         return;
       }
     } else {
-      dl = buildDemoDisplayList(w, h);
+      dl = buildDemoDisplayList(w, h, t('editor.demoCellText'));
     }
     paintDisplayList(ctx, dl, dpr);
     frameRef.current = dl;
     setFrame(dl);
-  }, []);
+  }, [t]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
   // workbook, active sheet, or a mutation (revision) changes the pixels.
@@ -628,8 +642,16 @@ export function XlsxEditor({
   // the visible window is small, so a rebuild per paint frame is cheap enough.
   const a11yGrid = useMemo(() => {
     if (!frame || !sheetInfo) return null;
-    return buildA11yGrid(frame, selection, sheetInfo.sheetNames[activeSheet] ?? '', en.a11y);
-  }, [frame, selection, sheetInfo, activeSheet]);
+    return buildA11yGrid(frame, selection, sheetInfo.sheetNames[activeSheet] ?? '', {
+      gridLabel: t('a11y.gridLabel'),
+      rowHeaderLabel: t('a11y.rowHeaderLabel'),
+      columnHeaderLabel: t('a11y.columnHeaderLabel'),
+      cellLabel: t('a11y.cellLabel'),
+      cellLabelSelected: t('a11y.cellLabelSelected'),
+      emptyCellLabel: t('a11y.emptyCellLabel'),
+      emptyCellLabelSelected: t('a11y.emptyCellLabelSelected'),
+    });
+  }, [frame, selection, sheetInfo, activeSheet, t]);
 
   // preventScroll everywhere: the sticky overlay host sits below the full-height
   // canvas in flow, so a plain focus() scrolls the grid to bring it into view.
@@ -1022,7 +1044,7 @@ export function XlsxEditor({
     <div
       className={className}
       role="application"
-      aria-label={en.editor.appLabel}
+      aria-label={t('editor.appLabel')}
       style={{
         position: 'relative',
         display: 'flex',
@@ -1040,19 +1062,23 @@ export function XlsxEditor({
         data-testid="xlsx-toolbar"
         style={xlsxToolbarStyles.shell}
       >
-        <div style={xlsxToolbarStyles.rail} role="group" aria-label="Spreadsheet actions">
+        <div
+          style={xlsxToolbarStyles.rail}
+          role="group"
+          aria-label={t('toolbar.actionsLabel')}
+        >
           <div
             style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
             role="group"
-            aria-label="File actions"
+            aria-label={t('toolbar.fileActionsLabel')}
           >
             <button
               type="button"
               data-testid="xlsx-save"
               onClick={save}
               disabled={!sheetInfo}
-              aria-label={en.toolbar.save}
-              title={en.toolbar.save}
+              aria-label={t('toolbar.save')}
+              title={t('toolbar.save')}
               style={xlsxToolbarButton(Boolean(sheetInfo))}
             >
               <XlsxToolbarIcon name="save" />
@@ -1062,21 +1088,25 @@ export function XlsxEditor({
               data-testid="xlsx-export-png"
               onClick={exportPng}
               disabled={!sheetInfo || !pngExportAvailable}
-              aria-label={en.toolbar.exportPng}
-              title={en.toolbar.exportPng}
+              aria-label={t('toolbar.exportPng')}
+              title={t('toolbar.exportPng')}
               style={xlsxToolbarButton(Boolean(sheetInfo && pngExportAvailable))}
             >
               <XlsxToolbarIcon name="image" />
             </button>
           </div>
-          <div style={xlsxToolbarStyles.group} role="group" aria-label="History">
+          <div
+            style={xlsxToolbarStyles.group}
+            role="group"
+            aria-label={t('toolbar.historyLabel')}
+          >
             <button
               type="button"
               data-testid="xlsx-undo"
               onClick={undo}
               disabled={!sheetInfo || collaborationEnabled}
-              aria-label={en.toolbar.undo}
-              title={en.toolbar.undo}
+              aria-label={t('toolbar.undo')}
+              title={t('toolbar.undo')}
               style={xlsxToolbarButton(Boolean(sheetInfo && !collaborationEnabled))}
             >
               <XlsxToolbarIcon name="undo" />
@@ -1086,20 +1116,24 @@ export function XlsxEditor({
               data-testid="xlsx-redo"
               onClick={redo}
               disabled={!sheetInfo || collaborationEnabled}
-              aria-label={en.toolbar.redo}
-              title={en.toolbar.redo}
+              aria-label={t('toolbar.redo')}
+              title={t('toolbar.redo')}
               style={xlsxToolbarButton(Boolean(sheetInfo && !collaborationEnabled))}
             >
               <XlsxToolbarIcon name="redo" />
             </button>
           </div>
-          <div style={xlsxToolbarStyles.formulaGroup} role="group" aria-label="Formula bar">
+          <div
+            style={xlsxToolbarStyles.formulaGroup}
+            role="group"
+            aria-label={t('toolbar.formulaBarLabel')}
+          >
             <input
               data-testid="xlsx-name-box"
               readOnly
               value={focusedCell?.a1 ?? ''}
-              placeholder={en.toolbar.nameBoxPlaceholder}
-              aria-label={en.toolbar.nameBoxPlaceholder}
+              placeholder={t('toolbar.nameBoxPlaceholder')}
+              aria-label={t('toolbar.nameBoxPlaceholder')}
               style={xlsxToolbarStyles.nameBox}
             />
             <span style={xlsxToolbarStyles.formulaMark} aria-hidden="true">
@@ -1108,8 +1142,8 @@ export function XlsxEditor({
             <input
               data-testid="xlsx-formula-input"
               value={formulaValue}
-              placeholder={en.toolbar.formulaPlaceholder}
-              aria-label={en.toolbar.formulaPlaceholder}
+              placeholder={t('toolbar.formulaPlaceholder')}
+              aria-label={t('toolbar.formulaPlaceholder')}
               disabled={!sheetInfo}
               onChange={(e) => setFormulaDraft(e.target.value)}
               onKeyDown={(e) => {
@@ -1135,8 +1169,8 @@ export function XlsxEditor({
                 onClick={() => setProposalsPanelOpen((open) => !open)}
                 disabled={!sheetInfo}
                 aria-expanded={proposalsPanelOpen}
-                aria-label={en.proposals.panelLabel}
-                title={en.proposals.panelLabel}
+                aria-label={t('proposals.panelLabel')}
+                title={t('proposals.panelLabel')}
                 style={{
                   ...xlsxToolbarButton(Boolean(sheetInfo), proposalsPanelOpen),
                   width: proposals.length > 0 ? 42 : 28,
@@ -1340,7 +1374,7 @@ export function XlsxEditor({
             color: '#b00020',
           }}
         >
-          {en.editor.openError}: {error}
+          {t('editor.openError')}: {error}
         </div>
       )}
 
@@ -1348,7 +1382,7 @@ export function XlsxEditor({
         <div
           data-testid="xlsx-sheet-tabs"
           role="tablist"
-          aria-label={en.editor.sheetTabsLabel}
+          aria-label={t('editor.sheetTabsLabel')}
           style={{
             display: 'flex',
             gap: 2,

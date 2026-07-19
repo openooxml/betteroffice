@@ -1,0 +1,40 @@
+{
+  "_lang": "en",
+  "toolbar": {
+    "actionsLabel": "Spreadsheet actions",
+    "fileActionsLabel": "File actions",
+    "historyLabel": "History",
+    "formulaBarLabel": "Formula bar",
+    "nameBoxPlaceholder": "Name box",
+    "formulaPlaceholder": "Enter a value or formula",
+    "save": "Save",
+    "exportPng": "Export PNG",
+    "undo": "Undo",
+    "redo": "Redo"
+  },
+  "editor": {
+    "appLabel": "Spreadsheet editor",
+    "demoCellText": "OpenOOXML xlsx",
+    "openError": "Couldn't open this workbook",
+    "sheetTabsLabel": "Sheets"
+  },
+  "proposals": {
+    "panelLabel": "Agent proposals",
+    "empty": "No pending proposals",
+    "cellCount": "{count, plural, one {# cell} other {# cells}}",
+    "changeArrow": "→",
+    "accept": "Accept",
+    "reject": "Reject",
+    "forceApply": "Force apply",
+    "staleWarning": "Cells changed since proposed: {cells}"
+  },
+  "a11y": {
+    "gridLabel": "Spreadsheet grid",
+    "rowHeaderLabel": "Row {row}",
+    "columnHeaderLabel": "Column {column}",
+    "cellLabel": "{address}, {value}",
+    "cellLabelSelected": "{address}, {value}, selected",
+    "emptyCellLabel": "{address}, empty",
+    "emptyCellLabelSelected": "{address}, empty, selected"
+  }
+}

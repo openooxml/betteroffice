@@ -1,0 +1,86 @@
+{
+  "name": "@betteroffice/xlsx-i18n",
+  "version": "0.0.5",
+  "description": "Shared UI locale strings and types for the @betteroffice/xlsx React editor.",
+  "sideEffects": false,
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./en": {
+      "types": "./dist/en.d.mts",
+      "import": "./dist/en.mjs"
+    },
+    "./de": {
+      "types": "./dist/de.d.mts",
+      "import": "./dist/de.mjs"
+    },
+    "./fr": {
+      "types": "./dist/fr.d.mts",
+      "import": "./dist/fr.mjs"
+    },
+    "./he": {
+      "types": "./dist/he.d.mts",
+      "import": "./dist/he.mjs"
+    },
+    "./hi": {
+      "types": "./dist/hi.d.mts",
+      "import": "./dist/hi.mjs"
+    },
+    "./id": {
+      "types": "./dist/id.d.mts",
+      "import": "./dist/id.mjs"
+    },
+    "./pl": {
+      "types": "./dist/pl.d.mts",
+      "import": "./dist/pl.mjs"
+    },
+    "./pt-BR": {
+      "types": "./dist/pt-BR.d.mts",
+      "import": "./dist/pt-BR.mjs"
+    },
+    "./tr": {
+      "types": "./dist/tr.d.mts",
+      "import": "./dist/tr.mjs"
+    },
+    "./zh-CN": {
+      "types": "./dist/zh-CN.d.mts",
+      "import": "./dist/zh-CN.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.1",
+    "typescript": "^6.0.3"
+  },
+  "keywords": [
+    "xlsx",
+    "editor",
+    "i18n",
+    "locales",
+    "translations"
+  ],
+  "author": "OpenOOXML",
+  "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/xlsx-i18n"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

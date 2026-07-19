@@ -1,0 +1,40 @@
+{
+  "_lang": "de",
+  "toolbar": {
+    "actionsLabel": null,
+    "fileActionsLabel": null,
+    "historyLabel": null,
+    "formulaBarLabel": null,
+    "nameBoxPlaceholder": null,
+    "formulaPlaceholder": null,
+    "save": null,
+    "exportPng": null,
+    "undo": null,
+    "redo": null
+  },
+  "editor": {
+    "appLabel": null,
+    "demoCellText": null,
+    "openError": null,
+    "sheetTabsLabel": null
+  },
+  "proposals": {
+    "panelLabel": null,
+    "empty": null,
+    "cellCount": null,
+    "changeArrow": null,
+    "accept": null,
+    "reject": null,
+    "forceApply": null,
+    "staleWarning": null
+  },
+  "a11y": {
+    "gridLabel": null,
+    "rowHeaderLabel": null,
+    "columnHeaderLabel": null,
+    "cellLabel": null,
+    "cellLabelSelected": null,
+    "emptyCellLabel": null,
+    "emptyCellLabelSelected": null
+  }
+}

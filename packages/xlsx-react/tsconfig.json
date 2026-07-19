@@ -21,6 +21,7 @@
     "paths": {
       "@/*": ["./src/*"],
       "@betteroffice/xlsx": ["../xlsx/src/index.ts"],
+      "@betteroffice/xlsx-i18n": ["../xlsx-i18n/src/index.ts"],
       "@betteroffice/xlsx/headless": ["../xlsx/src/headless.ts"],
       "@betteroffice/xlsx/*": ["../xlsx/src/*"]
     }

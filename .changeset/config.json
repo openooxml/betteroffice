@@ -9,7 +9,8 @@
     ],
     [
       "@betteroffice/xlsx",
-      "@betteroffice/xlsx-react"
+      "@betteroffice/xlsx-react",
+      "@betteroffice/xlsx-i18n"
     ],
     [
       "@betteroffice/docx",

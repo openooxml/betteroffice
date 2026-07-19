@@ -226,11 +226,20 @@
         "typescript": "^6.0.3",
       },
     },
+    "packages/xlsx-i18n": {
+      "name": "@betteroffice/xlsx-i18n",
+      "version": "0.0.5",
+      "devDependencies": {
+        "tsup": "^8.0.1",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/xlsx-react": {
       "name": "@betteroffice/xlsx-react",
       "version": "0.0.5",
       "dependencies": {
         "@betteroffice/xlsx": "workspace:*",
+        "@betteroffice/xlsx-i18n": "workspace:*",
       },
       "devDependencies": {
         "@types/react": "^19.2.17",
@@ -448,6 +457,8 @@
     "@betteroffice/web": ["@betteroffice/web@workspace:apps/web"],
 
     "@betteroffice/xlsx": ["@betteroffice/xlsx@workspace:packages/xlsx"],
+
+    "@betteroffice/xlsx-i18n": ["@betteroffice/xlsx-i18n@workspace:packages/xlsx-i18n"],
 
     "@betteroffice/xlsx-react": ["@betteroffice/xlsx-react@workspace:packages/xlsx-react"],
 
