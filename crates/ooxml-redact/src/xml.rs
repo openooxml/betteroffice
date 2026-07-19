@@ -133,6 +133,9 @@ fn rewrite_start(
             attribute_local(key).eq_ignore_ascii_case("TargetMode")
                 && value.eq_ignore_ascii_case("External")
         });
+    if format == Format::Xlsx && element == "c" {
+        *cell_type = None;
+    }
     let mut output = start.into_owned();
     output.clear_attributes();
     for (key, value) in attributes {

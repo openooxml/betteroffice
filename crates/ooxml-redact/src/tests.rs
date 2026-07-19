@@ -364,3 +364,30 @@ fn pptx_fixture() -> Vec<u8> {
         ("ppt/media/image1.png", placeholder_png()),
     ])
 }
+
+#[test]
+fn empty_shared_string_cell_does_not_leak_next_value() {
+    // Greptile #68: a self-closing <c t="s"/> has no End event, so its cell
+    // type must not bleed into the following untyped numeric cell's value.
+    let sheet = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        r#"<sheetData><row r="1">"#,
+        r#"<c r="A1" t="s"/>"#,
+        r#"<c r="B1"><v>424242</v></c>"#,
+        r#"</row></sheetData></worksheet>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/worksheets/sheet1.xml",
+        sheet.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("424242"),
+        "numeric cell value leaked: {text}"
+    );
+}
