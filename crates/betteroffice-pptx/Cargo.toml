@@ -1,0 +1,18 @@
+[package]
+name = "betteroffice-pptx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+# Publishing is gated on the lower-level PPTX crates being published.
+publish = false
+description = "Typed native Rust facade for parsing, editing, rendering, and saving PPTX presentations."
+readme = "README.md"
+keywords = ["pptx", "powerpoint", "ooxml", "presentationml"]
+categories = ["parser-implementations", "rendering"]
+
+[dependencies]
+pptx-edit = { path = "../pptx-edit" }
+pptx-parse = { path = "../pptx-parse" }
+pptx-render = { path = "../pptx-render" }

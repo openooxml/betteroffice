@@ -74,6 +74,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-pptx"
+version = "0.0.1"
+dependencies = [
+ "pptx-edit",
+ "pptx-parse",
+ "pptx-render",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.0.1"
 dependencies = [
