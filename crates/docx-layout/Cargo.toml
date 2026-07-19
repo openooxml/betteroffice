@@ -1,12 +1,17 @@
 [package]
-name = "docx-layout"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-docx-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "The pure layout-core (pagination) in Rust, compiled to WASM. A twin of the TypeScript layoutCore behind the same MeasuredBlock[] -> Layout contract; ports incrementally, one block kind at a time, gated by the golden corpus."
+keywords = ["docx", "word", "ooxml", "layout"]
+categories = ["rendering", "text-processing"]
 
 [lib]
+name = "docx_layout"
 crate-type = ["cdylib", "rlib"]
 
 # wasm-pack runs a wasm-opt post-pass after rustc/LLVM codegen. Pin it to -O3
@@ -18,8 +23,8 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ['-O3']
 
 [dependencies]
-ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
-ooxml-text = { path = "../ooxml-text" }
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,4 +32,4 @@ serde_json = "1"
 [dev-dependencies]
 # the glyph-run emission tests build an explicit FontStore (register the
 # Liberation fixture) and drive build_display_list_json_with_fonts directly
-ooxml-text = { path = "../ooxml-text" }
+ooxml-text.workspace = true

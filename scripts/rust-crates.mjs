@@ -12,7 +12,17 @@ export const RUST_CRATES = [
   { name: 'betteroffice-xlsx-render', dependency: 'xlsx-render' },
   { name: 'betteroffice-xlsx-ops', dependency: 'xlsx-ops' },
   { name: 'betteroffice-xlsx-raster', dependency: 'xlsx-raster' },
-  { name: 'betteroffice-xlsx', dependency: 'betteroffice-xlsx' }
+  { name: 'betteroffice-xlsx', dependency: 'betteroffice-xlsx' },
+  { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
+  { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
+  { name: 'betteroffice-docx-parse', dependency: 'docx-parse' },
+  { name: 'betteroffice-docx-layout', dependency: 'docx-layout' },
+  { name: 'betteroffice-docx-edit', dependency: 'docx-edit' },
+  { name: 'betteroffice-docx', dependency: 'betteroffice-docx' },
+  { name: 'betteroffice-pptx-parse', dependency: 'pptx-parse' },
+  { name: 'betteroffice-pptx-edit', dependency: 'pptx-edit' },
+  { name: 'betteroffice-pptx-render', dependency: 'pptx-render' },
+  { name: 'betteroffice-pptx', dependency: 'betteroffice-pptx' }
 ];
 
 export function rustReleaseVersion() {

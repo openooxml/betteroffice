@@ -1,12 +1,17 @@
 [package]
-name = "ooxml-text"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-ooxml-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Shared OOXML text shaping, measurement, line breaking, and bidirectional text support."
+keywords = ["ooxml", "text", "typography", "fonts"]
+categories = ["text-processing", "rendering"]
 
 [lib]
+name = "ooxml_text"
 crate-type = ["rlib"]
 
 [dependencies]

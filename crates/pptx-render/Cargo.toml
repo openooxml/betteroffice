@@ -1,16 +1,23 @@
 [package]
-name = "pptx-render"
-version = "0.0.0"
-edition = "2024"
-license = "Apache-2.0"
-publish = false
+name = "betteroffice-pptx-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
 description = "Rust-owned PPTX slide layout and display-list compiler."
+keywords = ["pptx", "powerpoint", "ooxml", "rendering"]
+categories = ["rendering", "graphics"]
+
+[lib]
+name = "pptx_render"
 
 [dependencies]
-ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
-ooxml-text = { path = "../ooxml-text", version = "=0.0.0" }
-pptx-edit = { path = "../pptx-edit", version = "=0.0.0" }
-pptx-parse = { path = "../pptx-parse", version = "=0.0.0" }
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true
+pptx-edit.workspace = true
+pptx-parse.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
