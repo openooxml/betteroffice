@@ -4,6 +4,10 @@
   "commit": false,
   "fixed": [
     [
+      "@betteroffice/pptx",
+      "@betteroffice/pptx-react"
+    ],
+    [
       "@betteroffice/xlsx",
       "@betteroffice/xlsx-react"
     ],

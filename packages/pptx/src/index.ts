@@ -1,0 +1,63 @@
+export { paintSlide, sizeCanvasForSlide } from './render/canvas';
+export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export { CollaborationError, CollaborationProvider } from './collaboration';
+export type {
+  CollaborationErrorCode,
+  CollaborationErrorListener,
+  CollaborationProviderOptions,
+  CollaborationReplica,
+  CollaborationStatus,
+  CollaborationStatusChange,
+  CollaborationStatusListener,
+  CollaborationTransport,
+  CollaborationTransportEvent,
+  CollaborationUpdateOrigin,
+} from './collaboration';
+export {
+  initWasm,
+  inspectPresentation,
+  isWasmAvailable,
+  openPresentation,
+  wasmVersion,
+} from './wasm/loader';
+export type {
+  OpenPresentationOptions,
+  PresentationHandle,
+  WasmInitInput,
+} from './wasm/loader';
+export type {
+  CaretStop,
+  DeckSnapshot,
+  GeometryPathCommand,
+  HistoryResult,
+  HitTestResult,
+  ImagePrimitive,
+  Paint,
+  ParagraphSnapshot,
+  PlaceholderPrimitive,
+  PositionedGlyph,
+  PositionedTextLine,
+  PositionedTextRun,
+  PptxFontFace,
+  PrimitiveTransform,
+  ShapeDraft,
+  ShapeKind,
+  ShapePrimitive,
+  ShapeReceipt,
+  ShapeRect,
+  ShapeSnapshot,
+  SlideDisplayList,
+  SlidePrimitive,
+  SlideReceipt,
+  SlideSnapshot,
+  StorySnapshot,
+  Stroke,
+  TextBoxPrimitive,
+  TextReceipt,
+  TextRunSnapshot,
+  TextStyle,
+  TextStylePatch,
+  TextStyleSnapshot,
+  TransformReceipt,
+  UpdateEvent,
+} from './types';

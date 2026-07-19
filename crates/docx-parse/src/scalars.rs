@@ -4,43 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::xml::XmlElement;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ColorValue {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rgb: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub theme_color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub theme_tint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub theme_shade: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto: Option<bool>,
-}
-
-pub fn parse_color_value(
-    rgb: Option<&str>,
-    theme_color: Option<&str>,
-    theme_tint: Option<&str>,
-    theme_shade: Option<&str>,
-) -> ColorValue {
-    ColorValue {
-        rgb: rgb
-            .filter(|value| !value.is_empty() && *value != "auto")
-            .map(str::to_owned),
-        auto: (rgb == Some("auto")).then_some(true),
-        theme_color: theme_color
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
-        theme_tint: theme_tint
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
-        theme_shade: theme_shade
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
-    }
-}
+pub use ooxml_drawingml::{ColorValue, parse_color_value};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

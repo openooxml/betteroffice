@@ -9,6 +9,7 @@ target/
 .env*
 *.tsbuildinfo
 packages/xlsx/src/wasm/generated/*.wasm
+packages/pptx/src/wasm/generated/*.wasm
 next-env.d.ts
 cloudflare-env.d.ts
 .DS_Store

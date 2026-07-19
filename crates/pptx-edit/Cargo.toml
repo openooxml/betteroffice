@@ -1,0 +1,24 @@
+[package]
+name = "pptx-edit"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Collaborative yrs-backed editing core for PPTX decks."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+wasm = ["dep:js-sys", "dep:wasm-bindgen"]
+
+[dependencies]
+js-sys = { version = "0.3", optional = true }
+ooxml-drawingml = { path = "../ooxml-drawingml", version = "=0.0.0" }
+pptx-parse = { path = "../pptx-parse", version = "=0.0.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+wasm-bindgen = { version = "0.2", optional = true }
+yrs = "0.27.3"
