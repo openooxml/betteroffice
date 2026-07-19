@@ -1795,8 +1795,11 @@ impl EngineSession {
         let binary_frame_epoch = display.binary_frame_epoch;
         let full = expected_frame_epoch != binary_frame_epoch || binary_frame_epoch == 0;
         let layout_epoch = self.pagination.borrow().layout_epoch;
-        let previous_pages = display.pages.clone();
         let mut next_page_id = display.next_page_id;
+        // Split borrows: the encoder reads the retained list and the previous
+        // snapshots in place — no per-frame deep clone of the snapshot set.
+        let display = &mut *display;
+        let previous_pages = &display.pages;
         let list = display
             .list
             .as_ref()
@@ -1811,13 +1814,13 @@ impl EngineSession {
             if incremental_build && !full && previous_pages.len() == list.pages.len() {
                 encode_frame_delta_incremental(
                     list,
-                    &previous_pages,
+                    previous_pages,
                     epochs,
                     &mut next_page_id,
                     rebuilt_page_start..rebuilt_page_end,
                 )?
             } else {
-                encode_frame_delta(list, &previous_pages, epochs, full, &mut next_page_id)?
+                encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?
             };
         display.pages = pages;
         display.next_page_id = next_page_id;
