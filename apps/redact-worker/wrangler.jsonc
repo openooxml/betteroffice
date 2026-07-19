@@ -7,9 +7,10 @@
   "r2_buckets": [
     {
       "binding": "REDACTED_BUCKET",
-      "bucket_name": "replace-with-redacted-bucket"
+      "bucket_name": "betteroffice-repros"
     }
   ],
+  "routes": [{ "pattern": "redact.betteroffice.dev", "custom_domain": true }],
   "observability": {
     "enabled": true
   }
