@@ -108,11 +108,13 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.restore();
 }
 
-// css font shorthand: `[italic] [bold] <size>px <family>`.
+// css font shorthand: `[italic] [bold] <size>px <family>`. Workbook fonts are
+// often not installed on the host (Calibri on macOS); without a fallback the
+// browser's unknown-family default is serif.
 function fontString(cmd: TextCmd): string {
   const style = cmd.italic ? 'italic ' : '';
   const weight = cmd.bold ? 'bold ' : '';
-  const family = cmd.fontFamily ?? 'sans-serif';
+  const family = cmd.fontFamily ? `"${cmd.fontFamily}", sans-serif` : 'sans-serif';
   return `${style}${weight}${cmd.fontSize}px ${family}`;
 }
 
