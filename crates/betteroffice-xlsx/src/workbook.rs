@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::{Arc, Mutex, Weak};
 
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
@@ -13,9 +15,13 @@ use xlsx_render::{DisplayList, GridGeometry, Viewport, build_display_list, displ
 #[cfg(feature = "raster")]
 use xlsx_render::{scaled, viewport_for_range, viewport_for_used_range};
 
+use crate::authority::{
+    AuthorityError, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate, SyncOrigin,
+    WorkbookAuthority, WorkbookStructure, is_structural_op,
+};
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, MutationResult,
-    ProposalAcceptance, ProposalRequest, Result, SheetInfo,
+    ProposalAcceptance, ProposalRequest, Result, SheetInfo, UpdateEvent, UpdateOrigin,
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
@@ -23,29 +29,76 @@ use crate::{RenderOptions, RenderedPng};
 const MAX_RANGE_CELLS: u64 = 100_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
+/// Maximum accepted encoded update or state-vector size: 64 MiB.
+pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
+/// Largest browser-safe collaboration client identifier.
+pub const MAX_COLLABORATION_CLIENT_ID: u64 = (1_u64 << 53) - 1;
+/// Maximum client entries accepted in a collaboration state vector.
+pub const MAX_COLLABORATION_STATE_VECTOR_ENTRIES: u32 = MAX_STATE_VECTOR_ENTRIES;
+const MAX_PENDING_COLLABORATION_UPDATES: usize = 4_096;
 pub const MAX_DISPLAY_CELLS: u64 = 250_000;
 pub const MAX_PIXMAP_DIM: u32 = 16_384;
 pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
 
+#[must_use = "dropping the subscription stops update delivery"]
+pub struct UpdateSubscription {
+    observers: Weak<Mutex<UpdateObservers>>,
+    id: u64,
+}
+
+impl Drop for UpdateSubscription {
+    fn drop(&mut self) {
+        if let Some(observers) = self.observers.upgrade() {
+            observers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .listeners
+                .remove(&self.id);
+        }
+    }
+}
+
+type UpdateListener = dyn Fn(UpdateEvent) + Send + Sync + 'static;
+
+#[derive(Default)]
+struct UpdateObservers {
+    listeners: BTreeMap<u64, Arc<UpdateListener>>,
+    next_id: u64,
+}
+
+enum WorkbookMode {
+    Standalone,
+    Collaborative { structure: WorkbookStructure },
+}
+
 pub struct Workbook {
+    authority: WorkbookAuthority,
+    mode: WorkbookMode,
+    pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
+    update_observers: Arc<Mutex<UpdateObservers>>,
 }
 
 impl Workbook {
     pub fn open(bytes: &[u8]) -> Result<Self> {
-        Self::open_internal(bytes, true)
+        Self::open_internal(bytes, true, None)
     }
 
     pub fn open_for_read(bytes: &[u8]) -> Result<Self> {
-        Self::open_internal(bytes, false)
+        Self::open_internal(bytes, false, None)
     }
 
-    fn open_internal(bytes: &[u8], build_graph: bool) -> Result<Self> {
+    /// Opens a replica. `client_id` must be unique among connected peers.
+    pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
+        Self::open_internal(bytes, true, Some(client_id))
+    }
+
+    fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
         let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
         let mut names = HashSet::with_capacity(parts.len());
         for (name, _) in &parts {
@@ -54,33 +107,275 @@ impl Workbook {
             }
         }
         let model = xlsx_parse::parse_workbook(&parts)?;
-        Self::from_parts(model, build_graph)
+        Self::from_parts(model, build_graph, client_id)
     }
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
-        let mut workbook = Self::open_internal(bytes, false)?;
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.recalculate_all(options);
+        Ok(workbook)
+    }
+
+    /// Opens and recalculates a replica with a peer-unique client ID.
+    pub fn open_collaborative_recalculated(
+        bytes: &[u8],
+        client_id: u64,
+        options: CalculationOptions,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, Some(client_id))?;
         workbook.recalculate_all(options);
         Ok(workbook)
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
-        Self::from_parts(model, true)
+        Self::from_parts(model, true, None)
     }
 
-    fn from_parts(model: WorkbookModel, build_graph: bool) -> Result<Self> {
+    /// Creates a replica from a model with a peer-unique client ID.
+    pub fn from_model_collaborative(model: WorkbookModel, client_id: u64) -> Result<Self> {
+        Self::from_parts(model, true, Some(client_id))
+    }
+
+    fn from_parts(model: WorkbookModel, build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        validate_model(&model)?;
+        if let Some(client_id) = client_id {
+            validate_collaboration_client_id(client_id)?;
+        }
+        let authority = match client_id {
+            Some(client_id) => WorkbookAuthority::from_model_with_client_id(&model, client_id),
+            None => WorkbookAuthority::from_model(&model),
+        }
+        .map_err(authority_error)?;
+        if client_id.is_some() {
+            validate_collaboration_size(&authority.encode_state_as_update_v1())?;
+            validate_collaboration_state_entries(authority.state_vector_entries())?;
+        }
+        let model = authority.materialize().map_err(authority_error)?;
         validate_model(&model)?;
         let graph = build_graph.then(|| DepGraph::build(&model));
+        let mode = match client_id {
+            Some(_) => WorkbookMode::Collaborative {
+                structure: authority.structure().map_err(authority_error)?,
+            },
+            None => WorkbookMode::Standalone,
+        };
         Ok(Self {
+            authority,
+            mode,
+            pending_remote_updates: Vec::new(),
             model,
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
             graph,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
+            update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
+        })
+    }
+
+    pub fn client_id(&self) -> u64 {
+        self.authority.client_id()
+    }
+
+    pub fn is_collaborative(&self) -> bool {
+        matches!(self.mode, WorkbookMode::Collaborative { .. })
+    }
+
+    pub fn encode_state_vector_v1(&self) -> Vec<u8> {
+        self.authority.encode_state_vector_v1()
+    }
+
+    pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
+        self.authority.encode_state_as_update_v1()
+    }
+
+    pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>> {
+        validate_collaboration_size(remote_state_vector)?;
+        let update = self
+            .authority
+            .encode_diff_v1(remote_state_vector)
+            .map_err(authority_error)?;
+        validate_collaboration_size(&update)?;
+        Ok(update)
+    }
+
+    pub fn apply_update_v1(
+        &mut self,
+        update: &[u8],
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let structure = match &self.mode {
+            WorkbookMode::Collaborative { structure } => structure.clone(),
+            WorkbookMode::Standalone => return Err(Error::NotCollaborative),
+        };
+        validate_collaboration_size(update)?;
+        if let Some(index) = self
+            .pending_remote_updates
+            .iter()
+            .position(|pending| pending == update)
+        {
+            self.pending_remote_updates.remove(index);
+        }
+        let before = self.model.clone();
+        let staged = self.stage_remote_updates(&[update])?;
+        if staged.structure != structure {
+            return Err(Error::CollaborativeStructureChanged);
+        }
+        if staged.pending {
+            self.validate_pending_remote_update(update)?;
+            let mut applied = if staged.effective {
+                self.apply_staged_remote_update(staged, options)?.applied
+            } else {
+                false
+            };
+            self.pending_remote_updates.push(update.to_vec());
+            applied |= self.resolve_pending_remote_updates(&structure, options)?;
+            return Ok(self.remote_mutation_result(&before, applied));
+        }
+        let mut applied = self.apply_staged_remote_update(staged, options)?.applied;
+        applied |= self.resolve_pending_remote_updates(&structure, options)?;
+        Ok(self.remote_mutation_result(&before, applied))
+    }
+
+    fn stage_remote_updates(&self, updates: &[&[u8]]) -> Result<StagedUpdate> {
+        let staged = self
+            .authority
+            .stage_updates_v1(updates)
+            .map_err(authority_error)?;
+        validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
+        validate_model(&staged.model)
+            .map_err(|error| Error::CollaborativeState(error.to_string()))?;
+        Ok(staged)
+    }
+
+    fn resolve_pending_remote_updates(
+        &mut self,
+        structure: &WorkbookStructure,
+        options: CalculationOptions,
+    ) -> Result<bool> {
+        let mut applied = false;
+        let mut index = 0;
+        while index < self.pending_remote_updates.len() {
+            let update = self.pending_remote_updates[index].clone();
+            match self.stage_remote_updates(&[&update]) {
+                Ok(staged) if &staged.structure != structure => {
+                    self.pending_remote_updates.remove(index);
+                }
+                Ok(staged) if staged.pending => {
+                    if staged.effective {
+                        applied |= self.apply_staged_remote_update(staged, options)?.applied;
+                        index = 0;
+                    } else {
+                        index += 1;
+                    }
+                }
+                Ok(staged) => {
+                    self.pending_remote_updates.remove(index);
+                    applied |= self.apply_staged_remote_update(staged, options)?.applied;
+                    index = 0;
+                }
+                Err(_) => {
+                    self.pending_remote_updates.remove(index);
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    fn validate_pending_remote_update(&self, update: &[u8]) -> Result<()> {
+        let updates = self.pending_remote_updates.len() + 1;
+        if updates > MAX_PENDING_COLLABORATION_UPDATES {
+            return Err(Error::CollaborationPendingUpdatesTooMany {
+                updates,
+                max: MAX_PENDING_COLLABORATION_UPDATES,
+            });
+        }
+        let bytes = self
+            .pending_remote_updates
+            .iter()
+            .try_fold(update.len(), |total, pending| {
+                total.checked_add(pending.len())
+            })
+            .unwrap_or(usize::MAX);
+        if bytes > MAX_COLLABORATION_BYTES {
+            return Err(Error::CollaborationDataTooLarge {
+                bytes,
+                max: MAX_COLLABORATION_BYTES,
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_staged_remote_update(
+        &mut self,
+        staged: StagedUpdate,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        if !staged.effective {
+            return Ok(MutationResult::default());
+        }
+
+        let commit_update = staged.commit_update;
+        let mut model = staged.model;
+        let update = staged.update;
+        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let mut calculation = calculation_result(&recalc);
+        calculation.changed = changed_cells_between(&self.model, &model);
+        self.authority
+            .apply_update_v1(&commit_update)
+            .map_err(authority_error)?;
+        self.model = model;
+        self.graph = Some(graph);
+        self.last_calculation = calculation.clone();
+        self.undo.clear();
+        self.authority.clear_history();
+        self.proposals.clear();
+        self.emit_update(UpdateEvent {
+            update,
+            origin: UpdateOrigin::Remote,
+        });
+        Ok(MutationResult {
+            applied: true,
+            changed: calculation.changed,
+            cycle_cells: calculation.cycle_cells,
+            limited_cells: calculation.limited_cells,
+        })
+    }
+
+    fn remote_mutation_result(&self, before: &WorkbookModel, applied: bool) -> MutationResult {
+        if !applied {
+            return MutationResult::default();
+        }
+        MutationResult {
+            applied: true,
+            changed: changed_cells_between(before, &self.model),
+            cycle_cells: self.last_calculation.cycle_cells.clone(),
+            limited_cells: self.last_calculation.limited_cells.clone(),
+        }
+    }
+
+    pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
+    where
+        F: Fn(UpdateEvent) + Send + Sync + 'static,
+    {
+        let mut observers = self
+            .update_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let id = observers.next_id;
+        observers.next_id = observers
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| Error::CollaborativeState("update observer ID overflow".to_string()))?;
+        observers.listeners.insert(id, Arc::new(callback));
+        Ok(UpdateSubscription {
+            observers: Arc::downgrade(&self.update_observers),
+            id,
         })
     }
 
     pub fn save(&self) -> Result<Vec<u8>> {
+        validate_model(&self.model)?;
         let parts = xlsx_parse::serialize_workbook(&self.model)?;
         ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
     }
@@ -193,11 +488,12 @@ impl Workbook {
         }
         self.ensure_graph();
         let formula = state.formula.clone();
-        self.commit_user(vec![Op::SetCell {
+        let ops = vec![Op::SetCell {
             sheet,
             at: cell,
             cell: state,
-        }])?;
+        }];
+        self.commit_user(&ops)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
             cell,
@@ -251,7 +547,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         self.ensure_graph();
-        self.commit_user(ops)?;
+        self.commit_user(&ops)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -280,6 +576,9 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
+        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+            return Err(Error::CollaborativeStructureOperation);
+        }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
         for op in &ops {
@@ -292,7 +591,7 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         let active_name = self.active_sheet_name();
-        self.commit_user(ops)?;
+        self.commit_user(&ops)?;
         self.restore_active_sheet(active_name.as_deref());
         if invalidates_proposals {
             self.proposals.clear();
@@ -311,23 +610,36 @@ impl Workbook {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.undo.can_undo()
+        !self.is_collaborative() && self.undo.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        self.undo.can_redo()
+        !self.is_collaborative() && self.undo.can_redo()
     }
 
     pub fn undo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
+        if self.is_collaborative() {
+            return Err(Error::CollaborativeUndoUnavailable);
+        }
         let active_name = self.active_sheet_name();
         let Some(ops) = self.undo.undo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
+        let update = self
+            .authority
+            .apply_ops(&ops, SyncOrigin::Undo)
+            .map_err(authority_error)?;
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
         }
         let result = self.rebuild_and_recalculate(options);
+        if let Some(update) = update {
+            self.emit_update(UpdateEvent {
+                update,
+                origin: UpdateOrigin::Local,
+            });
+        }
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
@@ -337,15 +649,28 @@ impl Workbook {
     }
 
     pub fn redo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
+        if self.is_collaborative() {
+            return Err(Error::CollaborativeUndoUnavailable);
+        }
         let active_name = self.active_sheet_name();
         let Some(ops) = self.undo.redo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
+        let update = self
+            .authority
+            .apply_ops(&ops, SyncOrigin::Redo)
+            .map_err(authority_error)?;
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
         }
         let result = self.rebuild_and_recalculate(options);
+        if let Some(update) = update {
+            self.emit_update(UpdateEvent {
+                update,
+                origin: UpdateOrigin::Local,
+            });
+        }
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
@@ -467,7 +792,7 @@ impl Workbook {
             });
         }
         self.ensure_graph();
-        self.commit_agent(ops, proposal.agent_id)?;
+        self.commit_agent(&ops, proposal.agent_id)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -587,16 +912,96 @@ impl Workbook {
         validate_cell_ref(cell)
     }
 
-    fn commit_user(&mut self, ops: Vec<Op>) -> Result<()> {
-        let transaction = Transaction::new(ops, Provenance::User);
-        self.undo.commit(&mut self.model, &transaction)?;
+    fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
+        if self.is_collaborative() {
+            let staged = self.stage_local_update(ops, SyncOrigin::User)?;
+            let mut model = self.model.clone();
+            xlsx_ops::apply_ops(&mut model, ops)?;
+            self.authority
+                .apply_local_update_v1(&staged.update, SyncOrigin::User)
+                .map_err(authority_error)?;
+            self.model = model;
+            self.emit_update(UpdateEvent {
+                update: staged.update,
+                origin: UpdateOrigin::Local,
+            });
+        } else {
+            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
+            self.undo.commit(&mut self.model, &transaction)?;
+            let update = self
+                .authority
+                .apply_ops(ops, SyncOrigin::User)
+                .map_err(authority_error)?;
+            if let Some(update) = update {
+                self.emit_update(UpdateEvent {
+                    update,
+                    origin: UpdateOrigin::Local,
+                });
+            }
+        }
         Ok(())
     }
 
-    fn commit_agent(&mut self, ops: Vec<Op>, agent_id: String) -> Result<()> {
-        let transaction = Transaction::new(ops, Provenance::Agent { id: agent_id });
-        self.undo.commit(&mut self.model, &transaction)?;
+    fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
+        if self.is_collaborative() {
+            let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
+            let mut model = self.model.clone();
+            xlsx_ops::apply_ops(&mut model, ops)?;
+            self.authority
+                .apply_local_update_v1(&staged.update, SyncOrigin::Agent)
+                .map_err(authority_error)?;
+            self.model = model;
+            self.emit_update(UpdateEvent {
+                update: staged.update,
+                origin: UpdateOrigin::Local,
+            });
+        } else {
+            let transaction = Transaction::new(ops.to_vec(), Provenance::Agent { id: agent_id });
+            self.undo.commit(&mut self.model, &transaction)?;
+            let update = self
+                .authority
+                .apply_ops(ops, SyncOrigin::Agent)
+                .map_err(authority_error)?;
+            if let Some(update) = update {
+                self.emit_update(UpdateEvent {
+                    update,
+                    origin: UpdateOrigin::Local,
+                });
+            }
+        }
         Ok(())
+    }
+
+    fn stage_local_update(&self, ops: &[Op], origin: SyncOrigin) -> Result<StagedLocalUpdate> {
+        let structure = match &self.mode {
+            WorkbookMode::Collaborative { structure } => structure,
+            WorkbookMode::Standalone => return Err(Error::NotCollaborative),
+        };
+        let staged = self
+            .authority
+            .stage_local_ops_v1(ops, origin)
+            .map_err(authority_error)?;
+        if &staged.structure != structure {
+            return Err(Error::CollaborativeStructureChanged);
+        }
+        validate_collaboration_size(&staged.update)?;
+        validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
+        Ok(staged)
+    }
+
+    fn emit_update(&self, event: UpdateEvent) {
+        let listeners = self
+            .update_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .listeners
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for listener in listeners {
+            let event = event.clone();
+            let _ = catch_unwind(AssertUnwindSafe(|| listener(event)));
+        }
     }
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
@@ -667,6 +1072,57 @@ impl Workbook {
     }
 }
 
+fn authority_error(error: AuthorityError) -> Error {
+    match error {
+        AuthorityError::ClientIdConflict(client_id) => Error::ClientIdConflict(client_id),
+        AuthorityError::InvalidStateVector(error) => Error::InvalidStateVector(error),
+        AuthorityError::InvalidUpdate(error) => Error::InvalidUpdate(error),
+        AuthorityError::InvalidState(error) => Error::CollaborativeState(error),
+    }
+}
+
+fn validate_collaboration_client_id(client_id: u64) -> Result<()> {
+    if client_id > MAX_COLLABORATION_CLIENT_ID {
+        Err(Error::InvalidClientId {
+            client_id,
+            max: MAX_COLLABORATION_CLIENT_ID,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_collaboration_size(bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_COLLABORATION_BYTES {
+        Err(Error::CollaborationDataTooLarge {
+            bytes: bytes.len(),
+            max: MAX_COLLABORATION_BYTES,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_collaboration_state(bytes: usize, state_vector_entries: usize) -> Result<()> {
+    if bytes > MAX_COLLABORATION_BYTES {
+        return Err(Error::CollaborationDataTooLarge {
+            bytes,
+            max: MAX_COLLABORATION_BYTES,
+        });
+    }
+    validate_collaboration_state_entries(state_vector_entries)
+}
+
+fn validate_collaboration_state_entries(entries: usize) -> Result<()> {
+    if entries > MAX_COLLABORATION_STATE_VECTOR_ENTRIES as usize {
+        Err(Error::CollaborativeState(format!(
+            "state vector contains {entries} entries, exceeds the {MAX_COLLABORATION_STATE_VECTOR_ENTRIES}-entry limit"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 fn calculation_result(result: &RecalcResult) -> CalculationResult {
     CalculationResult {
         changed: result
@@ -685,6 +1141,43 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
     }
+}
+
+fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<CellAddress> {
+    let mut changed = Vec::new();
+    for sheet_index in 0..before.sheets.len().max(after.sheets.len()) {
+        let sheet = SheetId(sheet_index as u32);
+        let mut cells = BTreeSet::new();
+        if let Some(before_sheet) = before.sheets.get(sheet_index) {
+            cells.extend(
+                before_sheet
+                    .iter_cells()
+                    .map(|(cell, _)| (cell.row, cell.col)),
+            );
+        }
+        if let Some(after_sheet) = after.sheets.get(sheet_index) {
+            cells.extend(
+                after_sheet
+                    .iter_cells()
+                    .map(|(cell, _)| (cell.row, cell.col)),
+            );
+        }
+        for (row, col) in cells {
+            let cell = CellRef::new(row, col);
+            let before_cell = before
+                .sheets
+                .get(sheet_index)
+                .and_then(|sheet| sheet.cell(cell));
+            let after_cell = after
+                .sheets
+                .get(sheet_index)
+                .and_then(|sheet| sheet.cell(cell));
+            if before_cell != after_cell {
+                changed.push(CellAddress { sheet, cell });
+            }
+        }
+    }
+    changed
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {

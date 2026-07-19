@@ -4,4 +4,8 @@
  */
 
 export { XlsxEditor } from './XlsxEditor';
-export type { XlsxEditorProps, XlsxEditorApi } from './XlsxEditor';
+export type {
+  XlsxEditorProps,
+  XlsxEditorApi,
+  XlsxEditorCollaborationOptions,
+} from './XlsxEditor';

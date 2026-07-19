@@ -1,5 +1,6 @@
 //! Typed facade for opening, editing, calculating, rendering, and saving XLSX files.
 
+mod authority;
 mod error;
 mod types;
 mod workbook;
@@ -8,8 +9,12 @@ pub use error::Error;
 pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, MutationResult,
     ProposalAcceptance, ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SheetInfo,
+    UpdateEvent, UpdateOrigin,
 };
-pub use workbook::{MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, Workbook};
+pub use workbook::{
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
+    MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, UpdateSubscription, Workbook,
+};
 
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{

@@ -5,6 +5,7 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     headless: 'src/headless.ts',
+    collaboration: 'src/collaboration/index.ts',
   },
   format: ['esm'],
   dts: true,

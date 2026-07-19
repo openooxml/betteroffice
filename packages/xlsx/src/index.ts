@@ -68,9 +68,12 @@ export {
 } from './wasm/loader';
 export type {
   WasmInitInput,
+  OpenWorkbookOptions,
   Viewport,
   SheetInfo,
   WorkbookHandle,
+  WorkbookUpdateListener,
+  WorkbookUpdateOrigin,
   CellEdit,
   CellInputEdit,
   EditResult,

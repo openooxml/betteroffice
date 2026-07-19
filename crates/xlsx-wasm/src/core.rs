@@ -3,7 +3,7 @@ use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CellAddress, CellInput as WorkbookCellInput, CellRange, CellRef,
     MutationResult, Op, Proposal, ProposalEditInput as WorkbookProposalEditInput, ProposalRequest,
-    SheetId, Viewport, Workbook,
+    SheetId, UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +141,55 @@ impl Session {
     pub fn open(bytes: &[u8], now_serial: Option<f64>) -> Result<Self, String> {
         Workbook::open_recalculated(bytes, calculation_options(now_serial))
             .map(|workbook| Self { workbook })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn open_collaborative(
+        bytes: &[u8],
+        client_id: u64,
+        now_serial: Option<f64>,
+    ) -> Result<Self, String> {
+        Workbook::open_collaborative_recalculated(bytes, client_id, calculation_options(now_serial))
+            .map(|workbook| Self { workbook })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn client_id(&self) -> u64 {
+        self.workbook.client_id()
+    }
+
+    pub fn encode_state_vector(&self) -> Vec<u8> {
+        self.workbook.encode_state_vector_v1()
+    }
+
+    pub fn encode_state_as_update(&self) -> Vec<u8> {
+        self.workbook.encode_state_as_update_v1()
+    }
+
+    pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>, String> {
+        self.workbook
+            .encode_diff_v1(remote_state_vector)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn apply_update_json(
+        &mut self,
+        update: &[u8],
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let result = self
+            .workbook
+            .apply_update_v1(update, calculation_options(now_serial))
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription, String>
+    where
+        F: Fn(UpdateEvent) + Send + Sync + 'static,
+    {
+        self.workbook
+            .observe_update_v1(callback)
             .map_err(|error| error.to_string())
     }
 
@@ -724,6 +773,106 @@ mod tests {
                 .unwrap_err()
                 .contains("cap")
         );
+    }
+
+    #[test]
+    fn collaborative_sessions_handshake_and_converge() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 101, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 202, None).unwrap();
+        let baseline = left.encode_state_vector();
+
+        assert_eq!(left.client_id(), 101);
+        assert_eq!(right.client_id(), 202);
+        assert_eq!(baseline, right.encode_state_vector());
+        assert_eq!(
+            left.encode_state_as_update(),
+            right.encode_state_as_update()
+        );
+        assert_eq!(
+            left.encode_diff(&right.encode_state_vector()).unwrap(),
+            [0, 0]
+        );
+
+        left.edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"left"}"#, None)
+            .unwrap();
+        right
+            .edit_cell_json(r#"{"sheet":0,"row":0,"col":1,"input":"right"}"#, None)
+            .unwrap();
+        let left_update = left.encode_diff(&baseline).unwrap();
+        let right_update = right.encode_diff(&baseline).unwrap();
+        assert!(
+            left.apply_update_json(&right_update, None)
+                .unwrap()
+                .contains(r#""sheetInfo":{"sheetNames":["Data","Empty"]"#)
+        );
+        right.apply_update_json(&left_update, None).unwrap();
+
+        assert_eq!(left.encode_state_vector(), right.encode_state_vector());
+        assert_eq!(
+            left.encode_state_as_update(),
+            right.encode_state_as_update()
+        );
+        assert!(
+            left.cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
+                .unwrap()
+                .contains(r#""input":"left""#)
+        );
+        assert!(
+            right
+                .cell_json(r#"{"sheet":0,"row":0,"col":1}"#)
+                .unwrap()
+                .contains(r#""input":"right""#)
+        );
+    }
+
+    #[test]
+    fn collaborative_invalid_bytes_roll_back() {
+        assert!(Session::open_collaborative(&[1, 2, 3], 303, None).is_err());
+        let bytes = sample_xlsx();
+        let mut session = Session::open_collaborative(&bytes, 303, None).unwrap();
+        let state = session.encode_state_as_update();
+        let cell = session.cell_json(r#"{"sheet":0,"row":0,"col":0}"#).unwrap();
+
+        assert!(session.encode_diff(&[0xff]).is_err());
+        assert!(session.apply_update_json(&[0xff], None).is_err());
+        assert_eq!(session.encode_state_as_update(), state);
+        assert_eq!(
+            session.cell_json(r#"{"sheet":0,"row":0,"col":0}"#).unwrap(),
+            cell
+        );
+    }
+
+    #[test]
+    fn collaborative_sessions_reject_structural_updates() {
+        let bytes = sample_xlsx();
+        let mut target = Session::open_collaborative(&bytes, 404, None).unwrap();
+        let target_state = target.encode_state_as_update();
+        assert!(
+            target
+                .apply_ops_json(
+                    r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                    None,
+                )
+                .unwrap_err()
+                .contains("structural operations")
+        );
+
+        let mut source = Session::open(&bytes, None).unwrap();
+        source
+            .apply_ops_json(
+                r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                None,
+            )
+            .unwrap();
+        let update = source.encode_diff(&target.encode_state_vector()).unwrap();
+        assert!(
+            target
+                .apply_update_json(&update, None)
+                .unwrap_err()
+                .contains("frozen workbook structure")
+        );
+        assert_eq!(target.encode_state_as_update(), target_state);
     }
 
     #[cfg(feature = "raster")]

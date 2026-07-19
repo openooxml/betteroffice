@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "Typed XLSX editor, calculation, rendering, and serialization facade."
+description = "Yrs-backed XLSX editor, calculation, rendering, and serialization facade."
 readme = "README.md"
 keywords = ["xlsx", "spreadsheet", "ooxml", "excel"]
 categories = ["parser-implementations", "rendering"]
@@ -23,3 +23,6 @@ xlsx-calc.workspace = true
 xlsx-ops.workspace = true
 xlsx-render.workspace = true
 xlsx-raster = { workspace = true, optional = true }
+serde_json = "1"
+sha2 = "0.10"
+yrs = "0.27.3"

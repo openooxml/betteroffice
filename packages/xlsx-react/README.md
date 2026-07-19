@@ -46,6 +46,27 @@ export function App() {
 
 Props: `file` (a `Uint8Array` of `.xlsx` bytes — omit it to render an empty
 frame), `fileName`, `onSave`, `onReady` (a handle for host/agent-driven edits),
-and `className`.
+`collaboration` (opens a network-ready replica and repaints peer updates), and
+`className`.
+
+Attach a transport provider from `onReady`:
+
+```tsx
+import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
+
+export function CollaborativeWorkbook() {
+  return (
+    <XlsxEditor
+      file={file}
+      collaboration={{ clientId }}
+      onReady={({ handle }) => {
+        const provider = new CollaborationProvider(handle, transport);
+        provider.connect();
+        return () => provider.destroy();
+      }}
+    />
+  );
+}
+```
 
 Docs: https://betteroffice.dev · Apache-2.0.

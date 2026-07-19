@@ -8,6 +8,7 @@
 
 import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { DisplayList } from '../display-list/types';
 
 /**
@@ -50,6 +51,16 @@ export interface EditResult {
 
 export interface CalculationStatus {
   limitedCells: string[];
+}
+
+export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
+export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
+
+export interface OpenWorkbookOptions {
+  /** Open a Yrs-backed replica that can accept peer updates. */
+  collaborative?: boolean;
+  /** Peer-unique positive safe integer. Generated securely when omitted. */
+  clientId?: number;
 }
 
 /**
@@ -138,7 +149,16 @@ function staleErrorFrom(message: string): StaleProposalError {
  * A typed handle over an open workbook, hiding the wasm object and its JSON
  * boundary. Call {@link WorkbookHandle.dispose} to free the wasm memory.
  */
-export interface WorkbookHandle {
+export interface WorkbookHandle extends CollaborationReplica {
+  readonly clientId: number;
+  /** Available in both modes; encodes this handle's current Yrs state vector. */
+  encodeStateVector(): Uint8Array;
+  /** Available in both modes; pass a peer vector to encode only the missing state. */
+  encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  /** Apply a peer update. Standalone handles throw the Rust `NotCollaborative` error. */
+  applyUpdate(update: Uint8Array): EditResult;
+  /** Observe owned update bytes from local commits and accepted remote updates. */
+  onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
@@ -257,109 +277,239 @@ export function isProposalsAvailable(): boolean {
  * Open a workbook from raw `.xlsx` bytes, initializing the core if needed.
  * Throws an `Error` if the bytes are not a readable workbook.
  */
-export function openWorkbook(bytes: Uint8Array): WorkbookHandle {
+export function openWorkbook(
+  bytes: Uint8Array,
+  options: OpenWorkbookOptions = {}
+): WorkbookHandle {
   requireInitialized();
+  const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    doc = XlsxDocument.open(bytes);
+    doc =
+      collaborativeClientId === undefined
+        ? XlsxDocument.open(bytes)
+        : XlsxDocument.openCollaborative(bytes, collaborativeClientId);
   } catch (e) {
     throw toError(e);
   }
-  return {
-    sheetInfo(): SheetInfo {
-      try {
-        return JSON.parse(doc.sheetInfoJson()) as SheetInfo;
-      } catch (e) {
-        throw toError(e);
+
+  const listeners = new Map<number, WorkbookUpdateListener>();
+  const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
+  let nextListenerId = 0;
+  let disposed = false;
+  let observerInstalled = false;
+  let wasmCallDepth = 0;
+  let flushingUpdates = false;
+
+  function assertAlive(): void {
+    if (disposed) throw new Error('workbook handle is disposed');
+  }
+
+  function flushUpdates(): void {
+    if (disposed || flushingUpdates || wasmCallDepth !== 0) return;
+    flushingUpdates = true;
+    try {
+      while (!disposed && pendingUpdates.length > 0) {
+        const event = pendingUpdates.shift();
+        if (!event) break;
+        for (const [id, listener] of [...listeners]) {
+          if (disposed) return;
+          if (listeners.get(id) !== listener) continue;
+          try {
+            listener(event.update.slice(), event.origin);
+          } catch {}
+        }
       }
+    } finally {
+      flushingUpdates = false;
+      if (disposed) pendingUpdates.length = 0;
+    }
+  }
+
+  function drainWasmUpdates(): void {
+    if (!observerInstalled || disposed) return;
+    while (true) {
+      const encoded = doc.drainUpdateEvent();
+      if (encoded.byteLength === 0) return;
+      const origin = encoded[0];
+      if (origin !== 0 && origin !== 1) {
+        throw new Error(`xlsx wasm returned unknown update origin ${origin}`);
+      }
+      pendingUpdates.push({
+        update: encoded.slice(1),
+        origin: origin === 0 ? 'local' : 'remote',
+      });
+    }
+  }
+
+  function wasmCall<T>(operation: () => T, drainUpdates = false): T {
+    assertAlive();
+    wasmCallDepth += 1;
+    try {
+      let result: T | undefined;
+      let failure: unknown;
+      let failed = false;
+      try {
+        result = operation();
+      } catch (error) {
+        failure = error;
+        failed = true;
+      }
+      if (drainUpdates) {
+        try {
+          drainWasmUpdates();
+        } catch (error) {
+          if (!failed) {
+            failure = error;
+            failed = true;
+          }
+        }
+      }
+      if (failed) throw toError(failure);
+      return result as T;
+    } finally {
+      wasmCallDepth -= 1;
+      if (wasmCallDepth === 0) flushUpdates();
+    }
+  }
+
+  function mutatingWasmCall<T>(operation: () => T): T {
+    return wasmCall(operation, true);
+  }
+
+  function parseJson<T>(operation: () => string, drainUpdates = false): T {
+    return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
+  }
+
+  function ensureUpdateObserver(): void {
+    if (observerInstalled) return;
+    wasmCall(() => doc.startUpdateObservation());
+    observerInstalled = true;
+  }
+
+  function clearUnusedUpdateObserver(): void {
+    if (!observerInstalled || listeners.size > 0 || disposed) return;
+    pendingUpdates.length = 0;
+    wasmCall(() => doc.clearUpdateObservation());
+    observerInstalled = false;
+  }
+
+  const handle: WorkbookHandle = {
+    get clientId(): number {
+      return wasmCall(() => doc.clientId);
+    },
+    encodeStateVector(): Uint8Array {
+      return wasmCall(() => doc.encodeStateVector().slice());
+    },
+    encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
+      return wasmCall(() =>
+        remoteStateVector === undefined
+          ? doc.encodeStateAsUpdate().slice()
+          : doc.encodeDiff(remoteStateVector.slice()).slice()
+      );
+    },
+    applyUpdate(update: Uint8Array): EditResult {
+      return parseJson(() => doc.applyUpdateJson(update.slice()), true);
+    },
+    onUpdate(listener: WorkbookUpdateListener): () => void {
+      assertAlive();
+      if (typeof listener !== 'function') throw new TypeError('update listener must be a function');
+      const id = nextListenerId++;
+      listeners.set(id, listener);
+      try {
+        ensureUpdateObserver();
+      } catch (error) {
+        listeners.delete(id);
+        throw error;
+      }
+      let subscribed = true;
+      return () => {
+        if (!subscribed) return;
+        subscribed = false;
+        listeners.delete(id);
+        clearUnusedUpdateObserver();
+      };
+    },
+    sheetInfo(): SheetInfo {
+      return parseJson(() => doc.sheetInfoJson());
     },
     calculationStatus(): CalculationStatus {
-      const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
-      if (typeof fn !== 'function') return { limitedCells: [] };
-      return call<CalculationStatus>(() => fn.call(doc));
+      return wasmCall(() => {
+        const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
+        if (typeof fn !== 'function') return { limitedCells: [] };
+        return JSON.parse(fn.call(doc)) as CalculationStatus;
+      });
     },
     displayList(viewport: Viewport): DisplayList {
-      try {
-        return JSON.parse(doc.displayListJson(JSON.stringify(viewport))) as DisplayList;
-      } catch (e) {
-        throw toError(e);
-      }
+      return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
     },
     setActiveSheet(index: number): void {
-      try {
-        doc.setActiveSheet(index);
-      } catch (e) {
-        throw toError(e);
-      }
+      mutatingWasmCall(() => doc.setActiveSheet(index));
     },
     editCell(sheet: number, row: number, col: number, input: string): EditResult {
-      return editResult(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })));
+      return parseJson(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })), true);
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
-      return editResult(() => doc.editCellsJson(JSON.stringify({ sheet, edits })));
+      return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
     },
     applyOps(ops: unknown[]): EditResult {
-      return editResult(() => doc.applyOpsJson(JSON.stringify({ ops })));
+      return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);
     },
     undo(): EditResult {
-      return editResult(() => doc.undoJson());
+      return parseJson(() => doc.undoJson(), true);
     },
     redo(): EditResult {
-      return editResult(() => doc.redoJson());
+      return parseJson(() => doc.redoJson(), true);
     },
     cell(sheet: number, row: number, col: number): CellEdit {
-      return call(() => doc.cellJson(JSON.stringify({ sheet, row, col })));
+      return parseJson(() => doc.cellJson(JSON.stringify({ sheet, row, col })));
     },
     rangeCells(sheet: number, range: string): CellEdit[][] {
-      const parsed = call<{ cells: CellEdit[][] }>(() =>
+      const parsed = parseJson<{ cells: CellEdit[][] }>(() =>
         doc.rangeCellsJson(JSON.stringify({ sheet, range }))
       );
       return parsed.cells;
     },
     renderPng(viewport: Viewport): Uint8Array {
-      const fn = (doc as { renderPng?: (v: string) => Uint8Array }).renderPng;
-      if (typeof fn !== 'function') throw new Error('png export not in this build');
-      try {
-        return fn.call(doc, JSON.stringify(viewport));
-      } catch (e) {
-        throw toError(e);
-      }
+      return wasmCall(() => {
+        const fn = (doc as { renderPng?: (v: string) => Uint8Array }).renderPng;
+        if (typeof fn !== 'function') throw new Error('png export not in this build');
+        return fn.call(doc, JSON.stringify(viewport)).slice();
+      });
     },
     renderRangePng(opts?: { range?: string; scale?: number }): Uint8Array {
-      const fn = (doc as { renderRangePng?: (a: string) => Uint8Array }).renderRangePng;
-      if (typeof fn !== 'function') throw new Error('png export not in this build');
-      try {
-        return fn.call(doc, JSON.stringify(opts ?? {}));
-      } catch (e) {
-        throw toError(e);
-      }
+      return wasmCall(() => {
+        const fn = (doc as { renderRangePng?: (a: string) => Uint8Array }).renderRangePng;
+        if (typeof fn !== 'function') throw new Error('png export not in this build');
+        return fn.call(doc, JSON.stringify(opts ?? {})).slice();
+      });
     },
     save(): Uint8Array {
-      try {
-        return doc.saveBytes();
-      } catch (e) {
-        throw toError(e);
-      }
+      return wasmCall(() => doc.saveBytes().slice());
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
-      const fn = (doc as { proposeJson?: (a: string) => string }).proposeJson;
-      if (typeof fn !== 'function') throw new Error('proposals not in this build');
-      return call<Proposal>(() => fn.call(doc, JSON.stringify({ agentId, note, edits })));
+      return mutatingWasmCall(() => {
+        const fn = (doc as { proposeJson?: (a: string) => string }).proposeJson;
+        if (typeof fn !== 'function') throw new Error('proposals not in this build');
+        return JSON.parse(fn.call(doc, JSON.stringify({ agentId, note, edits }))) as Proposal;
+      });
     },
     listProposals(): Proposal[] {
-      const fn = (doc as { listProposalsJson?: () => string }).listProposalsJson;
-      if (typeof fn !== 'function') return [];
-      return call<{ proposals: Proposal[] }>(() => fn.call(doc)).proposals;
+      return wasmCall(() => {
+        const fn = (doc as { listProposalsJson?: () => string }).listProposalsJson;
+        if (typeof fn !== 'function') return [];
+        return (JSON.parse(fn.call(doc)) as { proposals: Proposal[] }).proposals;
+      });
     },
     acceptProposal(id: string, opts?: { force?: boolean }): EditResult & { proposalId: string } {
-      const fn = (doc as { acceptProposalJson?: (a: string) => string }).acceptProposalJson;
-      if (typeof fn !== 'function') throw new Error('proposals not in this build');
       try {
-        return JSON.parse(
-          fn.call(doc, JSON.stringify({ id, force: opts?.force ?? false }))
-        ) as EditResult & {
-          proposalId: string;
-        };
+        return mutatingWasmCall(() => {
+          const fn = (doc as { acceptProposalJson?: (a: string) => string }).acceptProposalJson;
+          if (typeof fn !== 'function') throw new Error('proposals not in this build');
+          return JSON.parse(
+            fn.call(doc, JSON.stringify({ id, force: opts?.force ?? false }))
+          ) as EditResult & { proposalId: string };
+        });
       } catch (e) {
         const message = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
         if (message.startsWith(STALE_PREFIX)) throw staleErrorFrom(message);
@@ -367,31 +517,69 @@ export function openWorkbook(bytes: Uint8Array): WorkbookHandle {
       }
     },
     rejectProposal(id: string): boolean {
-      const fn = (doc as { rejectProposalJson?: (a: string) => string }).rejectProposalJson;
-      if (typeof fn !== 'function') return false;
-      return call<{ removed: boolean }>(() => fn.call(doc, JSON.stringify({ id }))).removed;
+      return mutatingWasmCall(() => {
+        const fn = (doc as { rejectProposalJson?: (a: string) => string }).rejectProposalJson;
+        if (typeof fn !== 'function') return false;
+        return (JSON.parse(fn.call(doc, JSON.stringify({ id }))) as { removed: boolean }).removed;
+      });
     },
     isProposalsAvailable(): boolean {
-      return typeof (doc as { proposeJson?: unknown }).proposeJson === 'function';
+      return wasmCall(() => typeof (doc as { proposeJson?: unknown }).proposeJson === 'function');
     },
     dispose(): void {
-      doc.free();
+      if (disposed) return;
+      disposed = true;
+      listeners.clear();
+      pendingUpdates.length = 0;
+      let disposalError: unknown;
+      if (observerInstalled) {
+        try {
+          doc.clearUpdateObservation();
+        } catch (error) {
+          disposalError = error;
+        }
+        observerInstalled = false;
+      }
+      try {
+        doc.free();
+      } catch (error) {
+        disposalError ??= error;
+      }
+      if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  return handle;
 }
 
-// run a wasm call returning a json string and parse it, normalizing throws.
-function call<T>(fn: () => string): T {
-  try {
-    return JSON.parse(fn()) as T;
-  } catch (e) {
-    throw toError(e);
+function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | undefined {
+  if (!options.collaborative) {
+    if (options.clientId !== undefined) {
+      throw new TypeError('clientId requires collaborative mode');
+    }
+    return undefined;
   }
-}
+  if (options.clientId !== undefined) {
+    if (
+      !Number.isSafeInteger(options.clientId) ||
+      options.clientId <= 0 ||
+      options.clientId > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new RangeError('clientId must be a nonzero safe integer');
+    }
+    return options.clientId;
+  }
 
-// every mutation returns the same `{applied, sheetInfo}` envelope.
-function editResult(fn: () => string): EditResult {
-  return call<EditResult>(fn);
+  const random = globalThis.crypto;
+  if (!random || typeof random.getRandomValues !== 'function') {
+    throw new Error('crypto.getRandomValues is required to generate a collaboration client ID');
+  }
+  const words = new Uint32Array(2);
+  let value: number;
+  do {
+    random.getRandomValues(words);
+    value = (words[0] & 0x1fffff) * 0x1_0000_0000 + words[1];
+  } while (value === 0);
+  return value;
 }
 
 /**
