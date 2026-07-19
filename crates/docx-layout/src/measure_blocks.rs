@@ -292,6 +292,18 @@ pub fn measure_blocks(
         .collect()
 }
 
+/// Whether any block anchors a floating zone (wrapped image, floating table,
+/// or text box). Callers use this to gate float-free fast paths; extraction is
+/// a read-only scan of the same zones `measure_blocks_with_floats` consumes.
+pub fn has_floating_zones(
+    blocks: &[LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+) -> Result<bool, String> {
+    Ok(!extract_floating_zones(blocks, content_width, config, page_geometry)?.is_empty())
+}
+
 pub fn measure_blocks_with_floats(
     blocks: &mut [LayoutBlock],
     widths: &[f64],
