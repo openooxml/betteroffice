@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const rezip_docx: (a: any) => [number, number, number, number];
+export const sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const unzip_docx: (a: number, b: number) => [number, number, number];
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

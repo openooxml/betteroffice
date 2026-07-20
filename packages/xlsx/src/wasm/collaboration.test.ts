@@ -126,6 +126,7 @@ describe('wasm collaboration', () => {
     const left = collaborative(1101);
     const right = collaborative(1102);
     try {
+      const beforeDisplay = right.displayList({ x: 0, y: 0, width: 500, height: 120 });
       left.patchRangeStyle(0, 'A1:B2', {
         bold: true,
         fillColor: '#ffcc00',
@@ -145,6 +146,11 @@ describe('wasm collaboration', () => {
         numberFormatPattern: '0.0000',
       });
       expect(right.selectionFormatting(0, 'C1')).toEqual(left.selectionFormatting(0, 'A1'));
+      const afterDisplay = right.displayList({ x: 0, y: 0, width: 500, height: 120 });
+      expect(afterDisplay).not.toEqual(beforeDisplay);
+      expect(
+        afterDisplay.commands.find((command) => command.op === 'text' && command.text === 'Q1')
+      ).toMatchObject({ op: 'text', fontSize: 11, bold: true });
       expect(left.historyState()).toMatchObject({ canUndo: true, undoDepth: 3 });
 
       const rightBeforeUndo = right.encodeStateVector();

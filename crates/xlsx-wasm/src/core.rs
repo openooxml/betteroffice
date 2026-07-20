@@ -600,6 +600,21 @@ mod tests {
     use super::*;
     use xlsx_model::{Cell, CellValue, Sheet, Workbook as WorkbookModel};
 
+    const VIEWPORT: &str = r#"{"x":0,"y":0,"width":300,"height":120}"#;
+
+    fn display_value(session: &Session) -> serde_json::Value {
+        serde_json::from_str(&session.display_list_json(VIEWPORT).unwrap()).unwrap()
+    }
+
+    fn text_command<'a>(display: &'a serde_json::Value, text: &str) -> &'a serde_json::Value {
+        display["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|command| command["op"] == "text" && command["text"] == text)
+            .unwrap()
+    }
+
     fn sample_xlsx() -> Vec<u8> {
         let mut sheet = Sheet::new("Data");
         sheet.set_cell(
@@ -854,6 +869,62 @@ mod tests {
             .selection_formatting_json(r#"{"sheet":0,"range":"A1:B2"}"#)
             .unwrap();
         assert!(formatting.contains(r#""bold":true"#));
+    }
+
+    #[test]
+    fn formatting_mutations_change_display_list_json() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let before_patch = display_value(&session);
+        assert_eq!(text_command(&before_patch, "Hello")["fontSize"], 11.0);
+
+        session
+            .patch_range_style_json(
+                r#"{"sheet":0,"range":"A1","patch":{"bold":true,"fontFamily":"Arial"}}"#,
+                None,
+            )
+            .unwrap();
+        let after_patch = display_value(&session);
+        assert_ne!(after_patch, before_patch);
+        assert_eq!(text_command(&after_patch, "Hello")["bold"], true);
+        assert_eq!(text_command(&after_patch, "Hello")["fontSize"], 11.0);
+        assert_eq!(text_command(&after_patch, "Hello")["fontFamily"], "Arial");
+
+        let captured = session
+            .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+            .unwrap();
+        let before_apply = display_value(&session);
+        session
+            .apply_format_json(
+                &format!(r#"{{"sheet":0,"range":"B2","format":{captured}}}"#),
+                None,
+            )
+            .unwrap();
+        let after_apply = display_value(&session);
+        assert_ne!(after_apply, before_apply);
+        assert_eq!(text_command(&after_apply, "42")["bold"], true);
+        assert_eq!(text_command(&after_apply, "42")["fontFamily"], "Arial");
+    }
+
+    #[test]
+    fn remote_formatting_changes_display_list_json() {
+        let bytes = sample_xlsx();
+        let mut left = Session::open_collaborative(&bytes, 11, None).unwrap();
+        let mut right = Session::open_collaborative(&bytes, 12, None).unwrap();
+        let before = display_value(&right);
+
+        left.patch_range_style_json(
+            r#"{"sheet":0,"range":"A1","patch":{"bold":true,"italic":true}}"#,
+            None,
+        )
+        .unwrap();
+        let update = left.encode_diff(&right.encode_state_vector()).unwrap();
+        right.apply_update_json(&update, None).unwrap();
+
+        let after = display_value(&right);
+        assert_ne!(after, before);
+        assert_eq!(text_command(&after, "Hello")["bold"], true);
+        assert_eq!(text_command(&after, "Hello")["italic"], true);
+        assert_eq!(text_command(&after, "Hello")["fontSize"], 11.0);
     }
 
     #[test]

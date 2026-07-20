@@ -65,6 +65,49 @@ describe('wasm loader', () => {
     }
   });
 
+  it('updates display-list font fields after style patch and format paint', () => {
+    const handle = openWorkbook(sampleBytes());
+    const viewport = { x: 0, y: 0, width: 500, height: 220 };
+    try {
+      const beforePatch = handle.displayList(viewport);
+      const beforeSource = beforePatch.commands.find(
+        (command) => command.op === 'text' && command.text === 'Line item 6'
+      );
+      expect(beforeSource).toMatchObject({ op: 'text', fontSize: 11 });
+
+      handle.patchRangeStyle(0, 'A8', { bold: true, italic: true, fontFamily: 'Arial' });
+      const afterPatch = handle.displayList(viewport);
+      const afterSource = afterPatch.commands.find(
+        (command) => command.op === 'text' && command.text === 'Line item 6'
+      );
+      expect(afterPatch).not.toEqual(beforePatch);
+      expect(afterSource).toMatchObject({
+        op: 'text',
+        fontSize: 11,
+        fontFamily: 'Arial',
+        bold: true,
+        italic: true,
+      });
+
+      const beforeApply = handle.displayList(viewport);
+      handle.applyFormat(0, 'C8', handle.captureFormat(0, 'A8'));
+      const afterApply = handle.displayList(viewport);
+      const target = afterApply.commands.find(
+        (command) => command.op === 'text' && command.text === '307' && command.clip?.y === 140
+      );
+      expect(afterApply).not.toEqual(beforeApply);
+      expect(target).toMatchObject({
+        op: 'text',
+        fontSize: 11,
+        fontFamily: 'Arial',
+        bold: true,
+        italic: true,
+      });
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('switches the active sheet', () => {
     const handle = openWorkbook(sampleBytes());
     try {
