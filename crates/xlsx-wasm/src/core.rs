@@ -1,9 +1,10 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    CalculationOptions, CellAddress, CellInput as WorkbookCellInput, CellRange, CellRef,
-    MutationResult, Op, Proposal, ProposalEditInput as WorkbookProposalEditInput, ProposalRequest,
-    SheetId, UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
+    CellRef, MutationResult, NumberFormatMutation, Op, Proposal,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
+    UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +58,32 @@ struct CellArgs {
 struct RangeArgs {
     sheet: u32,
     range: String,
+}
+
+#[derive(Deserialize)]
+struct StyleArgs {
+    sheet: u32,
+    range: String,
+    patch: StylePatch,
+}
+
+#[derive(Deserialize)]
+struct NumberFormatArgs {
+    sheet: u32,
+    range: String,
+    format: NumberFormatMutation,
+}
+
+#[derive(Deserialize)]
+struct ApplyFormatArgs {
+    sheet: u32,
+    range: String,
+    format: CapturedFormat,
+}
+
+#[derive(Serialize)]
+struct MergedRanges {
+    ranges: Vec<CellRange>,
 }
 
 #[derive(Serialize)]
@@ -366,6 +393,100 @@ impl Session {
         serde_json::to_string(&RangeCells { cells }).map_err(|error| error.to_string())
     }
 
+    pub fn patch_range_style_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: StyleArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad style args: {error}"))?;
+        let range = parse_range(&args.range)?;
+        let result = self
+            .workbook
+            .patch_range_style(
+                SheetId(args.sheet),
+                range,
+                args.patch,
+                calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn set_range_number_format_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: NumberFormatArgs = serde_json::from_str(args)
+            .map_err(|error| format!("bad number format args: {error}"))?;
+        let range = parse_range(&args.range)?;
+        let result = self
+            .workbook
+            .set_range_number_format(
+                SheetId(args.sheet),
+                range,
+                args.format,
+                calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn selection_formatting_json(&self, args: &str) -> Result<String, String> {
+        let args: RangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
+        let formatting = self
+            .workbook
+            .selection_formatting(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&formatting).map_err(|error| error.to_string())
+    }
+
+    pub fn capture_format_json(&self, args: &str) -> Result<String, String> {
+        let args: RangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
+        let format = self
+            .workbook
+            .capture_format(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&format).map_err(|error| error.to_string())
+    }
+
+    pub fn apply_format_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: ApplyFormatArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad format args: {error}"))?;
+        let range = parse_range(&args.range)?;
+        let result = self
+            .workbook
+            .apply_format(
+                SheetId(args.sheet),
+                range,
+                args.format,
+                calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn merged_ranges_json(&self, args: &str) -> Result<String, String> {
+        let args: RangeArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
+        let ranges = self
+            .workbook
+            .merged_ranges(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
+    }
+
+    pub fn history_state_json(&self) -> Result<String, String> {
+        serde_json::to_string(&self.workbook.history_state()).map_err(|error| error.to_string())
+    }
+
     pub fn propose_json(&mut self, args: &str, now_serial: Option<f64>) -> Result<String, String> {
         let args: ProposeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad propose args: {error}"))?;
@@ -468,6 +589,10 @@ impl Session {
 
 fn calculation_options(now_serial: Option<f64>) -> CalculationOptions {
     CalculationOptions { now_serial }
+}
+
+fn parse_range(range: &str) -> Result<CellRange, String> {
+    CellRange::parse_a1(range).map_err(|error| format!("bad range: {error}"))
 }
 
 #[cfg(test)]
@@ -665,6 +790,107 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&range).unwrap();
         assert_eq!(value["cells"].as_array().unwrap().len(), 2);
         assert_eq!(value["cells"][0].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn formatting_queries_round_trip_and_undo() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        let initial = session
+            .selection_formatting_json(r#"{"sheet":0,"range":"A1:B2"}"#)
+            .unwrap();
+        assert!(initial.contains(r#""bold":false"#), "{initial}");
+        let result = session
+            .patch_range_style_json(
+                r##"{"sheet":0,"range":"A1:B2","patch":{"bold":true,"fontFamily":"Arial","textColor":"#123456"}}"##,
+                None,
+            )
+            .unwrap();
+        assert!(result.contains(r#""applied":true"#));
+        let formatting = session
+            .selection_formatting_json(r#"{"sheet":0,"range":"A1:B2"}"#)
+            .unwrap();
+        assert!(formatting.contains(r#""bold":true"#), "{formatting}");
+        assert!(
+            formatting.contains(r#""fontFamily":"Arial""#),
+            "{formatting}"
+        );
+        assert!(
+            formatting.contains(r##""textColor":"#123456""##),
+            "{formatting}"
+        );
+        session
+            .set_range_number_format_json(
+                r#"{"sheet":0,"range":"A1:B2","format":{"type":"percent"}}"#,
+                None,
+            )
+            .unwrap();
+        let formatting = session
+            .selection_formatting_json(r#"{"sheet":0,"range":"A1:B2"}"#)
+            .unwrap();
+        assert!(formatting.contains(r#""numberFormat":"percent""#));
+        let captured = session
+            .capture_format_json(r#"{"sheet":0,"range":"A1"}"#)
+            .unwrap();
+        session
+            .apply_format_json(
+                &format!(r#"{{"sheet":0,"range":"C3","format":{captured}}}"#),
+                None,
+            )
+            .unwrap();
+        let target = session
+            .selection_formatting_json(r#"{"sheet":0,"range":"C3"}"#)
+            .unwrap();
+        assert!(target.contains(r#""bold":true"#));
+        assert_eq!(
+            session.history_state_json().unwrap(),
+            r#"{"canUndo":true,"canRedo":false,"undoDepth":3,"redoDepth":0}"#
+        );
+        session.undo_json(None).unwrap();
+        let history = session.history_state_json().unwrap();
+        assert!(history.contains(r#""undoDepth":2"#));
+        assert!(history.contains(r#""redoDepth":1"#));
+        let reopened = Session::open(&session.save().unwrap(), None).unwrap();
+        let formatting = reopened
+            .selection_formatting_json(r#"{"sheet":0,"range":"A1:B2"}"#)
+            .unwrap();
+        assert!(formatting.contains(r#""bold":true"#));
+    }
+
+    #[test]
+    fn merge_query_returns_intersections() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .apply_ops_json(
+                r#"{"ops":[{"type":"mergeCells","sheet":0,"range":{"start":{"row":1,"col":1},"end":{"row":2,"col":2}}}]}"#,
+                None,
+            )
+            .unwrap();
+        let merged = session
+            .merged_ranges_json(r#"{"sheet":0,"range":"C3:D4"}"#)
+            .unwrap();
+        assert!(merged.contains(r#""start":{"row":1,"col":1}"#), "{merged}");
+        assert_eq!(
+            session
+                .merged_ranges_json(r#"{"sheet":0,"range":"A1"}"#)
+                .unwrap(),
+            r#"{"ranges":[]}"#
+        );
+    }
+
+    #[test]
+    fn mixed_selection_formatting_omits_the_mixed_property() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session
+            .patch_range_style_json(r#"{"sheet":0,"range":"A1","patch":{"bold":true}}"#, None)
+            .unwrap();
+        let mixed = session
+            .selection_formatting_json(r#"{"sheet":0,"range":"A1:B1"}"#)
+            .unwrap();
+        assert!(!mixed.contains(r#""bold""#), "{mixed}");
+        let uniform = session
+            .selection_formatting_json(r#"{"sheet":0,"range":"A1"}"#)
+            .unwrap();
+        assert!(uniform.contains(r#""bold":true"#), "{uniform}");
     }
 
     #[test]

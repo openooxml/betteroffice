@@ -250,6 +250,7 @@ impl WorkbookAuthority {
         }
         self.sync_model(&model, ops, origin)
             .map_err(AuthorityError::InvalidState)?;
+        self.base.styles = model.styles;
         let update = self.doc.transact().encode_diff_v1(&state_vector);
         Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
     }
@@ -796,6 +797,13 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
+    )
+}
+
+pub(crate) fn is_formatting_op(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::PatchRangeStyle { .. } | Op::SetRangeNumberFormat { .. } | Op::ApplyRangeFormat { .. }
     )
 }
 
@@ -1506,6 +1514,9 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteCols { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
+            | Op::PatchRangeStyle { .. }
+            | Op::SetRangeNumberFormat { .. }
+            | Op::ApplyRangeFormat { .. }
     )
 }
 
@@ -1593,6 +1604,9 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
+        | Op::PatchRangeStyle { sheet, .. }
+        | Op::SetRangeNumberFormat { sheet, .. }
+        | Op::ApplyRangeFormat { sheet, .. }
         | Op::RenameSheet { sheet, .. }
         | Op::RestoreSheet { sheet, .. } => Some(*sheet),
         Op::AddSheet { .. } | Op::RemoveSheet { .. } => None,

@@ -245,6 +245,9 @@ fn parse_alignment(e: &BytesStart) -> Result<Alignment, ParseError> {
         wrap_text: attr(e, b"wrapText")?
             .map(|v| is_truthy(&v))
             .unwrap_or(false),
+        shrink_to_fit: attr(e, b"shrinkToFit")?
+            .map(|v| is_truthy(&v))
+            .unwrap_or(false),
     })
 }
 

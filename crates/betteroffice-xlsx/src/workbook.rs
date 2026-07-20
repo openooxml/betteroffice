@@ -5,11 +5,13 @@ use std::sync::{Arc, Mutex, Weak};
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
-    CellRange, CellRef, CellValue, MAX_COLS, MAX_ROWS, Sheet, SheetId, Workbook as WorkbookModel,
+    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, Fill, HAlign,
+    MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
-    CellState, Op, Proposal, ProposalSet, ProposedEdit, Provenance, Transaction, UndoStack,
-    cell_state_for_input_no_eval,
+    BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
+    NumberFormatMutation, Op, Proposal, ProposalSet, ProposedEdit, Provenance, StylePatch,
+    TextWrapping, Transaction, UndoStack, VerticalAlignment, cell_state_for_input_no_eval,
 };
 use xlsx_render::{DisplayList, GridGeometry, Viewport, build_display_list, display_text};
 #[cfg(feature = "raster")]
@@ -17,11 +19,12 @@ use xlsx_render::{scaled, viewport_for_range, viewport_for_used_range};
 
 use crate::authority::{
     AuthorityError, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate, SyncOrigin,
-    WorkbookAuthority, WorkbookStructure, is_structural_op,
+    WorkbookAuthority, WorkbookStructure, is_formatting_op, is_structural_op,
 };
 use crate::{
-    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, MutationResult,
-    ProposalAcceptance, ProposalRequest, Result, SheetInfo, UpdateEvent, UpdateOrigin,
+    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
+    MutationResult, NumberFormatKind, ProposalAcceptance, ProposalRequest, Result,
+    SelectionFormatting, SheetInfo, UpdateEvent, UpdateOrigin,
 };
 #[cfg(feature = "raster")]
 use crate::{RenderOptions, RenderedPng};
@@ -451,17 +454,7 @@ impl Workbook {
     }
 
     pub fn range_cells(&self, sheet: SheetId, range: CellRange) -> Result<Vec<Vec<CellEdit>>> {
-        validate_range(range)?;
-        self.sheet(sheet)?;
-        let rows = u64::from(range.end.row - range.start.row + 1);
-        let cols = u64::from(range.end.col - range.start.col + 1);
-        if rows * cols > MAX_RANGE_CELLS {
-            return Err(Error::RangeTooLarge {
-                rows,
-                cols,
-                max: MAX_RANGE_CELLS,
-            });
-        }
+        let (rows, cols) = self.validate_bounded_range(sheet, range)?;
         let mut cells = Vec::with_capacity(rows as usize);
         for row in range.start.row..=range.end.row {
             let mut row_cells = Vec::with_capacity(cols as usize);
@@ -471,6 +464,172 @@ impl Workbook {
             cells.push(row_cells);
         }
         Ok(cells)
+    }
+
+    pub fn patch_range_style(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        patch: StylePatch,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.validate_bounded_range(sheet, range)?;
+        self.apply_ops(
+            vec![Op::PatchRangeStyle {
+                sheet,
+                range,
+                patch,
+            }],
+            options,
+        )
+    }
+
+    pub fn set_range_number_format(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: NumberFormatMutation,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.validate_bounded_range(sheet, range)?;
+        self.apply_ops(
+            vec![Op::SetRangeNumberFormat {
+                sheet,
+                range,
+                format,
+            }],
+            options,
+        )
+    }
+
+    pub fn selection_formatting(
+        &self,
+        sheet: SheetId,
+        range: CellRange,
+    ) -> Result<SelectionFormatting> {
+        self.validate_bounded_range(sheet, range)?;
+        let formats = self.range_formats(sheet, range)?;
+        let number_formats = formats
+            .iter()
+            .map(|(_, format)| number_format_kind(&format.number_format))
+            .collect::<Vec<_>>();
+        let number_format = uniform(number_formats.iter().map(|(kind, _)| *kind));
+        let number_format_pattern =
+            uniform(number_formats.iter().map(|(_, pattern)| pattern.clone())).flatten();
+        let theme = &self.model.styles.theme;
+        Ok(SelectionFormatting {
+            number_format,
+            number_format_pattern,
+            font_family: uniform(
+                formats.iter().map(|(_, format)| {
+                    format.font.name.clone().unwrap_or_else(|| "Calibri".into())
+                }),
+            ),
+            font_size: uniform(
+                formats
+                    .iter()
+                    .map(|(_, format)| format.font.size_pt.unwrap_or(11.0)),
+            ),
+            bold: uniform(formats.iter().map(|(_, format)| format.font.bold)),
+            italic: uniform(formats.iter().map(|(_, format)| format.font.italic)),
+            strikethrough: uniform(formats.iter().map(|(_, format)| format.font.strike)),
+            text_color: uniform(formats.iter().map(|(_, format)| {
+                format
+                    .font
+                    .color
+                    .as_ref()
+                    .and_then(|color| color.resolve(theme))
+                    .unwrap_or_else(|| "#000000".into())
+                    .to_ascii_lowercase()
+            })),
+            fill_color: uniform(formats.iter().map(|(_, format)| {
+                match &format.fill {
+                    Fill::Solid(color) => color
+                        .resolve(theme)
+                        .unwrap_or_else(|| "#ffffff".into())
+                        .to_ascii_lowercase(),
+                    Fill::None => "#ffffff".into(),
+                }
+            })),
+            border_preset: detect_border_preset(&formats, range),
+            border_style: uniform_border_value(&formats, |edge| border_line_style(edge.style)),
+            border_color: uniform_border_value(&formats, |edge| {
+                edge.color
+                    .as_ref()
+                    .and_then(|color| color.resolve(theme))
+                    .unwrap_or_else(|| "#000000".into())
+                    .to_ascii_lowercase()
+            }),
+            horizontal_alignment: uniform(formats.iter().map(
+                |(_, format)| match format.alignment.h {
+                    Some(HAlign::Center | HAlign::CenterContinuous | HAlign::Distributed) => {
+                        HorizontalAlignment::Center
+                    }
+                    Some(HAlign::Right) => HorizontalAlignment::Right,
+                    _ => HorizontalAlignment::Left,
+                },
+            )),
+            vertical_alignment: uniform(formats.iter().map(
+                |(_, format)| match format.alignment.v {
+                    Some(VAlign::Top) => VerticalAlignment::Top,
+                    Some(VAlign::Center | VAlign::Distributed | VAlign::Justify) => {
+                        VerticalAlignment::Middle
+                    }
+                    _ => VerticalAlignment::Bottom,
+                },
+            )),
+            text_wrapping: uniform(formats.iter().map(|(_, format)| {
+                if format.alignment.wrap_text {
+                    TextWrapping::Wrap
+                } else if format.alignment.shrink_to_fit {
+                    TextWrapping::Clip
+                } else {
+                    TextWrapping::Overflow
+                }
+            })),
+        })
+    }
+
+    pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
+        let (rows, columns) = self.validate_bounded_range(sheet, range)?;
+        Ok(CapturedFormat {
+            rows: rows as u32,
+            columns: columns as u32,
+            formats: self
+                .range_formats(sheet, range)?
+                .into_iter()
+                .map(|(_, format)| format)
+                .collect(),
+        })
+    }
+
+    pub fn apply_format(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        format: CapturedFormat,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.validate_bounded_range(sheet, range)?;
+        self.apply_ops(
+            vec![Op::ApplyRangeFormat {
+                sheet,
+                range,
+                format,
+            }],
+            options,
+        )
+    }
+
+    pub fn merged_ranges(&self, sheet: SheetId, range: CellRange) -> Result<Vec<CellRange>> {
+        validate_range(range)?;
+        Ok(self
+            .sheet(sheet)?
+            .merges
+            .iter()
+            .copied()
+            .filter(|merged| ranges_intersect(*merged, range))
+            .collect())
     }
 
     pub fn edit_cell(
@@ -576,7 +735,11 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative() && ops.iter().any(is_structural_op) {
+        if self.is_collaborative()
+            && ops
+                .iter()
+                .any(|op| is_structural_op(op) || is_formatting_op(op))
+        {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -615,6 +778,18 @@ impl Workbook {
 
     pub fn can_redo(&self) -> bool {
         !self.is_collaborative() && self.undo.can_redo()
+    }
+
+    pub fn history_state(&self) -> HistoryState {
+        if self.is_collaborative() {
+            return HistoryState::default();
+        }
+        HistoryState {
+            can_undo: self.undo.can_undo(),
+            can_redo: self.undo.can_redo(),
+            undo_depth: self.undo.undo_depth(),
+            redo_depth: self.undo.redo_depth(),
+        }
     }
 
     pub fn undo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
@@ -908,6 +1083,38 @@ impl Workbook {
         self.validate_cell(cell)
     }
 
+    fn validate_bounded_range(&self, sheet: SheetId, range: CellRange) -> Result<(u64, u64)> {
+        validate_range(range)?;
+        self.sheet(sheet)?;
+        let rows = u64::from(range.end.row - range.start.row + 1);
+        let columns = u64::from(range.end.col - range.start.col + 1);
+        if rows * columns > MAX_RANGE_CELLS {
+            return Err(Error::RangeTooLarge {
+                rows,
+                cols: columns,
+                max: MAX_RANGE_CELLS,
+            });
+        }
+        Ok((rows, columns))
+    }
+
+    fn range_formats(
+        &self,
+        sheet: SheetId,
+        range: CellRange,
+    ) -> Result<Vec<(CellRef, CellFormat)>> {
+        let sheet_ref = self.sheet(sheet)?;
+        let mut formats = Vec::new();
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let style = sheet_ref.cell(at).and_then(|cell| cell.style);
+                formats.push((at, self.model.styles.cell_format(style)));
+            }
+        }
+        Ok(formats)
+    }
+
     fn validate_cell(&self, cell: CellRef) -> Result<()> {
         validate_cell_ref(cell)
     }
@@ -1070,6 +1277,138 @@ impl Workbook {
     pub fn last_calculation(&self) -> &CalculationResult {
         &self.last_calculation
     }
+}
+
+fn uniform<T: PartialEq + Clone>(mut values: impl Iterator<Item = T>) -> Option<T> {
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
+}
+
+fn number_format_kind(format: &NumberFormat) -> (NumberFormatKind, Option<String>) {
+    match format {
+        NumberFormat::Builtin { id: 0 } => (NumberFormatKind::Automatic, None),
+        NumberFormat::Builtin { id: 49 } => (NumberFormatKind::PlainText, None),
+        NumberFormat::Builtin { id: 9 | 10 } => (NumberFormatKind::Percent, None),
+        NumberFormat::Builtin { id: 11 | 48 } => (NumberFormatKind::Scientific, None),
+        NumberFormat::Builtin {
+            id: 5..=8 | 41..=44,
+        } => (NumberFormatKind::Currency, None),
+        NumberFormat::Builtin { id: 14..=17 | 22 } => (NumberFormatKind::Date, None),
+        NumberFormat::Builtin {
+            id: 18..=21 | 45..=47,
+        } => (NumberFormatKind::Time, None),
+        NumberFormat::Builtin {
+            id: 1..=4 | 37..=40,
+        } => (NumberFormatKind::Number, None),
+        NumberFormat::Builtin { .. } => (NumberFormatKind::Custom, None),
+        NumberFormat::Custom { pattern }
+            if pattern.contains('$')
+                || pattern.contains('€')
+                || pattern.contains('£')
+                || pattern.contains('¥') =>
+        {
+            (NumberFormatKind::Currency, Some(pattern.clone()))
+        }
+        NumberFormat::Custom { pattern } if pattern.contains('%') => {
+            (NumberFormatKind::Percent, Some(pattern.clone()))
+        }
+        NumberFormat::Custom { pattern } if pattern.contains("E+") || pattern.contains("E-") => {
+            (NumberFormatKind::Scientific, Some(pattern.clone()))
+        }
+        NumberFormat::Custom { pattern } => (NumberFormatKind::Custom, Some(pattern.clone())),
+    }
+}
+
+fn border_edges(border: &Border) -> [Option<&BorderEdge>; 4] {
+    [
+        border.left.as_ref(),
+        border.top.as_ref(),
+        border.right.as_ref(),
+        border.bottom.as_ref(),
+    ]
+}
+
+fn uniform_border_value<T: PartialEq + Clone>(
+    formats: &[(CellRef, CellFormat)],
+    value: impl Fn(&BorderEdge) -> T,
+) -> Option<T> {
+    uniform(
+        formats
+            .iter()
+            .flat_map(|(_, format)| border_edges(&format.border))
+            .flatten()
+            .map(value),
+    )
+}
+
+fn border_line_style(style: BorderStyle) -> BorderLineStyle {
+    match style {
+        BorderStyle::Dashed => BorderLineStyle::Dashed,
+        BorderStyle::Dotted | BorderStyle::Hair => BorderLineStyle::Dotted,
+        BorderStyle::Double => BorderLineStyle::Double,
+        BorderStyle::Thin | BorderStyle::Medium | BorderStyle::Thick => BorderLineStyle::Solid,
+    }
+}
+
+fn detect_border_preset(
+    formats: &[(CellRef, CellFormat)],
+    range: CellRange,
+) -> Option<BorderPreset> {
+    if formats
+        .iter()
+        .all(|(_, format)| border_edges(&format.border).iter().all(Option::is_none))
+    {
+        return Some(BorderPreset::None);
+    }
+    [
+        BorderPreset::All,
+        BorderPreset::Outer,
+        BorderPreset::Inner,
+        BorderPreset::Horizontal,
+        BorderPreset::Vertical,
+        BorderPreset::Left,
+        BorderPreset::Top,
+        BorderPreset::Right,
+        BorderPreset::Bottom,
+    ]
+    .into_iter()
+    .find(|preset| {
+        formats.iter().all(|(at, format)| {
+            let border = &format.border;
+            border.left.is_some() == border_expected(*preset, range, *at, 0)
+                && border.top.is_some() == border_expected(*preset, range, *at, 1)
+                && border.right.is_some() == border_expected(*preset, range, *at, 2)
+                && border.bottom.is_some() == border_expected(*preset, range, *at, 3)
+        })
+    })
+}
+
+fn border_expected(preset: BorderPreset, range: CellRange, at: CellRef, side: u8) -> bool {
+    let boundary = match side {
+        0 => at.col == range.start.col,
+        1 => at.row == range.start.row,
+        2 => at.col == range.end.col,
+        _ => at.row == range.end.row,
+    };
+    match preset {
+        BorderPreset::All => true,
+        BorderPreset::Inner => !boundary,
+        BorderPreset::Horizontal => matches!(side, 1 | 3) && !boundary,
+        BorderPreset::Vertical => matches!(side, 0 | 2) && !boundary,
+        BorderPreset::Outer => boundary,
+        BorderPreset::Left => side == 0 && boundary,
+        BorderPreset::Top => side == 1 && boundary,
+        BorderPreset::Right => side == 2 && boundary,
+        BorderPreset::Bottom => side == 3 && boundary,
+        BorderPreset::None => false,
+    }
+}
+
+fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
+    left.start.row <= right.end.row
+        && left.end.row >= right.start.row
+        && left.start.col <= right.end.col
+        && left.end.col >= right.start.col
 }
 
 fn authority_error(error: AuthorityError) -> Error {
@@ -1305,6 +1644,13 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             require_sheet(model, *sheet)?;
             validate_range(*range)?;
         }
+        Op::PatchRangeStyle { sheet, range, .. }
+        | Op::SetRangeNumberFormat { sheet, range, .. }
+        | Op::ApplyRangeFormat { sheet, range, .. } => {
+            require_sheet(model, *sheet)?;
+            validate_range(*range)?;
+            validate_range_size(*range)?;
+        }
         Op::AddSheet { index, .. } => {
             if *index > model.sheets.len() {
                 return Err(Error::InvalidOperation(format!(
@@ -1416,6 +1762,19 @@ fn validate_range(range: CellRange) -> Result<()> {
         return Err(Error::InvalidOperation(
             "range start must be above and left of range end".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_range_size(range: CellRange) -> Result<()> {
+    let rows = u64::from(range.end.row - range.start.row + 1);
+    let cols = u64::from(range.end.col - range.start.col + 1);
+    if rows * cols > MAX_RANGE_CELLS {
+        return Err(Error::RangeTooLarge {
+            rows,
+            cols,
+            max: MAX_RANGE_CELLS,
+        });
     }
     Ok(())
 }

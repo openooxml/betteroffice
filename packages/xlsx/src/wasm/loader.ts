@@ -53,6 +53,114 @@ export interface CalculationStatus {
   limitedCells: string[];
 }
 
+export type NumberFormat =
+  | 'automatic'
+  | 'plainText'
+  | 'number'
+  | 'percent'
+  | 'scientific'
+  | 'currency'
+  | 'date'
+  | 'time'
+  | 'custom';
+
+export type BorderPreset =
+  | 'all'
+  | 'inner'
+  | 'horizontal'
+  | 'vertical'
+  | 'outer'
+  | 'left'
+  | 'top'
+  | 'right'
+  | 'bottom'
+  | 'none';
+
+export type BorderStyle = 'solid' | 'dashed' | 'dotted' | 'double';
+export type HorizontalAlignment = 'left' | 'center' | 'right';
+export type VerticalAlignment = 'top' | 'middle' | 'bottom';
+export type TextWrapping = 'overflow' | 'wrap' | 'clip';
+export type StyleProperty =
+  | 'bold'
+  | 'italic'
+  | 'strikethrough'
+  | 'fontFamily'
+  | 'fontSize'
+  | 'textColor'
+  | 'fillColor'
+  | 'borders'
+  | 'horizontalAlignment'
+  | 'verticalAlignment'
+  | 'textWrapping';
+
+export interface BorderPatch {
+  preset?: BorderPreset;
+  style?: BorderStyle;
+  color?: string;
+}
+
+export interface RangeStylePatch {
+  bold?: boolean;
+  italic?: boolean;
+  strikethrough?: boolean;
+  fontFamily?: string;
+  fontSize?: number;
+  textColor?: string;
+  fillColor?: string;
+  border?: BorderPatch;
+  horizontalAlignment?: HorizontalAlignment;
+  verticalAlignment?: VerticalAlignment;
+  textWrapping?: TextWrapping;
+  clear?: StyleProperty[];
+}
+
+export type NumberFormatMutation =
+  | Exclude<NumberFormat, 'custom'>
+  | 'increaseDecimal'
+  | 'decreaseDecimal'
+  | { type: 'custom'; pattern: string };
+
+export interface SelectionFormatting {
+  numberFormat?: NumberFormat;
+  numberFormatPattern?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+  strikethrough?: boolean;
+  textColor?: string;
+  fillColor?: string;
+  borderPreset?: BorderPreset;
+  borderStyle?: BorderStyle;
+  borderColor?: string;
+  horizontalAlignment?: HorizontalAlignment;
+  verticalAlignment?: VerticalAlignment;
+  textWrapping?: TextWrapping;
+}
+
+export interface CapturedFormat {
+  rows: number;
+  columns: number;
+  formats: unknown[];
+}
+
+export interface CellPoint {
+  row: number;
+  col: number;
+}
+
+export interface MergedRange {
+  start: CellPoint;
+  end: CellPoint;
+}
+
+export interface HistoryState {
+  canUndo: boolean;
+  canRedo: boolean;
+  undoDepth: number;
+  redoDepth: number;
+}
+
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
 
@@ -179,6 +287,13 @@ export interface WorkbookHandle extends CollaborationReplica {
   cell(sheet: number, row: number, col: number): CellEdit;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
+  patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
+  setNumberFormat(sheet: number, range: string, format: NumberFormatMutation): EditResult;
+  selectionFormatting(sheet: number, range: string): SelectionFormatting;
+  captureFormat(sheet: number, range: string): CapturedFormat;
+  applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
+  mergedRanges(sheet: number, range: string): MergedRange[];
+  historyState(): HistoryState;
   /**
    * render the current sheet viewport to png bytes via the native raster
    * backend — the same display list the canvas paints, rasterized server-side.
@@ -469,6 +584,44 @@ export function openWorkbook(
         doc.rangeCellsJson(JSON.stringify({ sheet, range }))
       );
       return parsed.cells;
+    },
+    patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult {
+      return parseJson(
+        () => doc.patchRangeStyleJson(JSON.stringify({ sheet, range, patch })),
+        true
+      );
+    },
+    setNumberFormat(
+      sheet: number,
+      range: string,
+      format: NumberFormatMutation
+    ): EditResult {
+      const wire = typeof format === 'string' ? { type: format } : format;
+      return parseJson(
+        () => doc.setRangeNumberFormatJson(JSON.stringify({ sheet, range, format: wire })),
+        true
+      );
+    },
+    selectionFormatting(sheet: number, range: string): SelectionFormatting {
+      return parseJson(() => doc.selectionFormattingJson(JSON.stringify({ sheet, range })));
+    },
+    captureFormat(sheet: number, range: string): CapturedFormat {
+      return parseJson(() => doc.captureFormatJson(JSON.stringify({ sheet, range })));
+    },
+    applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult {
+      return parseJson(
+        () => doc.applyFormatJson(JSON.stringify({ sheet, range, format })),
+        true
+      );
+    },
+    mergedRanges(sheet: number, range: string): MergedRange[] {
+      const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
+        doc.mergedRangesJson(JSON.stringify({ sheet, range }))
+      );
+      return parsed.ranges;
+    },
+    historyState(): HistoryState {
+      return parseJson(() => doc.historyStateJson());
     },
     renderPng(viewport: Viewport): Uint8Array {
       return wasmCall(() => {

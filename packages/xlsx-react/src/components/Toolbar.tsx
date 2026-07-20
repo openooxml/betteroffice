@@ -47,6 +47,7 @@ export type MergeAction = 'all' | 'horizontal' | 'vertical' | 'unmerge';
 export interface SelectionFormatting {
   paintFormat?: boolean;
   numberFormat?: NumberFormat;
+  numberFormatPattern?: string;
   fontFamily?: string;
   fontSize?: number;
   bold?: boolean;

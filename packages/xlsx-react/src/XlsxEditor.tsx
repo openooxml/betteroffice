@@ -31,6 +31,7 @@ import type {
   CellAddr,
   CellEdit,
   CellInputEdit,
+  CapturedFormat,
   DisplayList,
   DrawCmd,
   Direction,
@@ -45,7 +46,11 @@ import type { CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { EditorToolbar } from './components/EditorToolbar';
-import type { MergeAction } from './components/Toolbar';
+import type {
+  FormattingAction,
+  MergeAction,
+  SelectionFormatting,
+} from './components/Toolbar';
 import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import { ProposalDecoration } from './proposals/ProposalDecoration';
@@ -369,6 +374,16 @@ function XlsxEditorContent({
   const [toolbarHeight, setToolbarHeight] = useState(DEFAULT_XLSX_TOOLBAR_HEIGHT);
   const [zoom, setZoom] = useState(1);
   const [revision, setRevision] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [selectionFormatting, setSelectionFormatting] = useState<SelectionFormatting>({});
+  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+  const [mergedRanges, setMergedRanges] = useState<
+    Array<{ start: CellAddr; end: CellAddr }>
+  >([]);
+  const [borderStyleChoice, setBorderStyleChoice] = useState<SelectionFormatting['borderStyle']>();
+  const [borderColorChoice, setBorderColorChoice] = useState<string>();
+  const [capturedFormat, setCapturedFormat] = useState<CapturedFormat | null>(null);
+  const paintSourceRef = useRef<string | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
   const [collaborationReplica, setCollaborationReplica] =
@@ -421,6 +436,13 @@ function XlsxEditorContent({
     setStaleFor({});
     setProposalsPanelOpen(false);
     setCollaborationReplica(null);
+    setSelectionFormatting({});
+    setHistoryState({ canUndo: false, canRedo: false });
+    setMergedRanges([]);
+    setBorderStyleChoice(undefined);
+    setBorderColorChoice(undefined);
+    setCapturedFormat(null);
+    paintSourceRef.current = null;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -598,10 +620,34 @@ function XlsxEditorContent({
   useEffect(() => {
     const stop = () => {
       draggingRef.current = false;
+      setDragging(false);
     };
     window.addEventListener('mouseup', stop);
     return () => window.removeEventListener('mouseup', stop);
   }, []);
+
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection || !sheetInfo) {
+      setSelectionFormatting({});
+      setHistoryState({ canUndo: false, canRedo: false });
+      setMergedRanges([]);
+      return;
+    }
+    const range = normalizeRange(selection);
+    try {
+      const from = handle.cell(activeSheet, range.top, range.left).a1;
+      const to = handle.cell(activeSheet, range.bottom, range.right).a1;
+      const a1 = `${from}:${to}`;
+      setSelectionFormatting(handle.selectionFormatting(activeSheet, a1));
+      setHistoryState(handle.historyState());
+      setMergedRanges(handle.mergedRanges(activeSheet, a1));
+    } catch {
+      setSelectionFormatting({});
+      setHistoryState({ canUndo: false, canRedo: false });
+      setMergedRanges([]);
+    }
+  }, [selection, sheetInfo, activeSheet, revision]);
 
   // rebuilt from the live frame so the offscreen mirror never lags a mutation;
   // the visible window is small, so a rebuild per paint frame is cheap enough.
@@ -634,6 +680,18 @@ function XlsxEditorContent({
     setSheetInfo(result.sheetInfo);
     setRevision((r) => r + 1);
   }, []);
+
+  const selectedRangeA1 = useCallback(
+    (target: Selection): string | null => {
+      const handle = handleRef.current;
+      if (!handle) return null;
+      const range = normalizeRange(target);
+      const from = handle.cell(activeSheet, range.top, range.left).a1;
+      const to = handle.cell(activeSheet, range.bottom, range.right).a1;
+      return `${from}:${to}`;
+    },
+    [activeSheet]
+  );
 
   const limits = useCallback((): SelectionLimits => {
     return deriveLimits(
@@ -766,6 +824,142 @@ function XlsxEditorContent({
     });
   }, [selection, activeSheet, applyResult]);
 
+  const formatSelection = useCallback(
+    (action: FormattingAction) => {
+      const handle = handleRef.current;
+      if (!handle || !selection || collaborationEnabled) return;
+      const range = selectedRangeA1(selection);
+      if (!range) return;
+      if (action === 'paintFormat') {
+        if (capturedFormat) {
+          setCapturedFormat(null);
+          paintSourceRef.current = null;
+          return;
+        }
+        try {
+          setCapturedFormat(handle.captureFormat(activeSheet, range));
+          const normalized = normalizeRange(selection);
+          paintSourceRef.current = `${activeSheet}:${normalized.top}:${normalized.left}:${normalized.bottom}:${normalized.right}`;
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+        return;
+      }
+      try {
+        let result: EditResult;
+        if (action === 'currency') {
+          result = handle.setNumberFormat(activeSheet, range, 'currency');
+        } else if (action === 'percent') {
+          result = handle.setNumberFormat(activeSheet, range, 'percent');
+        } else if (action === 'increaseDecimal') {
+          result = handle.setNumberFormat(activeSheet, range, 'increaseDecimal');
+        } else if (action === 'decreaseDecimal') {
+          result = handle.setNumberFormat(activeSheet, range, 'decreaseDecimal');
+        } else if (action === 'bold') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            bold: !selectionFormatting.bold,
+          });
+        } else if (action === 'italic') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            italic: !selectionFormatting.italic,
+          });
+        } else if (action === 'strikethrough') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            strikethrough: !selectionFormatting.strikethrough,
+          });
+        } else if (action.type === 'numberFormat') {
+          result =
+            action.value === 'custom'
+              ? handle.setNumberFormat(activeSheet, range, {
+                  type: 'custom',
+                  pattern: selectionFormatting.numberFormatPattern ?? '0.00',
+                })
+              : handle.setNumberFormat(activeSheet, range, action.value);
+        } else if (action.type === 'fontFamily') {
+          result = handle.patchRangeStyle(activeSheet, range, { fontFamily: action.value });
+        } else if (action.type === 'fontSize') {
+          result = handle.patchRangeStyle(activeSheet, range, { fontSize: action.value });
+        } else if (action.type === 'textColor') {
+          result = handle.patchRangeStyle(activeSheet, range, { textColor: action.value });
+        } else if (action.type === 'fillColor') {
+          result = handle.patchRangeStyle(activeSheet, range, { fillColor: action.value });
+        } else if (action.type === 'borderPreset') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            border: {
+              preset: action.value,
+              style: borderStyleChoice ?? selectionFormatting.borderStyle ?? 'solid',
+              color: borderColorChoice ?? selectionFormatting.borderColor ?? '#000000',
+            },
+          });
+        } else if (action.type === 'borderStyle') {
+          setBorderStyleChoice(action.value);
+          result = handle.patchRangeStyle(activeSheet, range, {
+            border: { style: action.value },
+          });
+        } else if (action.type === 'borderColor') {
+          setBorderColorChoice(action.value);
+          result = handle.patchRangeStyle(activeSheet, range, {
+            border: { color: action.value },
+          });
+        } else if (action.type === 'horizontalAlignment') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            horizontalAlignment: action.value,
+          });
+        } else if (action.type === 'verticalAlignment') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            verticalAlignment: action.value,
+          });
+        } else {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            textWrapping: action.value,
+          });
+        }
+        applyResult(result);
+        focusContainer();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [
+      selection,
+      collaborationEnabled,
+      selectedRangeA1,
+      capturedFormat,
+      activeSheet,
+      selectionFormatting,
+      borderStyleChoice,
+      borderColorChoice,
+      applyResult,
+      focusContainer,
+    ]
+  );
+
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection || !capturedFormat || dragging) return;
+    const normalized = normalizeRange(selection);
+    const key = `${activeSheet}:${normalized.top}:${normalized.left}:${normalized.bottom}:${normalized.right}`;
+    if (key === paintSourceRef.current) return;
+    const range = selectedRangeA1(selection);
+    if (!range) return;
+    try {
+      applyResult(handle.applyFormat(activeSheet, range, capturedFormat));
+      setCapturedFormat(null);
+      paintSourceRef.current = null;
+      focusContainer();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [
+    selection,
+    capturedFormat,
+    dragging,
+    activeSheet,
+    selectedRangeA1,
+    applyResult,
+    focusContainer,
+  ]);
+
   const undo = useCallback(() => {
     const handle = handleRef.current;
     if (!handle || collaborationEnabled) return;
@@ -824,12 +1018,20 @@ function XlsxEditorContent({
           });
         }
       } else {
-        ops.push({
-          type: 'unmergeCells',
-          sheet: activeSheet,
-          range: mergeRange(range.top, range.left, range.bottom, range.right),
-        });
+        for (const merged of mergedRanges) {
+          ops.push({
+            type: 'unmergeCells',
+            sheet: activeSheet,
+            range: mergeRange(
+              merged.start.row,
+              merged.start.col,
+              merged.end.row,
+              merged.end.col
+            ),
+          });
+        }
       }
+      if (ops.length === 0) return;
       try {
         applyResult(handle.applyOps(ops));
         focusContainer();
@@ -837,7 +1039,7 @@ function XlsxEditorContent({
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [selection, activeSheet, applyResult, focusContainer]
+    [selection, activeSheet, mergedRanges, applyResult, focusContainer]
   );
 
   // accept a proposal (optionally forcing past drift): apply it, drop any stale
@@ -1017,6 +1219,7 @@ function XlsxEditorContent({
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
       else setSelection(selectionAt(addr));
       draggingRef.current = true;
+      setDragging(true);
       focusContainer();
     },
     [selection, pointToCell, limits, focusContainer]
@@ -1070,6 +1273,8 @@ function XlsxEditorContent({
       setSelection(selectionAt({ row: 0, col: 0 }));
       setEditing(null);
       setFormulaDraft(null);
+      setCapturedFormat(null);
+      paintSourceRef.current = null;
       setSheetInfo(handle.sheetInfo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1095,19 +1300,26 @@ function XlsxEditorContent({
     >
       <div ref={toolbarRef} data-testid="xlsx-toolbar" style={xlsxToolbarStyles.shell}>
         <EditorToolbar
+          currentFormatting={{
+            ...selectionFormatting,
+            borderStyle: borderStyleChoice ?? selectionFormatting.borderStyle,
+            borderColor: borderColorChoice ?? selectionFormatting.borderColor,
+            paintFormat: capturedFormat !== null,
+          }}
           selectionShape={{
             rows: selectionRows,
             columns: selectionColumns,
-            canUnmerge: selectionRows > 1 || selectionColumns > 1,
+            canUnmerge: mergedRanges.length > 0,
           }}
           onSearchMenus={searchMenus}
           onUndo={undo}
           onRedo={redo}
-          canUndo={Boolean(sheetInfo && !collaborationEnabled)}
-          canRedo={Boolean(sheetInfo && !collaborationEnabled)}
+          canUndo={historyState.canUndo}
+          canRedo={historyState.canRedo}
           onPrint={print}
           zoom={zoom}
           onZoomChange={setZoom}
+          onFormat={collaborationEnabled ? undefined : formatSelection}
           onMerge={mergeSelection}
         >
           <EditorToolbar.Toolbar />

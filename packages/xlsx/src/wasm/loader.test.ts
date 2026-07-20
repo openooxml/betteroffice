@@ -111,6 +111,53 @@ describe('wasm loader', () => {
       handle.dispose();
     }
   });
+
+  it('round-trips formatting, format capture, merge metadata, and history state', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      expect(handle.historyState()).toEqual({
+        canUndo: false,
+        canRedo: false,
+        undoDepth: 0,
+        redoDepth: 0,
+      });
+      expect(handle.selectionFormatting(0, 'A8:B8').bold).toBe(false);
+      expect(
+        handle.patchRangeStyle(0, 'A8:B8', {
+          bold: true,
+          fontFamily: 'Arial',
+          textColor: '#123456',
+        }).applied
+      ).toBe(true);
+      expect(handle.selectionFormatting(0, 'A8:B8')).toMatchObject({
+        bold: true,
+        fontFamily: 'Arial',
+        textColor: '#123456',
+      });
+      handle.setNumberFormat(0, 'A8:B8', 'percent');
+      expect(handle.selectionFormatting(0, 'A8:B8').numberFormat).toBe('percent');
+      handle.setNumberFormat(0, 'A8:B8', 'increaseDecimal');
+      expect(handle.selectionFormatting(0, 'A8:B8').numberFormatPattern).toBe('0.000%');
+      const captured = handle.captureFormat(0, 'A8');
+      expect(captured).toMatchObject({ rows: 1, columns: 1 });
+      handle.applyFormat(0, 'C8', captured);
+      expect(handle.selectionFormatting(0, 'C8')).toMatchObject({
+        bold: true,
+        numberFormat: 'percent',
+      });
+      expect(handle.historyState()).toMatchObject({
+        canUndo: true,
+        canRedo: false,
+        undoDepth: 4,
+        redoDepth: 0,
+      });
+      handle.undo();
+      expect(handle.historyState()).toMatchObject({ undoDepth: 3, redoDepth: 1 });
+      expect(handle.mergedRanges(0, 'A1:Z20').length).toBeGreaterThan(0);
+    } finally {
+      handle.dispose();
+    }
+  });
 });
 
 // the two paths are gated on `isProposalsAvailable()` so this file passes
