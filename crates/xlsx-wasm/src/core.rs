@@ -1106,10 +1106,9 @@ mod tests {
         right.apply_update_json(&left_update, None).unwrap();
 
         assert_eq!(left.encode_state_vector(), right.encode_state_vector());
-        assert_eq!(
-            left.encode_state_as_update(),
-            right.encode_state_as_update()
-        );
+        assert_eq!(left.workbook.model(), right.workbook.model());
+        assert_eq!(left.workbook.model().styles, right.workbook.model().styles);
+        assert_eq!(display_value(&left), display_value(&right));
         assert!(
             left.cell_json(r#"{"sheet":0,"row":0,"col":0}"#)
                 .unwrap()
