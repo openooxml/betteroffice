@@ -1644,8 +1644,16 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
                 ));
             }
         }
-        for range in &sheet.merges {
+        for (index, range) in sheet.merges.iter().enumerate() {
             validate_range(*range)?;
+            if sheet.merges[index + 1..]
+                .iter()
+                .any(|other| ranges_intersect(*range, *other))
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains overlapping merged ranges".to_string(),
+                ));
+            }
         }
     }
     Ok(())

@@ -91,14 +91,27 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         }
         Op::MergeCells { sheet, range } => {
             let s = sheet_mut(wb, *sheet)?;
-            if s.merges.contains(range) {
+            let replaced = s
+                .merges
+                .iter()
+                .copied()
+                .filter(|merged| ranges_intersect(*merged, *range))
+                .collect::<Vec<_>>();
+            if replaced.as_slice() == [*range] {
                 return Ok(InvertedOp(vec![]));
             }
+            s.merges.retain(|merged| !ranges_intersect(*merged, *range));
             s.merges.push(*range);
-            Ok(InvertedOp(vec![Op::UnmergeCells {
+            let mut inverse = Vec::with_capacity(replaced.len() + 1);
+            inverse.push(Op::UnmergeCells {
                 sheet: *sheet,
                 range: *range,
-            }]))
+            });
+            inverse.extend(replaced.into_iter().map(|range| Op::MergeCells {
+                sheet: *sheet,
+                range,
+            }));
+            Ok(InvertedOp(inverse))
         }
         Op::UnmergeCells { sheet, range } => {
             let s = sheet_mut(wb, *sheet)?;
@@ -260,6 +273,13 @@ fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError>
         inverse.extend(chunk);
     }
     Ok(inverse)
+}
+
+fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
+    left.start.row <= right.end.row
+        && left.end.row >= right.start.row
+        && left.start.col <= right.end.col
+        && left.end.col >= right.start.col
 }
 
 /// remap an address through a structural op; `None` when it falls inside a

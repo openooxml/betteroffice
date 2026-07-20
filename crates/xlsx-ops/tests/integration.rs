@@ -100,6 +100,71 @@ fn full_workbook_round_trip_via_undo_stack() {
 }
 
 #[test]
+fn merge_replaces_intersections_and_undo_restores_them() {
+    let cases = [
+        (
+            "all",
+            vec!["G1:H2", "A1:B2", "D2:E3"],
+            vec!["B2:E4"],
+            vec!["G1:H2", "B2:E4"],
+        ),
+        (
+            "horizontal",
+            vec!["F1:G2", "A1:B2"],
+            vec!["A1:D1", "A2:D2"],
+            vec!["F1:G2", "A1:D1", "A2:D2"],
+        ),
+        (
+            "vertical",
+            vec!["D1:E2", "A1:B2"],
+            vec!["A1:A4", "B1:B4"],
+            vec!["D1:E2", "A1:A4", "B1:B4"],
+        ),
+    ];
+
+    for (name, initial, replacements, expected) in cases {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        wb.sheets[0].merges = initial
+            .iter()
+            .map(|range| CellRange::parse_a1(range).unwrap())
+            .collect();
+        let before = wb.sheets[0].merges.clone();
+        let ops = replacements
+            .iter()
+            .map(|range| Op::MergeCells {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1(range).unwrap(),
+            })
+            .collect();
+        let tx = Transaction::new(ops, Provenance::User);
+        let mut stack = UndoStack::new();
+
+        stack.commit(&mut wb, &tx).unwrap();
+
+        let expected = expected
+            .iter()
+            .map(|range| CellRange::parse_a1(range).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(wb.sheets[0].merges, expected, "{name}");
+        for (index, merged) in wb.sheets[0].merges.iter().enumerate() {
+            assert!(
+                wb.sheets[0].merges[index + 1..]
+                    .iter()
+                    .all(|other| merged.end.row < other.start.row
+                        || other.end.row < merged.start.row
+                        || merged.end.col < other.start.col
+                        || other.end.col < merged.start.col),
+                "{name}"
+            );
+        }
+
+        stack.undo(&mut wb).unwrap();
+        assert_eq!(wb.sheets[0].merges, before, "{name}");
+    }
+}
+
+#[test]
 fn apply_returns_replayable_inverse() {
     let mut wb = Workbook::default();
     wb.sheets.push(Sheet::new("Sheet1"));

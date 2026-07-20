@@ -298,6 +298,23 @@ fn rejects_empty_workbook_ops_atomically() {
 }
 
 #[test]
+fn rejects_overlapping_merged_ranges() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.merges = vec![
+        CellRange::parse_a1("A1:B2").unwrap(),
+        CellRange::parse_a1("B2:C3").unwrap(),
+    ];
+    model.sheets.push(sheet);
+
+    assert!(matches!(
+        Workbook::from_model(model),
+        Err(Error::InvalidOperation(message))
+            if message == "workbook contains overlapping merged ranges"
+    ));
+}
+
+#[test]
 fn validates_raw_ops_and_noop_history() {
     let mut workbook = Workbook::open(&sample_xlsx()).unwrap();
     let result = workbook.edit_cells(
