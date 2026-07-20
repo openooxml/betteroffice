@@ -19,6 +19,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from './residentEngineWorkerProtocol';
+import { residentCaretSnapshotForFrame } from './residentCaret';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
@@ -167,7 +168,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       performance.now() - started,
       pendingUpdates,
       applied.profile,
-      started
+      started,
+      true
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -230,7 +232,8 @@ async function replyFrame(
   engineMs: number,
   updates = pendingUpdates,
   engineProfile?: import('./index').YrsEngineApplyProfile,
-  requestStarted = performance.now()
+  requestStarted = performance.now(),
+  requireCaret = false
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   // The decoder's primitive-id arrays are zero-copy views into `bytes`. The
@@ -243,6 +246,14 @@ async function replyFrame(
       primitiveIds: page.primitiveIds.slice(),
     })),
   };
+  const caret = session?.residentCaretSnapshot();
+  if (!caret || !residentCaretSnapshotForFrame(caret, retainedFrame)) {
+    throw new Error('Resident caret snapshot does not match the produced frame');
+  }
+  if (requireCaret && !caret.caretRect) {
+    throw new Error('Resident input frame omitted collapsed caret geometry');
+  }
+  const selection = session?.selection() ?? null;
   // Pages no longer in the document release their surfaces entirely (their
   // elements unmounted main-side); off-window pages are only zeroed, so this
   // is the sole place a live document's canvas reference is dropped.
@@ -268,6 +279,8 @@ async function replyFrame(
       engineMs,
       workerTotalMs: performance.now() - requestStarted,
       engineProfile,
+      caret,
+      selection,
       replayMs,
       replayedPages,
       layoutRevision,

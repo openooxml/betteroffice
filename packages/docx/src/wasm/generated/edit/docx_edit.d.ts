@@ -298,6 +298,7 @@ export class EditSession {
      * deletion and insertion share one revision id.
      */
     replace_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
+    resident_caret_snapshot_json(): string;
     /**
      * Current offsets of a comment's sticky anchors:
      * `[{"story","start","end"}]`. Errors when an anchor no longer resolves.
@@ -638,6 +639,7 @@ export interface InitOutput {
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
+    readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

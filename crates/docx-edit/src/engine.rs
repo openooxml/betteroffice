@@ -22,7 +22,7 @@ use docx_layout::header_footer::{
     HeaderFooterVariant, extend_body_margins, measure_header_footer,
     resolve_header_footer_field_widths,
 };
-use docx_layout::hit::HitRegion;
+use docx_layout::hit::{CaretRect, HitRegion};
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
@@ -353,6 +353,23 @@ pub struct EngineStats {
     pub display_builds: u64,
     pub incremental_display_builds: u64,
     pub rebuilt_display_pages: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentCaretRect {
+    pub page_index: usize,
+    pub page_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentCaretSnapshot {
+    pub frame_epoch: u64,
+    pub caret_rect: Option<ResidentCaretRect>,
 }
 
 /// Fine-grained timings for one profiled resident input transaction.
@@ -1834,6 +1851,55 @@ impl EngineSession {
         self.display.borrow().list.as_ref().map(read)
     }
 
+    pub fn resident_caret_snapshot(
+        &self,
+        paragraph: Option<(&str, u32)>,
+    ) -> Result<ResidentCaretSnapshot, String> {
+        let position = paragraph.and_then(|(para_id, offset)| {
+            self.pagination
+                .borrow()
+                .input
+                .as_ref()?
+                .measured
+                .iter()
+                .find_map(|measured| {
+                    let (id, start) = paragraph_identity(&measured.block)?;
+                    (block_key(id) == para_id).then_some(start?)
+                })
+                .and_then(|start| {
+                    (start.is_finite()
+                        && start.fract() == 0.0
+                        && start >= i64::MIN as f64
+                        && start <= i64::MAX as f64)
+                        .then_some(start as i64)
+                })
+                .and_then(|start| start.checked_add(1 + i64::from(offset)))
+        });
+        let display = self.display.borrow();
+        let frame_epoch = display.binary_frame_epoch;
+        let caret_rect = position
+            .and_then(|position| {
+                display
+                    .list
+                    .as_ref()
+                    .and_then(|list| docx_layout::hit::caret_rect(list, position))
+            })
+            .and_then(|rect: CaretRect| {
+                let page = display.pages.get(rect.page_index)?;
+                Some(ResidentCaretRect {
+                    page_index: rect.page_index,
+                    page_id: page.page_id.to_string(),
+                    x: rect.x,
+                    y: rect.y,
+                    height: rect.height,
+                })
+            });
+        Ok(ResidentCaretSnapshot {
+            frame_epoch,
+            caret_rect,
+        })
+    }
+
     /// Region-aware hit testing directly against the resident display list.
     pub fn display_hit_test_regions_json(
         &self,
@@ -2690,6 +2756,10 @@ mod tests {
             .layout_document_json(&paragraph_pagination_input("x", false))
             .unwrap();
         engine.build_display_list_frame("{}", 0).unwrap();
+        let caret = engine.resident_caret_snapshot(Some(("p0", 0))).unwrap();
+        assert_eq!(caret.frame_epoch, 1);
+        assert_eq!(caret.caret_rect.as_ref().unwrap().page_id, "1");
+        assert_eq!(caret.caret_rect.as_ref().unwrap().page_index, 0);
         let next_input = paragraph_pagination_input("y", true);
         let incremental = engine.layout_document_json(&next_input).unwrap();
         let full = docx_layout::layout_to_json(&next_input).unwrap();

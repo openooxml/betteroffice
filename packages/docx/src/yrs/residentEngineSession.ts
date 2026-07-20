@@ -1,4 +1,10 @@
-import type { YrsEngineApplyProfile, YrsLoc, YrsSession } from './index';
+import type {
+  YrsEngineApplyProfile,
+  YrsLoc,
+  YrsResidentCaretSnapshot,
+  YrsSelection,
+  YrsSession,
+} from './index';
 import type { CollaborationUpdateOrigin } from '../collaboration/types';
 import { createEditSession, preloadEditWasm } from './wasm/index';
 
@@ -21,6 +27,8 @@ export type ResidentEngineSession = Pick<
   | 'onUpdate'
   | 'outlineGlyphJson'
   | 'registerFont'
+  | 'residentCaretSnapshot'
+  | 'selection'
   | 'setSelection'
   | 'yrsBlocksForStory'
 >;
@@ -63,6 +71,9 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     layoutDocumentWithRegionsJson: (input) => session.layout_document_with_regions_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    residentCaretSnapshot: () =>
+      JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
+    selection: () => JSON.parse(session.selection()) as YrsSelection | null,
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo(selectionHead?.story ?? 'body');
       return session.apply_input(text, expectedFrameEpoch);

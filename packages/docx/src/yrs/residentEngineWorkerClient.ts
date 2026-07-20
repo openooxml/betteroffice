@@ -1,4 +1,9 @@
-import type { YrsEngineApplyProfile, YrsResidentWorkerSnapshot, YrsSelection } from './index';
+import type {
+  YrsEngineApplyProfile,
+  YrsResidentCaretSnapshot,
+  YrsResidentWorkerSnapshot,
+  YrsSelection,
+} from './index';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
@@ -11,6 +16,8 @@ export interface ResidentEngineWorkerFrame {
   engineMs: number;
   workerTotalMs: number;
   engineProfile?: YrsEngineApplyProfile;
+  caret: YrsResidentCaretSnapshot;
+  selection: YrsSelection | null;
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
@@ -275,12 +282,18 @@ function frameResult(
   response: ResidentEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
   if (!response.frame) throw new Error('Resident engine worker response omitted its FrameDelta');
+  if (!response.caret) throw new Error('Resident engine worker response omitted its caret snapshot');
+  if (response.selection === undefined) {
+    throw new Error('Resident engine worker response omitted its selection');
+  }
   return {
     frame: new Uint8Array(response.frame),
     updates: (response.updates ?? []).map((update) => new Uint8Array(update)),
     engineMs: response.engineMs ?? 0,
     workerTotalMs: response.workerTotalMs ?? 0,
     engineProfile: response.engineProfile,
+    caret: response.caret,
+    selection: response.selection,
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,

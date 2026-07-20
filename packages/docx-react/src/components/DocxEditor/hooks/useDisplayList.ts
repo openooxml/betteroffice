@@ -20,12 +20,16 @@ import {
 import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
 import {
   canUseResidentEngineWorker,
+  residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   type ResidentEngineOffscreenPage,
+  type YrsResidentCaretSnapshot,
+  type YrsSelection,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { RustFontChainsProvider } from './useRustMeasurement';
+import { displayListNeedsHostImages } from '../canvasPresentation';
 
 // provider for the canvas renderer's display list: returns the injected value
 // when the host supplies one, otherwise the demo fixture. consumers only ever
@@ -43,24 +47,33 @@ export interface UseRustDisplayListResult {
   loading: boolean;
   /** Binary retained-frame state; null on the compatibility JSON path. */
   frame: RetainedFrame | null;
+  /** Query facade built from the same display list as `frame`. */
+  queries: DisplayListQueries | null;
+  /** Worker-computed caret tagged to `frame`. */
+  caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
-  applyInput(text: string): Promise<boolean>;
+  applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
   /** Apply one collapsed deletion/paragraph merge through the resident engine. */
-  applyDelete(direction: 'backward' | 'forward'): Promise<boolean>;
-  /** True once the dedicated worker owns resident frame production. */
-  workerActive: boolean;
+  applyDelete(direction: 'backward' | 'forward'): Promise<ResidentFrameApplyResult | null>;
   /**
    * True while the worker owns the visible page surfaces. Sticky across
    * invalidation (remote/structural updates) so the canvas keeps its last
    * pixels instead of remounting; drops only on genuine fallback or reset.
    */
   workerSurfacesActive: boolean;
+  workerPresentationActive: boolean;
+  setWorkerPresentationActive(active: boolean): void;
   attachOffscreenCanvases(
     pages: ResidentEngineOffscreenPage[],
     activePageIds: string[],
     devicePixelRatio: number,
     zoom: number
   ): Promise<boolean>;
+}
+
+export interface ResidentFrameApplyResult {
+  frameEpoch: number | null;
+  caretSynchronized: boolean;
 }
 
 /** test seam: unit tests inject a fake engine/inputs-resolver instead of the wasm module */
@@ -72,6 +85,20 @@ export interface RustDisplayListHookOverrides {
 type ResidentInputOperation =
   | { kind: 'insert'; text: string }
   | { kind: 'delete'; direction: 'backward' | 'forward' };
+
+interface RustDisplayListSnapshot {
+  displayList: DisplayList | null;
+  frame: RetainedFrame | null;
+  queries: DisplayListQueries | null;
+  caret: YrsResidentCaretSnapshot | null;
+}
+
+const EMPTY_DISPLAY_LIST_SNAPSHOT: RustDisplayListSnapshot = {
+  displayList: null,
+  frame: null,
+  queries: null,
+  caret: null,
+};
 
 // rebuilds the display list through the rust wasm engine after every layout
 // pass. dumb replay glue: the `{ measured, options, layout }` triple (plus the
@@ -95,12 +122,11 @@ export function useRustDisplayList(
   resolvedCommentIds?: ReadonlySet<number>,
   engine?: RustDisplayListEngine | null
 ): UseRustDisplayListResult {
-  const [displayList, setDisplayList] = useState<DisplayList | null>(null);
+  const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
+  const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
   const generationRef = useRef(0);
-  const frameRef = useRef<RetainedFrame | null>(null);
-  const [frame, setFrame] = useState<RetainedFrame | null>(null);
   const workerRef = useRef<{
     engine: YrsSession;
     client: ResidentEngineWorkerClient;
@@ -108,8 +134,14 @@ export function useRustDisplayList(
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
   const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const suppressWorkerInvalidationRef = useRef(0);
-  const [workerActive, setWorkerActive] = useState(false);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
+  const workerPresentationActiveRef = useRef(false);
+  const [workerPresentationActive, setWorkerPresentationActiveState] = useState(false);
+
+  const setWorkerPresentationActive = useCallback((active: boolean): void => {
+    workerPresentationActiveRef.current = active;
+    setWorkerPresentationActiveState((current) => (current === active ? current : active));
+  }, []);
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
@@ -125,7 +157,6 @@ export function useRustDisplayList(
       // Only frame freshness drops here. The worker keeps the page surfaces
       // (workerSurfacesActive) so the canvas retains its pixels until the
       // post-sync frame lands — flipping surfaces would remount every page.
-      setWorkerActive(false);
     });
   }, [residentEngine]);
 
@@ -138,13 +169,13 @@ export function useRustDisplayList(
   );
 
   const applyResidentInput = useCallback(
-    (operation: ResidentInputOperation): Promise<boolean> => {
-      const run = async (): Promise<boolean> => {
+    (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
+      const run = async (): Promise<ResidentFrameApplyResult | null> => {
         const worker = workerRef.current;
-        const currentFrame = frameRef.current;
-        if (!worker || !worker.client.isReady() || !currentFrame) return false;
+        const currentFrame = snapshotRef.current.frame;
+        if (!worker || !worker.client.isReady() || !currentFrame) return null;
         const selection = worker.engine.selection();
-        if (!selection) return false;
+        if (!selection) return null;
         const result =
           operation.kind === 'insert'
             ? await worker.client.applyInput(
@@ -159,24 +190,44 @@ export function useRustDisplayList(
                 currentFrame.frameEpoch,
                 false
               );
-        if (!result.applied) return false;
+        if (!result.applied) return null;
         const delta = decodeFrameDelta(result.frame);
-        const nextFrame = applyFrameDeltaOwned(currentFrame, delta);
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update, 'body');
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }
+        const previous = snapshotRef.current;
+        if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
+          return { frameEpoch: null, caretSynchronized: false };
+        }
+        const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
+        const caret = sameYrsSelection(result.selection, worker.engine.selection())
+          ? residentCaretSnapshotForFrame(result.caret, nextFrame)
+          : null;
+        const nextSnapshot = createRustDisplayListSnapshot(
+          nextFrame.displayList,
+          nextFrame,
+          caret,
+          null,
+          previous
+        );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
         generationRef.current += 1;
-        frameRef.current = nextFrame;
-        setFrame(nextFrame);
-        setDisplayList(nextFrame.displayList);
+        snapshotRef.current = nextSnapshot;
+        setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        return true;
+        return {
+          frameEpoch: nextFrame.frameEpoch,
+          caretSynchronized: Boolean(
+            caret?.caretRect &&
+              workerPresentationActiveRef.current &&
+              !displayListNeedsHostImages(nextFrame.displayList)
+          ),
+        };
       };
       const pending = workerInputQueueRef.current.then(run, run);
       workerInputQueueRef.current = pending.then(
@@ -190,12 +241,12 @@ export function useRustDisplayList(
         // caller use the structural compatibility path for unsupported
         // paragraphs (inline media/float-dependent measurement, non-body
         // stories, or a frame that has not established resident state).
-        if (nextError.message.includes('resident input state is not ready')) return false;
+        if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Resident input failed', nextError);
         setError(nextError);
         // Once invoked, never fall through to the legacy op: a worker failure
         // may have happened after committing the transaction.
-        return true;
+        return { frameEpoch: null, caretSynchronized: false };
       });
     },
     []
@@ -235,13 +286,12 @@ export function useRustDisplayList(
     if (!layout) {
       // layout reset (document change) — drop the stale pages
       generationRef.current++;
-      setDisplayList(null);
+      snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
+      setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
       setLoading(true);
-      frameRef.current = null;
-      setFrame(null);
-      setWorkerActive(false);
       setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
       return;
     }
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
@@ -276,9 +326,25 @@ export function useRustDisplayList(
         ? build(buildInputs, engine ?? undefined).then((displayList) => ({
             displayList,
             frame: null as RetainedFrame | null,
+            caret: null as YrsResidentCaretSnapshot | null,
+            queryEngine: engine,
+            workerProduced: false,
           }))
-        : buildRustDisplayFrame(buildInputs, engine ?? undefined, frameRef.current);
-    let pending: Promise<{ displayList: DisplayList; frame: RetainedFrame | null }>;
+        : buildRustDisplayFrame(buildInputs, engine ?? undefined, snapshotRef.current.frame).then(
+            (result) => ({
+              ...result,
+              caret: null as YrsResidentCaretSnapshot | null,
+              queryEngine: engine,
+              workerProduced: false,
+            })
+          );
+    let pending: Promise<{
+      displayList: DisplayList;
+      frame: RetainedFrame | null;
+      caret: YrsResidentCaretSnapshot | null;
+      queryEngine: RustDisplayListEngine | null | undefined;
+      workerProduced: boolean;
+    }>;
     if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
       if (!hostEngine) throw new Error('Resident worker snapshot requires a host engine');
@@ -296,8 +362,8 @@ export function useRustDisplayList(
           workerRef.current.client.destroy();
           workerRef.current = null;
         }
-        setWorkerActive(false);
         setWorkerSurfacesActive(false);
+        setWorkerPresentationActive(false);
         return buildOnMainThread();
       };
       try {
@@ -311,6 +377,7 @@ export function useRustDisplayList(
         const worker = workerRef.current.client;
         const extras = encodeDisplayListFrameExtras(buildInputs);
         const bootstrapping = worker.layoutRevision() === 0;
+        const previousFrame = bootstrapping ? null : snapshotRef.current.frame;
         // On a fresh client both hints are null, so a bootstrap snapshot is
         // always complete; a sync snapshot ships a state diff and skips font
         // bytes the worker already holds.
@@ -325,14 +392,21 @@ export function useRustDisplayList(
         const workerFrame = bootstrapping
           ? worker.bootstrap(buildSnapshot(), extras)
           : worker.layoutRevision() !== probe.layoutRevision
-            ? worker.sync(buildSnapshot(), extras, frameRef.current?.frameEpoch ?? 0)
-            : worker.buildFrame(extras, frameRef.current?.frameEpoch ?? 0);
+            ? worker.sync(buildSnapshot(), extras, previousFrame?.frameEpoch ?? 0)
+            : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0);
         pending = workerFrame
           .then((result) => {
-            const previous = bootstrapping ? null : frameRef.current;
             const delta = decodeFrameDelta(result.frame);
-            const nextFrame = applyFrameDelta(previous, delta);
-            return { displayList: nextFrame.displayList, frame: nextFrame };
+            const nextFrame = applyFrameDelta(previousFrame, delta);
+            return {
+              displayList: nextFrame.displayList,
+              frame: nextFrame,
+              caret: sameYrsSelection(result.selection, hostEngine.selection())
+                ? residentCaretSnapshotForFrame(result.caret, nextFrame)
+                : null,
+              queryEngine: null,
+              workerProduced: true,
+            };
           })
           .catch(fallback);
       } catch (error) {
@@ -344,13 +418,20 @@ export function useRustDisplayList(
     pending
       .then((result) => {
         if (generation !== generationRef.current) return;
-        frameRef.current = result.frame;
-        setFrame(result.frame);
-        setDisplayList(result.displayList);
+        const nextSnapshot = createRustDisplayListSnapshot(
+          result.displayList,
+          result.frame,
+          result.caret,
+          result.queryEngine,
+          snapshotRef.current
+        );
+        snapshotRef.current = nextSnapshot;
+        setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
-        const workerProduced = Boolean(probe && workerRef.current?.client.isReady());
-        setWorkerActive(workerProduced);
+        const workerProduced = Boolean(
+          result.workerProduced && probe && workerRef.current?.client.isReady()
+        );
         setWorkerSurfacesActive(workerProduced);
       })
       .catch((error) => {
@@ -361,19 +442,68 @@ export function useRustDisplayList(
         setError(nextError);
         setLoading(false);
       });
-  }, [layout, overrides, fontChainsProviderRef, resolvedCommentIds, engine, residentEngine]);
+  }, [
+    layout,
+    overrides,
+    fontChainsProviderRef,
+    resolvedCommentIds,
+    engine,
+    residentEngine,
+    setWorkerPresentationActive,
+  ]);
 
   return {
-    displayList,
+    displayList: snapshot.displayList,
     error,
     loading,
-    frame,
+    frame: snapshot.frame,
+    queries: snapshot.queries,
+    caret: snapshot.caret,
     applyInput,
     applyDelete,
-    workerActive,
     workerSurfacesActive,
+    workerPresentationActive,
+    setWorkerPresentationActive,
     attachOffscreenCanvases,
   };
+}
+
+function createRustDisplayListSnapshot(
+  displayList: DisplayList,
+  frame: RetainedFrame | null,
+  caret: YrsResidentCaretSnapshot | null,
+  engine: RustDisplayListEngine | null | undefined,
+  previous: RustDisplayListSnapshot
+): RustDisplayListSnapshot {
+  const residentQueries = residentDisplayListQueryEngine(engine);
+  return {
+    displayList,
+    frame,
+    queries: createDisplayListQueries(displayList, residentQueries, previous.queries),
+    caret,
+  };
+}
+
+function sameYrsSelection(left: YrsSelection | null, right: YrsSelection | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.anchor.story === right.anchor.story &&
+    left.anchor.paraId === right.anchor.paraId &&
+    left.anchor.offset === right.anchor.offset &&
+    left.head.story === right.head.story &&
+    left.head.paraId === right.head.paraId &&
+    left.head.offset === right.head.offset
+  );
+}
+
+function residentDisplayListQueryEngine(
+  engine: RustDisplayListEngine | null | undefined
+): ResidentDisplayListQueryEngine | undefined {
+  return engine?.displayHitTestRegionsJson &&
+    engine.displayRangeRectsJson &&
+    engine.displayRangeRectsRegionJson
+    ? (engine as ResidentDisplayListQueryEngine)
+    : undefined;
 }
 
 function isWorkerHostEngine(
@@ -395,12 +525,7 @@ export function useDisplayListQueries(
   displayList: DisplayList | null,
   engine?: RustDisplayListEngine | null
 ): DisplayListQueries | null {
-  const residentQueries =
-    engine?.displayHitTestRegionsJson &&
-    engine.displayRangeRectsJson &&
-    engine.displayRangeRectsRegionJson
-      ? (engine as ResidentDisplayListQueryEngine)
-      : undefined;
+  const residentQueries = residentDisplayListQueryEngine(engine);
   // The previous facade seeds handle adoption: consecutive builds patch only
   // changed pages into the Rust query store instead of re-serializing the
   // whole display list per build.
@@ -432,14 +557,21 @@ export interface UseCanvasRendererResult {
   resolveImage: ImageResolver;
   /** Rust display-list query facade for adapter interactions. */
   queries: DisplayListQueries | null;
+  /** Worker caret from the same atomic renderer snapshot. */
+  caret: YrsResidentCaretSnapshot | null;
+  /** Whether worker-presented pixels make `caret` authoritative. */
+  authoritativeCaretActive: boolean;
   /** host element of the canvas pages, so pointer routing can map client → page-local coords */
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   /** Glyph outlines sourced from the same resident font store as measurement. */
   glyphOutlineProvider: GlyphOutlineProvider | null;
   /** One-call ordinary text insertion; false until resident state is ready. */
-  applyInput(text: string): Promise<boolean>;
+  applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-call ordinary deletion/merge; false until resident state is ready. */
-  applyDelete(direction: 'backward' | 'forward'): Promise<boolean>;
+  applyDelete(
+    direction: 'backward' | 'forward'
+  ): Promise<ResidentFrameApplyResult | null>;
+  setWorkerPresentationActive(active: boolean): void;
   /** OffscreenCanvas replay bridge; null keeps DOM-canvas replay. */
   offscreenReplay: {
     attach(
@@ -482,10 +614,13 @@ export function useCanvasRenderer(
     error,
     loading,
     frame,
+    queries: snapshotQueries,
+    caret,
     applyInput,
     applyDelete,
-    workerActive,
     workerSurfacesActive,
+    workerPresentationActive,
+    setWorkerPresentationActive,
     attachOffscreenCanvases,
   } = useRustDisplayList(layout, undefined, fontChainsProviderRef, resolvedCommentIds, engine);
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
@@ -494,23 +629,19 @@ export function useCanvasRenderer(
     : loading || displayList == null
       ? 'loading'
       : 'ready';
-  // Worker-produced deltas update the retained DisplayList geometry cache on
-  // the main thread. Resident queries on the main replica are intentionally
-  // bypassed because that replica no longer owns the current display list.
-  const queries = useDisplayListQueries(displayList, workerActive ? null : engine);
   const [geometryReady, setGeometryReady] = useState(false);
   useEffect(() => {
-    if (!queries) {
+    if (!snapshotQueries) {
       setGeometryReady(false);
       return;
     }
-    if (queries.isReady()) {
+    if (snapshotQueries.isReady()) {
       setGeometryReady(true);
       return;
     }
     let cancelled = false;
     setGeometryReady(false);
-    void queries.whenReady().then(
+    void snapshotQueries.whenReady().then(
       () => {
         if (!cancelled) setGeometryReady(true);
       },
@@ -521,7 +652,7 @@ export function useCanvasRenderer(
     return () => {
       cancelled = true;
     };
-  }, [queries]);
+  }, [snapshotQueries]);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   // Offscreen replay is the default when the browser supports transferable
   // canvas surfaces. `offscreenReplay=0` is a diagnostic escape hatch; pages
@@ -546,6 +677,12 @@ export function useCanvasRenderer(
         : null,
     [attachOffscreenCanvases, offscreenAllowed, workerSurfacesActive]
   );
+  const authoritativeCaretActive = Boolean(
+    workerPresentationActive &&
+      displayList &&
+      caret?.caretRect &&
+      !displayListNeedsHostImages(displayList)
+  );
   return {
     displayList,
     frame,
@@ -557,11 +694,14 @@ export function useCanvasRenderer(
     error,
     onLayoutComputed,
     resolveImage,
-    queries: geometryReady ? queries : null,
+    queries: geometryReady ? snapshotQueries : null,
+    caret,
+    authoritativeCaretActive,
     canvasHostRef,
     glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
     applyInput,
     applyDelete,
+    setWorkerPresentationActive,
     offscreenReplay,
   };
 }

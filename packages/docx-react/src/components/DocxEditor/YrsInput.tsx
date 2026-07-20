@@ -33,6 +33,7 @@ import {
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
@@ -90,18 +91,22 @@ export interface YrsInputProps {
   locToDisplayPosition(loc: YrsLoc): number | null;
   nextParagraphStyleId?(styleId: string | null): string | null;
   displayListQueries?: DisplayListQueries | null;
+  displayListFrameEpoch?: number | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /** Called for selection-only changes and direct document mutations. */
   onStateChange(
     selection: YrsDisplaySelection,
     docChanged: boolean,
-    residentLayoutReady?: boolean
+    residentLayoutReady?: boolean,
+    residentCaretReady?: boolean
   ): void;
   onDirectInput(): void;
   /** One-owner body text path; false until the resident frame is initialized. */
-  applyResidentInput?(text: string): Promise<boolean>;
+  applyResidentInput?(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
-  applyResidentDelete?(direction: 'backward' | 'forward'): Promise<boolean>;
+  applyResidentDelete?(
+    direction: 'backward' | 'forward'
+  ): Promise<ResidentFrameApplyResult | null>;
   onFocusChange?(focused: boolean): void;
 }
 
@@ -185,6 +190,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     locToDisplayPosition,
     nextParagraphStyleId,
     displayListQueries,
+    displayListFrameEpoch = null,
     canvasHostRef,
     onStateChange,
     onDirectInput,
@@ -201,6 +207,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const inputOperationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
+  const pendingResidentFrameEpochRef = useRef<number | null>(null);
   const [positionStyle, setPositionStyle] = useState<CSSProperties>({ left: 0, top: 0, height: 1 });
   const [selectionEpoch, setSelectionEpoch] = useState(0);
 
@@ -253,11 +260,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, locToDisplayPosition]);
 
   const emitSelection = useCallback(
-    (docChanged: boolean, residentLayoutReady = false): void => {
+    (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false): void => {
       const selection = displaySelection();
       if (!selection) return;
       setSelectionEpoch((epoch) => epoch + 1);
-      onStateChange(selection, docChanged, residentLayoutReady);
+      onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
     [displaySelection, onStateChange]
   );
@@ -272,12 +279,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const finishMutation = useCallback(
-    (residentLayoutReady = false): void => {
+    (residentLayoutReady = false, residentCaretReady = false): void => {
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onDirectInput();
-      emitSelection(true, residentLayoutReady);
+      emitSelection(true, residentLayoutReady, residentCaretReady);
     },
     [emitSelection, onDirectInput]
+  );
+
+  const finishResidentMutation = useCallback(
+    (result: ResidentFrameApplyResult): void => {
+      if (result.caretSynchronized && result.frameEpoch !== null) {
+        pendingResidentFrameEpochRef.current = result.frameEpoch;
+      }
+      finishMutation(result.frameEpoch !== null, result.caretSynchronized);
+    },
+    [finishMutation]
   );
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
@@ -409,7 +426,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           applyResidentInput
         ) {
           const applied = await applyResidentInput(inputText);
-          if (applied) finishMutation(true);
+          if (applied) finishResidentMutation(applied);
           else commitCompatibilityInput();
           return;
         }
@@ -448,6 +465,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation,
       ensureSelection,
       finishMutation,
+      finishResidentMutation,
       inputPositionMap,
       isSuggesting,
       readOnly,
@@ -480,7 +498,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (hasTarget && activeStory === 'body' && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction);
           if (applied) {
-            finishMutation(true);
+            finishResidentMutation(applied);
             return;
           }
         }
@@ -539,6 +557,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       enqueueInputOperation,
       ensureSelection,
       finishMutation,
+      finishResidentMutation,
       inputPositionMap,
       isSuggesting,
       readOnly,
@@ -1047,6 +1066,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   useEffect(() => {
     if (!enabled || !displayListQueries) return;
+    if (!displayListQueries.isReady()) return;
+    const pendingFrameEpoch = pendingResidentFrameEpochRef.current;
+    if (pendingFrameEpoch !== null) {
+      if (displayListFrameEpoch === null || displayListFrameEpoch < pendingFrameEpoch) return;
+      pendingResidentFrameEpochRef.current = null;
+    }
     const selection = displaySelection();
     if (!selection) return;
     onStateChange(selection, false);
@@ -1078,7 +1103,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         scroller.scrollTop += caretBottom - viewport.bottom + margin;
       }
     }
-  }, [canvasHostRef, displayListQueries, displaySelection, enabled, onStateChange, selectionEpoch]);
+  }, [
+    canvasHostRef,
+    displayListFrameEpoch,
+    displayListQueries,
+    displaySelection,
+    enabled,
+    onStateChange,
+    selectionEpoch,
+  ]);
 
   if (!enabled) return null;
   const textarea = (

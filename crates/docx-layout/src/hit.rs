@@ -302,6 +302,15 @@ pub struct RangeRect {
     pub height: f64,
 }
 
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaretRect {
+    pub page_index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub height: f64,
+}
+
 /// append the highlight rects covering `[from, to)` over ONE primitive list (a
 /// page body or one HF band — both page-local) to `out`, stamping `page_index`
 /// on each. Shared by the body-only [`range_rects`] and the region-aware
@@ -372,6 +381,29 @@ fn collect_range_rects(
 /// [`range_rects_in_region`].
 pub fn range_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
     range_rects_in_region(dl, HitRegion::Body, None, from, to)
+}
+
+pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
+    if let Some(rect) = range_rects(dl, pos, pos.saturating_add(1))
+        .into_iter()
+        .next()
+    {
+        return Some(CaretRect {
+            page_index: rect.page_index,
+            x: rect.x,
+            y: rect.y,
+            height: rect.height,
+        });
+    }
+    let rect = range_rects(dl, pos.saturating_sub(1), pos)
+        .into_iter()
+        .next_back()?;
+    Some(CaretRect {
+        page_index: rect.page_index,
+        x: rect.x + rect.width,
+        y: rect.y,
+        height: rect.height,
+    })
 }
 
 /// highlight rectangles for a PM range resolved inside a specific page region —

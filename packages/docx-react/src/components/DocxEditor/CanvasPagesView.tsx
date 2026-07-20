@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -25,6 +26,7 @@ import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA1
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
+import { displayListNeedsHostImages } from './canvasPresentation';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
 // independently so hidden ProseMirror focus and IME state survive initial
@@ -61,6 +63,7 @@ export function CanvasPagedArea({
           interactive={interactive}
           glyphOutlineProvider={renderer.glyphOutlineProvider}
           offscreenReplay={renderer.offscreenReplay}
+          onWorkerPresentationChange={renderer.setWorkerPresentationActive}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
@@ -127,6 +130,7 @@ export function CanvasPagesView({
   interactive = false,
   glyphOutlineProvider,
   offscreenReplay,
+  onWorkerPresentationChange,
 }: {
   displayList: DisplayList;
   /** Binary retained-frame metadata used to scope page replay. */
@@ -154,6 +158,7 @@ export function CanvasPagesView({
   glyphOutlineProvider?: GlyphOutlineProvider | null;
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
+  onWorkerPresentationChange?: (active: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
@@ -161,9 +166,27 @@ export function CanvasPagesView({
   const offscreenSignatureRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
+  const workerPresentationRef = useRef(false);
+  const publishWorkerPresentation = useCallback(
+    (active: boolean) => {
+      if (workerPresentationRef.current === active) return;
+      workerPresentationRef.current = active;
+      onWorkerPresentationChange?.(active);
+    },
+    [onWorkerPresentationChange]
+  );
   const offscreenEligible = useMemo(
     () => Boolean(offscreenReplay && frame && !displayListNeedsHostImages(displayList)),
     [displayList, frame, offscreenReplay]
+  );
+  useEffect(() => {
+    if (!offscreenEligible || offscreenFailed) publishWorkerPresentation(false);
+  }, [offscreenEligible, offscreenFailed, publishWorkerPresentation]);
+  useEffect(
+    () => () => {
+      publishWorkerPresentation(false);
+    },
+    [publishWorkerPresentation]
   );
   const rasterEnvironmentRef = useRef<{
     dpr: number;
@@ -341,6 +364,7 @@ export function CanvasPagesView({
           pages.push({ pageId, canvas: canvas.transferControlToOffscreen() });
           transferredCanvasesRef.current.add(canvas);
         } catch {
+          publishWorkerPresentation(false);
           setOffscreenFailed(true);
           return;
         }
@@ -349,12 +373,18 @@ export function CanvasPagesView({
       if (pages.length > 0 || signature !== offscreenSignatureRef.current) {
         offscreenSignatureRef.current = signature;
         void offscreenReplay.attach(pages, activePageIds, dpr, zoom).then((attached) => {
+          if (replayGeneration === replayGenerationRef.current) {
+            publishWorkerPresentation(attached);
+          }
           if (!attached) {
             // transient (no worker client yet) — clear the signature so the
             // next pass retries instead of permanently flipping surfaces
             offscreenSignatureRef.current = '';
           }
-        }, () => setOffscreenFailed(true));
+        }, () => {
+          publishWorkerPresentation(false);
+          setOffscreenFailed(true);
+        });
       }
       return;
     }
@@ -442,6 +472,7 @@ export function CanvasPagesView({
     windowPending,
     windowStart,
     windowEnd,
+    publishWorkerPresentation,
   ]);
 
   // The host stays a full-width, un-transformed positioned box so the
@@ -497,15 +528,4 @@ export function CanvasPagesView({
       </div>
     </div>
   );
-}
-
-function displayListNeedsHostImages(displayList: DisplayList): boolean {
-  const visit = (value: unknown): boolean => {
-    if (!value || typeof value !== 'object') return false;
-    if (Array.isArray(value)) return value.some(visit);
-    const record = value as Record<string, unknown>;
-    if (record.kind === 'image' || record.kind === 'picture') return true;
-    return Object.values(record).some(visit);
-  };
-  return visit(displayList.pages);
 }

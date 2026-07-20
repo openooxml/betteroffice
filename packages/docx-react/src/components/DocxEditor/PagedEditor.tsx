@@ -42,6 +42,7 @@ import {
   extractTrackedChangesFromYrs,
   resolveDisplayPageClientRect,
   type TrackedChangesResult,
+  type DisplayList,
   type DisplayListQueries,
   type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
@@ -68,6 +69,7 @@ import {
   type YrsInlineFormatDelta,
   type YrsLoc,
   type YrsRenderEnv,
+  type YrsResidentCaretSnapshot,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
@@ -87,6 +89,7 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import { useYrsCoreSession } from './hooks/useYrsCoreSession';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
@@ -273,9 +276,11 @@ export interface PagedEditorProps {
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
-  applyResidentInput?: (text: string) => Promise<boolean>;
+  applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
-  applyResidentDelete?: (direction: 'backward' | 'forward') => Promise<boolean>;
+  applyResidentDelete?: (
+    direction: 'backward' | 'forward'
+  ) => Promise<ResidentFrameApplyResult | null>;
   /** Set of resolved comment IDs — hides highlight for these comments */
   resolvedCommentIds?: Set<number>;
   /** Suggestion mode active state */
@@ -297,6 +302,10 @@ export interface PagedEditorProps {
    * through Rust queries over the display list.
    */
   displayListQueries?: DisplayListQueries | null;
+  canvasDisplayList?: DisplayList | null;
+  displayListFrameEpoch?: number | null;
+  residentCaret?: YrsResidentCaretSnapshot | null;
+  residentCaretAuthoritative?: boolean;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /**
@@ -449,6 +458,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       measurementFontProvider,
       rustFontChainsProviderRef,
       displayListQueries = null,
+      canvasDisplayList = null,
+      displayListFrameEpoch = null,
+      residentCaret = null,
+      residentCaretAuthoritative = false,
       canvasHostRef,
       canvasOverlayTarget = null,
     } = props;
@@ -612,6 +625,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       containerRef,
       syncCoordinator,
       displayListQueries,
+      displayListFrameEpoch,
+      residentCaret,
+      residentCaretAuthoritative,
       getYrsDisplaySelection,
     });
     const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
@@ -652,7 +668,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
      * Publish sticky yrs selection geometry and refresh the yrs-backed layout.
      */
     const handleYrsStateChange = useCallback(
-      (selection: YrsDisplaySelection, docChanged: boolean, residentLayoutReady = false): void => {
+      (
+        selection: YrsDisplaySelection,
+        docChanged: boolean,
+        residentLayoutReady = false,
+        residentCaretReady = false
+      ): void => {
         const session = yrsCore.session;
         if (session) {
           onYrsHistoryChangeRef.current?.(session.canUndo(), session.canRedo());
@@ -702,7 +723,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // Layout reads the same authoritative selection, but selection state
         // itself is published above from the yrs event rather than inferred
         // later from a projection rebuild.
-        updateSelectionOverlay();
+        if (!residentCaretReady) updateSelectionOverlay();
         if (docChanged && !residentLayoutReady) {
           refreshYrsLayout();
         }
@@ -1533,6 +1554,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           locToDisplayPosition={yrsLocToDisplayPosition}
           nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
+          displayListFrameEpoch={displayListFrameEpoch}
           canvasHostRef={canvasHostRef ?? pagesContainerRef}
           onStateChange={handleYrsStateChange}
           onDirectInput={publishYrsDirectInput}
@@ -1552,19 +1574,23 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             aria-hidden="true"
           />
 
-          {canvasOverlayTarget && displayListQueries && (
-            <CanvasSelectionOverlay
-              selectionRects={hfEditMode ? [] : selectionRects}
-              caretPosition={hfEditMode ? null : caretPosition}
-              isFocused={isFocused && !hfEditMode}
-              readOnly={readOnly}
-              overlayTarget={canvasOverlayTarget}
-              canvasHostRef={interactionPageHostRef}
-              displayListQueries={displayListQueries}
-              sidebarOpen={commentsSidebarOpen}
-              zoom={zoom}
-            />
-          )}
+          {canvasOverlayTarget &&
+            canvasDisplayList &&
+            (residentCaretAuthoritative || displayListQueries) && (
+              <CanvasSelectionOverlay
+                selectionRects={hfEditMode ? [] : selectionRects}
+                caretPosition={hfEditMode ? null : caretPosition}
+                isFocused={isFocused && !hfEditMode}
+                readOnly={readOnly}
+                overlayTarget={canvasOverlayTarget}
+                canvasHostRef={interactionPageHostRef}
+                displayList={canvasDisplayList}
+                displayListQueries={displayListQueries}
+                directProjection={residentCaretAuthoritative}
+                sidebarOpen={commentsSidebarOpen}
+                zoom={zoom}
+              />
+            )}
 
           {canvasOverlayTarget && displayListQueries && !hfEditMode && (
             <CanvasCellSelectionOverlay

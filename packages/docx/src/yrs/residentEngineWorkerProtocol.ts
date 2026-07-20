@@ -1,4 +1,9 @@
-import type { YrsEngineApplyProfile, YrsResidentWorkerSnapshot, YrsSelection } from './index';
+import type {
+  YrsEngineApplyProfile,
+  YrsResidentCaretSnapshot,
+  YrsResidentWorkerSnapshot,
+  YrsSelection,
+} from './index';
 
 export type ResidentEngineWorkerRequest =
   | {
@@ -68,6 +73,8 @@ export type ResidentEngineWorkerResponse =
       engineMs?: number;
       workerTotalMs?: number;
       engineProfile?: YrsEngineApplyProfile;
+      caret?: YrsResidentCaretSnapshot;
+      selection?: YrsSelection | null;
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;

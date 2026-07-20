@@ -12,7 +12,7 @@ use docx_layout::display_list::{
     RevisionKind, ShapePathCommand, StructuralRevisionKind, StructuralRevisionScope, TableCellRef,
     build_display_list_json,
 };
-use docx_layout::hit::{hit_test, range_rects};
+use docx_layout::hit::{caret_rect, hit_test, range_rects};
 
 const DEMO_FIXTURE: &str =
     include_str!("../../../packages/docx/src/layout/render/__fixtures__/displayList.demo.json");
@@ -263,6 +263,20 @@ fn range_rects_cover_selected_lines() {
 
     // collapsed range selects nothing
     assert!(range_rects(&dl, 5, 5).is_empty());
+}
+
+#[test]
+fn caret_rect_uses_forward_and_trailing_edges() {
+    let dl = build("single-page-multi-paragraph");
+    let start = caret_rect(&dl, 1).unwrap();
+    assert_eq!(start.page_index, 0);
+    assert!((start.x - 96.0).abs() < 0.001);
+
+    let end = caret_rect(&dl, 16).unwrap();
+    assert_eq!(end.page_index, 0);
+    assert!((end.x - 216.0).abs() < 0.001);
+    assert_eq!(start.y, end.y);
+    assert_eq!(start.height, end.height);
 }
 
 #[test]

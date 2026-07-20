@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CaretPosition, SelectionRect } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
 
 import type { YrsDisplaySelection } from '../YrsInput';
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
@@ -13,6 +14,9 @@ export interface UseSelectionOverlayOptions {
   containerRef: React.RefObject<HTMLDivElement | null>;
   syncCoordinator: LayoutSelectionGate;
   displayListQueries?: DisplayListQueries | null;
+  displayListFrameEpoch?: number | null;
+  residentCaret?: YrsResidentCaretSnapshot | null;
+  residentCaretAuthoritative?: boolean;
   getYrsDisplaySelection: () => YrsDisplaySelection | null;
 }
 
@@ -30,11 +34,29 @@ export function useSelectionOverlay(opts: UseSelectionOverlayOptions): UseSelect
     containerRef,
     syncCoordinator,
     displayListQueries,
+    displayListFrameEpoch = null,
+    residentCaret = null,
+    residentCaretAuthoritative = false,
     getYrsDisplaySelection,
   } = opts;
 
-  const [selectionRects, setSelectionRects] = useState<SelectionRect[]>([]);
-  const [caretPosition, setCaretPosition] = useState<CaretPosition | null>(null);
+  const [selectionRects, setQueriedSelectionRects] = useState<SelectionRect[]>([]);
+  const [queriedCaretPosition, setQueriedCaretPosition] = useState<CaretPosition | null>(null);
+  const [sampledFrameEpoch, setSampledFrameEpoch] = useState<number | null>(null);
+  const setSelectionRects: React.Dispatch<React.SetStateAction<SelectionRect[]>> = useCallback(
+    (next) => {
+      setSampledFrameEpoch(displayListFrameEpoch);
+      setQueriedSelectionRects(next);
+    },
+    [displayListFrameEpoch]
+  );
+  const setCaretPosition: React.Dispatch<React.SetStateAction<CaretPosition | null>> = useCallback(
+    (next) => {
+      setSampledFrameEpoch(displayListFrameEpoch);
+      setQueriedCaretPosition(next);
+    },
+    [displayListFrameEpoch]
+  );
 
   const updateSelectionOverlay = useCallback(
     () => {
@@ -45,10 +67,12 @@ export function useSelectionOverlay(opts: UseSelectionOverlayOptions): UseSelect
       const from = Math.min(anchor, head);
       const to = Math.max(anchor, head);
       if (!displayListQueries) {
+        if (residentCaretAuthoritative) return;
         setCaretPosition((current) => (current === null ? current : null));
         setSelectionRects((current) => (current.length === 0 ? current : []));
         return;
       }
+      if (!displayListQueries.isReady()) return;
       if (from === to) {
         const rect = displayListQueries.caretRect(head);
         const next = rect
@@ -91,6 +115,9 @@ export function useSelectionOverlay(opts: UseSelectionOverlayOptions): UseSelect
       containerRef,
       displayListQueries,
       getYrsDisplaySelection,
+      residentCaretAuthoritative,
+      setCaretPosition,
+      setSelectionRects,
     ]
   );
 
@@ -108,8 +135,24 @@ export function useSelectionOverlay(opts: UseSelectionOverlayOptions): UseSelect
     if (layout) updateSelectionOverlay();
   }, [layout, updateSelectionOverlay]);
 
+  const authoritativeRect = residentCaretAuthoritative ? residentCaret?.caretRect : null;
+  const authoritativeNewer = Boolean(
+    authoritativeRect &&
+      residentCaret &&
+      (sampledFrameEpoch === null || sampledFrameEpoch < residentCaret.frameEpoch)
+  );
+  const caretPosition =
+    authoritativeRect && authoritativeNewer
+      ? {
+          x: authoritativeRect.x,
+          y: authoritativeRect.y,
+          height: authoritativeRect.height,
+          pageIndex: authoritativeRect.pageIndex,
+        }
+      : queriedCaretPosition;
+
   return {
-    selectionRects,
+    selectionRects: authoritativeNewer ? [] : selectionRects,
     caretPosition,
     setSelectionRects,
     setCaretPosition,

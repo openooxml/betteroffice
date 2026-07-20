@@ -28,6 +28,7 @@ export {
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export { residentCaretSnapshotForFrame } from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 
@@ -371,6 +372,19 @@ export interface YrsSelection {
   head: YrsLoc;
 }
 
+export interface YrsResidentCaretRect {
+  pageIndex: number;
+  pageId: string;
+  x: number;
+  y: number;
+  height: number;
+}
+
+export interface YrsResidentCaretSnapshot {
+  frameEpoch: number;
+  caretRect: YrsResidentCaretRect | null;
+}
+
 /** Opt-in internal stage timings for one resident engine input. @internal */
 export interface YrsEngineApplyProfile {
   selectionMs: number;
@@ -600,6 +614,8 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /** Caret geometry from the current resident display frame. */
+  residentCaretSnapshot(): YrsResidentCaretSnapshot;
   /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
   applyInput(text: string, expectedFrameEpoch: number): Uint8Array;
   /** Apply a collapsed character deletion/paragraph merge and return its resident FrameDelta. */
@@ -1068,6 +1084,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     buildDisplayListJson: (input) => session.build_display_list_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    residentCaretSnapshot: () =>
+      JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
       const story = cachedSelection?.head.story ?? 'body';
       ensureUndo(story);
