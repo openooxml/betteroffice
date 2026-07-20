@@ -52,6 +52,24 @@ fn sample_xlsx() -> Vec<u8> {
     ooxml_opc::rezip_parts(&sample_parts()).unwrap()
 }
 
+fn overlapping_merge_parts() -> Vec<(String, Vec<u8>)> {
+    let workbook =
+        r#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let worksheet = r#"<worksheet><sheetData/><mergeCells count="5"><mergeCell ref="A1:B2"/><mergeCell ref="B2:C3"/><mergeCell ref="C3:D4"/><mergeCell ref="D4:E5"/><mergeCell ref="F1:G1"/></mergeCells></worksheet>"#;
+    vec![
+        ("xl/workbook.xml".to_string(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_string(),
+            worksheet.as_bytes().to_vec(),
+        ),
+    ]
+}
+
 #[test]
 fn open_and_recalculation_are_explicit() {
     let cached = Workbook::open(&sample_xlsx()).unwrap();
@@ -312,6 +330,35 @@ fn rejects_overlapping_merged_ranges() {
         Err(Error::InvalidOperation(message))
             if message == "workbook contains overlapping merged ranges"
     ));
+}
+
+#[test]
+fn parsed_overlapping_merges_open_and_save_normalized() {
+    let model = xlsx_parse::parse_workbook(&overlapping_merge_parts()).unwrap();
+    let merges: Vec<_> = model.sheets[0]
+        .merges
+        .iter()
+        .map(|range| range.to_a1())
+        .collect();
+    assert_eq!(merges, ["A1:B2", "C3:D4", "F1:G1"]);
+
+    let workbook = Workbook::from_model(model).unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let sheet_xml = parts
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+        .unwrap();
+    assert!(sheet_xml.contains(
+        r#"<mergeCells count="3"><mergeCell ref="A1:B2"/><mergeCell ref="C3:D4"/><mergeCell ref="F1:G1"/></mergeCells>"#
+    ));
+
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].merges,
+        workbook.model().sheets[0].merges
+    );
 }
 
 #[test]
