@@ -827,7 +827,7 @@ function XlsxEditorContent({
   const formatSelection = useCallback(
     (action: FormattingAction) => {
       const handle = handleRef.current;
-      if (!handle || !selection || collaborationEnabled) return;
+      if (!handle || !selection) return;
       const range = selectedRangeA1(selection);
       if (!range) return;
       if (action === 'paintFormat') {
@@ -922,7 +922,6 @@ function XlsxEditorContent({
     },
     [
       selection,
-      collaborationEnabled,
       selectedRangeA1,
       capturedFormat,
       activeSheet,
@@ -962,23 +961,23 @@ function XlsxEditorContent({
 
   const undo = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle || collaborationEnabled) return;
+    if (!handle) return;
     try {
       applyResult(handle.undo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [applyResult, collaborationEnabled]);
+  }, [applyResult]);
 
   const redo = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle || collaborationEnabled) return;
+    if (!handle) return;
     try {
       applyResult(handle.redo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [applyResult, collaborationEnabled]);
+  }, [applyResult]);
 
   const print = useCallback(() => window.print(), []);
 
@@ -1319,7 +1318,7 @@ function XlsxEditorContent({
           onPrint={print}
           zoom={zoom}
           onZoomChange={setZoom}
-          onFormat={collaborationEnabled ? undefined : formatSelection}
+          onFormat={formatSelection}
           onMerge={mergeSelection}
         >
           <EditorToolbar.Toolbar />

@@ -104,7 +104,7 @@ describe('wasm collaboration', () => {
       expect(right.cell(0, 19, 0).input).toBe('left');
       expect(left.cell(0, 19, 1).input).toBe('right');
       expect(right.cell(0, 19, 1).input).toBe('right');
-      expect([...left.encodeStateAsUpdate()]).toEqual([...right.encodeStateAsUpdate()]);
+      expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
 
       const leftBefore = left.encodeStateVector();
       const rightBefore = right.encodeStateVector();
@@ -115,6 +115,42 @@ describe('wasm collaboration', () => {
       left.applyUpdate(concurrentRight);
       right.applyUpdate(concurrentLeft);
       expect(left.cell(0, 19, 2).input).toBe(right.cell(0, 19, 2).input);
+      expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
+    } finally {
+      left.dispose();
+      right.dispose();
+    }
+  });
+
+  it('round-trips formatting and collaborative undo between handles', () => {
+    const left = collaborative(1101);
+    const right = collaborative(1102);
+    try {
+      left.patchRangeStyle(0, 'A1:B2', {
+        bold: true,
+        fillColor: '#ffcc00',
+        textColor: '#123456',
+      });
+      left.setNumberFormat(0, 'A1:B2', { type: 'custom', pattern: '0.0000' });
+      const captured = left.captureFormat(0, 'A1');
+      left.applyFormat(0, 'C1', captured);
+
+      const update = left.encodeStateAsUpdate(right.encodeStateVector());
+      expect(right.applyUpdate(update).applied).toBe(true);
+      expect(right.selectionFormatting(0, 'A1:B2')).toMatchObject({
+        bold: true,
+        fillColor: '#ffcc00',
+        textColor: '#123456',
+        numberFormat: 'custom',
+        numberFormatPattern: '0.0000',
+      });
+      expect(right.selectionFormatting(0, 'C1')).toEqual(left.selectionFormatting(0, 'A1'));
+      expect(left.historyState()).toMatchObject({ canUndo: true, undoDepth: 3 });
+
+      const rightBeforeUndo = right.encodeStateVector();
+      expect(left.undo().applied).toBe(true);
+      expect(right.applyUpdate(left.encodeStateAsUpdate(rightBeforeUndo)).applied).toBe(true);
+      expect(right.selectionFormatting(0, 'C1').bold).toBe(false);
       expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
     } finally {
       left.dispose();

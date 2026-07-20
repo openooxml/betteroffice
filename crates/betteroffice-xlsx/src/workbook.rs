@@ -18,8 +18,8 @@ use xlsx_render::{DisplayList, GridGeometry, Viewport, build_display_list, displ
 use xlsx_render::{scaled, viewport_for_range, viewport_for_used_range};
 
 use crate::authority::{
-    AuthorityError, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate, SyncOrigin,
-    WorkbookAuthority, WorkbookStructure, is_formatting_op, is_structural_op,
+    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate,
+    SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
@@ -735,11 +735,7 @@ impl Workbook {
         if ops.is_empty() {
             return Ok(MutationResult::default());
         }
-        if self.is_collaborative()
-            && ops
-                .iter()
-                .any(|op| is_structural_op(op) || is_formatting_op(op))
-        {
+        if self.is_collaborative() && ops.iter().any(is_structural_op) {
             return Err(Error::CollaborativeStructureOperation);
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
@@ -773,16 +769,29 @@ impl Workbook {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.is_collaborative() && self.undo.can_undo()
+        if self.is_collaborative() {
+            self.authority.can_undo()
+        } else {
+            self.undo.can_undo()
+        }
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.is_collaborative() && self.undo.can_redo()
+        if self.is_collaborative() {
+            self.authority.can_redo()
+        } else {
+            self.undo.can_redo()
+        }
     }
 
     pub fn history_state(&self) -> HistoryState {
         if self.is_collaborative() {
-            return HistoryState::default();
+            return HistoryState {
+                can_undo: self.authority.can_undo(),
+                can_redo: self.authority.can_redo(),
+                undo_depth: self.authority.undo_depth(),
+                redo_depth: self.authority.redo_depth(),
+            };
         }
         HistoryState {
             can_undo: self.undo.can_undo(),
@@ -794,7 +803,8 @@ impl Workbook {
 
     pub fn undo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
         if self.is_collaborative() {
-            return Err(Error::CollaborativeUndoUnavailable);
+            let history = self.authority.undo().map_err(authority_error)?;
+            return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
         let Some(ops) = self.undo.undo(&mut self.model)? else {
@@ -825,7 +835,8 @@ impl Workbook {
 
     pub fn redo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
         if self.is_collaborative() {
-            return Err(Error::CollaborativeUndoUnavailable);
+            let history = self.authority.redo().map_err(authority_error)?;
+            return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
         let Some(ops) = self.undo.redo(&mut self.model)? else {
@@ -849,6 +860,40 @@ impl Workbook {
         Ok(MutationResult {
             applied: true,
             changed: result.changed,
+            cycle_cells: result.cycle_cells,
+            limited_cells: result.limited_cells,
+        })
+    }
+
+    fn apply_collaborative_history(
+        &mut self,
+        history: Option<HistoryUpdate>,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let Some(history) = history else {
+            return Ok(MutationResult::default());
+        };
+        let structure = match &self.mode {
+            WorkbookMode::Collaborative { structure } => structure,
+            WorkbookMode::Standalone => return Err(Error::NotCollaborative),
+        };
+        if &history.structure != structure {
+            return Err(Error::CollaborativeStructureChanged);
+        }
+        let active_name = self.active_sheet_name();
+        let before = self.model.clone();
+        self.model = history.model;
+        self.restore_active_sheet(active_name.as_deref());
+        self.proposals.clear();
+        let result = self.rebuild_and_recalculate(options);
+        let changed = changed_cells_between(&before, &self.model);
+        self.emit_update(UpdateEvent {
+            update: history.update,
+            origin: UpdateOrigin::Local,
+        });
+        Ok(MutationResult {
+            applied: true,
+            changed,
             cycle_cells: result.cycle_cells,
             limited_cells: result.limited_cells,
         })
@@ -1122,11 +1167,11 @@ impl Workbook {
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
-            let mut model = self.model.clone();
-            xlsx_ops::apply_ops(&mut model, ops)?;
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
+            let mut model = self.authority.materialize().map_err(authority_error)?;
+            retain_formula_caches(&self.model, &mut model);
             self.model = model;
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -1152,11 +1197,11 @@ impl Workbook {
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
-            let mut model = self.model.clone();
-            xlsx_ops::apply_ops(&mut model, ops)?;
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::Agent)
                 .map_err(authority_error)?;
+            let mut model = self.authority.materialize().map_err(authority_error)?;
+            retain_formula_caches(&self.model, &mut model);
             self.model = model;
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -1479,6 +1524,28 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .iter()
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
+    }
+}
+
+fn retain_formula_caches(current: &WorkbookModel, projected: &mut WorkbookModel) {
+    for (sheet_index, sheet) in projected.sheets.iter_mut().enumerate() {
+        let Some(current_sheet) = current.sheets.get(sheet_index) else {
+            continue;
+        };
+        let caches = sheet
+            .iter_cells()
+            .filter_map(|(at, cell)| {
+                let formula = cell.formula.as_deref()?;
+                let current_cell = current_sheet.cell(at)?;
+                (current_cell.formula.as_deref() == Some(formula))
+                    .then(|| (at, current_cell.value.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (at, value) in caches {
+            let mut cell = sheet.cell(at).cloned().expect("cache target exists");
+            cell.value = value;
+            sheet.set_cell(at, cell);
+        }
     }
 }
 
