@@ -23,10 +23,12 @@
 |---|---|
 | [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | drop-in React .docx editor |
-| [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n) | locale strings for the docx editor |
 | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
 | [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
 | [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | drop-in React spreadsheet editor |
+| [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
+| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
+| [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | drop-in React .pptx editor |
 
 ## Structure
 

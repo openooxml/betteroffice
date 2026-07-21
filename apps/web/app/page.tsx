@@ -46,8 +46,8 @@ const EDITORS = [
   {
     name: "Slides",
     format: "pptx",
-    desc: "Slide model and masters on the same shared core — in development.",
-    live: false,
+    desc: "Slide model, masters and shape editing on the same shared core.",
+    live: true,
   },
 ];
 
@@ -67,6 +67,14 @@ const PACKAGES = [
   {
     name: "@betteroffice/xlsx-react",
     desc: "The spreadsheet editor as a drop-in React component.",
+  },
+  {
+    name: "@betteroffice/pptx",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine.",
+  },
+  {
+    name: "@betteroffice/pptx-react",
+    desc: "The slides editor as a drop-in React component.",
   },
 ];
 
@@ -183,8 +191,8 @@ export default function Home() {
           </h2>
           <p className={`${secP} mb-6`}>
             BetterOffice packages the OpenOOXML engines as ready-to-use
-            editors. Documents and spreadsheets are live today; slides follow
-            on the same foundation.
+            editors. Documents, spreadsheets and slides are all live today on
+            the same foundation.
           </p>
         </Reveal>
         <Reveal delay={0.1}>
