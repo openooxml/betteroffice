@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, DateSystem, ErrorValue, MAX_COLS, MAX_ROWS, Sheet,
-    SheetId, Stylesheet, Workbook as WorkbookModel,
+    Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, ErrorValue, MAX_COLS, MAX_ROWS,
+    Sheet, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -13,18 +13,21 @@ use yrs::block::{
     BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
 };
 use yrs::encoding::read::{Error as DecodeError, Read};
+use yrs::sync::time::Clock;
 use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
+use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Out, ReadTxn, StateVector,
-    Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Origin, Out, ReadTxn,
+    StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
 const META: &str = "xlsx";
+const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CONTENTS: &str = "contents";
@@ -41,6 +44,7 @@ const MAX_SAFE_CLOCK: u32 = i32::MAX as u32;
 const MAX_UPDATE_BLOCKS: usize = 1_000_000;
 const MAX_UPDATE_VALUES: usize = 1_000_000;
 const MAX_UPDATE_DELETE_RANGES: usize = 1_000_000;
+const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +141,12 @@ pub(crate) struct StagedLocalUpdate {
     pub(crate) update: Vec<u8>,
 }
 
+pub(crate) struct HistoryUpdate {
+    pub(crate) model: WorkbookModel,
+    pub(crate) structure: WorkbookStructure,
+    pub(crate) update: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SheetOrderEntry {
     before: Vec<String>,
@@ -160,6 +170,8 @@ pub(crate) struct WorkbookAuthority {
     base: WorkbookBase,
     history: SheetOrderHistory,
     next_sheet_id: u64,
+    undo_stack: Vec<StackItem<()>>,
+    redo_stack: Vec<StackItem<()>>,
 }
 
 impl WorkbookAuthority {
@@ -187,7 +199,7 @@ impl WorkbookAuthority {
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
-        seed(&bootstrap, &base, model, &keys);
+        seed(&bootstrap, &base, model, &keys).map_err(AuthorityError::InvalidState)?;
         let bootstrap_update = bootstrap
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
@@ -207,6 +219,8 @@ impl WorkbookAuthority {
             base,
             history: SheetOrderHistory::default(),
             next_sheet_id: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
         authority
             .strict_materialize()
@@ -305,6 +319,8 @@ impl WorkbookAuthority {
             base: self.base.clone(),
             history: SheetOrderHistory::default(),
             next_sheet_id: self.next_sheet_id,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
         let after = staged.encode_state_as_update_v1();
         let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
@@ -349,9 +365,14 @@ impl WorkbookAuthority {
         let (model, structure) = staged
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
+        let (current_model, current_structure) = self
+            .strict_materialize()
+            .map_err(AuthorityError::InvalidState)?;
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
-            effective: before != after,
+            effective: after_vector != before_vector
+                || model != current_model
+                || structure != current_structure,
             model,
             pending,
             state_bytes: after.len(),
@@ -375,6 +396,8 @@ impl WorkbookAuthority {
             base: self.base.clone(),
             history: SheetOrderHistory::default(),
             next_sheet_id: self.next_sheet_id,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
         let _ = staged.apply_ops(ops, origin)?;
         let update = staged.doc.transact().encode_diff_v1(&state_vector);
@@ -390,15 +413,29 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn apply_local_update_v1(
-        &self,
+        &mut self,
         update: &[u8],
         origin: SyncOrigin,
     ) -> Result<(), AuthorityError> {
         let update = decode_update_v1(update).map_err(AuthorityError::InvalidUpdate)?;
-        self.doc
-            .transact_mut_with(origin.as_str())
-            .apply_update(update)
-            .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
+        if origin == SyncOrigin::User {
+            let mut undo =
+                build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
+                    .map_err(AuthorityError::InvalidState)?;
+            undo.reset();
+            self.doc
+                .transact_mut_with(self.client_id())
+                .apply_update(update)
+                .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
+            self.undo_stack = undo.undo_stack().to_vec();
+            self.redo_stack = undo.redo_stack().to_vec();
+            Ok(())
+        } else {
+            self.doc
+                .transact_mut_with(origin.as_str())
+                .apply_update(update)
+                .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
+        }
     }
 
     pub(crate) fn apply_update_v1(&self, update: &[u8]) -> Result<(), AuthorityError> {
@@ -407,6 +444,60 @@ impl WorkbookAuthority {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(update)
             .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))
+    }
+
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub(crate) fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub(crate) fn undo_depth(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub(crate) fn redo_depth(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    pub(crate) fn undo(&mut self) -> Result<Option<HistoryUpdate>, AuthorityError> {
+        self.apply_history_change(false)
+    }
+
+    pub(crate) fn redo(&mut self) -> Result<Option<HistoryUpdate>, AuthorityError> {
+        self.apply_history_change(true)
+    }
+
+    fn apply_history_change(
+        &mut self,
+        redo: bool,
+    ) -> Result<Option<HistoryUpdate>, AuthorityError> {
+        let state_vector = self.doc.transact().state_vector();
+        let mut undo =
+            build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
+                .map_err(AuthorityError::InvalidState)?;
+        let applied = if redo {
+            undo.redo_blocking()
+        } else {
+            undo.undo_blocking()
+        };
+        self.undo_stack = undo.undo_stack().to_vec();
+        self.redo_stack = undo.redo_stack().to_vec();
+        drop(undo);
+        if !applied {
+            return Ok(None);
+        }
+        let (model, structure) = self
+            .strict_materialize()
+            .map_err(AuthorityError::InvalidState)?;
+        let update = self.doc.transact().encode_diff_v1(&state_vector);
+        Ok(Some(HistoryUpdate {
+            model,
+            structure,
+            update,
+        }))
     }
 
     pub(crate) fn clear_history(&mut self) {
@@ -423,7 +514,7 @@ impl WorkbookAuthority {
     ) -> Result<(WorkbookModel, WorkbookStructure), String> {
         let txn = self.doc.transact();
         if strict {
-            require_root_keys(&txn, &[META, SHEET_ORDER, SHEETS])?;
+            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
         }
         let meta = txn
             .get_map(META)
@@ -451,6 +542,11 @@ impl WorkbookAuthority {
             return Err("workbook base fingerprint does not match shared state".to_string());
         }
         let generation = structure_generation(&meta, &txn)?;
+        let cell_formats = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let (styles, style_indices) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
 
         let order = txn
             .get_array(SHEET_ORDER)
@@ -461,6 +557,7 @@ impl WorkbookAuthority {
         let keys = sheet_keys(&order, &txn)?;
         let mut seen = HashSet::with_capacity(keys.len());
         let mut model = self.base.workbook();
+        model.styles = styles;
         for key in &keys {
             if !seen.insert(key.clone()) {
                 return Err(format!("duplicate sheet key {key}"));
@@ -477,7 +574,9 @@ impl WorkbookAuthority {
                     &format!("sheet {key}"),
                 )?;
             }
-            model.sheets.push(materialize_sheet(&sheet_map, &txn)?);
+            model
+                .sheets
+                .push(materialize_sheet(&sheet_map, &txn, &style_indices)?);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
@@ -497,7 +596,7 @@ impl WorkbookAuthority {
                     &[COL_WIDTHS, CONTENTS, MERGES, NAME, ROW_HEIGHTS, STYLES],
                     &format!("inactive sheet {key}"),
                 )?;
-                materialize_sheet(&sheet_map, &txn)?;
+                materialize_sheet(&sheet_map, &txn, &style_indices)?;
             }
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
@@ -525,6 +624,10 @@ impl WorkbookAuthority {
         ops: &[Op],
         origin: SyncOrigin,
     ) -> Result<(), String> {
+        let authored_model = self.materialize().map_err(|error| match error {
+            AuthorityError::InvalidState(error) => error,
+            _ => "cannot materialize authored workbook".to_string(),
+        })?;
         let current_keys = self.current_sheet_keys()?;
         let (keys, history) =
             self.plan_sheet_keys(&current_keys, ops, model.sheets.len(), origin)?;
@@ -535,6 +638,7 @@ impl WorkbookAuthority {
         let structure_delta = i64::try_from(ops.iter().filter(|op| is_structural_op(op)).count())
             .map_err(|_| "too many structural operations".to_string())?;
         let mut authored_cells = HashSet::new();
+        let mut formatted_cells = HashSet::new();
         let mut col_widths = HashSet::new();
         let mut row_heights = HashSet::new();
         let mut merges = HashSet::new();
@@ -542,7 +646,14 @@ impl WorkbookAuthority {
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
                 match (op, target) {
-                    (Op::SetCell { at, .. }, Some(key)) => {
+                    (Op::SetCell { sheet, at, cell }, Some(key)) => {
+                        let current_style = authored_model
+                            .sheet(*sheet)
+                            .and_then(|sheet| sheet.cell(*at))
+                            .and_then(|cell| cell.style);
+                        if cell.style != current_style {
+                            formatted_cells.insert((key.clone(), *at));
+                        }
                         authored_cells.insert((key, *at));
                     }
                     (Op::SetColWidth { col, .. }, Some(key)) => {
@@ -553,6 +664,18 @@ impl WorkbookAuthority {
                     }
                     (Op::MergeCells { .. } | Op::UnmergeCells { .. }, Some(key)) => {
                         merges.insert(key);
+                    }
+                    (
+                        Op::PatchRangeStyle { range, .. }
+                        | Op::SetRangeNumberFormat { range, .. }
+                        | Op::ApplyRangeFormat { range, .. },
+                        Some(key),
+                    ) => {
+                        for row in range.start.row..=range.end.row {
+                            for col in range.start.col..=range.end.col {
+                                formatted_cells.insert((key.clone(), CellRef::new(row, col)));
+                            }
+                        }
                     }
                     (Op::AddSheet { .. } | Op::RemoveSheet { .. }, None) => {}
                     (_, None) => {}
@@ -573,6 +696,7 @@ impl WorkbookAuthority {
             && !full_sync
             && structure_delta == 0
             && authored_cells.is_empty()
+            && formatted_cells.is_empty()
             && col_widths.is_empty()
             && row_heights.is_empty()
             && merges.is_empty()
@@ -582,6 +706,10 @@ impl WorkbookAuthority {
         }
 
         let mut txn = self.doc.transact_mut_with(origin.as_str());
+        let cell_formats = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        sync_cell_formats(&cell_formats, &mut txn, &model.styles)?;
         let order = txn
             .get_array(SHEET_ORDER)
             .ok_or_else(|| "missing sheet order".to_string())?;
@@ -603,19 +731,24 @@ impl WorkbookAuthority {
         if full_sync {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 let sheet_map = sheet_map_for_sync(&sheets, &mut txn, key)?;
-                sync_sheet(&sheet_map, &mut txn, sheet);
+                sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
             }
         } else {
             for (key, sheet) in keys.iter().zip(&model.sheets) {
                 if newly_active.contains(key) {
                     let sheet_map = sheet_map_for_sync(&sheets, &mut txn, key)?;
-                    sync_sheet(&sheet_map, &mut txn, sheet);
+                    sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
                 }
             }
             for (key, at) in authored_cells {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_authored_cell(&sheet_map, &mut txn, sheet_model, at)?;
+            }
+            for (key, at) in formatted_cells {
+                let (sheet_map, sheet_model) =
+                    sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
+                sync_cell_format(&sheet_map, &mut txn, sheet_model, &model.styles, at)?;
             }
             for (key, col) in col_widths {
                 let (sheet_map, sheet_model) =
@@ -799,8 +932,15 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
     )
 }
 
-fn seed(doc: &Doc, base: &WorkbookBase, model: &WorkbookModel, keys: &[String]) {
+fn seed(
+    doc: &Doc,
+    base: &WorkbookBase,
+    model: &WorkbookModel,
+    keys: &[String],
+) -> Result<(), String> {
     let mut txn = doc.transact_mut_with(BOOTSTRAP_ORIGIN);
+    let cell_formats = txn.get_or_insert_map(CELL_FORMATS);
+    sync_cell_formats(&cell_formats, &mut txn, &model.styles)?;
     let meta = txn.get_or_insert_map(META);
     meta.insert(&mut txn, BASE_FINGERPRINT, base.fingerprint.as_str());
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
@@ -810,8 +950,9 @@ fn seed(doc: &Doc, base: &WorkbookBase, model: &WorkbookModel, keys: &[String]) 
     let sheets = txn.get_or_insert_map(SHEETS);
     for (key, sheet) in keys.iter().zip(&model.sheets) {
         let sheet_map = sheets.insert(&mut txn, key.as_str(), MapPrelim::default());
-        sync_sheet(&sheet_map, &mut txn, sheet);
+        sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
     }
+    Ok(())
 }
 
 fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
@@ -819,6 +960,47 @@ fn hydrate_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)
         .map_err(|error| error.to_string())
+}
+
+fn build_undo_manager(
+    doc: &Doc,
+    undo_stack: Vec<StackItem<()>>,
+    redo_stack: Vec<StackItem<()>>,
+) -> Result<UndoManager<()>, String> {
+    let txn = doc.transact();
+    let sheets = txn
+        .get_map(SHEETS)
+        .ok_or_else(|| "missing sheet map".to_string())?;
+    drop(txn);
+    let options = UndoOptions {
+        capture_timeout_millis: UNDO_CAPTURE_TIMEOUT_MS,
+        tracked_origins: HashSet::from([Origin::from(doc.client_id().get())]),
+        capture_transaction: None,
+        timestamp: undo_clock(),
+        init_undo_stack: undo_stack,
+        init_redo_stack: redo_stack,
+    };
+    let mut undo = UndoManager::with_options(options);
+    undo.expand_scope(doc, &sheets);
+    Ok(undo)
+}
+
+fn undo_clock() -> Arc<dyn Clock> {
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    {
+        Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or_default()
+        })
+    }
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let ticks = AtomicU64::new(0);
+        Arc::new(move || ticks.fetch_add(UNDO_CAPTURE_TIMEOUT_MS + 1, Ordering::Relaxed))
+    }
 }
 
 fn decode_state_vector_v1(bytes: &[u8]) -> Result<StateVector, String> {
@@ -1593,6 +1775,9 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
+        | Op::PatchRangeStyle { sheet, .. }
+        | Op::SetRangeNumberFormat { sheet, .. }
+        | Op::ApplyRangeFormat { sheet, .. }
         | Op::RenameSheet { sheet, .. }
         | Op::RestoreSheet { sheet, .. } => Some(*sheet),
         Op::AddSheet { .. } | Op::RemoveSheet { .. } => None,
@@ -1672,7 +1857,12 @@ fn sheet_parts_by_key<'a, T: ReadTxn>(
     Ok((sheet_map, sheet_model))
 }
 
-fn sync_sheet(sheet_map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
+fn sync_sheet(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    stylesheet: &Stylesheet,
+) -> Result<(), String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     sheet_map.try_update(txn, MERGES, merges_to_any(&sheet.merges));
@@ -1682,7 +1872,8 @@ fn sync_sheet(sheet_map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
     sync_numbers(&col_widths, txn, &sheet.col_widths);
     sync_contents(&contents, txn, sheet);
     sync_numbers(&row_heights, txn, &sheet.row_heights);
-    sync_styles(&styles, txn, sheet);
+    sync_styles(&styles, txn, sheet, stylesheet)?;
+    Ok(())
 }
 
 fn sync_contents(map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
@@ -1693,12 +1884,19 @@ fn sync_contents(map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
     sync_map(map, txn, desired);
 }
 
-fn sync_styles(map: &MapRef, txn: &mut TransactionMut<'_>, sheet: &Sheet) {
+fn sync_styles(
+    map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    stylesheet: &Stylesheet,
+) -> Result<(), String> {
     let desired = sheet
         .iter_cells()
-        .filter_map(|(at, cell)| cell.style.map(|style| (cell_key(at), Any::from(style))))
-        .collect::<BTreeMap<_, _>>();
+        .filter_map(|(at, cell)| cell.style.map(|style| (at, style)))
+        .map(|(at, style)| style_key(stylesheet, style).map(|key| (cell_key(at), Any::from(key))))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     sync_map(map, txn, desired);
+    Ok(())
 }
 
 fn sync_map(map: &MapRef, txn: &mut TransactionMut<'_>, desired: BTreeMap<String, Any>) {
@@ -1723,7 +1921,6 @@ fn sync_authored_cell(
     at: CellRef,
 ) -> Result<(), String> {
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
-    let styles: MapRef = sheet_map.get_or_init(txn, STYLES);
     let key = cell_key(at);
     match sheet.cell(at) {
         Some(cell) => {
@@ -1735,14 +1932,102 @@ fn sync_authored_cell(
             if !authored_content_equal(current.as_ref(), Some(cell)) {
                 sync_optional(&contents, txn, &key, content_to_any(cell));
             }
-            sync_optional(&styles, txn, &key, cell.style.map(Any::from));
         }
         None => {
             contents.remove(txn, &key);
-            styles.remove(txn, &key);
         }
     }
     Ok(())
+}
+
+fn sync_cell_format(
+    sheet_map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    sheet: &Sheet,
+    stylesheet: &Stylesheet,
+    at: CellRef,
+) -> Result<(), String> {
+    let styles: MapRef = sheet_map.get_or_init(txn, STYLES);
+    let key = cell_key(at);
+    let style = sheet
+        .cell(at)
+        .and_then(|cell| cell.style)
+        .map(|style| style_key(stylesheet, style).map(Any::from))
+        .transpose()?;
+    sync_optional(&styles, txn, &key, style);
+    Ok(())
+}
+
+fn sync_cell_formats(
+    map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    stylesheet: &Stylesheet,
+) -> Result<(), String> {
+    let (key, payload) = cell_format_entry(&CellFormat::default())?;
+    map.try_update(txn, key, payload);
+    for index in 0..stylesheet.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        let format = stylesheet.cell_format(Some(index));
+        let (key, payload) = cell_format_entry(&format)?;
+        map.try_update(txn, key, payload);
+    }
+    Ok(())
+}
+
+fn materialize_cell_formats<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    base: &Stylesheet,
+) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
+    let mut catalog = BTreeMap::new();
+    for (key, value) in map.iter(txn) {
+        let payload = value
+            .cast::<String>()
+            .map_err(|_| format!("cell format {key} is not a string"))?;
+        let format = serde_json::from_str::<CellFormat>(&payload)
+            .map_err(|error| format!("invalid cell format {key}: {error}"))?;
+        let (expected, canonical) = cell_format_entry(&format)?;
+        if key != expected || payload != canonical {
+            return Err(format!("cell format {key} is not canonical"));
+        }
+        catalog.insert(key.to_string(), format);
+    }
+
+    let mut styles = base.clone();
+    let mut known = BTreeMap::new();
+    for index in 0..base.cell_xfs.len() {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        known.entry(style_key(base, index)?).or_insert(Some(index));
+    }
+    let mut indices = BTreeMap::new();
+    for (key, format) in catalog {
+        let index = match known.get(&key) {
+            Some(index) => *index,
+            None => {
+                let index = styles.intern_cell_format(&format);
+                known.insert(key.clone(), index);
+                index
+            }
+        };
+        indices.insert(key, index);
+    }
+    Ok((styles, indices))
+}
+
+fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
+    if stylesheet.xf(style).is_none() {
+        return Err(format!("cell style index {style} is out of range"));
+    }
+    cell_format_entry(&stylesheet.cell_format(Some(style))).map(|(key, _)| key)
+}
+
+fn cell_format_entry(format: &CellFormat) -> Result<(String, String), String> {
+    let payload = serde_json::to_string(format)
+        .map_err(|error| format!("cannot encode cell format: {error}"))?;
+    let digest = Sha256::digest(payload.as_bytes());
+    Ok((format!("{digest:x}"), payload))
 }
 
 fn authored_content_equal(left: Option<&Cell>, right: Option<&Cell>) -> bool {
@@ -1793,7 +2078,11 @@ fn sync_number(map: &MapRef, txn: &mut TransactionMut<'_>, index: u32, value: Op
     }
 }
 
-fn materialize_sheet<T: ReadTxn>(sheet_map: &MapRef, txn: &T) -> Result<Sheet, String> {
+fn materialize_sheet<T: ReadTxn>(
+    sheet_map: &MapRef,
+    txn: &T,
+    style_indices: &BTreeMap<String, Option<u32>>,
+) -> Result<Sheet, String> {
     let name = sheet_map
         .get(txn, NAME)
         .and_then(|value| value.cast::<String>().ok())
@@ -1811,10 +2100,13 @@ fn materialize_sheet<T: ReadTxn>(sheet_map: &MapRef, txn: &T) -> Result<Sheet, S
     let styles = nested_map(sheet_map, txn, STYLES)?;
     for (key, value) in styles.iter(txn) {
         let at = parse_cell_key(key)?;
-        let Out::Any(value) = value else {
-            return Err(format!("cell style {key} is not an atomic value"));
-        };
-        cells.entry((at.row, at.col)).or_default().style = Some(any_u32(&value, "cell style")?);
+        let style_key = value
+            .cast::<String>()
+            .map_err(|_| format!("cell style {key} is not a string"))?;
+        let style = style_indices
+            .get(&style_key)
+            .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
+        cells.entry((at.row, at.col)).or_default().style = *style;
     }
     for ((row, col), cell) in cells {
         sheet.set_cell(CellRef::new(row, col), cell);
@@ -2157,7 +2449,7 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
 
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     let mut hasher = Sha256::new();
-    hasher.update(b"betteroffice-xlsx-yrs-v2");
+    hasher.update(b"betteroffice-xlsx-yrs-v3");
     let base = serde_json::to_vec(&(model.date_system, &model.shared_strings, &model.styles))
         .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);

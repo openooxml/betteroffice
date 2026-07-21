@@ -296,7 +296,30 @@ fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, 
             _ => {}
         }
     }
+    normalize_merges(&mut sheet.merges);
     Ok(sheet)
+}
+
+fn normalize_merges(merges: &mut Vec<CellRange>) {
+    let mut index = 0;
+    while index < merges.len() {
+        let range = merges[index];
+        if merges[..index]
+            .iter()
+            .any(|kept| ranges_intersect(*kept, range))
+        {
+            merges.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
+    left.start.row <= right.end.row
+        && left.end.row >= right.start.row
+        && left.start.col <= right.end.col
+        && left.end.col >= right.start.col
 }
 
 /// apply a `<col>` width across its `[min, max]` span (clamped to sheet bounds).

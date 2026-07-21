@@ -31,6 +31,7 @@ import type {
   CellAddr,
   CellEdit,
   CellInputEdit,
+  CapturedFormat,
   DisplayList,
   DrawCmd,
   Direction,
@@ -44,6 +45,14 @@ import type {
 import type { CollaborationReplica } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
+import { EditorToolbar } from './components/EditorToolbar';
+import type {
+  FormattingAction,
+  MergeAction,
+  SelectionFormatting,
+} from './components/Toolbar';
+import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
+import { ToolbarIcon } from './components/ui/ToolbarIcon';
 import { ProposalDecoration } from './proposals/ProposalDecoration';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { proposalColor } from './proposals/palette';
@@ -100,7 +109,7 @@ interface EditState {
 const COL_W = 96;
 const ROW_H = 24;
 const BRAND = '#217346';
-const DEFAULT_XLSX_TOOLBAR_HEIGHT = 46;
+const DEFAULT_XLSX_TOOLBAR_HEIGHT = 87;
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 // a placeholder grid frame so the shell paints something real when no file is
@@ -194,6 +203,15 @@ function pngName(fileName: string | undefined): string {
   return `${(fileName ?? 'workbook.xlsx').replace(/\.xlsx$/i, '')}.png`;
 }
 
+function scaledRect(rect: { x: number; y: number; w: number; h: number }, zoom: number) {
+  return {
+    x: rect.x * zoom,
+    y: rect.y * zoom,
+    w: rect.w * zoom,
+    h: rect.h * zoom,
+  };
+}
+
 const visuallyHidden: React.CSSProperties = {
   position: 'absolute',
   width: 1,
@@ -219,11 +237,11 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
   rail: {
     display: 'flex',
     alignItems: 'center',
-    minHeight: 36,
+    minHeight: 32,
     margin: '0 8px',
-    padding: '4px 8px',
-    borderRadius: 999,
-    background: '#f1f5f9',
+    padding: '2px 8px',
+    borderRadius: 4,
+    background: '#ffffff',
     boxSizing: 'border-box',
     overflowX: 'auto',
     overflowY: 'hidden',
@@ -305,62 +323,6 @@ const xlsxToolbarStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-function xlsxToolbarButton(enabled: boolean, active = false): React.CSSProperties {
-  return {
-    appearance: 'none',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 2,
-    width: 28,
-    height: 28,
-    padding: 0,
-    border: 0,
-    borderRadius: 6,
-    background: active ? '#0f172a' : 'transparent',
-    color: enabled ? (active ? '#ffffff' : '#64748b') : '#94a3b8',
-    cursor: enabled ? 'pointer' : 'default',
-    opacity: enabled ? 1 : 0.32,
-  };
-}
-
-type XlsxToolbarIconName = 'save' | 'image' | 'undo' | 'redo' | 'proposals';
-
-function XlsxToolbarIcon({ name }: { name: XlsxToolbarIconName }) {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      style={{ flex: '0 0 auto' }}
-    >
-      {name === 'save' && <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 19h14" />}
-      {name === 'image' && (
-        <>
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <circle cx="8.5" cy="9.5" r="1.25" />
-          <path d="m6 17 4.5-4.5 3.25 3.25L16 13.5l2 2" />
-        </>
-      )}
-      {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
-      {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
-      {name === 'proposals' && (
-        <>
-          <path d="m12 3 1.25 3.75L17 8l-3.75 1.25L12 13l-1.25-3.75L7 8l3.75-1.25L12 3Z" />
-          <path d="m18 14 .75 2.25L21 17l-2.25.75L18 20l-.75-2.25L15 17l2.25-.75L18 14Z" />
-        </>
-      )}
-    </svg>
-  );
-}
-
 /**
  * The xlsx editor React component.
  */
@@ -410,7 +372,18 @@ function XlsxEditorContent({
   const [focusedCell, setFocusedCell] = useState<CellEdit | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
   const [toolbarHeight, setToolbarHeight] = useState(DEFAULT_XLSX_TOOLBAR_HEIGHT);
+  const [zoom, setZoom] = useState(1);
   const [revision, setRevision] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [selectionFormatting, setSelectionFormatting] = useState<SelectionFormatting>({});
+  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+  const [mergedRanges, setMergedRanges] = useState<
+    Array<{ start: CellAddr; end: CellAddr }>
+  >([]);
+  const [borderStyleChoice, setBorderStyleChoice] = useState<SelectionFormatting['borderStyle']>();
+  const [borderColorChoice, setBorderColorChoice] = useState<string>();
+  const [capturedFormat, setCapturedFormat] = useState<CapturedFormat | null>(null);
+  const paintSourceRef = useRef<string | null>(null);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
   const [collaborationReplica, setCollaborationReplica] =
@@ -466,6 +439,13 @@ function XlsxEditorContent({
     setStaleFor({});
     setProposalsPanelOpen(false);
     setCollaborationReplica(null);
+    setSelectionFormatting({});
+    setHistoryState({ canUndo: false, canRedo: false });
+    setMergedRanges([]);
+    setBorderStyleChoice(undefined);
+    setBorderColorChoice(undefined);
+    setCapturedFormat(null);
+    paintSourceRef.current = null;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -575,21 +555,28 @@ function XlsxEditorContent({
     canvas.height = Math.round(h * dpr);
     canvas.style.width = `${w}px`;
     canvas.style.height = `${h}px`;
+    const logicalWidth = w / zoom;
+    const logicalHeight = h / zoom;
     const handle = handleRef.current;
     let dl: DisplayList;
     if (handle) {
       try {
-        dl = handle.displayList({ x: scroll.scrollLeft, y: scroll.scrollTop, width: w, height: h });
+        dl = handle.displayList({
+          x: scroll.scrollLeft / zoom,
+          y: scroll.scrollTop / zoom,
+          width: logicalWidth,
+          height: logicalHeight,
+        });
       } catch {
         return;
       }
     } else {
-      dl = buildDemoDisplayList(w, h, t('editor.demoCellText'));
+      dl = buildDemoDisplayList(logicalWidth, logicalHeight, t('editor.demoCellText'));
     }
-    paintDisplayList(ctx, dl, dpr);
+    paintDisplayList(ctx, dl, dpr * zoom);
     frameRef.current = dl;
     setFrame(dl);
-  }, [t]);
+  }, [t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
   // workbook, active sheet, or a mutation (revision) changes the pixels.
@@ -636,10 +623,34 @@ function XlsxEditorContent({
   useEffect(() => {
     const stop = () => {
       draggingRef.current = false;
+      setDragging(false);
     };
     window.addEventListener('mouseup', stop);
     return () => window.removeEventListener('mouseup', stop);
   }, []);
+
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection || !sheetInfo) {
+      setSelectionFormatting({});
+      setHistoryState({ canUndo: false, canRedo: false });
+      setMergedRanges([]);
+      return;
+    }
+    const range = normalizeRange(selection);
+    try {
+      const from = handle.cell(activeSheet, range.top, range.left).a1;
+      const to = handle.cell(activeSheet, range.bottom, range.right).a1;
+      const a1 = `${from}:${to}`;
+      setSelectionFormatting(handle.selectionFormatting(activeSheet, a1));
+      setHistoryState(handle.historyState());
+      setMergedRanges(handle.mergedRanges(activeSheet, a1));
+    } catch {
+      setSelectionFormatting({});
+      setHistoryState({ canUndo: false, canRedo: false });
+      setMergedRanges([]);
+    }
+  }, [selection, sheetInfo, activeSheet, revision]);
 
   // rebuilt from the live frame so the offscreen mirror never lags a mutation;
   // the visible window is small, so a rebuild per paint frame is cheap enough.
@@ -678,18 +689,37 @@ function XlsxEditorContent({
     [refreshProposals]
   );
 
+  const selectedRangeA1 = useCallback(
+    (target: Selection): string | null => {
+      const handle = handleRef.current;
+      if (!handle) return null;
+      const range = normalizeRange(target);
+      const from = handle.cell(activeSheet, range.top, range.left).a1;
+      const to = handle.cell(activeSheet, range.bottom, range.right).a1;
+      return `${from}:${to}`;
+    },
+    [activeSheet]
+  );
+
   const limits = useCallback((): SelectionLimits => {
-    return deriveLimits(frameRef.current, sheetInfo!, scrollRef.current?.clientHeight ?? 0);
-  }, [sheetInfo]);
+    return deriveLimits(
+      frameRef.current,
+      sheetInfo!,
+      (scrollRef.current?.clientHeight ?? 0) / zoom
+    );
+  }, [sheetInfo, zoom]);
 
   // map a viewport-local pointer event to a sheet cell via the frame geometry.
-  const pointToCell = useCallback((clientX: number, clientY: number): CellAddr | null => {
-    const canvas = canvasRef.current;
-    const grid = frameRef.current?.grid;
-    if (!canvas || !grid) return null;
-    const rect = canvas.getBoundingClientRect();
-    return cellAtPoint(grid, clientX - rect.left, clientY - rect.top);
-  }, []);
+  const pointToCell = useCallback(
+    (clientX: number, clientY: number): CellAddr | null => {
+      const canvas = canvasRef.current;
+      const grid = frameRef.current?.grid;
+      if (!canvas || !grid) return null;
+      const rect = canvas.getBoundingClientRect();
+      return cellAtPoint(grid, (clientX - rect.left) / zoom, (clientY - rect.top) / zoom);
+    },
+    [zoom]
+  );
 
   const openEditor = useCallback(
     (seed?: string) => {
@@ -802,25 +832,222 @@ function XlsxEditorContent({
     });
   }, [selection, activeSheet, applyResult]);
 
+  const formatSelection = useCallback(
+    (action: FormattingAction) => {
+      const handle = handleRef.current;
+      if (!handle || !selection) return;
+      const range = selectedRangeA1(selection);
+      if (!range) return;
+      if (action === 'paintFormat') {
+        if (capturedFormat) {
+          setCapturedFormat(null);
+          paintSourceRef.current = null;
+          return;
+        }
+        try {
+          setCapturedFormat(handle.captureFormat(activeSheet, range));
+          const normalized = normalizeRange(selection);
+          paintSourceRef.current = `${activeSheet}:${normalized.top}:${normalized.left}:${normalized.bottom}:${normalized.right}`;
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+        return;
+      }
+      try {
+        let result: EditResult;
+        if (action === 'currency') {
+          result = handle.setNumberFormat(activeSheet, range, 'currency');
+        } else if (action === 'percent') {
+          result = handle.setNumberFormat(activeSheet, range, 'percent');
+        } else if (action === 'increaseDecimal') {
+          result = handle.setNumberFormat(activeSheet, range, 'increaseDecimal');
+        } else if (action === 'decreaseDecimal') {
+          result = handle.setNumberFormat(activeSheet, range, 'decreaseDecimal');
+        } else if (action === 'bold') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            bold: !selectionFormatting.bold,
+          });
+        } else if (action === 'italic') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            italic: !selectionFormatting.italic,
+          });
+        } else if (action === 'strikethrough') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            strikethrough: !selectionFormatting.strikethrough,
+          });
+        } else if (action.type === 'numberFormat') {
+          result =
+            action.value === 'custom'
+              ? handle.setNumberFormat(activeSheet, range, {
+                  type: 'custom',
+                  pattern: selectionFormatting.numberFormatPattern ?? '0.00',
+                })
+              : handle.setNumberFormat(activeSheet, range, action.value);
+        } else if (action.type === 'fontFamily') {
+          result = handle.patchRangeStyle(activeSheet, range, { fontFamily: action.value });
+        } else if (action.type === 'fontSize') {
+          result = handle.patchRangeStyle(activeSheet, range, { fontSize: action.value });
+        } else if (action.type === 'textColor') {
+          result = handle.patchRangeStyle(activeSheet, range, { textColor: action.value });
+        } else if (action.type === 'fillColor') {
+          result = handle.patchRangeStyle(activeSheet, range, { fillColor: action.value });
+        } else if (action.type === 'borderPreset') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            border: {
+              preset: action.value,
+              style: borderStyleChoice ?? selectionFormatting.borderStyle ?? 'solid',
+              color: borderColorChoice ?? selectionFormatting.borderColor ?? '#000000',
+            },
+          });
+        } else if (action.type === 'borderStyle') {
+          setBorderStyleChoice(action.value);
+          result = handle.patchRangeStyle(activeSheet, range, {
+            border: { style: action.value },
+          });
+        } else if (action.type === 'borderColor') {
+          setBorderColorChoice(action.value);
+          result = handle.patchRangeStyle(activeSheet, range, {
+            border: { color: action.value },
+          });
+        } else if (action.type === 'horizontalAlignment') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            horizontalAlignment: action.value,
+          });
+        } else if (action.type === 'verticalAlignment') {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            verticalAlignment: action.value,
+          });
+        } else {
+          result = handle.patchRangeStyle(activeSheet, range, {
+            textWrapping: action.value,
+          });
+        }
+        applyResult(result);
+        focusContainer();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [
+      selection,
+      selectedRangeA1,
+      capturedFormat,
+      activeSheet,
+      selectionFormatting,
+      borderStyleChoice,
+      borderColorChoice,
+      applyResult,
+      focusContainer,
+    ]
+  );
+
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection || !capturedFormat || dragging) return;
+    const normalized = normalizeRange(selection);
+    const key = `${activeSheet}:${normalized.top}:${normalized.left}:${normalized.bottom}:${normalized.right}`;
+    if (key === paintSourceRef.current) return;
+    const range = selectedRangeA1(selection);
+    if (!range) return;
+    try {
+      applyResult(handle.applyFormat(activeSheet, range, capturedFormat));
+      setCapturedFormat(null);
+      paintSourceRef.current = null;
+      focusContainer();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [
+    selection,
+    capturedFormat,
+    dragging,
+    activeSheet,
+    selectedRangeA1,
+    applyResult,
+    focusContainer,
+  ]);
+
   const undo = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle || collaborationEnabled) return;
+    if (!handle) return;
     try {
       applyResult(handle.undo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [applyResult, collaborationEnabled]);
+  }, [applyResult]);
 
   const redo = useCallback(() => {
     const handle = handleRef.current;
-    if (!handle || collaborationEnabled) return;
+    if (!handle) return;
     try {
       applyResult(handle.redo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [applyResult, collaborationEnabled]);
+  }, [applyResult]);
+
+  const print = useCallback(() => window.print(), []);
+
+  const searchMenus = useCallback(() => undefined, []);
+
+  const mergeSelection = useCallback(
+    (action: MergeAction) => {
+      const handle = handleRef.current;
+      if (!handle || !selection) return;
+      const range = normalizeRange(selection);
+      const cell = (row: number, col: number) => ({ row, col });
+      const mergeRange = (top: number, left: number, bottom: number, right: number) => ({
+        start: cell(top, left),
+        end: cell(bottom, right),
+      });
+      const ops: unknown[] = [];
+      if (action === 'all') {
+        ops.push({
+          type: 'mergeCells',
+          sheet: activeSheet,
+          range: mergeRange(range.top, range.left, range.bottom, range.right),
+        });
+      } else if (action === 'horizontal') {
+        for (let row = range.top; row <= range.bottom; row++) {
+          ops.push({
+            type: 'mergeCells',
+            sheet: activeSheet,
+            range: mergeRange(row, range.left, row, range.right),
+          });
+        }
+      } else if (action === 'vertical') {
+        for (let col = range.left; col <= range.right; col++) {
+          ops.push({
+            type: 'mergeCells',
+            sheet: activeSheet,
+            range: mergeRange(range.top, col, range.bottom, col),
+          });
+        }
+      } else {
+        for (const merged of mergedRanges) {
+          ops.push({
+            type: 'unmergeCells',
+            sheet: activeSheet,
+            range: mergeRange(
+              merged.start.row,
+              merged.start.col,
+              merged.end.row,
+              merged.end.col
+            ),
+          });
+        }
+      }
+      if (ops.length === 0) return;
+      try {
+        applyResult(handle.applyOps(ops));
+        focusContainer();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [selection, activeSheet, mergedRanges, applyResult, focusContainer]
+  );
 
   // accept a proposal (optionally forcing past drift): apply it, drop any stale
   // warning, refresh the list, repaint, and return focus to the grid.
@@ -878,16 +1105,16 @@ function XlsxEditorContent({
     if (!handle || !scroll) return;
     try {
       const png = handle.renderPng({
-        x: scroll.scrollLeft,
-        y: scroll.scrollTop,
-        width: scroll.clientWidth,
-        height: scroll.clientHeight,
+        x: scroll.scrollLeft / zoom,
+        y: scroll.scrollTop / zoom,
+        width: scroll.clientWidth / zoom,
+        height: scroll.clientHeight / zoom,
       });
       downloadBytes(png, pngName(fileName), 'image/png');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [fileName]);
+  }, [fileName, zoom]);
 
   // commit the formula bar draft to the focused cell.
   const commitFormula = useCallback(
@@ -999,6 +1226,7 @@ function XlsxEditorContent({
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
       else setSelection(selectionAt(addr));
       draggingRef.current = true;
+      setDragging(true);
       focusContainer();
     },
     [selection, pointToCell, limits, focusContainer]
@@ -1023,10 +1251,20 @@ function XlsxEditorContent({
   const focusRect =
     grid && selection ? cellRect(grid, selection.focus.row, selection.focus.col) : null;
   const editRect = grid && editing ? cellRect(grid, editing.row, editing.col) : null;
+  const scaledSelectionRect = selRect ? scaledRect(selRect, zoom) : null;
+  const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
+  const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
 
-  const spacerWidth = sheetInfo ? sheetInfo.contentWidth : undefined;
-  const spacerHeight = sheetInfo ? sheetInfo.contentHeight : undefined;
+  const spacerWidth = sheetInfo ? sheetInfo.contentWidth * zoom : undefined;
+  const spacerHeight = sheetInfo ? sheetInfo.contentHeight * zoom : undefined;
   const formulaValue = formulaDraft ?? focusedCell?.input ?? '';
+  const normalizedSelection = selection ? normalizeRange(selection) : null;
+  const selectionRows = normalizedSelection
+    ? normalizedSelection.bottom - normalizedSelection.top + 1
+    : 1;
+  const selectionColumns = normalizedSelection
+    ? normalizedSelection.right - normalizedSelection.left + 1
+    : 1;
 
   // switch sheets: retarget the core, reset scroll + selection, reread info.
   const switchSheet = (index: number) => {
@@ -1042,6 +1280,8 @@ function XlsxEditorContent({
       setSelection(selectionAt({ row: 0, col: 0 }));
       setEditing(null);
       setFormulaDraft(null);
+      setCapturedFormat(null);
+      paintSourceRef.current = null;
       setSheetInfo(handle.sheetInfo());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1065,135 +1305,117 @@ function XlsxEditorContent({
         fontFamily: 'ui-sans-serif, system-ui, sans-serif',
       }}
     >
-      <div
-        ref={toolbarRef}
-        data-testid="xlsx-toolbar"
-        style={xlsxToolbarStyles.shell}
-      >
-        <div
-          style={xlsxToolbarStyles.rail}
-          role="group"
-          aria-label={t('toolbar.actionsLabel')}
+      <div ref={toolbarRef} data-testid="xlsx-toolbar" style={xlsxToolbarStyles.shell}>
+        <EditorToolbar
+          currentFormatting={{
+            ...selectionFormatting,
+            borderStyle: borderStyleChoice ?? selectionFormatting.borderStyle,
+            borderColor: borderColorChoice ?? selectionFormatting.borderColor,
+            paintFormat: capturedFormat !== null,
+          }}
+          selectionShape={{
+            rows: selectionRows,
+            columns: selectionColumns,
+            canUnmerge: mergedRanges.length > 0,
+          }}
+          onSearchMenus={searchMenus}
+          onUndo={undo}
+          onRedo={redo}
+          canUndo={historyState.canUndo}
+          canRedo={historyState.canRedo}
+          onPrint={print}
+          zoom={zoom}
+          onZoomChange={setZoom}
+          onFormat={formatSelection}
+          onMerge={mergeSelection}
         >
+          <EditorToolbar.Toolbar />
           <div
-            style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
-            role="group"
-            aria-label={t('toolbar.fileActionsLabel')}
-          >
-            <button
-              type="button"
-              data-testid="xlsx-save"
-              onClick={save}
-              disabled={!sheetInfo}
-              aria-label={t('toolbar.save')}
-              title={t('toolbar.save')}
-              style={xlsxToolbarButton(Boolean(sheetInfo))}
-            >
-              <XlsxToolbarIcon name="save" />
-            </button>
-            <button
-              type="button"
-              data-testid="xlsx-export-png"
-              onClick={exportPng}
-              disabled={!sheetInfo || !pngExportAvailable}
-              aria-label={t('toolbar.exportPng')}
-              title={t('toolbar.exportPng')}
-              style={xlsxToolbarButton(Boolean(sheetInfo && pngExportAvailable))}
-            >
-              <XlsxToolbarIcon name="image" />
-            </button>
-          </div>
-          <div
-            style={xlsxToolbarStyles.group}
-            role="group"
-            aria-label={t('toolbar.historyLabel')}
-          >
-            <button
-              type="button"
-              data-testid="xlsx-undo"
-              onClick={undo}
-              disabled={!sheetInfo || collaborationEnabled}
-              aria-label={t('toolbar.undo')}
-              title={t('toolbar.undo')}
-              style={xlsxToolbarButton(Boolean(sheetInfo && !collaborationEnabled))}
-            >
-              <XlsxToolbarIcon name="undo" />
-            </button>
-            <button
-              type="button"
-              data-testid="xlsx-redo"
-              onClick={redo}
-              disabled={!sheetInfo || collaborationEnabled}
-              aria-label={t('toolbar.redo')}
-              title={t('toolbar.redo')}
-              style={xlsxToolbarButton(Boolean(sheetInfo && !collaborationEnabled))}
-            >
-              <XlsxToolbarIcon name="redo" />
-            </button>
-          </div>
-          <div
-            style={xlsxToolbarStyles.formulaGroup}
+            style={xlsxToolbarStyles.rail}
             role="group"
             aria-label={t('toolbar.formulaBarLabel')}
           >
-            <input
-              data-testid="xlsx-name-box"
-              readOnly
-              value={focusedCell?.a1 ?? ''}
-              placeholder={t('toolbar.nameBoxPlaceholder')}
-              aria-label={t('toolbar.nameBoxPlaceholder')}
-              style={xlsxToolbarStyles.nameBox}
-            />
-            <span style={xlsxToolbarStyles.formulaMark} aria-hidden="true">
-              fx
-            </span>
-            <input
-              data-testid="xlsx-formula-input"
-              value={formulaValue}
-              placeholder={t('toolbar.formulaPlaceholder')}
-              aria-label={t('toolbar.formulaPlaceholder')}
-              disabled={!sheetInfo}
-              onChange={(e) => setFormulaDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  commitFormula(e.shiftKey ? 'up' : 'down');
-                  focusContainer();
-                  e.preventDefault();
-                } else if (e.key === 'Escape') {
-                  setFormulaDraft(null);
-                  focusContainer();
-                  e.preventDefault();
-                }
-              }}
-              onBlur={() => commitFormula()}
-              style={xlsxToolbarStyles.formulaInput}
-            />
-          </div>
-          {proposalsAvailable && (
-            <div style={xlsxToolbarStyles.proposals}>
-              <button
-                type="button"
-                data-testid="xlsx-proposals-button"
-                onClick={() => setProposalsPanelOpen((open) => !open)}
+            <ToolbarGroup
+              style={{ ...xlsxToolbarStyles.group, paddingLeft: 0 }}
+              label={t('toolbar.fileActionsLabel')}
+            >
+              <ToolbarButton
+                testId="xlsx-save"
+                onClick={save}
                 disabled={!sheetInfo}
-                aria-expanded={proposalsPanelOpen}
-                aria-label={t('proposals.panelLabel')}
-                title={t('proposals.panelLabel')}
-                style={{
-                  ...xlsxToolbarButton(Boolean(sheetInfo), proposalsPanelOpen),
-                  width: proposals.length > 0 ? 42 : 28,
-                }}
+                title={t('toolbar.save')}
               >
-                <XlsxToolbarIcon name="proposals" />
-                {proposals.length > 0 && (
-                  <span data-testid="xlsx-proposals-count" style={xlsxToolbarStyles.count}>
-                    {proposals.length}
-                  </span>
-                )}
-              </button>
+                <ToolbarIcon name="save" size={18} />
+              </ToolbarButton>
+              <ToolbarButton
+                testId="xlsx-export-png"
+                onClick={exportPng}
+                disabled={!sheetInfo || !pngExportAvailable}
+                title={t('toolbar.exportPng')}
+              >
+                <ToolbarIcon name="image" size={18} />
+              </ToolbarButton>
+            </ToolbarGroup>
+            <div
+              style={xlsxToolbarStyles.formulaGroup}
+              role="group"
+              aria-label={t('toolbar.formulaBarLabel')}
+            >
+              <input
+                data-testid="xlsx-name-box"
+                readOnly
+                value={focusedCell?.a1 ?? ''}
+                placeholder={t('toolbar.nameBoxPlaceholder')}
+                aria-label={t('toolbar.nameBoxPlaceholder')}
+                style={xlsxToolbarStyles.nameBox}
+              />
+              <span style={xlsxToolbarStyles.formulaMark} aria-hidden="true">
+                fx
+              </span>
+              <input
+                data-testid="xlsx-formula-input"
+                value={formulaValue}
+                placeholder={t('toolbar.formulaPlaceholder')}
+                aria-label={t('toolbar.formulaPlaceholder')}
+                disabled={!sheetInfo}
+                onChange={(e) => setFormulaDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    commitFormula(e.shiftKey ? 'up' : 'down');
+                    focusContainer();
+                    e.preventDefault();
+                  } else if (e.key === 'Escape') {
+                    setFormulaDraft(null);
+                    focusContainer();
+                    e.preventDefault();
+                  }
+                }}
+                onBlur={() => commitFormula()}
+                style={xlsxToolbarStyles.formulaInput}
+              />
             </div>
-          )}
-        </div>
+            {proposalsAvailable && (
+              <div style={xlsxToolbarStyles.proposals}>
+                <ToolbarButton
+                  testId="xlsx-proposals-button"
+                  onClick={() => setProposalsPanelOpen((open) => !open)}
+                  disabled={!sheetInfo}
+                  active={proposalsPanelOpen}
+                  ariaExpanded={proposalsPanelOpen}
+                  title={t('proposals.panelLabel')}
+                  style={{ width: proposals.length > 0 ? 42 : 28 }}
+                >
+                  <ToolbarIcon name="proposals" size={18} />
+                  {proposals.length > 0 && (
+                    <span data-testid="xlsx-proposals-count" style={xlsxToolbarStyles.count}>
+                      {proposals.length}
+                    </span>
+                  )}
+                </ToolbarButton>
+              </div>
+            )}
+          </div>
+        </EditorToolbar>
       </div>
       {proposalsAvailable && proposalsPanelOpen && (
         <ProposalsPanel
@@ -1250,29 +1472,29 @@ function XlsxEditorContent({
               pointerEvents: 'none',
             }}
           >
-            {selRect && (
+            {scaledSelectionRect && (
               <div
                 data-testid="xlsx-selection"
                 style={{
                   position: 'absolute',
-                  left: selRect.x,
-                  top: selRect.y,
-                  width: selRect.w,
-                  height: selRect.h,
+                  left: scaledSelectionRect.x,
+                  top: scaledSelectionRect.y,
+                  width: scaledSelectionRect.w,
+                  height: scaledSelectionRect.h,
                   boxSizing: 'border-box',
                   border: `1px solid ${BRAND}`,
                   background: 'rgba(33, 115, 70, 0.12)',
                 }}
               />
             )}
-            {focusRect && !editing && (
+            {scaledFocusRect && !editing && (
               <div
                 style={{
                   position: 'absolute',
-                  left: focusRect.x,
-                  top: focusRect.y,
-                  width: focusRect.w,
-                  height: focusRect.h,
+                  left: scaledFocusRect.x,
+                  top: scaledFocusRect.y,
+                  width: scaledFocusRect.w,
+                  height: scaledFocusRect.h,
                   boxSizing: 'border-box',
                   border: `2px solid ${BRAND}`,
                 }}
@@ -1290,7 +1512,7 @@ function XlsxEditorContent({
                   return (
                     <ProposalDecoration
                       key={`${proposal.id}:${cell.a1}`}
-                      rect={rect}
+                      rect={scaledRect(rect, zoom)}
                       color={proposalColor(proposal.agentId)}
                       newText={cell.newText}
                       agentId={proposal.agentId}
@@ -1298,7 +1520,7 @@ function XlsxEditorContent({
                   );
                 })
               )}
-            {editing && editRect && (
+            {editing && scaledEditRect && (
               <input
                 ref={editorInputRef}
                 data-testid="xlsx-cell-editor"
@@ -1328,14 +1550,14 @@ function XlsxEditorContent({
                 }}
                 style={{
                   position: 'absolute',
-                  left: editRect.x,
-                  top: editRect.y,
-                  width: editRect.w,
-                  height: editRect.h,
+                  left: scaledEditRect.x,
+                  top: scaledEditRect.y,
+                  width: scaledEditRect.w,
+                  height: scaledEditRect.h,
                   boxSizing: 'border-box',
                   border: `2px solid ${BRAND}`,
                   padding: '0 3px',
-                  font: '13px system-ui, sans-serif',
+                  font: `${13 * zoom}px system-ui, sans-serif`,
                   background: '#ffffff',
                   pointerEvents: 'auto',
                   outline: 'none',

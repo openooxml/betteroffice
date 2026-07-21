@@ -7,6 +7,7 @@ use std::fmt;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workbook};
 
+use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{remap_formulas, rename_sheet_references};
 
@@ -20,6 +21,7 @@ pub enum OpError {
     SheetNotFound(SheetId),
     SheetIndexOutOfRange(usize),
     FormulaNotRewritable { sheet: SheetId, cell: CellRef },
+    InvalidStyle(String),
 }
 
 impl fmt::Display for OpError {
@@ -33,6 +35,7 @@ impl fmt::Display for OpError {
                 sheet.0,
                 cell.to_a1()
             ),
+            OpError::InvalidStyle(message) => f.write_str(message),
         }
     }
 }
@@ -88,14 +91,27 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         }
         Op::MergeCells { sheet, range } => {
             let s = sheet_mut(wb, *sheet)?;
-            if s.merges.contains(range) {
+            let replaced = s
+                .merges
+                .iter()
+                .copied()
+                .filter(|merged| ranges_intersect(*merged, *range))
+                .collect::<Vec<_>>();
+            if replaced.as_slice() == [*range] {
                 return Ok(InvertedOp(vec![]));
             }
+            s.merges.retain(|merged| !ranges_intersect(*merged, *range));
             s.merges.push(*range);
-            Ok(InvertedOp(vec![Op::UnmergeCells {
+            let mut inverse = Vec::with_capacity(replaced.len() + 1);
+            inverse.push(Op::UnmergeCells {
                 sheet: *sheet,
                 range: *range,
-            }]))
+            });
+            inverse.extend(replaced.into_iter().map(|range| Op::MergeCells {
+                sheet: *sheet,
+                range,
+            }));
+            Ok(InvertedOp(inverse))
         }
         Op::UnmergeCells { sheet, range } => {
             let s = sheet_mut(wb, *sheet)?;
@@ -109,6 +125,42 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 }
                 None => Ok(InvertedOp(vec![])),
             }
+        }
+        Op::PatchRangeStyle {
+            sheet,
+            range,
+            patch,
+        } => apply_range_formats(wb, *sheet, *range, |format, row, col| {
+            patch_cell_format(format, patch, *range, row, col)
+        }),
+        Op::SetRangeNumberFormat {
+            sheet,
+            range,
+            format,
+        } => apply_range_formats(wb, *sheet, *range, |cell_format, _, _| {
+            mutate_number_format(cell_format, format);
+            Ok(())
+        }),
+        Op::ApplyRangeFormat {
+            sheet,
+            range,
+            format,
+        } => {
+            if format.rows == 0
+                || format.columns == 0
+                || format.formats.len() != (format.rows as usize) * (format.columns as usize)
+            {
+                return Err(OpError::InvalidStyle(
+                    "captured format dimensions do not match its cells".into(),
+                ));
+            }
+            apply_range_formats(wb, *sheet, *range, |cell_format, row, col| {
+                let source_row = (row - range.start.row) % format.rows;
+                let source_col = (col - range.start.col) % format.columns;
+                let index = (source_row * format.columns + source_col) as usize;
+                *cell_format = format.formats[index].clone();
+                Ok(())
+            })
         }
         Op::AddSheet { index, name } => {
             let idx = (*index).min(wb.sheets.len());
@@ -168,6 +220,40 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     }
 }
 
+fn apply_range_formats(
+    wb: &mut Workbook,
+    sheet: SheetId,
+    range: CellRange,
+    mut update: impl FnMut(&mut xlsx_model::CellFormat, u32, u32) -> Result<(), OpError>,
+) -> Result<InvertedOp, OpError> {
+    let sheet_ref = wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let mut cells = Vec::new();
+    for row in range.start.row..=range.end.row {
+        for col in range.start.col..=range.end.col {
+            let at = CellRef::new(row, col);
+            cells.push((at, sheet_ref.cell(at).cloned().unwrap_or_default()));
+        }
+    }
+    let mut inverse = Vec::with_capacity(cells.len());
+    for (at, old) in cells {
+        let mut format = wb.styles.cell_format(old.style);
+        update(&mut format, at.row, at.col)?;
+        let mut next = old.clone();
+        next.style = wb.styles.intern_cell_format(&format);
+        if next != old {
+            wb.sheet_mut(sheet)
+                .ok_or(OpError::SheetNotFound(sheet))?
+                .set_cell(at, next);
+            inverse.push(Op::SetCell {
+                sheet,
+                at,
+                cell: CellState::from(old),
+            });
+        }
+    }
+    Ok(InvertedOp(inverse))
+}
+
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
@@ -187,6 +273,13 @@ fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError>
         inverse.extend(chunk);
     }
     Ok(inverse)
+}
+
+fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
+    left.start.row <= right.end.row
+        && left.end.row >= right.start.row
+        && left.start.col <= right.end.col
+        && left.end.col >= right.start.col
 }
 
 /// remap an address through a structural op; `None` when it falls inside a

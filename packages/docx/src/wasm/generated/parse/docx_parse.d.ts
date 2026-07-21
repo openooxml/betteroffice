@@ -56,6 +56,8 @@ export function parse_relationships_xml(xml: Uint8Array, part_path: string): str
  */
 export function rezip_docx(entries: any): Uint8Array;
 
+export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
+
 /**
  * Legacy staged Rust S10 serializer entry retained for ABI compatibility.
  */
@@ -100,6 +102,7 @@ export interface InitOutput {
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly rezip_docx: (a: any) => [number, number, number, number];
+    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

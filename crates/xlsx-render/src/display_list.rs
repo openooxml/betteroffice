@@ -24,7 +24,7 @@ pub struct Rect {
 /// a single primitive. `op` tags the variant with a stable string discriminant;
 /// style fields skip-serialize at their defaults for backward compatibility.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "op", rename_all = "camelCase")]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DrawCmd {
     FillRect {
         x: f32,

@@ -25,6 +25,14 @@ impl UndoStack {
         !self.redo.is_empty()
     }
 
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    pub fn redo_depth(&self) -> usize {
+        self.redo.len()
+    }
+
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
