@@ -278,6 +278,55 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = patchRangeStyleJson)]
+    pub fn patch_range_style_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .patch_range_style_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = setRangeNumberFormatJson)]
+    pub fn set_range_number_format_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .set_range_number_format_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = selectionFormattingJson)]
+    pub fn selection_formatting_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .selection_formatting_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = captureFormatJson)]
+    pub fn capture_format_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .capture_format_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = applyFormatJson)]
+    pub fn apply_format_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .apply_format_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = mergedRangesJson)]
+    pub fn merged_ranges_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .merged_ranges_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = historyStateJson)]
+    pub fn history_state_json(&self) -> Result<String, JsValue> {
+        self.session
+            .history_state_json()
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// register an agent proposal (preview only); returns the stored `Proposal` json.
     #[wasm_bindgen(js_name = proposeJson)]
     pub fn propose_json(&mut self, args: &str) -> Result<String, JsValue> {

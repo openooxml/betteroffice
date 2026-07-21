@@ -1,4 +1,9 @@
+use serde::Serialize;
 use xlsx_model::{CellRange, CellRef, SheetId};
+
+use xlsx_ops::{
+    BorderLineStyle, BorderPreset, HorizontalAlignment, TextWrapping, VerticalAlignment,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateOrigin {
@@ -57,6 +62,64 @@ pub struct MutationResult {
     pub changed: Vec<CellAddress>,
     pub cycle_cells: Vec<CellAddress>,
     pub limited_cells: Vec<CellAddress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NumberFormatKind {
+    Automatic,
+    PlainText,
+    Number,
+    Percent,
+    Scientific,
+    Currency,
+    Date,
+    Time,
+    Custom,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionFormatting {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<NumberFormatKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number_format_pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_preset: Option<BorderPreset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_style: Option<BorderLineStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub border_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizontal_alignment: Option<HorizontalAlignment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertical_alignment: Option<VerticalAlignment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_wrapping: Option<TextWrapping>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryState {
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_depth: usize,
+    pub redo_depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

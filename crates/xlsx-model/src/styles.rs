@@ -1,10 +1,10 @@
 //! style types (fonts, fills, borders, xf chains, theme colors). pure data;
 //! the cellXfs indirection chain is walked through the `Stylesheet` accessors.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// a color reference as it appears in a `<color>` element (§18.8.3).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Color {
     /// resolved `#rrggbb` (alpha dropped at parse; excel stores `aarrggbb`).
     Rgb(String),
@@ -32,7 +32,7 @@ impl Color {
 }
 
 /// a cell font. only the facets we render are modelled; unset fields inherit.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Font {
     pub name: Option<String>,
     pub size_pt: Option<f64>,
@@ -44,7 +44,7 @@ pub struct Font {
 }
 
 /// a cell fill. non-solid patterns collapse to their foreground color.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Fill {
     #[default]
     None,
@@ -52,7 +52,7 @@ pub enum Fill {
 }
 
 /// border line weight/style, collapsed from the full sml set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BorderStyle {
     Thin,
     Medium,
@@ -93,14 +93,14 @@ impl BorderStyle {
 }
 
 /// one edge of a cell border.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BorderEdge {
     pub style: BorderStyle,
     pub color: Option<Color>,
 }
 
 /// the four cell edges; `None` on an edge means no border there.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Border {
     pub left: Option<BorderEdge>,
     pub right: Option<BorderEdge>,
@@ -109,7 +109,7 @@ pub struct Border {
 }
 
 /// horizontal alignment (`ST_HorizontalAlignment`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HAlign {
     General,
     Left,
@@ -151,7 +151,7 @@ impl HAlign {
 }
 
 /// vertical alignment (`ST_VerticalAlignment`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VAlign {
     Top,
     Center,
@@ -184,23 +184,24 @@ impl VAlign {
 }
 
 /// cell text alignment; unset horizontal defaults to `general`, vertical to `bottom`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Alignment {
     pub h: Option<HAlign>,
     pub v: Option<VAlign>,
     pub wrap_text: bool,
+    pub shrink_to_fit: bool,
 }
 
 impl Alignment {
     /// true when the element carries no meaningful alignment.
     pub fn is_empty(&self) -> bool {
-        self.h.is_none() && self.v.is_none() && !self.wrap_text
+        self.h.is_none() && self.v.is_none() && !self.wrap_text && !self.shrink_to_fit
     }
 }
 
 /// a cell format record (`CT_Xf` in cellXfs). a `None` pool index means
 /// "inherit / default", not "index 0".
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Xf {
     pub font: Option<u32>,
     pub fill: Option<u32>,
@@ -211,7 +212,7 @@ pub struct Xf {
 
 /// the workbook theme colors in clrScheme declaration order
 /// `[dk1, lt1, dk2, lt2, accent1..6, hlink, folHlink]`; index via [`Theme::slot`].
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
     pub colors: [String; 12],
 }
@@ -254,7 +255,7 @@ impl Theme {
 
 /// the parsed style tables plus the resolved theme. a cell's `s` indexes
 /// `cell_xfs`; `num_fmts` holds only custom codes (id >= 164).
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Stylesheet {
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
@@ -269,6 +270,29 @@ pub struct Stylesheet {
 pub enum FormatCode<'a> {
     Custom(&'a str),
     Builtin(u16),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum NumberFormat {
+    Builtin { id: u16 },
+    Custom { pattern: String },
+}
+
+impl Default for NumberFormat {
+    fn default() -> Self {
+        Self::Builtin { id: 0 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellFormat {
+    pub font: Font,
+    pub fill: Fill,
+    pub border: Border,
+    pub number_format: NumberFormat,
+    pub alignment: Alignment,
 }
 
 impl Stylesheet {
@@ -324,6 +348,66 @@ impl Stylesheet {
         }
         FormatCode::Builtin(id)
     }
+
+    pub fn cell_format(&self, style_index: Option<u32>) -> CellFormat {
+        let Some(style_index) = style_index else {
+            return CellFormat::default();
+        };
+        let number_format = match self.format_code_for(style_index) {
+            FormatCode::Builtin(id) => NumberFormat::Builtin { id },
+            FormatCode::Custom(pattern) => NumberFormat::Custom {
+                pattern: pattern.to_string(),
+            },
+        };
+        CellFormat {
+            font: self.font_for(style_index).cloned().unwrap_or_default(),
+            fill: self.fill_for(style_index).cloned().unwrap_or_default(),
+            border: self.border_for(style_index).cloned().unwrap_or_default(),
+            number_format,
+            alignment: self.alignment_for(style_index).cloned().unwrap_or_default(),
+        }
+    }
+
+    pub fn intern_cell_format(&mut self, format: &CellFormat) -> Option<u32> {
+        if format == &CellFormat::default() {
+            return None;
+        }
+        let font = intern(&mut self.fonts, &format.font);
+        let fill = intern(&mut self.fills, &format.fill);
+        let border = intern(&mut self.borders, &format.border);
+        let num_fmt_id = match &format.number_format {
+            NumberFormat::Builtin { id } => Some(*id).filter(|id| *id != 0),
+            NumberFormat::Custom { pattern } => Some(self.intern_number_format(pattern)),
+        };
+        let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+        let xf = Xf {
+            font: (format.font != Font::default()).then_some(font),
+            fill: (format.fill != Fill::default()).then_some(fill),
+            border: (format.border != Border::default()).then_some(border),
+            num_fmt_id,
+            alignment,
+        };
+        Some(intern(&mut self.cell_xfs, &xf))
+    }
+
+    fn intern_number_format(&mut self, pattern: &str) -> u16 {
+        if let Some((id, _)) = self.num_fmts.iter().find(|(_, code)| code == pattern) {
+            return *id;
+        }
+        let id = (164..=u16::MAX)
+            .find(|id| self.num_fmts.iter().all(|(used, _)| used != id))
+            .unwrap_or(u16::MAX);
+        self.num_fmts.push((id, pattern.to_string()));
+        id
+    }
+}
+
+fn intern<T: PartialEq + Clone>(values: &mut Vec<T>, value: &T) -> u32 {
+    if let Some(index) = values.iter().position(|candidate| candidate == value) {
+        return index as u32;
+    }
+    values.push(value.clone());
+    (values.len() - 1) as u32
 }
 
 /// apply a spreadsheetml tint to a `#rrggbb` in hsl luminance per §18.8.3:
@@ -489,6 +573,7 @@ mod tests {
                         h: Some(HAlign::Center),
                         v: Some(VAlign::Center),
                         wrap_text: true,
+                        shrink_to_fit: false,
                     }),
                 },
             ],
@@ -510,5 +595,32 @@ mod tests {
 
         ss.cell_xfs[1].num_fmt_id = Some(14);
         assert_eq!(ss.format_code_for(1), FormatCode::Builtin(14));
+    }
+
+    #[test]
+    fn cell_formats_intern_and_resolve() {
+        let mut styles = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                name: Some("Arial".into()),
+                bold: true,
+                color: Some(Color::Rgb("#123456".into())),
+                ..Font::default()
+            },
+            number_format: NumberFormat::Custom {
+                pattern: "0.000".into(),
+            },
+            alignment: Alignment {
+                h: Some(HAlign::Center),
+                wrap_text: true,
+                ..Alignment::default()
+            },
+            ..CellFormat::default()
+        };
+        let first = styles.intern_cell_format(&format).unwrap();
+        let second = styles.intern_cell_format(&format).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(styles.cell_format(Some(first)), format);
+        assert_eq!(styles.intern_cell_format(&CellFormat::default()), None);
     }
 }

@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use xlsx_model::{Cell, CellRange, CellRef, CellValue, ColId, RowId, SheetId};
 
+use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
+
 /// serializable mirror of `xlsx_model::Cell`, which deliberately has no serde.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +95,21 @@ pub enum Op {
     UnmergeCells {
         sheet: SheetId,
         range: CellRange,
+    },
+    PatchRangeStyle {
+        sheet: SheetId,
+        range: CellRange,
+        patch: StylePatch,
+    },
+    SetRangeNumberFormat {
+        sheet: SheetId,
+        range: CellRange,
+        format: NumberFormatMutation,
+    },
+    ApplyRangeFormat {
+        sheet: SheetId,
+        range: CellRange,
+        format: CapturedFormat,
     },
     AddSheet {
         index: usize,

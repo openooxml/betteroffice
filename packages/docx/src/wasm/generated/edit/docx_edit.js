@@ -2438,7 +2438,7 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
-        __wbg_now_374e0d8e8b91c892: function() {
+        __wbg_now_6c169aa7096caae5: function() {
             const ret = performance.now();
             return ret;
         },

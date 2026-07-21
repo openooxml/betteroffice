@@ -13,12 +13,14 @@ export class XlsxDocument {
      * plus `proposalId`, or a `stale: ...` error when the base moved.
      */
     acceptProposalJson(args: string): string;
+    applyFormatJson(args: string): string;
     /**
      * apply a raw op list as one user transaction; returns `SheetInfo` json.
      */
     applyOpsJson(transaction_json: string): string;
     applyUpdateJson(update: Uint8Array): string;
     calculationStatusJson(): string;
+    captureFormatJson(args: string): string;
     /**
      * the editable representation of one cell.
      */
@@ -46,10 +48,12 @@ export class XlsxDocument {
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
+    historyStateJson(): string;
     /**
      * the pending proposals: `{"proposals":[...]}`.
      */
     listProposalsJson(): string;
+    mergedRangesJson(args: string): string;
     /**
      * open a workbook from raw `.xlsx` bytes.
      */
@@ -58,6 +62,7 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    patchRangeStyleJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
      */
@@ -86,10 +91,12 @@ export class XlsxDocument {
      * serialize the current workbook back to `.xlsx` bytes.
      */
     saveBytes(): Uint8Array;
+    selectionFormattingJson(args: string): string;
     /**
      * switch the active sheet by index.
      */
     setActiveSheet(index: number): void;
+    setRangeNumberFormatJson(args: string): string;
     /**
      * serialized `SheetInfo`: sheet names, active index, content extent.
      */
@@ -114,6 +121,8 @@ export class XlsxDocument {
  */
 export function rezip_docx(entries: any): Uint8Array;
 
+export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
+
 /**
  * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
  */
@@ -125,9 +134,11 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_xlsxdocument_free: (a: number, b: number) => void;
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
@@ -138,9 +149,12 @@ export interface InitOutput {
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly xlsxdocument_encodeStateVector: (a: number) => [number, number];
+    readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+    readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
@@ -148,12 +162,15 @@ export interface InitOutput {
     readonly xlsxdocument_renderPng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
+    readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
     readonly rezip_docx: (a: any) => [number, number, number, number];
+    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
