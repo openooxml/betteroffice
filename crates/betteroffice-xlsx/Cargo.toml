@@ -23,6 +23,7 @@ xlsx-calc.workspace = true
 xlsx-ops.workspace = true
 xlsx-render.workspace = true
 xlsx-raster = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 yrs = "0.27.3"

@@ -11,8 +11,8 @@ pub mod workbook;
 pub use addr::{CellRange, CellRef, ColId, MAX_COLS, MAX_ROWS, RowId, SheetId};
 pub use date::DateSystem;
 pub use styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, FormatCode, HAlign, Stylesheet,
-    Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, CellFormat, Color, Fill, Font, FormatCode, HAlign,
+    NumberFormat, Stylesheet, Theme, VAlign, Xf,
 };
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{Cell, CellProvider, Sheet, Workbook};

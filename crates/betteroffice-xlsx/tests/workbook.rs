@@ -3,8 +3,8 @@ use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DrawCmd, Error,
     MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
-    Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, UpdateOrigin, Viewport, Workbook,
-    WorkbookModel,
+    NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId,
+    StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,6 +50,24 @@ fn sample_parts() -> Vec<(String, Vec<u8>)> {
 
 fn sample_xlsx() -> Vec<u8> {
     ooxml_opc::rezip_parts(&sample_parts()).unwrap()
+}
+
+fn overlapping_merge_parts() -> Vec<(String, Vec<u8>)> {
+    let workbook =
+        r#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let worksheet = r#"<worksheet><sheetData/><mergeCells count="5"><mergeCell ref="A1:B2"/><mergeCell ref="B2:C3"/><mergeCell ref="C3:D4"/><mergeCell ref="D4:E5"/><mergeCell ref="F1:G1"/></mergeCells></worksheet>"#;
+    vec![
+        ("xl/workbook.xml".to_string(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_string(),
+            worksheet.as_bytes().to_vec(),
+        ),
+    ]
 }
 
 #[test]
@@ -295,6 +313,52 @@ fn rejects_empty_workbook_ops_atomically() {
     );
     assert!(matches!(result, Err(Error::NoSheets)));
     assert_eq!(workbook.sheet_count(), 2);
+}
+
+#[test]
+fn rejects_overlapping_merged_ranges() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.merges = vec![
+        CellRange::parse_a1("A1:B2").unwrap(),
+        CellRange::parse_a1("B2:C3").unwrap(),
+    ];
+    model.sheets.push(sheet);
+
+    assert!(matches!(
+        Workbook::from_model(model),
+        Err(Error::InvalidOperation(message))
+            if message == "workbook contains overlapping merged ranges"
+    ));
+}
+
+#[test]
+fn parsed_overlapping_merges_open_and_save_normalized() {
+    let model = xlsx_parse::parse_workbook(&overlapping_merge_parts()).unwrap();
+    let merges: Vec<_> = model.sheets[0]
+        .merges
+        .iter()
+        .map(|range| range.to_a1())
+        .collect();
+    assert_eq!(merges, ["A1:B2", "C3:D4", "F1:G1"]);
+
+    let workbook = Workbook::from_model(model).unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let sheet_xml = parts
+        .iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+        .unwrap();
+    assert!(sheet_xml.contains(
+        r#"<mergeCells count="3"><mergeCell ref="A1:B2"/><mergeCell ref="C3:D4"/><mergeCell ref="F1:G1"/></mergeCells>"#
+    ));
+
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].merges,
+        workbook.model().sheets[0].merges
+    );
 }
 
 #[test]
@@ -774,29 +838,35 @@ fn duplicate_runtime_client_ids_are_an_invalid_host_configuration() {
 }
 
 #[test]
-fn collaborative_undo_redo_are_rejected_without_recording_history() {
+fn collaborative_undo_redo_track_only_local_user_edits() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 221).unwrap();
     workbook
         .edit_cell(SheetId(0), cell("A1"), "20", CalculationOptions::default())
         .unwrap();
-    assert!(!workbook.can_undo());
+    assert!(workbook.can_undo());
     assert!(!workbook.can_redo());
+    assert_eq!(workbook.history_state().undo_depth, 1);
 
-    let model = workbook.model().clone();
-    let state = workbook.encode_state_as_update_v1();
-    assert!(matches!(
-        workbook.undo(CalculationOptions::default()),
-        Err(Error::CollaborativeUndoUnavailable)
-    ));
-    assert!(matches!(
-        workbook.redo(CalculationOptions::default()),
-        Err(Error::CollaborativeUndoUnavailable)
-    ));
-    assert_eq!(workbook.model(), &model);
-    assert_eq!(workbook.encode_state_as_update_v1(), state);
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "10");
+    assert!(!workbook.can_undo());
+    assert!(workbook.can_redo());
+    assert!(
+        workbook
+            .redo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "20");
 
-    workbook
+    let mut agent_only = Workbook::open_collaborative(&bytes, 222).unwrap();
+    agent_only
         .propose(
             ProposalRequest {
                 agent_id: "agent".into(),
@@ -810,18 +880,20 @@ fn collaborative_undo_redo_are_rejected_without_recording_history() {
             CalculationOptions::default(),
         )
         .unwrap();
-    workbook
+    agent_only
         .accept_proposal("p1", false, CalculationOptions::default())
         .unwrap();
-    assert!(!workbook.can_undo());
-    assert!(matches!(
-        workbook.undo(CalculationOptions::default()),
-        Err(Error::CollaborativeUndoUnavailable)
-    ));
+    assert!(!agent_only.can_undo());
+    assert!(
+        !agent_only
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
 }
 
 #[test]
-fn rejected_collaborative_undo_cannot_tombstone_a_concurrent_edit() {
+fn collaborative_undo_converges_after_a_concurrent_remote_edit() {
     let bytes = sample_xlsx();
     for (left_id, right_id) in [(231, 230), (230, 231)] {
         let mut left = Workbook::open_collaborative(&bytes, left_id).unwrap();
@@ -843,12 +915,6 @@ fn rejected_collaborative_undo_cannot_tombstone_a_concurrent_edit() {
                 CalculationOptions::default(),
             )
             .unwrap();
-        assert!(matches!(
-            left.undo(CalculationOptions::default()),
-            Err(Error::CollaborativeUndoUnavailable)
-        ));
-        assert_eq!(left.cell(SheetId(0), cell("C1")).unwrap().input, "left");
-
         let from_left = left.encode_diff_v1(&baseline).unwrap();
         let from_right = right.encode_diff_v1(&baseline).unwrap();
         left.apply_update_v1(&from_right, CalculationOptions::default())
@@ -857,11 +923,18 @@ fn rejected_collaborative_undo_cannot_tombstone_a_concurrent_edit() {
             .apply_update_v1(&from_left, CalculationOptions::default())
             .unwrap();
 
+        let right_before_undo = right.encode_state_vector_v1();
+        left.undo(CalculationOptions::default()).unwrap();
+        let undo = left.encode_diff_v1(&right_before_undo).unwrap();
+        right
+            .apply_update_v1(&undo, CalculationOptions::default())
+            .unwrap();
         assert_eq!(left.model(), right.model());
-        assert!(matches!(
-            left.cell(SheetId(0), cell("C1")).unwrap().input.as_str(),
-            "left" | "right"
-        ));
+        assert_eq!(
+            left.encode_state_vector_v1(),
+            right.encode_state_vector_v1()
+        );
+        assert!(right.can_undo());
     }
 }
 
@@ -930,16 +1003,13 @@ fn concurrent_style_and_content_changes_compose() {
         .edit_cell(SheetId(0), cell("A1"), "25", CalculationOptions::default())
         .unwrap();
     style
-        .apply_ops(
-            vec![Op::SetCell {
-                sheet: SheetId(0),
-                at: cell("A1"),
-                cell: CellState {
-                    value: CellValue::Number { value: 10.0 },
-                    style: None,
-                    ..CellState::default()
-                },
-            }],
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
             CalculationOptions::default(),
         )
         .unwrap();
@@ -960,7 +1030,233 @@ fn concurrent_style_and_content_changes_compose() {
         .cell(cell("A1"))
         .unwrap();
     assert_eq!(composed.value, CellValue::Number { value: 25.0 });
-    assert_eq!(composed.style, None);
+    assert_eq!(
+        content
+            .selection_formatting(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+            .unwrap()
+            .bold,
+        Some(true)
+    );
+}
+
+#[test]
+fn collaborative_formatting_round_trips_and_matches_aggregation() {
+    let bytes = sample_xlsx();
+    let mut left = Workbook::open_collaborative(&bytes, 403).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 404).unwrap();
+    let range = CellRange::new(cell("A1"), cell("B2"));
+
+    left.patch_range_style(
+        SheetId(0),
+        range,
+        StylePatch {
+            bold: Some(true),
+            fill_color: Some("#ffcc00".into()),
+            text_color: Some("#123456".into()),
+            ..StylePatch::default()
+        },
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    left.set_range_number_format(
+        SheetId(0),
+        range,
+        NumberFormatMutation::Custom {
+            pattern: "0.0000".into(),
+        },
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.selection_formatting(SheetId(0), range).unwrap(),
+        right.selection_formatting(SheetId(0), range).unwrap()
+    );
+    let formatting = right.selection_formatting(SheetId(0), range).unwrap();
+    assert_eq!(formatting.bold, Some(true));
+    assert_eq!(formatting.fill_color.as_deref(), Some("#ffcc00"));
+    assert_eq!(formatting.text_color.as_deref(), Some("#123456"));
+    assert_eq!(formatting.number_format, Some(NumberFormatKind::Custom));
+    assert_eq!(formatting.number_format_pattern.as_deref(), Some("0.0000"));
+}
+
+#[test]
+fn concurrent_formatting_restyles_converge_with_all_formats_available() {
+    let bytes = sample_xlsx();
+    let mut left = Workbook::open_collaborative(&bytes, 405).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 406).unwrap();
+    let baseline = left.encode_state_vector_v1();
+    let range = CellRange::new(cell("A1"), cell("B2"));
+
+    left.patch_range_style(
+        SheetId(0),
+        range,
+        StylePatch {
+            bold: Some(true),
+            text_color: Some("#aa0000".into()),
+            ..StylePatch::default()
+        },
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .patch_range_style(
+            SheetId(0),
+            range,
+            StylePatch {
+                italic: Some(true),
+                fill_color: Some("#00aa00".into()),
+                ..StylePatch::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let left_update = left.encode_diff_v1(&baseline).unwrap();
+    let right_update = right.encode_diff_v1(&baseline).unwrap();
+    left.apply_update_v1(&right_update, CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(&left_update, CalculationOptions::default())
+        .unwrap();
+
+    assert_eq!(left.model(), right.model());
+    assert_eq!(
+        left.encode_state_as_update_v1(),
+        right.encode_state_as_update_v1()
+    );
+    assert_eq!(left.model().styles.cell_xfs.len(), 3);
+    assert_eq!(
+        left.selection_formatting(SheetId(0), range).unwrap(),
+        right.selection_formatting(SheetId(0), range).unwrap()
+    );
+}
+
+#[test]
+fn concurrent_identical_formats_are_content_deduplicated() {
+    let bytes = sample_xlsx();
+    let mut left = Workbook::open_collaborative(&bytes, 407).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 408).unwrap();
+    let baseline = left.encode_state_vector_v1();
+    let patch = StylePatch {
+        bold: Some(true),
+        font_family: Some("Inter".into()),
+        ..StylePatch::default()
+    };
+
+    left.patch_range_style(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        patch.clone(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(cell("A2"), cell("A2")),
+            patch,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let left_update = left.encode_diff_v1(&baseline).unwrap();
+    let right_update = right.encode_diff_v1(&baseline).unwrap();
+    left.apply_update_v1(&right_update, CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(&left_update, CalculationOptions::default())
+        .unwrap();
+
+    assert_eq!(left.model(), right.model());
+    let sheet = &left.model().sheets[0];
+    assert_eq!(
+        sheet.cell(cell("A1")).unwrap().style,
+        sheet.cell(cell("A2")).unwrap().style
+    );
+    assert_eq!(left.model().styles.cell_xfs.len(), 2);
+}
+
+#[test]
+fn collaborative_formatting_undo_is_local_origin_only() {
+    let bytes = sample_xlsx();
+    let mut left = Workbook::open_collaborative(&bytes, 409).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 410).unwrap();
+
+    left.patch_range_style(
+        SheetId(0),
+        CellRange::new(cell("A1"), cell("A1")),
+        StylePatch {
+            bold: Some(true),
+            ..StylePatch::default()
+        },
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .patch_range_style(
+            SheetId(0),
+            CellRange::new(cell("A2"), cell("A2")),
+            StylePatch {
+                fill_color: Some("#abcdef".into()),
+                ..StylePatch::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let left_update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let right_update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&right_update, CalculationOptions::default())
+        .unwrap();
+    right
+        .apply_update_v1(&left_update, CalculationOptions::default())
+        .unwrap();
+    let format = right
+        .capture_format(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+        .unwrap();
+    right
+        .apply_format(
+            SheetId(0),
+            CellRange::new(cell("A3"), cell("A3")),
+            format,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let reused_format = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&reused_format, CalculationOptions::default())
+        .unwrap();
+    let right_before_undo = right.encode_state_vector_v1();
+
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    let undo = left.encode_diff_v1(&right_before_undo).unwrap();
+    right
+        .apply_update_v1(&undo, CalculationOptions::default())
+        .unwrap();
+
+    assert_eq!(left.model(), right.model());
+    let a1 = left
+        .selection_formatting(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+        .unwrap();
+    let a2 = left
+        .selection_formatting(SheetId(0), CellRange::new(cell("A2"), cell("A2")))
+        .unwrap();
+    let a3 = left
+        .selection_formatting(SheetId(0), CellRange::new(cell("A3"), cell("A3")))
+        .unwrap();
+    assert_eq!(a1.bold, Some(false));
+    assert_eq!(a2.fill_color.as_deref(), Some("#abcdef"));
+    assert_eq!(a3.bold, Some(true));
 }
 
 #[test]
@@ -1201,7 +1497,7 @@ fn malformed_and_structural_remote_updates_roll_back_every_facade_state() {
             assert_eq!(workbook.model(), model);
             assert_eq!(workbook.encode_state_as_update_v1(), state);
             assert_eq!(workbook.active_sheet(), SheetId(1));
-            assert!(!workbook.can_undo());
+            assert!(workbook.can_undo());
             assert!(!workbook.can_redo());
             assert_eq!(workbook.proposals().len(), 1);
             assert_eq!(workbook.last_calculation(), calculation);
@@ -1648,7 +1944,7 @@ fn effective_remote_updates_clear_local_proposals() {
     local
         .edit_cell(SheetId(0), cell("A2"), "11", CalculationOptions::default())
         .unwrap();
-    assert!(!local.can_undo());
+    assert!(local.can_undo());
     assert!(!local.can_redo());
     local
         .propose(
@@ -1674,14 +1970,13 @@ fn effective_remote_updates_clear_local_proposals() {
     local
         .apply_update_v1(&update, CalculationOptions::default())
         .unwrap();
-    assert!(!local.can_undo());
+    assert!(local.can_undo());
     assert!(!local.can_redo());
     assert!(local.proposals().is_empty());
     assert_eq!(local.active_sheet(), SheetId(1));
-    assert!(matches!(
-        local.undo(CalculationOptions::default()),
-        Err(Error::CollaborativeUndoUnavailable)
-    ));
+    assert!(local.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(local.cell(SheetId(0), cell("A1")).unwrap().input, "44");
+    assert_eq!(local.cell(SheetId(0), cell("A2")).unwrap().input, "5");
 }
 
 #[test]

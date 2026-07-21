@@ -16,6 +16,7 @@ export const serialize_docx_s11: (a: number, b: number) => [number, number, numb
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
 export const write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const rezip_docx: (a: any) => [number, number, number, number];
+export const sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const unzip_docx: (a: number, b: number) => [number, number, number];
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

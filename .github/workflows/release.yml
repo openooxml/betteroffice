@@ -21,6 +21,7 @@ jobs:
       contents: write
       pull-requests: write
       id-token: write # OIDC provenance / Trusted Publishing
+      actions: write # dispatch deploy.yml after publish
     steps:
       - uses: actions/checkout@v7
         with:
@@ -102,6 +103,7 @@ jobs:
         run: bun scripts/rewrite-workspace-deps.ts
 
       - name: Release PR or publish
+        id: changesets
         uses: changesets/action@v1.9.0
         with:
           version: bun run version-packages
@@ -114,3 +116,10 @@ jobs:
           # package after the first manual publish creates it). id-token: write
           # above authorizes the exchange and signs provenance.
           NPM_CONFIG_PROVENANCE: "true"
+
+      # GITHUB_TOKEN releases don't fire `on: release`, so dispatch directly.
+      - name: Trigger deploy
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run deploy.yml --ref main

@@ -65,6 +65,49 @@ describe('wasm loader', () => {
     }
   });
 
+  it('updates display-list font fields after style patch and format paint', () => {
+    const handle = openWorkbook(sampleBytes());
+    const viewport = { x: 0, y: 0, width: 500, height: 220 };
+    try {
+      const beforePatch = handle.displayList(viewport);
+      const beforeSource = beforePatch.commands.find(
+        (command) => command.op === 'text' && command.text === 'Line item 6'
+      );
+      expect(beforeSource).toMatchObject({ op: 'text', fontSize: 11 });
+
+      handle.patchRangeStyle(0, 'A8', { bold: true, italic: true, fontFamily: 'Arial' });
+      const afterPatch = handle.displayList(viewport);
+      const afterSource = afterPatch.commands.find(
+        (command) => command.op === 'text' && command.text === 'Line item 6'
+      );
+      expect(afterPatch).not.toEqual(beforePatch);
+      expect(afterSource).toMatchObject({
+        op: 'text',
+        fontSize: 11,
+        fontFamily: 'Arial',
+        bold: true,
+        italic: true,
+      });
+
+      const beforeApply = handle.displayList(viewport);
+      handle.applyFormat(0, 'C8', handle.captureFormat(0, 'A8'));
+      const afterApply = handle.displayList(viewport);
+      const target = afterApply.commands.find(
+        (command) => command.op === 'text' && command.text === '307' && command.clip?.y === 140
+      );
+      expect(afterApply).not.toEqual(beforeApply);
+      expect(target).toMatchObject({
+        op: 'text',
+        fontSize: 11,
+        fontFamily: 'Arial',
+        bold: true,
+        italic: true,
+      });
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('switches the active sheet', () => {
     const handle = openWorkbook(sampleBytes());
     try {
@@ -107,6 +150,53 @@ describe('wasm loader', () => {
       const undone = handle.undo();
       expect(undone.applied).toBe(true);
       expect(undone.sheetInfo.sheetNames).toEqual(['Budget', 'Summary', 'Styled']);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('round-trips formatting, format capture, merge metadata, and history state', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      expect(handle.historyState()).toEqual({
+        canUndo: false,
+        canRedo: false,
+        undoDepth: 0,
+        redoDepth: 0,
+      });
+      expect(handle.selectionFormatting(0, 'A8:B8').bold).toBe(false);
+      expect(
+        handle.patchRangeStyle(0, 'A8:B8', {
+          bold: true,
+          fontFamily: 'Arial',
+          textColor: '#123456',
+        }).applied
+      ).toBe(true);
+      expect(handle.selectionFormatting(0, 'A8:B8')).toMatchObject({
+        bold: true,
+        fontFamily: 'Arial',
+        textColor: '#123456',
+      });
+      handle.setNumberFormat(0, 'A8:B8', 'percent');
+      expect(handle.selectionFormatting(0, 'A8:B8').numberFormat).toBe('percent');
+      handle.setNumberFormat(0, 'A8:B8', 'increaseDecimal');
+      expect(handle.selectionFormatting(0, 'A8:B8').numberFormatPattern).toBe('0.000%');
+      const captured = handle.captureFormat(0, 'A8');
+      expect(captured).toMatchObject({ rows: 1, columns: 1 });
+      handle.applyFormat(0, 'C8', captured);
+      expect(handle.selectionFormatting(0, 'C8')).toMatchObject({
+        bold: true,
+        numberFormat: 'percent',
+      });
+      expect(handle.historyState()).toMatchObject({
+        canUndo: true,
+        canRedo: false,
+        undoDepth: 4,
+        redoDepth: 0,
+      });
+      handle.undo();
+      expect(handle.historyState()).toMatchObject({ undoDepth: 3, redoDepth: 1 });
+      expect(handle.mergedRanges(0, 'A1:Z20').length).toBeGreaterThan(0);
     } finally {
       handle.dispose();
     }

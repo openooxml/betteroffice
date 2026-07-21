@@ -648,6 +648,9 @@ fn write_alignment(w: &mut Writer<Vec<u8>>, a: &Alignment) -> io::Result<()> {
     if a.wrap_text {
         el.push_attribute(("wrapText", "1"));
     }
+    if a.shrink_to_fit {
+        el.push_attribute(("shrinkToFit", "1"));
+    }
     w.write_event(Event::Empty(el))?;
     Ok(())
 }

@@ -60,21 +60,22 @@ Use authenticated, authorized transports: byte and collection limits reduce
 resource exposure but do not make arbitrary hostile Yrs `Any` payloads a safe
 input sandbox.
 
-Undo and redo are intentionally unavailable in collaborative mode until they
-can be implemented with a Yrs-aware undo manager. Collaborative edits and
-accepted proposals are not added to the standalone inverse-op history, and
-`undo`/`redo` return `Error::CollaborativeUndoUnavailable` without mutation.
+Cell formats are stored in a content-addressed `xlsx:cell-formats` Yrs map, and
+per-sheet style maps reference those format keys. Concurrent style creation is
+therefore independent of local style-table indices. Collaborative undo and redo
+use a Yrs undo manager that tracks only local user-origin transactions; remote
+updates and accepted agent proposals are not added to local history.
 
 ## Support Matrix
 
 | Capability | Standalone | Collaborative |
 | --- | --- | --- |
-| Cell content and style | Yes | Yes |
+| Cell content and formatting | Yes | Yes |
 | Column widths and row heights | Yes | Yes |
 | Formula recalculation and cached save values | Yes | Yes, local projection only |
 | Row/column insert and delete | Yes | No |
 | Merge and unmerge | Yes | No |
 | Add, remove, rename, and restore sheets | Yes | No |
-| Undo/redo | Yes | No |
+| Undo/redo | Yes | Yes, local user origin only |
 | Agent proposals | Yes | Yes; acceptance is not locally undoable |
 | Yrs v1 vectors, diffs, updates, and observers | Encode/observe only | Yes |

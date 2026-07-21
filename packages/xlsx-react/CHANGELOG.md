@@ -1,5 +1,20 @@
 # @betteroffice/xlsx-react
 
+## 0.0.6
+
+### Patch Changes
+
+- a34e721: Add deterministic Yrs replicas, bounded and validated sync-v1 exchange, a
+  transport-agnostic npm collaboration provider, and React peer-update repainting.
+  Collaborative sessions support nonstructural cell and dimension edits; inverse-op
+  undo and redo remain disabled until a Yrs-aware undo manager can preserve
+  concurrent edits.
+- 69d62f1: Refine the XLSX and PPTX editor toolbars with compact DOCX-style control rails,
+  grouped icon actions, and responsive value fields.
+- Updated dependencies [a34e721]
+  - @betteroffice/xlsx@0.0.6
+  - @betteroffice/xlsx-i18n@0.0.6
+
 ## 0.0.5
 
 ### Patch Changes

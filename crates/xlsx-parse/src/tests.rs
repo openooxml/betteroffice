@@ -174,6 +174,41 @@ fn empty_cell_ref_uses_column_cursor() {
     assert_eq!(cell_at(&wb, "B2").value, CellValue::Number { value: 20.0 });
 }
 
+#[test]
+fn normalizes_overlapping_merges_in_declaration_order() {
+    let body = r#"
+        <sheetData/>
+        <mergeCells count="5">
+            <mergeCell ref="A1:B2"/>
+            <mergeCell ref="B2:C3"/>
+            <mergeCell ref="C3:D4"/>
+            <mergeCell ref="D4:E5"/>
+            <mergeCell ref="F1:G1"/>
+        </mergeCells>
+    "#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    let merges: Vec<_> = wb.sheets[0].merges.iter().map(|m| m.to_a1()).collect();
+
+    assert_eq!(merges, ["A1:B2", "C3:D4", "F1:G1"]);
+}
+
+#[test]
+fn non_overlapping_merges_are_byte_identical_after_parsing() {
+    let mut wb = Workbook::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet1");
+    sheet.merges = ["A1:B2", "D3:E4", "G5:H6"]
+        .into_iter()
+        .map(|range| xlsx_model::CellRange::parse_a1(range).unwrap())
+        .collect();
+    wb.sheets.push(sheet);
+    let parts = serialize_workbook(&wb).unwrap();
+
+    let parsed = parse_workbook(&parts).unwrap();
+    let serialized = serialize_workbook(&parsed).unwrap();
+
+    assert_eq!(parts, serialized);
+}
+
 /// comparable projection of a workbook's observable shape.
 type Snapshot = (
     Vec<(

@@ -23,7 +23,6 @@ pub enum Error {
         max: usize,
     },
     NotCollaborative,
-    CollaborativeUndoUnavailable,
     CollaborativeStructureOperation,
     CollaborativeStructureChanged,
     Spreadsheet(xlsx_parse::ParseError),
@@ -85,9 +84,6 @@ impl fmt::Display for Error {
             ),
             Self::NotCollaborative => {
                 f.write_str("remote updates require a collaborative workbook")
-            }
-            Self::CollaborativeUndoUnavailable => {
-                f.write_str("undo and redo are unavailable in collaborative mode")
             }
             Self::CollaborativeStructureOperation => {
                 f.write_str("structural operations are unavailable in collaborative mode")
