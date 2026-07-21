@@ -21,6 +21,7 @@
 
 | package | what it does |
 |---|---|
+| [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | typed Rust API for opening, editing, laying out, and saving DOCX documents |
 | [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | drop-in React .docx editor |
 | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
