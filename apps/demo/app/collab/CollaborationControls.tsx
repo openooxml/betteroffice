@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { cn } from "../../lib/cn";
 import type { CollaborationStatus } from "./types";
 
 interface CollaborationControlsProps {
@@ -34,19 +35,31 @@ export function CollaborationControls({
     .filter(Boolean)
     .join(" · ");
 
+  const indicator = error ? "error" : status;
+
   return (
-    <div className="collab-controls">
+    <div className="inline-flex flex-none items-center gap-2 font-mono text-[11px] leading-none">
       <span
-        className="collab-status"
-        data-status={error ? "error" : status}
+        className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-hairline-strong bg-white px-[9px] whitespace-nowrap text-mute"
+        data-status={indicator}
         role="status"
         title={error ?? undefined}
       >
-        <span className="collab-status-dot" aria-hidden="true" />
+        <span
+          className={cn(
+            "size-[7px] rounded-full",
+            indicator === "connected"
+              ? "bg-acc"
+              : indicator === "connecting"
+                ? "bg-[#d97706]"
+                : "bg-danger",
+          )}
+          aria-hidden="true"
+        />
         {label}
       </span>
       <button
-        className="collab-copy"
+        className="min-h-7 cursor-pointer rounded-[5px] border border-hairline-strong bg-white px-[9px] whitespace-nowrap text-fg hover:bg-surface max-[760px]:hidden"
         type="button"
         onClick={() => {
           void navigator.clipboard

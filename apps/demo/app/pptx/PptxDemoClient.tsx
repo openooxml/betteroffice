@@ -83,21 +83,30 @@ export function PptxDemoClient() {
   );
 
   return (
-    <div className="demo-shell pptx-app">
-      <header className="app-header">
-        <div className="brand">
-          <Link href="/" className="brand-mark">
-            <Logo height={18} />
-            BetterOffice <span className="brand-context">/ pptx</span>
+    <div className="fixed inset-0 z-20 flex flex-col bg-surface text-fg">
+      <header className="z-2 flex items-center gap-3.5 border-b border-hairline bg-white/92 px-4 py-[11px] backdrop-blur-lg">
+        <div className="flex min-w-0 items-baseline gap-2.5">
+          <Link
+            href="/"
+            className="inline-flex items-baseline gap-2 text-[14px] font-[650] tracking-[-0.01em] whitespace-nowrap text-fg no-underline"
+          >
+            <Logo height={18} className="self-center" />
+            BetterOffice <span className="font-normal text-faint">/ pptx</span>
           </Link>
-          <span className="brand-tagline">In-browser presentation editor</span>
+          <span className="overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">
+            In-browser presentation editor
+          </span>
         </div>
 
-        <div className="spacer" />
+        <div className="flex-1" />
 
-        {assets && <span className="filename">{SHOWCASE.name}</span>}
+        {assets && (
+          <span className="max-w-[180px] overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">
+            {SHOWCASE.name}
+          </span>
+        )}
 
-        <div className="actions">
+        <div className="flex flex-none items-center gap-2">
           <CollaborationControls
             status={collab.status}
             synced={collab.synced}
@@ -105,7 +114,7 @@ export function PptxDemoClient() {
             error={collab.error}
           />
           <a
-            className="github-link"
+            className="inline-flex size-8 items-center justify-center rounded-[5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg"
             href="https://github.com/openooxml/betteroffice"
             target="_blank"
             rel="noreferrer"
@@ -124,9 +133,12 @@ export function PptxDemoClient() {
           </a>
         </div>
       </header>
-      <main className="stage" data-testid="pptx-demo-stage">
+      <main
+        className="flex min-h-0 flex-1 flex-col *:min-h-0 *:flex-1"
+        data-testid="pptx-demo-stage"
+      >
         {error ? (
-          <p className="stage-message" role="alert">
+          <p className="m-auto text-mute" role="alert">
             Failed to load the demo presentation: {error}
           </p>
         ) : assets ? (
@@ -136,7 +148,7 @@ export function PptxDemoClient() {
             collaboration={collaboration}
           />
         ) : (
-          <p className="stage-message">Loading presentation…</p>
+          <p className="m-auto text-mute">Loading presentation…</p>
         )}
       </main>
     </div>
