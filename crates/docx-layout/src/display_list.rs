@@ -3593,7 +3593,12 @@ fn utf16_len(text: &str) -> usize {
 /// surrogate pair; authoritative cluster metadata already lands on grapheme
 /// boundaries and therefore passes through unchanged.
 fn slice_utf16(text: &str, start: usize, end: usize) -> String {
-    let total = utf16_len(text);
+    slice_utf16_with_total(text, utf16_len(text), start, end)
+}
+
+/// [`slice_utf16`] with the text's utf16 length precomputed, so per-line run
+/// slicing measures each run once instead of once per bound.
+fn slice_utf16_with_total(text: &str, total: usize, start: usize, end: usize) -> String {
     let start = start.min(total);
     let end = end.max(start).min(total);
     let mut units = 0usize;
@@ -3615,21 +3620,22 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
         };
         match run {
             RunIn::Text(t) => {
+                let total = utf16_len(&t.text);
                 let start = if run_index == line.head_run {
-                    line.head_char.min(utf16_len(&t.text))
+                    line.head_char.min(total)
                 } else {
                     0
                 };
                 let end = if run_index == line.tail_run {
-                    line.tail_char.min(utf16_len(&t.text))
+                    line.tail_char.min(total)
                 } else {
-                    utf16_len(&t.text)
+                    total
                 };
                 let end = end.max(start);
-                let text = slice_utf16(&t.text, start, end);
+                let text = slice_utf16_with_total(&t.text, total, start, end);
                 // an unsliced run keeps its own pm span; a boundary slice
                 // shifts the positions to match (text runs are 1 pm per char)
-                let (pm_start, pm_end) = if start == 0 && end == utf16_len(&t.text) {
+                let (pm_start, pm_end) = if start == 0 && end == total {
                     (t.pm_start, t.pm_end.or(t.pm_start.map(|p| p + end as i64)))
                 } else {
                     match t.pm_start {
@@ -6553,42 +6559,101 @@ fn try_emit_glyph_runs(
         None
     };
 
-    // resolve each char to a font up front (chain head fallback per ooxml-text)
-    let chars: Vec<char> = text.chars().collect();
-    let mut fonts: Vec<ooxml_text::FontId> = Vec::with_capacity(chars.len());
-    for &ch in &chars {
+    // resolve each char to a font (chain head fallback per ooxml-text). A run
+    // covered by a single font — the overwhelmingly common case — is detected
+    // in this validation pass without any per-char scratch allocation.
+    let mut first_font: Option<ooxml_text::FontId> = None;
+    let mut uniform = true;
+    for ch in text.chars() {
         match shape_fonts.resolve(chain, ch) {
-            Some(f) => fonts.push(f),
+            Some(font) => match first_font {
+                None => first_font = Some(font),
+                Some(first) if font != first => uniform = false,
+                Some(_) => {}
+            },
             None => return false,
         }
     }
+    let Some(first_font) = first_font else {
+        return false;
+    };
 
-    let mut ranges: Vec<(usize, usize, ooxml_text::FontId)> = Vec::new();
-    let mut ci = 0usize; // char index into `chars`
-    let n = chars.len();
-    while ci < n {
-        let font = fonts[ci];
-        let mut cj = ci + 1;
-        while cj < n && fonts[cj] == font {
-            cj += 1;
-        }
-        ranges.push((ci, cj, font));
-        ci = cj;
+    /// one maximal same-font subrange: its owned text slice plus the utf16
+    /// offsets of its char boundaries within the whole segment
+    struct ShapeSegment {
+        text: String,
+        font: ooxml_text::FontId,
+        utf16_start: usize,
+        utf16_end: usize,
     }
+
+    let mut segments: Vec<ShapeSegment> = if uniform {
+        vec![ShapeSegment {
+            text: text.to_owned(),
+            font: first_font,
+            utf16_start: 0,
+            // the single segment is also the last one, which closes on pm_end
+            // without consulting utf16_end
+            utf16_end: 0,
+        }]
+    } else {
+        let chars: Vec<char> = text.chars().collect();
+        let mut fonts: Vec<ooxml_text::FontId> = Vec::with_capacity(chars.len());
+        for &ch in &chars {
+            match shape_fonts.resolve(chain, ch) {
+                Some(font) => fonts.push(font),
+                None => return false,
+            }
+        }
+        // utf16 prefix table: prefix[i] = utf16 length of chars[..i], so a
+        // subrange's doc span is two lookups instead of two O(n) rescans
+        let mut prefix = Vec::with_capacity(chars.len() + 1);
+        let mut units = 0usize;
+        prefix.push(0);
+        for &ch in &chars {
+            units += ch.len_utf16();
+            prefix.push(units);
+        }
+        let mut segments = Vec::new();
+        let mut ci = 0usize;
+        while ci < chars.len() {
+            let font = fonts[ci];
+            let mut cj = ci + 1;
+            while cj < chars.len() && fonts[cj] == font {
+                cj += 1;
+            }
+            segments.push(ShapeSegment {
+                text: chars[ci..cj].iter().collect(),
+                font,
+                utf16_start: prefix[ci],
+                utf16_end: prefix[cj],
+            });
+            ci = cj;
+        }
+        segments
+    };
 
     // build the glyph runs into a local buffer; commit only when every subrange
     // shapes, so a mid-segment failure never leaves a partial run behind
     let mut local: Vec<Primitive> = Vec::new();
     let mut acc = 0.0_f64; // pen advance from the segment origin `x`
+    let segment_count = segments.len();
     let range_order: Box<dyn Iterator<Item = usize>> =
         if direction == ooxml_text::ShapeDirection::Rtl {
-            Box::new((0..ranges.len()).rev())
+            Box::new((0..segment_count).rev())
         } else {
-            Box::new(0..ranges.len())
+            Box::new(0..segment_count)
         };
     for range_index in range_order {
-        let (ci, cj, font) = ranges[range_index];
-        let sub_text: String = chars[ci..cj].iter().collect();
+        let font = segments[range_index].font;
+        // each index is visited exactly once, so the segment text moves into
+        // its primitive instead of cloning
+        let sub_text = std::mem::take(&mut segments[range_index].text);
+        let (sub_start_utf16, sub_end_utf16) = (
+            segments[range_index].utf16_start,
+            segments[range_index].utf16_end,
+        );
+        let is_last = range_index + 1 == segment_count;
         let glyphs = match ooxml_text::shape_with_direction(
             shape_fonts.store,
             font,
@@ -6629,11 +6694,9 @@ fn try_emit_glyph_runs(
         // text runs are 1 PM position per char, so a subrange's doc span shifts
         // pm_start by its char offset; the last subrange closes on pm_end so a
         // single-subrange run carries exactly the segment's [pm_start, pm_end]
-        let sub_start_utf16 = chars[..ci].iter().map(|ch| ch.len_utf16()).sum::<usize>();
-        let sub_end_utf16 = chars[..cj].iter().map(|ch| ch.len_utf16()).sum::<usize>();
         let mut sub_attrs = attrs.clone();
         sub_attrs.doc_start = pm_start.map(|p| p + sub_start_utf16 as i64);
-        sub_attrs.doc_end = if cj == n {
+        sub_attrs.doc_end = if is_last {
             pm_end
         } else {
             pm_start.map(|p| p + sub_end_utf16 as i64)
@@ -7245,7 +7308,10 @@ fn emit_shape_fragment(
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
     attrs.aria_label = block.title.clone();
     attrs.aria_description = block.description.clone();
-    attrs.decorative = block.decorative.filter(|decorative| *decorative);
+    // decorative is carried by ShapePrimitive's own field; duplicating it on
+    // the flattened attrs produced two identical JSON keys that serde_json's
+    // Map used to collapse silently. One authoritative slot keeps the encoded
+    // object duplicate-free.
     attrs.hidden_object = block.hidden.filter(|hidden| *hidden);
     attrs.logical_order = block.relative_height;
     attrs.group_id = block

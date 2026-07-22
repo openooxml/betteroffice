@@ -101,13 +101,17 @@ pub fn shape_with_properties(
             ShapeDirection::Ltr => 1,
             ShapeDirection::Rtl => 2,
         },
-        language: language.map(ToOwned::to_owned),
+        // Over-long tags are ignored by shaping below, so they are keyed as
+        // absent rather than retained verbatim in cache keys.
+        language: language
+            .filter(|tag| tag.len() <= 128)
+            .map(ToOwned::to_owned),
     });
     if let Some(glyphs) = cache_key.as_ref().and_then(|key| store.cached_shape(key)) {
         return Ok(glyphs);
     }
-    let bytes = store.font_bytes(font)?;
-    let face = rustybuzz::Face::from_slice(bytes, 0)
+    let face = store
+        .shaping_face(font)?
         .ok_or_else(|| FontError::Parse("rustybuzz rejected font bytes".to_string()))?;
 
     let mut buffer = rustybuzz::UnicodeBuffer::new();
@@ -131,7 +135,7 @@ pub fn shape_with_properties(
         })
         .collect();
 
-    let glyphs = rustybuzz::shape(&face, &features, buffer);
+    let glyphs = rustybuzz::shape(face, &features, buffer);
 
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
@@ -161,7 +165,7 @@ mod tests {
     const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
 
     #[test]
-    fn repeated_exact_shapes_reuse_a_bounded_resident_entry() {
+    fn first_shape_caches_and_repeats_reuse_the_resident_entry() {
         let mut store = FontStore::new();
         let font = store.register(LIBERATION_SANS.to_vec()).unwrap();
         let first = shape_with_properties(
@@ -174,7 +178,11 @@ mod tests {
             Some("en-US"),
         )
         .unwrap();
-        assert_eq!(store.shape_cache_len(), 0);
+        assert_eq!(
+            store.shape_cache_len(),
+            1,
+            "a run caches on the first shape"
+        );
         let second = shape_with_properties(
             &store,
             font,
@@ -187,18 +195,6 @@ mod tests {
         .unwrap();
         assert_eq!(second, first);
         assert_eq!(store.shape_cache_len(), 1);
-        let third = shape_with_properties(
-            &store,
-            font,
-            "resident shaping",
-            16.0,
-            &[],
-            ShapeDirection::Ltr,
-            Some("en-US"),
-        )
-        .unwrap();
-        assert_eq!(third, first);
-        assert_eq!(store.shape_cache_len(), 1);
 
         shape_with_direction(
             &store,
@@ -209,16 +205,10 @@ mod tests {
             ShapeDirection::Rtl,
         )
         .unwrap();
-        assert_eq!(store.shape_cache_len(), 1);
-        shape_with_direction(
-            &store,
-            font,
-            "resident shaping",
-            16.0,
-            &[],
-            ShapeDirection::Rtl,
-        )
-        .unwrap();
-        assert_eq!(store.shape_cache_len(), 2);
+        assert_eq!(
+            store.shape_cache_len(),
+            2,
+            "a different direction is a distinct entry"
+        );
     }
 }

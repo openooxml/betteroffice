@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-use crate::display_list::DisplayList;
+use crate::display_list::{DisplayList, DisplayPage};
 use crate::hit::{hit_test_regions, parse_region, range_rects, range_rects_in_region};
 
 /// Upper bound on concurrently-open handles. The facade keeps exactly one live,
@@ -100,6 +100,89 @@ pub fn open_display_list(json: &str) -> Result<u32, String> {
 /// unknown/already-closed handle is a no-op.
 pub fn close_display_list(handle: u32) {
     SESSIONS.with(|s| s.borrow_mut().close(handle));
+}
+
+/// Page-delta update payload for [`update_display_list`]: the next page array
+/// is assembled from retained pages (`reuse`: `[next_index, previous_index]`
+/// pairs) plus freshly parsed replacements (`replace`: `[next_index, page]`).
+/// Every one of the `total` slots must be filled exactly once.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayListUpdate {
+    total: usize,
+    #[serde(default)]
+    contract_version: Option<u32>,
+    #[serde(default)]
+    reuse: Vec<(usize, usize)>,
+    #[serde(default)]
+    replace: Vec<(usize, DisplayPage)>,
+}
+
+/// Apply a page-delta update to a stored display list, so an incremental
+/// rebuild re-parses only its changed pages instead of the whole list. On any
+/// inconsistency the handle is CLOSED before returning `Err`, so a caller's
+/// fallback path can never query a half-updated list.
+pub fn update_display_list(handle: u32, update_json: &str) -> Result<(), String> {
+    let result = serde_json::from_str::<DisplayListUpdate>(update_json)
+        .map_err(|e| format!("parse: {e}"))
+        .and_then(|update| {
+            SESSIONS.with(|s| {
+                let mut sessions = s.borrow_mut();
+                let dl = sessions
+                    .map
+                    .get_mut(&handle)
+                    .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
+                apply_display_list_update(dl, update)
+            })
+        });
+    // Any failure (including a malformed payload) closes the handle: the
+    // caller has already assumed ownership transfer, and its fallback is a
+    // fresh open — never a query against this possibly-stale handle.
+    if result.is_err() {
+        close_display_list(handle);
+    }
+    result
+}
+
+fn apply_display_list_update(
+    dl: &mut DisplayList,
+    update: DisplayListUpdate,
+) -> Result<(), String> {
+    if update.reuse.len().saturating_add(update.replace.len()) != update.total {
+        return Err("update slots do not cover the page total exactly".to_owned());
+    }
+    let mut previous: Vec<Option<DisplayPage>> = dl.pages.drain(..).map(Some).collect();
+    let mut next: Vec<Option<DisplayPage>> = Vec::new();
+    next.resize_with(update.total, || None);
+    for (next_index, previous_index) in update.reuse {
+        let page = previous
+            .get_mut(previous_index)
+            .and_then(Option::take)
+            .ok_or_else(|| format!("reused page {previous_index} is missing"))?;
+        let slot = next
+            .get_mut(next_index)
+            .ok_or_else(|| format!("page target {next_index} out of range"))?;
+        if slot.is_some() {
+            return Err(format!("duplicate page target {next_index}"));
+        }
+        *slot = Some(page);
+    }
+    for (next_index, page) in update.replace {
+        let slot = next
+            .get_mut(next_index)
+            .ok_or_else(|| format!("page target {next_index} out of range"))?;
+        if slot.is_some() {
+            return Err(format!("duplicate page target {next_index}"));
+        }
+        *slot = Some(page);
+    }
+    dl.pages = next
+        .into_iter()
+        .enumerate()
+        .map(|(index, page)| page.ok_or_else(|| format!("page {index} missing from update")))
+        .collect::<Result<Vec<_>, _>>()?;
+    dl.contract_version = update.contract_version;
+    Ok(())
 }
 
 /// Region-aware hit test against a stored display list — the by-handle twin of
@@ -261,6 +344,59 @@ mod tests {
         assert_ne!(a, 0, "0 is reserved as a no-handle sentinel");
         close_display_list(a);
         close_display_list(b);
+    }
+
+    #[test]
+    fn page_delta_update_matches_a_fresh_open() {
+        drain();
+        let two_pages = |second_text: &str| {
+            format!(
+                r##"{{"pages": [
+                    {{"pageIndex": 0, "width": 816, "height": 1056, "primitives": [{{
+                        "kind": "text", "text": "Hello", "x": 100, "baselineY": 200,
+                        "width": 50, "font": "400 16px Arial", "color": "#000000",
+                        "docStart": 1, "docEnd": 6
+                    }}]}},
+                    {{"pageIndex": 1, "width": 816, "height": 1056, "primitives": [{{
+                        "kind": "text", "text": "{second_text}", "x": 100, "baselineY": 200,
+                        "width": 50, "font": "400 16px Arial", "color": "#000000",
+                        "docStart": 7, "docEnd": 12
+                    }}]}}
+                ]}}"##
+            )
+        };
+        let handle = open_display_list(&two_pages("world")).expect("opens");
+        let replacement: serde_json::Value =
+            serde_json::from_str(&two_pages("patch!")).expect("list json");
+        let update = serde_json::json!({
+            "total": 2,
+            "reuse": [[0, 0]],
+            "replace": [[1, replacement["pages"][1]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+
+        let fresh = open_display_list(&two_pages("patch!")).expect("opens");
+        for (from, to) in [(1, 6), (7, 12), (0, 0)] {
+            assert_eq!(
+                range_rects_by_handle(handle, from, to).unwrap(),
+                range_rects_by_handle(fresh, from, to).unwrap(),
+                "range ({from},{to}) differs from a fresh open"
+            );
+        }
+        close_display_list(handle);
+        close_display_list(fresh);
+    }
+
+    #[test]
+    fn inconsistent_page_delta_update_closes_the_handle() {
+        drain();
+        let handle = open_display_list(SAMPLE).expect("opens");
+        let bad = serde_json::json!({ "total": 2, "reuse": [[0, 0]], "replace": [] });
+        assert!(update_display_list(handle, &bad.to_string()).is_err());
+        assert!(
+            hit_test_regions_by_handle(handle, 0, 120.0, 195.0).is_err(),
+            "a failed update closes the handle so callers fall back"
+        );
     }
 
     #[test]

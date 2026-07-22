@@ -531,11 +531,39 @@ function applyFrameDeltaInternal(
   };
 }
 
+const DISPLAY_PAGE_REVISION = '__betterofficePageRevision';
+
+/**
+ * Hidden in-place mutation counter for one display page. The owned delta path
+ * (`applyFrameDeltaOwned`) patches primitive positions through the SAME page
+ * object, so page identity alone cannot prove content equality; identity-based
+ * consumers (query-facade handle adoption) must compare this revision too. The
+ * property is non-enumerable, so serialization and structural reads never see
+ * it.
+ */
+export function displayPageRevision(page: DisplayPage): number {
+  return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_REVISION] as
+    | number
+    | undefined) ?? 0;
+}
+
+function bumpDisplayPageRevision(page: DisplayPage): void {
+  Object.defineProperty(page, DISPLAY_PAGE_REVISION, {
+    value: displayPageRevision(page) + 1,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function shiftDisplayPagePositionsOwned(
   page: DisplayPage,
   runs: readonly FramePositionShiftRun[],
   pageIndex: number
 ): DisplayPage {
+  // primitives are mutated through this object below, whether or not a new
+  // page wrapper is returned
+  bumpDisplayPageRevision(page);
   let primitiveIndex = 0;
   let runIndex = 0;
   const visit = (primitives: readonly DisplayPrimitive[]): void => {

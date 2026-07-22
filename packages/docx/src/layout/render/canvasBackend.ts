@@ -114,6 +114,35 @@ export function presentOffscreenPageBackBuffer(
 }
 
 /**
+ * Present a page buffer with a caret line composited at present time. The
+ * stroke goes through `stage`, so `buffer` keeps its clean raster and the
+ * line can later be dropped by re-presenting `buffer` without re-rastering.
+ * `caret` is a device-px rect.
+ */
+export function presentOffscreenPageBackBufferWithCaret(
+  canvas: OffscreenCanvas,
+  buffer: OffscreenCanvas,
+  stage: OffscreenCanvas,
+  caret: { x: number; y: number; width: number; height: number; color: string }
+): void {
+  if (stage.width !== buffer.width) stage.width = buffer.width;
+  if (stage.height !== buffer.height) stage.height = buffer.height;
+  const ctx = stage.getContext('2d');
+  if (!ctx) throw new Error('Caret stage 2D context is unavailable');
+  ctx.resetTransform();
+  ctx.globalCompositeOperation = 'copy';
+  ctx.drawImage(buffer, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = caret.color;
+  ctx.fillRect(caret.x, caret.y, caret.width, caret.height);
+  if (canvas.width !== stage.width) canvas.width = stage.width;
+  if (canvas.height !== stage.height) canvas.height = stage.height;
+  const presenter = canvas.getContext('bitmaprenderer');
+  if (!presenter) throw new Error('Offscreen bitmap renderer is unavailable');
+  presenter.transferFromImageBitmap(stage.transferToImageBitmap());
+}
+
+/**
  * DPR- and zoom-aware canvas sizing: the bitmap is the page's logical px size
  * times `devicePixelRatio * zoom`, the CSS box is the page size times `zoom`
  * (so the page physically grows with the zoom control, mirroring the DOM

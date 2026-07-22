@@ -1026,6 +1026,43 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    pub fn resident_caret_snapshot_json(&self) -> Result<String, JsValue> {
+        let paragraph = {
+            let selection = self.selection.borrow();
+            let Some(selection) = selection.as_ref() else {
+                return serde_json::to_string(
+                    &self.engine.resident_caret_snapshot(None).map_err(js_err)?,
+                )
+                .map_err(js_err);
+            };
+            if selection.story != "body" {
+                None
+            } else {
+                let txn = self.engine.doc().yrs_doc().transact();
+                let anchor = selection.anchor.get_offset(&txn).map(|offset| offset.index);
+                let head = selection.head.get_offset(&txn).map(|offset| offset.index);
+                drop(txn);
+                match (anchor, head) {
+                    (Some(anchor), Some(head)) if anchor == head => {
+                        let (para_id, offset) =
+                            index_loc(self.engine.doc(), &selection.story, head)?;
+                        Some((para_id, offset))
+                    }
+                    _ => None,
+                }
+            }
+        };
+        let snapshot = self
+            .engine
+            .resident_caret_snapshot(
+                paragraph
+                    .as_ref()
+                    .map(|(id, offset)| (id.as_str(), *offset)),
+            )
+            .map_err(js_err)?;
+        serde_json::to_string(&snapshot).map_err(js_err)
+    }
+
     /// Apply one ordinary collapsed body-text insertion and return the
     /// resulting FrameDelta. Selection, measurement inputs, pagination
     /// checkpoints, and display state all remain resident in this session.

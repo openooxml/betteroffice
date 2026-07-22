@@ -8,9 +8,14 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
+use std::rc::Rc;
 
 use docx_layout::display_list::{DisplayList, DisplayPage, DocAttrs, Primitive};
+#[cfg(test)]
 use serde_json::Value;
+
+mod typed_page;
+use typed_page::{collect_page_strings, encode_page, hash_page};
 
 pub const FRAME_DELTA_VERSION: u16 = 1;
 pub const FRAME_HEADER_LEN: usize = 80;
@@ -47,7 +52,9 @@ pub struct FramePageSnapshot {
     pub fingerprint: u64,
     pub visual_fingerprint: u64,
     pub page_index: u32,
-    pub primitive_ids: Vec<u64>,
+    /// Shared with the next frame's snapshot when the page's primitive
+    /// identity is unchanged — cloning a snapshot never copies the id array.
+    pub primitive_ids: Rc<[u64]>,
     pub positions: Vec<PrimitivePositionSnapshot>,
 }
 
@@ -69,20 +76,20 @@ pub struct FrameEpochs {
 }
 
 #[derive(Debug)]
-struct PreparedPage {
+struct PreparedPage<'a> {
     snapshot: FramePageSnapshot,
-    value: Option<Value>,
+    page: &'a DisplayPage,
     is_new: bool,
     moved: bool,
 }
 
 #[derive(Debug)]
-enum PageOp<'a> {
-    Upsert(&'a PreparedPage),
+enum PageOp<'a, 'b> {
+    Upsert(&'a PreparedPage<'b>),
     Remove(&'a FramePageSnapshot),
-    Move(&'a PreparedPage),
-    PatchPositions(&'a PreparedPage, Vec<PositionPatch>),
-    ShiftPositions(&'a PreparedPage, Vec<PositionShiftRun>),
+    Move(&'a PreparedPage<'b>),
+    PatchPositions(&'a PreparedPage<'b>, Vec<PositionPatch>),
+    ShiftPositions(&'a PreparedPage<'b>, Vec<PositionShiftRun>),
 }
 
 #[derive(Debug)]
@@ -146,8 +153,9 @@ fn encode_frame_delta_inner(
     rebuilt_pages: Option<Range<usize>>,
 ) -> Result<(Vec<u8>, Vec<FramePageSnapshot>), String> {
     let prepared = prepare_pages(list, previous, next_page_id, rebuilt_pages.as_ref())?;
-    let next_snapshots: Vec<_> = prepared.iter().map(|page| page.snapshot.clone()).collect();
-    let next_ids: HashSet<u64> = next_snapshots.iter().map(|page| page.page_id).collect();
+    let next_ids: HashSet<u64> = prepared.iter().map(|page| page.snapshot.page_id).collect();
+    let previous_by_id: HashMap<u64, &FramePageSnapshot> =
+        previous.iter().map(|old| (old.page_id, old)).collect();
 
     let mut ops = Vec::new();
     if full {
@@ -159,9 +167,7 @@ fn encode_frame_delta_inner(
             }
         }
         for page in &prepared {
-            let old = previous
-                .iter()
-                .find(|old| old.page_id == page.snapshot.page_id);
+            let old = previous_by_id.get(&page.snapshot.page_id).copied();
             if page.is_new || old.is_none() {
                 ops.push(PageOp::Upsert(page));
             } else if let Some(old) = old
@@ -190,12 +196,7 @@ fn encode_frame_delta_inner(
     let mut strings = BTreeSet::new();
     for op in &ops {
         if let PageOp::Upsert(page) = op {
-            collect_strings(
-                page.value
-                    .as_ref()
-                    .expect("upsert pages always carry a prepared value"),
-                &mut strings,
-            );
+            collect_page_strings(page.page, &mut strings)?;
         }
     }
     let strings: Vec<String> = strings.into_iter().collect();
@@ -246,19 +247,12 @@ fn encode_frame_delta_inner(
                 align(&mut out, 8);
                 let primitive_id_offset = checked_u32(out.len(), "primitive id offset")?;
                 patch_u32(&mut out, record + 28, primitive_id_offset);
-                for id in &page.snapshot.primitive_ids {
+                for id in page.snapshot.primitive_ids.iter() {
                     write_u64(&mut out, *id);
                 }
 
                 let payload_offset = out.len();
-                encode_value(
-                    page.value
-                        .as_ref()
-                        .expect("upsert pages always carry a prepared value"),
-                    &string_ids,
-                    &mut out,
-                    None,
-                )?;
+                encode_page(page.page, &string_ids, &mut out)?;
                 let payload_len = out.len() - payload_offset;
                 patch_u32(
                     &mut out,
@@ -398,26 +392,37 @@ fn encode_frame_delta_inner(
     );
     patch_u32(&mut out, 72, list.contract_version.unwrap_or_default());
 
+    drop(ops);
+    let next_snapshots = prepared.into_iter().map(|page| page.snapshot).collect();
     Ok((out, next_snapshots))
 }
 
-fn prepare_pages(
-    list: &DisplayList,
+fn prepare_pages<'a>(
+    list: &'a DisplayList,
     previous: &[FramePageSnapshot],
     next_page_id: &mut u64,
     rebuilt_pages: Option<&Range<usize>>,
-) -> Result<Vec<PreparedPage>, String> {
+) -> Result<Vec<PreparedPage<'a>>, String> {
     let anchors = page_anchors(list);
+    // Anchors are unique within one snapshot list (page_anchors suffixes an
+    // occurrence counter), so keyed lookups replace the old per-page scans.
+    let mut previous_by_anchor: HashMap<&str, usize> = previous
+        .iter()
+        .enumerate()
+        .map(|(index, old)| (old.anchor.as_str(), index))
+        .collect();
+    let mut previous_by_index: HashMap<u32, usize> = previous
+        .iter()
+        .enumerate()
+        .map(|(index, old)| (old.page_index, index))
+        .collect();
     let mut claimed = HashSet::new();
     let mut matched_previous = vec![None; list.pages.len()];
     // Reserve every semantic anchor before considering the index fallback. A
     // newly inserted leading page must not steal the id of the old page at
     // index zero and shift every retained surface identity after it.
     for (next_index, anchor) in anchors.iter().enumerate() {
-        if let Some(previous_index) = previous
-            .iter()
-            .position(|old| old.anchor == *anchor && !claimed.contains(&old.page_id))
-        {
+        if let Some(previous_index) = previous_by_anchor.remove(anchor.as_str()) {
             claimed.insert(previous[previous_index].page_id);
             matched_previous[next_index] = Some(previous_index);
         }
@@ -427,19 +432,16 @@ fn prepare_pages(
             continue;
         }
         let page_index = checked_u32(next_index, "page index")?;
-        if let Some(previous_index) = previous
-            .iter()
-            .position(|old| old.page_index == page_index && !claimed.contains(&old.page_id))
+        if let Some(previous_index) = previous_by_index.remove(&page_index)
+            && claimed.insert(previous[previous_index].page_id)
         {
-            claimed.insert(previous[previous_index].page_id);
             *matched = Some(previous_index);
         }
     }
 
     let mut prepared = Vec::with_capacity(list.pages.len());
-    for (index, page) in list.pages.iter().enumerate() {
+    for ((index, page), anchor) in list.pages.iter().enumerate().zip(anchors) {
         let page_index = checked_u32(index, "page index")?;
-        let anchor = anchors[index].clone();
         let matched = matched_previous[index].map(|previous_index| &previous[previous_index]);
         let (page_id, is_new, moved) = if let Some(old) = matched {
             (old.page_id, false, old.page_index != page_index)
@@ -452,13 +454,10 @@ fn prepare_pages(
         let positions = primitive_positions(page);
         let full_prepare =
             is_new || rebuilt_pages.is_none_or(|rebuilt_pages| rebuilt_pages.contains(&index));
-        let (value, fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
-            let value = serde_json::to_value(page)
-                .map_err(|error| format!("serialize display page: {error}"))?;
-            let fingerprint = hash_page_value(&value);
-            let visual_fingerprint = hash_visual_page_value(&value);
-            let primitive_ids = primitive_ids(page, page_id);
-            (Some(value), fingerprint, visual_fingerprint, primitive_ids)
+        let (fingerprint, visual_fingerprint, primitive_ids) = if full_prepare {
+            let hashes = hash_page(page)?;
+            let primitive_ids: Rc<[u64]> = primitive_ids(page, page_id).into();
+            (hashes.fingerprint, hashes.visual_fingerprint, primitive_ids)
         } else {
             let old = matched.expect("clean incremental pages retain a previous snapshot");
             let fingerprint = if positions == old.positions {
@@ -467,10 +466,9 @@ fn prepare_pages(
                 hash_positions(old.visual_fingerprint, &positions)
             };
             (
-                None,
                 fingerprint,
                 old.visual_fingerprint,
-                old.primitive_ids.clone(),
+                Rc::clone(&old.primitive_ids),
             )
         };
         prepared.push(PreparedPage {
@@ -483,7 +481,7 @@ fn prepare_pages(
                 primitive_ids,
                 positions,
             },
-            value,
+            page,
             is_new,
             moved,
         });
@@ -568,7 +566,7 @@ fn position_patches(previous: &FramePageSnapshot, next: &FramePageSnapshot) -> V
         .positions
         .iter()
         .zip(&next.positions)
-        .zip(&next.primitive_ids)
+        .zip(next.primitive_ids.iter())
         .filter_map(|((previous, next), primitive_id)| {
             let before = [
                 previous.doc_start,
@@ -742,6 +740,7 @@ fn primitive_owner(primitive: &Primitive) -> Option<String> {
         })
 }
 
+#[cfg(test)]
 fn collect_strings(value: &Value, strings: &mut BTreeSet<String>) {
     match value {
         Value::String(value) => {
@@ -780,6 +779,7 @@ const VALUE_GLYPH_ARRAY: u8 = 9;
 const GLYPH_LOGICAL_ORDER: u8 = 1 << 0;
 const GLYPH_BIDI_LEVEL: u8 = 1 << 1;
 
+#[cfg(test)]
 fn encode_value(
     value: &Value,
     string_ids: &HashMap<&str, u32>,
@@ -850,6 +850,7 @@ fn encode_value(
     Ok(())
 }
 
+#[cfg(test)]
 fn compact_glyphs(value: &Value) -> Option<&[Value]> {
     let Value::Array(glyphs) = value else {
         return None;
@@ -883,6 +884,7 @@ fn compact_glyphs(value: &Value) -> Option<&[Value]> {
         .then_some(glyphs)
 }
 
+#[cfg(test)]
 fn encode_glyph_array(glyphs: &[Value], out: &mut Vec<u8>) -> Result<(), String> {
     out.push(VALUE_GLYPH_ARRAY);
     let length_at = out.len();
@@ -941,6 +943,7 @@ fn string_id(ids: &HashMap<&str, u32>, value: &str) -> Result<u32, String> {
         .ok_or_else(|| "FrameDelta string table missed a value".to_owned())
 }
 
+#[cfg(test)]
 fn hash_page_value(value: &Value) -> u64 {
     fn visit(value: &Value, root: bool, hash: &mut u64) {
         match value {
@@ -992,6 +995,7 @@ fn hash_page_value(value: &Value) -> u64 {
 /// Paint/a11y structure hash with only absolute document-position metadata
 /// removed. Equality means the browser can retain the raster and receive a
 /// compact stable-primitive position patch for its mirror/overlays.
+#[cfg(test)]
 fn hash_visual_page_value(value: &Value) -> u64 {
     fn visit(value: &Value, parent_key: Option<&str>, root: bool, hash: &mut u64) {
         match value {
@@ -1158,6 +1162,310 @@ mod tests {
 
     fn u64_at(bytes: &[u8], offset: usize) -> u64 {
         u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
+    /// Test-only decoder over the typed value stream, mirroring the browser
+    /// decoder's structure so typed emission can be checked against the
+    /// `Value` reference implementation.
+    fn decode_typed(bytes: &[u8], cursor: &mut usize, strings: &[String]) -> Value {
+        let tag = bytes[*cursor];
+        *cursor += 1;
+        match tag {
+            VALUE_NULL => Value::Null,
+            VALUE_FALSE => Value::Bool(false),
+            VALUE_TRUE => Value::Bool(true),
+            VALUE_I64 => {
+                let value = i64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().unwrap());
+                *cursor += 8;
+                Value::from(value)
+            }
+            VALUE_U64 => {
+                let value = u64_at(bytes, *cursor);
+                *cursor += 8;
+                Value::from(value)
+            }
+            VALUE_F64 => {
+                let value = f64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().unwrap());
+                *cursor += 8;
+                Value::from(value)
+            }
+            VALUE_STRING => {
+                let id = u32_at(bytes, *cursor) as usize;
+                *cursor += 4;
+                Value::from(strings[id].as_str())
+            }
+            VALUE_ARRAY => {
+                let length = u32_at(bytes, *cursor) as usize;
+                let count = u32_at(bytes, *cursor + 4) as usize;
+                *cursor += 8;
+                let end = *cursor + length;
+                let values = (0..count)
+                    .map(|_| decode_typed(bytes, cursor, strings))
+                    .collect();
+                assert_eq!(*cursor, end, "array byte length/count mismatch");
+                Value::Array(values)
+            }
+            VALUE_OBJECT => {
+                let length = u32_at(bytes, *cursor) as usize;
+                let count = u32_at(bytes, *cursor + 4) as usize;
+                *cursor += 8;
+                let end = *cursor + length;
+                let mut fields = serde_json::Map::new();
+                for _ in 0..count {
+                    let key = strings[u32_at(bytes, *cursor) as usize].clone();
+                    *cursor += 4;
+                    let value = decode_typed(bytes, cursor, strings);
+                    assert!(fields.insert(key, value).is_none(), "duplicate object key");
+                }
+                assert_eq!(*cursor, end, "object byte length/count mismatch");
+                Value::Object(fields)
+            }
+            VALUE_GLYPH_ARRAY => {
+                let length = u32_at(bytes, *cursor) as usize;
+                let count = u32_at(bytes, *cursor + 4) as usize;
+                *cursor += 8;
+                let end = *cursor + length;
+                let mut glyphs = Vec::new();
+                for _ in 0..count {
+                    let mut glyph = serde_json::Map::new();
+                    glyph.insert("id".into(), Value::from(u32_at(bytes, *cursor) as u64));
+                    let x =
+                        f64::from_le_bytes(bytes[*cursor + 4..*cursor + 12].try_into().unwrap());
+                    let y =
+                        f64::from_le_bytes(bytes[*cursor + 12..*cursor + 20].try_into().unwrap());
+                    glyph.insert("x".into(), Value::from(x));
+                    glyph.insert("y".into(), Value::from(y));
+                    glyph.insert(
+                        "cluster".into(),
+                        Value::from(u32_at(bytes, *cursor + 20) as u64),
+                    );
+                    let advance =
+                        f64::from_le_bytes(bytes[*cursor + 24..*cursor + 32].try_into().unwrap());
+                    glyph.insert("advance".into(), Value::from(advance));
+                    let flags = bytes[*cursor + 32];
+                    *cursor += 33;
+                    if flags & GLYPH_LOGICAL_ORDER != 0 {
+                        glyph.insert("logicalOrder".into(), Value::from(u64_at(bytes, *cursor)));
+                        *cursor += 8;
+                    }
+                    if flags & GLYPH_BIDI_LEVEL != 0 {
+                        glyph.insert("bidiLevel".into(), Value::from(bytes[*cursor] as u64));
+                        *cursor += 1;
+                    }
+                    glyphs.push(Value::Object(glyph));
+                }
+                assert_eq!(*cursor, end, "glyph array byte length/count mismatch");
+                Value::Array(glyphs)
+            }
+            other => panic!("unknown typed value opcode {other}"),
+        }
+    }
+
+    /// Rewrites compact-eligible glyph arrays into the canonical numeric forms
+    /// the wire round-trips (ids as u64, coordinates as f64), so a decoded
+    /// stream compares equal to the `Value` reference.
+    fn canonicalize_compact_glyphs(value: &mut Value) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    canonicalize_compact_glyphs(value);
+                }
+            }
+            Value::Object(fields) => {
+                for (key, value) in fields.iter_mut() {
+                    if key == "glyphs" && compact_glyphs(value).is_some() {
+                        let Value::Array(glyphs) = value else {
+                            unreachable!()
+                        };
+                        for glyph in glyphs {
+                            let Value::Object(fields) = glyph else {
+                                unreachable!()
+                            };
+                            for (key, field) in fields.iter_mut() {
+                                *field = match key.as_str() {
+                                    "id" | "cluster" | "logicalOrder" | "bidiLevel" => {
+                                        Value::from(field.as_u64().unwrap())
+                                    }
+                                    _ => Value::from(field.as_f64().unwrap()),
+                                };
+                            }
+                        }
+                    } else {
+                        canonicalize_compact_glyphs(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rich_list() -> DisplayList {
+        serde_json::from_value(serde_json::json!({
+            "contractVersion": 1,
+            "pages": [{
+                "pageIndex": 0,
+                "width": 816,
+                "height": 1056,
+                "sectionId": "s1",
+                "pageLabel": "1",
+                "primitives": [
+                    {
+                        "kind": "glyphRun",
+                        "fontId": 3,
+                        "size": 16.0,
+                        "color": "#112233",
+                        "text": "ab",
+                        "glyphs": [
+                            {"id": 42, "x": 0.0, "y": 120.0, "cluster": 0, "advance": 8.5},
+                            {"id": 7, "x": 8.5, "y": 120.0, "cluster": 1, "advance": 8.0,
+                             "logicalOrder": 1, "bidiLevel": 1}
+                        ],
+                        "docStart": 1,
+                        "docEnd": 3,
+                        "paraId": "P1",
+                        "effects": [{"kind": "glow", "radius": 2.5}],
+                        "border": {"style": "single", "width": 0.5}
+                    },
+                    {
+                        "kind": "text",
+                        "text": "plain",
+                        "x": 96,
+                        "baselineY": 160,
+                        "width": 40,
+                        "font": "16px serif",
+                        "color": "#000000",
+                        "docStart": 4,
+                        "docEnd": 9,
+                        "blockId": 7
+                    }
+                ]
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn typed_emission_matches_the_value_reference() {
+        for list in [list("hello"), list_at_position(2), rich_list()] {
+            for page in &list.pages {
+                let value = serde_json::to_value(page).unwrap();
+
+                let mut typed_strings = BTreeSet::new();
+                collect_page_strings(page, &mut typed_strings).unwrap();
+                let mut reference_strings = BTreeSet::new();
+                collect_strings(&value, &mut reference_strings);
+                assert_eq!(typed_strings, reference_strings, "string tables differ");
+
+                let strings: Vec<String> = typed_strings.into_iter().collect();
+                let ids: HashMap<&str, u32> = strings
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (value.as_str(), index as u32))
+                    .collect();
+                let mut out = Vec::new();
+                encode_page(page, &ids, &mut out).unwrap();
+                let mut cursor = 0;
+                let decoded = decode_typed(&out, &mut cursor, &strings);
+                assert_eq!(cursor, out.len(), "typed stream has trailing bytes");
+                let mut expected = value;
+                canonicalize_compact_glyphs(&mut expected);
+                assert_eq!(decoded, expected, "typed stream decodes differently");
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_flattened_keys_compact_to_the_last_write() {
+        // a decorative shape sets both the named primitive field and the
+        // flattened DocAttrs member; serde_json::Map deduped this on the old
+        // path, and the streaming emitter must match (the browser decoder
+        // rejects duplicate object keys outright)
+        let mut list: DisplayList = serde_json::from_value(serde_json::json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 816,
+                "height": 1056,
+                "primitives": [{
+                    "kind": "shape",
+                    "x": 10, "y": 20, "w": 30, "h": 40,
+                    "geometryPath": [],
+                    "docStart": 1, "docEnd": 2
+                }]
+            }]
+        }))
+        .unwrap();
+        let docx_layout::display_list::Primitive::Shape(shape) = &mut list.pages[0].primitives[0]
+        else {
+            panic!("shape expected");
+        };
+        shape.decorative = true;
+        shape.attrs.decorative = Some(true);
+
+        let page = &list.pages[0];
+        let mut typed_strings = BTreeSet::new();
+        collect_page_strings(page, &mut typed_strings).unwrap();
+        let strings: Vec<String> = typed_strings.into_iter().collect();
+        let ids: HashMap<&str, u32> = strings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.as_str(), index as u32))
+            .collect();
+        let mut out = Vec::new();
+        encode_page(page, &ids, &mut out).unwrap();
+        let mut cursor = 0;
+        let decoded = decode_typed(&out, &mut cursor, &strings);
+        assert_eq!(cursor, out.len());
+        let mut expected = serde_json::to_value(page).unwrap();
+        canonicalize_compact_glyphs(&mut expected);
+        assert_eq!(
+            decoded, expected,
+            "duplicate keys must compact to serde_json's last-write value"
+        );
+        assert_eq!(
+            expected["primitives"][0]["decorative"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn reference_hashes_agree_with_the_streaming_exclusion_semantics() {
+        // the retained Value-based hashes and the streaming hashes must agree
+        // on WHAT is excluded, even though their accumulation orders differ
+        let before = serde_json::to_value(&list_at_position(2).pages[0]).unwrap();
+        let after = serde_json::to_value(&list_at_position(12).pages[0]).unwrap();
+        assert_ne!(hash_page_value(&before), hash_page_value(&after));
+        assert_eq!(
+            hash_visual_page_value(&before),
+            hash_visual_page_value(&after)
+        );
+        let streamed_before = hash_page(&list_at_position(2).pages[0]).unwrap();
+        let streamed_after = hash_page(&list_at_position(12).pages[0]).unwrap();
+        assert_ne!(streamed_before.fingerprint, streamed_after.fingerprint);
+        assert_eq!(
+            streamed_before.visual_fingerprint,
+            streamed_after.visual_fingerprint
+        );
+    }
+
+    #[test]
+    fn typed_hashes_are_deterministic_and_position_scoped() {
+        let before = hash_page(&list_at_position(2).pages[0]).unwrap();
+        let again = hash_page(&list_at_position(2).pages[0]).unwrap();
+        assert_eq!(before.fingerprint, again.fingerprint);
+        assert_eq!(before.visual_fingerprint, again.visual_fingerprint);
+
+        let after = hash_page(&list_at_position(12).pages[0]).unwrap();
+        assert_ne!(
+            before.fingerprint, after.fingerprint,
+            "position changes alter the structural fingerprint"
+        );
+        assert_eq!(
+            before.visual_fingerprint, after.visual_fingerprint,
+            "position changes preserve the visual fingerprint"
+        );
+
+        let content = hash_page(&list("other").pages[0]).unwrap();
+        assert_ne!(before.visual_fingerprint, content.visual_fingerprint);
     }
 
     #[test]

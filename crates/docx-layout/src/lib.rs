@@ -416,6 +416,15 @@ pub fn close_display_list(handle: u32) {
     session::close_display_list(handle);
 }
 
+/// wasm wrapper over [`session::update_display_list`]: apply a page-delta
+/// update to a stored display list so an incremental rebuild re-parses only
+/// its changed pages. `Err` closes the handle first, so the caller's fallback
+/// (a fresh [`open_display_list`]) can never race a half-updated list.
+#[wasm_bindgen]
+pub fn update_display_list(handle: u32, update: &str) -> Result<(), JsValue> {
+    session::update_display_list(handle, update).map_err(|e| JsValue::from_str(&e))
+}
+
 /// wasm wrapper over [`session::hit_test_regions_by_handle`]: region-aware hit
 /// test against a stored display list. `Err` on an unknown/closed handle so the
 /// caller can fall back to [`hit_test_regions_json`].

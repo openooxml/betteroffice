@@ -1386,6 +1386,27 @@ export class EditSession {
         }
     }
     /**
+     * @returns {string}
+     */
+    resident_caret_snapshot_json() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.editsession_resident_caret_snapshot_json(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * Current offsets of a comment's sticky anchors:
      * `[{"story","start","end"}]`. Errors when an anchor no longer resolves.
      * @param {string} comment_id
@@ -2421,6 +2442,23 @@ export function register_measure_font(bytes) {
     }
     return ret[0] >>> 0;
 }
+
+/**
+ * wasm wrapper over [`session::update_display_list`]: apply a page-delta
+ * update to a stored display list so an incremental rebuild re-parses only
+ * its changed pages. `Err` closes the handle first, so the caller's fallback
+ * (a fresh [`open_display_list`]) can never race a half-updated list.
+ * @param {number} handle
+ * @param {string} update
+ */
+export function update_display_list(handle, update) {
+    const ptr0 = passStringToWasm0(update, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.update_display_list(handle, ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -2438,7 +2476,7 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
-        __wbg_now_6c169aa7096caae5: function() {
+        __wbg_now_8d8330f8b87878a2: function() {
             const ret = performance.now();
             return ret;
         },

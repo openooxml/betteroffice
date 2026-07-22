@@ -9,15 +9,8 @@
  * `--doc-caret` token, and the selection-highlight color byte-identical to the
  * existing overlay implementation.
  *
- * The display-list rects come back page-local (px, per page) + a pageIndex. We
- * convert each to `editorContentRef`-relative coordinates through the live
- * per-page `<canvas>` rect — the same conversion `useFloatingCommentBtn` uses
- * for the "Add comment" button — so the caret lands on the glyph regardless of
- * the page column's centering, the sidebar-open `translateX` shift, or zoom.
- * The result is scroll-invariant (both the canvas and this overlay live inside
- * `editorContentRef` and scroll together), so it is recomputed only on
- * selection change, host/target resize, and the sidebar/zoom transition end —
- * never per scroll tick.
+ * Worker-presented caret geometry renders synchronously inside page-sized
+ * wrappers. DOM-canvas fallback geometry keeps its live-canvas projection.
  *
  * Renders nothing on the default DOM-painter path: PagedEditor only mounts this
  * (in place of its inline overlay) once `overlayTarget` resolves, which
@@ -29,7 +22,13 @@
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { SelectionRect, CaretPosition } from '@betteroffice/docx/layout';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import {
+  CANVAS_PAGE_GAP_PX,
+  CANVAS_PAGES_PADDING_PX,
+  type DisplayList,
+  type DisplayListQueries,
+} from '@betteroffice/docx/layout/render';
+import { SIDEBAR_DOCUMENT_SHIFT } from '../../sidebar/constants';
 import { SelectionOverlay } from './SelectionOverlay';
 
 export interface CanvasSelectionOverlayProps {
@@ -43,17 +42,18 @@ export interface CanvasSelectionOverlayProps {
   readOnly?: boolean;
   /**
    * Portal target — `editorContentRef.current`, the positioned ancestor that
-   * shares the `.canvas-pages` host's top-left. Converted coordinates are
-   * expressed relative to it.
+   * shares the `.canvas-pages` host's top-left.
    */
   overlayTarget: HTMLElement;
-  /** `.canvas-pages` host — live per-page `<canvas>` rects are read from here. */
+  /** `.canvas-pages` host used by the DOM-canvas projection path. */
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
-  /** Display-list queries — page sizes drive the page-local → canvas scale. */
-  displayListQueries: DisplayListQueries;
-  /** Sidebar open — recompute after its `translateX` transition settles. */
+  displayList: DisplayList;
+  displayListQueries?: DisplayListQueries | null;
+  /** The worker has already presented the frame owning these rects. */
+  directProjection: boolean;
+  /** Sidebar open state. */
   sidebarOpen: boolean;
-  /** Zoom — recompute when page geometry scales. */
+  /** Current page zoom. */
   zoom: number;
 }
 
@@ -64,10 +64,120 @@ export function CanvasSelectionOverlay({
   readOnly = false,
   overlayTarget,
   canvasHostRef,
-  displayListQueries,
+  displayList,
+  displayListQueries = null,
+  directProjection,
   sidebarOpen,
   zoom,
 }: CanvasSelectionOverlayProps) {
+  if (directProjection) {
+    return (
+      <DirectCanvasSelectionOverlay
+        selectionRects={selectionRects}
+        caretPosition={caretPosition}
+        isFocused={isFocused}
+        readOnly={readOnly}
+        overlayTarget={overlayTarget}
+        displayList={displayList}
+        sidebarOpen={sidebarOpen}
+        zoom={zoom}
+      />
+    );
+  }
+  if (!displayListQueries) return null;
+  return (
+    <ProjectedCanvasSelectionOverlay
+      selectionRects={selectionRects}
+      caretPosition={caretPosition}
+      isFocused={isFocused}
+      readOnly={readOnly}
+      overlayTarget={overlayTarget}
+      canvasHostRef={canvasHostRef}
+      displayListQueries={displayListQueries}
+      sidebarOpen={sidebarOpen}
+      zoom={zoom}
+    />
+  );
+}
+
+function DirectCanvasSelectionOverlay({
+  selectionRects,
+  caretPosition,
+  isFocused,
+  readOnly,
+  overlayTarget,
+  displayList,
+  sidebarOpen,
+  zoom,
+}: Omit<CanvasSelectionOverlayProps, 'canvasHostRef' | 'displayListQueries' | 'directProjection'>) {
+  const rectsByPage = new Map<number, SelectionRect[]>();
+  for (const rect of selectionRects) {
+    const pageRects = rectsByPage.get(rect.pageIndex) ?? [];
+    pageRects.push({
+      ...rect,
+      x: rect.x * zoom,
+      y: rect.y * zoom,
+      width: rect.width * zoom,
+      height: rect.height * zoom,
+    });
+    rectsByPage.set(rect.pageIndex, pageRects);
+  }
+
+  let pageTop = CANVAS_PAGES_PADDING_PX;
+  const overlays = displayList.pages.flatMap((page) => {
+    const top = pageTop;
+    pageTop += page.height * zoom + CANVAS_PAGE_GAP_PX;
+    const rects = rectsByPage.get(page.pageIndex) ?? [];
+    const caret =
+      caretPosition?.pageIndex === page.pageIndex
+        ? {
+            ...caretPosition,
+            x: caretPosition.x * zoom,
+            y: caretPosition.y * zoom,
+            height: caretPosition.height * zoom,
+          }
+        : null;
+    if (rects.length === 0 && !caret) return [];
+    return [
+      <div
+        key={page.pageIndex}
+        style={{
+          position: 'absolute',
+          top,
+          left: '50%',
+          width: page.width * zoom,
+          height: page.height * zoom,
+          transform: `translateX(-50%)${sidebarOpen ? ` translateX(-${SIDEBAR_DOCUMENT_SHIFT}px)` : ''}`,
+          transition: 'transform 0.2s ease',
+          pointerEvents: 'none',
+        }}
+      >
+        <SelectionOverlay
+          selectionRects={rects}
+          caretPosition={caret}
+          isFocused={isFocused}
+          readOnly={readOnly}
+        />
+      </div>,
+    ];
+  });
+
+  return createPortal(overlays, overlayTarget);
+}
+
+function ProjectedCanvasSelectionOverlay({
+  selectionRects,
+  caretPosition,
+  isFocused,
+  readOnly,
+  overlayTarget,
+  canvasHostRef,
+  displayListQueries,
+  sidebarOpen,
+  zoom,
+}: Omit<CanvasSelectionOverlayProps, 'displayList' | 'directProjection'> & {
+  displayListQueries: DisplayListQueries;
+}) {
   const [converted, setConverted] = useState<{
     rects: SelectionRect[];
     caret: CaretPosition | null;
@@ -80,12 +190,6 @@ export function CanvasSelectionOverlay({
       return;
     }
 
-    // Project a page-local (px) point on `pageIndex` into `overlayTarget`
-    // coordinates via the live `<canvas>` rect. The rect already reflects the
-    // page column's centering, the sidebar-open shift, and any zoom, so the
-    // caret sits on the glyph in every case. `scaleX/Y` are 1 while the canvas
-    // paints at logical px (its CSS size equals the display-list page size) but
-    // stay correct if a future zoom scales the canvas.
     const recompute = () => {
       const targetRect = overlayTarget.getBoundingClientRect();
       const project = (pageIndex: number, x: number, y: number) => {
@@ -106,26 +210,26 @@ export function CanvasSelectionOverlay({
       };
 
       const nextRects: SelectionRect[] = [];
-      for (const r of selectionRects) {
-        const p = project(r.pageIndex, r.x, r.y);
-        if (!p) continue;
+      for (const rect of selectionRects) {
+        const projected = project(rect.pageIndex, rect.x, rect.y);
+        if (!projected) continue;
         nextRects.push({
-          x: p.left,
-          y: p.top,
-          width: r.width * p.scaleX,
-          height: r.height * p.scaleY,
-          pageIndex: r.pageIndex,
+          x: projected.left,
+          y: projected.top,
+          width: rect.width * projected.scaleX,
+          height: rect.height * projected.scaleY,
+          pageIndex: rect.pageIndex,
         });
       }
 
       let nextCaret: CaretPosition | null = null;
       if (caretPosition) {
-        const p = project(caretPosition.pageIndex, caretPosition.x, caretPosition.y);
-        if (p) {
+        const projected = project(caretPosition.pageIndex, caretPosition.x, caretPosition.y);
+        if (projected) {
           nextCaret = {
-            x: p.left,
-            y: p.top,
-            height: caretPosition.height * p.scaleY,
+            x: projected.left,
+            y: projected.top,
+            height: caretPosition.height * projected.scaleY,
             pageIndex: caretPosition.pageIndex,
           };
         }
@@ -135,17 +239,13 @@ export function CanvasSelectionOverlay({
     };
 
     recompute();
-
-    // Host / target resize (window resize, scrollbar toggle) shifts the page
-    // geometry; the sidebar-open `translateX` and zoom animate on the inner
-    // column, ending with a `transitionend` that bubbles to the host.
-    const ro = new ResizeObserver(recompute);
-    ro.observe(host);
-    ro.observe(overlayTarget);
+    const resizeObserver = new ResizeObserver(recompute);
+    resizeObserver.observe(host);
+    resizeObserver.observe(overlayTarget);
     window.addEventListener('resize', recompute);
     host.addEventListener('transitionend', recompute);
     return () => {
-      ro.disconnect();
+      resizeObserver.disconnect();
       window.removeEventListener('resize', recompute);
       host.removeEventListener('transitionend', recompute);
     };

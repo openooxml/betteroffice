@@ -1,4 +1,10 @@
-import type { YrsEngineApplyProfile, YrsResidentWorkerSnapshot, YrsSelection } from './index';
+import type {
+  YrsEngineApplyProfile,
+  YrsResidentCaretSnapshot,
+  YrsResidentWorkerSnapshot,
+  YrsSelection,
+} from './index';
+import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
@@ -11,6 +17,10 @@ export interface ResidentEngineWorkerFrame {
   engineMs: number;
   workerTotalMs: number;
   engineProfile?: YrsEngineApplyProfile;
+  caret: YrsResidentCaretSnapshot;
+  selection: YrsSelection | null;
+  /** The presented frame carries the worker-painted caret line. */
+  caretPainted: boolean;
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
@@ -41,6 +51,8 @@ export class ResidentEngineWorkerClient {
   private destroyed = false;
   private ready = false;
   private revision = 0;
+  private remoteVector: Uint8Array | null = null;
+  private appliedFontsRevision: number | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('./residentEngineWorker.mjs', import.meta.url), {
@@ -49,6 +61,9 @@ export class ResidentEngineWorkerClient {
     });
     this.worker.onmessage = (event: MessageEvent<ResidentEngineWorkerResponse>) => {
       const response = event.data;
+      if (response.ok && response.stateVector) {
+        this.remoteVector = new Uint8Array(response.stateVector);
+      }
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
@@ -74,10 +89,21 @@ export class ResidentEngineWorkerClient {
     return this.revision;
   }
 
+  /** The worker replica's last reported yrs state vector (null before any). */
+  remoteStateVector(): Uint8Array | null {
+    return this.remoteVector;
+  }
+
+  /** The fonts revision this worker last applied (null before bootstrap). */
+  syncedFontsRevision(): number | null {
+    return this.appliedFontsRevision;
+  }
+
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string
   ): Promise<ResidentEngineWorkerFrame> {
+    const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
       {
         type: 'bootstrap',
@@ -89,6 +115,7 @@ export class ResidentEngineWorkerClient {
       RESIDENT_ENGINE_WORKER_STARTUP_TIMEOUT_MS
     );
     const result = frameResult(response);
+    this.recordSync(response, fontsRevision);
     this.ready = true;
     this.revision = result.layoutRevision;
     return result;
@@ -97,21 +124,28 @@ export class ResidentEngineWorkerClient {
   async sync(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
-    expectedFrameEpoch: number
+    expectedFrameEpoch: number,
+    paintCaret = false
   ): Promise<ResidentEngineWorkerFrame> {
+    const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'sync', snapshot, extras, expectedFrameEpoch },
+      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
+    this.recordSync(response, fontsRevision);
     this.ready = true;
     this.revision = result.layoutRevision;
     return result;
   }
 
-  async buildFrame(extras: string, expectedFrameEpoch: number): Promise<ResidentEngineWorkerFrame> {
+  async buildFrame(
+    extras: string,
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame> {
     const result = frameResult(
-      await this.request({ type: 'buildFrame', extras, expectedFrameEpoch })
+      await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
     );
     return result;
   }
@@ -120,12 +154,20 @@ export class ResidentEngineWorkerClient {
     text: string,
     selection: YrsSelection,
     expectedFrameEpoch: number,
-    profile = false
+    profile = false,
+    paintCaret = false
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
       const result = frameResult(
-        await this.request({ type: 'applyInput', text, selection, expectedFrameEpoch, profile })
+        await this.request({
+          type: 'applyInput',
+          text,
+          selection,
+          expectedFrameEpoch,
+          profile,
+          paintCaret,
+        })
       );
       return { applied: true, ...result };
     } catch (error) {
@@ -138,7 +180,8 @@ export class ResidentEngineWorkerClient {
     direction: 'backward' | 'forward',
     selection: YrsSelection,
     expectedFrameEpoch: number,
-    profile = false
+    profile = false,
+    paintCaret = false
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -149,6 +192,7 @@ export class ResidentEngineWorkerClient {
           selection,
           expectedFrameEpoch,
           profile,
+          paintCaret,
         })
       );
       return { applied: true, ...result };
@@ -156,6 +200,15 @@ export class ResidentEngineWorkerClient {
       if (error instanceof ResidentWorkerUnavailableError) return { applied: false };
       throw error;
     }
+  }
+
+  /** Drop the worker-painted caret line by re-presenting the caret page's
+   * retained raster. Fire-and-forget and idempotent. */
+  eraseCaret(): void {
+    if (this.destroyed) return;
+    const id = this.nextId++;
+    const message: ResidentEngineWorkerRequest = { id, type: 'eraseCaret' };
+    this.worker.postMessage(message);
   }
 
   invalidate(update: Uint8Array, selection: YrsSelection | null): void {
@@ -176,11 +229,12 @@ export class ResidentEngineWorkerClient {
     pages: ResidentEngineOffscreenPage[],
     activePageIds: string[],
     devicePixelRatio: number,
-    zoom: number
+    zoom: number,
+    caretStyle: ResidentCaretPaintStyle
   ): Promise<void> {
     const canvases = pages.map((page) => page.canvas);
     await this.request(
-      { type: 'attachCanvases', pages, activePageIds, devicePixelRatio, zoom },
+      { type: 'attachCanvases', pages, activePageIds, devicePixelRatio, zoom, caretStyle },
       canvases
     );
   }
@@ -224,6 +278,15 @@ export class ResidentEngineWorkerClient {
     });
   }
 
+  /** Record a successfully applied bootstrap/sync payload's fonts revision.
+   * The state vector is tracked centrally in `onmessage`. */
+  private recordSync(
+    _response: ResidentEngineWorkerResponse & { ok: true },
+    fontsRevision: number
+  ): void {
+    this.appliedFontsRevision = fontsRevision;
+  }
+
   private failAll(error: Error): void {
     for (const pending of this.pending.values()) {
       if (pending.timeout) clearTimeout(pending.timeout);
@@ -247,12 +310,19 @@ function frameResult(
   response: ResidentEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
   if (!response.frame) throw new Error('Resident engine worker response omitted its FrameDelta');
+  if (!response.caret) throw new Error('Resident engine worker response omitted its caret snapshot');
+  if (response.selection === undefined) {
+    throw new Error('Resident engine worker response omitted its selection');
+  }
   return {
     frame: new Uint8Array(response.frame),
     updates: (response.updates ?? []).map((update) => new Uint8Array(update)),
     engineMs: response.engineMs ?? 0,
     workerTotalMs: response.workerTotalMs ?? 0,
     engineProfile: response.engineProfile,
+    caret: response.caret,
+    selection: response.selection,
+    caretPainted: response.caretPainted ?? false,
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,

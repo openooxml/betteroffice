@@ -84,6 +84,7 @@ export function rangeRectsJson(displayList: string, from: number, to: number): s
 
 type OpenDisplayListExport = (json: string) => number;
 type CloseDisplayListExport = (handle: number) => void;
+type UpdateDisplayListExport = (handle: number, update: string) => void;
 type HitTestRegionsByHandleExport = (
   handle: number,
   pageIndex: number,
@@ -148,6 +149,27 @@ export function openDisplayList(displayList: string): number {
 export function closeDisplayList(handle: number): void {
   state.ensure();
   glueExport<CloseDisplayListExport>('close_display_list')?.(handle);
+}
+
+/**
+ * Apply a page-delta update to a stored display list, re-parsing only its
+ * changed pages. Throws when the export is absent or the update is
+ * inconsistent — the Rust side closes the handle on failure, so the facade's
+ * fallback (a fresh `openDisplayList`) is always safe.
+ */
+export function updateDisplayList(handle: number, update: string): void {
+  state.ensure();
+  const apply = glueExport<UpdateDisplayListExport>('update_display_list');
+  if (!apply) {
+    throw new Error('update_display_list is not available in the embedded layout wasm yet');
+  }
+  apply(handle, update);
+}
+
+/** True when the embedded layout wasm carries the page-delta update export. */
+export function hasDisplayListUpdate(): boolean {
+  state.ensure();
+  return glueExport<UpdateDisplayListExport>('update_display_list') !== undefined;
 }
 
 /**

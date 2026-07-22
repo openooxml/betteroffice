@@ -12,7 +12,9 @@ import { type BundledFontProvider } from '@betteroffice/docx/layout';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import {
   InlineHeaderFooterEditor,
 } from '../InlineHeaderFooterEditor';
@@ -103,6 +105,14 @@ export function DocxEditorPagedArea({
   applyResidentInput,
   applyResidentDelete,
   displayListQueries,
+  canvasDisplayList,
+  displayListFrameEpoch,
+  residentCaret,
+  residentCaretAuthoritative,
+  paintedCaretActive,
+  onCaretInput,
+  onCaretInputDispatched,
+  onCaretInterrupt,
   canvasHostRef,
   // Floating comment button
   floatingCommentBtn,
@@ -179,10 +189,21 @@ export function DocxEditorPagedArea({
   onTotalPagesChange: (totalPages: number) => void;
   /** Layout of each pass, surfaced for the experimental canvas renderer. */
   onLayoutComputed?: (layout: Layout | null) => void;
-  applyResidentInput?: (text: string) => Promise<boolean>;
-  applyResidentDelete?: (direction: 'backward' | 'forward') => Promise<boolean>;
+  applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
+  applyResidentDelete?: (
+    direction: 'backward' | 'forward'
+  ) => Promise<ResidentFrameApplyResult | null>;
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
+  canvasDisplayList?: DisplayList | null;
+  displayListFrameEpoch?: number | null;
+  residentCaret?: YrsResidentCaretSnapshot | null;
+  residentCaretAuthoritative?: boolean;
+  /** Worker-painted caret line is on screen; hide the DOM blink caret. */
+  paintedCaretActive?: boolean;
+  onCaretInput?: () => void;
+  onCaretInputDispatched?: () => void;
+  onCaretInterrupt?: () => void;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   floatingCommentBtn: { top: number; left: number } | null;
@@ -410,6 +431,14 @@ export function DocxEditorPagedArea({
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
+        canvasDisplayList={canvasDisplayList}
+        displayListFrameEpoch={displayListFrameEpoch}
+        residentCaret={residentCaret}
+        residentCaretAuthoritative={residentCaretAuthoritative}
+        paintedCaretActive={paintedCaretActive}
+        onCaretInput={onCaretInput}
+        onCaretInputDispatched={onCaretInputDispatched}
+        onCaretInterrupt={onCaretInterrupt}
         canvasHostRef={canvasHostRef}
         canvasOverlayTarget={canvasOverlayTarget}
         resolvedCommentIds={resolvedIdsForRender}

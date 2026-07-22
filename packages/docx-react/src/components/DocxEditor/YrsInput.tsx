@@ -19,20 +19,23 @@ import React, {
 } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import type {
-  YrsAuthor,
-  YrsInputPositionMap,
-  YrsInlineFormatDelta,
-  YrsLoc,
-  YrsRunMark,
-  YrsSelection,
-  YrsSession,
-  YrsStoryRange,
+import {
+  sameYrsSelection,
+  type YrsAuthor,
+  type YrsInputPositionMap,
+  type YrsInlineFormatDelta,
+  type YrsLoc,
+  type YrsResidentCaretSnapshot,
+  type YrsRunMark,
+  type YrsSelection,
+  type YrsSession,
+  type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import {
   resolveDisplayPageClientRect,
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
+import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
@@ -90,19 +93,32 @@ export interface YrsInputProps {
   locToDisplayPosition(loc: YrsLoc): number | null;
   nextParagraphStyleId?(styleId: string | null): string | null;
   displayListQueries?: DisplayListQueries | null;
+  displayListFrameEpoch?: number | null;
+  residentCaret?: YrsResidentCaretSnapshot | null;
+  residentCaretAuthoritative?: boolean;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /** Called for selection-only changes and direct document mutations. */
   onStateChange(
     selection: YrsDisplaySelection,
     docChanged: boolean,
-    residentLayoutReady?: boolean
+    residentLayoutReady?: boolean,
+    residentCaretReady?: boolean
   ): void;
   onDirectInput(): void;
   /** One-owner body text path; false until the resident frame is initialized. */
-  applyResidentInput?(text: string): Promise<boolean>;
+  applyResidentInput?(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
-  applyResidentDelete?(direction: 'backward' | 'forward'): Promise<boolean>;
+  applyResidentDelete?(
+    direction: 'backward' | 'forward'
+  ): Promise<ResidentFrameApplyResult | null>;
   onFocusChange?(focused: boolean): void;
+  /** Document-mutating input landed (keeps the worker-painted caret mode alive). */
+  onCaretInput?(): void;
+  /** Text input dispatched — called synchronously from the input event, before
+   * the async apply, so the DOM caret hides before the new frame presents. */
+  onCaretInputDispatched?(): void;
+  /** Selection-only move or IME start (immediate swap to the DOM blink caret). */
+  onCaretInterrupt?(): void;
 }
 
 const BASE_STYLE: CSSProperties = {
@@ -185,12 +201,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     locToDisplayPosition,
     nextParagraphStyleId,
     displayListQueries,
+    displayListFrameEpoch = null,
+    residentCaret = null,
+    residentCaretAuthoritative = false,
     canvasHostRef,
     onStateChange,
     onDirectInput,
     applyResidentInput,
     applyResidentDelete,
     onFocusChange,
+    onCaretInput,
+    onCaretInputDispatched,
+    onCaretInterrupt,
   },
   ref
 ) {
@@ -201,6 +223,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const inputOperationQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
+  const pendingResidentFrameEpochRef = useRef<number | null>(null);
   const [positionStyle, setPositionStyle] = useState<CSSProperties>({ left: 0, top: 0, height: 1 });
   const [selectionEpoch, setSelectionEpoch] = useState(0);
 
@@ -253,11 +276,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, locToDisplayPosition]);
 
   const emitSelection = useCallback(
-    (docChanged: boolean, residentLayoutReady = false): void => {
+    (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false): void => {
       const selection = displaySelection();
       if (!selection) return;
       setSelectionEpoch((epoch) => epoch + 1);
-      onStateChange(selection, docChanged, residentLayoutReady);
+      onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
     [displaySelection, onStateChange]
   );
@@ -266,19 +289,41 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (anchor: YrsLoc, head: YrsLoc = anchor, emit = true): void => {
       if (!session) return;
       session.setSelection(anchor, head);
-      if (emit) emitSelection(false);
+      if (emit) {
+        onCaretInterrupt?.();
+        emitSelection(false);
+      }
     },
-    [emitSelection, session]
+    [emitSelection, onCaretInterrupt, session]
   );
 
   const finishMutation = useCallback(
-    (residentLayoutReady = false): void => {
+    (residentLayoutReady = false, residentCaretReady = false): void => {
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
+      onCaretInput?.();
       onDirectInput();
-      emitSelection(true, residentLayoutReady);
+      emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onDirectInput]
+    [emitSelection, onCaretInput, onDirectInput]
   );
+
+  const finishResidentMutation = useCallback(
+    (result: ResidentFrameApplyResult): void => {
+      if (result.caretSynchronized && result.frameEpoch !== null) {
+        pendingResidentFrameEpochRef.current = result.frameEpoch;
+      }
+      finishMutation(result.frameEpoch !== null, result.caretSynchronized);
+    },
+    [finishMutation]
+  );
+
+  // Body-story only: painted-caret coverage for other stories is unproven, and
+  // an unhonored dispatch hold would blank the caret per keystroke there.
+  const dispatchCaretInput = useCallback((): void => {
+    if (!session || readOnly) return;
+    if (session.selection()?.head.story !== 'body') return;
+    onCaretInputDispatched?.();
+  }, [onCaretInputDispatched, readOnly, session]);
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
     const current = ensureSelection();
@@ -346,6 +391,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const insertText = useCallback(
     (text: string): void => {
       if (!session || readOnly || text.length === 0) return;
+      dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
         const map = current ? inputPositionMap(current.anchor.story) : null;
@@ -409,7 +455,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           applyResidentInput
         ) {
           const applied = await applyResidentInput(inputText);
-          if (applied) finishMutation(true);
+          if (applied) finishResidentMutation(applied);
           else commitCompatibilityInput();
           return;
         }
@@ -445,9 +491,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       applyResidentInput,
+      dispatchCaretInput,
       enqueueInputOperation,
       ensureSelection,
       finishMutation,
+      finishResidentMutation,
       inputPositionMap,
       isSuggesting,
       readOnly,
@@ -458,6 +506,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
+      dispatchCaretInput();
       enqueueInputOperation(async () => {
         if (!session || readOnly) return;
         if (deleteSelected()) {
@@ -480,7 +529,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (hasTarget && activeStory === 'body' && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction);
           if (applied) {
-            finishMutation(true);
+            finishResidentMutation(applied);
             return;
           }
         }
@@ -536,9 +585,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [
       applyResidentDelete,
       deleteSelected,
+      dispatchCaretInput,
       enqueueInputOperation,
       ensureSelection,
       finishMutation,
+      finishResidentMutation,
       inputPositionMap,
       isSuggesting,
       readOnly,
@@ -548,6 +599,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const splitParagraph = useCallback((): void => {
+    dispatchCaretInput();
     enqueueInputOperation(() => {
       if (!session || readOnly) return;
       const selectedStart = deleteSelected();
@@ -592,6 +644,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [
     deleteSelected,
+    dispatchCaretInput,
     enqueueInputOperation,
     ensureSelection,
     finishMutation,
@@ -912,8 +965,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionPendingRef.current = false;
       compositionCommitRef.current = '';
       event.currentTarget.value = '';
+      onCaretInterrupt?.();
     },
-    []
+    [onCaretInterrupt]
   );
 
   const handleCompositionUpdate = useCallback(
@@ -1047,11 +1101,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   useEffect(() => {
     if (!enabled || !displayListQueries) return;
+    if (!displayListQueries.isReady()) return;
+    const pendingFrameEpoch = pendingResidentFrameEpochRef.current;
+    if (pendingFrameEpoch !== null) {
+      if (displayListFrameEpoch === null || displayListFrameEpoch < pendingFrameEpoch) return;
+      pendingResidentFrameEpochRef.current = null;
+    }
     const selection = displaySelection();
     if (!selection) return;
     onStateChange(selection, false);
 
-    const caret = displayListQueries.caretRect(selection.head);
+    // Same-frame worker caret geometry needs no facade query (and so cannot
+    // force handle adoption on the typing path).
+    const authoritativeCaret =
+      residentCaretAuthoritative &&
+      residentCaret?.caretRect &&
+      residentCaret.frameEpoch === displayListFrameEpoch &&
+      residentCaret.selection &&
+      sameYrsSelection(residentCaret.selection, session?.selection() ?? null)
+        ? residentCaret.caretRect
+        : null;
+    const caret = authoritativeCaret ?? displayListQueries.caretRect(selection.head);
     const host = canvasHostRef?.current;
     if (!caret || !host) return;
     const pageRect = resolveDisplayPageClientRect(host, displayListQueries, caret.pageIndex);
@@ -1078,7 +1148,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         scroller.scrollTop += caretBottom - viewport.bottom + margin;
       }
     }
-  }, [canvasHostRef, displayListQueries, displaySelection, enabled, onStateChange, selectionEpoch]);
+  }, [
+    canvasHostRef,
+    displayListFrameEpoch,
+    displayListQueries,
+    displaySelection,
+    enabled,
+    onStateChange,
+    residentCaret,
+    residentCaretAuthoritative,
+    selectionEpoch,
+    session,
+  ]);
 
   if (!enabled) return null;
   const textarea = (

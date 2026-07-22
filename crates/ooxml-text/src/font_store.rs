@@ -21,8 +21,7 @@
 //! outline path over which parser read the table.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 
 use skrifa::raw::TableProvider;
 use skrifa::{FontRef, MetadataProvider};
@@ -30,11 +29,13 @@ use skrifa::{FontRef, MetadataProvider};
 use crate::shape::ShapedGlyph;
 
 const MAX_SHAPE_CACHE_ENTRIES: usize = 4_096;
-const MAX_SHAPE_CACHE_ADMISSIONS: usize = 4_096;
 pub(crate) const MAX_CACHED_SHAPE_TEXT_BYTES: usize = 64 * 1024;
 const MAX_CACHED_SHAPE_GLYPHS: usize = 64 * 1024;
 const MAX_SHAPE_CACHE_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SHAPE_CACHE_GLYPHS: usize = 1_000_000;
+const MAX_CHAR_CACHE_ENTRIES: usize = 8_192;
+
+const MAX_CACHED_SHAPE_FEATURES: usize = 64;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ShapeCacheKey {
@@ -46,12 +47,76 @@ pub(crate) struct ShapeCacheKey {
     pub language: Option<String>,
 }
 
+impl ShapeCacheKey {
+    /// Retained bytes for cache accounting: the owned text plus the owned
+    /// key fields callers control (features, language).
+    fn weight(&self) -> usize {
+        self.text.len()
+            + self.language.as_ref().map_or(0, String::len)
+            + self.features.len() * std::mem::size_of::<([u8; 4], u32)>()
+    }
+}
+
+/// One generation of the segmented shape cache, with its size accounting.
 #[derive(Default)]
-struct ShapeCache {
+struct ShapeCacheGeneration {
     entries: HashMap<ShapeCacheKey, Vec<ShapedGlyph>>,
-    admissions: HashSet<u64>,
     text_bytes: usize,
     glyphs: usize,
+}
+
+impl ShapeCacheGeneration {
+    fn would_overflow(&self, key: &ShapeCacheKey, glyphs: usize) -> bool {
+        self.entries.len() >= MAX_SHAPE_CACHE_ENTRIES
+            || self.text_bytes.saturating_add(key.weight()) > MAX_SHAPE_CACHE_TEXT_BYTES
+            || self.glyphs.saturating_add(glyphs) > MAX_SHAPE_CACHE_GLYPHS
+    }
+
+    fn insert(&mut self, key: ShapeCacheKey, glyphs: Vec<ShapedGlyph>) {
+        if let Some(replaced) = self.entries.remove(&key) {
+            self.text_bytes = self.text_bytes.saturating_sub(key.weight());
+            self.glyphs = self.glyphs.saturating_sub(replaced.len());
+        }
+        self.text_bytes += key.weight();
+        self.glyphs += glyphs.len();
+        self.entries.insert(key, glyphs);
+    }
+
+    fn remove(&mut self, key: &ShapeCacheKey) -> Option<Vec<ShapedGlyph>> {
+        let glyphs = self.entries.remove(key)?;
+        self.text_bytes = self.text_bytes.saturating_sub(key.weight());
+        self.glyphs = self.glyphs.saturating_sub(glyphs.len());
+        Some(glyphs)
+    }
+}
+
+/// Segmented (two-generation) shape cache: inserts and hits live in `hot`;
+/// when `hot` reaches a cap it becomes `cold` and a fresh `hot` starts. A
+/// `cold` hit promotes the entry back into `hot`. Entries not touched for a
+/// full generation age out with `cold` — a gradual LRU approximation with
+/// O(1) operations and no wholesale invalidation cliff.
+#[derive(Default)]
+struct ShapeCache {
+    hot: ShapeCacheGeneration,
+    cold: ShapeCacheGeneration,
+}
+
+impl ShapeCache {
+    fn insert_hot(&mut self, key: ShapeCacheKey, glyphs: Vec<ShapedGlyph>) {
+        if self.hot.would_overflow(&key, glyphs.len()) {
+            self.cold = std::mem::take(&mut self.hot);
+        }
+        self.hot.insert(key, glyphs);
+    }
+}
+
+/// Per-character cmap/advance lookup memo. `mapped` is the raw cmap result
+/// (including glyph id 0); `advance` is the design-space advance for the
+/// mapped glyph, when the font reports one.
+#[derive(Clone, Copy, Debug)]
+struct CharEntry {
+    mapped: Option<u16>,
+    advance: Option<f32>,
 }
 
 /// Opaque handle to a font registered in a [`FontStore`].
@@ -130,8 +195,18 @@ pub struct FontMetrics {
 }
 
 struct FontEntry {
-    data: Vec<u8>,
+    // Declared before `data` so the borrowing parser views drop first.
+    //
+    // SAFETY invariants for the `'static` lifetimes below: both views borrow
+    // `data`'s heap allocation. `data` is a `Box<[u8]>` that is never
+    // reassigned, never mutated, and dropped only when the whole entry drops
+    // (entries are never removed individually — the store only grows or drops
+    // wholesale). Moving `FontEntry` (e.g. a `Vec` realloc) moves the box
+    // pointer, not the heap bytes, so the views stay valid.
+    face: Option<rustybuzz::Face<'static>>,
+    data: Box<[u8]>,
     metrics: FontMetrics,
+    char_cache: RefCell<HashMap<char, CharEntry>>,
 }
 
 /// Registry of fonts, keyed by [`FontId`], parsed from raw bytes.
@@ -173,10 +248,21 @@ impl FontStore {
             os2_win_descent: os2.us_win_descent(),
         };
 
+        let data: Box<[u8]> = bytes.into_boxed_slice();
+        // SAFETY: see the `FontEntry` field invariants — the view borrows
+        // `data`'s heap allocation, which outlives it and never moves.
+        let pinned: &'static [u8] =
+            unsafe { std::slice::from_raw_parts(data.as_ptr(), data.len()) };
+        // A font rustybuzz rejects still registers (skrifa accepted it);
+        // shaping then reports the parse failure per call, as before.
+        let face = rustybuzz::Face::from_slice(pinned, 0);
+
         let id = FontId(self.fonts.len() as u32);
         self.fonts.push(FontEntry {
-            data: bytes,
+            face,
+            data,
             metrics,
+            char_cache: RefCell::new(HashMap::new()),
         });
         Ok(id)
     }
@@ -188,75 +274,88 @@ impl FontStore {
 
     /// Raw bytes of a registered font (for shaping / outline extraction).
     pub fn font_bytes(&self, id: FontId) -> Result<&[u8], FontError> {
-        self.entry(id).map(|e| e.data.as_slice())
+        self.entry(id).map(|e| &*e.data)
+    }
+
+    /// Parsed shaping face memoized at registration. `None` when rustybuzz
+    /// rejected bytes skrifa accepted.
+    pub(crate) fn shaping_face(
+        &self,
+        id: FontId,
+    ) -> Result<Option<&rustybuzz::Face<'_>>, FontError> {
+        self.entry(id).map(|e| e.face.as_ref())
     }
 
     pub(crate) fn cached_shape(&self, key: &ShapeCacheKey) -> Option<Vec<ShapedGlyph>> {
-        self.shape_cache.borrow().entries.get(key).cloned()
+        let mut cache = self.shape_cache.borrow_mut();
+        if let Some(glyphs) = cache.hot.entries.get(key) {
+            return Some(glyphs.clone());
+        }
+        let glyphs = cache.cold.remove(key)?;
+        let cloned = glyphs.clone();
+        cache.insert_hot(key.clone(), glyphs);
+        Some(cloned)
     }
 
     pub(crate) fn cache_shape(&self, key: ShapeCacheKey, glyphs: &[ShapedGlyph]) {
-        if key.text.len() > MAX_CACHED_SHAPE_TEXT_BYTES || glyphs.len() > MAX_CACHED_SHAPE_GLYPHS {
+        if key.text.len() > MAX_CACHED_SHAPE_TEXT_BYTES
+            || key.features.len() > MAX_CACHED_SHAPE_FEATURES
+            || glyphs.len() > MAX_CACHED_SHAPE_GLYPHS
+        {
             return;
         }
         let mut cache = self.shape_cache.borrow_mut();
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        let admission = hasher.finish();
-        if !cache.admissions.remove(&admission) {
-            if cache.admissions.len() >= MAX_SHAPE_CACHE_ADMISSIONS {
-                cache.admissions.clear();
-            }
-            cache.admissions.insert(admission);
-            return;
-        }
-        if let Some(replaced) = cache.entries.remove(&key) {
-            cache.text_bytes = cache.text_bytes.saturating_sub(key.text.len());
-            cache.glyphs = cache.glyphs.saturating_sub(replaced.len());
-        }
-        if cache.entries.len() >= MAX_SHAPE_CACHE_ENTRIES
-            || cache.text_bytes.saturating_add(key.text.len()) > MAX_SHAPE_CACHE_TEXT_BYTES
-            || cache.glyphs.saturating_add(glyphs.len()) > MAX_SHAPE_CACHE_GLYPHS
-        {
-            cache.entries.clear();
-            cache.text_bytes = 0;
-            cache.glyphs = 0;
-        }
-        cache.text_bytes += key.text.len();
-        cache.glyphs += glyphs.len();
-        cache.entries.insert(key, glyphs.to_vec());
+        cache.cold.remove(&key);
+        cache.insert_hot(key, glyphs.to_vec());
     }
 
     #[cfg(test)]
     pub(crate) fn shape_cache_len(&self) -> usize {
-        self.shape_cache.borrow().entries.len()
+        let cache = self.shape_cache.borrow();
+        cache.hot.entries.len() + cache.cold.entries.len()
+    }
+
+    /// Memoized cmap (+advance) lookup for one character of one font.
+    fn char_entry(&self, id: FontId, ch: char) -> Result<CharEntry, FontError> {
+        let entry = self.entry(id)?;
+        if let Some(cached) = entry.char_cache.borrow().get(&ch) {
+            return Ok(*cached);
+        }
+        let font = Self::font_ref(entry);
+        let mapped = font.charmap().map(ch);
+        let advance = mapped.and_then(|gid| {
+            font.glyph_metrics(
+                skrifa::instance::Size::unscaled(),
+                skrifa::instance::LocationRef::default(),
+            )
+            .advance_width(gid)
+        });
+        let computed = CharEntry {
+            mapped: mapped.map(|g| g.to_u32() as u16),
+            advance,
+        };
+        let mut cache = entry.char_cache.borrow_mut();
+        if cache.len() >= MAX_CHAR_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(ch, computed);
+        Ok(computed)
     }
 
     /// cmap lookup: glyph id for a character, `None` if the font does not
     /// cover it. Glyph id 0 (`.notdef`) counts as no coverage.
     pub fn glyph_id(&self, id: FontId, ch: char) -> Result<Option<u16>, FontError> {
-        let entry = self.entry(id)?;
-        let font = Self::font_ref(entry);
-        Ok(font
-            .charmap()
-            .map(ch)
-            .map(|g| g.to_u32() as u16)
-            .filter(|&g| g != 0))
+        Ok(self.char_entry(id, ch)?.mapped.filter(|&g| g != 0))
     }
 
     /// Horizontal advance width for a character, in font units.
     /// `None` if the character is not covered by this font's cmap.
     pub fn advance_width(&self, id: FontId, ch: char) -> Result<Option<f32>, FontError> {
-        let entry = self.entry(id)?;
-        let font = Self::font_ref(entry);
-        let Some(gid) = font.charmap().map(ch) else {
+        let entry = self.char_entry(id, ch)?;
+        if entry.mapped.is_none() {
             return Ok(None);
-        };
-        let metrics = font.glyph_metrics(
-            skrifa::instance::Size::unscaled(),
-            skrifa::instance::LocationRef::default(),
-        );
-        Ok(metrics.advance_width(gid))
+        }
+        Ok(entry.advance)
     }
 
     /// Whether the font's cmap covers `ch`.
@@ -285,5 +384,81 @@ impl FontStore {
     // registration already proved the bytes parse, so this cannot fail
     fn font_ref(entry: &FontEntry) -> FontRef<'_> {
         FontRef::new(&entry.data).expect("bytes validated at register()")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shape::ShapedGlyph;
+
+    const LIBERATION_SANS: &[u8] = include_bytes!("../tests/fonts/LiberationSans-Regular.ttf");
+
+    fn key(text: String) -> ShapeCacheKey {
+        ShapeCacheKey {
+            font: FontId(0),
+            text,
+            size_bits: 16f32.to_bits(),
+            features: Vec::new(),
+            direction: 1,
+            language: None,
+        }
+    }
+
+    const GLYPH: ShapedGlyph = ShapedGlyph {
+        glyph_id: 1,
+        cluster: 0,
+        x_advance: 10.0,
+        x_offset: 0.0,
+        y_offset: 0.0,
+    };
+
+    #[test]
+    fn shape_cache_rotation_retains_recent_entries_instead_of_clearing() {
+        let store = FontStore::new();
+        store.cache_shape(key("survivor".to_owned()), &[GLYPH]);
+        for wave in 0..2 {
+            for index in 0..MAX_SHAPE_CACHE_ENTRIES {
+                store.cache_shape(key(format!("filler {wave} {index}")), &[GLYPH]);
+            }
+            // touching the survivor after each wave promotes it back to hot
+            assert!(
+                store.cached_shape(&key("survivor".to_owned())).is_some(),
+                "a recently used entry survives generation rotation"
+            );
+        }
+        assert!(
+            store.shape_cache_len() <= 2 * MAX_SHAPE_CACHE_ENTRIES,
+            "the segmented cache is bounded"
+        );
+        assert!(
+            store.cached_shape(&key("filler 0 0".to_owned())).is_none(),
+            "entries untouched for a full generation age out"
+        );
+    }
+
+    #[test]
+    fn char_lookups_are_memoized_per_font() {
+        let mut store = FontStore::new();
+        let font = store.register(LIBERATION_SANS.to_vec()).unwrap();
+        let gid = store.glyph_id(font, 'A').unwrap();
+        let advance = store.advance_width(font, 'A').unwrap();
+        assert!(gid.is_some());
+        assert!(advance.is_some());
+        assert_eq!(store.glyph_id(font, 'A').unwrap(), gid);
+        assert_eq!(store.advance_width(font, 'A').unwrap(), advance);
+        assert_eq!(
+            store.fonts[font.0 as usize].char_cache.borrow().len(),
+            1,
+            "repeat lookups reuse the memo"
+        );
+        assert!(!store.covers(font, '\u{10FFFF}').unwrap());
+    }
+
+    #[test]
+    fn shaping_face_is_memoized_at_registration() {
+        let mut store = FontStore::new();
+        let font = store.register(LIBERATION_SANS.to_vec()).unwrap();
+        assert!(store.shaping_face(font).unwrap().is_some());
     }
 }

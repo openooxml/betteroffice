@@ -278,6 +278,10 @@ export interface RustDisplayListQueryEngine {
   openDisplayList?(displayList: string): number;
   /** free a handle's parsed display list */
   closeDisplayList?(handle: number): void;
+  /** patch a stored display list's changed pages in place (see layout wasm) */
+  updateDisplayList?(handle: number, update: string): void;
+  /** true when the embedded wasm carries the page-delta update export */
+  hasDisplayListUpdate?(): boolean;
   /** region-aware hit test against a stored display list (by handle) */
   hitTestRegionsByHandle?(handle: number, pageIndex: number, x: number, y: number): string;
   /** body PM range against a stored display list (by handle) */
@@ -306,6 +310,8 @@ function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngin
     hasDisplayListSession: m.hasDisplayListSession,
     openDisplayList: m.openDisplayList,
     closeDisplayList: m.closeDisplayList,
+    updateDisplayList: m.updateDisplayList,
+    hasDisplayListUpdate: m.hasDisplayListUpdate,
     hitTestRegionsByHandle: m.hitTestRegionsByHandle,
     rangeRectsByHandle: m.rangeRectsByHandle,
     rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,

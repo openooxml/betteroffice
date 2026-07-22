@@ -28,6 +28,11 @@ export {
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export {
+  residentCaretSnapshotForFrame,
+  residentCaretDeviceRect,
+  type ResidentCaretPaintStyle,
+} from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 
@@ -371,6 +376,33 @@ export interface YrsSelection {
   head: YrsLoc;
 }
 
+export interface YrsResidentCaretRect {
+  pageIndex: number;
+  pageId: string;
+  x: number;
+  y: number;
+  height: number;
+}
+
+export interface YrsResidentCaretSnapshot {
+  frameEpoch: number;
+  caretRect: YrsResidentCaretRect | null;
+  /** Selection the rect was computed for. Absent on raw engine snapshots. */
+  selection?: YrsSelection | null;
+}
+
+export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.anchor.story === right.anchor.story &&
+    left.anchor.paraId === right.anchor.paraId &&
+    left.anchor.offset === right.anchor.offset &&
+    left.head.story === right.head.story &&
+    left.head.paraId === right.head.paraId &&
+    left.head.offset === right.head.offset
+  );
+}
+
 /** Opt-in internal stage timings for one resident engine input. @internal */
 export interface YrsEngineApplyProfile {
   selectionMs: number;
@@ -395,14 +427,33 @@ export interface YrsEngineApplyProfile {
  */
 export interface YrsResidentWorkerSnapshot {
   clientId: number;
+  /** Full document state, or a state-vector diff when the caller supplied
+   * the worker's known vector — both apply through the same merge path. */
   state: Uint8Array;
   selection: YrsSelection | null;
+  /** Empty when the caller declared the worker's fonts current
+   * (`knownFontsRevision` matches); the worker then keeps its registrations. */
   fonts: Uint8Array[];
+  /** Monotonic revision of the resident font set (bumped by register/clear). */
+  fontsRevision: number;
   renderInputs: Array<{ story: string; env: YrsRenderEnv }>;
   measureInputs: string[];
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+}
+
+/**
+ * What the sync target already holds, so a snapshot can ship deltas instead
+ * of the whole world.
+ *
+ * @internal
+ */
+export interface YrsResidentWorkerSyncOptions {
+  /** The worker replica's last reported yrs state vector. */
+  knownStateVector?: Uint8Array | null;
+  /** The `fontsRevision` the worker last applied. */
+  knownFontsRevision?: number | null;
 }
 
 /** A range-aggregated toggle mark. @public */
@@ -581,6 +632,8 @@ export interface YrsSession extends CollaborationReplica {
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /** Caret geometry from the current resident display frame. */
+  residentCaretSnapshot(): YrsResidentCaretSnapshot;
   /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
   applyInput(text: string, expectedFrameEpoch: number): Uint8Array;
   /** Apply a collapsed character deletion/paragraph merge and return its resident FrameDelta. */
@@ -596,7 +649,14 @@ export interface YrsSession extends CollaborationReplica {
     expectedFrameEpoch: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
-  residentWorkerSnapshot(): YrsResidentWorkerSnapshot | null;
+  residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
+  /**
+   * Cheap worker-sync probe: the resident layout revision when a worker
+   * snapshot would be available, without encoding document state or copying
+   * font bytes. Steady-state frame builds consult this instead of building a
+   * full snapshot.
+   */
+  residentWorkerProbe(): { layoutRevision: number } | null;
   /** Resident display-list hit/range queries; results are small JSON records. */
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
   displayRangeRectsJson(from: number, to: number): string;
@@ -888,6 +948,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
+  let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
 
   const invalidateReadCaches = (): void => {
@@ -1008,12 +1069,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }
       const id = session.register_measure_font(bytes);
       residentFonts.push(bytes.slice());
+      residentFontsRevision += 1;
       return id;
     },
     clearFonts: () => {
       session.clear_measure_fonts();
       residentFonts.length = 0;
       residentMeasureInputs.clear();
+      residentFontsRevision += 1;
       ownsResidentFontStore = true;
     },
     measureParagraphJson: (input) => {
@@ -1039,6 +1102,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     buildDisplayListJson: (input) => session.build_display_list_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    residentCaretSnapshot: () =>
+      JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
       const story = cachedSelection?.head.story ?? 'body';
       ensureUndo(story);
@@ -1063,15 +1128,25 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
-    residentWorkerSnapshot: () => {
+    residentWorkerSnapshot: (options) => {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
       const selectionJson = session.selection();
+      const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
+      let state: Uint8Array | null = null;
+      if (options?.knownStateVector) {
+        try {
+          state = session.encode_diff(options.knownStateVector.slice());
+        } catch {
+          state = null;
+        }
+      }
       return {
         clientId,
-        state: session.encode_state(),
+        state: state ?? session.encode_state(),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
-        fonts: residentFonts.map((bytes) => bytes.slice()),
+        fonts: fontsCurrent ? [] : residentFonts.map((bytes) => bytes.slice()),
+        fontsRevision: residentFontsRevision,
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,
           env: structuredClone(env),
@@ -1081,6 +1156,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         layoutWithRegions: residentLayoutWithRegions,
         layoutRevision: residentLayoutRevision,
       };
+    },
+    residentWorkerProbe: () => {
+      if (!residentLayoutInput) return null;
+      if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
+      return { layoutRevision: residentLayoutRevision };
     },
     displayHitTestRegionsJson: (pageIndex, x, y) =>
       session.display_hit_test_regions_json(pageIndex, x, y),
