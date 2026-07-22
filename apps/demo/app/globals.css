@@ -58,6 +58,15 @@
     font-family: var(--font-mono);
     font-feature-settings: "liga" 0;
   }
+
+  /* v4 borders default to currentColor; fail soft to hairline gray */
+  *,
+  ::before,
+  ::after,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-hairline);
+  }
 }
 
 /* registration marks on the section rails — no utility for pseudo content */
