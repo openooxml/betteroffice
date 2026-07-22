@@ -4,6 +4,7 @@ import type {
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
+import type { ResidentCaretPaintStyle } from './residentCaret';
 
 export type ResidentEngineWorkerRequest =
   | {
@@ -19,12 +20,14 @@ export type ResidentEngineWorkerRequest =
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
+      paintCaret: boolean;
     }
   | {
       id: number;
       type: 'buildFrame';
       extras: string;
       expectedFrameEpoch: number;
+      paintCaret: boolean;
     }
   | {
       id: number;
@@ -33,6 +36,7 @@ export type ResidentEngineWorkerRequest =
       selection: YrsSelection;
       expectedFrameEpoch: number;
       profile: boolean;
+      paintCaret: boolean;
     }
   | {
       id: number;
@@ -41,6 +45,7 @@ export type ResidentEngineWorkerRequest =
       selection: YrsSelection;
       expectedFrameEpoch: number;
       profile: boolean;
+      paintCaret: boolean;
     }
   | {
       id: number;
@@ -55,7 +60,9 @@ export type ResidentEngineWorkerRequest =
       activePageIds: string[];
       devicePixelRatio: number;
       zoom: number;
+      caretStyle: ResidentCaretPaintStyle;
     }
+  | { id: number; type: 'eraseCaret' }
   | { id: number; type: 'destroy' };
 
 export type ResidentEngineWorkerRequestWithoutId = ResidentEngineWorkerRequest extends infer Request
@@ -75,6 +82,8 @@ export type ResidentEngineWorkerResponse =
       engineProfile?: YrsEngineApplyProfile;
       caret?: YrsResidentCaretSnapshot;
       selection?: YrsSelection | null;
+      /** The presented frame carries the worker-painted caret line. */
+      caretPainted?: boolean;
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;

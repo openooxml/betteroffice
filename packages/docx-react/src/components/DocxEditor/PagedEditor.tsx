@@ -306,6 +306,14 @@ export interface PagedEditorProps {
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
   residentCaretAuthoritative?: boolean;
+  /** Worker-painted caret line is on screen; hide the DOM blink caret. */
+  paintedCaretActive?: boolean;
+  /** Document-mutating input notification for the painted-caret mode machine. */
+  onCaretInput?(): void;
+  /** Text input dispatched: hide the DOM caret before the worker round-trip. */
+  onCaretInputDispatched?(): void;
+  /** Selection move / blur / IME / mode change: swap to the DOM caret now. */
+  onCaretInterrupt?(): void;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /**
@@ -462,6 +470,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       displayListFrameEpoch = null,
       residentCaret = null,
       residentCaretAuthoritative = false,
+      paintedCaretActive = false,
+      onCaretInput,
+      onCaretInputDispatched,
+      onCaretInterrupt,
       canvasHostRef,
       canvasOverlayTarget = null,
     } = props;
@@ -553,6 +565,16 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     useEffect(() => {
       if (hfEditMode) setIsFocused(false);
     }, [hfEditMode]);
+
+    useEffect(() => {
+      if (!isFocused) onCaretInterrupt?.();
+    }, [isFocused, onCaretInterrupt]);
+
+    // Read-only / suggesting / HF-edit transitions bypass the resident input
+    // path, so any painted caret line would go stale — swap to the DOM caret.
+    useEffect(() => {
+      onCaretInterrupt?.();
+    }, [readOnly, isSuggesting, hfEditMode, onCaretInterrupt]);
 
     // Image selection state — `isImageInteractingRef` lives at the parent so
     // useSelectionOverlay can read it (to gate the deferred image-info clear)
@@ -1568,6 +1590,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           applyResidentInput={applyResidentInput}
           applyResidentDelete={applyResidentDelete}
           onFocusChange={setIsFocused}
+          onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
+          onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
+          onCaretInterrupt={onCaretInterrupt}
         />
 
         {/* Non-rendering orchestration host. Visible pages are canvas-only;
@@ -1586,7 +1611,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             (residentCaretAuthoritative || displayListQueries) && (
               <CanvasSelectionOverlay
                 selectionRects={hfEditMode ? [] : selectionRects}
-                caretPosition={hfEditMode ? null : caretPosition}
+                // While the worker paints the caret into the presented frame,
+                // the DOM blink caret stays unmounted (two-mode caret).
+                caretPosition={hfEditMode || paintedCaretActive ? null : caretPosition}
                 isFocused={isFocused && !hfEditMode}
                 readOnly={readOnly}
                 overlayTarget={canvasOverlayTarget}

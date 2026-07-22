@@ -4,6 +4,7 @@ import type {
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
+import type { ResidentCaretPaintStyle } from './residentCaret';
 import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
@@ -18,6 +19,8 @@ export interface ResidentEngineWorkerFrame {
   engineProfile?: YrsEngineApplyProfile;
   caret: YrsResidentCaretSnapshot;
   selection: YrsSelection | null;
+  /** The presented frame carries the worker-painted caret line. */
+  caretPainted: boolean;
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
@@ -121,11 +124,12 @@ export class ResidentEngineWorkerClient {
   async sync(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
-    expectedFrameEpoch: number
+    expectedFrameEpoch: number,
+    paintCaret = false
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'sync', snapshot, extras, expectedFrameEpoch },
+      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
@@ -135,9 +139,13 @@ export class ResidentEngineWorkerClient {
     return result;
   }
 
-  async buildFrame(extras: string, expectedFrameEpoch: number): Promise<ResidentEngineWorkerFrame> {
+  async buildFrame(
+    extras: string,
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame> {
     const result = frameResult(
-      await this.request({ type: 'buildFrame', extras, expectedFrameEpoch })
+      await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
     );
     return result;
   }
@@ -146,12 +154,20 @@ export class ResidentEngineWorkerClient {
     text: string,
     selection: YrsSelection,
     expectedFrameEpoch: number,
-    profile = false
+    profile = false,
+    paintCaret = false
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
       const result = frameResult(
-        await this.request({ type: 'applyInput', text, selection, expectedFrameEpoch, profile })
+        await this.request({
+          type: 'applyInput',
+          text,
+          selection,
+          expectedFrameEpoch,
+          profile,
+          paintCaret,
+        })
       );
       return { applied: true, ...result };
     } catch (error) {
@@ -164,7 +180,8 @@ export class ResidentEngineWorkerClient {
     direction: 'backward' | 'forward',
     selection: YrsSelection,
     expectedFrameEpoch: number,
-    profile = false
+    profile = false,
+    paintCaret = false
   ): Promise<ResidentEngineWorkerApplyResult | { applied: false }> {
     if (!this.ready) return { applied: false };
     try {
@@ -175,6 +192,7 @@ export class ResidentEngineWorkerClient {
           selection,
           expectedFrameEpoch,
           profile,
+          paintCaret,
         })
       );
       return { applied: true, ...result };
@@ -182,6 +200,15 @@ export class ResidentEngineWorkerClient {
       if (error instanceof ResidentWorkerUnavailableError) return { applied: false };
       throw error;
     }
+  }
+
+  /** Drop the worker-painted caret line by re-presenting the caret page's
+   * retained raster. Fire-and-forget and idempotent. */
+  eraseCaret(): void {
+    if (this.destroyed) return;
+    const id = this.nextId++;
+    const message: ResidentEngineWorkerRequest = { id, type: 'eraseCaret' };
+    this.worker.postMessage(message);
   }
 
   invalidate(update: Uint8Array, selection: YrsSelection | null): void {
@@ -202,11 +229,12 @@ export class ResidentEngineWorkerClient {
     pages: ResidentEngineOffscreenPage[],
     activePageIds: string[],
     devicePixelRatio: number,
-    zoom: number
+    zoom: number,
+    caretStyle: ResidentCaretPaintStyle
   ): Promise<void> {
     const canvases = pages.map((page) => page.canvas);
     await this.request(
-      { type: 'attachCanvases', pages, activePageIds, devicePixelRatio, zoom },
+      { type: 'attachCanvases', pages, activePageIds, devicePixelRatio, zoom, caretStyle },
       canvases
     );
   }
@@ -294,6 +322,7 @@ function frameResult(
     engineProfile: response.engineProfile,
     caret: response.caret,
     selection: response.selection,
+    caretPainted: response.caretPainted ?? false,
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,

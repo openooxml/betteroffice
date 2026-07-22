@@ -109,6 +109,10 @@ export function DocxEditorPagedArea({
   displayListFrameEpoch,
   residentCaret,
   residentCaretAuthoritative,
+  paintedCaretActive,
+  onCaretInput,
+  onCaretInputDispatched,
+  onCaretInterrupt,
   canvasHostRef,
   // Floating comment button
   floatingCommentBtn,
@@ -195,6 +199,11 @@ export function DocxEditorPagedArea({
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
   residentCaretAuthoritative?: boolean;
+  /** Worker-painted caret line is on screen; hide the DOM blink caret. */
+  paintedCaretActive?: boolean;
+  onCaretInput?: () => void;
+  onCaretInputDispatched?: () => void;
+  onCaretInterrupt?: () => void;
   /** `.canvas-pages` host element — canvas-path pointer events attach here. */
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   floatingCommentBtn: { top: number; left: number } | null;
@@ -426,6 +435,10 @@ export function DocxEditorPagedArea({
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}
         residentCaretAuthoritative={residentCaretAuthoritative}
+        paintedCaretActive={paintedCaretActive}
+        onCaretInput={onCaretInput}
+        onCaretInputDispatched={onCaretInputDispatched}
+        onCaretInterrupt={onCaretInterrupt}
         canvasHostRef={canvasHostRef}
         canvasOverlayTarget={canvasOverlayTarget}
         resolvedCommentIds={resolvedIdsForRender}

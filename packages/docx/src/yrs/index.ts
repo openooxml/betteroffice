@@ -28,7 +28,11 @@ export {
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
-export { residentCaretSnapshotForFrame } from './residentCaret';
+export {
+  residentCaretSnapshotForFrame,
+  residentCaretDeviceRect,
+  type ResidentCaretPaintStyle,
+} from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 

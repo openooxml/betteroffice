@@ -112,6 +112,13 @@ export interface YrsInputProps {
     direction: 'backward' | 'forward'
   ): Promise<ResidentFrameApplyResult | null>;
   onFocusChange?(focused: boolean): void;
+  /** Document-mutating input landed (keeps the worker-painted caret mode alive). */
+  onCaretInput?(): void;
+  /** Text input dispatched — called synchronously from the input event, before
+   * the async apply, so the DOM caret hides before the new frame presents. */
+  onCaretInputDispatched?(): void;
+  /** Selection-only move or IME start (immediate swap to the DOM blink caret). */
+  onCaretInterrupt?(): void;
 }
 
 const BASE_STYLE: CSSProperties = {
@@ -203,6 +210,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     applyResidentInput,
     applyResidentDelete,
     onFocusChange,
+    onCaretInput,
+    onCaretInputDispatched,
+    onCaretInterrupt,
   },
   ref
 ) {
@@ -279,18 +289,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (anchor: YrsLoc, head: YrsLoc = anchor, emit = true): void => {
       if (!session) return;
       session.setSelection(anchor, head);
-      if (emit) emitSelection(false);
+      if (emit) {
+        onCaretInterrupt?.();
+        emitSelection(false);
+      }
     },
-    [emitSelection, session]
+    [emitSelection, onCaretInterrupt, session]
   );
 
   const finishMutation = useCallback(
     (residentLayoutReady = false, residentCaretReady = false): void => {
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
+      onCaretInput?.();
       onDirectInput();
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onDirectInput]
+    [emitSelection, onCaretInput, onDirectInput]
   );
 
   const finishResidentMutation = useCallback(
@@ -302,6 +316,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [finishMutation]
   );
+
+  // Body-story only: painted-caret coverage for other stories is unproven, and
+  // an unhonored dispatch hold would blank the caret per keystroke there.
+  const dispatchCaretInput = useCallback((): void => {
+    if (!session || readOnly) return;
+    if (session.selection()?.head.story !== 'body') return;
+    onCaretInputDispatched?.();
+  }, [onCaretInputDispatched, readOnly, session]);
 
   const storedFormatting = useCallback((): YrsStoredFormatting | null => {
     const current = ensureSelection();
@@ -369,6 +391,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const insertText = useCallback(
     (text: string): void => {
       if (!session || readOnly || text.length === 0) return;
+      dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
         const map = current ? inputPositionMap(current.anchor.story) : null;
@@ -468,6 +491,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       applyResidentInput,
+      dispatchCaretInput,
       enqueueInputOperation,
       ensureSelection,
       finishMutation,
@@ -482,6 +506,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
+      dispatchCaretInput();
       enqueueInputOperation(async () => {
         if (!session || readOnly) return;
         if (deleteSelected()) {
@@ -560,6 +585,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [
       applyResidentDelete,
       deleteSelected,
+      dispatchCaretInput,
       enqueueInputOperation,
       ensureSelection,
       finishMutation,
@@ -573,6 +599,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const splitParagraph = useCallback((): void => {
+    dispatchCaretInput();
     enqueueInputOperation(() => {
       if (!session || readOnly) return;
       const selectedStart = deleteSelected();
@@ -617,6 +644,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     });
   }, [
     deleteSelected,
+    dispatchCaretInput,
     enqueueInputOperation,
     ensureSelection,
     finishMutation,
@@ -937,8 +965,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionPendingRef.current = false;
       compositionCommitRef.current = '';
       event.currentTarget.value = '';
+      onCaretInterrupt?.();
     },
-    []
+    [onCaretInterrupt]
   );
 
   const handleCompositionUpdate = useCallback(

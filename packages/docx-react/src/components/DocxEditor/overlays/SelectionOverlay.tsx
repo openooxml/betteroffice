@@ -45,7 +45,7 @@ export interface SelectionOverlayProps {
 // caret — the overlay sits outside the inverted page, so #000 would vanish.
 const DEFAULT_CARET_COLOR = 'var(--doc-caret, #000)';
 const DEFAULT_SELECTION_COLOR = 'rgba(66, 133, 244, 0.3)'; // Google Docs style blue
-const DEFAULT_CARET_WIDTH = 2;
+export const DEFAULT_CARET_WIDTH = 2;
 const DEFAULT_BLINK_INTERVAL = 530; // Standard cursor blink rate
 
 // =============================================================================

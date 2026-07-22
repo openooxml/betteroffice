@@ -23,6 +23,7 @@ import {
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
   sameYrsSelection,
+  type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
   type YrsResidentCaretSnapshot,
   type YrsSelection,
@@ -31,6 +32,7 @@ import {
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
+import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 
 // provider for the canvas renderer's display list: returns the injected value
 // when the host supplies one, otherwise the demo fixture. consumers only ever
@@ -68,8 +70,17 @@ export interface UseRustDisplayListResult {
     pages: ResidentEngineOffscreenPage[],
     activePageIds: string[],
     devicePixelRatio: number,
-    zoom: number
+    zoom: number,
+    caretStyle: ResidentCaretPaintStyle
   ): Promise<boolean>;
+  /** True while the worker-painted caret line owns the caret (DOM caret hidden). */
+  paintedCaretActive: boolean;
+  /** Local text input: keeps painted-caret mode alive for follow-up frames. */
+  notifyCaretInput(): void;
+  /** Text input dispatched: hide the DOM caret before the worker round-trip. */
+  notifyCaretInputDispatched(): void;
+  /** Selection move / blur / IME start / mode change: immediate swap to the DOM caret. */
+  notifyCaretInterrupt(): void;
 }
 
 export interface ResidentFrameApplyResult {
@@ -139,10 +150,115 @@ export function useRustDisplayList(
   const workerPresentationActiveRef = useRef(false);
   const [workerPresentationActive, setWorkerPresentationActiveState] = useState(false);
 
-  const setWorkerPresentationActive = useCallback((active: boolean): void => {
-    workerPresentationActiveRef.current = active;
-    setWorkerPresentationActiveState((current) => (current === active ? current : active));
-  }, []);
+  const paintedCaretMachineRef = useRef<PaintedCaretMachine | null>(null);
+  if (!paintedCaretMachineRef.current) paintedCaretMachineRef.current = new PaintedCaretMachine();
+  const paintedCaretMachine = paintedCaretMachineRef.current;
+  const [paintedCaretActive, setPaintedCaretActiveState] = useState(false);
+  const paintedCaretIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dispatchHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const residentPaintInflightRef = useRef(0);
+
+  // Idle/interrupt swap: the DOM caret renders first (state flip), then the
+  // erase posts two rAFs later — an overlap is possible, a caret gap is not.
+  // The post re-checks the machine so a paint that landed meanwhile survives.
+  const requestPaintedCaretErase = useCallback((): void => {
+    setPaintedCaretActiveState(false);
+    const post = (): void => {
+      if (paintedCaretMachine.isActive() || residentPaintInflightRef.current > 0) return;
+      workerRef.current?.client.eraseCaret();
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(post));
+    } else {
+      setTimeout(post, 0);
+    }
+  }, [paintedCaretMachine]);
+
+  const schedulePaintedCaretIdle = useCallback((): void => {
+    if (paintedCaretIdleTimerRef.current !== null) clearTimeout(paintedCaretIdleTimerRef.current);
+    const fire = (): void => {
+      paintedCaretIdleTimerRef.current = null;
+      const now = performance.now();
+      if (paintedCaretMachine.idleTimeout(now)) {
+        requestPaintedCaretErase();
+        return;
+      }
+      if (paintedCaretMachine.isActive()) {
+        paintedCaretIdleTimerRef.current = setTimeout(
+          fire,
+          Math.max(1, paintedCaretMachine.msUntilIdle(now))
+        );
+      }
+    };
+    paintedCaretIdleTimerRef.current = setTimeout(fire, CARET_PAINT_IDLE_MS);
+  }, [paintedCaretMachine, requestPaintedCaretErase]);
+
+  const applyPaintedCaretReply = useCallback(
+    (painted: boolean, token: number): void => {
+      if (painted && paintedCaretMachine.framePainted(token)) {
+        setPaintedCaretActiveState(true);
+        schedulePaintedCaretIdle();
+        return;
+      }
+      // Painted but interrupted mid-flight: the DOM caret is already showing,
+      // so the stale line can be erased immediately.
+      if (painted) workerRef.current?.client.eraseCaret();
+      // An in-flight resident input owns the next verdict; deciding here would
+      // remount the DOM caret for a frame in the middle of a burst.
+      if (residentPaintInflightRef.current > 0) return;
+      paintedCaretMachine.frameUnpainted();
+      setPaintedCaretActiveState(false);
+    },
+    [paintedCaretMachine, schedulePaintedCaretIdle]
+  );
+
+  const notifyCaretInput = useCallback((): void => {
+    paintedCaretMachine.noteInput(performance.now());
+  }, [paintedCaretMachine]);
+
+  // Dispatch-time hide: called synchronously from the input event, BEFORE the
+  // worker round-trip. The worker presents glyphs+painted caret atomically off
+  // the main thread, so a caret left mounted until the reply commits shows the
+  // new character with a stale caret one position behind. Hiding for the
+  // in-flight window is invisible; the dispatch hold self-expires and every
+  // resolution path (painted, unpainted, interrupt) reconciles it.
+  const notifyCaretInputDispatched = useCallback((): void => {
+    if (!workerPresentationActiveRef.current) return;
+    paintedCaretMachine.noteDispatch(performance.now());
+    setPaintedCaretActiveState(true);
+    if (dispatchHoldTimerRef.current !== null) clearTimeout(dispatchHoldTimerRef.current);
+    dispatchHoldTimerRef.current = setTimeout(() => {
+      dispatchHoldTimerRef.current = null;
+      const now = performance.now();
+      if (!paintedCaretMachine.isActive() && !paintedCaretMachine.isHolding(now)) {
+        setPaintedCaretActiveState(false);
+      }
+    }, CARET_PAINT_IDLE_MS + 16);
+  }, [paintedCaretMachine]);
+
+  const notifyCaretInterrupt = useCallback((): void => {
+    if (paintedCaretMachine.interrupt()) {
+      requestPaintedCaretErase();
+      return;
+    }
+    // A pending dispatch hold must not survive a selection change.
+    setPaintedCaretActiveState(false);
+  }, [paintedCaretMachine, requestPaintedCaretErase]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('blur', notifyCaretInterrupt);
+    return () => window.removeEventListener('blur', notifyCaretInterrupt);
+  }, [notifyCaretInterrupt]);
+
+  const setWorkerPresentationActive = useCallback(
+    (active: boolean): void => {
+      workerPresentationActiveRef.current = active;
+      if (!active) notifyCaretInterrupt();
+      setWorkerPresentationActiveState((current) => (current === active ? current : active));
+    },
+    [notifyCaretInterrupt]
+  );
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
@@ -163,6 +279,12 @@ export function useRustDisplayList(
 
   useEffect(
     () => () => {
+      if (paintedCaretIdleTimerRef.current !== null) {
+        clearTimeout(paintedCaretIdleTimerRef.current);
+      }
+      if (dispatchHoldTimerRef.current !== null) {
+        clearTimeout(dispatchHoldTimerRef.current);
+      }
       workerRef.current?.client.destroy();
       workerRef.current = null;
     },
@@ -192,20 +314,31 @@ export function useRustDisplayList(
         if (!worker || !worker.client.isReady() || !currentFrame) return null;
         const selection = worker.engine.selection();
         if (!selection) return null;
-        const result =
-          operation.kind === 'insert'
-            ? await worker.client.applyInput(
-                operation.text,
-                selection,
-                currentFrame.frameEpoch,
-                false
-              )
-            : await worker.client.applyDelete(
-                operation.direction,
-                selection,
-                currentFrame.frameEpoch,
-                false
-              );
+        paintedCaretMachine.noteInput(performance.now());
+        const paintCaret = workerPresentationActiveRef.current;
+        const paintToken = paintedCaretMachine.token();
+        residentPaintInflightRef.current += 1;
+        let result;
+        try {
+          result =
+            operation.kind === 'insert'
+              ? await worker.client.applyInput(
+                  operation.text,
+                  selection,
+                  currentFrame.frameEpoch,
+                  false,
+                  paintCaret
+                )
+              : await worker.client.applyDelete(
+                  operation.direction,
+                  selection,
+                  currentFrame.frameEpoch,
+                  false,
+                  paintCaret
+                );
+        } finally {
+          residentPaintInflightRef.current -= 1;
+        }
         if (!result.applied) return null;
         const delta = decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
@@ -216,6 +349,7 @@ export function useRustDisplayList(
         }
         const previous = snapshotRef.current;
         if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
+          // Superseded: a newer frame's reply owns the painted-caret verdict.
           return { frameEpoch: null, caretSynchronized: false };
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
@@ -239,6 +373,7 @@ export function useRustDisplayList(
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
+        applyPaintedCaretReply(Boolean(result.caretPainted && caret?.caretRect), paintToken);
         return {
           frameEpoch: nextFrame.frameEpoch,
           caretSynchronized: Boolean(
@@ -268,7 +403,7 @@ export function useRustDisplayList(
         return { frameEpoch: null, caretSynchronized: false };
       });
     },
-    []
+    [applyPaintedCaretReply, paintedCaretMachine]
   );
 
   const applyInput = useCallback(
@@ -287,7 +422,8 @@ export function useRustDisplayList(
       pages: ResidentEngineOffscreenPage[],
       activePageIds: string[],
       devicePixelRatio: number,
-      zoom: number
+      zoom: number,
+      caretStyle: ResidentCaretPaintStyle
     ): Promise<boolean> => {
       const worker = workerRef.current?.client;
       // Queue even while the worker is mid-invalidation: requests are handled
@@ -295,7 +431,7 @@ export function useRustDisplayList(
       // rasters the newly attached surfaces itself. Refusing here would strand
       // already-transferred canvases (they cannot be re-transferred).
       if (!worker) return false;
-      await worker.attachCanvases(pages, activePageIds, devicePixelRatio, zoom);
+      await worker.attachCanvases(pages, activePageIds, devicePixelRatio, zoom, caretStyle);
       return true;
     },
     []
@@ -311,6 +447,7 @@ export function useRustDisplayList(
       setLoading(true);
       setWorkerSurfacesActive(false);
       setWorkerPresentationActive(false);
+      notifyCaretInterrupt();
       return;
     }
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
@@ -348,6 +485,7 @@ export function useRustDisplayList(
             caret: null as YrsResidentCaretSnapshot | null,
             queryEngine: engine,
             workerProduced: false,
+            caretPainted: false,
           }))
         : buildRustDisplayFrame(buildInputs, engine ?? undefined, snapshotRef.current.frame).then(
             (result) => ({
@@ -355,14 +493,17 @@ export function useRustDisplayList(
               caret: null as YrsResidentCaretSnapshot | null,
               queryEngine: engine,
               workerProduced: false,
+              caretPainted: false,
             })
           );
+    const paintToken = paintedCaretMachine.token();
     let pending: Promise<{
       displayList: DisplayList;
       frame: RetainedFrame | null;
       caret: YrsResidentCaretSnapshot | null;
       queryEngine: RustDisplayListEngine | null | undefined;
       workerProduced: boolean;
+      caretPainted: boolean;
     }>;
     if (!overrides?.build && probe && canUseResidentEngineWorker()) {
       const hostEngine = residentEngine;
@@ -408,11 +549,17 @@ export function useRustDisplayList(
           if (!snapshot) throw new Error('Resident worker snapshot was not available');
           return snapshot;
         };
+        // Structural text input reaches the worker as a sync/buildFrame; keep
+        // the painted caret glued to those frames while the typing burst lasts.
+        const paintCaret =
+          !bootstrapping &&
+          workerPresentationActiveRef.current &&
+          paintedCaretMachine.shouldPaint(performance.now());
         const workerFrame = bootstrapping
           ? worker.bootstrap(buildSnapshot(), extras)
           : worker.layoutRevision() !== probe.layoutRevision
-            ? worker.sync(buildSnapshot(), extras, previousFrame?.frameEpoch ?? 0)
-            : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0);
+            ? worker.sync(buildSnapshot(), extras, previousFrame?.frameEpoch ?? 0, paintCaret)
+            : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret);
         pending = workerFrame
           .then((result) => {
             const delta = decodeFrameDelta(result.frame);
@@ -428,6 +575,7 @@ export function useRustDisplayList(
               ),
               queryEngine: null,
               workerProduced: true,
+              caretPainted: result.caretPainted,
             };
           })
           .catch(fallback);
@@ -455,6 +603,10 @@ export function useRustDisplayList(
           result.workerProduced && probe && workerRef.current?.client.isReady()
         );
         setWorkerSurfacesActive(workerProduced);
+        applyPaintedCaretReply(
+          Boolean(workerProduced && result.caretPainted && result.caret?.caretRect),
+          paintToken
+        );
       })
       .catch((error) => {
         if (generation !== generationRef.current) return;
@@ -472,6 +624,9 @@ export function useRustDisplayList(
     engine,
     residentEngine,
     setWorkerPresentationActive,
+    paintedCaretMachine,
+    applyPaintedCaretReply,
+    notifyCaretInterrupt,
   ]);
 
   return {
@@ -487,6 +642,10 @@ export function useRustDisplayList(
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
+    paintedCaretActive,
+    notifyCaretInput,
+    notifyCaretInputDispatched,
+    notifyCaretInterrupt,
   };
 }
 
@@ -599,9 +758,18 @@ export interface UseCanvasRendererResult {
       pages: ResidentEngineOffscreenPage[],
       activePageIds: string[],
       devicePixelRatio: number,
-      zoom: number
+      zoom: number,
+      caretStyle: ResidentCaretPaintStyle
     ): Promise<boolean>;
   } | null;
+  /** True while the worker-painted caret line owns the caret (DOM caret hidden). */
+  paintedCaretActive: boolean;
+  /** Local text input notification for the painted-caret mode machine. */
+  notifyCaretInput(): void;
+  /** Text input dispatched: hide the DOM caret before the worker round-trip. */
+  notifyCaretInputDispatched(): void;
+  /** Selection move / blur / IME / mode change: immediate swap to the DOM caret. */
+  notifyCaretInterrupt(): void;
 }
 
 // bundles the canvas-renderer host wiring for DocxEditor: collects each
@@ -643,6 +811,10 @@ export function useCanvasRenderer(
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
+    paintedCaretActive,
+    notifyCaretInput,
+    notifyCaretInputDispatched,
+    notifyCaretInterrupt,
   } = useRustDisplayList(layout, undefined, fontChainsProviderRef, resolvedCommentIds, engine);
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const status: UseCanvasRendererResult['status'] = error
@@ -724,5 +896,9 @@ export function useCanvasRenderer(
     applyDelete,
     setWorkerPresentationActive,
     offscreenReplay,
+    paintedCaretActive,
+    notifyCaretInput,
+    notifyCaretInputDispatched,
+    notifyCaretInterrupt,
   };
 }

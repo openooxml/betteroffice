@@ -27,6 +27,8 @@ import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
+import { resolveCaretPaintColor } from './paintedCaret';
+import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
 // independently so hidden ProseMirror focus and IME state survive initial
@@ -166,6 +168,8 @@ export function CanvasPagesView({
   const offscreenSignatureRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
+  const offscreenFailedRef = useRef(false);
+  const offscreenAttachedRef = useRef(false);
   const workerPresentationRef = useRef(false);
   const publishWorkerPresentation = useCallback(
     (active: boolean) => {
@@ -314,6 +318,8 @@ export function CanvasPagesView({
   const [glyphCacheReady, setGlyphCacheReady] = useState(false);
   useEffect(() => {
     setOffscreenFailed(false);
+    offscreenFailedRef.current = false;
+    offscreenAttachedRef.current = false;
     offscreenSignatureRef.current = '';
   }, [offscreenReplay]);
   useEffect(() => {
@@ -364,27 +370,40 @@ export function CanvasPagesView({
           pages.push({ pageId, canvas: canvas.transferControlToOffscreen() });
           transferredCanvasesRef.current.add(canvas);
         } catch {
+          offscreenFailedRef.current = true;
           publishWorkerPresentation(false);
           setOffscreenFailed(true);
           return;
         }
       }
-      const signature = `${activePageIds.join(',')}|${dpr}|${zoom}`;
+      const caretColor = resolveCaretPaintColor(innerHostRef.current);
+      const caretStyle = { color: caretColor, width: DEFAULT_CARET_WIDTH };
+      const signature = `${activePageIds.join(',')}|${dpr}|${zoom}|${caretColor}`;
       if (pages.length > 0 || signature !== offscreenSignatureRef.current) {
         offscreenSignatureRef.current = signature;
-        void offscreenReplay.attach(pages, activePageIds, dpr, zoom).then((attached) => {
-          if (replayGeneration === replayGenerationRef.current) {
-            publishWorkerPresentation(attached);
-          }
+        void offscreenReplay.attach(pages, activePageIds, dpr, zoom, caretStyle).then((attached) => {
+          // Publish on resolution regardless of replay generation: attach
+          // resolutions are FIFO, so the last one reflects the worker's real
+          // attachment state. Gating on the generation dropped the publish
+          // whenever a frame landed while the first attach was still
+          // rastering — i.e. on every document load — leaving presentation
+          // permanently unpublished while the worker was in fact presenting.
+          offscreenAttachedRef.current = attached;
+          if (!offscreenFailedRef.current) publishWorkerPresentation(attached);
           if (!attached) {
             // transient (no worker client yet) — clear the signature so the
             // next pass retries instead of permanently flipping surfaces
             offscreenSignatureRef.current = '';
           }
         }, () => {
+          offscreenFailedRef.current = true;
           publishWorkerPresentation(false);
           setOffscreenFailed(true);
         });
+      } else if (offscreenAttachedRef.current) {
+        // Heal any publish lost to ordering (StrictMode remount, late
+        // resolution): the worker is attached and this pass kept it active.
+        publishWorkerPresentation(true);
       }
       return;
     }
