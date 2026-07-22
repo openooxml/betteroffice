@@ -125,11 +125,14 @@ struct ProposeArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProposeEditInput {
     sheet: u32,
     row: u32,
     col: u32,
     input: String,
+    #[serde(default)]
+    number_format: Option<NumberFormatMutation>,
 }
 
 #[derive(Deserialize)]
@@ -503,6 +506,7 @@ impl Session {
                             sheet: SheetId(edit.sheet),
                             cell: CellRef::new(edit.row, edit.col),
                             input: edit.input,
+                            number_format: edit.number_format,
                         })
                         .collect(),
                 },

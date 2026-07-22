@@ -103,8 +103,10 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.font = fontString(cmd);
   ctx.textAlign = ALIGN_TO_TEXT_ALIGN[cmd.align ?? 'left'];
   ctx.textBaseline = 'alphabetic';
+  if (cmd.highlight) paintHighlight(ctx, cmd);
+  ctx.fillStyle = cmd.color;
   ctx.fillText(cmd.text, cmd.x, cmd.y);
-  if (cmd.underline || cmd.strike) paintDecorations(ctx, cmd);
+  if (cmd.underline || cmd.strike || cmd.dashedUnderline) paintDecorations(ctx, cmd);
   ctx.restore();
 }
 
@@ -126,4 +128,23 @@ function paintDecorations(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   ctx.fillStyle = cmd.color;
   if (cmd.underline) ctx.fillRect(x0, cmd.y + cmd.fontSize * 0.1, width, thickness);
   if (cmd.strike) ctx.fillRect(x0, cmd.y - cmd.fontSize * 0.26, width, thickness);
+  if (cmd.dashedUnderline) {
+    ctx.save();
+    ctx.strokeStyle = cmd.color;
+    ctx.lineWidth = thickness;
+    ctx.setLineDash([3, 2]);
+    strokeSegment(ctx, x0, cmd.y + cmd.fontSize * 0.1, x0 + width, cmd.y + cmd.fontSize * 0.1);
+    ctx.restore();
+  }
+}
+
+function paintHighlight(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
+  const metrics = ctx.measureText(cmd.text);
+  const width = metrics.width;
+  const align = cmd.align ?? 'left';
+  const x0 = align === 'right' ? cmd.x - width : align === 'center' ? cmd.x - width / 2 : cmd.x;
+  const ascent = metrics.actualBoundingBoxAscent || cmd.fontSize * 0.8;
+  const descent = metrics.actualBoundingBoxDescent || cmd.fontSize * 0.2;
+  ctx.fillStyle = cmd.highlight!;
+  ctx.fillRect(x0 - 2, cmd.y - ascent - 1, width + 4, ascent + descent + 2);
 }

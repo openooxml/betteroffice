@@ -80,6 +80,8 @@ export interface TextCmd {
   italic?: boolean;
   underline?: boolean;
   strike?: boolean;
+  highlight?: string;
+  dashedUnderline?: boolean;
   /** css/font family from the style font; the backend falls back to its default. */
   fontFamily?: string;
   /**

@@ -1,11 +1,5 @@
-/**
- * Deterministic per-agent color for proposal decorations. A stable hash over the
- * agentId picks from a small, visually distinct palette so every cell an agent
- * proposes shares one hue and two agents rarely collide. Chrome-only styling.
- */
+/** Deterministic per-agent color for proposal review labels. */
 
-// distinct, mid-saturation hues that read on a white grid; the ghost text and
-// dashed border both use the agent's entry.
 const PALETTE = [
   '#7c3aed', // violet
   '#0891b2', // cyan
@@ -25,9 +19,7 @@ function hashAgent(agentId: string): number {
   return (hash >>> 0) % PALETTE.length;
 }
 
-/**
- * The palette color for an agentId's proposal decorations.
- */
+/** The palette color for an agent's proposal review label. */
 export function proposalColor(agentId: string): string {
   return PALETTE[hashAgent(agentId)];
 }

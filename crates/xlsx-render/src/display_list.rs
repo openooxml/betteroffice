@@ -62,6 +62,10 @@ pub enum DrawCmd {
         underline: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         strike: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        highlight: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        dashed_underline: bool,
         /// font family from the style font; the backend falls back to its default face.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
@@ -140,6 +144,8 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 italic,
                 underline,
                 strike,
+                highlight,
+                dashed_underline,
                 font_family,
                 ghost,
             } => DrawCmd::Text {
@@ -159,6 +165,8 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 italic,
                 underline,
                 strike,
+                highlight,
+                dashed_underline,
                 font_family,
                 ghost,
             },
@@ -230,6 +238,8 @@ mod tests {
                     italic: false,
                     underline: false,
                     strike: false,
+                    highlight: None,
+                    dashed_underline: false,
                     font_family: None,
                     ghost: false,
                 },

@@ -50,6 +50,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                 italic,
                 underline,
                 strike,
+                highlight,
+                dashed_underline,
                 font_family: _,
                 ghost: _,
             } => {
@@ -67,6 +69,8 @@ pub fn render_png(dl: &DisplayList) -> Result<Vec<u8>, String> {
                         italic: *italic,
                         underline: *underline,
                         strike: *strike,
+                        highlight: highlight.as_deref().map(parse_color).transpose()?,
+                        dashed_underline: *dashed_underline,
                     },
                 );
             }
@@ -146,12 +150,17 @@ fn parse_color(s: &str) -> Result<Color, String> {
     let hex = s
         .strip_prefix('#')
         .ok_or_else(|| format!("bad color: {s}"))?;
-    if hex.len() != 6 {
+    if hex.len() != 6 && hex.len() != 8 {
         return Err(format!("bad color: {s}"));
     }
     let byte =
         |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| format!("bad color: {s}"));
-    Ok(Color::from_rgba8(byte(0)?, byte(2)?, byte(4)?, 255))
+    Ok(Color::from_rgba8(
+        byte(0)?,
+        byte(2)?,
+        byte(4)?,
+        if hex.len() == 8 { byte(6)? } else { 255 },
+    ))
 }
 
 #[cfg(test)]
@@ -198,6 +207,8 @@ mod tests {
                     italic: false,
                     underline: false,
                     strike: false,
+                    highlight: None,
+                    dashed_underline: false,
                     font_family: None,
                     ghost: false,
                 },

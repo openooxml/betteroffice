@@ -289,6 +289,7 @@ fn undo_redo_and_proposals_share_the_typed_session() {
                     sheet: SheetId(0),
                     cell: cell("A1"),
                     input: "30".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -316,6 +317,7 @@ fn pending_proposals_ghost_into_display_lists() {
                     sheet: SheetId(0),
                     cell: cell("A1"),
                     input: "30".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -373,6 +375,161 @@ fn pending_proposals_ghost_into_display_lists() {
             .any(|(text, color, strike)| text == "30" && color == "#000000" && !*strike)
     );
     assert!(!committed.iter().any(|(_, color, _)| color == "#c62828"));
+}
+
+#[test]
+fn proposal_previews_use_target_number_formats() {
+    let mut workbook =
+        Workbook::open_recalculated(&sample_xlsx(), CalculationOptions::default()).unwrap();
+
+    let proposal = workbook
+        .propose(
+            ProposalRequest {
+                agent_id: "agent".into(),
+                note: None,
+                edits: vec![
+                    ProposalEditInput {
+                        sheet: SheetId(0),
+                        cell: cell("A1"),
+                        input: "0.484".into(),
+                        number_format: Some(NumberFormatMutation::Percent),
+                    },
+                    ProposalEditInput {
+                        sheet: SheetId(0),
+                        cell: cell("A2"),
+                        input: "46204".into(),
+                        number_format: Some(NumberFormatMutation::Date),
+                    },
+                ],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    assert_eq!(proposal.edits[0].old_text, "10");
+    assert_eq!(proposal.edits[0].new_text, "48.40%");
+    assert_eq!(proposal.edits[1].old_text, "5");
+    assert_eq!(proposal.edits[1].new_text, "7/1/2026");
+
+    workbook
+        .accept_proposal(&proposal.id, false, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(
+        workbook
+            .selection_formatting(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+            .unwrap()
+            .number_format,
+        Some(NumberFormatKind::Percent)
+    );
+    assert_eq!(
+        workbook
+            .selection_formatting(SheetId(0), CellRange::new(cell("A2"), cell("A2")))
+            .unwrap()
+            .number_format,
+        Some(NumberFormatKind::Date)
+    );
+}
+
+#[test]
+fn formula_proposals_keep_the_old_computed_display_value() {
+    let mut workbook =
+        Workbook::open_recalculated(&sample_xlsx(), CalculationOptions::default()).unwrap();
+    let proposal = workbook
+        .propose(
+            ProposalRequest {
+                agent_id: "agent".into(),
+                note: None,
+                edits: vec![ProposalEditInput {
+                    sheet: SheetId(0),
+                    cell: cell("B1"),
+                    input: "=A2".into(),
+                    number_format: None,
+                }],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    assert_eq!(proposal.edits[0].old_text, "15");
+    assert_eq!(proposal.edits[0].new_text, "5");
+
+    let display = workbook
+        .display_list(&Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            height: 120.0,
+        })
+        .unwrap();
+    let values: Vec<_> = display
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text {
+                text,
+                color,
+                strike,
+                ..
+            } if color == "#c62828" || color == "#2e7d32" => {
+                Some((text.as_str(), color.as_str(), *strike))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        values,
+        vec![("15", "#c62828", true), ("5", "#2e7d32", false)]
+    );
+}
+
+#[test]
+fn proposal_ghosts_include_recalculated_formula_dependents() {
+    let mut workbook =
+        Workbook::open_recalculated(&sample_xlsx(), CalculationOptions::default()).unwrap();
+    workbook
+        .propose(
+            ProposalRequest {
+                agent_id: "agent".into(),
+                note: None,
+                edits: vec![ProposalEditInput {
+                    sheet: SheetId(0),
+                    cell: cell("A1"),
+                    input: "20".into(),
+                    number_format: None,
+                }],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let display = workbook
+        .display_list(&Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 240.0,
+            height: 120.0,
+        })
+        .unwrap();
+    let values: Vec<_> = display
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text {
+                text,
+                color,
+                strike,
+                ..
+            } if color == "#c62828" || color == "#2e7d32" => {
+                Some((text.as_str(), color.as_str(), *strike))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(values.contains(&("10", "#c62828", true)));
+    assert!(values.contains(&("20", "#2e7d32", false)));
+    assert!(values.contains(&("15", "#c62828", true)));
+    assert!(values.contains(&("25", "#2e7d32", false)));
 }
 
 #[test]
@@ -644,6 +801,7 @@ fn proposal_staleness_uses_cell_state_not_display_text() {
                     sheet: SheetId(0),
                     cell: cell("B1"),
                     input: "1".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -676,11 +834,13 @@ fn proposal_acceptance_applies_duplicate_targets_sequentially() {
                         sheet: SheetId(0),
                         cell: cell("A1"),
                         input: "20".into(),
+                        number_format: None,
                     },
                     ProposalEditInput {
                         sheet: SheetId(0),
                         cell: cell("A1"),
                         input: "30".into(),
+                        number_format: None,
                     },
                 ],
             },
@@ -705,6 +865,7 @@ fn rename_invalidates_pending_proposals() {
                     sheet: SheetId(0),
                     cell: cell("A1"),
                     input: "=Data!A2".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -757,6 +918,7 @@ fn structural_ops_invalidate_coordinate_proposals() {
                     sheet: SheetId(0),
                     cell: cell("A1"),
                     input: "30".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -946,6 +1108,7 @@ fn collaborative_undo_redo_track_only_local_user_edits() {
                     sheet: SheetId(0),
                     cell: cell("A2"),
                     input: "30".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -1554,6 +1717,7 @@ fn malformed_and_structural_remote_updates_roll_back_every_facade_state() {
                     sheet: SheetId(0),
                     cell: cell("A1"),
                     input: "99".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -1912,6 +2076,7 @@ fn wholly_pending_updates_do_not_reemit_existing_tombstones() {
                     sheet: SheetId(0),
                     cell: cell("A2"),
                     input: "proposal".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),
@@ -2026,6 +2191,7 @@ fn effective_remote_updates_clear_local_proposals() {
                     sheet: SheetId(0),
                     cell: cell("A1"),
                     input: "40".into(),
+                    number_format: None,
                 }],
             },
             CalculationOptions::default(),

@@ -29,6 +29,8 @@ fn text(x: f32, y: f32, s: &str, align: Align, clip: Rect) -> DrawCmd {
         italic: false,
         underline: false,
         strike: false,
+        highlight: None,
+        dashed_underline: false,
         font_family: None,
         ghost: false,
     }
@@ -59,6 +61,8 @@ fn styled_text(
         italic,
         underline,
         strike,
+        highlight: None,
+        dashed_underline: false,
         font_family: None,
         ghost: false,
     }

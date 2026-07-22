@@ -2,7 +2,8 @@ use serde::Serialize;
 use xlsx_model::{CellRange, CellRef, SheetId};
 
 use xlsx_ops::{
-    BorderLineStyle, BorderPreset, HorizontalAlignment, TextWrapping, VerticalAlignment,
+    BorderLineStyle, BorderPreset, HorizontalAlignment, NumberFormatMutation, TextWrapping,
+    VerticalAlignment,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +128,7 @@ pub struct ProposalEditInput {
     pub sheet: SheetId,
     pub cell: CellRef,
     pub input: String,
+    pub number_format: Option<NumberFormatMutation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

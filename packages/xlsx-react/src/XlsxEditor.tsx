@@ -53,9 +53,7 @@ import type {
 } from './components/Toolbar';
 import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
-import { ProposalDecoration } from './proposals/ProposalDecoration';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { proposalColor } from './proposals/palette';
 
 /**
  * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
@@ -1500,26 +1498,6 @@ function XlsxEditorContent({
                 }}
               />
             )}
-            {/* border/tab chrome for pending proposals visible in this viewport;
-                the engine paints the ghost old→new pair into the canvas itself.
-                aria-hidden — the a11y grid announces real committed values only. */}
-            {grid &&
-              proposals.flatMap((proposal) =>
-                proposal.cells.map((cell) => {
-                  if (cell.sheet !== activeSheet) return null;
-                  const rect = cellRect(grid, cell.row, cell.col);
-                  if (!rect) return null;
-                  return (
-                    <ProposalDecoration
-                      key={`${proposal.id}:${cell.a1}`}
-                      rect={scaledRect(rect, zoom)}
-                      color={proposalColor(proposal.agentId)}
-                      newText={cell.newText}
-                      agentId={proposal.agentId}
-                    />
-                  );
-                })
-              )}
             {editing && scaledEditRect && (
               <input
                 ref={editorInputRef}

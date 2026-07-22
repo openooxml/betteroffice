@@ -233,14 +233,14 @@ describe('wasm loader — proposals', () => {
 
       // E7 is empty in the fixture body; propose a value there.
       const proposal = handle.propose('demo-agent', 'column totals', [
-        { sheet: 0, row: 6, col: 4, input: '=SUM(B3:B4)' },
+        { sheet: 0, row: 6, col: 4, input: '0.5', numberFormat: 'percent' },
       ]);
       expect(proposal.agentId).toBe('demo-agent');
       expect(proposal.note).toBe('column totals');
       expect(proposal.cells).toHaveLength(1);
       expect(proposal.cells[0].a1).toBe('E7');
       // old/new are formatted display texts, not the raw input.
-      expect(proposal.cells[0].newText).not.toContain('=SUM');
+      expect(proposal.cells[0].newText).toBe('50.00%');
 
       // staging does not mutate the grid.
       expect(handle.cell(0, 6, 4).input).toBe('');
@@ -249,7 +249,8 @@ describe('wasm loader — proposals', () => {
       const accepted = handle.acceptProposal(proposal.id);
       expect(accepted.applied).toBe(true);
       expect(accepted.proposalId).toBe(proposal.id);
-      expect(handle.cell(0, 6, 4).input).toBe('=SUM(B3:B4)');
+      expect(handle.cell(0, 6, 4).input).toBe('0.5');
+      expect(handle.selectionFormatting(0, 'E7').numberFormat).toBe('percent');
       // accepting clears it from the pending list.
       expect(handle.listProposals().map((p) => p.id)).not.toContain(proposal.id);
 

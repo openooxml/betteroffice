@@ -75,14 +75,13 @@ export function XlsxDemoClient() {
     setReady(true);
   }, []);
 
-  // the demo agent: stage =SUM totals for the numeric columns as a proposal.
   const proposeTotals = useCallback(() => {
     const api = apiRef.current;
     if (!api) return;
     const edits = buildTotalsEdits(api.handle);
     if (edits.length === 0) return;
     try {
-      api.handle.propose("demo-agent", "column totals", edits);
+      api.handle.propose("demo-agent", "totals and source updates", edits);
       api.refreshProposals();
     } catch {
       // proposals not in this wasm build — nothing staged.
@@ -281,7 +280,7 @@ export function XlsxDemoClient() {
                 data-testid="propose-totals"
                 onClick={proposeTotals}
                 disabled={!ready}
-                title="Stage =SUM totals for numeric columns as an agent proposal"
+                title="Stage tracked totals and source updates as an agent proposal"
               >
                 Agent: propose totals
               </button>
