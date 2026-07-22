@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx-react",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Word-faithful React DOCX editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",

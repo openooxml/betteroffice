@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/xlsx",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Excel-faithful XLSX spreadsheet editor and viewer core — full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
   "keywords": [
     "xlsx",

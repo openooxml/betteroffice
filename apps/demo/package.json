@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/demo",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.0.6",
   "scripts": {
     "build:deck": "bun ../../scripts/create-demo-deck.ts",
     "build:wasm": "bun ../../scripts/build-xlsx-wasm.ts && bun ../../scripts/build-docx-wasm.ts && bun ../../scripts/build-pptx-wasm.ts",

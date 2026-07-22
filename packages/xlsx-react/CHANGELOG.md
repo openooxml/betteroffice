@@ -1,5 +1,29 @@
 # @betteroffice/xlsx-react
 
+## 0.0.7
+
+### Patch Changes
+
+- 793b761: Render pending proposals as Word-style tracked changes: struck-through old
+  values with a red run highlight, new values in green with a dashed underline
+  and green run highlight, laid out side by side or new-over-old and following
+  cell alignment. Proposal staging recalculates the formula graph and ghosts
+  downstream dependents whose computed values change, proposal edits can carry
+  a number format, and no-op proposals render unmarked.
+- c6ad184: Add a Google Sheets-style toolbar to the XLSX editor backed by new engine
+  APIs for range styling, number formats, selection-format aggregation, format
+  painting, merge queries, and history state. Formatting is fully collaborative
+  through a content-addressed style catalog (collaboration schema v3; v2 state
+  does not migrate). Merging replaces intersecting ranges like Excel, parsing
+  repairs overlapping merges in third-party files, and display-list font fields
+  now serialize correctly so styled text renders with its real font, size, and
+  weight.
+- Updated dependencies [793b761]
+- Updated dependencies [c6ad184]
+- Updated dependencies [793b761]
+  - @betteroffice/xlsx@0.0.7
+  - @betteroffice/xlsx-i18n@0.0.7
+
 ## 0.0.6
 
 ### Patch Changes
