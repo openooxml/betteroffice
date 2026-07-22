@@ -614,6 +614,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       () => yrsInputRef.current?.displaySelection() ?? null,
       []
     );
+    const getYrsStickySelection = useCallback(
+      () => yrsCore.session?.selection() ?? null,
+      [yrsCore.session]
+    );
     const {
       selectionRects,
       caretPosition,
@@ -629,6 +633,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       residentCaret,
       residentCaretAuthoritative,
       getYrsDisplaySelection,
+      getYrsStickySelection,
     });
     const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
     updateSelectionOverlayRef.current = updateSelectionOverlay;
@@ -1555,6 +1560,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
           displayListFrameEpoch={displayListFrameEpoch}
+          residentCaret={residentCaret}
+          residentCaretAuthoritative={residentCaretAuthoritative}
           canvasHostRef={canvasHostRef ?? pagesContainerRef}
           onStateChange={handleYrsStateChange}
           onDirectInput={publishYrsDirectInput}

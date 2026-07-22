@@ -10,10 +10,14 @@
  * facade parses the display list into the Rust store exactly ONCE
  * (`openDisplayList` → handle) and routes every hit-test / range-rect query
  * through the by-handle exports — no per-query re-serialization or re-parse.
- * When those exports are absent (before the integrator re-embeds the wasm) it
- * falls back to the JSON-arg exports, stringifying the list once and reusing
- * the string for every query. Either way the query RESULTS are byte-identical —
- * the handle path is pure perf.
+ * The handle is acquired LAZILY: at the first query that needs it, or when the
+ * host calls `prime()` from idle time. Keystroke-driven facade replacement
+ * therefore costs no serialization on the input path; superseded generations
+ * chain their adoption donor so a deferred pickup still ships one page-delta
+ * instead of a full re-open. When the session exports are absent (before the
+ * integrator re-embeds the wasm) it falls back to the JSON-arg exports,
+ * stringifying the list once and reusing the string for every query. Either
+ * way the query RESULTS are byte-identical — the handle path is pure perf.
  *
  * Handle lifecycle: the handle is opened once per facade (per display-list
  * build) and released by `dispose()`. Callers that drop the facade without
@@ -187,6 +191,13 @@ export interface DisplayListQueries {
   /** Explicit body-sidebar alias retained alongside `anchorRect`. */
   sidebarAnchorRect(pos: number): DisplayListRect | null;
   /**
+   * Acquire the Rust session handle now (adopting the donor facade's parsed
+   * list when possible). Optional: the first query acquires it on demand;
+   * hosts call this from idle time to keep serialization off interaction
+   * paths. No-op once attempted, superseded, or disposed.
+   */
+  prime(): void;
+  /**
    * Release the wasm session handle backing this facade. Idempotent; safe to
    * call even when no handle was opened (JSON-arg fallback path). Callers that
    * forget are covered by a `FinalizationRegistry`, but disposing eagerly frees
@@ -233,6 +244,11 @@ interface FacadeDeltaSeed {
   engine(): RustDisplayListQueryEngine | null;
   /** Relinquish the live handle (the donor's queries fall back to JSON-arg). */
   takeHandle(): number | null;
+  hasHandle(): boolean;
+  /** Nearest ancestor facade that held the handle when this one was created. */
+  donor(): DisplayListQueries | null;
+  /** A successor now owns this generation: never open/adopt a handle here. */
+  supersede(): void;
 }
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
@@ -307,7 +323,23 @@ export function createDisplayListQueries(
   // `handle`; null means the JSON-arg fallback (unsupported wasm, open failed, or
   // a handle dropped after a stale-handle error).
   let handle: number | null = null;
+  let handleAttempted = false;
+  let superseded = false;
   let disposed = false;
+
+  // The adoption donor: `previous` when it holds the handle, otherwise the
+  // donor `previous` itself recorded — pre-collapsed to one hop so a typing
+  // burst retains at most one superseded list. Marking the predecessor
+  // superseded keeps stale-closure queries on it from stealing the handle out
+  // of the chain.
+  let donorFacade: DisplayListQueries | null = null;
+  if (previous) {
+    const previousSeed = facadeDeltaSeeds.get(previous);
+    if (previousSeed) {
+      donorFacade = previousSeed.hasHandle() ? previous : previousSeed.donor();
+      previousSeed.supersede();
+    }
+  }
 
   const closeHandle = (): void => {
     if (handle !== null) {
@@ -320,11 +352,13 @@ export function createDisplayListQueries(
     }
   };
 
-  // adopt the previous facade's parsed list when only some pages changed:
+  // adopt the donor facade's parsed list when only some pages changed:
   // ships a page-delta into the Rust store instead of the whole list
   const adoptHandle = (): boolean => {
-    if (!previous || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
-    const seed = facadeDeltaSeeds.get(previous);
+    const donor = donorFacade;
+    donorFacade = null;
+    if (!donor || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
+    const seed = facadeDeltaSeeds.get(donor);
     if (!seed || seed.engine() !== eng) return false;
     const update = buildDisplayListUpdateJson(seed, list);
     if (!update) return false;
@@ -348,11 +382,12 @@ export function createDisplayListQueries(
     }
   };
 
-  // open exactly one handle once the engine is known to support sessions; a
-  // failure leaves `handle` null so queries take the JSON-arg path
+  // acquire at most one handle, on the first query that wants it (or via
+  // prime()); a failure leaves `handle` null so queries take the JSON-arg path
   const openHandle = (): void => {
-    if (disposed || handle !== null || !eng) return;
+    if (disposed || superseded || handleAttempted || handle !== null || !eng) return;
     if (!eng.hasDisplayListSession?.() || !eng.openDisplayList) return;
+    handleAttempted = true;
     if (adoptHandle()) return;
     try {
       handle = eng.openDisplayList(getJson());
@@ -365,19 +400,13 @@ export function createDisplayListQueries(
     }
   };
 
-  if (resident) {
-    resolveReady();
-  } else if (eng) {
-    openHandle();
+  if (resident || eng) {
     resolveReady();
   } else {
     loadRustDisplayListQueryEngine().then(
       (loaded) => {
         eng = loaded;
-        openHandle();
         resolveReady();
-        // if disposed while the engine was loading, release the just-opened handle
-        if (disposed) closeHandle();
       },
       (error) => {
         sourceError = error instanceof Error ? error : new Error(String(error));
@@ -397,6 +426,7 @@ export function createDisplayListQueries(
     label: string
   ): string | null => {
     if (!eng) return null;
+    if (handle === null) openHandle();
     if (handle !== null && byHandle) {
       try {
         return byHandle(handle);
@@ -839,6 +869,7 @@ export function createDisplayListQueries(
     caretRect,
     anchorRect,
     sidebarAnchorRect: anchorRect,
+    prime: openHandle,
     dispose,
   };
 
@@ -851,6 +882,11 @@ export function createDisplayListQueries(
     list,
     pageRevisions: list.pages.map(displayPageRevision),
     engine: () => eng,
+    hasHandle: () => handle !== null,
+    donor: () => donorFacade,
+    supersede: () => {
+      superseded = true;
+    },
     takeHandle: () => {
       const transferred = handle;
       if (transferred !== null) {

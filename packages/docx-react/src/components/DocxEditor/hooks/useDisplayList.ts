@@ -22,6 +22,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
+  sameYrsSelection,
   type ResidentEngineOffscreenPage,
   type YrsResidentCaretSnapshot,
   type YrsSelection,
@@ -168,6 +169,21 @@ export function useRustDisplayList(
     []
   );
 
+  // Handle acquisition (page-delta serialization into the Rust query store) is
+  // deferred out of the keystroke path: prime the newest facade from idle time
+  // so the first interaction after a typing burst pays one accumulated delta
+  // at most. Superseded facades no-op their pending prime.
+  useEffect(() => {
+    const queries = snapshot.queries;
+    if (!queries) return;
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(() => queries.prime());
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(() => queries.prime(), 200);
+    return () => clearTimeout(id);
+  }, [snapshot.queries]);
+
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
@@ -203,9 +219,12 @@ export function useRustDisplayList(
           return { frameEpoch: null, caretSynchronized: false };
         }
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
-        const caret = sameYrsSelection(result.selection, worker.engine.selection())
-          ? residentCaretSnapshotForFrame(result.caret, nextFrame)
-          : null;
+        const caret = residentCaretForSelection(
+          result.caret,
+          result.selection,
+          worker.engine.selection(),
+          nextFrame
+        );
         const nextSnapshot = createRustDisplayListSnapshot(
           nextFrame.displayList,
           nextFrame,
@@ -401,9 +420,12 @@ export function useRustDisplayList(
             return {
               displayList: nextFrame.displayList,
               frame: nextFrame,
-              caret: sameYrsSelection(result.selection, hostEngine.selection())
-                ? residentCaretSnapshotForFrame(result.caret, nextFrame)
-                : null,
+              caret: residentCaretForSelection(
+                result.caret,
+                result.selection,
+                hostEngine.selection(),
+                nextFrame
+              ),
               queryEngine: null,
               workerProduced: true,
             };
@@ -484,16 +506,15 @@ function createRustDisplayListSnapshot(
   };
 }
 
-function sameYrsSelection(left: YrsSelection | null, right: YrsSelection | null): boolean {
-  if (!left || !right) return left === right;
-  return (
-    left.anchor.story === right.anchor.story &&
-    left.anchor.paraId === right.anchor.paraId &&
-    left.anchor.offset === right.anchor.offset &&
-    left.head.story === right.head.story &&
-    left.head.paraId === right.head.paraId &&
-    left.head.offset === right.head.offset
-  );
+function residentCaretForSelection(
+  caret: YrsResidentCaretSnapshot,
+  computedFor: YrsSelection | null,
+  current: YrsSelection | null,
+  frame: RetainedFrame
+): YrsResidentCaretSnapshot | null {
+  if (!computedFor || !sameYrsSelection(computedFor, current)) return null;
+  const validated = residentCaretSnapshotForFrame(caret, frame);
+  return validated ? { ...validated, selection: computedFor } : null;
 }
 
 function residentDisplayListQueryEngine(

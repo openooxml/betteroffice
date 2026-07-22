@@ -18,7 +18,7 @@
     "noFallthroughCasesInSwitch": true,
     "declaration": true,
     "declarationMap": true,
-    "types": ["node"],
+    "types": ["bun", "node"],
     "paths": {
       "@/*": ["./src/*"],
       "@betteroffice/docx": ["../docx/src/core.ts"],

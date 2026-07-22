@@ -19,15 +19,17 @@ import React, {
 } from 'react';
 import type { CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import type {
-  YrsAuthor,
-  YrsInputPositionMap,
-  YrsInlineFormatDelta,
-  YrsLoc,
-  YrsRunMark,
-  YrsSelection,
-  YrsSession,
-  YrsStoryRange,
+import {
+  sameYrsSelection,
+  type YrsAuthor,
+  type YrsInputPositionMap,
+  type YrsInlineFormatDelta,
+  type YrsLoc,
+  type YrsResidentCaretSnapshot,
+  type YrsRunMark,
+  type YrsSelection,
+  type YrsSession,
+  type YrsStoryRange,
 } from '@betteroffice/docx/yrs';
 import {
   resolveDisplayPageClientRect,
@@ -92,6 +94,8 @@ export interface YrsInputProps {
   nextParagraphStyleId?(styleId: string | null): string | null;
   displayListQueries?: DisplayListQueries | null;
   displayListFrameEpoch?: number | null;
+  residentCaret?: YrsResidentCaretSnapshot | null;
+  residentCaretAuthoritative?: boolean;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /** Called for selection-only changes and direct document mutations. */
   onStateChange(
@@ -191,6 +195,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     nextParagraphStyleId,
     displayListQueries,
     displayListFrameEpoch = null,
+    residentCaret = null,
+    residentCaretAuthoritative = false,
     canvasHostRef,
     onStateChange,
     onDirectInput,
@@ -1076,7 +1082,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (!selection) return;
     onStateChange(selection, false);
 
-    const caret = displayListQueries.caretRect(selection.head);
+    // Same-frame worker caret geometry needs no facade query (and so cannot
+    // force handle adoption on the typing path).
+    const authoritativeCaret =
+      residentCaretAuthoritative &&
+      residentCaret?.caretRect &&
+      residentCaret.frameEpoch === displayListFrameEpoch &&
+      residentCaret.selection &&
+      sameYrsSelection(residentCaret.selection, session?.selection() ?? null)
+        ? residentCaret.caretRect
+        : null;
+    const caret = authoritativeCaret ?? displayListQueries.caretRect(selection.head);
     const host = canvasHostRef?.current;
     if (!caret || !host) return;
     const pageRect = resolveDisplayPageClientRect(host, displayListQueries, caret.pageIndex);
@@ -1110,7 +1126,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     displaySelection,
     enabled,
     onStateChange,
+    residentCaret,
+    residentCaretAuthoritative,
     selectionEpoch,
+    session,
   ]);
 
   if (!enabled) return null;

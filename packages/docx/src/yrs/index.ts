@@ -383,6 +383,20 @@ export interface YrsResidentCaretRect {
 export interface YrsResidentCaretSnapshot {
   frameEpoch: number;
   caretRect: YrsResidentCaretRect | null;
+  /** Selection the rect was computed for. Absent on raw engine snapshots. */
+  selection?: YrsSelection | null;
+}
+
+export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection | null): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.anchor.story === right.anchor.story &&
+    left.anchor.paraId === right.anchor.paraId &&
+    left.anchor.offset === right.anchor.offset &&
+    left.head.story === right.head.story &&
+    left.head.paraId === right.head.paraId &&
+    left.head.offset === right.head.offset
+  );
 }
 
 /** Opt-in internal stage timings for one resident engine input. @internal */
