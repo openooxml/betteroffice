@@ -8,6 +8,10 @@
     "packages/*",
     "crates"
   ],
+  "overrides": {
+    "fast-uri": "^3.1.4",
+    "sharp": "^0.35.0"
+  },
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",
     "dev:docs": "bun run --filter './apps/docs' dev",
