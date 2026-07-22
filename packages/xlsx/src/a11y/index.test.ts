@@ -79,6 +79,16 @@ describe('buildA11yGrid', () => {
     expect(g.label).toBe('Spreadsheet grid');
   });
 
+  it('skips ghost preview commands so the committed text wins', () => {
+    const dl = sampleDisplayList();
+    const box: Rect = { x: 80, y: 0, w: 80, h: 20 };
+    const preview = textCmd(box, '99');
+    if (preview.op === 'text') preview.ghost = true;
+    dl.commands.push(preview);
+    const g = buildA11yGrid(dl, null, 'Sheet1', strings);
+    expect(g.rows[0].cells[1].text).toBe('42');
+  });
+
   it('addresses columns past Z with bijective letters', () => {
     const dl: DisplayList = {
       width: 80,

@@ -39,10 +39,11 @@ function key(x: number, y: number): string {
 
 // index each clipped text command by its clip's top-left, the cell box origin
 // the renderer aligns cell text to. later commands win, matching paint order.
+// ghost previews are skipped so proposed values never read as committed.
 function textByCellOrigin(displayList: DisplayList): Map<string, string> {
   const map = new Map<string, string>();
   for (const cmd of displayList.commands) {
-    if (cmd.op === 'text' && cmd.clip) map.set(key(cmd.clip.x, cmd.clip.y), cmd.text);
+    if (cmd.op === 'text' && cmd.clip && !cmd.ghost) map.set(key(cmd.clip.x, cmd.clip.y), cmd.text);
   }
   return map;
 }

@@ -37,9 +37,49 @@ const TEXT_PAD_PX: f32 = 2.0;
 const ASCENT_RATIO: f32 = 0.7;
 const DESCENT_RATIO: f32 = 0.2;
 
+// ghost pair colors, matching the docx revision palette (del struck / ins).
+const GHOST_DEL_COLOR: &str = "#c62828";
+const GHOST_INS_COLOR: &str = "#2e7d32";
+const GHOST_DEL_HIGHLIGHT: &str = "#c628281a";
+const GHOST_INS_HIGHLIGHT: &str = "#2e7d321a";
+// conservative per-char advance estimate as a fraction of the font size.
+const GHOST_CHAR_W_RATIO: f32 = 0.6;
+const GHOST_GAP_PX: f32 = 6.0;
+const GHOST_MIN_SCALE: f32 = 0.6;
+
+/// a pending edit rendered as a ghost pair in place of the cell's committed
+/// text: `old_text` struck in red, `new_text` in green.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhostEdit {
+    pub row: u32,
+    pub col: u32,
+    pub old_text: String,
+    pub new_text: String,
+    pub alignment_value: CellValue,
+}
+
+struct GhostFont {
+    size: f32,
+    family: Option<String>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+}
+
 /// build the display list for one viewport of one sheet. commands are emitted
 /// background -> fills -> gridlines -> borders -> text, each layer painting over the previous.
 pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) -> DisplayList {
+    build_display_list_with_ghosts(wb, sheet, viewport, &[])
+}
+
+/// like [`build_display_list`], with ghost pairs painted in place of the
+/// committed text of each ghost's cell.
+pub fn build_display_list_with_ghosts(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+) -> DisplayList {
     let mut commands = Vec::new();
 
     commands.push(DrawCmd::FillRect {
@@ -74,6 +114,11 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
             .map(|c| geom.col_x(c) - viewport.x)
             .collect(),
     };
+    let changed_ghost_cells: std::collections::HashSet<(u32, u32)> = ghosts
+        .iter()
+        .filter(|g| g.old_text != g.new_text)
+        .map(|g| (g.row, g.col))
+        .collect();
 
     for (at, cell) in visible_anchors(sheet_ref, &rows, &cols) {
         let Some(style) = cell.style else { continue };
@@ -140,6 +185,9 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
     }
 
     for (at, cell) in visible_anchors(sheet_ref, &rows, &cols) {
+        if changed_ghost_cells.contains(&(at.row, at.col)) {
+            continue;
+        }
         let Some((text, color)) = cell_display_text(styles, wb.date_system, cell) else {
             continue;
         };
@@ -180,8 +228,33 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
             italic: font.is_some_and(|f| f.italic),
             underline: font.is_some_and(|f| f.underline),
             strike: font.is_some_and(|f| f.strike),
+            highlight: None,
+            dashed_underline: false,
             font_family: font.and_then(|f| f.name.clone()),
+            ghost: false,
         });
+    }
+
+    for ghost in ghosts {
+        if !rows.contains(&ghost.row) || !cols.contains(&ghost.col) {
+            continue;
+        }
+        let at = CellRef::new(ghost.row, ghost.col);
+        let cell = sheet_ref.cell(at);
+        let font = cell.and_then(|c| c.style).and_then(|s| styles.font_for(s));
+        let font = GhostFont {
+            size: font
+                .and_then(|font| font.size_pt)
+                .map(|size| size as f32)
+                .unwrap_or(FONT_SIZE_PT),
+            family: font.and_then(|font| font.name.clone()),
+            bold: font.is_some_and(|font| font.bold),
+            italic: font.is_some_and(|font| font.italic),
+            underline: font.is_some_and(|font| font.underline),
+        };
+        let bx = cell_box(&geom, viewport, sheet_ref, at);
+        let align = resolve_align_with_value(styles, cell, &ghost.alignment_value);
+        emit_ghost(&mut commands, ghost, bx, font, align);
     }
 
     DisplayList {
@@ -190,6 +263,161 @@ pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) ->
         commands,
         grid,
     }
+}
+
+/// paint one pending edit inside a cell box.
+fn emit_ghost(
+    commands: &mut Vec<DrawCmd>,
+    ghost: &GhostEdit,
+    (cx0, cy0, cw, ch): (f32, f32, f32, f32),
+    font: GhostFont,
+    single_align: Align,
+) {
+    let old = ghost.old_text.as_str();
+    let new = ghost.new_text.as_str();
+    if old == new {
+        return;
+    }
+
+    let clip = Rect {
+        x: cx0,
+        y: cy0,
+        w: cw,
+        h: ch,
+    };
+    let x = cx0 + TEXT_PAD_PX;
+    let avail = (cw - 2.0 * TEXT_PAD_PX).max(0.0);
+    let full_size = font.size;
+
+    let mut line = |x: f32,
+                    y: f32,
+                    text: String,
+                    size: f32,
+                    color: &str,
+                    align: Align,
+                    strike: bool,
+                    preview: bool| {
+        commands.push(DrawCmd::Text {
+            x,
+            y,
+            text,
+            font_size: size,
+            color: color.to_string(),
+            clip,
+            align,
+            bold: font.bold,
+            italic: font.italic,
+            underline: font.underline,
+            strike,
+            highlight: Some(
+                if preview {
+                    GHOST_INS_HIGHLIGHT
+                } else {
+                    GHOST_DEL_HIGHLIGHT
+                }
+                .to_string(),
+            ),
+            dashed_underline: preview,
+            font_family: font.family.clone(),
+            ghost: preview,
+        });
+    };
+
+    if old.is_empty() || new.is_empty() {
+        let (text, color, strike, preview) = if old.is_empty() {
+            (new, GHOST_INS_COLOR, false, true)
+        } else {
+            (old, GHOST_DEL_COLOR, true, false)
+        };
+        let x = match single_align {
+            Align::Left => cx0 + TEXT_PAD_PX,
+            Align::Right => cx0 + cw - TEXT_PAD_PX,
+            Align::Center => cx0 + cw / 2.0,
+        };
+        line(
+            x,
+            baseline_y(cy0, ch, full_size, None),
+            ellipsize(text, avail, full_size),
+            full_size,
+            color,
+            single_align,
+            strike,
+            preview,
+        );
+        return;
+    }
+
+    let old_width = ghost_text_width(old, full_size);
+    let new_width = ghost_text_width(new, full_size);
+    if old_width + GHOST_GAP_PX + new_width <= avail {
+        let baseline = baseline_y(cy0, ch, full_size, None);
+        line(
+            x,
+            baseline,
+            old.to_string(),
+            full_size,
+            GHOST_DEL_COLOR,
+            Align::Left,
+            true,
+            false,
+        );
+        line(
+            x + old_width + GHOST_GAP_PX,
+            baseline,
+            new.to_string(),
+            full_size,
+            GHOST_INS_COLOR,
+            Align::Left,
+            false,
+            true,
+        );
+        return;
+    }
+
+    let line_ratio = ASCENT_RATIO + DESCENT_RATIO;
+    let scale = (ch / (2.0 * full_size * line_ratio)).clamp(GHOST_MIN_SCALE, 1.0);
+    let size = full_size * scale;
+    let line_h = size * line_ratio;
+    let top = cy0 + ((ch - 2.0 * line_h) / 2.0).max(0.0);
+    let first_baseline = top + size * ASCENT_RATIO;
+    line(
+        x,
+        first_baseline,
+        ellipsize(new, avail, size),
+        size,
+        GHOST_INS_COLOR,
+        Align::Left,
+        false,
+        true,
+    );
+    line(
+        x,
+        first_baseline + line_h,
+        ellipsize(old, avail, size),
+        size,
+        GHOST_DEL_COLOR,
+        Align::Left,
+        true,
+        false,
+    );
+}
+
+/// estimated advance width of `text` at `size`, deliberately generous so fit
+/// decisions err toward ellipsizing rather than overlap.
+fn ghost_text_width(text: &str, size: f32) -> f32 {
+    text.chars().count() as f32 * size * GHOST_CHAR_W_RATIO
+}
+
+/// `text` unchanged when its estimate fits `budget`, else a truncated prefix
+/// ending in `…`.
+fn ellipsize(text: &str, budget: f32, size: f32) -> String {
+    if ghost_text_width(text, size) <= budget {
+        return text.to_string();
+    }
+    let char_w = size * GHOST_CHAR_W_RATIO;
+    let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
+    let prefix: String = text.chars().take(keep).collect();
+    format!("{prefix}…")
 }
 
 /// visible cells that draw: inside the range and not a covered merge cell
@@ -284,13 +512,21 @@ pub fn display_text(
 /// horizontal anchor for a cell: an explicit xf alignment wins, otherwise the
 /// value type decides (numbers right, booleans center, text/errors left).
 fn resolve_align(styles: &Stylesheet, cell: &xlsx_model::Cell) -> Align {
-    let type_default = match cell.value {
+    resolve_align_with_value(styles, Some(cell), &cell.value)
+}
+
+fn resolve_align_with_value(
+    styles: &Stylesheet,
+    cell: Option<&xlsx_model::Cell>,
+    value: &CellValue,
+) -> Align {
+    let type_default = match value {
         CellValue::Number { .. } => Align::Right,
         CellValue::Bool { .. } => Align::Center,
         _ => Align::Left,
     };
     let h = cell
-        .style
+        .and_then(|cell| cell.style)
         .and_then(|s| styles.alignment_for(s))
         .and_then(|a| a.h);
     match h {
@@ -489,6 +725,333 @@ mod tests {
         assert_eq!(dl.grid.row_offsets.len(), 3);
         assert!((dl.grid.col_offsets[0] - (dc * 1.0 - vp.x)).abs() < 0.01);
         assert!((dl.grid.row_offsets[0] - (dr * 2.0 - vp.y)).abs() < 0.01);
+    }
+
+    fn ghost(row: u32, col: u32, old: &str, new: &str) -> GhostEdit {
+        ghost_with_alignment_value(
+            row,
+            col,
+            old,
+            new,
+            CellValue::Text {
+                value: new.to_string(),
+            },
+        )
+    }
+
+    fn ghost_with_alignment_value(
+        row: u32,
+        col: u32,
+        old: &str,
+        new: &str,
+        alignment_value: CellValue,
+    ) -> GhostEdit {
+        GhostEdit {
+            row,
+            col,
+            old_text: old.into(),
+            new_text: new.into(),
+            alignment_value,
+        }
+    }
+
+    fn text_cmds(dl: &DisplayList) -> Vec<(&str, &str, bool, Align)> {
+        dl.commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text {
+                    text,
+                    color,
+                    strike,
+                    align,
+                    ..
+                } => Some((text.as_str(), color.as_str(), *strike, *align)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ghost_flags(dl: &DisplayList) -> Vec<bool> {
+        dl.commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { ghost, .. } => Some(*ghost),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ghost_pair_prefers_old_then_new_on_one_line() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(10.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "10", "42")]);
+
+        let texts = text_cmds(&dl);
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[0], ("10", GHOST_DEL_COLOR, true, Align::Left));
+        assert_eq!(texts[1], ("42", GHOST_INS_COLOR, false, Align::Left));
+        assert_eq!(ghost_flags(&dl), vec![false, true]);
+
+        let lines: Vec<(f32, f32, f32)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text {
+                    x, y, font_size, ..
+                } => Some((*x, *y, *font_size)),
+                _ => None,
+            })
+            .collect();
+        assert!(lines[0].0 < lines[1].0);
+        assert_eq!(lines[0].1, lines[1].1);
+        assert_eq!((lines[0].2, lines[1].2), (FONT_SIZE_PT, FONT_SIZE_PT));
+    }
+
+    #[test]
+    fn ghost_insertion_paints_green_only() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[ghost_with_alignment_value(
+                1,
+                1,
+                "",
+                "7",
+                CellValue::Number { value: 7.0 },
+            )],
+        );
+
+        let texts = text_cmds(&dl);
+        assert_eq!(texts, vec![("7", GHOST_INS_COLOR, false, Align::Right)]);
+        assert_eq!(ghost_flags(&dl), vec![true]);
+        let (x, clip) = dl
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text { x, clip, .. } => Some((*x, *clip)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(x, clip.x + clip.w - TEXT_PAD_PX);
+    }
+
+    #[test]
+    fn single_ghosts_honor_explicit_alignment_and_deleted_value_type() {
+        let mut wb = Workbook::default();
+        let style = wb
+            .styles
+            .intern_cell_format(&xlsx_model::CellFormat {
+                alignment: xlsx_model::Alignment {
+                    h: Some(HAlign::Left),
+                    ..xlsx_model::Alignment::default()
+                },
+                ..xlsx_model::CellFormat::default()
+            })
+            .unwrap();
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style: Some(style),
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(CellRef::new(1, 0), num_cell(7.0));
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 60.0,
+            },
+            &[
+                ghost_with_alignment_value(0, 0, "", "7", CellValue::Number { value: 7.0 }),
+                ghost_with_alignment_value(1, 0, "7", "", CellValue::Number { value: 7.0 }),
+            ],
+        );
+
+        assert_eq!(
+            text_cmds(&dl),
+            vec![
+                ("7", GHOST_INS_COLOR, false, Align::Left),
+                ("7", GHOST_DEL_COLOR, true, Align::Right),
+            ]
+        );
+    }
+
+    #[test]
+    fn stacked_ghost_pair_puts_new_value_on_top() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("previous long value"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[ghost(0, 0, "previous long value", "replacement long value")],
+        );
+
+        let texts = text_cmds(&dl);
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].0.ends_with('…') && !texts[0].2);
+        assert!(texts[1].0.ends_with('…') && texts[1].2);
+        assert_eq!((texts[0].3, texts[1].3), (Align::Left, Align::Left));
+
+        let lines: Vec<_> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { y, font_size, .. } => Some((*y, *font_size)),
+                _ => None,
+            })
+            .collect();
+        assert!(lines[0].0 < lines[1].0);
+        assert_eq!((lines[0].1, lines[1].1), (FONT_SIZE_PT, FONT_SIZE_PT));
+    }
+
+    #[test]
+    fn short_rows_shrink_stacked_ghosts_without_overlap() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.row_heights.insert(0, 7.5);
+        sheet.set_cell(CellRef::new(0, 0), num_cell(10.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 80.0,
+        };
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &vp,
+            &[ghost(0, 0, "previous", "replacement")],
+        );
+
+        let lines: Vec<(f32, f32)> = dl
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                DrawCmd::Text { y, font_size, .. } => Some((*y, *font_size)),
+                _ => None,
+            })
+            .collect();
+        let texts = text_cmds(&dl);
+        assert!(!texts[0].2 && texts[1].2);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            (lines[0].1, lines[1].1),
+            (
+                FONT_SIZE_PT * GHOST_MIN_SCALE,
+                FONT_SIZE_PT * GHOST_MIN_SCALE
+            )
+        );
+        assert!(
+            lines[1].0 - lines[0].0
+                >= FONT_SIZE_PT * GHOST_MIN_SCALE * (ASCENT_RATIO + DESCENT_RATIO) - 0.01
+        );
+    }
+
+    #[test]
+    fn equal_formatted_values_keep_the_committed_cell_text() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(4855.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 60.0,
+        };
+        let dl =
+            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "4855", "4855")]);
+
+        assert_eq!(
+            text_cmds(&dl),
+            vec![("4855", TEXT_COLOR, false, Align::Right)]
+        );
+        assert_eq!(ghost_flags(&dl), vec![false]);
+        assert_eq!(
+            dl.commands
+                .iter()
+                .filter(|command| matches!(command, DrawCmd::FillRect { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ghost_runs_carry_revision_highlights_and_new_underline() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), num_cell(10.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        let dl = build_display_list_with_ghosts(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 60.0,
+            },
+            &[ghost(0, 0, "10", "42")],
+        );
+        let styles: Vec<_> = dl
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    highlight,
+                    dashed_underline,
+                    ..
+                } => Some((highlight.as_deref(), *dashed_underline)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            styles,
+            vec![
+                (Some(GHOST_DEL_HIGHLIGHT), false),
+                (Some(GHOST_INS_HIGHLIGHT), true)
+            ]
+        );
     }
 
     #[test]

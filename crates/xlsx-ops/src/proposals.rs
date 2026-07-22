@@ -2,8 +2,19 @@
 //! until a human accepts or rejects. display texts are captured upstream.
 
 use serde::{Deserialize, Serialize};
+use xlsx_model::CellValue;
 
-use crate::CellState;
+use crate::{CellState, NumberFormatMutation};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposalGhost {
+    pub sheet: u32,
+    pub row: u32,
+    pub col: u32,
+    pub old_text: String,
+    pub new_text: String,
+    pub alignment_value: CellValue,
+}
 
 /// one cell edit inside a proposal. `input` is the raw editor string re-applied
 /// on accept and stays off the wire; `old_text`/`new_text` are display texts.
@@ -17,6 +28,8 @@ pub struct ProposedEdit {
     pub input: String,
     #[serde(skip)]
     pub old_state: CellState,
+    #[serde(skip)]
+    pub number_format: Option<NumberFormatMutation>,
     pub a1: String,
     pub old_text: String,
     pub new_text: String,
@@ -31,6 +44,8 @@ pub struct Proposal {
     pub note: Option<String>,
     #[serde(rename = "cells")]
     pub edits: Vec<ProposedEdit>,
+    #[serde(skip)]
+    pub ghosts: Vec<ProposalGhost>,
 }
 
 /// the session's live set of pending proposals, with a monotonic id counter.
@@ -88,6 +103,7 @@ mod tests {
             col: 0,
             input: new.to_string(),
             old_state: CellState::default(),
+            number_format: None,
             a1: a1.to_string(),
             old_text: old.to_string(),
             new_text: new.to_string(),
@@ -100,6 +116,7 @@ mod tests {
             agent_id: "agent-1".to_string(),
             note: None,
             edits: vec![edit("A1", "", "hi")],
+            ghosts: Vec::new(),
         }
     }
 

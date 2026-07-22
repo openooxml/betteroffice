@@ -44,6 +44,7 @@ pub enum DrawCmd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<String>,
     },
+    #[serde(rename_all = "camelCase")]
     Text {
         x: f32,
         y: f32,
@@ -61,9 +62,17 @@ pub enum DrawCmd {
         underline: bool,
         #[serde(default, skip_serializing_if = "is_false")]
         strike: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        highlight: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        dashed_underline: bool,
         /// font family from the style font; the backend falls back to its default face.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         font_family: Option<String>,
+        /// preview text that is not the cell's committed value (a ghost `new`);
+        /// excluded from a11y text recovery.
+        #[serde(default, skip_serializing_if = "is_false")]
+        ghost: bool,
     },
 }
 
@@ -135,7 +144,10 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 italic,
                 underline,
                 strike,
+                highlight,
+                dashed_underline,
                 font_family,
+                ghost,
             } => DrawCmd::Text {
                 x: x * factor,
                 y: y * factor,
@@ -153,7 +165,10 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 italic,
                 underline,
                 strike,
+                highlight,
+                dashed_underline,
                 font_family,
+                ghost,
             },
         })
         .collect();
@@ -223,7 +238,10 @@ mod tests {
                     italic: false,
                     underline: false,
                     strike: false,
+                    highlight: None,
+                    dashed_underline: false,
                     font_family: None,
+                    ghost: false,
                 },
             ],
             grid: GridMeta {

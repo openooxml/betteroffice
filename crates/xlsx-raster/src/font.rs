@@ -42,6 +42,8 @@ pub struct TextRun<'a> {
     pub italic: bool,
     pub underline: bool,
     pub strike: bool,
+    pub highlight: Option<Color>,
+    pub dashed_underline: bool,
 }
 
 /// paint one shaped, single-line run, clipped strictly to the run's clip rect.
@@ -124,10 +126,40 @@ fn paint_run(
     ox: f32,
     oy: f32,
 ) {
+    paint_highlight(target, face, run, pen, run_width, scale, ox, oy);
     paint_glyphs(
         target, face, glyphs, pen, run.y, scale, paint, run.bold, run.italic, ox, oy,
     );
     paint_decorations(target, face, run, pen, run_width, scale, paint, ox, oy);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_highlight(
+    target: &mut Pixmap,
+    face: &rustybuzz::Face<'_>,
+    run: &TextRun,
+    pen: f32,
+    run_width: f32,
+    scale: f32,
+    ox: f32,
+    oy: f32,
+) {
+    let Some(color) = run.highlight else {
+        return;
+    };
+    let ascent = face.ascender() as f32 * scale;
+    let descent = -face.descender() as f32 * scale;
+    let Some(rect) = Rect::from_xywh(
+        pen - ox - 2.0,
+        run.y - oy - ascent - 1.0,
+        run_width + 4.0,
+        ascent + descent + 2.0,
+    ) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    target.fill_rect(rect, &paint, Transform::identity(), None);
 }
 
 // (ox, oy) translates into a clip-sized scratch when the run overflows its clip.
@@ -197,6 +229,23 @@ fn paint_decorations(
         let pos = m.map(|m| m.position as f32).unwrap_or(0.26 * em);
         let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
         bar(pos, thick);
+    }
+    if run.dashed_underline {
+        let m = face.underline_metrics();
+        let pos = m.map(|m| m.position as f32).unwrap_or(-0.1 * em);
+        let thick = m.map(|m| m.thickness as f32).unwrap_or(0.05 * em);
+        let h = (thick * scale).max(0.5);
+        let y = run.y - pos * scale - oy - h / 2.0;
+        let dash = 3.0_f32.max(h * 2.0);
+        let gap = 2.0_f32.max(h);
+        let mut x = pen - ox;
+        let end = x + run_width;
+        while x < end {
+            if let Some(rect) = Rect::from_xywh(x, y, dash.min(end - x), h) {
+                target.fill_rect(rect, paint, Transform::identity(), None);
+            }
+            x += dash + gap;
+        }
     }
 }
 

@@ -10,12 +10,15 @@ use xlsx_model::{
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
-    NumberFormatMutation, Op, Proposal, ProposalSet, ProposedEdit, Provenance, StylePatch,
-    TextWrapping, Transaction, UndoStack, VerticalAlignment, cell_state_for_input_no_eval,
+    NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
+    StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
+    cell_state_for_input_no_eval,
 };
-use xlsx_render::{DisplayList, GridGeometry, Viewport, build_display_list, display_text};
+use xlsx_render::{
+    DisplayList, GhostEdit, GridGeometry, Viewport, build_display_list_with_ghosts, display_text,
+};
 #[cfg(feature = "raster")]
-use xlsx_render::{scaled, viewport_for_range, viewport_for_used_range};
+use xlsx_render::{build_display_list, scaled, viewport_for_range, viewport_for_used_range};
 
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate,
@@ -913,6 +916,9 @@ impl Workbook {
                 .sheet_mut(edit.sheet)
                 .ok_or(Error::SheetOutOfRange(edit.sheet))?
                 .set_cell(edit.cell, state.into());
+            if let Some(format) = &edit.number_format {
+                apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
+            }
         }
         rebuild_and_recalc_all(&mut preview, options.now_serial);
 
@@ -924,16 +930,19 @@ impl Workbook {
                 col: edit.cell.col,
                 input: edit.input,
                 old_state: current_cell_state(&self.model, edit.sheet, edit.cell),
+                number_format: edit.number_format,
                 a1: edit.cell.to_a1(),
                 old_text: display_text_at(&self.model, edit.sheet, edit.cell)?,
                 new_text: display_text_at(&preview, edit.sheet, edit.cell)?,
             });
         }
+        let ghosts = proposal_ghosts(&self.model, &preview, &edits)?;
         let proposal = Proposal {
             id: self.proposals.next_id(),
             agent_id: request.agent_id,
             note: request.note,
             edits,
+            ghosts,
         };
         self.proposals.add(proposal.clone());
         Ok(proposal)
@@ -990,19 +999,26 @@ impl Workbook {
             self.validate_target(sheet, cell)?;
             let state = edit_cell_state(&preview, sheet, cell, &edit.input);
             validate_cell_state(&state)?;
-            if cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
-                continue;
+            if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
+                preview
+                    .sheet_mut(sheet)
+                    .expect("sheet validated")
+                    .set_cell(cell, state.clone().into());
+                touched.push((sheet, cell, state.formula.clone()));
+                ops.push(Op::SetCell {
+                    sheet,
+                    at: cell,
+                    cell: state,
+                });
             }
-            preview
-                .sheet_mut(sheet)
-                .expect("sheet validated")
-                .set_cell(cell, state.clone().into());
-            touched.push((sheet, cell, state.formula.clone()));
-            ops.push(Op::SetCell {
-                sheet,
-                at: cell,
-                cell: state,
-            });
+            if let Some(format) = &edit.number_format {
+                apply_proposed_number_format(&mut preview, sheet, cell, format)?;
+                ops.push(Op::SetRangeNumberFormat {
+                    sheet,
+                    range: CellRange::new(cell, cell),
+                    format: format.clone(),
+                });
+            }
         }
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             self.proposals.remove(id);
@@ -1046,10 +1062,55 @@ impl Workbook {
         self.display_list_for(self.active_sheet, viewport)
     }
 
+    /// display list for `sheet` with ghost pairs for pending proposals; a
+    /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
         validate_display_region(sheet_ref, viewport)?;
-        Ok(build_display_list(&self.model, sheet, viewport))
+        let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
+        for proposal in self.proposals.list() {
+            let drifted: BTreeSet<_> = proposal
+                .edits
+                .iter()
+                .filter_map(|edit| {
+                    let at = CellRef::new(edit.row, edit.col);
+                    (current_cell_state(&self.model, SheetId(edit.sheet), at) != edit.old_state)
+                        .then_some((edit.sheet, edit.row, edit.col))
+                })
+                .collect();
+            let direct: BTreeSet<_> = proposal
+                .edits
+                .iter()
+                .map(|edit| (edit.sheet, edit.row, edit.col))
+                .collect();
+            for ghost in &proposal.ghosts {
+                let address = (ghost.sheet, ghost.row, ghost.col);
+                let is_direct = direct.contains(&address);
+                if ghost.sheet != sheet.0
+                    || drifted.contains(&address)
+                    || (!is_direct && !drifted.is_empty())
+                {
+                    continue;
+                }
+                ghosts.insert(
+                    (ghost.row, ghost.col),
+                    GhostEdit {
+                        row: ghost.row,
+                        col: ghost.col,
+                        old_text: ghost.old_text.clone(),
+                        new_text: ghost.new_text.clone(),
+                        alignment_value: ghost.alignment_value.clone(),
+                    },
+                );
+            }
+        }
+        let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
+        Ok(build_display_list_with_ghosts(
+            &self.model,
+            sheet,
+            viewport,
+            &ghosts,
+        ))
     }
 
     #[cfg(feature = "raster")]
@@ -1952,6 +2013,108 @@ fn display_text_at(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> R
         Some(cell) => display_text(&workbook.styles, workbook.date_system, cell),
         None => String::new(),
     })
+}
+
+fn apply_proposed_number_format(
+    workbook: &mut WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    format: &NumberFormatMutation,
+) -> Result<()> {
+    xlsx_ops::apply(
+        workbook,
+        &Op::SetRangeNumberFormat {
+            sheet,
+            range: CellRange::new(cell, cell),
+            format: format.clone(),
+        },
+    )?;
+    Ok(())
+}
+
+fn proposal_ghosts(
+    committed: &WorkbookModel,
+    preview: &WorkbookModel,
+    edits: &[ProposedEdit],
+) -> Result<Vec<ProposalGhost>> {
+    let direct: BTreeSet<_> = edits
+        .iter()
+        .map(|edit| (edit.sheet, edit.row, edit.col))
+        .collect();
+    let mut ghosts = edits
+        .iter()
+        .map(|edit| ProposalGhost {
+            sheet: edit.sheet,
+            row: edit.row,
+            col: edit.col,
+            old_text: edit.old_text.clone(),
+            new_text: edit.new_text.clone(),
+            alignment_value: proposal_alignment_value(
+                committed,
+                preview,
+                SheetId(edit.sheet),
+                CellRef::new(edit.row, edit.col),
+            ),
+        })
+        .collect::<Vec<_>>();
+
+    for address in changed_cells_between(committed, preview) {
+        let key = (address.sheet.0, address.cell.row, address.cell.col);
+        if direct.contains(&key) {
+            continue;
+        }
+        let committed_formula = committed
+            .sheet(address.sheet)
+            .and_then(|sheet| sheet.cell(address.cell))
+            .is_some_and(|cell| cell.formula.is_some());
+        let preview_formula = preview
+            .sheet(address.sheet)
+            .and_then(|sheet| sheet.cell(address.cell))
+            .is_some_and(|cell| cell.formula.is_some());
+        if !committed_formula || !preview_formula {
+            continue;
+        }
+        let old_text = display_text_at(committed, address.sheet, address.cell)?;
+        let new_text = display_text_at(preview, address.sheet, address.cell)?;
+        if old_text == new_text {
+            continue;
+        }
+        ghosts.push(ProposalGhost {
+            sheet: address.sheet.0,
+            row: address.cell.row,
+            col: address.cell.col,
+            old_text,
+            new_text,
+            alignment_value: proposal_alignment_value(
+                committed,
+                preview,
+                address.sheet,
+                address.cell,
+            ),
+        });
+    }
+    Ok(ghosts)
+}
+
+fn proposal_alignment_value(
+    committed: &WorkbookModel,
+    preview: &WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+) -> CellValue {
+    let new_value = preview
+        .sheet(sheet)
+        .and_then(|sheet| sheet.cell(cell))
+        .map(|cell| cell.value.clone())
+        .unwrap_or_default();
+    if !matches!(new_value, CellValue::Empty) {
+        return new_value;
+    }
+    committed
+        .sheet(sheet)
+        .and_then(|sheet| sheet.cell(cell))
+        .map(|cell| cell.value.clone())
+        .unwrap_or_default()
 }
 
 fn value_to_input(value: &CellValue) -> String {

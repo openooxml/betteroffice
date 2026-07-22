@@ -53,9 +53,7 @@ import type {
 } from './components/Toolbar';
 import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
-import { ProposalDecoration } from './proposals/ProposalDecoration';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { proposalColor } from './proposals/palette';
 
 /**
  * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
@@ -412,8 +410,10 @@ function XlsxEditorContent({
     return () => observer.disconnect();
   }, []);
 
-  // re-read the pending proposal list from the handle. safe to call against an
-  // old core (the loader returns an empty list).
+  // re-read the pending proposal list and queue a repaint — ghosts paint into
+  // the engine frame, so every lifecycle change (propose/accept/reject) must
+  // republish it. safe to call against an old core (the loader returns an
+  // empty list).
   const refreshProposals = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) {
@@ -425,6 +425,7 @@ function XlsxEditorContent({
     } catch {
       setProposals([]);
     }
+    setRevision((r) => r + 1);
   }, []);
 
   // open the workbook when the file changes; dispose it on change/unmount and
@@ -675,11 +676,16 @@ function XlsxEditorContent({
     if (editing) editorInputRef.current?.focus({ preventScroll: true });
   }, [editing]);
 
-  // fold a mutation result back into state and queue a repaint.
-  const applyResult = useCallback((result: EditResult) => {
-    setSheetInfo(result.sheetInfo);
-    setRevision((r) => r + 1);
-  }, []);
+  // fold a mutation result back into state and queue a repaint. re-reads the
+  // pending proposals because structural ops and undo/redo can drop them.
+  const applyResult = useCallback(
+    (result: EditResult) => {
+      setSheetInfo(result.sheetInfo);
+      setRevision((r) => r + 1);
+      refreshProposals();
+    },
+    [refreshProposals]
+  );
 
   const selectedRangeA1 = useCallback(
     (target: Selection): string | null => {
@@ -1060,8 +1066,8 @@ function XlsxEditorContent({
     [applyResult, refreshProposals, focusContainer]
   );
 
-  // reject a proposal: drop it and its warning, then refresh so its decorations
-  // disappear (they are driven by the pending list, not the canvas).
+  // reject a proposal: drop it and its warning, then refresh so its border
+  // chrome disappears and the canvas repaints without its ghost.
   const rejectProposal = useCallback(
     (id: string) => {
       const handle = handleRef.current;
@@ -1492,25 +1498,6 @@ function XlsxEditorContent({
                 }}
               />
             )}
-            {/* ghost previews for pending proposals visible in this viewport.
-                aria-hidden — the a11y grid announces real committed values only. */}
-            {grid &&
-              proposals.flatMap((proposal) =>
-                proposal.cells.map((cell) => {
-                  if (cell.sheet !== activeSheet) return null;
-                  const rect = cellRect(grid, cell.row, cell.col);
-                  if (!rect) return null;
-                  return (
-                    <ProposalDecoration
-                      key={`${proposal.id}:${cell.a1}`}
-                      rect={scaledRect(rect, zoom)}
-                      color={proposalColor(proposal.agentId)}
-                      newText={cell.newText}
-                      agentId={proposal.agentId}
-                    />
-                  );
-                })
-              )}
             {editing && scaledEditRect && (
               <input
                 ref={editorInputRef}

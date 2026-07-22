@@ -196,6 +196,7 @@ export interface CellInputEdit {
  */
 export interface ProposalEdit extends CellInputEdit {
   sheet: number;
+  numberFormat?: NumberFormatMutation;
 }
 
 /**
@@ -644,7 +645,15 @@ export function openWorkbook(
       return mutatingWasmCall(() => {
         const fn = (doc as { proposeJson?: (a: string) => string }).proposeJson;
         if (typeof fn !== 'function') throw new Error('proposals not in this build');
-        return JSON.parse(fn.call(doc, JSON.stringify({ agentId, note, edits }))) as Proposal;
+        const wireEdits = edits.map(({ numberFormat, ...edit }) => ({
+          ...edit,
+          ...(numberFormat === undefined
+            ? {}
+            : { numberFormat: typeof numberFormat === 'string' ? { type: numberFormat } : numberFormat }),
+        }));
+        return JSON.parse(
+          fn.call(doc, JSON.stringify({ agentId, note, edits: wireEdits }))
+        ) as Proposal;
       });
     },
     listProposals(): Proposal[] {

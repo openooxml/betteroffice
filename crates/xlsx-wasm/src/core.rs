@@ -125,11 +125,14 @@ struct ProposeArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProposeEditInput {
     sheet: u32,
     row: u32,
     col: u32,
     input: String,
+    #[serde(default)]
+    number_format: Option<NumberFormatMutation>,
 }
 
 #[derive(Deserialize)]
@@ -503,6 +506,7 @@ impl Session {
                             sheet: SheetId(edit.sheet),
                             cell: CellRef::new(edit.row, edit.col),
                             input: edit.input,
+                            number_format: edit.number_format,
                         })
                         .collect(),
                 },
@@ -1051,6 +1055,18 @@ mod tests {
             )
             .unwrap();
         assert!(second.contains(r#""id":"p2""#));
+        let ghosted = session
+            .display_list_json(r#"{"x":0,"y":0,"width":200,"height":80}"#)
+            .unwrap();
+        assert!(
+            ghosted.contains(r##""text":"$2,000.00","fontSize":11.0,"color":"#2e7d32""##),
+            "{ghosted}"
+        );
+        assert!(
+            ghosted.contains(r##""text":"$1,000.00","fontSize":11.0,"color":"#c62828""##),
+            "{ghosted}"
+        );
+        assert!(ghosted.contains(r#""strike":true"#), "{ghosted}");
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"3000"}"#, None)
             .unwrap();
@@ -1058,6 +1074,7 @@ mod tests {
             .display_list_json(r#"{"x":0,"y":0,"width":200,"height":80}"#)
             .unwrap();
         assert!(display.contains("$3,000.00"), "{display}");
+        assert!(!display.contains(r##""color":"#c62828""##), "{display}");
     }
 
     #[test]
