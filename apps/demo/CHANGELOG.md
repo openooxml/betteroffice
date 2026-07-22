@@ -1,5 +1,18 @@
 # @betteroffice/demo
 
+## 0.0.6
+
+### Patch Changes
+
+- Updated dependencies [b34bb01]
+- Updated dependencies [793b761]
+- Updated dependencies [c6ad184]
+- Updated dependencies [793b761]
+  - @betteroffice/docx@0.0.3
+  - @betteroffice/xlsx@0.0.7
+  - @betteroffice/xlsx-react@0.0.7
+  - @betteroffice/docx-react@0.0.3
+
 ## 0.0.5
 
 ### Patch Changes
