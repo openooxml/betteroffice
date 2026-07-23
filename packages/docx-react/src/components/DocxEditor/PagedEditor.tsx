@@ -26,6 +26,7 @@ import {
   type YrsStoredFormatting,
 } from './YrsInput';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
+import { RemotePresenceOverlay } from './overlays/RemotePresenceOverlay';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
 import { CanvasImageSelectionOverlay } from './overlays/CanvasImageSelectionOverlay';
 import { CanvasTableResizeOverlay } from './overlays/CanvasTableResizeOverlay';
@@ -668,6 +669,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const yrsProjectionVersionRef = useRef(0);
     const lastYrsToolbarSelectionKeyRef = useRef<string | null>(null);
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
+    const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const publishYrsDirectInput = useCallback((): void => {
       yrsCore.publishDirectInput();
@@ -704,6 +706,23 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const session = yrsCore.session;
         if (session) {
           onYrsHistoryChangeRef.current?.(session.canUndo(), session.canRedo());
+        }
+        const presence = collaboration?.presence;
+        const stickySelection = session?.selection() ?? null;
+        const presenceSelectionKey = stickySelection
+          ? JSON.stringify([stickySelection.anchor, stickySelection.head])
+          : null;
+        if (
+          presence &&
+          session &&
+          lastPublishedPresenceSelectionKeyRef.current !== presenceSelectionKey
+        ) {
+          lastPublishedPresenceSelectionKeyRef.current = presenceSelectionKey;
+          try {
+            presence.setCursor(session.encodeSelection(), !docChanged);
+          } catch {
+            presence.setCursor(null, !docChanged);
+          }
         }
         const liveStory = session?.selection()?.head.story ?? activeYrsRootStory;
         const inputMap = yrsCore.inputPositionMap(liveStory);
@@ -771,6 +790,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       [
         activeYrsRootStory,
+        collaboration?.presence,
         hfEditRId,
         refreshYrsLayout,
         updateSelectionOverlay,
@@ -779,6 +799,22 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsCore.session,
       ]
     );
+
+    useEffect(() => {
+      const presence = collaboration?.presence;
+      const session = yrsCore.session;
+      lastPublishedPresenceSelectionKeyRef.current = null;
+      if (!presence || !session) return;
+      const selection = session.selection();
+      lastPublishedPresenceSelectionKeyRef.current = selection
+        ? JSON.stringify([selection.anchor, selection.head])
+        : null;
+      try {
+        presence.setCursor(session.encodeSelection());
+      } catch {
+        presence.setCursor(null);
+      }
+    }, [collaboration?.presence, yrsCore.session]);
 
     const syncYrsInputState = useCallback(
       (docChanged: boolean): boolean => {
@@ -1621,6 +1657,25 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 displayList={canvasDisplayList}
                 displayListQueries={displayListQueries}
                 directProjection={residentCaretAuthoritative}
+                sidebarOpen={commentsSidebarOpen}
+                zoom={zoom}
+              />
+            )}
+
+          {canvasOverlayTarget &&
+            canvasDisplayList &&
+            displayListQueries &&
+            collaboration?.presence &&
+            yrsCore.session && (
+              <RemotePresenceOverlay
+                presence={collaboration.presence}
+                session={yrsCore.session}
+                locToDisplayPosition={yrsLocToDisplayPosition}
+                overlayTarget={canvasOverlayTarget}
+                canvasHostRef={interactionPageHostRef}
+                displayListQueries={displayListQueries}
+                displayListIdentity={canvasDisplayList}
+                displayListFrameEpoch={displayListFrameEpoch}
                 sidebarOpen={commentsSidebarOpen}
                 zoom={zoom}
               />
