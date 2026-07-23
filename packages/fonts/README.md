@@ -62,6 +62,7 @@ import {
   resolveMetricCompatFamily, // "calibri" -> "Carlito" (case-insensitive, aliases included)
   resolveMetricCompatFace, // ("SimHei", bold, italic) -> concrete face (Regular fallback)
   resolveScriptFallbackFace, // ('cjk-sc' | 'arabic' | ..., bold, italic) -> coverage face
+  resolveLastResortFace, // always-available base face for any (family, bold, italic)
   loadBundledFontBytes, // face -> Promise<ArrayBuffer> (cached per face)
   registerBundledFontFace, // face -> FontFace registration (no-op outside the DOM)
 } from '@betteroffice/docx-fonts';

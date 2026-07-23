@@ -35,5 +35,5 @@ An xml-js `Element` tree (non-compact mode) satisfies this out of the box.
 - `@betteroffice/drawingml/units` — EMU/point/pixel conversion helpers.
 
 Used by [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx)
-and the OpenOOXML pptx project. Versioned in lockstep with the other
-`@openooxml` packages.
+and developed in the [BetterOffice](https://betteroffice.dev) monorepo alongside
+the other `@betteroffice` packages. Apache-2.0.
