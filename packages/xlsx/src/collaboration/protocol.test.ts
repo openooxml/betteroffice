@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  decodeAwarenessUpdate,
   decodeMessages,
+  encodeAwarenessUpdate,
   encodeEmptyAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
@@ -25,6 +28,50 @@ describe('collaboration protocol encoding', () => {
     expect([...encodeSyncStep2(Uint8Array.of(3, 4))]).toEqual([0, 1, 2, 3, 4]);
     expect([...encodeUpdate(Uint8Array.of(5, 6))]).toEqual([0, 2, 2, 5, 6]);
     expect([...encodeEmptyAwarenessUpdate()]).toEqual([1, 1, 0]);
+    expect([...encodeQueryAwareness()]).toEqual([3]);
+  });
+
+  it('round-trips awareness states and explicit leaves', () => {
+    const updates = [
+      {
+        clientId: 42,
+        clock: 7,
+        state: {
+          user: { name: 'Quiet Otter', color: '#0B57D0' },
+          cursor: {
+            sheet: 'sheet:0',
+            anchor: { row: 2, col: 3 },
+            head: { row: 5, col: 8 },
+          },
+        },
+      },
+      { clientId: 43, clock: 9, state: null },
+    ];
+    const [message] = decodeMessages(encodeAwarenessUpdate(updates));
+    expect(message.type).toBe('awareness');
+    if (message.type !== 'awareness') throw new Error('expected awareness');
+    expect(decodeAwarenessUpdate(message.update)).toEqual(updates);
+  });
+
+  it('normalizes an absent cursor to present without a selection', () => {
+    const state = JSON.stringify({
+      user: { name: 'Quiet Otter', color: '#0B57D0' },
+    });
+    const bytes = new TextEncoder().encode(state);
+    expect(
+      decodeAwarenessUpdate(
+        Uint8Array.from([1, 42, 7, bytes.byteLength, ...bytes])
+      )
+    ).toEqual([
+      {
+        clientId: 42,
+        clock: 7,
+        state: {
+          user: { name: 'Quiet Otter', color: '#0B57D0' },
+          cursor: null,
+        },
+      },
+    ]);
   });
 
   it('uses standard multibyte varUint lengths', () => {
@@ -85,6 +132,19 @@ describe('collaboration protocol decoding', () => {
       Uint8Array.of(2, 0, 1),
     ];
     for (const frame of frames) expect(() => decodeMessages(frame)).toThrow(ProtocolError);
+  });
+
+  it('rejects malformed awareness payloads and bounded state floods', () => {
+    expect(() => decodeAwarenessUpdate(Uint8Array.of())).toThrow('Truncated varUint');
+    expect(() => decodeAwarenessUpdate(Uint8Array.of(1, 1, 0, 2, 123, 125))).toThrow(
+      'Awareness state must contain a user'
+    );
+    expect(() => decodeAwarenessUpdate(Uint8Array.of(0, 1))).toThrow(
+      'Trailing awareness update data'
+    );
+    expect(() => decodeAwarenessUpdate(Uint8Array.of(2), 1)).toThrow(
+      'Awareness update exceeds 1 states'
+    );
   });
 
   it('rejects overflowing and non-canonical varUints', () => {

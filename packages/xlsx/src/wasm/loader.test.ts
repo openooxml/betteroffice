@@ -39,6 +39,7 @@ describe('wasm loader', () => {
     const handle = openWorkbook(sampleBytes());
     try {
       const info = handle.sheetInfo();
+      expect(info.sheetIds).toEqual(['sheet:0', 'sheet:1', 'sheet:2']);
       expect(info.sheetNames).toEqual(['Budget', 'Summary', 'Styled']);
       expect(info.activeSheet).toBe(0);
       expect(info.contentWidth).toBeGreaterThan(0);

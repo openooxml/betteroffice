@@ -199,7 +199,7 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
-    /// serialized `SheetInfo`: sheet names, active index, content extent.
+    /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
     #[wasm_bindgen(js_name = sheetInfoJson)]
     pub fn sheet_info_json(&self) -> Result<String, JsValue> {
         self.session

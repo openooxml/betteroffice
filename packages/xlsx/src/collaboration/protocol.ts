@@ -1,5 +1,8 @@
+import type { AwarenessPayload, AwarenessUpdate } from './types';
+
 export const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024 + 16;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
+export const DEFAULT_MAX_AWARENESS_STATES = 1024;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -126,6 +129,62 @@ function encodeFrame(parts: readonly Uint8Array[], maxFrameBytes: number): Uint8
   return frame;
 }
 
+function encodeVarString(value: string): Uint8Array[] {
+  const bytes = new TextEncoder().encode(value);
+  return [encodeVarUint(bytes.byteLength), bytes];
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function awarenessCell(value: unknown): { row: number; col: number } {
+  if (!isObject(value)) throw new ProtocolError('Awareness cell must be an object');
+  const { row, col } = value;
+  if (
+    !Number.isSafeInteger(row) ||
+    !Number.isSafeInteger(col) ||
+    (row as number) < 0 ||
+    (col as number) < 0
+  ) {
+    throw new ProtocolError('Awareness cell coordinates must be non-negative safe integers');
+  }
+  return { row: row as number, col: col as number };
+}
+
+function awarenessPayload(value: unknown): AwarenessPayload | null {
+  if (value === null) return null;
+  if (!isObject(value) || !isObject(value.user)) {
+    throw new ProtocolError('Awareness state must contain a user');
+  }
+  const { name, color } = value.user;
+  if (typeof name !== 'string' || name.length === 0 || name.length > 128) {
+    throw new ProtocolError('Awareness user name must contain 1 to 128 characters');
+  }
+  if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) {
+    throw new ProtocolError('Awareness user color must be #RRGGBB');
+  }
+
+  const cursor = value.cursor;
+  if (cursor === null || cursor === undefined) {
+    return { user: { name, color }, cursor: null };
+  }
+  if (!isObject(cursor) || typeof cursor.sheet !== 'string') {
+    throw new ProtocolError('Awareness cursor must contain a sheet identifier');
+  }
+  if (cursor.sheet.length === 0 || cursor.sheet.length > 256) {
+    throw new ProtocolError('Awareness sheet identifier must contain 1 to 256 characters');
+  }
+  return {
+    user: { name, color },
+    cursor: {
+      sheet: cursor.sheet,
+      anchor: awarenessCell(cursor.anchor),
+      head: awarenessCell(cursor.head),
+    },
+  };
+}
+
 function encodeSyncMessage(
   subtype: number,
   payload: Uint8Array,
@@ -166,15 +225,85 @@ export function encodeUpdate(
 export function encodeEmptyAwarenessUpdate(
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
 ): Uint8Array {
-  const emptyUpdate = Uint8Array.of(0);
+  return encodeAwarenessUpdate([], maxFrameBytes);
+}
+
+export function encodeAwarenessUpdate(
+  updates: readonly AwarenessUpdate[],
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  if (updates.length > DEFAULT_MAX_AWARENESS_STATES) {
+    throw new ProtocolError(
+      `Awareness update exceeds ${DEFAULT_MAX_AWARENESS_STATES} states`
+    );
+  }
+  const payloadParts: Uint8Array[] = [encodeVarUint(updates.length)];
+  for (const update of updates) {
+    if (!Number.isSafeInteger(update.clientId) || update.clientId <= 0) {
+      throw new ProtocolError('Awareness clientId must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(update.clock) || update.clock < 0) {
+      throw new ProtocolError('Awareness clock must be a non-negative safe integer');
+    }
+    const state = awarenessPayload(update.state);
+    payloadParts.push(
+      encodeVarUint(update.clientId),
+      encodeVarUint(update.clock),
+      ...encodeVarString(JSON.stringify(state))
+    );
+  }
+  const payload = encodeFrame(payloadParts, maxFrameBytes);
   return encodeFrame(
     [
       encodeVarUint(TOP_LEVEL_AWARENESS),
-      encodeVarUint(emptyUpdate.byteLength),
-      emptyUpdate,
+      encodeVarUint(payload.byteLength),
+      payload,
     ],
     maxFrameBytes
   );
+}
+
+export function encodeQueryAwareness(
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  return encodeFrame([encodeVarUint(TOP_LEVEL_QUERY_AWARENESS)], maxFrameBytes);
+}
+
+export function decodeAwarenessUpdate(
+  update: Uint8Array,
+  maxStates = DEFAULT_MAX_AWARENESS_STATES
+): AwarenessUpdate[] {
+  if (!(update instanceof Uint8Array)) {
+    throw new ProtocolError('Awareness update must be a Uint8Array');
+  }
+  if (!Number.isSafeInteger(maxStates) || maxStates < 1) {
+    throw new ProtocolError('Awareness state limit must be a positive integer');
+  }
+  const decoder = new Decoder(update);
+  const count = decoder.readVarUint();
+  if (count > maxStates) {
+    throw new ProtocolError(`Awareness update exceeds ${maxStates} states`);
+  }
+  const updates: AwarenessUpdate[] = [];
+  for (let index = 0; index < count; index++) {
+    const clientId = decoder.readVarUint();
+    const clock = decoder.readVarUint();
+    if (clientId <= 0) {
+      throw new ProtocolError('Awareness clientId must be a positive safe integer');
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decoder.readVarString());
+    } catch (cause) {
+      if (cause instanceof ProtocolError) throw cause;
+      throw new ProtocolError(
+        `Invalid awareness JSON${cause instanceof Error ? `: ${cause.message}` : ''}`
+      );
+    }
+    updates.push({ clientId, clock, state: awarenessPayload(parsed) });
+  }
+  if (!decoder.done) throw new ProtocolError('Trailing awareness update data');
+  return updates;
 }
 
 export function decodeMessages(
