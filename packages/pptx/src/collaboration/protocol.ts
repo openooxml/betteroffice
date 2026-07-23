@@ -1,3 +1,6 @@
+import { sanitizePresenceColor, type AwarenessUpdateEntry } from './presence';
+import type { PptxPresenceCursor, PptxPresenceState } from './types';
+
 export const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
 
@@ -12,6 +15,7 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
+const MAX_AWARENESS_STRING_LENGTH = 1024;
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }
@@ -108,6 +112,11 @@ export function encodeVarUint(value: number): Uint8Array {
   return Uint8Array.from(bytes);
 }
 
+function encodeVarString(value: string): Uint8Array {
+  const bytes = new TextEncoder().encode(value);
+  return encodeFrame([encodeVarUint(bytes.byteLength), bytes], DEFAULT_MAX_FRAME_BYTES);
+}
+
 function encodeFrame(parts: readonly Uint8Array[], maxFrameBytes: number): Uint8Array {
   let length = 0;
   for (const part of parts) {
@@ -166,15 +175,87 @@ export function encodeUpdate(
 export function encodeEmptyAwarenessUpdate(
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
 ): Uint8Array {
-  const emptyUpdate = Uint8Array.of(0);
+  return encodeAwarenessUpdate([], maxFrameBytes);
+}
+
+export function encodeAwarenessUpdate(
+  entries: readonly AwarenessUpdateEntry[],
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  if (entries.length > DEFAULT_MAX_MESSAGES_PER_FRAME) {
+    throw new ProtocolError(
+      `Awareness update exceeds ${DEFAULT_MAX_MESSAGES_PER_FRAME} entries`
+    );
+  }
+  const updateParts: Uint8Array[] = [encodeVarUint(entries.length)];
+  for (const entry of entries) {
+    validateAwarenessEntry(entry);
+    const encodedState = JSON.stringify(entry.state);
+    if (encodedState === undefined) {
+      throw new ProtocolError('Awareness state is not JSON serializable');
+    }
+    updateParts.push(
+      encodeVarUint(entry.clientId),
+      encodeVarUint(entry.clock),
+      encodeVarString(encodedState)
+    );
+  }
+  const update = encodeFrame(updateParts, maxFrameBytes);
   return encodeFrame(
     [
       encodeVarUint(TOP_LEVEL_AWARENESS),
-      encodeVarUint(emptyUpdate.byteLength),
-      emptyUpdate,
+      encodeVarUint(update.byteLength),
+      update,
     ],
     maxFrameBytes
   );
+}
+
+export function encodeQueryAwareness(
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  return encodeFrame([encodeVarUint(TOP_LEVEL_QUERY_AWARENESS)], maxFrameBytes);
+}
+
+export function decodeAwarenessUpdate(
+  update: Uint8Array,
+  maxEntries = DEFAULT_MAX_MESSAGES_PER_FRAME
+): AwarenessUpdateEntry[] {
+  if (!(update instanceof Uint8Array)) {
+    throw new ProtocolError('Awareness update must be a Uint8Array');
+  }
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+    throw new ProtocolError('Awareness entry limit must be a positive integer');
+  }
+  const decoder = new Decoder(update);
+  const count = decoder.readVarUint();
+  if (count > maxEntries) {
+    throw new ProtocolError(`Awareness update exceeds ${maxEntries} entries`);
+  }
+
+  const entries: AwarenessUpdateEntry[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const clientId = decoder.readVarUint();
+    const clock = decoder.readVarUint();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decoder.readVarString());
+    } catch (cause) {
+      if (cause instanceof ProtocolError) throw cause;
+      throw new ProtocolError(
+        `Invalid awareness JSON${cause instanceof Error ? `: ${cause.message}` : ''}`
+      );
+    }
+    const entry = {
+      clientId,
+      clock,
+      state: parseAwarenessState(parsed, clientId, clock),
+    };
+    validateAwarenessEntry(entry);
+    entries.push(entry);
+  }
+  if (!decoder.done) throw new ProtocolError('Awareness update has trailing bytes');
+  return entries;
 }
 
 export function decodeMessages(
@@ -237,4 +318,66 @@ export function decodeMessages(
   }
 
   return messages;
+}
+
+function parseAwarenessState(
+  value: unknown,
+  clientId: number,
+  clock: number
+): PptxPresenceState | null {
+  if (value === null) return null;
+  if (!isRecord(value)) throw new ProtocolError('Awareness state must be an object or null');
+  if (value.clientId !== clientId || value.clock !== clock) {
+    throw new ProtocolError('Awareness state identity does not match its entry');
+  }
+  if (!isRecord(value.user)) throw new ProtocolError('Awareness user must be an object');
+  const name = requireAwarenessString(value.user.name, 'Awareness user name');
+  const color = sanitizePresenceColor(clientId, value.user.color);
+  return {
+    clientId,
+    clock,
+    user: { name, color },
+    cursor: parseAwarenessCursor(value.cursor),
+  };
+}
+
+function parseAwarenessCursor(value: unknown): PptxPresenceCursor | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) throw new ProtocolError('Awareness cursor must be an object or null');
+  const slideId = requireAwarenessString(value.slideId, 'Awareness slideId');
+  const shapeId =
+    value.shapeId === undefined
+      ? undefined
+      : requireAwarenessString(value.shapeId, 'Awareness shapeId');
+  return shapeId ? { slideId, shapeId } : { slideId };
+}
+
+function validateAwarenessEntry(entry: AwarenessUpdateEntry): void {
+  requireVarUint(entry.clientId, 'Awareness clientId');
+  requireVarUint(entry.clock, 'Awareness clock');
+  if (entry.state === null) return;
+  parseAwarenessState(entry.state, entry.clientId, entry.clock);
+}
+
+function requireVarUint(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new ProtocolError(`${name} must be a non-negative safe integer`);
+  }
+}
+
+function requireAwarenessString(value: unknown, name: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_AWARENESS_STRING_LENGTH
+  ) {
+    throw new ProtocolError(
+      `${name} must be between 1 and ${MAX_AWARENESS_STRING_LENGTH} characters`
+    );
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

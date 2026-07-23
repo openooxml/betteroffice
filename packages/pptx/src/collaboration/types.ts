@@ -51,7 +51,44 @@ export interface CollaborationProviderOptions {
   maxFrameBytes?: number;
   maxMessagesPerFrame?: number;
   maxPendingBytes?: number;
+  user?: CollaborationUser;
 }
 
 export type CollaborationStatusListener = (change: CollaborationStatusChange) => void;
 export type CollaborationErrorListener = (error: CollaborationError) => void;
+
+export interface CollaborationUser {
+  name: string;
+  color?: string;
+}
+
+export interface PptxPresenceUser {
+  name: string;
+  color: string;
+}
+
+export interface PptxPresenceCursor {
+  slideId: string;
+  shapeId?: string;
+}
+
+export interface PptxPresenceState {
+  clientId: number;
+  clock: number;
+  user: PptxPresenceUser;
+  cursor: PptxPresenceCursor | null;
+}
+
+export interface PptxPresencePeer {
+  state: PptxPresenceState;
+  lastSeen: number;
+  cursorMovedAt: number;
+}
+
+export type PptxPresenceListener = (peers: readonly PptxPresencePeer[]) => void;
+
+export interface PptxPresence {
+  readonly peers: readonly PptxPresencePeer[];
+  setCursor(cursor: PptxPresenceCursor | null): void;
+  onPresence(listener: PptxPresenceListener): () => void;
+}

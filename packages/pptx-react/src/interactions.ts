@@ -53,6 +53,17 @@ export function findShape(shapes: ShapeSnapshot[], shapeId: string): ShapeSnapsh
   return null;
 }
 
+export function indexShapes(shapes: ShapeSnapshot[]): Map<string, ShapeSnapshot> {
+  const index = new Map<string, ShapeSnapshot>();
+  const pending = [...shapes];
+  while (pending.length > 0) {
+    const shape = pending.pop()!;
+    index.set(shape.id, shape);
+    pending.push(...shape.children);
+  }
+  return index;
+}
+
 export function findTopLevelShape(slide: SlideSnapshot, shapeId: string): ShapeSnapshot | null {
   for (const shape of slide.shapes) {
     if (shape.id === shapeId || findShape(shape.children, shapeId)) return shape;
