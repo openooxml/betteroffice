@@ -12,7 +12,6 @@ import type {
   SlideDisplayList,
   StorySnapshot,
   TextBoxPrimitive,
-  TextStyle,
   TextStylePatch,
 } from '@betteroffice/pptx';
 import type { CollaborationReplica } from '@betteroffice/pptx/collaboration';
@@ -27,11 +26,18 @@ import {
 } from 'react';
 import type {
   CSSProperties,
-  ChangeEvent,
   KeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent,
 } from 'react';
+import { EditorToolbar } from './components/EditorToolbar';
+import type {
+  FormattingAction,
+  PptxEditorTool,
+  PptxZoom,
+  SelectionFormatting,
+  SlideLayoutOption,
+} from './components/Toolbar';
 import {
   canMoveShape,
   findShape,
@@ -43,6 +49,11 @@ import {
   textPositionAtPoint,
 } from './interactions';
 import type { FrameBounds, SlidePoint } from './interactions';
+import {
+  effectiveStyleFromSelection,
+  selectionFormattingFromStory,
+} from './textFormatting';
+import type { EffectiveTextStyle } from './textFormatting';
 
 export interface PptxTextSelection {
   shapeId: string;
@@ -108,11 +119,23 @@ type PointerGesture =
       dragThreshold: number;
       repeatedClick: boolean;
       dragging: boolean;
+    }
+  | {
+      kind: 'textBox';
+      pointerId: number;
+      slideId: string;
+      start: SlidePoint;
+      last: SlidePoint;
     };
 
 interface ShapeDragPreview {
   shapeId: string;
   delta: SlidePoint;
+}
+
+interface TextBoxPreview {
+  start: SlidePoint;
+  end: SlidePoint;
 }
 
 interface RecentShapeClick {
@@ -123,53 +146,14 @@ interface RecentShapeClick {
   timeStamp: number;
 }
 
-const initialStyle: Required<Pick<TextStyle, 'bold' | 'italic' | 'fontSizePt' | 'color'>> = {
+const initialStyle: EffectiveTextStyle = {
   bold: false,
   italic: false,
+  underline: 'none',
   fontSizePt: 24,
   color: '#111827',
+  fontFamily: 'Arial',
 };
-
-type PptxToolbarIconName = 'undo' | 'redo' | 'addSlide' | 'deleteSlide' | 'textBox';
-
-function PptxToolbarIcon({ name }: { name: PptxToolbarIconName }) {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-      style={{ flex: '0 0 auto' }}
-    >
-      {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
-      {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
-      {name === 'addSlide' && (
-        <>
-          <rect x="3" y="5" width="14" height="14" rx="2" />
-          <path d="M7 9h6M7 13h4M20 10v6m-3-3h6" />
-        </>
-      )}
-      {name === 'deleteSlide' && (
-        <>
-          <path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7" />
-          <path d="M10 11v5m4-5v5" />
-        </>
-      )}
-      {name === 'textBox' && (
-        <>
-          <rect x="3" y="4" width="18" height="16" rx="2" />
-          <path d="M8 8h8m-4 0v8m-3 0h6" />
-        </>
-      )}
-    </svg>
-  );
-}
 
 export function PptxEditor({
   i18n,
@@ -214,7 +198,11 @@ function PptxEditorContent({
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
   const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
   const [dragPreview, setDragPreview] = useState<ShapeDragPreview | null>(null);
+  const [textBoxPreview, setTextBoxPreview] = useState<TextBoxPreview | null>(null);
   const [textStyle, setTextStyle] = useState(initialStyle);
+  const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
+  const [zoom, setZoom] = useState<PptxZoom>('fit');
+  const [activeTool, setActiveTool] = useState<PptxEditorTool>('select');
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -268,14 +256,17 @@ function PptxEditorContent({
           gesture &&
           (!activeSlide ||
             activeSlide.id !== gesture.slideId ||
-            !findShape(activeSlide.shapes, gesture.shapeId))
+            (gesture.kind !== 'textBox' &&
+              !findShape(activeSlide.shapes, gesture.shapeId)))
         ) {
           pointerGestureRef.current = null;
           recentShapeClickRef.current = null;
           setDragPreview(null);
+          setTextBoxPreview(null);
         }
         modelRef.current = next;
         setModel(next);
+        setHistoryState({ canUndo: handle.canUndo(), canRedo: handle.canRedo() });
         setError(null);
         if (notify) onChangeRef.current?.(snapshot);
         return next;
@@ -304,6 +295,9 @@ function PptxEditorContent({
     setSelection(null);
     setShapeSelection(null);
     setDragPreview(null);
+    setTextBoxPreview(null);
+    setHistoryState({ canUndo: false, canRedo: false });
+    setActiveTool('select');
     pointerGestureRef.current = null;
     recentShapeClickRef.current = null;
     setError(null);
@@ -375,7 +369,7 @@ function PptxEditorContent({
     return () => observer.disconnect();
   }, []);
 
-  const scale = useMemo(() => {
+  const fitScale = useMemo(() => {
     if (!model?.frame || viewport.width <= 0 || viewport.height <= 0) return 1;
     return Math.min(
       (viewport.width - 40) / model.frame.width,
@@ -383,6 +377,7 @@ function PptxEditorContent({
       1
     );
   }, [model?.frame, viewport]);
+  const scale = zoom === 'fit' ? fitScale : zoom;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -430,14 +425,116 @@ function PptxEditorContent({
     [model, selectedShape]
   );
 
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle || !selection) return;
+    try {
+      const story = handle.story(selection.storyId);
+      setTextStyle(
+        effectiveStyleFromSelection(
+          story,
+          selection.anchor,
+          selection.focus,
+          initialStyle
+        )
+      );
+    } catch (value) {
+      reportError(value);
+    }
+  }, [model, reportError, selection]);
+
+  const selectionFormatting = useMemo<SelectionFormatting>(() => {
+    if (!selection || selection.anchor === selection.focus) {
+      return selectionFormattingFromStyle(textStyle);
+    }
+    const handle = handleRef.current;
+    if (!handle) return selectionFormattingFromStyle(textStyle);
+    try {
+      return selectionFormattingFromStory(
+        handle.story(selection.storyId),
+        selection.anchor,
+        selection.focus,
+        initialStyle
+      );
+    } catch {
+      return selectionFormattingFromStyle(textStyle);
+    }
+  }, [model, selection, textStyle]);
+
+  const slideLayouts = useMemo<SlideLayoutOption[]>(() => {
+    const unique = new Set<string | null>();
+    for (const slide of model?.snapshot.slides ?? []) unique.add(slide.layoutPartPath);
+    return [...unique].map((partPath) => ({ partPath }));
+  }, [model?.snapshot]);
+
   const selectSlide = (index: number) => {
     setSelection(null);
     setShapeSelection(null);
     setDragPreview(null);
+    setTextBoxPreview(null);
     pointerGestureRef.current = null;
     recentShapeClickRef.current = null;
     refreshAt(index);
     stageRef.current?.focus();
+  };
+
+  const createTextBox = (start: SlidePoint, end: SlidePoint) => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    if (!handle || !current?.frame) return;
+    const slide = current.snapshot.slides[current.slideIndex];
+    if (!slide) return;
+    const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
+    const width = dragged ? Math.abs(end.x - start.x) : current.frame.width * 0.36;
+    const height = dragged ? Math.abs(end.y - start.y) : current.frame.height * 0.12;
+    const x = Math.max(
+      0,
+      Math.min(
+        dragged ? Math.min(start.x, end.x) : start.x,
+        current.frame.width - width
+      )
+    );
+    const y = Math.max(
+      0,
+      Math.min(
+        dragged ? Math.min(start.y, end.y) : start.y,
+        current.frame.height - height
+      )
+    );
+    try {
+      const receipt = handle.addTextBox(slide.id, {
+        name: t('objects.defaultTextBoxName'),
+        rect: {
+          x: Math.round((x * current.snapshot.widthEmu) / current.frame.width),
+          y: Math.round((y * current.snapshot.heightEmu) / current.frame.height),
+          width: Math.round(
+            (Math.max(12, width) * current.snapshot.widthEmu) / current.frame.width
+          ),
+          height: Math.round(
+            (Math.max(12, height) * current.snapshot.heightEmu) / current.frame.height
+          ),
+        },
+        text: '',
+        style: textStyle,
+      });
+      const next = refreshAt(undefined, true);
+      setActiveTool('select');
+      setShapeSelection(null);
+      setDragPreview(null);
+      setTextBoxPreview(null);
+      pointerGestureRef.current = null;
+      recentShapeClickRef.current = null;
+      const shape = next?.snapshot.slides[next.slideIndex]?.shapes.find(
+        (candidate) => candidate.id === receipt.shapeId
+      );
+      const story = shape?.textStories[0];
+      if (story) {
+        setSelection({ shapeId: shape.id, storyId: story.id, anchor: 0, focus: 0 });
+        stageRef.current?.focus();
+      }
+    } catch (value) {
+      reportError(value);
+    }
   };
 
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
@@ -452,10 +549,28 @@ function PptxEditorContent({
       event.clientY
     );
     if (!point) return;
+    const slide = current.snapshot.slides[current.slideIndex];
+    if (activeTool === 'textBox' && slide) {
+      setSelection(null);
+      setShapeSelection(null);
+      setDragPreview(null);
+      setTextBoxPreview({ start: point, end: point });
+      recentShapeClickRef.current = null;
+      pointerGestureRef.current = {
+        kind: 'textBox',
+        pointerId: event.pointerId,
+        slideId: slide.id,
+        start: point,
+        last: point,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      stageRef.current?.focus();
+      event.preventDefault();
+      return;
+    }
     try {
       handle.layoutSlide(current.slideIndex);
       const hit = handle.hitTest(point.x, point.y);
-      const slide = current.snapshot.slides[current.slideIndex];
       if (
         slide &&
         selection &&
@@ -600,7 +715,7 @@ function PptxEditorContent({
           focus,
         });
       }
-    } else {
+    } else if (gesture.kind === 'shape') {
       gesture.last = point;
       if (
         !gesture.dragging &&
@@ -620,6 +735,9 @@ function PptxEditorContent({
           delta: { x: point.x - gesture.start.x, y: point.y - gesture.start.y },
         });
       }
+    } else {
+      gesture.last = point;
+      setTextBoxPreview({ start: gesture.start, end: point });
     }
     return true;
   };
@@ -636,6 +754,12 @@ function PptxEditorContent({
     setDragPreview(null);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (gesture.kind === 'textBox') {
+      setTextBoxPreview(null);
+      createTextBox(gesture.start, gesture.last);
+      event.preventDefault();
+      return;
     }
     if (gesture.kind !== 'shape') return;
     if (!gesture.dragging) {
@@ -677,6 +801,7 @@ function PptxEditorContent({
     if (pointerGestureRef.current?.pointerId !== event.pointerId) return;
     pointerGestureRef.current = null;
     setDragPreview(null);
+    setTextBoxPreview(null);
     recentShapeClickRef.current = null;
   };
 
@@ -689,15 +814,34 @@ function PptxEditorContent({
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const handle = handleRef.current;
-    if (!handle || !selection) return;
-    if ((event.metaKey || event.ctrlKey) && (event.key === 'b' || event.key === 'B')) {
+    if (!handle) return;
+    const modifier = event.metaKey || event.ctrlKey;
+    if (event.key === 'Escape') {
+      setActiveTool('select');
+      setTextBoxPreview(null);
+      pointerGestureRef.current = null;
+      event.preventDefault();
+      return;
+    }
+    if (modifier && (event.key === 'z' || event.key === 'Z')) {
+      event.preventDefault();
+      history(event.shiftKey ? 'redo' : 'undo');
+      return;
+    }
+    if (!selection) return;
+    if (modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
       applyFormatting({ bold: !textStyle.bold });
       return;
     }
-    if ((event.metaKey || event.ctrlKey) && (event.key === 'i' || event.key === 'I')) {
+    if (modifier && (event.key === 'i' || event.key === 'I')) {
       event.preventDefault();
       applyFormatting({ italic: !textStyle.italic });
+      return;
+    }
+    if (modifier && (event.key === 'u' || event.key === 'U')) {
+      event.preventDefault();
+      applyFormatting({ underline: textStyle.underline === 'none' ? 'sng' : 'none' });
       return;
     }
     const start = Math.min(selection.anchor, selection.focus);
@@ -785,73 +929,41 @@ function PptxEditorContent({
     }
   };
 
-  const addSlide = () => {
+  const formatSelection = (action: FormattingAction) => {
+    if (action === 'bold') {
+      applyFormatting({ bold: !selectionFormatting.bold });
+    } else if (action === 'italic') {
+      applyFormatting({ italic: !selectionFormatting.italic });
+    } else if (action === 'underline') {
+      applyFormatting({ underline: selectionFormatting.underline ? 'none' : 'sng' });
+    } else if (action.type === 'fontFamily') {
+      applyFormatting({ fontFamily: action.value });
+    } else if (action.type === 'fontSize') {
+      applyFormatting({ fontSizePt: action.value });
+    } else if (action.type === 'textColor') {
+      applyFormatting({ color: action.value });
+    }
+  };
+
+  const addSlide = (layoutPartPath?: string | null) => {
     const handle = handleRef.current;
     const current = modelRef.current;
     if (!handle || !current) return;
     try {
       const index = current.slideIndex + 1;
-      const layout = current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined;
+      const layout =
+        layoutPartPath === undefined
+          ? current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined
+          : layoutPartPath ?? undefined;
       handle.insertSlide(index, layout);
       setSelection(null);
       setShapeSelection(null);
       setDragPreview(null);
+      setTextBoxPreview(null);
+      setActiveTool('select');
       pointerGestureRef.current = null;
       recentShapeClickRef.current = null;
       refreshAt(index, true, true);
-    } catch (value) {
-      reportError(value);
-    }
-  };
-
-  const deleteSlide = () => {
-    const handle = handleRef.current;
-    const current = modelRef.current;
-    if (!handle || !current || current.snapshot.slides.length <= 1) return;
-    try {
-      handle.deleteSlide(current.snapshot.slides[current.slideIndex].id);
-      setSelection(null);
-      setShapeSelection(null);
-      setDragPreview(null);
-      pointerGestureRef.current = null;
-      recentShapeClickRef.current = null;
-      refreshAt(Math.max(0, current.slideIndex - 1), true, true);
-    } catch (value) {
-      reportError(value);
-    }
-  };
-
-  const addTextBox = () => {
-    const handle = handleRef.current;
-    const current = modelRef.current;
-    if (!handle || !current) return;
-    const slide = current.snapshot.slides[current.slideIndex];
-    if (!slide) return;
-    try {
-      const receipt = handle.addTextBox(slide.id, {
-        name: t('objects.defaultTextBoxName'),
-        rect: {
-          x: Math.round(current.snapshot.widthEmu * 0.15),
-          y: Math.round(current.snapshot.heightEmu * 0.25),
-          width: Math.round(current.snapshot.widthEmu * 0.7),
-          height: Math.round(current.snapshot.heightEmu * 0.3),
-        },
-        text: '',
-        style: textStyle,
-      });
-      const next = refreshAt(undefined, true);
-      setShapeSelection(null);
-      setDragPreview(null);
-      pointerGestureRef.current = null;
-      recentShapeClickRef.current = null;
-      const shape = next?.snapshot.slides[next.slideIndex]?.shapes.find(
-        (candidate) => candidate.id === receipt.shapeId
-      );
-      const story = shape?.textStories[0];
-      if (story) {
-        setSelection({ shapeId: shape.id, storyId: story.id, anchor: 0, focus: 0 });
-        stageRef.current?.focus();
-      }
     } catch (value) {
       reportError(value);
     }
@@ -866,6 +978,8 @@ function PptxEditorContent({
       setSelection(null);
       setShapeSelection(null);
       setDragPreview(null);
+      setTextBoxPreview(null);
+      setActiveTool('select');
       pointerGestureRef.current = null;
       recentShapeClickRef.current = null;
       refreshAt(undefined, true);
@@ -882,117 +996,31 @@ function PptxEditorContent({
 
   return (
     <div className={className} style={styles.root}>
-      <div style={styles.toolbarShell}>
-        <div style={styles.toolbar} role="group" aria-label={t('toolbar.label')}>
-          <div style={styles.toolbarGroup} role="group" aria-label={t('toolbar.historyLabel')}>
-            <button
-              type="button"
-              style={toolbarButton(handleRef.current?.canUndo() ?? false)}
-              disabled={!handleRef.current?.canUndo()}
-              aria-label={t('toolbar.undo')}
-              title={t('toolbar.undo')}
-              onClick={() => history('undo')}
-            >
-              <PptxToolbarIcon name="undo" />
-            </button>
-            <button
-              type="button"
-              style={toolbarButton(handleRef.current?.canRedo() ?? false)}
-              disabled={!handleRef.current?.canRedo()}
-              aria-label={t('toolbar.redo')}
-              title={t('toolbar.redo')}
-              onClick={() => history('redo')}
-            >
-              <PptxToolbarIcon name="redo" />
-            </button>
-          </div>
-          <span style={styles.divider} aria-hidden="true" />
-          <div
-            style={styles.toolbarGroup}
-            role="group"
-            aria-label={t('toolbar.textFormattingLabel')}
-          >
-            <button
-              type="button"
-              aria-pressed={textStyle.bold}
-              aria-label={t('toolbar.bold')}
-              title={t('toolbar.bold')}
-              style={formatButton(textStyle.bold)}
-              onClick={() => applyFormatting({ bold: !textStyle.bold })}
-            >
-              B
-            </button>
-            <button
-              type="button"
-              aria-pressed={textStyle.italic}
-              aria-label={t('toolbar.italic')}
-              title={t('toolbar.italic')}
-              style={{ ...formatButton(textStyle.italic), fontStyle: 'italic' }}
-              onClick={() => applyFormatting({ italic: !textStyle.italic })}
-            >
-              I
-            </button>
-            <input
-              aria-label={t('toolbar.fontSize')}
-              title={t('toolbar.fontSize')}
-              type="number"
-              min={6}
-              max={400}
-              value={textStyle.fontSizePt}
-              style={styles.numberInput}
-              onChange={(event: ChangeEvent<HTMLInputElement>) => {
-                const value = Number(event.target.value);
-                if (Number.isFinite(value)) applyFormatting({ fontSizePt: value });
-              }}
-            />
-            <input
-              aria-label={t('toolbar.textColor')}
-              title={t('toolbar.textColor')}
-              type="color"
-              value={textStyle.color}
-              style={styles.colorInput}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                applyFormatting({ color: event.target.value })
-              }
-            />
-          </div>
-          <span style={styles.divider} aria-hidden="true" />
-          <div style={styles.toolbarGroup} role="group" aria-label={t('toolbar.slidesLabel')}>
-            <button
-              type="button"
-              style={toolbarButton(true)}
-              aria-label={t('toolbar.addSlide')}
-              title={t('toolbar.addSlide')}
-              onClick={addSlide}
-            >
-              <PptxToolbarIcon name="addSlide" />
-            </button>
-            <button
-              type="button"
-              style={toolbarButton(slideCount > 1)}
-              disabled={slideCount <= 1}
-              aria-label={t('toolbar.deleteSlide')}
-              title={t('toolbar.deleteSlide')}
-              onClick={deleteSlide}
-            >
-              <PptxToolbarIcon name="deleteSlide" />
-            </button>
-          </div>
-          <span style={styles.divider} aria-hidden="true" />
-          <div style={styles.toolbarGroup} role="group" aria-label={t('toolbar.objectsLabel')}>
-            <button
-              type="button"
-              style={toolbarButton(slideCount > 0)}
-              disabled={slideCount === 0}
-              aria-label={t('toolbar.addTextBox')}
-              title={t('toolbar.addTextBox')}
-              onClick={addTextBox}
-            >
-              <PptxToolbarIcon name="textBox" />
-            </button>
-          </div>
-        </div>
-      </div>
+      <EditorToolbar
+        currentFormatting={selectionFormatting}
+        textSelectionActive={selection !== null}
+        onFormat={formatSelection}
+        onInsertSlide={addSlide}
+        slideLayouts={slideLayouts}
+        currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
+        onUndo={() => history('undo')}
+        onRedo={() => history('redo')}
+        canUndo={historyState.canUndo}
+        canRedo={historyState.canRedo}
+        zoom={zoom}
+        onZoomChange={setZoom}
+        activeTool={activeTool}
+        onToolChange={(tool) => {
+          setActiveTool(tool);
+          setTextBoxPreview(null);
+          pointerGestureRef.current = null;
+          stageRef.current?.focus();
+        }}
+        disabled={!model || slideCount === 0}
+        style={styles.toolbarShell}
+      >
+        <EditorToolbar.Toolbar />
+      </EditorToolbar>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
           {model?.snapshot.slides.map((slide, index) => (
@@ -1041,9 +1069,17 @@ function PptxEditorContent({
               >
                 <canvas
                   ref={canvasRef}
+                  data-testid="pptx-slide-canvas"
                   style={{
                     ...styles.canvas,
-                    cursor: selection ? 'text' : selectedShapeMovable ? 'move' : 'default',
+                    cursor:
+                      activeTool === 'textBox'
+                        ? 'crosshair'
+                        : selection
+                          ? 'text'
+                          : selectedShapeMovable
+                            ? 'move'
+                            : 'default',
                   }}
                   onPointerDown={pointerDown}
                   onPointerMove={pointerMove}
@@ -1073,6 +1109,22 @@ function PptxEditorContent({
                       top: (selectedShapeBounds.y + (shapeDragDelta?.y ?? 0)) * scale,
                       width: Math.max(1, selectedShapeBounds.width * scale),
                       height: Math.max(1, selectedShapeBounds.height * scale),
+                    }}
+                    aria-hidden="true"
+                  />
+                ) : null}
+                {textBoxPreview ? (
+                  <span
+                    style={{
+                      ...styles.textBoxPreview,
+                      left: Math.min(textBoxPreview.start.x, textBoxPreview.end.x) * scale,
+                      top: Math.min(textBoxPreview.start.y, textBoxPreview.end.y) * scale,
+                      width:
+                        Math.max(1, Math.abs(textBoxPreview.end.x - textBoxPreview.start.x)) *
+                        scale,
+                      height:
+                        Math.max(1, Math.abs(textBoxPreview.end.y - textBoxPreview.start.y)) *
+                        scale,
                     }}
                     aria-hidden="true"
                   />
@@ -1167,6 +1219,17 @@ function previousTextIndex(story: StorySnapshot, index: number): number {
 function nextTextIndex(story: StorySnapshot, index: number): number {
   const character = Array.from(storyText(story).slice(index))[0];
   return character ? index + character.length : index;
+}
+
+function selectionFormattingFromStyle(style: EffectiveTextStyle): SelectionFormatting {
+  return {
+    bold: style.bold,
+    italic: style.italic,
+    underline: style.underline !== 'none',
+    fontSize: style.fontSizePt,
+    textColor: style.color,
+    fontFamily: style.fontFamily,
+  };
 }
 
 async function installBrowserFonts(fonts: ReadonlyArray<PptxFontFace>): Promise<FontFace[]> {
@@ -1304,58 +1367,6 @@ const styles: Record<string, CSSProperties> = {
     background: '#ffffff',
     borderBottom: '1px solid #e2e8f0',
   },
-  toolbar: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 0,
-    minHeight: 36,
-    margin: '0 8px',
-    padding: '4px 8px',
-    background: '#f1f5f9',
-    borderRadius: 999,
-    boxSizing: 'border-box',
-    overflowX: 'auto',
-    overflowY: 'hidden',
-  },
-  toolbarGroup: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 1,
-    flex: '0 0 auto',
-  },
-  divider: {
-    width: 1,
-    height: 24,
-    margin: '0 6px',
-    background: '#e2e8f0',
-    flex: '0 0 auto',
-  },
-  numberInput: {
-    appearance: 'textfield',
-    width: 40,
-    height: 28,
-    marginLeft: 2,
-    boxSizing: 'border-box',
-    border: '1px solid #e2e8f0',
-    borderRadius: 6,
-    padding: '0 4px',
-    background: '#f8fafc',
-    color: '#0f172a',
-    font: '12px ui-sans-serif, system-ui, sans-serif',
-    textAlign: 'center',
-    outlineColor: '#2563eb',
-  },
-  colorInput: {
-    width: 28,
-    height: 28,
-    marginLeft: 2,
-    padding: 2,
-    border: '1px solid #e2e8f0',
-    borderRadius: 6,
-    background: '#f8fafc',
-    cursor: 'pointer',
-    outlineColor: '#2563eb',
-  },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   slideStrip: {
     width: 184,
@@ -1392,36 +1403,16 @@ const styles: Record<string, CSSProperties> = {
     boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
     pointerEvents: 'none',
   },
+  textBoxPreview: {
+    position: 'absolute',
+    border: '1.5px dashed #1a73e8',
+    background: 'rgba(26, 115, 232, 0.08)',
+    boxSizing: 'border-box',
+    pointerEvents: 'none',
+  },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
 };
-
-function toolbarButton(enabled: boolean): CSSProperties {
-  return {
-    appearance: 'none',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 28,
-    height: 28,
-    padding: 0,
-    border: 0,
-    borderRadius: 6,
-    color: enabled ? '#64748b' : '#94a3b8',
-    background: 'transparent',
-    cursor: enabled ? 'pointer' : 'default',
-    opacity: enabled ? 1 : 0.32,
-  };
-}
-
-function formatButton(active: boolean): CSSProperties {
-  return {
-    ...toolbarButton(true),
-    fontWeight: 700,
-    color: active ? '#ffffff' : '#64748b',
-    background: active ? '#0f172a' : 'transparent',
-  };
-}
 
 function slideButton(active: boolean): CSSProperties {
   return {
