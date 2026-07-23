@@ -6,6 +6,25 @@ import type {
   CollaborationTextInsertion,
 } from './types';
 
+const PRESENCE_COLORS = [
+  '#0B57D0',
+  '#B3261E',
+  '#137333',
+  '#7B1FA2',
+  '#A142F4',
+  '#A04B00',
+  '#006A6A',
+  '#455A64',
+] as const;
+const PRESENCE_COLOR_PATTERN = /^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/;
+
+export function resolvePresenceColor(clientId: number, color: unknown): string {
+  if (typeof color === 'string' && PRESENCE_COLOR_PATTERN.test(color)) return color;
+  const paletteIndex =
+    Number.isSafeInteger(clientId) && clientId >= 0 ? clientId % PRESENCE_COLORS.length : 0;
+  return PRESENCE_COLORS[paletteIndex];
+}
+
 export interface AwarenessUpdateEntry {
   clientId: number;
   clock: number;

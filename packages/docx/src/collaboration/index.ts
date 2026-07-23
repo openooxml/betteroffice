@@ -1,4 +1,5 @@
 export { CollaborationProvider } from './provider';
+export { resolvePresenceColor } from './awareness';
 export {
   createDirectCollaborationReplica,
   createWorkerCollaborationReplica,

@@ -1,4 +1,4 @@
-import type { AwarenessUpdateEntry } from './awareness';
+import { resolvePresenceColor, type AwarenessUpdateEntry } from './awareness';
 
 export const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
@@ -236,7 +236,7 @@ function decodeByteArray(value: unknown, label: string): Uint8Array {
   return Uint8Array.from(value as number[]);
 }
 
-function decodeAwarenessState(value: string): AwarenessUpdateEntry['state'] {
+function decodeAwarenessState(value: string, clientId: number): AwarenessUpdateEntry['state'] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -248,18 +248,22 @@ function decodeAwarenessState(value: string): AwarenessUpdateEntry['state'] {
     throw new ProtocolError('Awareness state must be an object or null');
   }
   const state = parsed as Record<string, unknown>;
-  const user = state.user;
-  if (typeof user !== 'object' || user === null || Array.isArray(user)) {
+  const userValue = state.user;
+  if (typeof userValue !== 'object' || userValue === null || Array.isArray(userValue)) {
     throw new ProtocolError('Awareness user must be an object');
   }
-  const userRecord = user as Record<string, unknown>;
-  if (typeof userRecord.name !== 'string' || typeof userRecord.color !== 'string') {
-    throw new ProtocolError('Awareness user requires string name and color');
+  const userRecord = userValue as Record<string, unknown>;
+  if (typeof userRecord.name !== 'string') {
+    throw new ProtocolError('Awareness user requires a string name');
   }
+  const decodedUser = {
+    name: userRecord.name,
+    color: resolvePresenceColor(clientId, userRecord.color),
+  };
   const cursor = state.cursor;
   if (cursor === null || cursor === undefined) {
     return {
-      user: { name: userRecord.name, color: userRecord.color },
+      user: decodedUser,
       cursor: null,
     };
   }
@@ -271,7 +275,7 @@ function decodeAwarenessState(value: string): AwarenessUpdateEntry['state'] {
     throw new ProtocolError('Awareness cursor requires a string story');
   }
   return {
-    user: { name: userRecord.name, color: userRecord.color },
+    user: decodedUser,
     cursor: {
       story: cursorRecord.story,
       anchor: decodeByteArray(cursorRecord.anchor, 'Awareness cursor anchor'),
@@ -288,10 +292,11 @@ export function decodeAwarenessUpdate(update: Uint8Array): AwarenessUpdateEntry[
   }
   const entries: AwarenessUpdateEntry[] = [];
   for (let index = 0; index < count; index += 1) {
+    const clientId = decoder.readVarUint();
     entries.push({
-      clientId: decoder.readVarUint(),
+      clientId,
       clock: decoder.readVarUint(),
-      state: decodeAwarenessState(decoder.readVarString()),
+      state: decodeAwarenessState(decoder.readVarString(), clientId),
     });
   }
   if (!decoder.done) throw new ProtocolError('Trailing awareness data');

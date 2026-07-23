@@ -381,6 +381,27 @@ describe('CollaborationProvider awareness', () => {
     });
   });
 
+  it('discards malformed awareness without interrupting document sync', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({
+      type: 'message',
+      data: encodeSyncStep2(Uint8Array.of(4)),
+    });
+
+    transport.emit({
+      type: 'message',
+      data: concat(Uint8Array.of(1, 5, 1, 8, 1, 1, 123), encodeUpdate(Uint8Array.of(9))),
+    });
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(9)]);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+  });
+
   it('coalesces cursor movement and keeps typing updates local', async () => {
     const replica = new FakeReplica();
     const transport = new FakeTransport();
@@ -463,6 +484,30 @@ describe('CollaborationProvider transport flow control', () => {
     transport.emit({ type: 'drain' });
     expect(provider.pendingBytes).toBe(0);
     expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 2, 1, 5]]);
+  });
+
+  it('attempts a leave directly while document frames are backpressured', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, {
+      user: { name: 'Calm Otter' },
+    });
+    provider.connect();
+    transport.emit({ type: 'open' });
+    transport.attempted = [];
+    transport.sent = [];
+    transport.accept = false;
+
+    replica.emit(Uint8Array.of(5), 'local');
+    expect(provider.pendingBytes).toBe(4);
+    provider.destroy();
+
+    expect(provider.pendingBytes).toBe(0);
+    expect(transport.attempted).toHaveLength(2);
+    const [leave] = decodeMessages(transport.attempted[1]);
+    expect(leave.type).toBe('awareness');
+    if (leave.type !== 'awareness') return;
+    expect(decodeAwarenessUpdate(leave.update)).toEqual([{ clientId: 1, clock: 2, state: null }]);
   });
 
   it('fails on overflow and converges through a fresh state-vector handshake', () => {

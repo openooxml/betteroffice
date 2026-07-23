@@ -14,6 +14,7 @@ import {
   expireAwarenessRecords,
   reduceAwarenessEntries,
   reduceTypingInference,
+  resolvePresenceColor,
   type AwarenessRecord,
 } from './awareness';
 import {
@@ -39,17 +40,6 @@ const CURSOR_BROADCAST_INTERVAL_MS = 80;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PEER_EXPIRY_MS = 45_000;
 const EXPIRY_SWEEP_INTERVAL_MS = 5_000;
-const PRESENCE_COLORS = [
-  '#0B57D0',
-  '#B3261E',
-  '#137333',
-  '#7B1FA2',
-  '#A142F4',
-  '#A04B00',
-  '#006A6A',
-  '#455A64',
-] as const;
-
 type Timer = ReturnType<typeof setTimeout>;
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
@@ -100,12 +90,9 @@ function resolveUser(
   if (typeof user.name !== 'string' || user.name.trim().length === 0) {
     throw new TypeError('user.name must be a non-empty string');
   }
-  if (user.color !== undefined && (typeof user.color !== 'string' || !user.color.trim())) {
-    throw new TypeError('user.color must be a non-empty string');
-  }
   return {
     name: user.name.trim(),
-    color: user.color?.trim() ?? PRESENCE_COLORS[clientId % PRESENCE_COLORS.length],
+    color: resolvePresenceColor(clientId, user.color),
   };
 }
 
@@ -543,11 +530,7 @@ export class CollaborationProvider {
             this.awarenessRecords = reduction.records;
             if (reduction.peersChanged) this.emitPeers();
           } catch (cause) {
-            this.failConnection(
-              token,
-              normalizeError('protocol', 'Failed to apply awareness update', cause)
-            );
-            return;
+            this.report(normalizeError('protocol', 'Failed to apply awareness update', cause));
           }
           break;
         case 'auth':

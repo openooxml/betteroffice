@@ -135,6 +135,21 @@ describe('collaboration protocol decoding', () => {
     ).toThrow(ProtocolError);
   });
 
+  it('falls back to the client palette for unsafe awareness colors', () => {
+    const update = encodeAwarenessUpdate([
+      {
+        clientId: 12,
+        clock: 1,
+        state: {
+          user: { name: 'Bright Fox', color: 'url("https://attacker/pixel")' },
+          cursor: null,
+        },
+      },
+    ]);
+
+    expect(decodeAwarenessUpdate(update)[0]?.state?.user.color).toBe('#A142F4');
+  });
+
   it('rejects overflowing and non-canonical varUints', () => {
     const overflow = Uint8Array.from([0, 2, ...new Array(7).fill(0xff), 0x10]);
     expect(() => decodeMessages(overflow)).toThrow('varUint exceeds Number.MAX_SAFE_INTEGER');

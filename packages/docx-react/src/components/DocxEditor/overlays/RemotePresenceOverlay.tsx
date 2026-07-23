@@ -1,13 +1,23 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type {
-  CollaborationPeer,
-  CollaborationPresence,
+import {
+  resolvePresenceColor,
+  type CollaborationPeer,
+  type CollaborationPresence,
 } from '@betteroffice/docx/collaboration';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import type { YrsLoc, YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
 
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import {
+  buildRemotePresencePageMetrics,
+  clampRemoteSelectionRange,
+  pageInRemotePresenceWindow,
+  remotePresencePagePositionRange,
+  remotePresencePageWindow,
+  simplifyRemoteSelectionRects,
+} from './remotePresenceGeometry';
 
 const FLAG_VISIBLE_MS = 3_000;
 
@@ -107,9 +117,40 @@ export function RemotePresenceOverlay({
       setGeometry([]);
       return;
     }
+    const pageMetrics = buildRemotePresencePageMetrics(displayListQueries.displayList, zoom);
+    const scrollParent = findVerticalScrollParentOrRoot(host);
+    const usesWindow =
+      scrollParent === document.scrollingElement || scrollParent === document.documentElement;
+    const scrollTarget: EventTarget = usesWindow ? window : scrollParent;
 
     const recompute = () => {
       if (!displayListQueries.isReady()) {
+        setGeometry([]);
+        return;
+      }
+      const column = host.firstElementChild as HTMLElement | null;
+      if (!column) {
+        setGeometry([]);
+        return;
+      }
+      const viewportTop = usesWindow ? 0 : scrollParent.getBoundingClientRect().top;
+      const viewportBottom =
+        viewportTop + (usesWindow ? window.innerHeight : scrollParent.clientHeight);
+      const pageWindow = remotePresencePageWindow(
+        pageMetrics,
+        column.getBoundingClientRect().top,
+        viewportTop,
+        viewportBottom
+      );
+      if (!pageWindow) {
+        setGeometry([]);
+        return;
+      }
+      const pagePositionRange = remotePresencePagePositionRange(
+        displayListQueries.displayList,
+        pageWindow
+      );
+      if (!pagePositionRange) {
         setGeometry([]);
         return;
       }
@@ -134,39 +175,44 @@ export function RemotePresenceOverlay({
         const positions = positionFor(selection, locToDisplayPosition);
         if (!positions) continue;
 
-        const caretRect = displayListQueries.caretRect(positions.head);
-        const caret = caretRect
-          ? projectPageLocalRect(
-              host,
-              overlayTarget,
-              displayListQueries,
-              caretRect.pageIndex,
-              caretRect.x,
-              caretRect.y,
-              0,
-              caretRect.height
-            )
-          : null;
+        const caretRect =
+          positions.head >= pagePositionRange.from && positions.head <= pagePositionRange.to
+            ? displayListQueries.caretRect(positions.head)
+            : null;
+        const caret =
+          caretRect && pageInRemotePresenceWindow(caretRect.pageIndex, pageWindow)
+            ? projectPageLocalRect(
+                host,
+                overlayTarget,
+                displayListQueries,
+                caretRect.pageIndex,
+                caretRect.x,
+                caretRect.y,
+                0,
+                caretRect.height
+              )
+            : null;
         const from = Math.min(positions.anchor, positions.head);
         const to = Math.max(positions.anchor, positions.head);
-        const selectionRects =
-          from === to
-            ? []
-            : displayListQueries
-                .rangeRects(from, to)
-                .flatMap((rect) => {
-                  const projected = projectPageLocalRect(
-                    host,
-                    overlayTarget,
-                    displayListQueries,
-                    rect.pageIndex,
-                    rect.x,
-                    rect.y,
-                    rect.width,
-                    rect.height
-                  );
-                  return projected ? [projected] : [];
-                });
+        const selectionRange = clampRemoteSelectionRange(pagePositionRange, from, to);
+        const selectionRects = selectionRange
+          ? simplifyRemoteSelectionRects(
+              displayListQueries.rangeRects(selectionRange.from, selectionRange.to),
+              pageWindow
+            ).flatMap((rect) => {
+              const projected = projectPageLocalRect(
+                host,
+                overlayTarget,
+                displayListQueries,
+                rect.pageIndex,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height
+              );
+              return projected ? [projected] : [];
+            })
+          : [];
         if (!caret && selectionRects.length === 0) continue;
         next.push({
           peer,
@@ -186,24 +232,37 @@ export function RemotePresenceOverlay({
 
     recompute();
     let disposed = false;
+    let frameId: number | null = null;
+    const scheduleRecompute = () => {
+      if (frameId !== null) return;
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        if (!disposed) recompute();
+      });
+    };
     if (!displayListQueries.isReady()) {
       void displayListQueries
         .whenReady()
         .then(() => {
-          if (!disposed) recompute();
+          if (!disposed) scheduleRecompute();
         })
         .catch(() => {});
     }
-    const observer = new ResizeObserver(recompute);
+    const observer = new ResizeObserver(scheduleRecompute);
     observer.observe(host);
     observer.observe(overlayTarget);
-    window.addEventListener('resize', recompute);
-    host.addEventListener('transitionend', recompute);
+    scrollTarget.addEventListener('scroll', scheduleRecompute, {
+      passive: true,
+    });
+    window.addEventListener('resize', scheduleRecompute);
+    host.addEventListener('transitionend', scheduleRecompute);
     return () => {
       disposed = true;
+      if (frameId !== null) cancelAnimationFrame(frameId);
       observer.disconnect();
-      window.removeEventListener('resize', recompute);
-      host.removeEventListener('transitionend', recompute);
+      scrollTarget.removeEventListener('scroll', scheduleRecompute);
+      window.removeEventListener('resize', scheduleRecompute);
+      host.removeEventListener('transitionend', scheduleRecompute);
     };
   }, [
     canvasHostRef,
@@ -231,7 +290,7 @@ export function RemotePresenceOverlay({
       }}
     >
       {geometry.flatMap(({ peer, caret, selection }) => {
-        const color = peer.user.color;
+        const color = resolvePresenceColor(peer.clientId, peer.user.color);
         const flagVisible =
           peer.cursorMovedAt > 0 &&
           flagNow - peer.cursorMovedAt < FLAG_VISIBLE_MS;
@@ -245,8 +304,11 @@ export function RemotePresenceOverlay({
                 top: rect.top,
                 width: rect.width,
                 height: rect.height,
-                background: `color-mix(in srgb, ${color} 18%, transparent)`,
-                outline: `1px solid color-mix(in srgb, ${color} 28%, transparent)`,
+                boxSizing: 'border-box',
+                backgroundColor: `color-mix(in srgb, ${color} 18%, transparent)`,
+                borderColor: `color-mix(in srgb, ${color} 28%, transparent)`,
+                borderStyle: 'solid',
+                borderWidth: 1,
               }}
             />
           )),
@@ -260,7 +322,7 @@ export function RemotePresenceOverlay({
                 width: 2,
                 height: caret.height,
                 borderRadius: 1,
-                background: color,
+                backgroundColor: color,
               }}
             >
               <div
@@ -274,7 +336,7 @@ export function RemotePresenceOverlay({
                   overflow: 'hidden',
                   opacity: flagVisible ? 1 : 0,
                   color: '#FFFFFF',
-                  background: color,
+                  backgroundColor: color,
                   font: '600 11px/16px system-ui, sans-serif',
                   whiteSpace: 'nowrap',
                   transform: flagVisible ? 'translateY(0)' : 'translateY(2px)',
