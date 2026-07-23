@@ -21,6 +21,8 @@ export const PRESENCE_COLORS = [
   '#00695C',
 ] as const;
 
+const PRESENCE_COLOR_PATTERN = /^#[0-9a-fA-F]+$/;
+
 export interface AwarenessUpdateEntry {
   clientId: number;
   clock: number;
@@ -29,6 +31,14 @@ export interface AwarenessUpdateEntry {
 
 export function presenceColorForClientId(clientId: number): string {
   return PRESENCE_COLORS[Math.abs(clientId) % PRESENCE_COLORS.length];
+}
+
+export function sanitizePresenceColor(clientId: number, color: unknown): string {
+  return typeof color === 'string' &&
+    (color.length === 4 || color.length === 7) &&
+    PRESENCE_COLOR_PATTERN.test(color)
+    ? color
+    : presenceColorForClientId(clientId);
 }
 
 export function presenceUser(
@@ -42,7 +52,7 @@ export function presenceUser(
     throw new TypeError('Collaboration user color must be a string');
   }
   const name = user?.name.trim() || `Guest ${clientId.toString(36).toUpperCase()}`;
-  const color = user?.color?.trim() || presenceColorForClientId(clientId);
+  const color = sanitizePresenceColor(clientId, user?.color);
   return { name, color };
 }
 

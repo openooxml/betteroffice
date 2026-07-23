@@ -318,6 +318,27 @@ describe('CollaborationProvider sync', () => {
     expect(provider.synced).toBe(true);
   });
 
+  it('keeps document sync alive after malformed inner awareness data', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.sent = [];
+    const malformedAwareness = Uint8Array.of(1, 5, 1, 2, 1, 1, 123);
+
+    transport.emit({
+      type: 'message',
+      data: concat(malformedAwareness, encodeSyncStep2(Uint8Array.of(4))),
+    });
+    replica.emit(Uint8Array.of(5), 'local');
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4)]);
+    expect(sentMessageTypes(transport)).toEqual(['update']);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+  });
+
   it('applies remote presence clocks and explicit leave without echoing local state', () => {
     const { provider, transport } = open();
     const changes: number[][] = [];
@@ -592,6 +613,28 @@ describe('CollaborationProvider lifecycle', () => {
     expect(decodeAwarenessUpdate(awareness.update)).toEqual([
       { clientId: 1, clock: 2, state: null },
     ]);
+    expect(transport.disconnectCount).toBe(1);
+  });
+
+  it('attempts an explicit leave while queued frames remain backpressured', () => {
+    const { provider, replica, transport } = open();
+    transport.sent = [];
+    transport.attempted = [];
+    transport.accept = false;
+    replica.emit(Uint8Array.of(9), 'local');
+    expect(provider.pendingBytes).toBe(4);
+    transport.attempted = [];
+
+    provider.destroy();
+
+    expect(transport.attempted).toHaveLength(1);
+    const [awareness] = decodeMessages(transport.attempted[0]);
+    if (awareness.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(awareness.update)).toEqual([
+      { clientId: 1, clock: 2, state: null },
+    ]);
+    expect(provider.pendingBytes).toBe(0);
+    expect(provider.status).toBe('destroyed');
     expect(transport.disconnectCount).toBe(1);
   });
 

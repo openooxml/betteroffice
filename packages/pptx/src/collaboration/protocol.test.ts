@@ -11,6 +11,7 @@ import {
   encodeVarUint,
   ProtocolError,
 } from './protocol';
+import { presenceColorForClientId } from './presence';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const output = new Uint8Array(parts.reduce((length, part) => length + part.byteLength, 0));
@@ -20,6 +21,17 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     offset += part.byteLength;
   }
   return output;
+}
+
+function rawAwarenessUpdate(clientId: number, clock: number, state: unknown): Uint8Array {
+  const encodedState = new TextEncoder().encode(JSON.stringify(state));
+  return concat(
+    encodeVarUint(1),
+    encodeVarUint(clientId),
+    encodeVarUint(clock),
+    encodeVarUint(encodedState.byteLength),
+    encodedState
+  );
 }
 
 describe('collaboration protocol encoding', () => {
@@ -144,6 +156,20 @@ describe('collaboration protocol decoding', () => {
         },
       ])
     ).toThrow('Awareness state identity does not match its entry');
+  });
+
+  it('replaces unsafe peer colors with the deterministic palette color', () => {
+    const clientId = 42;
+    const [entry] = decodeAwarenessUpdate(
+      rawAwarenessUpdate(clientId, 7, {
+        clientId,
+        clock: 7,
+        user: { name: 'Peer', color: 'url(https://attacker.invalid/pixel)' },
+        cursor: null,
+      })
+    );
+
+    expect(entry.state?.user.color).toBe(presenceColorForClientId(clientId));
   });
 
   it('enforces the physical frame limit', () => {

@@ -1,4 +1,4 @@
-import type { AwarenessUpdateEntry } from './presence';
+import { sanitizePresenceColor, type AwarenessUpdateEntry } from './presence';
 import type { PptxPresenceCursor, PptxPresenceState } from './types';
 
 export const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
@@ -332,7 +332,7 @@ function parseAwarenessState(
   }
   if (!isRecord(value.user)) throw new ProtocolError('Awareness user must be an object');
   const name = requireAwarenessString(value.user.name, 'Awareness user name');
-  const color = requireAwarenessString(value.user.color, 'Awareness user color');
+  const color = sanitizePresenceColor(clientId, value.user.color);
   return {
     clientId,
     clock,

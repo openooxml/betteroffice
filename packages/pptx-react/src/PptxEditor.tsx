@@ -40,12 +40,19 @@ import {
   findShape,
   findTopLevelShape,
   frameBoundsForShape,
+  indexShapes,
   movedShapePosition,
   passedDragThreshold,
   slidePoint,
   textPositionAtPoint,
 } from './interactions';
 import type { FrameBounds, SlidePoint } from './interactions';
+import {
+  groupPresenceBySlide,
+  groupShapePresence,
+  limitPresence,
+  type BoundedPresence,
+} from './presence-rendering';
 
 export interface PptxTextSelection {
   shapeId: string;
@@ -121,6 +128,8 @@ interface ShapeDragPreview {
 
 interface RemoteShapePresence {
   peer: PptxPresencePeer;
+  peerCount: number;
+  shapeId: string;
   bounds: FrameBounds;
 }
 
@@ -478,31 +487,36 @@ function PptxEditorContent({
     [collaborationPresence]
   );
 
-  const remoteShapePresences = useMemo<RemoteShapePresence[]>(() => {
-    if (!model?.frame || !activeSlide) return [];
-    const selections: RemoteShapePresence[] = [];
-    for (const peer of remotePeers) {
-      const cursor = peer.state.cursor;
-      if (cursor?.slideId !== activeSlide.id || !cursor.shapeId) continue;
-      const shape = findShape(activeSlide.shapes, cursor.shapeId);
+  const toolbarPresence = useMemo(() => limitPresence(remotePeers), [remotePeers]);
+
+  const remoteShapePresence = useMemo<BoundedPresence<RemoteShapePresence>>(() => {
+    if (!model?.frame || !activeSlide) return { visible: [], overflow: 0 };
+    const shapeIndex = indexShapes(activeSlide.shapes);
+    const grouped = groupShapePresence(remotePeers, activeSlide.id, shapeIndex);
+    const visible: RemoteShapePresence[] = [];
+    let overflow = grouped.overflow;
+    for (const group of grouped.visible) {
+      const shape = shapeIndex.get(group.shapeId);
       if (!shape) continue;
       const bounds = frameBoundsForShape(model.snapshot, model.frame, shape);
-      if (bounds) selections.push({ peer, bounds });
+      if (bounds) {
+        visible.push({
+          peer: group.peer,
+          peerCount: group.count,
+          shapeId: group.shapeId,
+          bounds,
+        });
+      } else {
+        overflow += group.count;
+      }
     }
-    return selections;
+    return { visible, overflow };
   }, [activeSlide, model, remotePeers]);
 
   const remotePeersBySlide = useMemo(() => {
-    const peersBySlide = new Map<string, PptxPresencePeer[]>();
-    for (const peer of remotePeers) {
-      const slideId = peer.state.cursor?.slideId;
-      if (!slideId) continue;
-      const peers = peersBySlide.get(slideId) ?? [];
-      peers.push(peer);
-      peersBySlide.set(slideId, peers);
-    }
-    return peersBySlide;
-  }, [remotePeers]);
+    const slideIds = new Set(model?.snapshot.slides.map((slide) => slide.id));
+    return groupPresenceBySlide(remotePeers, slideIds);
+  }, [model, remotePeers]);
 
   const selectSlide = (index: number) => {
     setSelection(null);
@@ -1068,7 +1082,7 @@ function PptxEditorContent({
         </div>
         {remotePeers.length > 0 ? (
           <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
-            {remotePeers.map((peer) => {
+            {toolbarPresence.visible.map((peer) => {
               const sameSlide = peer.state.cursor?.slideId === currentSlideId;
               return (
                 <span
@@ -1082,50 +1096,70 @@ function PptxEditorContent({
                 </span>
               );
             })}
+            {toolbarPresence.overflow > 0 ? (
+              <span
+                role="listitem"
+                style={presenceChip('#64748b', true)}
+                title={`${toolbarPresence.overflow} more collaborators`}
+                aria-label={`${toolbarPresence.overflow} more collaborators`}
+              >
+                +{toolbarPresence.overflow}
+              </span>
+            ) : null}
           </div>
         ) : null}
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
-          {model?.snapshot.slides.map((slide, index) => (
-            <button
-              type="button"
-              key={slide.id}
-              aria-current={index === currentSlide ? 'page' : undefined}
-              style={slideButton(index === currentSlide)}
-              onClick={() => selectSlide(index)}
-            >
-              <span style={styles.slideNumber}>{index + 1}</span>
-              <span style={styles.slidePreview}>
-                {model.thumbnails.get(slide.id) ? (
-                  <SlideThumbnail
-                    frame={model.thumbnails.get(slide.id)!}
-                    resolveImage={(assetId) =>
-                      resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
-                    }
-                  />
-                ) : (
-                  <span style={styles.slideTitle}>
-                    {slideTitle(slide.shapes) ||
-                      t('slides.fallbackTitle', { number: index + 1 })}
+          {model?.snapshot.slides.map((slide, index) => {
+            const slidePresence = remotePeersBySlide.get(slide.id);
+            return (
+              <button
+                type="button"
+                key={slide.id}
+                aria-current={index === currentSlide ? 'page' : undefined}
+                style={slideButton(index === currentSlide)}
+                onClick={() => selectSlide(index)}
+              >
+                <span style={styles.slideNumber}>{index + 1}</span>
+                <span style={styles.slidePreview}>
+                  {model.thumbnails.get(slide.id) ? (
+                    <SlideThumbnail
+                      frame={model.thumbnails.get(slide.id)!}
+                      resolveImage={(assetId) =>
+                        resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
+                      }
+                    />
+                  ) : (
+                    <span style={styles.slideTitle}>
+                      {slideTitle(slide.shapes) ||
+                        t('slides.fallbackTitle', { number: index + 1 })}
+                    </span>
+                  )}
+                  {slide.id !== currentSlideId &&
+                  slidePresence &&
+                  (slidePresence.visible.length > 0 || slidePresence.overflow > 0) ? (
+                      <span style={styles.thumbnailPresence} aria-hidden="true">
+                        {slidePresence.visible.map((peer) => (
+                          <span
+                            key={peer.state.clientId}
+                            style={{
+                              ...styles.thumbnailPresenceDot,
+                              backgroundColor: peer.state.user.color,
+                            }}
+                          />
+                        ))}
+                        {slidePresence.overflow > 0 ? (
+                          <span style={styles.thumbnailPresenceOverflow}>
+                            +{slidePresence.overflow}
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : null}
                   </span>
-                )}
-                {slide.id !== currentSlideId && remotePeersBySlide.get(slide.id)?.length ? (
-                  <span style={styles.thumbnailPresence} aria-hidden="true">
-                    {remotePeersBySlide.get(slide.id)!.map((peer) => (
-                      <span
-                        key={peer.state.clientId}
-                        style={{
-                          ...styles.thumbnailPresenceDot,
-                          backgroundColor: peer.state.user.color,
-                        }}
-                      />
-                    ))}
-                  </span>
-                ) : null}
-              </span>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </aside>
         <div
           ref={stageRef}
@@ -1170,15 +1204,23 @@ function PptxEditorContent({
                   }
                 />
                 <canvas ref={overlayCanvasRef} style={styles.canvasOverlay} aria-hidden="true" />
-                {remoteShapePresences.map(({ peer, bounds }, index) => (
-                  <RemoteShapeOutline
-                    key={peer.state.clientId}
-                    peer={peer}
-                    bounds={bounds}
-                    scale={scale}
-                    labelOffset={index}
-                  />
-                ))}
+                {remoteShapePresence.visible.map(
+                  ({ peer, peerCount, shapeId, bounds }, index) => (
+                    <RemoteShapeOutline
+                      key={shapeId}
+                      peer={peer}
+                      peerCount={peerCount}
+                      bounds={bounds}
+                      scale={scale}
+                      labelOffset={index}
+                    />
+                  )
+                )}
+                {remoteShapePresence.overflow > 0 ? (
+                  <span style={styles.remoteShapeOverflow} aria-hidden="true">
+                    +{remoteShapePresence.overflow} selections
+                  </span>
+                ) : null}
                 {selectedShapeBounds ? (
                   <span
                     style={{
@@ -1211,11 +1253,13 @@ function PptxEditorContent({
 
 function RemoteShapeOutline({
   peer,
+  peerCount,
   bounds,
   scale,
   labelOffset,
 }: {
   peer: PptxPresencePeer;
+  peerCount: number;
   bounds: FrameBounds;
   scale: number;
   labelOffset: number;
@@ -1261,6 +1305,7 @@ function RemoteShapeOutline({
           }}
         >
           {peer.state.user.name}
+          {peerCount > 1 ? ` +${peerCount - 1}` : ''}
         </span>
       ) : null}
     </span>
@@ -1583,6 +1628,12 @@ const styles: Record<string, CSSProperties> = {
     borderRadius: 999,
     boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
   },
+  thumbnailPresenceOverflow: {
+    color: '#475569',
+    fontSize: 8,
+    fontWeight: 700,
+    lineHeight: '8px',
+  },
   stage: { position: 'relative', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
   canvasHost: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', overflow: 'auto' },
   canvasFrame: { position: 'relative', flex: '0 0 auto' },
@@ -1625,6 +1676,19 @@ const styles: Record<string, CSSProperties> = {
     whiteSpace: 'nowrap',
     transform: 'translateY(-100%)',
     boxShadow: '0 1px 3px rgba(15, 23, 42, 0.25)',
+  },
+  remoteShapeOverflow: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    zIndex: 3,
+    padding: '3px 6px',
+    borderRadius: 999,
+    backgroundColor: '#475569',
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: 700,
+    pointerEvents: 'none',
   },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },

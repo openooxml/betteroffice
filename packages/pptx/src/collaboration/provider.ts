@@ -487,19 +487,14 @@ export class CollaborationProvider {
           this.applyRemoteUpdate(token, message.update);
           break;
         case 'awareness': {
-          let entries: ReturnType<typeof decodeAwarenessUpdate>;
           try {
-            entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);
+            const entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);
+            if (this.remotePresence.apply(entries, Date.now())) {
+              this.emitPresence();
+              this.schedulePresenceExpiry();
+            }
           } catch (cause) {
-            this.failConnection(
-              token,
-              normalizeError('protocol', 'Invalid awareness update', cause)
-            );
-            return;
-          }
-          if (this.remotePresence.apply(entries, Date.now())) {
-            this.emitPresence();
-            this.schedulePresenceExpiry();
+            this.report(normalizeError('protocol', 'Invalid awareness update', cause));
           }
           break;
         }
@@ -614,18 +609,24 @@ export class CollaborationProvider {
     this.cursorTimer = null;
     this.lastAwarenessSentAt = Date.now();
     try {
-      this.sendFrame(
-        encodeAwarenessUpdate(
-          [{ clientId: this.localClientId, clock, state }],
-          this.maxFrameBytes
-        )
+      const frame = encodeAwarenessUpdate(
+        [{ clientId: this.localClientId, clock, state }],
+        this.maxFrameBytes
       );
+      if (leaving) this.sendLeaveFrameBestEffort(frame);
+      else this.sendFrame(frame);
     } catch (cause) {
       this.failConnection(
         token,
         normalizeError('protocol', 'Failed to encode awareness update', cause)
       );
     }
+  }
+
+  private sendLeaveFrameBestEffort(frame: Uint8Array): void {
+    try {
+      this.transport.send(frame.slice());
+    } catch {}
   }
 
   private startPresenceTimers(): void {
