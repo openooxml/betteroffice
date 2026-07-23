@@ -36,6 +36,7 @@ import type {
   DrawCmd,
   Direction,
   EditResult,
+  MergedRange,
   Proposal,
   Selection,
   SelectionLimits,
@@ -57,7 +58,11 @@ import type {
 } from './components/Toolbar';
 import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
-import { PresenceStrip, RemoteSelections } from './presence/Presence';
+import {
+  expandRangeToMergedCells,
+  PresenceStrip,
+  RemoteSelections,
+} from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 
 /**
@@ -115,6 +120,7 @@ const COL_W = 96;
 const ROW_H = 24;
 const BRAND = '#217346';
 const DEFAULT_XLSX_TOOLBAR_HEIGHT = 87;
+const MAX_OVERLAY_MERGED_RANGES = 1024;
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 // a placeholder grid frame so the shell paints something real when no file is
@@ -386,6 +392,7 @@ function XlsxEditorContent({
   const [mergedRanges, setMergedRanges] = useState<
     Array<{ start: CellAddr; end: CellAddr }>
   >([]);
+  const [visibleMergedRanges, setVisibleMergedRanges] = useState<readonly MergedRange[]>([]);
   const [borderStyleChoice, setBorderStyleChoice] = useState<SelectionFormatting['borderStyle']>();
   const [borderColorChoice, setBorderColorChoice] = useState<string>();
   const [capturedFormat, setCapturedFormat] = useState<CapturedFormat | null>(null);
@@ -449,6 +456,7 @@ function XlsxEditorContent({
     setSelectionFormatting({});
     setHistoryState({ canUndo: false, canRedo: false });
     setMergedRanges([]);
+    setVisibleMergedRanges([]);
     setBorderStyleChoice(undefined);
     setBorderColorChoice(undefined);
     setCapturedFormat(null);
@@ -604,10 +612,28 @@ function XlsxEditorContent({
     } else {
       dl = buildDemoDisplayList(logicalWidth, logicalHeight, t('editor.demoCellText'));
     }
+    let nextMergedRanges: readonly MergedRange[] = [];
+    const grid = dl.grid;
+    const rows = (grid?.rowOffsets.length ?? 0) - 1;
+    const columns = (grid?.colOffsets.length ?? 0) - 1;
+    if (handle && grid && rows > 0 && columns > 0) {
+      try {
+        const from = handle.cell(activeSheet, grid.startRow, grid.startCol).a1;
+        const to = handle.cell(
+          activeSheet,
+          grid.startRow + rows - 1,
+          grid.startCol + columns - 1
+        ).a1;
+        nextMergedRanges = handle
+          .mergedRanges(activeSheet, `${from}:${to}`)
+          .slice(0, MAX_OVERLAY_MERGED_RANGES);
+      } catch {}
+    }
     paintDisplayList(ctx, dl, dpr * zoom);
     frameRef.current = dl;
+    setVisibleMergedRanges(nextMergedRanges);
     setFrame(dl);
-  }, [t, zoom]);
+  }, [activeSheet, t, zoom]);
 
   // paint loop: repaint on scroll/resize (rAF-coalesced) and whenever the open
   // workbook, active sheet, or a mutation (revision) changes the pixels.
@@ -1278,9 +1304,22 @@ function XlsxEditorContent({
   }, [selection, openEditor]);
 
   const grid = frame?.grid;
-  const selRect = grid && selection ? rangeRect(grid, normalizeRange(selection)) : null;
-  const focusRect =
-    grid && selection ? cellRect(grid, selection.focus.row, selection.focus.col) : null;
+  const renderedSelection = selection
+    ? expandRangeToMergedCells(normalizeRange(selection), visibleMergedRanges)
+    : null;
+  const renderedFocus = selection
+    ? expandRangeToMergedCells(
+        {
+          top: selection.focus.row,
+          left: selection.focus.col,
+          bottom: selection.focus.row,
+          right: selection.focus.col,
+        },
+        visibleMergedRanges
+      )
+    : null;
+  const selRect = grid && renderedSelection ? rangeRect(grid, renderedSelection) : null;
+  const focusRect = grid && renderedFocus ? rangeRect(grid, renderedFocus) : null;
   const editRect = grid && editing ? cellRect(grid, editing.row, editing.col) : null;
   const scaledSelectionRect = selRect ? scaledRect(selRect, zoom) : null;
   const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
@@ -1543,6 +1582,7 @@ function XlsxEditorContent({
               sheetIds={sheetInfo?.sheetIds ?? []}
               activeSheet={activeSheet}
               zoom={zoom}
+              mergedRanges={visibleMergedRanges}
             />
             {editing && scaledEditRect && (
               <input

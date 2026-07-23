@@ -11,6 +11,7 @@ export {
   applyAwarenessUpdates,
   colorForClientId,
   expireAwarenessPeers,
+  normalizeAwarenessColor,
   normalizeCollaborationUser,
   resolveAwarenessCursor,
   type AwarenessPeerEntry,

@@ -1,4 +1,5 @@
 import type { AwarenessPayload, AwarenessUpdate } from './types';
+import { normalizeAwarenessColor } from './awareness';
 
 export const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024 + 16;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
@@ -152,7 +153,7 @@ function awarenessCell(value: unknown): { row: number; col: number } {
   return { row: row as number, col: col as number };
 }
 
-function awarenessPayload(value: unknown): AwarenessPayload | null {
+function awarenessPayload(value: unknown, clientId: number): AwarenessPayload | null {
   if (value === null) return null;
   if (!isObject(value) || !isObject(value.user)) {
     throw new ProtocolError('Awareness state must contain a user');
@@ -161,13 +162,11 @@ function awarenessPayload(value: unknown): AwarenessPayload | null {
   if (typeof name !== 'string' || name.length === 0 || name.length > 128) {
     throw new ProtocolError('Awareness user name must contain 1 to 128 characters');
   }
-  if (typeof color !== 'string' || !/^#[0-9a-f]{6}$/i.test(color)) {
-    throw new ProtocolError('Awareness user color must be #RRGGBB');
-  }
+  const normalizedColor = normalizeAwarenessColor(color, clientId);
 
   const cursor = value.cursor;
   if (cursor === null || cursor === undefined) {
-    return { user: { name, color }, cursor: null };
+    return { user: { name, color: normalizedColor }, cursor: null };
   }
   if (!isObject(cursor) || typeof cursor.sheet !== 'string') {
     throw new ProtocolError('Awareness cursor must contain a sheet identifier');
@@ -176,7 +175,7 @@ function awarenessPayload(value: unknown): AwarenessPayload | null {
     throw new ProtocolError('Awareness sheet identifier must contain 1 to 256 characters');
   }
   return {
-    user: { name, color },
+    user: { name, color: normalizedColor },
     cursor: {
       sheet: cursor.sheet,
       anchor: awarenessCell(cursor.anchor),
@@ -245,7 +244,7 @@ export function encodeAwarenessUpdate(
     if (!Number.isSafeInteger(update.clock) || update.clock < 0) {
       throw new ProtocolError('Awareness clock must be a non-negative safe integer');
     }
-    const state = awarenessPayload(update.state);
+    const state = awarenessPayload(update.state, update.clientId);
     payloadParts.push(
       encodeVarUint(update.clientId),
       encodeVarUint(update.clock),
@@ -300,7 +299,7 @@ export function decodeAwarenessUpdate(
         `Invalid awareness JSON${cause instanceof Error ? `: ${cause.message}` : ''}`
       );
     }
-    updates.push({ clientId, clock, state: awarenessPayload(parsed) });
+    updates.push({ clientId, clock, state: awarenessPayload(parsed, clientId) });
   }
   if (!decoder.done) throw new ProtocolError('Trailing awareness update data');
   return updates;

@@ -11,6 +11,7 @@ import {
   encodeVarUint,
   ProtocolError,
 } from './protocol';
+import { colorForClientId } from './awareness';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const output = new Uint8Array(parts.reduce((length, part) => length + part.byteLength, 0));
@@ -72,6 +73,27 @@ describe('collaboration protocol encoding', () => {
         },
       },
     ]);
+  });
+
+  it('sanitizes peer colors to a strict hex value at decode time', () => {
+    const state = JSON.stringify({
+      user: { name: 'Quiet Otter', color: 'url(https://example.invalid/peer)' },
+    });
+    const bytes = new TextEncoder().encode(state);
+    expect(
+      decodeAwarenessUpdate(
+        Uint8Array.from([1, 42, 7, bytes.byteLength, ...bytes])
+      )[0].state?.user.color
+    ).toBe(colorForClientId(42));
+
+    const shortHex = new TextEncoder().encode(
+      JSON.stringify({ user: { name: 'Quiet Otter', color: '#aBc' } })
+    );
+    expect(
+      decodeAwarenessUpdate(
+        Uint8Array.from([1, 42, 8, shortHex.byteLength, ...shortHex])
+      )[0].state?.user.color
+    ).toBe('#AABBCC');
   });
 
   it('uses standard multibyte varUint lengths', () => {

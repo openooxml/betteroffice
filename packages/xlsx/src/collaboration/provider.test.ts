@@ -318,6 +318,31 @@ describe('CollaborationProvider sync', () => {
     expect(provider.synced).toBe(true);
   });
 
+  it('isolates malformed awareness while document updates keep flowing', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of()) });
+    replica.applied = [];
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        Uint8Array.of(1, 5, 1, 22, 1, 1, 123),
+        encodeUpdate(Uint8Array.of(4))
+      ),
+    });
+    transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(5)) });
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Invalid awareness update');
+    provider.destroy();
+  });
+
   it('publishes host identity and a cursor in the initial awareness state', () => {
     const replica = new FakeReplica();
     const transport = new FakeTransport();
@@ -456,6 +481,27 @@ describe('CollaborationProvider transport flow control', () => {
     transport.emit({ type: 'drain' });
     expect(provider.pendingBytes).toBe(0);
     expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 2, 1, 5]]);
+  });
+
+  it('attempts an explicit leave directly under backpressure during teardown', () => {
+    for (const method of ['disconnect', 'destroy'] as const) {
+      const { provider, replica, transport } = open();
+      transport.sent = [];
+      transport.accept = false;
+      replica.emit(Uint8Array.of(5), 'local');
+      expect(provider.pendingBytes).toBeGreaterThan(0);
+      transport.attempted = [];
+
+      provider[method]();
+
+      expect(provider.pendingBytes).toBe(0);
+      expect(messageTypes(transport.attempted)).toEqual(['awareness']);
+      const [message] = decodeMessages(transport.attempted[0]);
+      if (message.type !== 'awareness') throw new Error('expected awareness');
+      expect(decodeAwarenessUpdate(message.update)).toEqual([
+        { clientId: 1, clock: 2, state: null },
+      ]);
+    }
   });
 
   it('fails on overflow and converges through a fresh state-vector handshake', () => {

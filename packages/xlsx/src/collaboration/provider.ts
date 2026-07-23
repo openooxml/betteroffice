@@ -231,8 +231,7 @@ export class CollaborationProvider {
     if (!active) return;
 
     this.clearPending();
-    this.publishAwareness(null);
-    this.clearPending();
+    this.publishAwareness(null, 'best-effort');
     this.stopAwarenessTimers();
     this.clearAwarenessPeers();
     this.hasPublishedAwarenessForOpen = false;
@@ -256,8 +255,7 @@ export class CollaborationProvider {
       this.connectionStatus === 'connecting' ||
       this.connectionStatus === 'connected';
     this.clearPending();
-    this.publishAwareness(null);
-    this.clearPending();
+    this.publishAwareness(null, 'best-effort');
     this.stopAwarenessTimers();
     this.clearAwarenessPeers();
     this.hasPublishedAwarenessForOpen = false;
@@ -516,11 +514,7 @@ export class CollaborationProvider {
             );
             if (changed) this.emitAwareness();
           } catch (cause) {
-            this.failConnection(
-              token,
-              normalizeError('protocol', 'Invalid awareness update', cause)
-            );
-            return;
+            this.report(normalizeError('protocol', 'Invalid awareness update', cause));
           }
           break;
         case 'auth':
@@ -593,7 +587,10 @@ export class CollaborationProvider {
     }
   }
 
-  private publishAwareness(state: 'current' | null = 'current'): void {
+  private publishAwareness(
+    state: 'current' | null = 'current',
+    delivery: 'queued' | 'best-effort' = 'queued'
+  ): void {
     if (!this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     if (this.awarenessBroadcastTimer) {
       clearTimeout(this.awarenessBroadcastTimer);
@@ -601,39 +598,43 @@ export class CollaborationProvider {
     }
     const token = this.epoch;
     if (this.awarenessClock >= Number.MAX_SAFE_INTEGER) {
-      this.failConnection(
-        token,
-        new CollaborationError('protocol', 'Awareness clock exhausted')
-      );
+      if (delivery === 'queued') {
+        this.failConnection(
+          token,
+          new CollaborationError('protocol', 'Awareness clock exhausted')
+        );
+      }
       return;
     }
     this.awarenessClock += 1;
     try {
       this.hasPublishedAwarenessForOpen = true;
-      this.sendFrame(
-        encodeAwarenessUpdate(
-          [
-            {
-              clientId: this.replica.clientId,
-              clock: this.awarenessClock,
-              state:
-                state === null
-                  ? null
-                  : {
-                      user: this.awarenessUser,
-                      cursor: this.awarenessCursor,
-                    },
-            },
-          ],
-          this.maxFrameBytes
-        )
+      const frame = encodeAwarenessUpdate(
+        [
+          {
+            clientId: this.replica.clientId,
+            clock: this.awarenessClock,
+            state:
+              state === null
+                ? null
+                : {
+                    user: this.awarenessUser,
+                    cursor: this.awarenessCursor,
+                  },
+          },
+        ],
+        this.maxFrameBytes
       );
+      if (delivery === 'best-effort') this.sendBestEffort(frame);
+      else this.sendFrame(frame);
       this.lastAwarenessSentAt = Date.now();
     } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('protocol', 'Failed to encode awareness update', cause)
-      );
+      if (delivery === 'queued') {
+        this.failConnection(
+          token,
+          normalizeError('protocol', 'Failed to encode awareness update', cause)
+        );
+      }
     }
   }
 
@@ -707,6 +708,12 @@ export class CollaborationProvider {
       return;
     }
     if (!accepted && this.isCurrent(token) && this.isOpen) this.queueFrame(token, frame);
+  }
+
+  private sendBestEffort(frame: Uint8Array): void {
+    try {
+      this.transport.send(frame.slice());
+    } catch {}
   }
 
   private queueFrame(token: number, frame: Uint8Array): void {

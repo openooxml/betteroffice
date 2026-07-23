@@ -103,6 +103,9 @@ describe('awareness identity and cursor resolution', () => {
     expect(
       normalizeCollaborationUser({ name: 'Swift Fox', color: '#abcdef' }, 8)
     ).toEqual({ name: 'Swift Fox', color: '#ABCDEF' });
+    expect(
+      normalizeCollaborationUser({ name: 'Swift Fox', color: '#abc' }, 8)
+    ).toEqual({ name: 'Swift Fox', color: '#AABBCC' });
   });
 
   it('normalizes ranges and drops unknown sheets or out-of-bounds cells', () => {

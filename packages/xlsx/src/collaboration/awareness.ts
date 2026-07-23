@@ -44,10 +44,6 @@ export interface ResolvedAwarenessCursor {
   };
 }
 
-function validColor(color: string | undefined): color is string {
-  return typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color);
-}
-
 function cloneCursor(cursor: AwarenessCursor | null): AwarenessCursor | null {
   if (!cursor) return null;
   return {
@@ -88,6 +84,15 @@ export function colorForClientId(clientId: number): string {
   return AWARENESS_COLORS[clientId % AWARENESS_COLORS.length];
 }
 
+export function normalizeAwarenessColor(color: unknown, clientId: number): string {
+  if (typeof color !== 'string' || !/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(color)) {
+    return colorForClientId(clientId);
+  }
+  const hex = color.slice(1).toUpperCase();
+  if (hex.length === 6) return `#${hex}`;
+  return `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`;
+}
+
 export function normalizeCollaborationUser(
   user: CollaborationUserOptions | undefined,
   clientId: number
@@ -95,7 +100,7 @@ export function normalizeCollaborationUser(
   const name = user?.name.trim().slice(0, 128) || 'Anonymous';
   return {
     name,
-    color: validColor(user?.color) ? user.color.toUpperCase() : colorForClientId(clientId),
+    color: normalizeAwarenessColor(user?.color, clientId),
   };
 }
 
