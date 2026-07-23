@@ -42,7 +42,9 @@ export interface CollaborationProvider {
   onError?(listener: (error: Error) => void): () => void;
 }
 
-export type CollaborationProviderFactory = (
+export type CollaborationProviderFactory<
+  TProvider extends CollaborationProvider = CollaborationProvider,
+> = (
   replica: CollaborationReplica,
   transport: CollaborationTransport,
-) => CollaborationProvider;
+) => TProvider;

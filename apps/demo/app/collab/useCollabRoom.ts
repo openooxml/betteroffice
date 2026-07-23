@@ -19,6 +19,63 @@ function createClientId(): number {
   return value || 1;
 }
 
+const IDENTITY_KEY = "betteroffice:collaboration-user";
+const ADJECTIVES = [
+  "Bright",
+  "Calm",
+  "Clever",
+  "Kind",
+  "Merry",
+  "Nimble",
+  "Quiet",
+  "Swift",
+] as const;
+const ANIMALS = [
+  "Badger",
+  "Falcon",
+  "Fox",
+  "Koala",
+  "Otter",
+  "Panda",
+  "Robin",
+  "Tiger",
+] as const;
+
+export interface DemoCollaborationUser {
+  name: string;
+}
+
+function generatedIdentity(): DemoCollaborationUser {
+  const values = crypto.getRandomValues(new Uint32Array(2));
+  return {
+    name: `${ADJECTIVES[values[0] % ADJECTIVES.length]} ${
+      ANIMALS[values[1] % ANIMALS.length]
+    }`,
+  };
+}
+
+export function useDemoIdentity(): DemoCollaborationUser | null {
+  const [user, setUser] = useState<DemoCollaborationUser | null>(null);
+  useEffect(() => {
+    let identity: DemoCollaborationUser | null = null;
+    try {
+      const stored = sessionStorage.getItem(IDENTITY_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Partial<DemoCollaborationUser>;
+        if (typeof parsed.name === "string" && parsed.name.trim()) {
+          identity = { name: parsed.name.trim() };
+        }
+      }
+    } catch {}
+    identity ??= generatedIdentity();
+    try {
+      sessionStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+    } catch {}
+    setUser(identity);
+  }, []);
+  return user;
+}
+
 export function useDemoRoom(): string | null {
   const pathname = usePathname();
   const router = useRouter();
@@ -37,8 +94,11 @@ export function useDemoRoom(): string | null {
   return room;
 }
 
-export interface CollabRoomState {
+export interface CollabRoomState<
+  TProvider extends CollaborationProvider = CollaborationProvider,
+> {
   clientId: number | null;
+  provider: TProvider | null;
   status: CollaborationStatus;
   synced: boolean;
   peerCount: number | null;
@@ -46,18 +106,19 @@ export interface CollabRoomState {
   onReplica(replica: CollaborationReplica | null): void;
 }
 
-export function useCollabRoom(
+export function useCollabRoom<TProvider extends CollaborationProvider>(
   relayOrigin: string,
   roomId: string | null,
-  createProvider: CollaborationProviderFactory,
-): CollabRoomState {
+  createProvider: CollaborationProviderFactory<TProvider>,
+): CollabRoomState<TProvider> {
   const [clientId, setClientId] = useState<number | null>(null);
   const [status, setStatus] =
     useState<CollaborationStatus>("disconnected");
   const [synced, setSynced] = useState(false);
   const [peerCount, setPeerCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const providerRef = useRef<CollaborationProvider | null>(null);
+  const [provider, setProvider] = useState<TProvider | null>(null);
+  const providerRef = useRef<TProvider | null>(null);
   const transportRef = useRef<RoomTransport | null>(null);
   const cleanupRef = useRef<Array<() => void>>([]);
 
@@ -68,6 +129,7 @@ export function useCollabRoom(
     const provider = providerRef.current;
     const transport = transportRef.current;
     providerRef.current = null;
+    setProvider(null);
     transportRef.current = null;
     void provider?.destroy();
     void transport?.disconnect();
@@ -92,6 +154,7 @@ export function useCollabRoom(
       const provider = createProvider(replica, transport);
       transportRef.current = transport;
       providerRef.current = provider;
+      setProvider(provider);
       cleanupRef.current.push(
         transport.onPeerCount(setPeerCount),
         provider.onStatus((change) => {
@@ -109,5 +172,5 @@ export function useCollabRoom(
     [createProvider, relayOrigin, roomId, teardown],
   );
 
-  return { clientId, status, synced, peerCount, error, onReplica };
+  return { clientId, provider, status, synced, peerCount, error, onReplica };
 }
