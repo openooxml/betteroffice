@@ -52,6 +52,8 @@ import type { FrameBounds, SlidePoint } from './interactions';
 import {
   effectiveStyleFromSelection,
   selectionFormattingFromStory,
+  storyFormattingFromStory,
+  storyTextRanges,
 } from './textFormatting';
 import type { EffectiveTextStyle } from './textFormatting';
 
@@ -416,6 +418,7 @@ function PptxEditorContent({
     if (!slide || slide.id !== shapeSelection.slideId) return null;
     return findShape(slide.shapes, shapeSelection.shapeId);
   }, [model, shapeSelection]);
+  const selectedShapeStoryId = selectedShape?.textStories[0]?.id ?? null;
 
   const selectedShapeBounds = useMemo<FrameBounds | null>(
     () =>
@@ -444,12 +447,17 @@ function PptxEditorContent({
   }, [model, reportError, selection]);
 
   const selectionFormatting = useMemo<SelectionFormatting>(() => {
-    if (!selection || selection.anchor === selection.focus) {
+    if (selection && selection.anchor === selection.focus) {
       return selectionFormattingFromStyle(textStyle);
     }
     const handle = handleRef.current;
     if (!handle) return selectionFormattingFromStyle(textStyle);
     try {
+      if (!selection) {
+        return selectedShapeStoryId
+          ? storyFormattingFromStory(handle.story(selectedShapeStoryId), initialStyle)
+          : selectionFormattingFromStyle(textStyle);
+      }
       return selectionFormattingFromStory(
         handle.story(selection.storyId),
         selection.anchor,
@@ -459,7 +467,7 @@ function PptxEditorContent({
     } catch {
       return selectionFormattingFromStyle(textStyle);
     }
-  }, [model, selection, textStyle]);
+  }, [model, selectedShapeStoryId, selection, textStyle]);
 
   const slideLayouts = useMemo<SlideLayoutOption[]>(() => {
     const unique = new Set<string | null>();
@@ -828,22 +836,35 @@ function PptxEditorContent({
       history(event.shiftKey ? 'redo' : 'undo');
       return;
     }
-    if (!selection) return;
+    if (!selection && !selectedShapeStoryId) return;
     if (modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
-      applyFormatting({ bold: !textStyle.bold });
+      applyFormatting({
+        bold: selection ? !textStyle.bold : !selectionFormatting.bold,
+      });
       return;
     }
     if (modifier && (event.key === 'i' || event.key === 'I')) {
       event.preventDefault();
-      applyFormatting({ italic: !textStyle.italic });
+      applyFormatting({
+        italic: selection ? !textStyle.italic : !selectionFormatting.italic,
+      });
       return;
     }
     if (modifier && (event.key === 'u' || event.key === 'U')) {
       event.preventDefault();
-      applyFormatting({ underline: textStyle.underline === 'none' ? 'sng' : 'none' });
+      applyFormatting({
+        underline: selection
+          ? textStyle.underline === 'none'
+            ? 'sng'
+            : 'none'
+          : selectionFormatting.underline
+            ? 'none'
+            : 'sng',
+      });
       return;
     }
+    if (!selection) return;
     const start = Math.min(selection.anchor, selection.focus);
     const end = Math.max(selection.anchor, selection.focus);
     try {
@@ -915,14 +936,22 @@ function PptxEditorContent({
   const applyFormatting = (patch: TextStylePatch) => {
     setTextStyle((current) => ({ ...current, ...patch }));
     const handle = handleRef.current;
-    if (!handle || !selection || selection.anchor === selection.focus) return;
+    if (!handle) return;
     try {
-      handle.formatText(
-        selection.storyId,
-        Math.min(selection.anchor, selection.focus),
-        Math.max(selection.anchor, selection.focus),
-        patch
-      );
+      if (selection) {
+        if (selection.anchor === selection.focus) return;
+        handle.formatText(
+          selection.storyId,
+          Math.min(selection.anchor, selection.focus),
+          Math.max(selection.anchor, selection.focus),
+          patch
+        );
+      } else if (selectedShapeStoryId) {
+        const story = handle.story(selectedShapeStoryId);
+        formatStory(handle, story, patch);
+      } else {
+        return;
+      }
       refreshAt(undefined, true);
     } catch (value) {
       reportError(value);
@@ -998,7 +1027,7 @@ function PptxEditorContent({
     <div className={className} style={styles.root}>
       <EditorToolbar
         currentFormatting={selectionFormatting}
-        textSelectionActive={selection !== null}
+        textSelectionActive={selection !== null || selectedShapeStoryId !== null}
         onFormat={formatSelection}
         onInsertSlide={addSlide}
         slideLayouts={slideLayouts}
@@ -1207,6 +1236,29 @@ function storyText(story: StorySnapshot): string {
   return story.paragraphs
     .map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
     .join('\n');
+}
+
+function formatStory(
+  handle: PresentationHandle,
+  story: StorySnapshot,
+  patch: TextStylePatch
+): void {
+  try {
+    handle.formatText(story.id, 0, story.length, patch);
+    return;
+  } catch (value) {
+    if (
+      !(value instanceof Error) ||
+      !value.message.includes('crosses a paragraph boundary')
+    ) {
+      throw value;
+    }
+  }
+  for (const range of storyTextRanges(story)) {
+    if (range.start < range.end) {
+      handle.formatText(story.id, range.start, range.end, patch);
+    }
+  }
 }
 
 function previousTextIndex(story: StorySnapshot, index: number): number {

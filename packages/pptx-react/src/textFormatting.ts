@@ -34,6 +34,24 @@ export function selectionFormattingFromStory(
   };
 }
 
+export function storyFormattingFromStory(
+  story: StorySnapshot,
+  fallback: EffectiveTextStyle
+): SelectionFormatting {
+  return selectionFormattingFromStory(story, 0, story.length, fallback);
+}
+
+export function storyTextRanges(story: StorySnapshot): Array<{ start: number; end: number }> {
+  let start = 0;
+  return story.paragraphs.map((paragraph) => {
+    const end =
+      start + paragraph.runs.reduce((length, run) => length + run.text.length, 0);
+    const range = { start, end };
+    start = end + 1;
+    return range;
+  });
+}
+
 export function effectiveStyleFromSelection(
   story: StorySnapshot,
   anchor: number,

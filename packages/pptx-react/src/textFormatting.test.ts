@@ -3,6 +3,8 @@ import type { StorySnapshot, TextStyleSnapshot } from '@betteroffice/pptx';
 import {
   effectiveStyleFromSelection,
   selectionFormattingFromStory,
+  storyFormattingFromStory,
+  storyTextRanges,
 } from './textFormatting';
 
 const fallback = {
@@ -34,6 +36,24 @@ describe('pptx text formatting', () => {
     expect(formatting.fontFamily).toBe('Aptos');
   });
 
+  it('summarizes every run in a shape text story', () => {
+    expect(storyFormattingFromStory(shapeStory(), fallback)).toEqual({
+      bold: undefined,
+      italic: false,
+      underline: undefined,
+      fontSize: undefined,
+      textColor: undefined,
+      fontFamily: undefined,
+    });
+  });
+
+  it('maps every shape story paragraph to its text range', () => {
+    expect(storyTextRanges(shapeStory())).toEqual([
+      { start: 0, end: 10 },
+      { start: 11, end: 15 },
+    ]);
+  });
+
   it('uses the fallback style for an empty story', () => {
     const empty = { ...story(), length: 0, paragraphs: [{ id: 'p', alignment: null, level: 0, bulletJson: null, runs: [] }] };
     expect(effectiveStyleFromSelection(empty, 0, 0, fallback)).toEqual(fallback);
@@ -60,6 +80,32 @@ function story(): StorySnapshot {
               fontSizePt: 28,
               color: '#325ee6',
               fontFamily: 'Aptos',
+            }),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function shapeStory(): StorySnapshot {
+  const first = story();
+  return {
+    ...first,
+    length: 15,
+    paragraphs: [
+      ...first.paragraphs,
+      {
+        id: 'second-paragraph',
+        alignment: null,
+        level: 0,
+        bulletJson: null,
+        runs: [
+          {
+            text: 'More',
+            style: style({
+              color: '#db2777',
+              fontFamily: 'Calibri',
             }),
           },
         ],
