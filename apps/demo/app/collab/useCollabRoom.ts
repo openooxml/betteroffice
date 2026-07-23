@@ -37,27 +37,31 @@ export function useDemoRoom(): string | null {
   return room;
 }
 
-export interface CollabRoomState {
+export interface CollabRoomState<
+  Provider extends CollaborationProvider = CollaborationProvider,
+> {
   clientId: number | null;
   status: CollaborationStatus;
   synced: boolean;
   peerCount: number | null;
   error: string | null;
+  provider: Provider | null;
   onReplica(replica: CollaborationReplica | null): void;
 }
 
-export function useCollabRoom(
+export function useCollabRoom<Provider extends CollaborationProvider>(
   relayOrigin: string,
   roomId: string | null,
-  createProvider: CollaborationProviderFactory,
-): CollabRoomState {
+  createProvider: CollaborationProviderFactory<Provider>,
+): CollabRoomState<Provider> {
   const [clientId, setClientId] = useState<number | null>(null);
   const [status, setStatus] =
     useState<CollaborationStatus>("disconnected");
   const [synced, setSynced] = useState(false);
   const [peerCount, setPeerCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const providerRef = useRef<CollaborationProvider | null>(null);
+  const [provider, setProvider] = useState<Provider | null>(null);
+  const providerRef = useRef<Provider | null>(null);
   const transportRef = useRef<RoomTransport | null>(null);
   const cleanupRef = useRef<Array<() => void>>([]);
 
@@ -68,6 +72,7 @@ export function useCollabRoom(
     const provider = providerRef.current;
     const transport = transportRef.current;
     providerRef.current = null;
+    setProvider(null);
     transportRef.current = null;
     void provider?.destroy();
     void transport?.disconnect();
@@ -92,6 +97,7 @@ export function useCollabRoom(
       const provider = createProvider(replica, transport);
       transportRef.current = transport;
       providerRef.current = provider;
+      setProvider(provider);
       cleanupRef.current.push(
         transport.onPeerCount(setPeerCount),
         provider.onStatus((change) => {
@@ -109,5 +115,5 @@ export function useCollabRoom(
     [createProvider, relayOrigin, roomId, teardown],
   );
 
-  return { clientId, status, synced, peerCount, error, onReplica };
+  return { clientId, status, synced, peerCount, error, provider, onReplica };
 }

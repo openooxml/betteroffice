@@ -7,6 +7,7 @@ import { XlsxEditor } from "@betteroffice/xlsx-react";
 import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
 import { isProposalsAvailable } from "@betteroffice/xlsx";
 import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
+import type { CollaborationUserOptions } from "@betteroffice/xlsx/collaboration";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
@@ -21,6 +22,27 @@ import { buildTotalsEdits } from "./demoAgent";
 
 const SHOWCASE = { url: "/showcase.xlsx", name: "showcase.xlsx" };
 const SAMPLE = { url: "/sample.xlsx", name: "sample.xlsx" };
+const COLLABORATION_USER_KEY = "betteroffice:collaboration:user";
+const COLLABORATION_ADJECTIVES = [
+  "Bright",
+  "Calm",
+  "Clever",
+  "Gentle",
+  "Kind",
+  "Lively",
+  "Quiet",
+  "Swift",
+];
+const COLLABORATION_ANIMALS = [
+  "Badger",
+  "Falcon",
+  "Fox",
+  "Koala",
+  "Otter",
+  "Panda",
+  "Robin",
+  "Turtle",
+];
 
 const btn =
   "inline-flex cursor-pointer items-center gap-1.5 rounded-[5px] border border-hairline-strong bg-white px-[11px] py-[7px] font-mono text-[11px] leading-none font-normal whitespace-nowrap text-fg transition-colors duration-[140ms] ease-[ease] hover:bg-surface focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fg disabled:cursor-default disabled:opacity-50 disabled:hover:bg-white";
@@ -32,6 +54,24 @@ const btnGhost = cn(
   btn,
   "border-transparent bg-transparent text-mute hover:bg-surface hover:text-fg",
 );
+
+function collaborationUser(): CollaborationUserOptions {
+  let stored: string | undefined;
+  try {
+    stored = sessionStorage.getItem(COLLABORATION_USER_KEY)?.trim();
+  } catch {}
+  if (stored) return { name: stored.slice(0, 128) };
+  const values = crypto.getRandomValues(new Uint32Array(2));
+  const adjective =
+    COLLABORATION_ADJECTIVES[values[0] % COLLABORATION_ADJECTIVES.length];
+  const animal =
+    COLLABORATION_ANIMALS[values[1] % COLLABORATION_ANIMALS.length];
+  const name = `${adjective} ${animal}`;
+  try {
+    sessionStorage.setItem(COLLABORATION_USER_KEY, name);
+  } catch {}
+  return { name };
+}
 
 // a styled label wrapping a hidden file input, so "Open file" reads as a button.
 function OpenFileLabel({
@@ -60,10 +100,14 @@ function OpenFileLabel({
 export function XlsxDemoClient() {
   const bootEmpty = useSearchParams().get("empty") === "1";
   const room = useDemoRoom();
+  const [user, setUser] = useState<CollaborationUserOptions | null>(null);
+  useEffect(() => setUser(collaborationUser()), []);
   const createProvider = useCallback(
     (replica: CollaborationReplica, transport: CollaborationTransport) =>
-      new CollaborationProvider(replica, transport),
-    [],
+      new CollaborationProvider(replica, transport, {
+        user: user ?? undefined,
+      }),
+    [user],
   );
   const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
   const [file, setFile] = useState<Uint8Array | undefined>();
@@ -343,11 +387,12 @@ export function XlsxDemoClient() {
             file={file}
             fileName={fileName}
             collaboration={
-              collaborativeFile && room && seed && collab.clientId
+              collaborativeFile && room && seed && collab.clientId && user
                 ? {
                     clientId: collab.clientId,
                     initialUpdate: seed,
                     onReplica: collab.onReplica,
+                    provider: collab.provider,
                   }
                 : undefined
             }
