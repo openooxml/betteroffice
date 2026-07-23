@@ -390,11 +390,13 @@ pub fn parse_shape(node: &XmlElement) -> Shape {
     let preset = properties.and_then(|element| element.child_by_full_name("a:prstGeom"));
     let has_adjustments = direct_child(preset, "avLst")
         .is_some_and(|list| list.children_by_local_name("gd").next().is_some());
-    let preset_path = has_adjustments
-        .then(|| parse_preset_geometry_path(properties))
-        .flatten();
     let transform =
         parse_transform(properties.and_then(|element| element.child_by_full_name("a:xfrm")));
+    let preset_path = has_adjustments
+        .then(|| {
+            parse_preset_geometry_path(properties, transform.size.width / transform.size.height)
+        })
+        .flatten();
     let fill = parse_legacy_fill(properties, style);
     let outline = parse_legacy_outline(properties, style);
     let fill_paint = parse_fill_paint(properties, style);
