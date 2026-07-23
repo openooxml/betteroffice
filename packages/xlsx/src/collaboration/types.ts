@@ -33,6 +33,54 @@ export interface CollaborationStatusChange {
   synced: boolean;
 }
 
+export interface CollaborationUser {
+  name: string;
+  color: string;
+}
+
+export interface CollaborationUserOptions {
+  name: string;
+  color?: string;
+}
+
+export interface AwarenessCell {
+  row: number;
+  col: number;
+}
+
+export interface AwarenessCursor {
+  sheet: string;
+  anchor: AwarenessCell;
+  head: AwarenessCell;
+}
+
+export interface AwarenessPayload {
+  user: CollaborationUser;
+  cursor: AwarenessCursor | null;
+}
+
+export interface AwarenessState extends AwarenessPayload {
+  clientId: number;
+  clock: number;
+}
+
+export interface AwarenessUpdate {
+  clientId: number;
+  clock: number;
+  state: AwarenessPayload | null;
+}
+
+export interface AwarenessPeer extends AwarenessState {
+  lastSeen: number;
+  cursorMovedAt: number;
+}
+
+export interface CollaborationAwareness {
+  readonly peers: readonly AwarenessPeer[];
+  setCursor(cursor: AwarenessCursor | null): void;
+  onAwareness(listener: AwarenessListener): () => void;
+}
+
 export type CollaborationErrorCode = 'backpressure' | 'protocol' | 'replica' | 'transport';
 
 export class CollaborationError extends Error {
@@ -51,7 +99,9 @@ export interface CollaborationProviderOptions {
   maxFrameBytes?: number;
   maxMessagesPerFrame?: number;
   maxPendingBytes?: number;
+  user?: CollaborationUserOptions;
 }
 
 export type CollaborationStatusListener = (change: CollaborationStatusChange) => void;
 export type CollaborationErrorListener = (error: CollaborationError) => void;
+export type AwarenessListener = (peers: readonly AwarenessPeer[]) => void;
