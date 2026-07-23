@@ -2,11 +2,15 @@ import {
   initWasm,
   openPresentation,
   paintSlide,
+  PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver,
+  CollaborationReplica,
   DeckSnapshot,
+  PptxPresence,
+  PptxPresencePeer,
   PptxFontFace,
   PresentationHandle,
   SlideDisplayList,
@@ -15,7 +19,6 @@ import type {
   TextStyle,
   TextStylePatch,
 } from '@betteroffice/pptx';
-import type { CollaborationReplica } from '@betteroffice/pptx/collaboration';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import {
@@ -60,6 +63,7 @@ export interface PptxEditorCollaborationOptions {
   clientId: number;
   initialUpdate?: Uint8Array;
   onReplica?: (replica: CollaborationReplica | null) => void;
+  presence?: PptxPresence;
 }
 
 export interface PptxEditorProps {
@@ -113,6 +117,11 @@ type PointerGesture =
 interface ShapeDragPreview {
   shapeId: string;
   delta: SlidePoint;
+}
+
+interface RemoteShapePresence {
+  peer: PptxPresencePeer;
+  bounds: FrameBounds;
 }
 
 interface RecentShapeClick {
@@ -197,6 +206,7 @@ function PptxEditorContent({
   const collaborationClientId = collaboration?.clientId ?? clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const collaborationOnReplica = collaboration?.onReplica;
+  const collaborationPresence = collaboration?.presence;
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
   const onReadyRef = useRef(onReady);
@@ -220,6 +230,7 @@ function PptxEditorContent({
   const [loading, setLoading] = useState(false);
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
+  const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
 
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -366,6 +377,15 @@ function PptxEditorContent({
   }, [collaborationOnReplica, collaborationReplica]);
 
   useEffect(() => {
+    if (!collaborationPresence) {
+      setRemotePeers([]);
+      return;
+    }
+    setRemotePeers(collaborationPresence.peers);
+    return collaborationPresence.onPresence(setRemotePeers);
+  }, [collaborationPresence]);
+
+  useEffect(() => {
     const host = canvasHostRef.current;
     if (!host) return;
     const update = () => setViewport({ width: host.clientWidth, height: host.clientHeight });
@@ -429,6 +449,60 @@ function PptxEditorContent({
         : null,
     [model, selectedShape]
   );
+
+  const activeSlide = model?.snapshot.slides[model.slideIndex];
+  const currentSlideId = activeSlide?.id;
+  const localPresenceShapeId = useMemo(() => {
+    if (!activeSlide) return undefined;
+    if (shapeSelection?.slideId === activeSlide.id) return shapeSelection.shapeId;
+    if (!selection) return undefined;
+    return findTopLevelShape(activeSlide, selection.shapeId)?.id;
+  }, [activeSlide, selection, shapeSelection]);
+
+  useEffect(() => {
+    if (!collaborationPresence) return;
+    collaborationPresence.setCursor(
+      currentSlideId
+        ? {
+            slideId: currentSlideId,
+            ...(localPresenceShapeId ? { shapeId: localPresenceShapeId } : {}),
+          }
+        : null
+    );
+  }, [collaborationPresence, currentSlideId, localPresenceShapeId]);
+
+  useEffect(
+    () => () => {
+      collaborationPresence?.setCursor(null);
+    },
+    [collaborationPresence]
+  );
+
+  const remoteShapePresences = useMemo<RemoteShapePresence[]>(() => {
+    if (!model?.frame || !activeSlide) return [];
+    const selections: RemoteShapePresence[] = [];
+    for (const peer of remotePeers) {
+      const cursor = peer.state.cursor;
+      if (cursor?.slideId !== activeSlide.id || !cursor.shapeId) continue;
+      const shape = findShape(activeSlide.shapes, cursor.shapeId);
+      if (!shape) continue;
+      const bounds = frameBoundsForShape(model.snapshot, model.frame, shape);
+      if (bounds) selections.push({ peer, bounds });
+    }
+    return selections;
+  }, [activeSlide, model, remotePeers]);
+
+  const remotePeersBySlide = useMemo(() => {
+    const peersBySlide = new Map<string, PptxPresencePeer[]>();
+    for (const peer of remotePeers) {
+      const slideId = peer.state.cursor?.slideId;
+      if (!slideId) continue;
+      const peers = peersBySlide.get(slideId) ?? [];
+      peers.push(peer);
+      peersBySlide.set(slideId, peers);
+    }
+    return peersBySlide;
+  }, [remotePeers]);
 
   const selectSlide = (index: number) => {
     setSelection(null);
@@ -992,6 +1066,24 @@ function PptxEditorContent({
             </button>
           </div>
         </div>
+        {remotePeers.length > 0 ? (
+          <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
+            {remotePeers.map((peer) => {
+              const sameSlide = peer.state.cursor?.slideId === currentSlideId;
+              return (
+                <span
+                  key={peer.state.clientId}
+                  role="listitem"
+                  style={presenceChip(peer.state.user.color, sameSlide)}
+                  title={peer.state.user.name}
+                  aria-label={peer.state.user.name}
+                >
+                  {presenceInitials(peer.state.user.name)}
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
@@ -1018,6 +1110,19 @@ function PptxEditorContent({
                       t('slides.fallbackTitle', { number: index + 1 })}
                   </span>
                 )}
+                {slide.id !== currentSlideId && remotePeersBySlide.get(slide.id)?.length ? (
+                  <span style={styles.thumbnailPresence} aria-hidden="true">
+                    {remotePeersBySlide.get(slide.id)!.map((peer) => (
+                      <span
+                        key={peer.state.clientId}
+                        style={{
+                          ...styles.thumbnailPresenceDot,
+                          backgroundColor: peer.state.user.color,
+                        }}
+                      />
+                    ))}
+                  </span>
+                ) : null}
               </span>
             </button>
           ))}
@@ -1065,6 +1170,15 @@ function PptxEditorContent({
                   }
                 />
                 <canvas ref={overlayCanvasRef} style={styles.canvasOverlay} aria-hidden="true" />
+                {remoteShapePresences.map(({ peer, bounds }, index) => (
+                  <RemoteShapeOutline
+                    key={peer.state.clientId}
+                    peer={peer}
+                    bounds={bounds}
+                    scale={scale}
+                    labelOffset={index}
+                  />
+                ))}
                 {selectedShapeBounds ? (
                   <span
                     style={{
@@ -1092,6 +1206,64 @@ function PptxEditorContent({
         </div>
       </div>
     </div>
+  );
+}
+
+function RemoteShapeOutline({
+  peer,
+  bounds,
+  scale,
+  labelOffset,
+}: {
+  peer: PptxPresencePeer;
+  bounds: FrameBounds;
+  scale: number;
+  labelOffset: number;
+}) {
+  const [labelVisible, setLabelVisible] = useState(
+    () => Date.now() - peer.cursorMovedAt < PRESENCE_LABEL_DURATION_MS
+  );
+  useEffect(() => {
+    const remaining = PRESENCE_LABEL_DURATION_MS - (Date.now() - peer.cursorMovedAt);
+    if (remaining <= 0) {
+      setLabelVisible(false);
+      return;
+    }
+    setLabelVisible(true);
+    const timer = setTimeout(() => setLabelVisible(false), remaining);
+    return () => clearTimeout(timer);
+  }, [peer.cursorMovedAt]);
+
+  return (
+    <span
+      style={{
+        ...styles.remoteShapeSelection,
+        left: bounds.x * scale,
+        top: bounds.y * scale,
+        width: Math.max(1, bounds.width * scale),
+        height: Math.max(1, bounds.height * scale),
+        borderColor: peer.state.user.color,
+      }}
+      aria-hidden="true"
+    >
+      <span
+        style={{
+          ...styles.remoteShapeWash,
+          backgroundColor: peer.state.user.color,
+        }}
+      />
+      {labelVisible ? (
+        <span
+          style={{
+            ...styles.remoteShapeLabel,
+            top: -4 - (labelOffset % 3) * 20,
+            backgroundColor: peer.state.user.color,
+          }}
+        >
+          {peer.state.user.name}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -1299,6 +1471,8 @@ const styles: Record<string, CSSProperties> = {
     fontFamily: 'ui-sans-serif, system-ui, sans-serif',
   },
   toolbarShell: {
+    display: 'flex',
+    alignItems: 'center',
     flex: '0 0 auto',
     padding: '4px 0 5px',
     background: '#ffffff',
@@ -1308,6 +1482,8 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     gap: 0,
+    flex: '1 1 auto',
+    minWidth: 0,
     minHeight: 36,
     margin: '0 8px',
     padding: '4px 8px',
@@ -1316,6 +1492,15 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     overflowX: 'auto',
     overflowY: 'hidden',
+  },
+  presenceStrip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    flex: '0 0 auto',
+    maxWidth: '35%',
+    padding: '0 10px 0 2px',
+    overflowX: 'auto',
   },
   toolbarGroup: {
     display: 'inline-flex',
@@ -1367,6 +1552,7 @@ const styles: Record<string, CSSProperties> = {
   },
   slideNumber: { width: 18, flex: '0 0 auto', paddingTop: 3, fontSize: 11, color: '#647087', textAlign: 'right' },
   slidePreview: {
+    position: 'relative',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1380,6 +1566,23 @@ const styles: Record<string, CSSProperties> = {
   },
   slideTitle: { fontSize: 9, lineHeight: 1.25, color: '#39445a', textAlign: 'center' },
   thumbnailCanvas: { display: 'block', maxWidth: '100%', height: 'auto' },
+  thumbnailPresence: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    display: 'flex',
+    gap: 3,
+    padding: 2,
+    borderRadius: 999,
+    background: 'rgba(255, 255, 255, 0.88)',
+    boxShadow: '0 1px 3px rgba(15, 23, 42, 0.2)',
+  },
+  thumbnailPresenceDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
+  },
   stage: { position: 'relative', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
   canvasHost: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', overflow: 'auto' },
   canvasFrame: { position: 'relative', flex: '0 0 auto' },
@@ -1387,10 +1590,41 @@ const styles: Record<string, CSSProperties> = {
   canvasOverlay: { position: 'absolute', inset: 0, display: 'block', pointerEvents: 'none' },
   shapeSelection: {
     position: 'absolute',
+    zIndex: 3,
     border: '2px solid #2563eb',
     boxSizing: 'border-box',
     boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
     pointerEvents: 'none',
+  },
+  remoteShapeSelection: {
+    position: 'absolute',
+    zIndex: 2,
+    border: '2px solid',
+    borderRadius: 2,
+    boxSizing: 'border-box',
+    boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.88)',
+    pointerEvents: 'none',
+  },
+  remoteShapeWash: {
+    position: 'absolute',
+    inset: 0,
+    opacity: 0.12,
+  },
+  remoteShapeLabel: {
+    position: 'absolute',
+    left: -2,
+    maxWidth: 180,
+    overflow: 'hidden',
+    padding: '3px 6px',
+    borderRadius: '4px 4px 4px 0',
+    color: '#ffffff',
+    fontSize: 11,
+    fontWeight: 650,
+    lineHeight: '14px',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    transform: 'translateY(-100%)',
+    boxShadow: '0 1px 3px rgba(15, 23, 42, 0.25)',
   },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
@@ -1420,6 +1654,36 @@ function formatButton(active: boolean): CSSProperties {
     fontWeight: 700,
     color: active ? '#ffffff' : '#64748b',
     background: active ? '#0f172a' : 'transparent',
+  };
+}
+
+function presenceInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase();
+}
+
+function presenceChip(color: string, sameSlide: boolean): CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 28,
+    height: 28,
+    flex: '0 0 auto',
+    border: '2px solid #ffffff',
+    borderRadius: 999,
+    backgroundColor: color,
+    boxShadow: '0 0 0 1px rgba(15, 23, 42, 0.14)',
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: '-0.02em',
+    opacity: sameSlide ? 1 : 0.38,
   };
 }
 
