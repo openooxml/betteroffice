@@ -6,7 +6,13 @@ drop-in `<DocxEditor>` component with the toolbar, ruler, selection, keyboard,
 comments, and tracked-changes UI wired up. Rendering and layout run in the
 core's Rust/WebAssembly engine; pages are painted onto canvas.
 
-> **Experimental (`0.0.x`).** The API is unstable and may change in any release.
+<!-- TODO(author): screenshot/GIF — editor with tracked changes / collab cursors -->
+<img src="https://betteroffice.dev/readme/docx-editor.png" alt="DocxEditor with tracked changes and comments" width="720" />
+
+> **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
+> components, collaboration — are settling and unlikely to change shape. Smaller
+> APIs may still move between releases; breaking changes are always listed in
+> the changelog.
 
 ```bash
 bun add @betteroffice/docx-react @betteroffice/docx react react-dom
@@ -14,7 +20,18 @@ bun add @betteroffice/docx-react @betteroffice/docx react react-dom
 
 `react` and `react-dom` (18 or 19) are peer dependencies.
 
-## Usage
+## View a document
+
+```tsx
+import { DocxEditor } from '@betteroffice/docx-react';
+import '@betteroffice/docx-react/styles.css';
+
+<DocxEditor documentBuffer={buffer} mode="viewing" />;
+```
+
+`documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
+
+## Edit a document
 
 ```tsx
 import { useState } from 'react';
@@ -36,27 +53,35 @@ export function App() {
       />
       <DocxEditor
         documentBuffer={file}
-        onSave={(bytes) => {
-          // edited .docx bytes; without onSave, File > Save downloads them
-          console.log(`saved ${bytes.byteLength} bytes`);
-        }}
+        onSave={(bytes) => console.log(`saved ${bytes.byteLength} bytes`)}
       />
     </>
   );
 }
 ```
 
-Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under
-Next.js, at the page/layout level — CSS imported inside a `next/dynamic`
-component does not attach in production builds).
-
-Bundled metric-compatible fonts ship in-repo, and the `measurementFontProvider`
-prop accepts a custom provider for Word-accurate metrics.
+Without `onSave`, File > Save downloads the edited bytes.
 
 Key props: `documentBuffer` (or a parsed `document`), `onSave`, `onChange`,
 `author`, `mode` (`editing` / `suggesting` / `viewing`), `showToolbar`,
-`showRuler`, `showZoomControl`, `measurementFontProvider`. The `ref` exposes
-the full editor API (selection, formatting, find/replace, comments, revisions).
+`showRuler`, `showZoomControl`, `i18n`, `measurementFontProvider`. The `ref`
+exposes the full editor API (selection, formatting, find/replace, comments,
+revisions).
+
+## What works today
+
+- Editing with Word-faithful pagination; layout runs in Rust, never in the DOM
+- Suggesting mode: tracked changes with accept/reject review UI
+- Comment threads with replies and resolution, controllable from the host
+- Find and replace, headers and footers, footnotes, images, tables
+- Zoom control and ruler
+- Localized UI via the `i18n` prop
+  ([`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n))
+- Real-time collaboration with people or agents; the document is a CRDT
+- Live collaborator cursors are landing in the next release.
+
+Bundled metric-compatible fonts ship in-repo, and the `measurementFontProvider`
+prop accepts a custom provider for Word-accurate metrics.
 
 ## Collaboration
 
@@ -82,5 +107,13 @@ import { CollaborationProvider } from '@betteroffice/docx/collaboration';
   }}
 />;
 ```
+
+## Framework notes
+
+Import `@betteroffice/docx-react/styles.css` once (in a bundler entry or, under
+Next.js, at the page/layout level — CSS imported inside a `next/dynamic`
+component does not attach in production builds). The editor is browser-only
+(canvas, wasm, workers); under Next.js load it with `next/dynamic` and
+`ssr: false`.
 
 Docs: https://betteroffice.dev · Apache-2.0.

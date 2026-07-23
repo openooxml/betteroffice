@@ -4,7 +4,10 @@ Framework-free core for the BetterOffice PPTX editor — the Rust parser, yrs de
 model, slide layout, and display-list engine compiled to WebAssembly, plus the
 Canvas2D replay host.
 
-> **Experimental (`0.0.x`).** The API is unstable and may change in any release.
+> **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
+> components, collaboration — are settling and unlikely to change shape. Smaller
+> APIs may still move between releases; breaking changes are always listed in
+> the changelog.
 
 ```bash
 bun add @betteroffice/pptx
@@ -14,17 +17,24 @@ Most apps want the turnkey React component in
 [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react).
 Use this package directly to build custom presentation chrome.
 
-## Usage
+## Open and render a slide
 
 ```ts
-import { initWasm, openPresentation, paintSlide } from '@betteroffice/pptx';
+import {
+  initWasm,
+  openPresentation,
+  paintSlide,
+  sizeCanvasForSlide,
+} from '@betteroffice/pptx';
 
 await initWasm();
 const bytes = new Uint8Array(await file.arrayBuffer());
 const deck = openPresentation(bytes, {
   fonts: [{ family: 'My Sans', bytes: fontBytes }],
 });
+
 const frame = deck.layoutSlide(0);
+sizeCanvasForSlide(canvas, frame, devicePixelRatio);
 await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
 
@@ -32,6 +42,11 @@ All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
 display-list emission stay in Rust. The package decodes the typed boundary and
 replays the resulting primitives on canvas. Font bytes are supplied by the host
 and registered with the Rust shaper through `openPresentation`.
+
+Beyond rendering, `PresentationHandle` covers editing: text
+(`insertText` / `deleteText` / `formatText`), slides
+(`insertSlide` / `deleteSlide` / `moveSlide`), shapes
+(`addTextBox` / `moveShape` / `resizeShape`), `hitTest`, and undo/redo.
 
 ## Collaboration
 
