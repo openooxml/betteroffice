@@ -1,12 +1,22 @@
 import {
+  decodeAwarenessUpdate,
   decodeMessages,
   DEFAULT_MAX_FRAME_BYTES,
   DEFAULT_MAX_MESSAGES_PER_FRAME,
-  encodeEmptyAwarenessUpdate,
+  encodeAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
 } from './protocol';
+import {
+  PRESENCE_CURSOR_INTERVAL_MS,
+  PRESENCE_EXPIRY_MS,
+  PRESENCE_HEARTBEAT_MS,
+  PresencePeers,
+  presenceUser,
+  samePresenceCursor,
+} from './presence';
 import {
   CollaborationError,
   type CollaborationErrorCode,
@@ -18,6 +28,11 @@ import {
   type CollaborationStatusListener,
   type CollaborationTransport,
   type CollaborationTransportEvent,
+  type PptxPresenceCursor,
+  type PptxPresenceListener,
+  type PptxPresencePeer,
+  type PptxPresenceState,
+  type PptxPresenceUser,
 } from './types';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
@@ -51,14 +66,47 @@ function requireBytes(value: unknown, operation: string): Uint8Array {
   return value.slice();
 }
 
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof timer === 'object' && timer && 'unref' in timer) {
+    (timer as { unref(): void }).unref();
+  }
+}
+
+function requireClientId(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError('Replica clientId must be a non-negative safe integer');
+  }
+  return value;
+}
+
+function normalizeCursor(cursor: PptxPresenceCursor | null): PptxPresenceCursor | null {
+  if (cursor === null) return null;
+  if (!cursor || typeof cursor.slideId !== 'string' || cursor.slideId.length === 0) {
+    throw new TypeError('Presence cursor slideId must be a non-empty string');
+  }
+  if (
+    cursor.shapeId !== undefined &&
+    (typeof cursor.shapeId !== 'string' || cursor.shapeId.length === 0)
+  ) {
+    throw new TypeError('Presence cursor shapeId must be a non-empty string');
+  }
+  return cursor.shapeId
+    ? { slideId: cursor.slideId, shapeId: cursor.shapeId }
+    : { slideId: cursor.slideId };
+}
+
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
   private readonly transport: CollaborationTransport;
   private readonly maxFrameBytes: number;
   private readonly maxMessagesPerFrame: number;
   private readonly maxPendingBytes: number;
+  private readonly localClientId: number;
+  private readonly localUser: PptxPresenceUser;
+  private readonly remotePresence: PresencePeers;
   private readonly statusListeners = new Map<number, CollaborationStatusListener>();
   private readonly errorListeners = new Map<number, CollaborationErrorListener>();
+  private readonly presenceListeners = new Map<number, PptxPresenceListener>();
   private readonly pendingFrames: Uint8Array[] = [];
   private unsubscribeReplica: () => void;
   private unsubscribeTransport: () => void = () => {};
@@ -73,6 +121,12 @@ export class CollaborationProvider {
   private nextListenerId = 0;
   private queuedBytes = 0;
   private isFlushing = false;
+  private localClock = 0;
+  private localCursor: PptxPresenceCursor | null = null;
+  private lastAwarenessSentAt = 0;
+  private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private expiryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     replica: CollaborationReplica,
@@ -81,6 +135,9 @@ export class CollaborationProvider {
   ) {
     this.replica = replica;
     this.transport = transport;
+    this.localClientId = requireClientId(replica.clientId);
+    this.localUser = presenceUser(this.localClientId, options.user);
+    this.remotePresence = new PresencePeers(this.localClientId);
     this.maxFrameBytes = validateLimit(
       'maxFrameBytes',
       options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
@@ -116,6 +173,18 @@ export class CollaborationProvider {
 
   get pendingBytes(): number {
     return this.queuedBytes;
+  }
+
+  get peers(): readonly PptxPresencePeer[] {
+    return this.remotePresence.peers;
+  }
+
+  setCursor(cursor: PptxPresenceCursor | null): void {
+    if (this.isDestroyed) return;
+    const next = normalizeCursor(cursor);
+    if (samePresenceCursor(this.localCursor, next)) return;
+    this.localCursor = next;
+    if (this.isOpen && this.wantsConnection) this.scheduleCursorBroadcast();
   }
 
   connect(): void {
@@ -184,12 +253,19 @@ export class CollaborationProvider {
       this.connectionStatus !== 'disconnected';
     if (!active) return;
 
+    if (this.isOpen && this.wantsConnection) {
+      const token = this.epoch;
+      this.broadcastLocalPresence(true);
+      if (!this.isCurrent(token)) return;
+    }
+    this.stopPresenceTimers();
     this.wantsConnection = false;
     this.isOpen = false;
     this.epoch += 1;
     this.connectAttempt += 1;
     const unsubscribe = this.takeTransportSubscription();
     this.clearPending();
+    this.clearRemotePresence();
     const cleanupErrors = this.cleanupTransport(unsubscribe, true);
     this.setStatus('disconnected', false);
     for (const error of cleanupErrors) this.report(error);
@@ -198,12 +274,15 @@ export class CollaborationProvider {
   destroy(): void {
     if (this.isDestroyed) return;
 
+    if (this.isOpen && this.wantsConnection) this.broadcastLocalPresence(true);
+    if (this.isDestroyed) return;
     const active =
       this.wantsConnection ||
       this.isOpen ||
       this.hasTransportSubscription ||
       this.connectionStatus === 'connecting' ||
       this.connectionStatus === 'connected';
+    this.stopPresenceTimers();
     this.isDestroyed = true;
     this.wantsConnection = false;
     this.isOpen = false;
@@ -211,6 +290,7 @@ export class CollaborationProvider {
     this.connectAttempt += 1;
     const unsubscribe = this.takeTransportSubscription();
     this.clearPending();
+    this.clearRemotePresence();
     const cleanupErrors = this.cleanupTransport(unsubscribe, active);
     this.setStatus('destroyed', false);
     for (const error of cleanupErrors) this.report(error);
@@ -222,6 +302,7 @@ export class CollaborationProvider {
     this.unsubscribeReplica = () => {};
     this.statusListeners.clear();
     this.errorListeners.clear();
+    this.presenceListeners.clear();
   }
 
   onStatus(listener: CollaborationStatusListener): () => void {
@@ -240,6 +321,17 @@ export class CollaborationProvider {
     return () => this.errorListeners.delete(id);
   }
 
+  onPresence(listener: PptxPresenceListener): () => void {
+    if (this.isDestroyed) return () => {};
+    if (typeof listener !== 'function') throw new TypeError('presence listener must be a function');
+    const id = this.nextListenerId++;
+    this.presenceListeners.set(id, listener);
+    try {
+      listener(this.peers);
+    } catch {}
+    return () => this.presenceListeners.delete(id);
+  }
+
   private isCurrent(token: number): boolean {
     return !this.isDestroyed && this.wantsConnection && token === this.epoch;
   }
@@ -251,8 +343,10 @@ export class CollaborationProvider {
     this.isOpen = false;
     this.epoch += 1;
     this.connectAttempt += 1;
+    this.stopPresenceTimers();
     const unsubscribe = this.takeTransportSubscription();
     this.clearPending();
+    this.clearRemotePresence();
     const cleanupErrors = this.cleanupTransport(unsubscribe, true);
     this.setStatus('disconnected', false);
     this.report(error);
@@ -305,7 +399,9 @@ export class CollaborationProvider {
       case 'close':
         this.isOpen = false;
         this.connectAttempt += 1;
+        this.stopPresenceTimers();
         this.clearPending();
+        this.clearRemotePresence();
         this.setStatus('disconnected', false);
         break;
       case 'error':
@@ -347,6 +443,19 @@ export class CollaborationProvider {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep1', cause));
+      return;
+    }
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    this.startPresenceTimers();
+    this.broadcastLocalPresence(false);
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    try {
+      this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('protocol', 'Failed to encode awareness query', cause)
+      );
     }
   }
 
@@ -377,8 +486,23 @@ export class CollaborationProvider {
         case 'update':
           this.applyRemoteUpdate(token, message.update);
           break;
-        case 'awareness':
+        case 'awareness': {
+          let entries: ReturnType<typeof decodeAwarenessUpdate>;
+          try {
+            entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);
+          } catch (cause) {
+            this.failConnection(
+              token,
+              normalizeError('protocol', 'Invalid awareness update', cause)
+            );
+            return;
+          }
+          if (this.remotePresence.apply(entries, Date.now())) {
+            this.emitPresence();
+            this.schedulePresenceExpiry();
+          }
           break;
+        }
         case 'auth':
           this.failConnection(
             token,
@@ -389,15 +513,7 @@ export class CollaborationProvider {
           );
           return;
         case 'query-awareness':
-          try {
-            this.sendFrame(encodeEmptyAwarenessUpdate(this.maxFrameBytes));
-          } catch (cause) {
-            this.failConnection(
-              token,
-              normalizeError('protocol', 'Failed to encode awareness response', cause)
-            );
-            return;
-          }
+          this.broadcastLocalPresence(false);
           break;
       }
     }
@@ -454,6 +570,108 @@ export class CollaborationProvider {
       this.sendFrame(encodeUpdate(ownedUpdate, this.maxFrameBytes));
     } catch (cause) {
       this.failConnection(token, normalizeError('protocol', 'Failed to encode update', cause));
+    }
+  }
+
+  private scheduleCursorBroadcast(): void {
+    if (this.cursorTimer) return;
+    const delay = Math.max(
+      0,
+      PRESENCE_CURSOR_INTERVAL_MS - (Date.now() - this.lastAwarenessSentAt)
+    );
+    if (delay === 0) {
+      this.broadcastLocalPresence(false);
+      return;
+    }
+    this.cursorTimer = setTimeout(() => {
+      this.cursorTimer = null;
+      this.broadcastLocalPresence(false);
+    }, delay);
+    unrefTimer(this.cursorTimer);
+  }
+
+  private broadcastLocalPresence(leaving: boolean): void {
+    if (!this.isOpen || this.isDestroyed || !this.wantsConnection) return;
+    const token = this.epoch;
+    if (this.localClock >= Number.MAX_SAFE_INTEGER) {
+      this.failConnection(
+        token,
+        new CollaborationError('protocol', 'Awareness clock exceeds Number.MAX_SAFE_INTEGER')
+      );
+      return;
+    }
+    this.localClock += 1;
+    const clock = this.localClock;
+    const state: PptxPresenceState | null = leaving
+      ? null
+      : {
+          clientId: this.localClientId,
+          clock,
+          user: { ...this.localUser },
+          cursor: this.localCursor ? { ...this.localCursor } : null,
+        };
+    if (this.cursorTimer) clearTimeout(this.cursorTimer);
+    this.cursorTimer = null;
+    this.lastAwarenessSentAt = Date.now();
+    try {
+      this.sendFrame(
+        encodeAwarenessUpdate(
+          [{ clientId: this.localClientId, clock, state }],
+          this.maxFrameBytes
+        )
+      );
+    } catch (cause) {
+      this.failConnection(
+        token,
+        normalizeError('protocol', 'Failed to encode awareness update', cause)
+      );
+    }
+  }
+
+  private startPresenceTimers(): void {
+    this.stopPresenceTimers();
+    this.heartbeatTimer = setInterval(() => {
+      this.broadcastLocalPresence(false);
+    }, PRESENCE_HEARTBEAT_MS);
+    unrefTimer(this.heartbeatTimer);
+    this.schedulePresenceExpiry();
+  }
+
+  private stopPresenceTimers(): void {
+    if (this.cursorTimer) clearTimeout(this.cursorTimer);
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.cursorTimer = null;
+    this.heartbeatTimer = null;
+    this.expiryTimer = null;
+  }
+
+  private schedulePresenceExpiry(): void {
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    if (!this.isOpen || this.isDestroyed) return;
+    const peers = this.remotePresence.peers;
+    if (peers.length === 0) return;
+    const expiresAt = Math.min(...peers.map((peer) => peer.lastSeen + PRESENCE_EXPIRY_MS));
+    this.expiryTimer = setTimeout(() => {
+      this.expiryTimer = null;
+      if (this.remotePresence.expire(Date.now())) this.emitPresence();
+      this.schedulePresenceExpiry();
+    }, Math.max(0, expiresAt - Date.now()));
+    unrefTimer(this.expiryTimer);
+  }
+
+  private clearRemotePresence(): void {
+    if (this.remotePresence.clear()) this.emitPresence();
+  }
+
+  private emitPresence(): void {
+    const peers = this.peers;
+    for (const [id, listener] of [...this.presenceListeners]) {
+      if (this.presenceListeners.get(id) !== listener) continue;
+      try {
+        listener(peers);
+      } catch {}
     }
   }
 

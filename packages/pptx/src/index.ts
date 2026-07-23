@@ -2,6 +2,7 @@ export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type {
+  CollaborationUser,
   CollaborationErrorCode,
   CollaborationErrorListener,
   CollaborationProviderOptions,
@@ -12,7 +13,14 @@ export type {
   CollaborationTransport,
   CollaborationTransportEvent,
   CollaborationUpdateOrigin,
+  PptxPresence,
+  PptxPresenceCursor,
+  PptxPresenceListener,
+  PptxPresencePeer,
+  PptxPresenceState,
+  PptxPresenceUser,
 } from './collaboration';
+export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';
 export {
   initWasm,
   inspectPresentation,

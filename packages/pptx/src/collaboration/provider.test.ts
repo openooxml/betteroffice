@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { decodeMessages, encodeSyncStep1, encodeSyncStep2, encodeUpdate } from './protocol';
+import {
+  decodeAwarenessUpdate,
+  decodeMessages,
+  encodeAwarenessUpdate,
+  encodeSyncStep1,
+  encodeSyncStep2,
+  encodeUpdate,
+} from './protocol';
 import { CollaborationProvider } from './provider';
 import type {
   CollaborationError,
@@ -18,6 +25,10 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     offset += part.byteLength;
   }
   return output;
+}
+
+function sentMessageTypes(transport: FakeTransport): string[] {
+  return transport.sent.flatMap((frame) => decodeMessages(frame).map((message) => message.type));
 }
 
 class FakeReplica implements CollaborationReplica {
@@ -182,7 +193,20 @@ describe('CollaborationProvider sync', () => {
 
     expect(provider.status).toBe('connected');
     expect(provider.synced).toBe(false);
-    expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 0, 2, 1, 2]]);
+    expect([...transport.sent[0]]).toEqual([0, 0, 2, 1, 2]);
+    expect(sentMessageTypes(transport)).toEqual([
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
+    ]);
+    const [awareness] = decodeMessages(transport.sent[1]);
+    if (awareness.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(awareness.update)[0].state).toMatchObject({
+      clientId: 1,
+      clock: 1,
+      user: { name: 'Guest 1' },
+      cursor: null,
+    });
   });
 
   it('answers Step1 with a diff encoded as Step2', () => {
@@ -232,9 +256,13 @@ describe('CollaborationProvider sync', () => {
 
     expect(provider.status).toBe('connected');
     expect(provider.synced).toBe(false);
-    expect(transport.sent.map((frame) => [...frame])).toEqual([
-      [0, 0, 1, 7],
-      [0, 0, 1, 7],
+    expect(sentMessageTypes(transport)).toEqual([
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
     ]);
   });
 
@@ -245,9 +273,13 @@ describe('CollaborationProvider sync', () => {
 
     expect(provider.status).toBe('connected');
     expect(transport.connectCount).toBe(1);
-    expect(transport.sent.map((frame) => [...frame])).toEqual([
-      [0, 0, 1, 7],
-      [0, 0, 1, 7],
+    expect(sentMessageTypes(transport)).toEqual([
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
     ]);
   });
 
@@ -276,8 +308,68 @@ describe('CollaborationProvider sync', () => {
     transport.emit({ type: 'message', data: frame });
 
     expect(replica.applied).toEqual([Uint8Array.of(3), Uint8Array.of(4)]);
-    expect(transport.sent.map((message) => [...message])).toEqual([[1, 1, 0]]);
+    expect(sentMessageTypes(transport)).toEqual(['awareness']);
+    const [awareness] = decodeMessages(transport.sent[0]);
+    if (awareness.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(awareness.update)[0].state).toMatchObject({
+      clientId: 1,
+      clock: 2,
+    });
     expect(provider.synced).toBe(true);
+  });
+
+  it('applies remote presence clocks and explicit leave without echoing local state', () => {
+    const { provider, transport } = open();
+    const changes: number[][] = [];
+    provider.onPresence((peers) =>
+      changes.push(peers.map((peer) => peer.state.clientId))
+    );
+    const state = {
+      clientId: 2,
+      clock: 3,
+      user: { name: 'Calm Fox', color: '#2E7D32' },
+      cursor: { slideId: 'slide-a', shapeId: 'shape-b' },
+    };
+
+    transport.emit({
+      type: 'message',
+      data: encodeAwarenessUpdate([{ clientId: 2, clock: 3, state }]),
+    });
+    transport.emit({
+      type: 'message',
+      data: encodeAwarenessUpdate([
+        { clientId: 2, clock: 2, state: { ...state, clock: 2 } },
+      ]),
+    });
+    transport.emit({
+      type: 'message',
+      data: encodeAwarenessUpdate([{ clientId: 1, clock: 99, state: null }]),
+    });
+    transport.emit({
+      type: 'message',
+      data: encodeAwarenessUpdate([{ clientId: 2, clock: 4, state: null }]),
+    });
+
+    expect(changes).toEqual([[], [2], []]);
+    expect(provider.peers).toEqual([]);
+  });
+
+  it('coalesces cursor changes and sends the latest shape', async () => {
+    const { provider, transport } = open();
+    transport.sent = [];
+
+    provider.setCursor({ slideId: 'slide-a', shapeId: 'shape-a' });
+    provider.setCursor({ slideId: 'slide-a', shapeId: 'shape-b' });
+    await Bun.sleep(90);
+
+    expect(sentMessageTypes(transport)).toEqual(['awareness']);
+    const [awareness] = decodeMessages(transport.sent[0]);
+    if (awareness.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(awareness.update)[0].state?.cursor).toEqual({
+      slideId: 'slide-a',
+      shapeId: 'shape-b',
+    });
+    provider.destroy();
   });
 });
 
@@ -372,7 +464,11 @@ describe('CollaborationProvider transport flow control', () => {
     transport.accept = true;
     transport.sent = [];
     transport.emit({ type: 'open' });
-    expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 0, 1, 7]]);
+    expect(sentMessageTypes(transport)).toEqual([
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
+    ]);
   });
 });
 
@@ -382,13 +478,13 @@ describe('CollaborationProvider errors and ownership', () => {
       Uint8Array.of(0, 2, 2, 1),
       Uint8Array.of(9),
       Uint8Array.of(2, 0, 3, 110, 111, 112),
-      new Uint8Array(7),
+      new Uint8Array(257),
     ];
 
     for (const data of cases) {
       const replica = new FakeReplica();
       const transport = new FakeTransport();
-      const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: 6 });
+      const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: 256 });
       const errors: CollaborationError[] = [];
       provider.onError((error) => errors.push(error));
       provider.connect();
@@ -473,17 +569,32 @@ describe('CollaborationProvider errors and ownership', () => {
   it('enforces outbound frame limits', () => {
     const replica = new FakeReplica();
     const transport = new FakeTransport();
-    const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: 4 });
+    const provider = new CollaborationProvider(replica, transport, { maxFrameBytes: 100 });
     const errors: CollaborationError[] = [];
     provider.onError((error) => errors.push(error));
     provider.connect();
     transport.emit({ type: 'open' });
-    replica.emit(Uint8Array.of(1, 2), 'local');
+    replica.emit(new Uint8Array(98), 'local');
     expect(errors.map((error) => error.code)).toEqual(['protocol']);
   });
 });
 
 describe('CollaborationProvider lifecycle', () => {
+  it('broadcasts an explicit leave before disconnecting', () => {
+    const { provider, transport } = open();
+    transport.sent = [];
+
+    provider.disconnect();
+
+    expect(sentMessageTypes(transport)).toEqual(['awareness']);
+    const [awareness] = decodeMessages(transport.sent[0]);
+    if (awareness.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(awareness.update)).toEqual([
+      { clientId: 1, clock: 2, state: null },
+    ]);
+    expect(transport.disconnectCount).toBe(1);
+  });
+
   it('emits connection and initial-sync status changes', () => {
     const replica = new FakeReplica();
     const transport = new FakeTransport();
@@ -578,7 +689,11 @@ describe('CollaborationProvider lifecycle', () => {
     expect(replica.applied).toEqual([]);
 
     transport.emit({ type: 'open' });
-    expect(transport.sent.map((frame) => [...frame])).toEqual([[0, 0, 1, 7]]);
+    expect(sentMessageTypes(transport)).toEqual([
+      'sync-step-1',
+      'awareness',
+      'query-awareness',
+    ]);
   });
 
   it('makes connect, disconnect, and destroy idempotent without disposing the replica', () => {

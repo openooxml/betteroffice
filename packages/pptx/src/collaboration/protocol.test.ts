@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  decodeAwarenessUpdate,
   decodeMessages,
+  encodeAwarenessUpdate,
   encodeEmptyAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
@@ -25,6 +28,27 @@ describe('collaboration protocol encoding', () => {
     expect([...encodeSyncStep2(Uint8Array.of(3, 4))]).toEqual([0, 1, 2, 3, 4]);
     expect([...encodeUpdate(Uint8Array.of(5, 6))]).toEqual([0, 2, 2, 5, 6]);
     expect([...encodeEmptyAwarenessUpdate()]).toEqual([1, 1, 0]);
+    expect([...encodeQueryAwareness()]).toEqual([3]);
+  });
+
+  it('round-trips presence and leave awareness entries', () => {
+    const state = {
+      clientId: 42,
+      clock: 7,
+      user: { name: 'Brisk Otter', color: '#3949AB' },
+      cursor: { slideId: 'slide-1', shapeId: 'shape-2' },
+    };
+    const frame = encodeAwarenessUpdate([
+      { clientId: 42, clock: 7, state },
+      { clientId: 9, clock: 11, state: null },
+    ]);
+    const [message] = decodeMessages(frame);
+    expect(message.type).toBe('awareness');
+    if (message.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(message.update)).toEqual([
+      { clientId: 42, clock: 7, state },
+      { clientId: 9, clock: 11, state: null },
+    ]);
   });
 
   it('uses standard multibyte varUint lengths', () => {
@@ -101,6 +125,25 @@ describe('collaboration protocol decoding', () => {
       'Unknown sync message type 3'
     );
     expect(() => decodeMessages(Uint8Array.of(2, 1))).toThrow('Unknown auth message type 1');
+  });
+
+  it('rejects malformed or inconsistent awareness states', () => {
+    const invalidJson = Uint8Array.of(1, 1, 1, 1, 1, 123);
+    expect(() => decodeAwarenessUpdate(invalidJson)).toThrow('Invalid awareness JSON');
+    expect(() =>
+      encodeAwarenessUpdate([
+        {
+          clientId: 1,
+          clock: 2,
+          state: {
+            clientId: 1,
+            clock: 3,
+            user: { name: 'Peer', color: '#3949AB' },
+            cursor: null,
+          },
+        },
+      ])
+    ).toThrow('Awareness state identity does not match its entry');
   });
 
   it('enforces the physical frame limit', () => {
