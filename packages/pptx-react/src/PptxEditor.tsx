@@ -27,7 +27,6 @@ import {
 import type {
   CSSProperties,
   KeyboardEvent,
-  MouseEvent as ReactMouseEvent,
   PointerEvent,
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
@@ -53,9 +52,10 @@ import {
   effectiveStyleFromSelection,
   selectionFormattingFromStory,
   storyFormattingFromStory,
-  storyTextRanges,
 } from './textFormatting';
 import type { EffectiveTextStyle } from './textFormatting';
+import { extendTextRange, textRangeAt } from './textSelection';
+import type { TextSelectionGranularity } from './textSelection';
 
 export interface PptxTextSelection {
   shapeId: string;
@@ -108,6 +108,13 @@ type PointerGesture =
       shapeId: string;
       storyId: string;
       anchor: number;
+      focus: number;
+      granularity: 'character' | TextSelectionGranularity;
+      clickCount: number;
+      clickShapeId: string;
+      startClientX: number;
+      startClientY: number;
+      dragging: boolean;
     }
   | {
       kind: 'shape';
@@ -119,7 +126,7 @@ type PointerGesture =
       start: SlidePoint;
       last: SlidePoint;
       dragThreshold: number;
-      repeatedClick: boolean;
+      clickCount: number;
       dragging: boolean;
     }
   | {
@@ -140,12 +147,13 @@ interface TextBoxPreview {
   end: SlidePoint;
 }
 
-interface RecentShapeClick {
+interface RecentCanvasClick {
   slideId: string;
   shapeId: string;
   clientX: number;
   clientY: number;
   timeStamp: number;
+  count: number;
 }
 
 const initialStyle: EffectiveTextStyle = {
@@ -193,7 +201,7 @@ function PptxEditorContent({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const pointerGestureRef = useRef<PointerGesture | null>(null);
-  const recentShapeClickRef = useRef<RecentShapeClick | null>(null);
+  const recentClickRef = useRef<RecentCanvasClick | null>(null);
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
@@ -262,7 +270,7 @@ function PptxEditorContent({
               !findShape(activeSlide.shapes, gesture.shapeId)))
         ) {
           pointerGestureRef.current = null;
-          recentShapeClickRef.current = null;
+          recentClickRef.current = null;
           setDragPreview(null);
           setTextBoxPreview(null);
         }
@@ -301,7 +309,7 @@ function PptxEditorContent({
     setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
     pointerGestureRef.current = null;
-    recentShapeClickRef.current = null;
+    recentClickRef.current = null;
     setError(null);
     imageCacheRef.current.clear();
     if (!file) return;
@@ -481,7 +489,7 @@ function PptxEditorContent({
     setDragPreview(null);
     setTextBoxPreview(null);
     pointerGestureRef.current = null;
-    recentShapeClickRef.current = null;
+    recentClickRef.current = null;
     refreshAt(index);
     stageRef.current?.focus();
   };
@@ -531,7 +539,7 @@ function PptxEditorContent({
       setDragPreview(null);
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
-      recentShapeClickRef.current = null;
+      recentClickRef.current = null;
       const shape = next?.snapshot.slides[next.slideIndex]?.shapes.find(
         (candidate) => candidate.id === receipt.shapeId
       );
@@ -563,7 +571,7 @@ function PptxEditorContent({
       setShapeSelection(null);
       setDragPreview(null);
       setTextBoxPreview({ start: point, end: point });
-      recentShapeClickRef.current = null;
+      recentClickRef.current = null;
       pointerGestureRef.current = {
         kind: 'textBox',
         pointerId: event.pointerId,
@@ -579,7 +587,56 @@ function PptxEditorContent({
     try {
       handle.layoutSlide(current.slideIndex);
       const hit = handle.hitTest(point.x, point.y);
+      const shape = slide && hit ? findTopLevelShape(slide, hit.shapeId) : null;
+      const recentClick = recentClickRef.current;
+      const repeatedClick = Boolean(
+        slide &&
+          shape &&
+          recentClick?.slideId === slide.id &&
+          recentClick.shapeId === shape.id &&
+          event.timeStamp - recentClick.timeStamp <= 600 &&
+          Math.hypot(
+            event.clientX - recentClick.clientX,
+            event.clientY - recentClick.clientY
+          ) <= 6
+      );
+      const clickCount =
+        repeatedClick && recentClick ? Math.min(recentClick.count + 1, 3) : 1;
+      recentClickRef.current = null;
       if (
+        slide &&
+        hit?.kind === 'text' &&
+        shape &&
+        clickCount >= 2
+      ) {
+        const story = handle.story(hit.storyId);
+        const granularity = clickCount >= 3 ? 'paragraph' : 'word';
+        const range = textRangeAt(storyText(story), hit.position, granularity);
+        setSelection({
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor: range.start,
+          focus: range.end,
+        });
+        setShapeSelection(null);
+        setDragPreview(null);
+        pointerGestureRef.current = {
+          kind: 'text',
+          pointerId: event.pointerId,
+          slideId: slide.id,
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor: range.start,
+          focus: range.end,
+          granularity,
+          clickCount,
+          clickShapeId: shape.id,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          dragging: false,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } else if (
         slide &&
         selection &&
         hit?.kind === 'text' &&
@@ -596,7 +653,6 @@ function PptxEditorContent({
         });
         setShapeSelection(null);
         setDragPreview(null);
-        recentShapeClickRef.current = null;
         pointerGestureRef.current = {
           kind: 'text',
           pointerId: event.pointerId,
@@ -604,24 +660,20 @@ function PptxEditorContent({
           shapeId: hit.shapeId,
           storyId: hit.storyId,
           anchor,
+          focus: hit.position,
+          granularity: 'character',
+          clickCount,
+          clickShapeId: shape?.id ?? hit.shapeId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          dragging: false,
         };
         event.currentTarget.setPointerCapture(event.pointerId);
       } else if (slide && hit) {
-        const shape = findTopLevelShape(slide, hit.shapeId);
         if (shape) {
           setSelection(null);
           setShapeSelection({ slideId: slide.id, shapeId: shape.id });
           setDragPreview(null);
-          const recentClick = recentShapeClickRef.current;
-          const repeatedClick =
-            recentClick?.slideId === slide.id &&
-            recentClick.shapeId === shape.id &&
-            event.timeStamp - recentClick.timeStamp <= 600 &&
-            Math.hypot(
-              event.clientX - recentClick.clientX,
-              event.clientY - recentClick.clientY
-            ) <= 6;
-          recentShapeClickRef.current = null;
           if (canMoveShape(shape)) {
             pointerGestureRef.current = {
               kind: 'shape',
@@ -633,7 +685,7 @@ function PptxEditorContent({
               start: point,
               last: point,
               dragThreshold: repeatedClick ? 8 : 4,
-              repeatedClick,
+              clickCount,
               dragging: false,
             };
             event.currentTarget.setPointerCapture(event.pointerId);
@@ -643,14 +695,14 @@ function PptxEditorContent({
         } else {
           setSelection(null);
           setShapeSelection(null);
-          recentShapeClickRef.current = null;
+          recentClickRef.current = null;
           pointerGestureRef.current = null;
         }
       } else {
         setSelection(null);
         setShapeSelection(null);
         setDragPreview(null);
-        recentShapeClickRef.current = null;
+        recentClickRef.current = null;
         pointerGestureRef.current = null;
       }
       stageRef.current?.focus();
@@ -660,45 +712,11 @@ function PptxEditorContent({
     }
   };
 
-  const pointerDoubleClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
-    if (event.button !== 0) return;
-    const handle = handleRef.current;
-    const current = modelRef.current;
-    if (!handle || !current?.frame) return;
-    const point = slidePoint(
-      event.currentTarget.getBoundingClientRect(),
-      current.frame,
-      event.clientX,
-      event.clientY
-    );
-    if (!point) return;
-    try {
-      handle.layoutSlide(current.slideIndex);
-      const hit = handle.hitTest(point.x, point.y);
-      if (hit?.kind === 'text') {
-        handle.story(hit.storyId);
-        setSelection({
-          shapeId: hit.shapeId,
-          storyId: hit.storyId,
-          anchor: hit.position,
-          focus: hit.position,
-        });
-        setShapeSelection(null);
-        setDragPreview(null);
-        pointerGestureRef.current = null;
-        recentShapeClickRef.current = null;
-        stageRef.current?.focus();
-        event.preventDefault();
-      }
-    } catch (value) {
-      reportError(value);
-    }
-  };
-
   const updatePointerGesture = (event: PointerEvent<HTMLCanvasElement>): boolean => {
     const gesture = pointerGestureRef.current;
+    const handle = handleRef.current;
     const current = modelRef.current;
-    if (!gesture || gesture.pointerId !== event.pointerId || !current?.frame) {
+    if (!gesture || gesture.pointerId !== event.pointerId || !handle || !current?.frame) {
       return false;
     }
     const point = slidePoint(
@@ -709,6 +727,17 @@ function PptxEditorContent({
     );
     if (!point || current.snapshot.slides[current.slideIndex]?.id !== gesture.slideId) return false;
     if (gesture.kind === 'text') {
+      if (
+        !gesture.dragging &&
+        passedDragThreshold(
+          gesture.startClientX,
+          gesture.startClientY,
+          event.clientX,
+          event.clientY
+        )
+      ) {
+        gesture.dragging = true;
+      }
       const focus = textPositionAtPoint(
         current.frame,
         gesture.shapeId,
@@ -716,11 +745,21 @@ function PptxEditorContent({
         point
       );
       if (focus !== null) {
+        const range =
+          gesture.granularity === 'character'
+            ? { anchor: gesture.anchor, focus }
+            : extendTextRange(
+                { start: gesture.anchor, end: gesture.focus },
+                textRangeAt(
+                  storyText(handle.story(gesture.storyId)),
+                  focus,
+                  gesture.granularity
+                )
+              );
         setSelection({
           shapeId: gesture.shapeId,
           storyId: gesture.storyId,
-          anchor: gesture.anchor,
-          focus,
+          ...range,
         });
       }
     } else if (gesture.kind === 'shape') {
@@ -769,20 +808,32 @@ function PptxEditorContent({
       event.preventDefault();
       return;
     }
-    if (gesture.kind !== 'shape') return;
-    if (!gesture.dragging) {
-      recentShapeClickRef.current = gesture.repeatedClick
+    if (gesture.kind === 'text') {
+      recentClickRef.current = gesture.dragging
         ? null
         : {
             slideId: gesture.slideId,
-            shapeId: gesture.shapeId,
+            shapeId: gesture.clickShapeId,
             clientX: event.clientX,
             clientY: event.clientY,
             timeStamp: event.timeStamp,
+            count: gesture.clickCount,
           };
       return;
     }
-    recentShapeClickRef.current = null;
+    if (gesture.kind !== 'shape') return;
+    if (!gesture.dragging) {
+      recentClickRef.current = {
+        slideId: gesture.slideId,
+        shapeId: gesture.shapeId,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        timeStamp: event.timeStamp,
+        count: gesture.clickCount,
+      };
+      return;
+    }
+    recentClickRef.current = null;
     const handle = handleRef.current;
     const current = modelRef.current;
     const slide = current?.snapshot.slides[current.slideIndex];
@@ -810,13 +861,13 @@ function PptxEditorContent({
     pointerGestureRef.current = null;
     setDragPreview(null);
     setTextBoxPreview(null);
-    recentShapeClickRef.current = null;
+    recentClickRef.current = null;
   };
 
   const commit = (nextSelection: PptxTextSelection | null) => {
     setSelection(nextSelection);
     setShapeSelection(null);
-    recentShapeClickRef.current = null;
+    recentClickRef.current = null;
     refreshAt(undefined, true);
   };
 
@@ -991,7 +1042,7 @@ function PptxEditorContent({
       setTextBoxPreview(null);
       setActiveTool('select');
       pointerGestureRef.current = null;
-      recentShapeClickRef.current = null;
+      recentClickRef.current = null;
       refreshAt(index, true, true);
     } catch (value) {
       reportError(value);
@@ -1010,7 +1061,7 @@ function PptxEditorContent({
       setTextBoxPreview(null);
       setActiveTool('select');
       pointerGestureRef.current = null;
-      recentShapeClickRef.current = null;
+      recentClickRef.current = null;
       refreshAt(undefined, true);
     } catch (value) {
       reportError(value);
@@ -1115,7 +1166,6 @@ function PptxEditorContent({
                   onPointerUp={pointerUp}
                   onPointerCancel={cancelPointerGesture}
                   onLostPointerCapture={cancelPointerGesture}
-                  onDoubleClick={pointerDoubleClick}
                   aria-label={
                     selectedShape
                       ? t('slides.canvasLabelWithSelection', {
@@ -1243,22 +1293,7 @@ function formatStory(
   story: StorySnapshot,
   patch: TextStylePatch
 ): void {
-  try {
-    handle.formatText(story.id, 0, story.length, patch);
-    return;
-  } catch (value) {
-    if (
-      !(value instanceof Error) ||
-      !value.message.includes('crosses a paragraph boundary')
-    ) {
-      throw value;
-    }
-  }
-  for (const range of storyTextRanges(story)) {
-    if (range.start < range.end) {
-      handle.formatText(story.id, range.start, range.end, patch);
-    }
-  }
+  handle.formatText(story.id, 0, story.length, patch);
 }
 
 function previousTextIndex(story: StorySnapshot, index: number): number {

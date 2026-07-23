@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use pptx_edit::{DeckSession, EditCtx, ShapeDraft, ShapeRect, TextStyle, UpdateOrigin};
+use pptx_edit::{
+    DeckSession, EditCtx, EditError, ShapeDraft, ShapeRect, TextStyle, TextStylePatch, UpdateOrigin,
+};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
@@ -12,6 +14,27 @@ fn first_text_story(session: &DeckSession) -> String {
         .iter()
         .flat_map(|slide| &slide.shapes)
         .find_map(|shape| shape.text_stories.first())
+        .unwrap()
+        .id
+        .clone()
+}
+
+fn first_multi_paragraph_story(session: &DeckSession) -> String {
+    session
+        .snapshot()
+        .unwrap()
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .flat_map(|shape| &shape.text_stories)
+        .find(|story| {
+            story
+                .paragraphs
+                .iter()
+                .filter(|paragraph| !paragraph.runs.is_empty())
+                .count()
+                >= 2
+        })
         .unwrap()
         .id
         .clone()
@@ -185,6 +208,70 @@ fn undo_reverts_only_local_origin_and_preserves_remote_text() {
             .plain_text()
             .contains("LOCAL")
     );
+}
+
+#[test]
+fn cross_paragraph_format_is_one_undoable_operation() {
+    let session = DeckSession::open(FIXTURE, 405).unwrap();
+    let story_id = first_multi_paragraph_story(&session);
+    let before = session.story(&story_id).unwrap();
+
+    let receipt = session
+        .format_text(
+            &EditCtx::local("local"),
+            &story_id,
+            0,
+            before.length,
+            &TextStylePatch {
+                bold: Some(true),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!((receipt.start, receipt.end), (0, before.length));
+    let formatted = session.story(&story_id).unwrap();
+    let formatted_paragraphs = formatted
+        .paragraphs
+        .iter()
+        .filter(|paragraph| !paragraph.runs.is_empty())
+        .collect::<Vec<_>>();
+    assert!(formatted_paragraphs.len() >= 2);
+    assert!(formatted_paragraphs.iter().all(|paragraph| {
+        paragraph
+            .runs
+            .iter()
+            .all(|run| run.style.bold == Some(true))
+    }));
+
+    session.add_undo_barrier();
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(!session.can_undo());
+}
+
+#[test]
+fn cross_paragraph_format_rejects_out_of_bounds_ranges() {
+    let session = DeckSession::open(FIXTURE, 406).unwrap();
+    let story_id = first_multi_paragraph_story(&session);
+    let length = session.story(&story_id).unwrap().length;
+
+    assert!(matches!(
+        session.format_text(
+            &EditCtx::local("local"),
+            &story_id,
+            0,
+            length + 1,
+            &TextStylePatch {
+                italic: Some(true),
+                ..TextStylePatch::default()
+            },
+        ),
+        Err(EditError::OutOfBounds {
+            index,
+            length: story_length
+        }) if index == length + 1 && story_length == length
+    ));
 }
 
 #[test]
