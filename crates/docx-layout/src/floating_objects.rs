@@ -17,9 +17,8 @@
 //!
 //! INTEGRATION
 //! ===========
-//! The measurement side stays in TypeScript for now. Before the JSON seam,
-//! `measureBlocksWithFloats` (`packages/core/src/layout/measure/measureBlocksPipeline.ts`)
-//! pre-scans the block list, extracts `FloatingImageZone`s
+//! Measurement happens host-side before the JSON seam: the measure
+//! pipeline pre-scans the block list, extracts `FloatingImageZone`s
 //! (`{ leftMargin, rightMargin, topY, bottomY, segments?, fullWidthBlock? }`,
 //! content-area coordinates relative to the anchor block) from anchored
 //! images, floating tables, and floating text boxes, groups co-located floats

@@ -31,18 +31,14 @@
 
 //! The pure layout-core (pagination) in Rust, compiled to WASM.
 //!
-//! A twin of the TypeScript `layoutCore` behind the same contract:
-//! `(MeasuredBlock[], LayoutOptions) -> Layout`, marshaled as JSON. It ports
-//! INCREMENTALLY — this spine paginates paragraph flow (spacing collapse,
-//! page/column splits, PM ranges, resolved lines), explicit page/column
-//! breaks, multi-column options, inline/anchored images, text boxes, and
-//! per-page footnote reservations. Features still owned by the TypeScript
-//! engine sit behind the stubs in [`hooks`]; engaging one returns
-//! `Unsupported`, so the JS seam falls back. Coverage grows one hook at a
-//! time, each checkpointed against the golden corpus
-//! (`crates/docx-layout/tests/goldens.rs` natively,
-//! `packages/core/src/layout/pagination/__golden__/rustParity.test.ts` via
-//! wasm).
+//! Contract: `(MeasuredBlock[], LayoutOptions) -> Layout`, marshaled as
+//! JSON. Paginates paragraph flow (spacing collapse, page/column splits,
+//! PM ranges, resolved lines), explicit page/column breaks, multi-column
+//! options, inline/anchored images, text boxes, and per-page footnote
+//! reservations. Inputs that engage an uncovered feature hit the stubs in
+//! [`hooks`] and return `Unsupported` so the host seam can degrade
+//! gracefully. Coverage is checkpointed against the golden corpus
+//! (`crates/docx-layout/tests/goldens.rs`).
 //!
 //! Module map (TS source → Rust module):
 //! - `pagination/types.ts` → [`types`]
@@ -88,10 +84,10 @@ use wasm_bindgen::prelude::*;
 /// Why the engine refused an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {
-    /// The input engages a feature this port doesn't cover yet — the caller
-    /// must fall back to the reference (TypeScript) engine.
+    /// The input engages a feature the engine doesn't cover yet — the
+    /// caller must degrade gracefully.
     Unsupported(String),
-    /// The input violates the layout contract (the TS engine would throw).
+    /// The input violates the layout contract.
     Invalid(String),
 }
 

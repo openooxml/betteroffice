@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "The pure layout-core (pagination) in Rust, compiled to WASM. A twin of the TypeScript layoutCore behind the same MeasuredBlock[] -> Layout contract; ports incrementally, one block kind at a time, gated by the golden corpus."
+description = "The docx layout core in Rust, compiled to WASM: pagination, line flow, tables, floats, notes, and display lists behind the MeasuredBlock[] -> Layout contract, gated by the golden corpus."
 keywords = ["docx", "word", "ooxml", "layout"]
 categories = ["rendering", "text-processing"]
 

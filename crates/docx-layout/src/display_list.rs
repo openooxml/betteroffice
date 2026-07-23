@@ -4045,9 +4045,7 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     }
 }
 
-/// Exact body content/column boxes for interaction queries. This mirrors
-/// `calculateColumnGeometry` in the transitional TypeScript paginator so the
-/// metadata is identical whether the supplied Layout came from TS or Rust.
+/// Exact body content/column boxes for interaction queries.
 fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     let content_width = (page.size.w - page.margins.left - page.margins.right).max(0.0);
     let content_height = (page.size.h - page.margins.top - page.margins.bottom).max(0.0);
