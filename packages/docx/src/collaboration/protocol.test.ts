@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  decodeAwarenessUpdate,
   decodeMessages,
+  encodeAwarenessMessage,
+  encodeAwarenessUpdate,
   encodeEmptyAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
@@ -25,6 +29,29 @@ describe('collaboration protocol encoding', () => {
     expect([...encodeSyncStep2(Uint8Array.of(3, 4))]).toEqual([0, 1, 2, 3, 4]);
     expect([...encodeUpdate(Uint8Array.of(5, 6))]).toEqual([0, 2, 2, 5, 6]);
     expect([...encodeEmptyAwarenessUpdate()]).toEqual([1, 1, 0]);
+    expect([...encodeQueryAwareness()]).toEqual([3]);
+  });
+
+  it('round-trips sticky cursor awareness and leave states', () => {
+    const states = [
+      {
+        clientId: 17,
+        clock: 4,
+        state: {
+          user: { name: 'Calm Otter', color: '#0B57D0' },
+          cursor: {
+            story: 'body',
+            anchor: Uint8Array.of(1, 2, 3),
+            head: Uint8Array.of(4, 5),
+          },
+        },
+      },
+      { clientId: 18, clock: 9, state: null },
+    ];
+    const [message] = decodeMessages(encodeAwarenessMessage(states));
+    expect(message.type).toBe('awareness');
+    if (message.type !== 'awareness') return;
+    expect(decodeAwarenessUpdate(message.update)).toEqual(states);
   });
 
   it('uses standard multibyte varUint lengths', () => {
@@ -85,6 +112,27 @@ describe('collaboration protocol decoding', () => {
       Uint8Array.of(2, 0, 1),
     ];
     for (const frame of frames) expect(() => decodeMessages(frame)).toThrow(ProtocolError);
+  });
+
+  it('rejects malformed awareness payloads', () => {
+    expect(() => decodeAwarenessUpdate(Uint8Array.of())).toThrow('Truncated varUint');
+    expect(() => decodeAwarenessUpdate(Uint8Array.of(1, 1, 1, 1, 123))).toThrow(
+      'Invalid awareness JSON'
+    );
+    expect(() =>
+      decodeAwarenessUpdate(
+        encodeAwarenessUpdate([
+          {
+            clientId: 1,
+            clock: 1,
+            state: {
+              user: { name: 'A', color: '#000000' },
+              cursor: null,
+            },
+          },
+        ]).slice(0, -1)
+      )
+    ).toThrow(ProtocolError);
   });
 
   it('rejects overflowing and non-canonical varUints', () => {

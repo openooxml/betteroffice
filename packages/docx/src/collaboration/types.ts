@@ -51,6 +51,51 @@ export interface CollaborationProviderOptions {
   maxFrameBytes?: number;
   maxMessagesPerFrame?: number;
   maxPendingBytes?: number;
+  user?: CollaborationUser;
+}
+
+export interface CollaborationUser {
+  name: string;
+  color?: string;
+}
+
+export interface CollaborationResolvedUser {
+  name: string;
+  color: string;
+}
+
+export interface CollaborationCursor {
+  story: string;
+  anchor: Uint8Array;
+  head: Uint8Array;
+}
+
+export interface CollaborationTextInsertion {
+  clientId: number;
+  story: string;
+  paraId: string;
+  endOffset: number;
+}
+
+export interface CollaborationAwarenessState {
+  clientId: number;
+  clock: number;
+  user: CollaborationResolvedUser;
+  cursor: CollaborationCursor | null;
+}
+
+export interface CollaborationPeer extends CollaborationAwarenessState {
+  lastSeenAt: number;
+  cursorMovedAt: number;
+  inferredCursor: CollaborationTextInsertion | null;
+}
+
+export type CollaborationPeerListener = (peers: readonly CollaborationPeer[]) => void;
+
+export interface CollaborationPresence {
+  readonly peers: readonly CollaborationPeer[];
+  setCursor(cursor: CollaborationCursor | null, broadcast?: boolean): void;
+  onPeers(listener: CollaborationPeerListener): () => void;
 }
 
 export type CollaborationStatusListener = (change: CollaborationStatusChange) => void;

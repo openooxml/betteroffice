@@ -16,7 +16,9 @@
 
 import type { EditSession } from './wasm/index';
 import type {
+  CollaborationCursor,
   CollaborationReplica,
+  CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 
@@ -686,7 +688,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Full state, or only the state missing from a peer vector. */
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Applies a remote/incremental yrs v1 update. */
-  applyUpdate(update: Uint8Array): void;
+  applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array, story: string): void;
   /**
@@ -703,6 +705,10 @@ export interface YrsSession extends CollaborationReplica {
   setSelection(anchor: YrsLoc, head?: YrsLoc): void;
   /** Resolve this peer's current sticky selection, or null before initialization. */
   selection(): YrsSelection | null;
+  /** Encode the current selection as binary Yrs sticky indices. */
+  encodeSelection(): CollaborationCursor | null;
+  /** Resolve a peer's binary Yrs sticky indices against this replica. */
+  resolveSelection(cursor: CollaborationCursor): YrsSelection | null;
   /** Store this peer's rectangular table selection outside the document. */
   setCellSelection(range: YrsTableRange): void;
   /** Resolve the current sticky cell selection, or null before initialization. */
@@ -1180,7 +1186,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
-    applyUpdate: (update) => mutate(() => session.apply_update(update)),
+    applyUpdate: (update) =>
+      mutate(
+        () =>
+          JSON.parse(
+            session.apply_update_with_inference(update)
+          ) as CollaborationTextInsertion | null
+      ),
     applyLocalUpdate: (update, story) => {
       ensureUndo(story);
       mutate(() => session.apply_local_update(update));
@@ -1212,6 +1224,29 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
       cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
+    },
+    encodeSelection: () => {
+      const encoded = JSON.parse(session.encoded_selection()) as {
+        story: string;
+        anchor: number[];
+        head: number[];
+      } | null;
+      return encoded
+        ? {
+            story: encoded.story,
+            anchor: Uint8Array.from(encoded.anchor),
+            head: Uint8Array.from(encoded.head),
+          }
+        : null;
+    },
+    resolveSelection: (cursor) => {
+      try {
+        return JSON.parse(
+          session.resolve_encoded_selection(cursor.story, cursor.anchor, cursor.head)
+        ) as YrsSelection;
+      } catch {
+        return null;
+      }
     },
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
