@@ -167,6 +167,8 @@ export interface PagedEditorProps {
   document: Document | null;
   /** Source document used only when seeding a replacement yrs session. */
   yrsSeedDocument?: Document | null;
+  /** Source bytes used by the engine-native seeding path. */
+  yrsSeedBytes?: Uint8Array | null;
   /** Collaboration identity and replica lifecycle callback. */
   collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
@@ -420,6 +422,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       document,
       yrsSeedDocument = document,
+      yrsSeedBytes = null,
       collaboration,
       styles,
       theme: _theme,
@@ -504,7 +507,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
-    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument, collaboration);
+    const yrsCore = useYrsCoreSession(
+      true,
+      document,
+      yrsSeedDocument,
+      yrsSeedBytes,
+      collaboration
+    );
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {

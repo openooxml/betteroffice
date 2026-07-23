@@ -1335,6 +1335,11 @@ impl EditSession {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
     }
 
+    /// Parses a DOCX and seeds every editable story.
+    pub fn seed_from_docx(&self, bytes: &[u8]) -> Result<(), JsValue> {
+        crate::seed_from_docx(self.engine.doc(), bytes).map_err(js_err)
+    }
+
     /// Seeds stories from JSON (the json form of `load`):
     /// `[{"storyId","paragraphs":[{"text","pStyle"?,"alignment"?}, …]}, …]`.
     /// Paragraph text must not contain paragraph breaks. Returns

@@ -6,6 +6,7 @@ import {
   loadDocumentFonts,
   getRenderableDocumentFonts,
   getEmbeddedFontFamilies,
+  toArrayBuffer,
   type DocxInput,
 } from '@betteroffice/docx/utils';
 import type { FontOption } from '@betteroffice/docx/utils/fontOptions';
@@ -66,15 +67,17 @@ export function useDocumentLoader({
   const [yrsSeedDocument, setYrsSeedDocument] = useState<Document | null>(
     initialDocument ?? null
   );
+  const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   // Monotonically increasing generation counter so a late `parseDocx`
   // result doesn't overwrite a newer load that started while we were
   // parsing.
   const loadGenerationRef = useRef(0);
 
   const loadParsedDocument = useCallback(
-    (doc: Document) => {
+    (doc: Document, seedBytes?: Uint8Array) => {
       resetForNewDocument();
       setYrsSeedDocument(doc);
+      setYrsSeedBytes(seedBytes?.slice() ?? null);
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
       loadDocumentFonts(doc).catch((err) => {
@@ -97,9 +100,10 @@ export function useDocumentLoader({
       resetForNewDocument();
       setLoadingState({ isLoading: true, parseError: null });
       try {
-        const doc = await parseDocx(buffer);
+        const source = buffer instanceof ArrayBuffer ? buffer : await toArrayBuffer(buffer);
+        const doc = await parseDocx(source);
         if (loadGenerationRef.current !== generation) return;
-        loadParsedDocument(doc);
+        loadParsedDocument(doc, new Uint8Array(source));
       } catch (error) {
         if (loadGenerationRef.current !== generation) return;
         const message = error instanceof Error ? error.message : 'Failed to parse document';
@@ -159,5 +163,6 @@ export function useDocumentLoader({
     loadParsedDocument,
     loadBuffer,
     yrsSeedDocument,
+    yrsSeedBytes,
   };
 }

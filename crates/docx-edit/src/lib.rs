@@ -75,6 +75,7 @@ mod presence;
 mod queries;
 mod raw;
 mod read_state;
+mod seed;
 mod undo;
 
 pub mod canonical;
@@ -102,6 +103,7 @@ pub use queries::{
 };
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
+pub use seed::seed_from_docx;
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH};
 
 // The JS boundary for this crate (a wasm-bindgen session API over
@@ -331,6 +333,28 @@ impl EditingDoc {
     ) -> EditResult<ParagraphId> {
         let para_id = self.next_id();
         self.create_story_with_paragraph_id(story_id, para_id, initial_text, p_style, alignment)
+    }
+
+    pub(crate) fn create_empty_stories(&self, story_ids: &[String]) -> EditResult<()> {
+        let mut txn = self.doc.transact_mut_with(self.client_id);
+        let stories = txn
+            .get_map(STORIES)
+            .expect("stories root is declared by EditingDoc::new");
+        for story_id in story_ids {
+            let para_id = self.next_id();
+            if stories.contains_key(&txn, story_id) {
+                return Err(EditError::StoryExists(story_id.clone()));
+            }
+            let story = stories.insert(&mut txn, story_id.clone(), TextPrelim::new(""));
+            let pilcrow = story.insert_embed_with_attributes(
+                &mut txn,
+                0,
+                MapPrelim::default(),
+                insertion_attrs(None, None),
+            );
+            write_pilcrow_properties(&pilcrow, &mut txn, &para_id, "Normal", "left");
+        }
+        Ok(())
     }
 
     /// Adds a one-paragraph story with a caller-supplied paragraph ID.

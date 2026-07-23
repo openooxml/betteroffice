@@ -27,6 +27,7 @@ export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
   seedDocument: Document | null,
+  seedBytes: Uint8Array | null,
   collaboration?: DocxEditorCollaborationOptions
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
@@ -42,7 +43,7 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
 
   useEffect(() => {
-    if (!enabled || !seedDocument) return;
+    if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     setSession(null);
     inputPositionMapsRef.current.clear();
@@ -56,7 +57,8 @@ export function useYrsCoreSession(
           return;
         }
         if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
-        else yrs.documentToYrs(next, seedDocument);
+        else if (seedBytes) next.seedFromDocx(seedBytes);
+        else if (seedDocument) yrs.documentToYrs(next, seedDocument);
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
@@ -73,7 +75,7 @@ export function useYrsCoreSession(
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
     };
-  }, [enabled, seedDocument, collaborationClientId, collaborationInitialUpdate]);
+  }, [enabled, seedDocument, seedBytes, collaborationClientId, collaborationInitialUpdate]);
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;

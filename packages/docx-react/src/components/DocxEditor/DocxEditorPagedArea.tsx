@@ -52,6 +52,7 @@ export function DocxEditorPagedArea({
   // Document + section
   document,
   yrsSeedDocument,
+  yrsSeedBytes,
   collaboration,
   theme,
   initialSectionProperties,
@@ -132,6 +133,8 @@ export function DocxEditorPagedArea({
   document: Document | null;
   /** Source document for replacing the yrs session on an actual load. */
   yrsSeedDocument: Document | null;
+  /** Source bytes for replacing the yrs session without a TS projection. */
+  yrsSeedBytes: Uint8Array | null;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -383,6 +386,7 @@ export function DocxEditorPagedArea({
         ref={pagedEditorRef}
         document={document}
         yrsSeedDocument={yrsSeedDocument}
+        yrsSeedBytes={yrsSeedBytes}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}

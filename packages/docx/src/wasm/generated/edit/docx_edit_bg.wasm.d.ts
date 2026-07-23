@@ -69,6 +69,7 @@ export const editsession_replace_range: (a: number, b: number, c: number, d: num
 export const editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+export const editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number];
 export const editsession_selection: (a: number) => [number, number, number, number];
 export const editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

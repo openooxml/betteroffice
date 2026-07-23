@@ -675,6 +675,8 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
+  /** Parses a DOCX and seeds every editable story directly in the engine. */
+  seedFromDocx(bytes: Uint8Array): void;
   /**
    * Seeds stories from parsed content (S1 scaffold; the real
    * `load(ParsedDocument)` lands with the ops track). Returns paraIds per
@@ -1176,6 +1178,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
 
     loadState: (update) => mutate(() => session.load(update)),
+    seedFromDocx: (bytes) => mutate(() => session.seed_from_docx(bytes)),
     loadStories: (stories) =>
       mutate(
         () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>

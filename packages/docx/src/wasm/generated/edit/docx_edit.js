@@ -1508,6 +1508,18 @@ export class EditSession {
         }
     }
     /**
+     * Parses a DOCX and seeds every editable story.
+     * @param {Uint8Array} bytes
+     */
+    seed_from_docx(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.editsession_seed_from_docx(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * Resolves this peer's current sticky selection as two public Locs, or
      * `null` before the host establishes an initial selection.
      * @returns {string}

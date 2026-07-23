@@ -822,7 +822,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef,
   });
 
-  const { loadParsedDocument, loadBuffer, yrsSeedDocument } = useDocumentLoader({
+  const { loadParsedDocument, loadBuffer, yrsSeedDocument, yrsSeedBytes } = useDocumentLoader({
     documentBuffer,
     initialDocument,
     externalContent: false,
@@ -1764,6 +1764,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           >
             <DocxEditorPagedArea
               yrsSeedDocument={yrsSeedDocument}
+              yrsSeedBytes={yrsSeedBytes}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
