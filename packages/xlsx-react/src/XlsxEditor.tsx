@@ -42,7 +42,11 @@ import type {
   SheetInfo,
   WorkbookHandle,
 } from '@betteroffice/xlsx';
-import type { CollaborationReplica } from '@betteroffice/xlsx/collaboration';
+import type {
+  AwarenessPeer,
+  CollaborationAwareness,
+  CollaborationReplica,
+} from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { EditorToolbar } from './components/EditorToolbar';
@@ -53,6 +57,7 @@ import type {
 } from './components/Toolbar';
 import { ToolbarButton, ToolbarGroup } from './components/ui/ToolbarPrimitives';
 import { ToolbarIcon } from './components/ui/ToolbarIcon';
+import { PresenceStrip, RemoteSelections } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 
 /**
@@ -72,6 +77,8 @@ export interface XlsxEditorCollaborationOptions {
   initialUpdate?: Uint8Array;
   /** Receive the editor-owned collaboration replica. */
   onReplica?: (replica: CollaborationReplica | null) => void;
+  /** Presence-capable provider connected to the editor-owned replica. */
+  provider?: CollaborationAwareness | null;
 }
 
 /**
@@ -348,6 +355,7 @@ function XlsxEditorContent({
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
   const collaborationOnReplica = collaboration?.onReplica;
+  const collaborationProvider = collaboration?.provider;
   const toolbarRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -386,6 +394,7 @@ function XlsxEditorContent({
   const [proposalsPanelOpen, setProposalsPanelOpen] = useState(false);
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
+  const [awarenessPeers, setAwarenessPeers] = useState<readonly AwarenessPeer[]>([]);
   // a1 lists keyed by proposal id: cells that drifted since a proposal was
   // staged, surfaced when accepting it throws a StaleProposalError.
   const [staleFor, setStaleFor] = useState<Record<string, string[]>>({});
@@ -536,6 +545,30 @@ function XlsxEditorContent({
     collaborationOnReplica(collaborationReplica);
     return () => collaborationOnReplica(null);
   }, [collaborationOnReplica, collaborationReplica]);
+
+  useEffect(() => {
+    setAwarenessPeers([]);
+    if (!collaborationProvider) return;
+    return collaborationProvider.onAwareness((peers) => setAwarenessPeers([...peers]));
+  }, [collaborationProvider]);
+
+  useEffect(() => {
+    return () => collaborationProvider?.setCursor(null);
+  }, [collaborationProvider]);
+
+  useEffect(() => {
+    if (!collaborationProvider) return;
+    const sheet = sheetInfo?.sheetIds[activeSheet];
+    if (!selection || !sheet) {
+      collaborationProvider.setCursor(null);
+      return;
+    }
+    collaborationProvider.setCursor({
+      sheet,
+      anchor: { ...selection.anchor },
+      head: { ...selection.focus },
+    });
+  }, [collaborationProvider, selection, sheetInfo, activeSheet, revision]);
 
   // paint the current scroll window into the canvas and publish the frame for
   // overlays + a11y. reads refs so it stays identity-stable across renders.
@@ -1392,6 +1425,12 @@ function XlsxEditorContent({
                 style={xlsxToolbarStyles.formulaInput}
               />
             </div>
+            <PresenceStrip
+              peers={awarenessPeers}
+              sheetIds={sheetInfo?.sheetIds ?? []}
+              sheetNames={sheetInfo?.sheetNames ?? []}
+              activeSheet={activeSheet}
+            />
             {proposalsAvailable && (
               <div style={xlsxToolbarStyles.proposals}>
                 <ToolbarButton
@@ -1498,6 +1537,13 @@ function XlsxEditorContent({
                 }}
               />
             )}
+            <RemoteSelections
+              peers={awarenessPeers}
+              grid={grid}
+              sheetIds={sheetInfo?.sheetIds ?? []}
+              activeSheet={activeSheet}
+              zoom={zoom}
+            />
             {editing && scaledEditRect && (
               <input
                 ref={editorInputRef}
