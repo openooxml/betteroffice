@@ -147,6 +147,7 @@ function shape(id: string, x: number, y: number, width: number, height: number):
     flipH: false,
     flipV: false,
     geometry: 'rect',
+    adjustValues: {},
     placeholder: null,
     fill: null,
     outline: null,

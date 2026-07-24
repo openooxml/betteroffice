@@ -33,10 +33,13 @@ import { EditorToolbar } from './components/EditorToolbar';
 import type {
   FormattingAction,
   PptxEditorTool,
+  PptxShapePreset,
   PptxZoom,
   SelectionFormatting,
+  ShapeFormattingAction,
   SlideLayoutOption,
 } from './components/Toolbar';
+import { SHAPE_PRESETS } from './components/Toolbar';
 import {
   canMoveShape,
   findShape,
@@ -54,6 +57,7 @@ import {
   storyFormattingFromStory,
 } from './textFormatting';
 import type { EffectiveTextStyle } from './textFormatting';
+import { shapeFormattingFromShape } from './shapeFormatting';
 import { extendTextRange, textRangeAt } from './textSelection';
 import type { TextSelectionGranularity } from './textSelection';
 
@@ -133,6 +137,14 @@ type PointerGesture =
       kind: 'textBox';
       pointerId: number;
       slideId: string;
+      start: SlidePoint;
+      last: SlidePoint;
+    }
+  | {
+      kind: 'shapeInsert';
+      pointerId: number;
+      slideId: string;
+      geometry: PptxShapePreset;
       start: SlidePoint;
       last: SlidePoint;
     };
@@ -267,6 +279,7 @@ function PptxEditorContent({
           (!activeSlide ||
             activeSlide.id !== gesture.slideId ||
             (gesture.kind !== 'textBox' &&
+              gesture.kind !== 'shapeInsert' &&
               !findShape(activeSlide.shapes, gesture.shapeId)))
         ) {
           pointerGestureRef.current = null;
@@ -427,6 +440,10 @@ function PptxEditorContent({
     return findShape(slide.shapes, shapeSelection.shapeId);
   }, [model, shapeSelection]);
   const selectedShapeStoryId = selectedShape?.textStories[0]?.id ?? null;
+  const selectedShapeFormatting = useMemo(
+    () => shapeFormattingFromShape(selectedShape),
+    [selectedShape]
+  );
 
   const selectedShapeBounds = useMemo<FrameBounds | null>(
     () =>
@@ -553,6 +570,64 @@ function PptxEditorContent({
     }
   };
 
+  const createShape = (
+    geometry: PptxShapePreset,
+    start: SlidePoint,
+    end: SlidePoint
+  ) => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    if (!handle || !current?.frame) return;
+    const slide = current.snapshot.slides[current.slideIndex];
+    const preset = SHAPE_PRESETS.find((candidate) => candidate.geometry === geometry);
+    if (!slide || !preset) return;
+    const dragged = Math.abs(end.x - start.x) >= 6 || Math.abs(end.y - start.y) >= 6;
+    const width = dragged ? Math.abs(end.x - start.x) : current.frame.width * 0.22;
+    const height = dragged ? Math.abs(end.y - start.y) : current.frame.height * 0.18;
+    const x = Math.max(
+      0,
+      Math.min(
+        dragged ? Math.min(start.x, end.x) : start.x - width / 2,
+        current.frame.width - width
+      )
+    );
+    const y = Math.max(
+      0,
+      Math.min(
+        dragged ? Math.min(start.y, end.y) : start.y - height / 2,
+        current.frame.height - height
+      )
+    );
+    try {
+      const receipt = handle.addShape(slide.id, {
+        name: t(preset.labelKey),
+        geometry,
+        rect: {
+          x: Math.round((x * current.snapshot.widthEmu) / current.frame.width),
+          y: Math.round((y * current.snapshot.heightEmu) / current.frame.height),
+          width: Math.round(
+            (Math.max(12, width) * current.snapshot.widthEmu) / current.frame.width
+          ),
+          height: Math.round(
+            (Math.max(12, height) * current.snapshot.heightEmu) / current.frame.height
+          ),
+        },
+        fill: '#d9eaf7',
+      });
+      const next = refreshAt(undefined, true);
+      setActiveTool('select');
+      setSelection(null);
+      setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+      setDragPreview(null);
+      setTextBoxPreview(null);
+      pointerGestureRef.current = null;
+      recentClickRef.current = null;
+      if (next) stageRef.current?.focus();
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
   const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     if (!event.isPrimary || event.button !== 0) return;
     const handle = handleRef.current;
@@ -566,19 +641,29 @@ function PptxEditorContent({
     );
     if (!point) return;
     const slide = current.snapshot.slides[current.slideIndex];
-    if (activeTool === 'textBox' && slide) {
+    const shapePreset = shapePresetFromTool(activeTool);
+    if ((activeTool === 'textBox' || shapePreset) && slide) {
       setSelection(null);
       setShapeSelection(null);
       setDragPreview(null);
       setTextBoxPreview({ start: point, end: point });
       recentClickRef.current = null;
-      pointerGestureRef.current = {
-        kind: 'textBox',
-        pointerId: event.pointerId,
-        slideId: slide.id,
-        start: point,
-        last: point,
-      };
+      pointerGestureRef.current = shapePreset
+        ? {
+            kind: 'shapeInsert',
+            pointerId: event.pointerId,
+            slideId: slide.id,
+            geometry: shapePreset,
+            start: point,
+            last: point,
+          }
+        : {
+            kind: 'textBox',
+            pointerId: event.pointerId,
+            slideId: slide.id,
+            start: point,
+            last: point,
+          };
       event.currentTarget.setPointerCapture(event.pointerId);
       stageRef.current?.focus();
       event.preventDefault();
@@ -808,6 +893,12 @@ function PptxEditorContent({
       event.preventDefault();
       return;
     }
+    if (gesture.kind === 'shapeInsert') {
+      setTextBoxPreview(null);
+      createShape(gesture.geometry, gesture.start, gesture.last);
+      event.preventDefault();
+      return;
+    }
     if (gesture.kind === 'text') {
       recentClickRef.current = gesture.dragging
         ? null
@@ -1025,6 +1116,36 @@ function PptxEditorContent({
     }
   };
 
+  const formatShape = (action: ShapeFormattingAction) => {
+    const handle = handleRef.current;
+    if (!handle || !shapeSelection || !selectedShape) return;
+    try {
+      if (action.type === 'fillColor') {
+        handle.setShapeFill(shapeSelection.slideId, shapeSelection.shapeId, action.value);
+      } else if (action.type === 'strokeColor') {
+        handle.setShapeStroke(
+          shapeSelection.slideId,
+          shapeSelection.shapeId,
+          action.value ? { color: action.value } : {}
+        );
+      } else if (action.type === 'strokeWidth') {
+        handle.setShapeStroke(
+          shapeSelection.slideId,
+          shapeSelection.shapeId,
+          action.value === null ? {} : { widthPt: action.value }
+        );
+      } else {
+        handle.setShapeAdjust(shapeSelection.slideId, shapeSelection.shapeId, {
+          ...selectedShape.adjustValues,
+          [action.name]: action.value,
+        });
+      }
+      refreshAt(undefined, true);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
   const addSlide = (layoutPartPath?: string | null) => {
     const handle = handleRef.current;
     const current = modelRef.current;
@@ -1056,7 +1177,6 @@ function PptxEditorContent({
       if (direction === 'undo') handle.undo();
       else handle.redo();
       setSelection(null);
-      setShapeSelection(null);
       setDragPreview(null);
       setTextBoxPreview(null);
       setActiveTool('select');
@@ -1080,6 +1200,9 @@ function PptxEditorContent({
         currentFormatting={selectionFormatting}
         textSelectionActive={selection !== null || selectedShapeStoryId !== null}
         onFormat={formatSelection}
+        currentShapeFormatting={selectedShapeFormatting}
+        shapeSelectionActive={selectedShape?.kind === 'shape'}
+        onShapeFormat={formatShape}
         onInsertSlide={addSlide}
         slideLayouts={slideLayouts}
         currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
@@ -1092,6 +1215,10 @@ function PptxEditorContent({
         activeTool={activeTool}
         onToolChange={(tool) => {
           setActiveTool(tool);
+          if (tool !== 'select') {
+            setSelection(null);
+            setShapeSelection(null);
+          }
           setTextBoxPreview(null);
           pointerGestureRef.current = null;
           stageRef.current?.focus();
@@ -1153,7 +1280,7 @@ function PptxEditorContent({
                   style={{
                     ...styles.canvas,
                     cursor:
-                      activeTool === 'textBox'
+                      activeTool !== 'select'
                         ? 'crosshair'
                         : selection
                           ? 'text'
@@ -1250,6 +1377,14 @@ function SlideThumbnail({
 function clampSlideIndex(index: number, count: number): number {
   if (count === 0) return 0;
   return Math.max(0, Math.min(count - 1, index));
+}
+
+function shapePresetFromTool(tool: PptxEditorTool): PptxShapePreset | null {
+  if (!tool.startsWith('shape:')) return null;
+  const geometry = tool.slice('shape:'.length);
+  return SHAPE_PRESETS.some((preset) => preset.geometry === geometry)
+    ? (geometry as PptxShapePreset)
+    : null;
 }
 
 function useStableFontFaces(fonts: ReadonlyArray<PptxFontFace>): ReadonlyArray<PptxFontFace> {

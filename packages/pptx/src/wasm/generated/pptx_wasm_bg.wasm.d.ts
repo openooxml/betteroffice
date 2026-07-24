@@ -10,6 +10,7 @@ export const pptxrenderer_new: () => number;
 export const pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const rendererVersion: () => [number, number];
 export const __wbg_pptxdocument_free: (a: number, b: number) => void;
+export const pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_canRedo: (a: number) => number;
@@ -34,6 +35,9 @@ export const pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c:
 export const pptxdocument_redoJson: (a: number) => [number, number, number, number];
 export const pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
 export const pptxdocument_startUpdateObservation: (a: number) => [number, number];
 export const pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];

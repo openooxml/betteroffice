@@ -6,6 +6,10 @@ export type ToolbarIconName =
   | 'newSlide'
   | 'select'
   | 'textBox'
+  | 'shape'
+  | 'fillColor'
+  | 'borderColor'
+  | 'borderWidth'
   | 'bold'
   | 'italic'
   | 'underline'
@@ -49,6 +53,25 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
         <>
           <rect x="3" y="4" width="18" height="16" rx="1.5" />
           <path d="M8 8h8m-4 0v8m-3 0h6" />
+        </>
+      )}
+      {name === 'shape' && <rect x="4" y="6" width="16" height="12" rx="3" />}
+      {name === 'fillColor' && (
+        <>
+          <path d="m7 4 10 10-5 5-7-7Z" />
+          <path d="m5 12 7-7m6 12h2" />
+        </>
+      )}
+      {name === 'borderColor' && (
+        <>
+          <path d="M5 18h14M8 15l8-8 2 2-8 8H8Z" />
+        </>
+      )}
+      {name === 'borderWidth' && (
+        <>
+          <path d="M5 7h14" strokeWidth="1" />
+          <path d="M5 12h14" strokeWidth="2" />
+          <path d="M5 18h14" strokeWidth="3" />
         </>
       )}
       {name === 'bold' && <path d="M7 4h6a4 4 0 0 1 0 8H7zm0 8h7a4 4 0 0 1 0 8H7z" />}

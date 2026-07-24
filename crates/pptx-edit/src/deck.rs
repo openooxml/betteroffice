@@ -1,7 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
-use ooxml_drawingml::{ShapeFill, Theme};
+use ooxml_drawingml::{
+    ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_to_path, resolve_color_value_to_hex,
+};
 use pptx_parse::{PptxPackage, ShapeNode, Slide};
 use serde::de::DeserializeOwned;
 use yrs::{
@@ -11,14 +13,17 @@ use yrs::{
 
 use crate::story::{seed_plain_story, seed_story, snapshot_story, validate_story};
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, SHAPES, SLIDE_ORDER, SLIDES,
-    STORIES, ShapeDraft, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, SlideReceipt,
+    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, PresetShapeDraft, SHAPES,
+    SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind,
+    ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
     SlideSnapshot, TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
+const EMU_PER_POINT: f64 = 12_700.0;
+const DEFAULT_ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
     let package_json =
@@ -114,6 +119,12 @@ fn seed_shape(
         ShapeNode::Shape(shape) => {
             shape_map.insert(txn, "kind", "shape");
             shape_map.insert(txn, "geometry", shape.geometry.as_str());
+            insert_json(
+                &shape_map,
+                txn,
+                "adjustValuesJson",
+                Some(&shape.adjust_values),
+            )?;
             insert_json(&shape_map, txn, "fillJson", shape.fill.as_ref())?;
             insert_json(&shape_map, txn, "outlineJson", shape.outline.as_ref())?;
             if let Some(body) = &shape.text {
@@ -350,6 +361,164 @@ impl DeckSession {
         })
     }
 
+    pub fn add_shape(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        draft: &PresetShapeDraft,
+    ) -> EditResult<ShapeReceipt> {
+        validate_rect(draft.rect)?;
+        let aspect_ratio = draft.rect.width as f64 / draft.rect.height as f64;
+        if preset_geometry_to_path(&draft.geometry, &Default::default(), aspect_ratio).is_none() {
+            return Err(EditError::InvalidGeometry(format!(
+                "unsupported preset geometry {}",
+                draft.geometry
+            )));
+        }
+        let fill = shape_fill(draft.fill.as_deref())?;
+        let adjust_values = if draft.geometry == "roundRect" {
+            BTreeMap::from([("adj".to_owned(), DEFAULT_ROUND_RECT_ADJUSTMENT)])
+        } else {
+            BTreeMap::new()
+        };
+        let shape_id = self.next_id("shape");
+        let mut txn = self.transact_for(context);
+        let slide = slide_ref(&txn, slide_id)?;
+        let order = slide_shape_order(&slide, &txn)?;
+        let index = order.len(&txn);
+        let shapes = required_map(&txn, SHAPES)?;
+        let shape = shapes.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
+        shape.insert(&mut txn, "id", shape_id.as_str());
+        shape.insert(&mut txn, "sourceId", 0_f64);
+        shape.insert(&mut txn, "kind", "shape");
+        shape.insert(&mut txn, "name", draft.name.as_str());
+        shape.insert(&mut txn, "x", draft.rect.x as f64);
+        shape.insert(&mut txn, "y", draft.rect.y as f64);
+        shape.insert(&mut txn, "width", draft.rect.width as f64);
+        shape.insert(&mut txn, "height", draft.rect.height as f64);
+        shape.insert(&mut txn, "rotationDeg", 0_f64);
+        shape.insert(&mut txn, "flipH", false);
+        shape.insert(&mut txn, "flipV", false);
+        shape.insert(&mut txn, "geometry", draft.geometry.as_str());
+        insert_json(&shape, &mut txn, "adjustValuesJson", Some(&adjust_values))?;
+        insert_json(&shape, &mut txn, "fillJson", Some(&fill))?;
+        shape.insert(&mut txn, "textStories", string_array(&[]));
+        shape.insert(&mut txn, "children", string_array(&[]));
+        order.push_back(&mut txn, shape_id.as_str());
+        Ok(ShapeReceipt {
+            slide_id: slide_id.to_owned(),
+            shape_id,
+            index,
+        })
+    }
+
+    pub fn set_shape_fill(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        color: Option<&str>,
+    ) -> EditResult<ShapeFillReceipt> {
+        let fill = shape_fill(color)?;
+        let mut txn = self.transact_for(context);
+        require_shape_membership(&txn, slide_id, shape_id)?;
+        let shape = shape_ref(&txn, shape_id)?;
+        require_shape_kind(&shape, &txn)?;
+        let before = optional_json::<ShapeFill, _>(&shape, &txn, "fillJson")?
+            .as_ref()
+            .and_then(fill_color);
+        insert_json(&shape, &mut txn, "fillJson", Some(&fill))?;
+        Ok(ShapeFillReceipt {
+            slide_id: slide_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            before,
+            after: fill_color(&fill),
+        })
+    }
+
+    pub fn set_shape_stroke(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        stroke: &ShapeStroke,
+    ) -> EditResult<ShapeStrokeReceipt> {
+        let color = stroke.color.as_deref().map(color_value).transpose()?;
+        if let Some(width) = stroke.width_pt
+            && (!width.is_finite() || !(0.0..=1_000.0).contains(&width))
+        {
+            return Err(EditError::InvalidGeometry(format!(
+                "stroke width {width}pt is outside the safe range"
+            )));
+        }
+        let mut txn = self.transact_for(context);
+        require_shape_membership(&txn, slide_id, shape_id)?;
+        let shape = shape_ref(&txn, shape_id)?;
+        require_shape_kind(&shape, &txn)?;
+        let existing = optional_json::<ShapeOutline, _>(&shape, &txn, "outlineJson")?;
+        let before = existing.as_ref().and_then(outline_stroke);
+        let outline = if stroke.color.is_none() && stroke.width_pt.is_none() {
+            ShapeOutline::default()
+        } else {
+            let mut outline = existing.unwrap_or_default();
+            if let Some(color) = color {
+                if outline.width.is_none() {
+                    outline.width = Some(EMU_PER_POINT);
+                }
+                outline.color = Some(color);
+            } else if outline.color.is_none() {
+                outline.color = Some(color_value("#000000")?);
+            }
+            if let Some(width) = stroke.width_pt {
+                outline.width = Some(width * EMU_PER_POINT);
+            }
+            outline
+        };
+        insert_json(&shape, &mut txn, "outlineJson", Some(&outline))?;
+        Ok(ShapeStrokeReceipt {
+            slide_id: slide_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            before,
+            after: outline_stroke(&outline),
+        })
+    }
+
+    pub fn set_shape_adjust(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        adjustments: &BTreeMap<String, f64>,
+    ) -> EditResult<ShapeAdjustReceipt> {
+        let mut txn = self.transact_for(context);
+        require_shape_membership(&txn, slide_id, shape_id)?;
+        let shape = shape_ref(&txn, shape_id)?;
+        require_shape_kind(&shape, &txn)?;
+        let geometry = required_string(&shape, &txn, "geometry")?;
+        let before = optional_json(&shape, &txn, "adjustValuesJson")?.unwrap_or_else(BTreeMap::new);
+        let mut after = BTreeMap::new();
+        for (name, value) in adjustments {
+            if name.is_empty() || name.len() > 128 || !value.is_finite() {
+                return Err(EditError::InvalidGeometry(format!(
+                    "invalid adjustment {name:?}"
+                )));
+            }
+            let maximum = if geometry == "roundRect" && name == "adj" {
+                0.5
+            } else {
+                1.0
+            };
+            after.insert(name.clone(), value.clamp(0.0, maximum));
+        }
+        insert_json(&shape, &mut txn, "adjustValuesJson", Some(&after))?;
+        Ok(ShapeAdjustReceipt {
+            slide_id: slide_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            before,
+            after,
+        })
+    }
+
     pub fn remove_shape(
         &self,
         context: &EditCtx,
@@ -561,6 +730,7 @@ fn snapshot_shape<T: ReadTxn>(
         flip_h: map_bool(&shape, txn, "flipH").unwrap_or_default(),
         flip_v: map_bool(&shape, txn, "flipV").unwrap_or_default(),
         geometry: required_string(&shape, txn, "geometry")?,
+        adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
         placeholder: optional_json(&shape, txn, "placeholderJson")?,
         fill: optional_json(&shape, txn, "fillJson")?,
         outline: optional_json(&shape, txn, "outlineJson")?,
@@ -605,6 +775,16 @@ fn shape_ref<T: ReadTxn>(txn: &T, shape_id: &str) -> EditResult<MapRef> {
         .get(txn, shape_id)
         .and_then(|value| value.cast::<MapRef>().ok())
         .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))
+}
+
+fn require_shape_kind<T: ReadTxn>(shape: &MapRef, txn: &T) -> EditResult<()> {
+    if required_string(shape, txn, "kind")? == "shape" {
+        Ok(())
+    } else {
+        Err(EditError::InvalidGeometry(
+            "only preset shapes support shape styling".to_owned(),
+        ))
+    }
 }
 
 fn slide_shape_order<T: ReadTxn>(slide: &MapRef, txn: &T) -> EditResult<ArrayRef> {
@@ -760,6 +940,43 @@ fn validate_coordinate(value: i64) -> EditResult<()> {
         )));
     }
     Ok(())
+}
+
+fn shape_fill(color: Option<&str>) -> EditResult<ShapeFill> {
+    Ok(match color {
+        Some(color) => ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(color_value(color)?),
+            gradient: None,
+        },
+        None => ShapeFill::named("none"),
+    })
+}
+
+fn fill_color(fill: &ShapeFill) -> Option<String> {
+    (fill.fill_type != "none")
+        .then(|| resolve_color_value_to_hex(fill.color.as_ref()))
+        .flatten()
+}
+
+fn outline_stroke(outline: &ShapeOutline) -> Option<ShapeStroke> {
+    Some(ShapeStroke {
+        color: Some(resolve_color_value_to_hex(outline.color.as_ref())?),
+        width_pt: outline.width.map(|width| width / EMU_PER_POINT),
+    })
+}
+
+fn color_value(color: &str) -> EditResult<ColorValue> {
+    let rgb = color.strip_prefix('#').unwrap_or(color);
+    if rgb.len() != 6 || !rgb.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(EditError::InvalidGeometry(format!(
+            "color {color:?} must be a six-digit hex value"
+        )));
+    }
+    Ok(ColorValue {
+        rgb: Some(rgb.to_ascii_uppercase()),
+        ..ColorValue::default()
+    })
 }
 
 fn required_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<String> {

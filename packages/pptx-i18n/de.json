@@ -21,7 +21,8 @@
       "zoom": null,
       "tools": null,
       "font": null,
-      "text": null
+      "text": null,
+      "shape": null
     },
     "newSlide": null,
     "newSlideWithLayout": null,
@@ -32,6 +33,7 @@
     "zoomValue": null,
     "selectToolShortcut": null,
     "textBoxTool": null,
+    "shapeTool": null,
     "fontFamily": null,
     "mixed": null,
     "decreaseFontSize": null,
@@ -40,7 +42,33 @@
     "italicShortcut": null,
     "underline": null,
     "underlineShortcut": null,
-    "more": null
+    "more": null,
+    "fillColor": null,
+    "noFill": null,
+    "borderColor": null,
+    "borderWidth": null,
+    "borderWidthValue": null,
+    "noBorder": null,
+    "cornerRadius": null,
+    "shapes": {
+      "rect": null,
+      "roundRect": null,
+      "ellipse": null,
+      "triangle": null,
+      "rtTriangle": null,
+      "diamond": null,
+      "parallelogram": null,
+      "trapezoid": null,
+      "pentagon": null,
+      "hexagon": null,
+      "octagon": null,
+      "star5": null,
+      "rightArrow": null,
+      "leftArrow": null,
+      "upArrow": null,
+      "downArrow": null,
+      "chevron": null
+    }
   },
   "slides": {
     "panelLabel": null,

@@ -176,6 +176,8 @@ pub struct Shape {
     #[serde(flatten)]
     pub base: ShapeBase,
     pub geometry: String,
+    #[serde(default)]
+    pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
     pub text: Option<TextBody>,
