@@ -4,7 +4,7 @@
 //! CONCURRENTLY as a standalone module. A stub returns
 //! `LayoutError::Unsupported` the moment its feature is actually engaged by
 //! the input (and the neutral value otherwise), so paragraph-only documents
-//! flow while everything else falls back to the TypeScript engine.
+//! flow while uncovered features surface `Unsupported` to the caller.
 //!
 //! Integration contract: when the sibling module lands, replace the stub body
 //! with a call into it — the call sites in `place.rs`/`prescan.rs` do not

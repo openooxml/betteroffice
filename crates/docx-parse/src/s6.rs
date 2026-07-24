@@ -1,4 +1,4 @@
-//! S6 body projection used by the independent TypeScript/Rust corpus gate.
+//! S6 body projection used by the independent corpus gate.
 
 use base64::Engine as _;
 use indexmap::IndexMap;

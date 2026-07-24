@@ -6,7 +6,7 @@
 //! prescan plan. Paragraph placement (including spacing collapse, float line
 //! offsets, page/column splits, per-fragment PM ranges and resolved lines) is
 //! fully ported; the features listed in `hooks.rs` are stubbed there and make
-//! the engine return `Unsupported` so the JS seam falls back to TypeScript.
+//! the engine return `Unsupported`.
 //!
 //! Checkpoint capture (`controls.checkpoints` in the TS walk) is not ported:
 //! checkpoints are derived resume bookmarks, excluded from golden
@@ -792,8 +792,7 @@ fn layout_paragraph(
     measure: &ParagraphExtent,
     paginator: &mut Paginator,
 ) -> Result<(), LayoutError> {
-    // a run kind this port doesn't know can't be re-emitted faithfully in
-    // resolved lines — degrade to the TS engine
+    // an unknown run kind can't be re-emitted faithfully in resolved lines
     if block.runs.iter().any(|r| matches!(r, Run::Unsupported)) {
         return Err(LayoutError::Unsupported("unknown run kind".into()));
     }

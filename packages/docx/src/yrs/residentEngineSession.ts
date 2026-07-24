@@ -5,7 +5,10 @@ import type {
   YrsSelection,
   YrsSession,
 } from './index';
-import type { CollaborationUpdateOrigin } from '../collaboration/types';
+import type {
+  CollaborationTextInsertion,
+  CollaborationUpdateOrigin,
+} from '../collaboration/types';
 import { createEditSession, preloadEditWasm } from './wasm/index';
 
 export type ResidentEngineSession = Pick<
@@ -96,7 +99,10 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadState: (update) => session.load(update),
-    applyUpdate: (update) => session.apply_update(update),
+    applyUpdate: (update) =>
+      JSON.parse(
+        session.apply_update_with_inference(update)
+      ) as CollaborationTextInsertion | null,
     onUpdate: (listener) => {
       listeners.add(listener);
       ensureObserver();

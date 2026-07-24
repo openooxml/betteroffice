@@ -80,6 +80,7 @@ export class EditSession {
      * Applies a remote/incremental yrs v1 update.
      */
     apply_update(update: Uint8Array): void;
+    apply_update_with_inference(update: Uint8Array): string;
     /**
      * Binary FrameDelta v1 display output. The returned `Vec<u8>` is exposed
      * by wasm-bindgen as a transferable-friendly `Uint8Array`.
@@ -164,6 +165,7 @@ export class EditSession {
      */
     encode_state(): Uint8Array;
     encode_state_vector(): Uint8Array;
+    encoded_selection(): string;
     /**
      * Applies a set-valued, tri-state inline formatting delta over
      * `[start, end)` in one transaction. Omitted fields are kept and `null`
@@ -304,6 +306,7 @@ export class EditSession {
      * `[{"story","start","end"}]`. Errors when an anchor no longer resolves.
      */
     resolve_comment(comment_id: string): string;
+    resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string;
     /**
      * Resolves this peer's current sticky selection as two public Locs, or
      * `null` before the host establishes an initial selection.
@@ -588,6 +591,7 @@ export interface InitOutput {
     readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
@@ -612,6 +616,7 @@ export interface InitOutput {
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];
+    readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
@@ -641,6 +646,7 @@ export interface InitOutput {
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

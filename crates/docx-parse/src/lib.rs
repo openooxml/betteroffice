@@ -31,8 +31,7 @@
 //!
 //! S0 freezes the cross-language canonical contract in [`canonical`]. S1 adds
 //! bounded XML and relationship parsing on top of `ooxml-opc`'s existing
-//! ZIP/OPC trust boundary. The production TypeScript parser remains the live
-//! default while the two implementations run under the differential harness.
+//! ZIP/OPC trust boundary.
 
 pub mod block;
 pub mod borders;

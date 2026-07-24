@@ -6,7 +6,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "Safe DOCX XML parsing, typed relationship models, and the versioned Rust/TypeScript equivalence contract."
+description = "Safe DOCX XML parsing, typed relationship models, and the versioned canonical document contract."
 keywords = ["docx", "word", "ooxml", "wordprocessingml"]
 categories = ["parser-implementations", "encoding"]
 

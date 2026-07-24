@@ -29,6 +29,9 @@ use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
 
+use crate::presence::{
+    apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
+};
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, DocUndoManager, EditCtx, EditingDoc,
     EngineSession, FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta,
@@ -1441,6 +1444,20 @@ impl EditSession {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
     }
 
+    pub fn apply_update_with_inference(&self, update: &[u8]) -> Result<String, JsValue> {
+        let inference =
+            apply_update_with_typing_inference(self.engine.doc(), update).map_err(js_err)?;
+        serde_json::to_string(&inference.map(|inference| {
+            json!({
+                "clientId": inference.client_id,
+                "story": inference.story,
+                "paraId": inference.para_id,
+                "endOffset": inference.end_offset,
+            })
+        }))
+        .map_err(js_err)
+    }
+
     /// Applies an update produced by this document's dedicated local worker.
     /// The local origin lets the main replica's UndoManager retain ownership of
     /// the edit; remote/collaboration updates must use `apply_update` instead.
@@ -1657,6 +1674,44 @@ impl EditSession {
             },
             "head": {
                 "story": selection.story,
+                "paraId": head_para,
+                "offset": head_offset,
+            }
+        })
+        .to_string())
+    }
+
+    pub fn encoded_selection(&self) -> Result<String, JsValue> {
+        let selection = self.selection.borrow();
+        let Some(selection) = selection.as_ref() else {
+            return Ok("null".to_owned());
+        };
+        Ok(json!({
+            "story": selection.story,
+            "anchor": encode_sticky(&selection.anchor),
+            "head": encode_sticky(&selection.head),
+        })
+        .to_string())
+    }
+
+    pub fn resolve_encoded_selection(
+        &self,
+        story: &str,
+        anchor: &[u8],
+        head: &[u8],
+    ) -> Result<String, JsValue> {
+        let (anchor_index, head_index) =
+            resolve_sticky_selection(self.engine.doc(), story, anchor, head).map_err(js_err)?;
+        let (anchor_para, anchor_offset) = index_loc(self.engine.doc(), story, anchor_index)?;
+        let (head_para, head_offset) = index_loc(self.engine.doc(), story, head_index)?;
+        Ok(json!({
+            "anchor": {
+                "story": story,
+                "paraId": anchor_para,
+                "offset": anchor_offset,
+            },
+            "head": {
+                "story": story,
                 "paraId": head_para,
                 "offset": head_offset,
             }
