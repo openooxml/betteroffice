@@ -271,6 +271,128 @@ fn vertical_move_crosses_paragraphs_columns_and_pages() {
 }
 
 #[test]
+fn vertical_move_maps_utf16_and_rtl_edges() {
+    let line =
+        |text: &str, baseline: f64, doc_start: i64, doc_end: i64, line_index: u64, rtl: bool| {
+            serde_json::json!({
+                "kind": "text",
+                "text": text,
+                "x": 100,
+                "baselineY": baseline,
+                "width": if line_index == 0 { 10 } else { 90 },
+                "font": "400 16px Calibri",
+                "color": "#000000",
+                "docStart": doc_start,
+                "docEnd": doc_end,
+                "blockId": 1,
+                "lineIndex": line_index,
+                "rtl": rtl
+            })
+        };
+    let display_list = |target: serde_json::Value| -> DisplayList {
+        serde_json::from_value(serde_json::json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 500,
+                "height": 500,
+                "columnBounds": [{"x": 80, "y": 80, "width": 340, "height": 340}],
+                "primitives": [
+                    line("x", 100.0, 1, 2, 0, false),
+                    target
+                ]
+            }]
+        }))
+        .unwrap()
+    };
+
+    let surrogate = display_list(line("😀a", 130.0, 6, 9, 1, false));
+    let into_surrogate =
+        vertical_move(&surrogate, 1, VerticalDirection::Down, Some(160.0)).unwrap();
+    assert_eq!(into_surrogate.position, 8);
+    assert_eq!(hit_test(&surrogate, 0, 160.0, 130.0), Some(8));
+
+    let rtl = display_list(line("אבג", 130.0, 6, 9, 1, true));
+    let into_rtl = vertical_move(&rtl, 1, VerticalDirection::Down, Some(100.0)).unwrap();
+    assert_eq!(into_rtl.position, 9);
+    assert_eq!(hit_test(&rtl, 0, 100.0, 130.0), Some(9));
+    assert_eq!(caret_rect(&rtl, 6).unwrap().x, 190.0);
+    assert_eq!(caret_rect(&rtl, 9).unwrap().x, 100.0);
+}
+
+#[test]
+fn hit_test_does_not_split_grapheme_clusters() {
+    let dl: DisplayList = serde_json::from_value(serde_json::json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 500,
+            "height": 500,
+            "primitives": [{
+                "kind": "text",
+                "text": "a\u{0301}b",
+                "x": 100,
+                "baselineY": 130,
+                "width": 90,
+                "font": "400 16px Calibri",
+                "color": "#000000",
+                "docStart": 6,
+                "docEnd": 9,
+                "blockId": 1,
+                "lineIndex": 0
+            }]
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(hit_test(&dl, 0, 128.0, 130.0), Some(8));
+}
+
+#[test]
+fn vertical_move_keeps_shifted_runs_on_their_resolved_line() {
+    let dl: DisplayList = serde_json::from_value(serde_json::json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 500,
+            "height": 500,
+            "columnBounds": [{"x": 80, "y": 80, "width": 340, "height": 340}],
+            "primitives": [
+                {
+                    "kind": "text", "text": "a", "x": 100, "baselineY": 100, "width": 40,
+                    "font": "400 16px Calibri", "color": "#000000",
+                    "docStart": 1, "docEnd": 2, "blockId": 1, "lineIndex": 0
+                },
+                {
+                    "kind": "text", "text": "b", "x": 140, "baselineY": 94, "width": 40,
+                    "font": "400 10px Calibri", "color": "#000000",
+                    "docStart": 2, "docEnd": 3, "blockId": 1, "lineIndex": 0
+                },
+                {
+                    "kind": "text", "text": "c", "x": 100, "baselineY": 130, "width": 80,
+                    "font": "400 16px Calibri", "color": "#000000",
+                    "docStart": 4, "docEnd": 5, "blockId": 1, "lineIndex": 1
+                }
+            ]
+        }]
+    }))
+    .unwrap();
+
+    let down = vertical_move(&dl, 2, VerticalDirection::Down, None).unwrap();
+    assert!((4..=5).contains(&down.position));
+}
+
+#[test]
+fn display_list_stamps_resolved_line_indices() {
+    let dl = build("single-page-multi-paragraph");
+    let positioned: Vec<&DocAttrs> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(doc_attrs)
+        .filter(|attrs| attrs.doc_start.is_some())
+        .collect();
+    assert!(!positioned.is_empty());
+    assert!(positioned.iter().all(|attrs| attrs.line_index.is_some()));
+}
+
+#[test]
 fn vertical_move_uses_table_rows_as_visual_lines() {
     let text = |value: &str,
                 x: f64,
@@ -288,7 +410,8 @@ fn vertical_move_uses_table_rows_as_visual_lines() {
             "color": "#000000",
             "docStart": doc_start,
             "docEnd": doc_end,
-            "blockId": doc_start
+            "blockId": doc_start,
+            "lineIndex": 0
         });
         if let Some((row, col)) = cell {
             primitive["cell"] = serde_json::json!({
@@ -316,8 +439,8 @@ fn vertical_move_uses_table_rows_as_visual_lines() {
             "primitives": [
                 text("left", 100.0, 120.0, 1, 5, Some((0, 0))),
                 text("below", 100.0, 150.0, 20, 25, Some((1, 0))),
-                text("right", 220.0, 120.0, 10, 15, Some((0, 1))),
-                text("below", 220.0, 150.0, 30, 35, Some((1, 1))),
+                text("right", 220.0, 127.0, 10, 15, Some((0, 1))),
+                text("below", 220.0, 158.0, 30, 35, Some((1, 1))),
                 text("after", 100.0, 190.0, 40, 45, None)
             ]
         }]
@@ -378,6 +501,31 @@ fn caret_rect_uses_forward_and_trailing_edges() {
     assert!((end.x - 216.0).abs() < 0.001);
     assert_eq!(start.y, end.y);
     assert_eq!(start.height, end.height);
+}
+
+#[test]
+fn caret_rect_preserves_inline_image_edges() {
+    let dl: DisplayList = serde_json::from_value(serde_json::json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 500,
+            "height": 500,
+            "primitives": [{
+                "kind": "image",
+                "relId": "rId1",
+                "x": 100,
+                "y": 120,
+                "w": 40,
+                "h": 30,
+                "docStart": 4,
+                "docEnd": 5
+            }]
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(caret_rect(&dl, 4).unwrap().x, 100.0);
+    assert_eq!(caret_rect(&dl, 5).unwrap().x, 140.0);
 }
 
 #[test]

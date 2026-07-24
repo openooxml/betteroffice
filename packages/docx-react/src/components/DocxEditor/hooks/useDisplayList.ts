@@ -33,6 +33,10 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { RustFontChainsProvider } from './useRustMeasurement';
 import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
+import {
+  DisplayListQueryEpochGate,
+  type ResolveDisplayListQueries,
+} from './displayListQueryEpochGate';
 
 // provider for the canvas renderer's display list: returns the injected value
 // when the host supplies one, otherwise the demo fixture. consumers only ever
@@ -52,6 +56,8 @@ export interface UseRustDisplayListResult {
   frame: RetainedFrame | null;
   /** Query facade built from the same display list as `frame`. */
   queries: DisplayListQueries | null;
+  /** Resolve the newest query facade after pending document/frame changes. */
+  resolveQueries: ResolveDisplayListQueries;
   /** Worker-computed caret tagged to `frame`. */
   caret: YrsResidentCaretSnapshot | null;
   /** Apply a plain-text edit through the resident engine and publish its frame. */
@@ -136,6 +142,10 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
+  const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
+  if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
+  const queryEpochGate = queryEpochGateRef.current;
+  const contentEpochRef = useRef(0);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
   const generationRef = useRef(0);
@@ -263,19 +273,21 @@ export function useRustDisplayList(
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
   useEffect(() => {
-    if (!residentEngine || !canUseResidentEngineWorker()) return;
+    if (!residentEngine) return;
     return residentEngine.onUpdate((update) => {
       if (suppressWorkerInvalidationRef.current > 0) return;
+      contentEpochRef.current += 1;
+      queryEpochGate.invalidate();
       // Update observers fire from inside the wasm transaction. Calling any
       // other EditSession method here would re-enter the borrowed wasm object
       // (wasm-bindgen correctly rejects that unsafe alias). Selection is sent
       // with the next input request after the transaction has returned.
-      workerRef.current?.client.invalidate(update, null);
+      if (canUseResidentEngineWorker()) workerRef.current?.client.invalidate(update, null);
       // Only frame freshness drops here. The worker keeps the page surfaces
       // (workerSurfacesActive) so the canvas retains its pixels until the
       // post-sync frame lands — flipping surfaces would remount every page.
     });
-  }, [residentEngine]);
+  }, [queryEpochGate, residentEngine]);
 
   useEffect(
     () => () => {
@@ -287,8 +299,52 @@ export function useRustDisplayList(
       }
       workerRef.current?.client.destroy();
       workerRef.current = null;
+      queryEpochGate.clear();
     },
-    []
+    [queryEpochGate]
+  );
+
+  const publishQuerySnapshot = useCallback(
+    (nextSnapshot: RustDisplayListSnapshot, contentEpoch: number): void => {
+      const queries = nextSnapshot.queries;
+      if (!queries) {
+        if (contentEpoch === contentEpochRef.current) queryEpochGate.clear();
+        return;
+      }
+      if (contentEpoch !== contentEpochRef.current) return;
+      queryEpochGate.invalidate();
+      const publish = (): void => {
+        if (
+          snapshotRef.current !== nextSnapshot ||
+          contentEpoch !== contentEpochRef.current ||
+          !queries.isReady()
+        ) {
+          return;
+        }
+        queryEpochGate.publish({
+          queries,
+          frameEpoch: nextSnapshot.frame?.frameEpoch ?? null,
+        });
+      };
+      if (queries.isReady()) {
+        publish();
+        return;
+      }
+      void queries.whenReady().then(publish, () => {
+        if (
+          snapshotRef.current === nextSnapshot &&
+          contentEpoch === contentEpochRef.current
+        ) {
+          queryEpochGate.clear();
+        }
+      });
+    },
+    [queryEpochGate]
+  );
+
+  const resolveQueries = useCallback<ResolveDisplayListQueries>(
+    (minimumFrameEpoch = null) => queryEpochGate.resolve(minimumFrameEpoch),
+    [queryEpochGate]
   );
 
   // Handle acquisition (page-delta serialization into the Rust query store) is
@@ -370,6 +426,7 @@ export function useRustDisplayList(
         // frame produced by the edit transaction.
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
+        publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
@@ -397,13 +454,19 @@ export function useRustDisplayList(
         // stories, or a frame that has not established resident state).
         if (nextError.message.includes('resident input state is not ready')) return null;
         console.error('[CanvasRenderer] Resident input failed', nextError);
+        queryEpochGate.clear();
         setError(nextError);
         // Once invoked, never fall through to the legacy op: a worker failure
         // may have happened after committing the transaction.
         return { frameEpoch: null, caretSynchronized: false };
       });
     },
-    [applyPaintedCaretReply, paintedCaretMachine]
+    [
+      applyPaintedCaretReply,
+      paintedCaretMachine,
+      publishQuerySnapshot,
+      queryEpochGate,
+    ]
   );
 
   const applyInput = useCallback(
@@ -441,6 +504,8 @@ export function useRustDisplayList(
     if (!layout) {
       // layout reset (document change) — drop the stale pages
       generationRef.current++;
+      contentEpochRef.current += 1;
+      queryEpochGate.clear();
       snapshotRef.current = EMPTY_DISPLAY_LIST_SNAPSHOT;
       setSnapshot(EMPTY_DISPLAY_LIST_SNAPSHOT);
       setError(null);
@@ -450,9 +515,12 @@ export function useRustDisplayList(
       notifyCaretInterrupt();
       return;
     }
+    queryEpochGate.invalidate();
+    const contentEpoch = contentEpochRef.current;
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
     const generation = ++generationRef.current;
     if (!inputs) {
+      queryEpochGate.clear();
       setError(new Error('No display-list inputs were recorded for the current layout.'));
       setLoading(false);
       return;
@@ -587,7 +655,12 @@ export function useRustDisplayList(
     }
     pending
       .then((result) => {
-        if (generation !== generationRef.current) return;
+        if (
+          generation !== generationRef.current ||
+          contentEpoch !== contentEpochRef.current
+        ) {
+          return;
+        }
         const nextSnapshot = createRustDisplayListSnapshot(
           result.displayList,
           result.frame,
@@ -596,6 +669,7 @@ export function useRustDisplayList(
           snapshotRef.current
         );
         snapshotRef.current = nextSnapshot;
+        publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
         setError(null);
         setLoading(false);
@@ -609,10 +683,16 @@ export function useRustDisplayList(
         );
       })
       .catch((error) => {
-        if (generation !== generationRef.current) return;
+        if (
+          generation !== generationRef.current ||
+          contentEpoch !== contentEpochRef.current
+        ) {
+          return;
+        }
         const nextError =
           error instanceof Error ? error : new Error(`Display-list build failed: ${String(error)}`);
         console.error('[CanvasRenderer] Rust display-list build failed', nextError);
+        queryEpochGate.clear();
         setError(nextError);
         setLoading(false);
       });
@@ -627,6 +707,8 @@ export function useRustDisplayList(
     paintedCaretMachine,
     applyPaintedCaretReply,
     notifyCaretInterrupt,
+    publishQuerySnapshot,
+    queryEpochGate,
   ]);
 
   return {
@@ -635,6 +717,7 @@ export function useRustDisplayList(
     loading,
     frame: snapshot.frame,
     queries: snapshot.queries,
+    resolveQueries,
     caret: snapshot.caret,
     applyInput,
     applyDelete,
@@ -738,6 +821,8 @@ export interface UseCanvasRendererResult {
   resolveImage: ImageResolver;
   /** Rust display-list query facade for adapter interactions. */
   queries: DisplayListQueries | null;
+  /** Resolve the newest facade after pending edits and relayouts. */
+  resolveQueries: ResolveDisplayListQueries;
   /** Worker caret from the same atomic renderer snapshot. */
   caret: YrsResidentCaretSnapshot | null;
   /** Whether worker-presented pixels make `caret` authoritative. */
@@ -805,6 +890,7 @@ export function useCanvasRenderer(
     loading,
     frame,
     queries: snapshotQueries,
+    resolveQueries,
     caret,
     applyInput,
     applyDelete,
@@ -889,6 +975,7 @@ export function useCanvasRenderer(
     onLayoutComputed,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
+    resolveQueries,
     caret,
     authoritativeCaretActive,
     canvasHostRef,

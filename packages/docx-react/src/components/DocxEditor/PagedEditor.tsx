@@ -91,6 +91,7 @@ import {
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
@@ -303,6 +304,7 @@ export interface PagedEditorProps {
    * through Rust queries over the display list.
    */
   displayListQueries?: DisplayListQueries | null;
+  resolveDisplayListQueries?: ResolveDisplayListQueries;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -467,6 +469,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       measurementFontProvider,
       rustFontChainsProviderRef,
       displayListQueries = null,
+      resolveDisplayListQueries,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -1623,6 +1626,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           locToDisplayPosition={yrsLocToDisplayPosition}
           nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
+          resolveDisplayListQueries={
+            activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
+          }
           displayListFrameEpoch={displayListFrameEpoch}
           residentCaret={residentCaret}
           residentCaretAuthoritative={residentCaretAuthoritative}

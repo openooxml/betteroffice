@@ -98,6 +98,7 @@ dependencies = [
  "betteroffice-ooxml-text",
  "serde",
  "serde_json",
+ "unicode-segmentation",
  "wasm-bindgen",
 ]
 

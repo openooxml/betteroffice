@@ -36,6 +36,7 @@ import {
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
@@ -45,7 +46,8 @@ import {
   yrsSelectionNearTable,
   yrsTableSelectionRange,
 } from './yrsCommands';
-import { VerticalCaretGoal } from './verticalCaretGoal';
+import { InputOperationQueue } from './inputOperationQueue';
+import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -95,6 +97,7 @@ export interface YrsInputProps {
   locToDisplayPosition(loc: YrsLoc): number | null;
   nextParagraphStyleId?(styleId: string | null): string | null;
   displayListQueries?: DisplayListQueries | null;
+  resolveDisplayListQueries?: ResolveDisplayListQueries;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
   residentCaretAuthoritative?: boolean;
@@ -204,6 +207,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     locToDisplayPosition,
     nextParagraphStyleId,
     displayListQueries,
+    resolveDisplayListQueries,
     displayListFrameEpoch = null,
     residentCaret = null,
     residentCaretAuthoritative = false,
@@ -224,18 +228,26 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
-  const inputOperationQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
+  if (!inputOperationQueueRef.current) {
+    inputOperationQueueRef.current = new InputOperationQueue((error) => {
+      console.error('[YrsInput] queued input operation failed', error);
+    });
+  }
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
+  const displayListQueriesRef = useRef(displayListQueries);
+  const displayListFrameEpochRef = useRef(displayListFrameEpoch);
+  const resolveDisplayListQueriesRef = useRef(resolveDisplayListQueries);
+  displayListQueriesRef.current = displayListQueries;
+  displayListFrameEpochRef.current = displayListFrameEpoch;
+  resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
   const [positionStyle, setPositionStyle] = useState<CSSProperties>({ left: 0, top: 0, height: 1 });
   const [selectionEpoch, setSelectionEpoch] = useState(0);
 
   const enqueueInputOperation = useCallback((operation: () => void | Promise<void>): void => {
-    const pending = inputOperationQueueRef.current.then(operation, operation);
-    inputOperationQueueRef.current = pending.catch((error) => {
-      console.error('[YrsInput] queued input operation failed', error);
-    });
+    inputOperationQueueRef.current?.enqueue(operation);
   }, []);
 
   const suggestingAuthor = useCallback((): YrsAuthor | undefined => {
@@ -314,7 +326,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const finishResidentMutation = useCallback(
     (result: ResidentFrameApplyResult): void => {
-      if (result.caretSynchronized && result.frameEpoch !== null) {
+      if (result.frameEpoch !== null) {
         pendingResidentFrameEpochRef.current = result.frameEpoch;
       }
       finishMutation(result.frameEpoch !== null, result.caretSynchronized);
@@ -744,9 +756,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       byWord = false
     ): void => {
       const verticalDirection = direction === 'up' || direction === 'down' ? direction : null;
-      if (!verticalDirection) verticalCaretGoalRef.current.reset();
-      enqueueInputOperation(() => {
+      enqueueInputOperation(async () => {
+        if (!verticalDirection) verticalCaretGoalRef.current.reset();
         if (!session) return;
+        const queryResolver = resolveDisplayListQueriesRef.current;
+        const currentQueries = displayListQueriesRef.current;
+        const querySnapshot = verticalDirection
+          ? queryResolver
+            ? await queryResolver(pendingResidentFrameEpochRef.current)
+            : currentQueries
+              ? { queries: currentQueries, frameEpoch: displayListFrameEpochRef.current }
+              : null
+          : null;
         const current = ensureSelection();
         const activeStory = current?.head.story;
         const map = activeStory ? inputPositionMap(activeStory) : null;
@@ -767,26 +788,30 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           const movement =
             displayPosition == null
               ? null
-              : displayListQueries?.verticalMove(
+              : querySnapshot?.queries.verticalMove(
                   displayPosition,
                   verticalDirection,
                   verticalCaretGoalRef.current.current()
                 );
-          if (!movement) return;
-          verticalCaretGoalRef.current.retain(movement.goalX);
-          const target = resolveDisplayTarget?.(movement.position) ?? {
-            story: activeStory,
-            displayPosition: movement.position,
-          };
-          const next = displayPositionToLoc(target.displayPosition, target.story);
-          if (!next || (extend && current.anchor.story !== next.story)) return;
-          if (
-            next.story === head.story &&
-            next.paraId === head.paraId &&
-            next.offset === head.offset
-          ) {
+          if (movement) {
+            verticalCaretGoalRef.current.retain(movement.goalX);
+            const target = resolveDisplayTarget?.(movement.position) ?? {
+              story: activeStory,
+              displayPosition: movement.position,
+            };
+            const next = displayPositionToLoc(target.displayPosition, target.story);
+            if (!next || (extend && current.anchor.story !== next.story)) return;
+            if (
+              next.story === head.story &&
+              next.paraId === head.paraId &&
+              next.offset === head.offset
+            ) {
+              return;
+            }
+            setSelection(extend ? current.anchor : next, next);
             return;
           }
+          const next = paragraphVerticalMove(map.paragraphs, head, verticalDirection);
           setSelection(extend ? current.anchor : next, next);
           return;
         }
@@ -829,7 +854,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       });
     },
     [
-      displayListQueries,
       displayPositionToLoc,
       enqueueInputOperation,
       ensureSelection,
@@ -842,8 +866,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const selectAll = useCallback((): void => {
-    verticalCaretGoalRef.current.reset();
     enqueueInputOperation(() => {
+      verticalCaretGoalRef.current.reset();
       const current = ensureSelection();
       const activeStory = current?.head.story;
       const map = activeStory ? inputPositionMap(activeStory) : null;
@@ -1139,6 +1163,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   useEffect(() => {
     verticalCaretGoalRef.current.reset();
+    pendingResidentFrameEpochRef.current = null;
   }, [session, story]);
 
   useEffect(() => {

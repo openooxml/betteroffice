@@ -274,6 +274,8 @@ export interface DocAttrs {
   // fragment node). The mirror stamps them on the paragraph wrapper.
   fromLine?: number;
   toLine?: number;
+  /** Resolved line index within the owning paragraph. */
+  lineIndex?: number;
   /**
    * Table cell the primitive paints inside, when any. The a11y mirror builds
    * real ARIA table semantics (role table/row/cell, aria-row/colindex) from
