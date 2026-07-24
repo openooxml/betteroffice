@@ -2773,7 +2773,67 @@ fn visit_story(
     }
 }
 
-fn units_to_raw_ops(units: Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
+fn collect_font_entry(key: &str, value: &Value, fonts: &mut BTreeSet<String>) {
+    if matches!(
+        key,
+        "fontFamily" | "listMarkerFontFamily" | "markerFontFamily"
+    ) {
+        match value {
+            Value::String(name) if !name.trim().is_empty() => {
+                fonts.insert(name.trim().to_owned());
+            }
+            Value::Object(slots) => {
+                for key in ["ascii", "hAnsi", "eastAsia", "cs"] {
+                    if let Some(name) = slots
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                    {
+                        fonts.insert(name.trim().to_owned());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_fonts_from_value(value: &Value, fonts: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_fonts_from_value(value, fonts);
+            }
+        }
+        Value::Object(values) => {
+            for (key, value) in values {
+                collect_font_entry(key, value, fonts);
+                collect_fonts_from_value(value, fonts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_font_table_fonts(envelope: &docx_parse::S9WireEnvelope, fonts: &mut BTreeSet<String>) {
+    for font in &envelope.document.package.font_table.fonts {
+        if !font.name.trim().is_empty() {
+            fonts.insert(font.name.trim().to_owned());
+        }
+        if let Some(name) = font
+            .alt_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        {
+            fonts.insert(name.trim().to_owned());
+        }
+    }
+}
+
+fn units_to_raw_ops(
+    units: Vec<InlineUnit>,
+    referenced_fonts: &mut BTreeSet<String>,
+) -> Result<Vec<RawOp>, String> {
     let mut ops = vec![RawOp::Delete { index: 0, len: 1 }];
     let mut index = 0u32;
     let mut text = String::new();
@@ -2797,6 +2857,16 @@ fn units_to_raw_ops(units: Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
         Ok(())
     };
     for unit in units {
+        for (key, value) in &unit.attrs {
+            collect_font_entry(key, value, referenced_fonts);
+            collect_fonts_from_value(value, referenced_fonts);
+        }
+        if let UnitContent::Embed { payload, .. } = &unit.content {
+            for (key, value) in payload {
+                collect_font_entry(key, value, referenced_fonts);
+                collect_fonts_from_value(value, referenced_fonts);
+            }
+        }
         match unit.content {
             UnitContent::Text(value) => {
                 if text.is_empty() {
@@ -2826,13 +2896,14 @@ fn units_to_raw_ops(units: Vec<InlineUnit>) -> Result<Vec<RawOp>, String> {
     Ok(ops)
 }
 
-fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>), String> {
+fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>, BTreeSet<String>), String> {
     let StoryPlan {
         story_id,
         units,
         comment_coverage,
     } = plan;
-    let mut ops = units_to_raw_ops(units)?;
+    let mut referenced_fonts = BTreeSet::new();
+    let mut ops = units_to_raw_ops(units, &mut referenced_fonts)?;
     if !comment_coverage.is_empty() {
         ops.extend(
             comment_coverage
@@ -2846,7 +2917,7 @@ fn seed_plan(plan: StoryPlan) -> Result<(String, Vec<RawOp>), String> {
                 }),
         );
     }
-    Ok((story_id, ops))
+    Ok((story_id, ops, referenced_fonts))
 }
 
 fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
@@ -2854,10 +2925,30 @@ fn entry_parts(entry: &Value) -> Option<(&str, &Value)> {
     Some((entry.first()?.as_str()?, entry.get(1)?))
 }
 
-pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
-    let envelope = docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default())
-        .map_err(|error| error.to_string())?;
+pub(crate) fn parse_docx_for_edit(bytes: &[u8]) -> Result<docx_parse::S9WireEnvelope, String> {
+    docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "wasm")]
+pub(crate) fn referenced_fonts(
+    envelope: &docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
+    let mut fonts = BTreeSet::new();
+    collect_font_table_fonts(envelope, &mut fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    collect_fonts_from_value(&parsed, &mut fonts);
+    Ok(fonts.into_iter().collect())
+}
+
+pub(crate) fn seed_parsed_docx(
+    document: &EditingDoc,
+    envelope: docx_parse::S9WireEnvelope,
+) -> Result<Vec<String>, String> {
+    let mut referenced_fonts = BTreeSet::new();
+    collect_font_table_fonts(&envelope, &mut referenced_fonts);
+    let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if needs_source_json(&parsed) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
@@ -2949,15 +3040,21 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
                 .collect::<Vec<_>>(),
         )
         .map_err(|error| error.to_string())?;
-    let batches = context
-        .plans
-        .into_iter()
-        .map(seed_plan)
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut batches = Vec::with_capacity(context.plans.len());
+    for plan in context.plans {
+        let (story_id, ops, fonts) = seed_plan(plan)?;
+        batches.push((story_id, ops));
+        referenced_fonts.extend(fonts);
+    }
     document
         .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(referenced_fonts.into_iter().collect())
+}
+
+pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
+    let envelope = parse_docx_for_edit(bytes)?;
+    seed_parsed_docx(document, envelope).map(|_| ())
 }
 
 #[cfg(test)]

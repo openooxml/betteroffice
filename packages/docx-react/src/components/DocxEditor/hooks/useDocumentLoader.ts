@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
-import { parseDocx } from '@betteroffice/docx/docx';
+import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 import {
+  loadEmbeddedFonts,
   loadDocumentFonts,
+  loadFontsWithMapping,
   getRenderableDocumentFonts,
   getEmbeddedFontFamilies,
+  selectRenderableFonts,
   toArrayBuffer,
   type DocxInput,
 } from '@betteroffice/docx/utils';
@@ -68,13 +71,15 @@ export function useDocumentLoader({
     initialDocument ?? null
   );
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
-  // Monotonically increasing generation counter so a late `parseDocx`
-  // result doesn't overwrite a newer load that started while we were
-  // parsing.
+  // Monotonically increasing generation counter for overlapping loads.
   const loadGenerationRef = useRef(0);
+  const pendingLoadRef = useRef<(() => void) | null>(null);
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
+      loadGenerationRef.current += 1;
+      pendingLoadRef.current?.();
+      pendingLoadRef.current = null;
       resetForNewDocument();
       setYrsSeedDocument(doc);
       setYrsSeedBytes(seedBytes?.slice() ?? null);
@@ -97,13 +102,18 @@ export function useDocumentLoader({
   const loadBuffer = useCallback(
     async (buffer: DocxInput) => {
       const generation = ++loadGenerationRef.current;
+      pendingLoadRef.current?.();
       resetForNewDocument();
       setLoadingState({ isLoading: true, parseError: null });
       try {
         const source = buffer instanceof ArrayBuffer ? buffer : await toArrayBuffer(buffer);
-        const doc = await parseDocx(source);
         if (loadGenerationRef.current !== generation) return;
-        loadParsedDocument(doc, new Uint8Array(source));
+        setYrsSeedDocument(null);
+        setYrsSeedBytes(new Uint8Array(source));
+        history.reset(null);
+        await new Promise<void>((resolve) => {
+          pendingLoadRef.current = resolve;
+        });
       } catch (error) {
         if (loadGenerationRef.current !== generation) return;
         const message = error instanceof Error ? error.message : 'Failed to parse document';
@@ -111,7 +121,51 @@ export function useDocumentLoader({
         onError?.(error instanceof Error ? error : new Error(message));
       }
     },
-    [resetForNewDocument, loadParsedDocument, onError, setLoadingState]
+    [resetForNewDocument, history, onError, setLoadingState]
+  );
+
+  const acceptHostDocument = useCallback(
+    (host: YrsDocxHost) => {
+      const doc = host.document;
+      history.reset(doc);
+      setLoadingState({ isLoading: false, parseError: null });
+      const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
+      const documentFonts = [
+        ...getRenderableDocumentFonts(doc, { embeddedFamilies }),
+        ...selectRenderableFonts(host.referencedFonts, { embeddedFamilies }),
+      ];
+      setDocumentFonts(
+        [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
+      );
+      void loadEmbeddedFonts(
+        doc.package.fontTable,
+        host.embeddedFonts,
+        host.fontTableRelationshipsXml
+      )
+        .catch((error) => {
+          console.warn('Failed to load embedded document fonts:', error);
+        })
+        .then(() =>
+          Promise.all([loadFontsWithMapping(host.referencedFonts), loadDocumentFonts(doc)])
+        )
+        .catch((error) => {
+          console.warn('Failed to load document fonts:', error);
+        });
+      pendingLoadRef.current?.();
+      pendingLoadRef.current = null;
+    },
+    [history, setDocumentFonts, setLoadingState]
+  );
+
+  const failHostDocument = useCallback(
+    (error: Error) => {
+      setYrsSeedBytes(null);
+      setLoadingState({ isLoading: false, parseError: error.message });
+      onError?.(error);
+      pendingLoadRef.current?.();
+      pendingLoadRef.current = null;
+    },
+    [onError, setLoadingState]
   );
 
   // React to documentBuffer / document prop changes.
@@ -159,10 +213,20 @@ export function useDocumentLoader({
     commentIdAllocator,
   ]);
 
+  useEffect(
+    () => () => {
+      pendingLoadRef.current?.();
+      pendingLoadRef.current = null;
+    },
+    []
+  );
+
   return {
     loadParsedDocument,
     loadBuffer,
     yrsSeedDocument,
     yrsSeedBytes,
+    acceptHostDocument,
+    failHostDocument,
   };
 }

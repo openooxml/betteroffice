@@ -13,6 +13,8 @@
 
 import { parseRelationshipsXmlWithRust } from '../docx/rustParseFacade';
 import { readDocxContainer } from '../docx/zipContainer';
+import { preloadParseWasm } from '../docx/parseWasm';
+import { preloadOpcWasm } from '../docx/wasm';
 import { deobfuscateFont, isValidFontKey } from './fontDeobfuscation';
 import { loadFontFromBuffer } from './fontLoader';
 import type { FontTable, FontInfo, FontEmbed } from '../types/styles';
@@ -171,6 +173,7 @@ export async function extractEmbeddedFontFaces(document: Document): Promise<Embe
   const buffer = document.originalBuffer;
   if (!buffer) return [];
 
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const container = readDocxContainer(buffer);
   const rawFonts = new Map<string, ArrayBuffer>();
   let fontTableRelsXml: string | null = null;
@@ -198,6 +201,8 @@ export async function loadEmbeddedFonts(
   rawFonts: ReadonlyMap<string, ArrayBuffer>,
   fontTableRelsXml: string | null | undefined
 ): Promise<Set<string>> {
+  if (!fontTable || !fontTableRelsXml || rawFonts.size === 0) return new Set();
+  await preloadParseWasm();
   const faces = getEmbeddedFontFaces(fontTable, rawFonts, fontTableRelsXml);
   const families = new Set<string>();
   if (faces.length === 0) return families;

@@ -49,6 +49,7 @@ import { useControllableBoolean } from './DocxEditor/hooks/useControllableBoolea
 import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
+import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
 import { useContextMenus } from './DocxEditor/hooks/useContextMenus';
 import { useCommentManagement } from './DocxEditor/hooks/useCommentManagement';
 import { useCommentLifecycle } from './DocxEditor/hooks/useCommentLifecycle';
@@ -822,7 +823,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef,
   });
 
-  const { loadParsedDocument, loadBuffer, yrsSeedDocument, yrsSeedBytes } = useDocumentLoader({
+  const {
+    loadParsedDocument,
+    loadBuffer,
+    yrsSeedDocument,
+    yrsSeedBytes,
+    acceptHostDocument,
+    failHostDocument,
+  } = useDocumentLoader({
     documentBuffer,
     initialDocument,
     externalContent: false,
@@ -839,6 +847,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     setDocumentFonts,
   });
+
+  const yrsCore = useYrsCoreSession(
+    true,
+    history.state,
+    yrsSeedDocument,
+    yrsSeedBytes,
+    collaboration,
+    {
+      onHostDocument: acceptHostDocument,
+      onError: failHostDocument,
+    }
+  );
 
   const {
     imageInputRef,
@@ -885,29 +905,61 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [history]
   );
 
-  // Handle document change
+  const notifyDocumentChange = useCallback(
+    (document: Document) => {
+      onChange?.(document);
+      for (const callback of contentChangeSubscribersRef.current) {
+        try {
+          callback(document);
+        } catch (error) {
+          console.error('contentChange subscriber threw:', error);
+        }
+      }
+    },
+    [onChange]
+  );
+
+  const handleContentHousekeeping = useCallback(() => {
+    if (showOutlineRef.current) refreshHeadings();
+    if (cleanOrphanedCommentsTimerRef.current) {
+      clearTimeout(cleanOrphanedCommentsTimerRef.current);
+    }
+    cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
+  }, [cleanOrphanedComments, refreshHeadings, showOutlineRef]);
+
   const handleDocumentChange = useCallback(
     (newDocument: Document) => {
       pushDocument(newDocument);
-      onChange?.(newDocument);
-      // Fan out to bridge subscribers (errors in one don't break the others).
-      for (const cb of contentChangeSubscribersRef.current) {
-        try {
-          cb(newDocument);
-        } catch (e) {
-          console.error('contentChange subscriber threw:', e);
-        }
+      if (onChange || contentChangeSubscribersRef.current.size > 0) {
+        notifyDocumentChange(yrsCore.documentFromYrs(newDocument) ?? newDocument);
       }
-      // Update outline headings if sidebar is open
-      if (showOutlineRef.current) refreshHeadings();
-      // Clean up orphaned comments (debounced — avoid yanking comments mid-edit)
-      if (cleanOrphanedCommentsTimerRef.current) {
-        clearTimeout(cleanOrphanedCommentsTimerRef.current);
-      }
-      cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
+      handleContentHousekeeping();
     },
-    [onChange, pushDocument, cleanOrphanedComments, refreshHeadings, showOutlineRef]
+    [
+      handleContentHousekeeping,
+      notifyDocumentChange,
+      onChange,
+      pushDocument,
+      yrsCore.documentFromYrs,
+    ]
   );
+
+  const handleYrsContentChange = useCallback(() => {
+    if (onChange || contentChangeSubscribersRef.current.size > 0) {
+      const document = yrsCore.documentFromYrs();
+      if (document) {
+        pushDocument(document);
+        notifyDocumentChange(document);
+      }
+    }
+    handleContentHousekeeping();
+  }, [
+    handleContentHousekeeping,
+    notifyDocumentChange,
+    onChange,
+    pushDocument,
+    yrsCore.documentFromYrs,
+  ]);
 
   // Recompute the floating "add comment" button position from the current Yrs
   // selection + page/container geometry. Called from handleSelectionChange and
@@ -1211,6 +1263,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useDocxEditorRefApi({
     ref,
     document: history.state,
+    documentFromYrs: yrsCore.documentFromYrs,
     historyStateRef,
     pagedEditorRef,
     handleSave,
@@ -1763,8 +1816,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             interactive={!readOnly}
           >
             <DocxEditorPagedArea
-              yrsSeedDocument={yrsSeedDocument}
-              yrsSeedBytes={yrsSeedBytes}
+              yrsCore={yrsCore}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
@@ -1790,7 +1842,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               author={author}
               measurementFontProvider={measurementFontProvider}
               rustFontChainsProviderRef={rustFontChainsProviderRef}
-              onDocumentChange={handleDocumentChange}
+              onYrsContentChange={handleYrsContentChange}
               onYrsHistoryChange={handleYrsHistoryChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}

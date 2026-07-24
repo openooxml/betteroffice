@@ -80,4 +80,41 @@ describe('DOCX engine seeding parity', () => {
       engine.destroy();
     }
   });
+
+  it('returns thin host metadata and materializes the canonical package on demand', async () => {
+    const bytes = Uint8Array.from(readFileSync(FIXTURE));
+    const parsed = await parseDocx(bytes.buffer);
+    const engine = await createYrsSession({ clientId: 47005 });
+    const existingRoom = await createYrsSession({ clientId: 47006 });
+    try {
+      const host = engine.openDocx(bytes, false);
+
+      expect(engine.storyIds()).toEqual([]);
+      expect(host.document.package.document.content).toEqual([]);
+      expect(
+        host.document.package.document.sections?.every((section) => section.content.length === 0)
+      ).toBe(true);
+      expect(
+        [...(host.document.package.headers?.values() ?? [])].every(
+          (header) => header.content.length === 0
+        )
+      ).toBe(true);
+      expect(host.document.package.media?.size).toBe(0);
+      expect(host.document.package.charts?.size).toBe(0);
+      expect(host.referencedFonts.length).toBeGreaterThan(0);
+
+      const materialized = engine.materializeDocx();
+      expect(materialized?.package.document.content).toEqual(parsed.package.document.content);
+      expect(materialized?.package.document.sections).toEqual(parsed.package.document.sections);
+      expect(materialized?.package.headers).toEqual(parsed.package.headers);
+      expect(materialized?.package.footers).toEqual(parsed.package.footers);
+
+      existingRoom.loadState(Uint8Array.from(readFileSync(LEGACY_SEED)));
+      engine.loadState(existingRoom.encodeState());
+      expectEquivalentStories(engine, existingRoom);
+    } finally {
+      engine.destroy();
+      existingRoom.destroy();
+    }
+  });
 });

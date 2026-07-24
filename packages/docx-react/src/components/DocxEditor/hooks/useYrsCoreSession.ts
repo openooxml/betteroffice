@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LayoutBlock } from '@betteroffice/docx/layout/pagination';
-import type { Document } from '@betteroffice/docx/types/document';
 import type {
+  Document,
+  Endnote,
+  Footnote,
+  HeaderFooter,
+  Section,
+} from '@betteroffice/docx/types/document';
+import type {
+  YrsDocxHost,
   YrsInputPositionMap,
   YrsLoc,
   YrsRenderEnv,
@@ -19,8 +26,80 @@ export interface YrsCoreSession {
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
   displayPositionToLoc(position: number, storyId?: string): YrsLoc | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
-  documentFromYrs(): Document | null;
+  documentFromYrs(baseDocument?: Document | null): Document | null;
   publishDirectInput(): void;
+}
+
+interface YrsCoreSessionCallbacks {
+  onHostDocument?: (host: YrsDocxHost) => void;
+  onError?: (error: Error) => void;
+}
+
+function mergeHeaderFooterMaps(
+  full: Map<string, HeaderFooter> | undefined,
+  host: Map<string, HeaderFooter> | undefined
+): Map<string, HeaderFooter> | undefined {
+  if (host === undefined) return undefined;
+  return new Map(
+    [...host].map(([relationshipId, metadata]) => {
+      const existing = full?.get(relationshipId);
+      return [relationshipId, existing ? { ...metadata, content: existing.content } : metadata];
+    })
+  );
+}
+
+function mergeNotes<T extends Footnote | Endnote>(
+  full: T[] | undefined,
+  host: T[] | undefined
+): T[] | undefined {
+  if (host === undefined) return undefined;
+  return host.map((metadata) => {
+    const existing = full?.find((note) => note.id === metadata.id);
+    return existing ? { ...existing, ...metadata, content: existing.content } : metadata;
+  });
+}
+
+function mergeSections(
+  full: Section[] | undefined,
+  host: Section[] | undefined
+): Section[] | undefined {
+  if (host === undefined) return undefined;
+  return host.map((metadata, index) => {
+    const existing =
+      full?.find((section) => section.id !== undefined && section.id === metadata.id) ??
+      full?.[index];
+    return existing ? { ...metadata, content: existing.content } : metadata;
+  });
+}
+
+export function mergeDocxHostMetadata(full: Document, host: Document): Document {
+  const fullPackage = full.package;
+  const hostPackage = host.package;
+  return {
+    ...full,
+    contractVersion: host.contractVersion ?? full.contractVersion,
+    originalBuffer: full.originalBuffer ?? host.originalBuffer,
+    warnings: host.warnings,
+    package: {
+      ...fullPackage,
+      contractVersion: hostPackage.contractVersion ?? fullPackage.contractVersion,
+      styles: hostPackage.styles,
+      theme: hostPackage.theme,
+      settings: hostPackage.settings,
+      fontTable: hostPackage.fontTable,
+      relationships: hostPackage.relationships,
+      headers: mergeHeaderFooterMaps(fullPackage.headers, hostPackage.headers),
+      footers: mergeHeaderFooterMaps(fullPackage.footers, hostPackage.footers),
+      footnotes: mergeNotes(fullPackage.footnotes, hostPackage.footnotes),
+      endnotes: mergeNotes(fullPackage.endnotes, hostPackage.endnotes),
+      document: {
+        ...fullPackage.document,
+        sections: mergeSections(fullPackage.document.sections, hostPackage.document.sections),
+        finalSectionProperties: hostPackage.document.finalSectionProperties,
+        comments: hostPackage.document.comments,
+      },
+    },
+  };
 }
 
 export function useYrsCoreSession(
@@ -28,7 +107,8 @@ export function useYrsCoreSession(
   document: Document | null,
   seedDocument: Document | null,
   seedBytes: Uint8Array | null,
-  collaboration?: DocxEditorCollaborationOptions
+  collaboration?: DocxEditorCollaborationOptions,
+  callbacks?: YrsCoreSessionCallbacks
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -36,6 +116,9 @@ export function useYrsCoreSession(
   const facadeRef = useRef<YrsFacadeModule | null>(null);
   const documentRef = useRef(document);
   documentRef.current = document;
+  const callbacksRef = useRef(callbacks);
+  callbacksRef.current = callbacks;
+  const compatibilityBaseRef = useRef<Document | null>(null);
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
@@ -48,6 +131,7 @@ export function useYrsCoreSession(
     setSession(null);
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
+    compatibilityBaseRef.current = null;
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
@@ -56,15 +140,25 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
-        else if (seedBytes) next.seedFromDocx(seedBytes);
-        else if (seedDocument) yrs.documentToYrs(next, seedDocument);
+        let host: YrsDocxHost | null = null;
+        if (seedBytes) {
+          host = next.openDocx(seedBytes, !collaborationInitialUpdate);
+          if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
+        } else if (seedDocument) {
+          yrs.documentToYrs(next, seedDocument);
+        }
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
+        if (host) callbacksRef.current?.onHostDocument?.(host);
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);
+        if (!cancelled) {
+          callbacksRef.current?.onError?.(
+            error instanceof Error ? error : new Error(String(error))
+          );
+        }
       });
 
     return () => {
@@ -130,12 +224,17 @@ export function useYrsCoreSession(
     [inputPositionMap]
   );
 
-  const documentFromYrs = useCallback((): Document | null => {
+  const documentFromYrs = useCallback((baseDocument?: Document | null): Document | null => {
     const live = sessionRef.current;
     const facade = facadeRef.current;
-    const base = documentRef.current;
+    const host = baseDocument === undefined ? documentRef.current : baseDocument;
+    let base = host;
     if (!enabledRef.current || !live || !facade || !base) return null;
     try {
+      const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
+      if (compatibilityBase) {
+        base = mergeDocxHostMetadata(compatibilityBase, base);
+      }
       const dirtyStories = projectionStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
@@ -143,6 +242,7 @@ export function useYrsCoreSession(
         dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
       );
       dirtyStories.clear();
+      if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {
       console.error('[yrs] failed to project the document for save', error);
