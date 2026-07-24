@@ -71,6 +71,10 @@ import type { RustFontChainsProvider } from './DocxEditor/hooks/useRustMeasureme
 import { useResetEditorState } from './DocxEditor/hooks/useResetEditorState';
 import type { YrsToolbarSelection } from './DocxEditor/yrsToolbar';
 import { DocxEditorShell } from './DocxEditor/DocxEditorShell';
+import {
+  commitLegacyDocumentChange,
+  commitYrsDocumentChange,
+} from './DocxEditor/documentChangeCommit';
 import type { FontOption } from './ui/FontPicker';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './DocumentOutline';
 import { RULER_WIDTH } from './ui/VerticalRuler';
@@ -933,10 +937,13 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const handleDocumentChange = useCallback(
     (newDocument: Document) => {
-      pushDocument(newDocument);
-      if (onChange || contentChangeSubscribersRef.current.size > 0) {
-        notifyDocumentChange(yrsCore.documentFromYrs(newDocument) ?? newDocument);
-      }
+      commitLegacyDocumentChange(newDocument, yrsCore.documentFromYrs, {
+        push: pushDocument,
+        notify:
+          onChange || contentChangeSubscribersRef.current.size > 0
+            ? notifyDocumentChange
+            : undefined,
+      });
       handleContentHousekeeping();
     },
     [
@@ -950,11 +957,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const handleYrsContentChange = useCallback(() => {
     if (onChange || contentChangeSubscribersRef.current.size > 0) {
-      const document = yrsCore.documentFromYrs();
-      if (document) {
-        pushDocument(document);
-        notifyDocumentChange(document);
-      }
+      commitYrsDocumentChange(yrsCore.documentFromYrs, {
+        push: pushDocument,
+        notify: notifyDocumentChange,
+      });
     }
     handleContentHousekeeping();
   }, [
