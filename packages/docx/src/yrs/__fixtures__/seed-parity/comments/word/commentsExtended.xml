@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w15:commentEx w15:paraId="11111111" w15:done="0"/>
+  <w15:commentEx w15:paraId="22222222" w15:paraIdParent="11111111" w15:done="0"/>
+  <w15:commentEx w15:paraId="33333333" w15:done="1"/>
+  <w15:commentEx w15:paraId="44444445" w15:paraIdParent="33333333" w15:done="0"/>
+</w15:commentsEx>

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:comment w:id="1" w:author="Ada Lovelace" w:initials="AL" w:date="2026-02-01T10:00:00Z">
+    <w:p w14:paraId="11111111">
+      <w:pPr><w:pStyle w:val="CommentText"/></w:pPr>
+      <w:r><w:t>Root comment on the first span.</w:t></w:r>
+    </w:p>
+  </w:comment>
+  <w:comment w:id="2" w:author="Grace Hopper" w:initials="GH" w:date="2026-02-01T11:00:00Z">
+    <w:p w14:paraId="22222222">
+      <w:pPr><w:pStyle w:val="CommentText"/></w:pPr>
+      <w:r><w:t xml:space="preserve">Reply in the same thread, with </w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> emphasis.</w:t></w:r>
+    </w:p>
+  </w:comment>
+  <w:comment w:id="3" w:author="Ada Lovelace" w:initials="AL" w:date="2026-02-02T09:30:00Z">
+    <w:p w14:paraId="33333333">
+      <w:pPr><w:pStyle w:val="CommentText"/></w:pPr>
+      <w:r><w:t>Comment on the outer overlapping range.</w:t></w:r>
+    </w:p>
+  </w:comment>
+  <w:comment w:id="4" w:author="Alan Turing" w:initials="AT" w:date="2026-02-02T09:45:00Z">
+    <w:p w14:paraId="44444444">
+      <w:pPr><w:pStyle w:val="CommentText"/></w:pPr>
+      <w:r><w:t>Comment on the inner overlapping range.</w:t></w:r>
+    </w:p>
+    <w:p w14:paraId="44444445">
+      <w:pPr><w:pStyle w:val="CommentText"/></w:pPr>
+      <w:r><w:t>Second paragraph of the same comment.</w:t></w:r>
+    </w:p>
+  </w:comment>
+</w:comments>
