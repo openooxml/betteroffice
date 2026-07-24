@@ -77,11 +77,20 @@ enum WorkbookMode {
     Collaborative { structure: WorkbookStructure },
 }
 
+struct RemovedSheetOrigin {
+    index: usize,
+    name: String,
+    origin: Option<usize>,
+}
+
 pub struct Workbook {
     authority: WorkbookAuthority,
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
+    source_package: Option<xlsx_parse::PreservedPackage>,
+    sheet_origins: Vec<Option<usize>>,
+    removed_sheet_origins: Vec<RemovedSheetOrigin>,
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
@@ -112,8 +121,13 @@ impl Workbook {
                 return Err(Error::DuplicatePart(name.clone()));
             }
         }
-        let model = xlsx_parse::parse_workbook(&parts)?;
-        Self::from_parts(model, build_graph, client_id)
+        let parsed = xlsx_parse::parse_workbook_with_package(&parts)?;
+        Self::from_parts(
+            parsed.workbook,
+            Some(parsed.package),
+            build_graph,
+            client_id,
+        )
     }
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
@@ -134,15 +148,20 @@ impl Workbook {
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
-        Self::from_parts(model, true, None)
+        Self::from_parts(model, None, true, None)
     }
 
     /// Creates a replica from a model with a peer-unique client ID.
     pub fn from_model_collaborative(model: WorkbookModel, client_id: u64) -> Result<Self> {
-        Self::from_parts(model, true, Some(client_id))
+        Self::from_parts(model, None, true, Some(client_id))
     }
 
-    fn from_parts(model: WorkbookModel, build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+    fn from_parts(
+        model: WorkbookModel,
+        source_package: Option<xlsx_parse::PreservedPackage>,
+        build_graph: bool,
+        client_id: Option<u64>,
+    ) -> Result<Self> {
         validate_model(&model)?;
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
@@ -165,11 +184,22 @@ impl Workbook {
             },
             None => WorkbookMode::Standalone,
         };
+        let sheet_origins = source_package
+            .as_ref()
+            .map(|package| {
+                (0..model.sheets.len())
+                    .map(|index| (index < package.source_sheet_count()).then_some(index))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![None; model.sheets.len()]);
         Ok(Self {
             authority,
             mode,
             pending_remote_updates: Vec::new(),
             model,
+            source_package,
+            sheet_origins,
+            removed_sheet_origins: Vec::new(),
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
             graph,
@@ -382,7 +412,14 @@ impl Workbook {
 
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model(&self.model)?;
-        let parts = xlsx_parse::serialize_workbook(&self.model)?;
+        let parts = match &self.source_package {
+            Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins(
+                &self.model,
+                package,
+                &self.sheet_origins,
+            )?,
+            None => xlsx_parse::serialize_workbook(&self.model)?,
+        };
         ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
     }
 
@@ -810,6 +847,7 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
+        let before_sheet_names = self.sheet_names();
         let Some(ops) = self.undo.undo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
@@ -817,6 +855,7 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Undo)
             .map_err(authority_error)?;
+        self.apply_sheet_origin_ops(before_sheet_names, &ops);
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
@@ -842,6 +881,7 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
+        let before_sheet_names = self.sheet_names();
         let Some(ops) = self.undo.redo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
@@ -849,6 +889,7 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Redo)
             .map_err(authority_error)?;
+        self.apply_sheet_origin_ops(before_sheet_names, &ops);
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
@@ -1226,6 +1267,7 @@ impl Workbook {
     }
 
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
+        let before_sheet_names = self.sheet_names();
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
@@ -1252,10 +1294,12 @@ impl Workbook {
                 });
             }
         }
+        self.apply_sheet_origin_ops(before_sheet_names, ops);
         Ok(())
     }
 
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
+        let before_sheet_names = self.sheet_names();
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
@@ -1282,6 +1326,7 @@ impl Workbook {
                 });
             }
         }
+        self.apply_sheet_origin_ops(before_sheet_names, ops);
         Ok(())
     }
 
@@ -1367,6 +1412,52 @@ impl Workbook {
         self.model
             .sheet(self.active_sheet)
             .map(|sheet| sheet.name.clone())
+    }
+
+    fn sheet_names(&self) -> Vec<String> {
+        self.model
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.clone())
+            .collect()
+    }
+
+    fn apply_sheet_origin_ops(&mut self, mut names: Vec<String>, ops: &[Op]) {
+        for op in ops {
+            match op {
+                Op::AddSheet { index, name } => {
+                    let index = (*index).min(self.sheet_origins.len());
+                    let restored = self
+                        .removed_sheet_origins
+                        .iter()
+                        .rposition(|removed| {
+                            removed.index == index && removed.name.eq_ignore_ascii_case(name)
+                        })
+                        .and_then(|removed| self.removed_sheet_origins.remove(removed).origin);
+                    self.sheet_origins.insert(index, restored);
+                    names.insert(index, name.clone());
+                }
+                Op::RemoveSheet { index } if *index < self.sheet_origins.len() => {
+                    self.removed_sheet_origins.push(RemovedSheetOrigin {
+                        index: *index,
+                        name: names
+                            .get(*index)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Sheet{}", index + 1)),
+                        origin: self.sheet_origins.remove(*index),
+                    });
+                    if *index < names.len() {
+                        names.remove(*index);
+                    }
+                }
+                Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } => {
+                    if let Some(current) = names.get_mut(sheet.0 as usize) {
+                        *current = name.clone();
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     fn restore_active_sheet(&mut self, previous_name: Option<&str>) {

@@ -1,0 +1,523 @@
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
+use xlsx_model::{Theme, Workbook};
+
+use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
+use crate::{MAX_DEPTH, ParseError};
+
+/// Source package data retained for ownership-aware writes.
+#[derive(Clone, Debug)]
+pub struct PreservedPackage {
+    pub(crate) parts: Vec<(String, Vec<u8>)>,
+    pub(crate) content_types: Vec<ContentTypeEntry>,
+    pub(crate) root_relationships: Vec<Relationship>,
+    pub(crate) workbook_relationships: Vec<Relationship>,
+    pub(crate) workbook_template: XmlTemplate,
+    pub(crate) workbook_pr_attributes: Option<Vec<XmlAttribute>>,
+    pub(crate) sheets: Vec<PreservedSheet>,
+    pub(crate) shared_strings: Option<PartReference>,
+    pub(crate) styles: Option<PartReference>,
+    pub(crate) theme: Option<PartReference>,
+    pub(crate) stylesheet_template: Option<XmlTemplate>,
+    pub(crate) original_theme: Theme,
+}
+
+impl PreservedPackage {
+    pub(crate) fn capture(
+        parts: &[(String, Vec<u8>)],
+        workbook: &Workbook,
+    ) -> Result<Self, ParseError> {
+        let workbook_xml = find_part(parts, "xl/workbook.xml")
+            .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
+        let workbook_template = XmlTemplate::capture(workbook_xml)?;
+        let workbook_pr_attributes = workbook_template
+            .children
+            .iter()
+            .find(|child| child.local_name == "workbookPr")
+            .map(|child| attributes_from_fragment(&child.bytes))
+            .transpose()?;
+
+        let workbook_relationships = find_part(parts, "xl/_rels/workbook.xml.rels")
+            .map(parse_relationships)
+            .transpose()?
+            .unwrap_or_default();
+        let relationship_by_id = workbook_relationships
+            .iter()
+            .filter_map(|relationship| relationship.id().map(|id| (id.to_owned(), relationship)))
+            .collect::<HashMap<_, _>>();
+
+        let sheet_entries = parse_sheet_entries(workbook_xml)?;
+        let mut sheets = Vec::with_capacity(sheet_entries.len());
+        for (index, entry) in sheet_entries.into_iter().enumerate() {
+            let relationship = entry
+                .relationship_id
+                .as_deref()
+                .and_then(|id| relationship_by_id.get(id).copied());
+            let path = relationship
+                .and_then(Relationship::target)
+                .map(|target| resolve_part_path("xl", target))
+                .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
+            let bytes =
+                find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
+            sheets.push(PreservedSheet {
+                path,
+                relationship_id: entry.relationship_id,
+                sheet_id: entry.sheet_id.unwrap_or((index + 1) as u32),
+                attributes: entry.attributes,
+                template: XmlTemplate::capture(bytes)?,
+            });
+        }
+
+        let shared_strings = part_reference(
+            parts,
+            &workbook_relationships,
+            "sharedStrings",
+            "xl/sharedStrings.xml",
+        );
+        let styles = part_reference(parts, &workbook_relationships, "styles", "xl/styles.xml");
+        let theme = part_reference(
+            parts,
+            &workbook_relationships,
+            "theme",
+            "xl/theme/theme1.xml",
+        );
+        let stylesheet_template = styles
+            .as_ref()
+            .and_then(|part| find_part(parts, &part.path))
+            .map(XmlTemplate::capture)
+            .transpose()?;
+
+        Ok(Self {
+            parts: parts.to_vec(),
+            content_types: find_part(parts, "[Content_Types].xml")
+                .map(parse_content_types)
+                .transpose()?
+                .unwrap_or_default(),
+            root_relationships: find_part(parts, "_rels/.rels")
+                .map(parse_relationships)
+                .transpose()?
+                .unwrap_or_default(),
+            workbook_relationships,
+            workbook_template,
+            workbook_pr_attributes,
+            sheets,
+            shared_strings,
+            styles,
+            theme,
+            stylesheet_template,
+            original_theme: workbook.styles.theme.clone(),
+        })
+    }
+
+    /// Returns retained bytes for a package part.
+    pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
+        find_part(&self.parts, path)
+    }
+
+    #[doc(hidden)]
+    pub fn source_sheet_count(&self) -> usize {
+        self.sheets.len()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PreservedSheet {
+    pub(crate) path: String,
+    pub(crate) relationship_id: Option<String>,
+    pub(crate) sheet_id: u32,
+    pub(crate) attributes: Vec<XmlAttribute>,
+    pub(crate) template: XmlTemplate,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PartReference {
+    pub(crate) path: String,
+    pub(crate) relationship_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Relationship {
+    pub(crate) attributes: Vec<XmlAttribute>,
+}
+
+impl Relationship {
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.attribute("Id")
+    }
+
+    pub(crate) fn target(&self) -> Option<&str> {
+        self.attribute("Target")
+    }
+
+    pub(crate) fn has_type(&self, suffix: &str) -> bool {
+        self.attribute("Type")
+            .and_then(|value| value.rsplit('/').next())
+            == Some(suffix)
+    }
+
+    pub(crate) fn attribute(&self, local_name: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.local_name() == local_name)
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    pub(crate) fn set_attribute(&mut self, local_name: &str, name: &str, value: String) {
+        set_attribute(&mut self.attributes, local_name, name, value);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ContentTypeEntry {
+    pub(crate) element: String,
+    pub(crate) attributes: Vec<XmlAttribute>,
+}
+
+impl ContentTypeEntry {
+    pub(crate) fn attribute(&self, local_name: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.local_name() == local_name)
+            .map(|attribute| attribute.value.as_str())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct XmlAttribute {
+    pub(crate) name: String,
+    pub(crate) value: String,
+}
+
+impl XmlAttribute {
+    pub(crate) fn local_name(&self) -> &str {
+        self.name.rsplit(':').next().unwrap_or(&self.name)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct XmlTemplate {
+    prefix: Vec<u8>,
+    pub(crate) children: Vec<XmlChild>,
+    trailing: Vec<u8>,
+    suffix: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct XmlChild {
+    before: Vec<u8>,
+    pub(crate) local_name: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl XmlTemplate {
+    pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
+        let mut reader = Reader::from_reader(data);
+        let config = reader.config_mut();
+        config.expand_empty_elements = false;
+        config.check_end_names = true;
+
+        let mut depth = 0_usize;
+        let mut root_start = None;
+        let mut root_end = None;
+        let mut active_child: Option<(usize, String)> = None;
+        let mut spans = Vec::new();
+
+        loop {
+            let before = reader.buffer_position() as usize;
+            let event = reader.read_event().map_err(xml_err)?;
+            let after = reader.buffer_position() as usize;
+            match event {
+                Event::Start(element) => {
+                    if depth == 0 {
+                        root_start = Some(after);
+                    } else if depth == 1 {
+                        active_child = Some((
+                            before,
+                            String::from_utf8_lossy(element.name().local_name().as_ref())
+                                .into_owned(),
+                        ));
+                    }
+                    depth += 1;
+                    if depth > MAX_DEPTH {
+                        return Err(ParseError::DepthExceeded);
+                    }
+                }
+                Event::Empty(element) if depth == 1 => {
+                    spans.push((
+                        before,
+                        after,
+                        String::from_utf8_lossy(element.name().local_name().as_ref()).into_owned(),
+                    ));
+                }
+                Event::End(_) if depth == 1 => {
+                    root_end = Some(before);
+                    break;
+                }
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 1
+                        && let Some((start, name)) = active_child.take()
+                    {
+                        spans.push((start, after, name));
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+
+        let root_start =
+            root_start.ok_or_else(|| ParseError::Malformed("xml part has no root".into()))?;
+        let root_end =
+            root_end.ok_or_else(|| ParseError::Malformed("xml root is not closed".into()))?;
+        let mut cursor = root_start;
+        let mut children = Vec::with_capacity(spans.len());
+        for (start, end, local_name) in spans {
+            if start < cursor || end > root_end {
+                return Err(ParseError::Malformed("overlapping xml child spans".into()));
+            }
+            children.push(XmlChild {
+                before: data[cursor..start].to_vec(),
+                local_name,
+                bytes: data[start..end].to_vec(),
+            });
+            cursor = end;
+        }
+
+        Ok(Self {
+            prefix: data[..root_start].to_vec(),
+            children,
+            trailing: data[cursor..root_end].to_vec(),
+            suffix: data[root_end..].to_vec(),
+        })
+    }
+
+    pub(crate) fn render(
+        &self,
+        replacements: Vec<(&'static str, Option<Vec<u8>>)>,
+        rank: fn(&str) -> usize,
+    ) -> Vec<u8> {
+        let replacements = replacements
+            .into_iter()
+            .map(|(name, bytes)| (name.to_owned(), bytes))
+            .collect::<BTreeMap<_, _>>();
+        let mut emitted = HashSet::new();
+        let mut output = Vec::new();
+        output.extend_from_slice(&self.prefix);
+
+        for child in &self.children {
+            output.extend_from_slice(&child.before);
+            let child_rank = rank(&child.local_name);
+            let mut pending = replacements
+                .iter()
+                .filter(|(name, _)| !emitted.contains(name.as_str()) && rank(name) < child_rank)
+                .collect::<Vec<_>>();
+            pending.sort_by_key(|(name, _)| rank(name));
+            for (name, bytes) in pending {
+                emitted.insert(name.clone());
+                if let Some(bytes) = bytes {
+                    output.extend_from_slice(bytes);
+                }
+            }
+
+            if let Some(bytes) = replacements.get(&child.local_name) {
+                if emitted.insert(child.local_name.clone())
+                    && let Some(bytes) = bytes
+                {
+                    output.extend_from_slice(bytes);
+                }
+            } else {
+                output.extend_from_slice(&child.bytes);
+            }
+        }
+
+        output.extend_from_slice(&self.trailing);
+        let mut pending = replacements
+            .iter()
+            .filter(|(name, _)| !emitted.contains(name.as_str()))
+            .collect::<Vec<_>>();
+        pending.sort_by_key(|(name, _)| rank(name));
+        for (name, bytes) in pending {
+            emitted.insert(name.clone());
+            if let Some(bytes) = bytes {
+                output.extend_from_slice(bytes);
+            }
+        }
+        output.extend_from_slice(&self.suffix);
+        output
+    }
+}
+
+pub(crate) fn set_attribute(
+    attributes: &mut Vec<XmlAttribute>,
+    local_name: &str,
+    name: &str,
+    value: String,
+) {
+    if let Some(attribute) = attributes
+        .iter_mut()
+        .find(|attribute| attribute.local_name() == local_name)
+    {
+        attribute.value = value;
+    } else {
+        attributes.push(XmlAttribute {
+            name: name.to_owned(),
+            value,
+        });
+    }
+}
+
+pub(crate) fn remove_attribute(attributes: &mut Vec<XmlAttribute>, local_name: &str) {
+    attributes.retain(|attribute| attribute.local_name() != local_name);
+}
+
+pub(crate) fn relationship_part_path(part_path: &str) -> String {
+    match part_path.rsplit_once('/') {
+        Some((directory, filename)) => format!("{directory}/_rels/{filename}.rels"),
+        None => format!("_rels/{part_path}.rels"),
+    }
+}
+
+fn parse_relationships(data: &[u8]) -> Result<Vec<Relationship>, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut relationships = Vec::new();
+    loop {
+        match next_event(&mut reader, &mut buffer, &mut depth)? {
+            Event::Start(element) if local_name(&element) == b"Relationship" => {
+                relationships.push(Relationship {
+                    attributes: attributes(&element)?,
+                });
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(relationships)
+}
+
+fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut entries = Vec::new();
+    loop {
+        match next_event(&mut reader, &mut buffer, &mut depth)? {
+            Event::Start(element) => {
+                let name = local_name(&element);
+                if matches!(name.as_slice(), b"Default" | b"Override") {
+                    entries.push(ContentTypeEntry {
+                        element: String::from_utf8_lossy(&name).into_owned(),
+                        attributes: attributes(&element)?,
+                    });
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(entries)
+}
+
+struct SheetEntry {
+    relationship_id: Option<String>,
+    sheet_id: Option<u32>,
+    attributes: Vec<XmlAttribute>,
+}
+
+fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut sheets_depth = None;
+    let mut entries = Vec::new();
+    loop {
+        match next_event(&mut reader, &mut buffer, &mut depth)? {
+            Event::Start(element) if local_name(&element) == b"sheets" => {
+                sheets_depth = Some(depth);
+            }
+            Event::Start(element)
+                if local_name(&element) == b"sheet"
+                    && sheets_depth.is_some_and(|sheets| depth == sheets + 1) =>
+            {
+                entries.push(SheetEntry {
+                    relationship_id: attr(&element, b"id")?,
+                    sheet_id: attr(&element, b"sheetId")?.and_then(|id| id.parse().ok()),
+                    attributes: attributes(&element)?,
+                });
+            }
+            Event::End(element)
+                if local_name_from_end(&element) == b"sheets"
+                    && sheets_depth.is_some_and(|sheets| depth < sheets) =>
+            {
+                sheets_depth = None;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(entries)
+}
+
+fn part_reference(
+    parts: &[(String, Vec<u8>)],
+    relationships: &[Relationship],
+    relationship_type: &str,
+    fallback: &str,
+) -> Option<PartReference> {
+    if let Some(relationship) = relationships
+        .iter()
+        .find(|relationship| relationship.has_type(relationship_type))
+        && let Some(target) = relationship.target()
+    {
+        let path = resolve_part_path("xl", target);
+        if find_part(parts, &path).is_some() {
+            return Some(PartReference {
+                path,
+                relationship_id: relationship.id().map(str::to_owned),
+            });
+        }
+    }
+    find_part(parts, fallback).map(|_| PartReference {
+        path: fallback.to_owned(),
+        relationship_id: None,
+    })
+}
+
+fn attributes(element: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, ParseError> {
+    element
+        .attributes()
+        .map(|attribute| {
+            let attribute = attribute.map_err(xml_err)?;
+            Ok(XmlAttribute {
+                name: String::from_utf8_lossy(attribute.key.as_ref()).into_owned(),
+                value: attribute
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .map_err(xml_err)?
+                    .into_owned(),
+            })
+        })
+        .collect()
+}
+
+fn attributes_from_fragment(fragment: &[u8]) -> Result<Vec<XmlAttribute>, ParseError> {
+    let mut reader = Reader::from_reader(fragment);
+    loop {
+        match reader.read_event().map_err(xml_err)? {
+            Event::Start(element) | Event::Empty(element) => return attributes(&element),
+            Event::Eof => {
+                return Err(ParseError::Malformed(
+                    "xml fragment has no element".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn local_name_from_end(element: &quick_xml::events::BytesEnd<'_>) -> Vec<u8> {
+    element.name().local_name().as_ref().to_vec()
+}

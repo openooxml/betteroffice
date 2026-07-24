@@ -1,7 +1,7 @@
 //! `xlsx_model::Workbook` -> minimal valid xlsx parts. structural round-trip:
 //! whatever `read` captures comes back out.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 
 use quick_xml::Writer;
@@ -11,6 +11,10 @@ use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Style
 use xlsx_model::{Cell, CellRef, CellValue, DateSystem, Sheet, Workbook};
 
 use crate::ParseError;
+use crate::package::{
+    ContentTypeEntry, PartReference, PreservedPackage, Relationship, XmlAttribute, XmlTemplate,
+    relationship_part_path, remove_attribute, set_attribute,
+};
 use crate::xml::xml_err;
 
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -19,6 +23,8 @@ const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-type
 const NS_PKG_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const CT_WORKSHEET: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
+const CT_WORKBOOK: &str =
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
 const CT_SST: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
 const REL_WORKSHEET: &str =
@@ -30,6 +36,8 @@ const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml"
 const REL_STYLES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
 const REL_THEME: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+const REL_OFFICE_DOCUMENT: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 const NS_DML: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
 /// serialize a workbook to opc parts in a fixed, deterministic order.
@@ -64,6 +72,408 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
     Ok(parts)
 }
 
+/// Serializes owned parts over a preserved source package.
+pub fn serialize_workbook_with_package(
+    wb: &Workbook,
+    package: &PreservedPackage,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    let origins = (0..wb.sheets.len())
+        .map(|index| (index < package.sheets.len()).then_some(index))
+        .collect::<Vec<_>>();
+    serialize_workbook_with_package_and_origins(wb, package, &origins)
+}
+
+#[doc(hidden)]
+pub fn serialize_workbook_with_package_and_origins(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    if origins.len() != wb.sheets.len() {
+        return Err(ParseError::Malformed(
+            "sheet origin count does not match workbook".to_owned(),
+        ));
+    }
+
+    let have_sst = !wb.shared_strings.is_empty();
+    let have_styles = !wb.styles.is_empty();
+    let mut used_relationship_ids = package
+        .workbook_relationships
+        .iter()
+        .filter_map(Relationship::id)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mut used_paths = package
+        .parts
+        .iter()
+        .map(|(path, _)| normalized_part_name(path))
+        .collect::<HashSet<_>>();
+    let sheets = plan_sheets(
+        package,
+        origins,
+        &mut used_relationship_ids,
+        &mut used_paths,
+    );
+    let shared_strings = have_sst.then(|| {
+        plan_part(
+            package.shared_strings.as_ref(),
+            &package.workbook_relationships,
+            "sharedStrings",
+            REL_SST,
+            "xl/sharedStrings.xml",
+            &mut used_relationship_ids,
+        )
+    });
+    let styles = have_styles.then(|| {
+        plan_part(
+            package.styles.as_ref(),
+            &package.workbook_relationships,
+            "styles",
+            REL_STYLES,
+            "xl/styles.xml",
+            &mut used_relationship_ids,
+        )
+    });
+    let theme = have_styles.then(|| {
+        plan_part(
+            package.theme.as_ref(),
+            &package.workbook_relationships,
+            "theme",
+            REL_THEME,
+            "xl/theme/theme1.xml",
+            &mut used_relationship_ids,
+        )
+    });
+
+    let mut parts = PartStore::new(package.parts.clone());
+    let retained_origins = sheets
+        .iter()
+        .filter_map(|sheet| sheet.origin)
+        .collect::<HashSet<_>>();
+    for (index, source) in package.sheets.iter().enumerate() {
+        if !retained_origins.contains(&index) {
+            parts.remove(&source.path);
+            parts.remove(&relationship_part_path(&source.path));
+        }
+    }
+
+    for (sheet, plan) in wb.sheets.iter().zip(&sheets) {
+        let bytes = match plan.origin.and_then(|origin| package.sheets.get(origin)) {
+            Some(source) => worksheet_xml_with_template(sheet, wb, &source.template)?,
+            None => worksheet_xml(sheet, wb)?,
+        };
+        parts.set(plan.path.clone(), bytes);
+    }
+
+    let workbook = workbook_xml_with_template(wb, package, &sheets)?;
+    parts.set("xl/workbook.xml".to_owned(), workbook);
+    parts.set(
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        merged_workbook_relationships(
+            package,
+            &sheets,
+            shared_strings.as_ref(),
+            styles.as_ref(),
+            theme.as_ref(),
+        )?,
+    );
+    parts.set(
+        "_rels/.rels".to_owned(),
+        merged_root_relationships(package)?,
+    );
+    parts.set(
+        "[Content_Types].xml".to_owned(),
+        merged_content_types(
+            package,
+            &sheets,
+            shared_strings.as_ref(),
+            styles.as_ref(),
+            theme.as_ref(),
+        )?,
+    );
+
+    replace_optional_part(
+        &mut parts,
+        package.shared_strings.as_ref(),
+        shared_strings.as_ref(),
+        || shared_strings_xml(wb),
+    )?;
+    replace_optional_part(
+        &mut parts,
+        package.styles.as_ref(),
+        styles.as_ref(),
+        || match &package.stylesheet_template {
+            Some(template) => styles_xml_with_template(&wb.styles, template),
+            None => styles_xml(&wb.styles),
+        },
+    )?;
+
+    match (package.theme.as_ref(), theme.as_ref()) {
+        (Some(source), Some(planned))
+            if source.path == planned.path && wb.styles.theme == package.original_theme => {}
+        (source, Some(planned)) => {
+            if let Some(source) = source
+                && source.path != planned.path
+            {
+                parts.remove(&source.path);
+            }
+            parts.set(planned.path.clone(), theme_xml(&wb.styles)?);
+        }
+        (Some(source), None) => parts.remove(&source.path),
+        (None, None) => {}
+    }
+
+    Ok(parts.finish())
+}
+
+#[derive(Clone)]
+struct PlannedSheet {
+    origin: Option<usize>,
+    path: String,
+    relationship: Relationship,
+    sheet_id: u32,
+    attributes: Vec<XmlAttribute>,
+}
+
+#[derive(Clone)]
+struct PlannedPart {
+    path: String,
+    relationship: Relationship,
+}
+
+fn plan_sheets(
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    used_relationship_ids: &mut HashSet<String>,
+    used_paths: &mut HashSet<String>,
+) -> Vec<PlannedSheet> {
+    let mut claimed_origins = HashSet::new();
+    let mut next_sheet_id = package
+        .sheets
+        .iter()
+        .map(|sheet| sheet.sheet_id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    origins
+        .iter()
+        .map(|origin| {
+            let origin = origin
+                .filter(|origin| *origin < package.sheets.len() && claimed_origins.insert(*origin));
+            if let Some(origin) = origin {
+                let source = &package.sheets[origin];
+                let source_relationship = source.relationship_id.as_deref().and_then(|id| {
+                    package
+                        .workbook_relationships
+                        .iter()
+                        .find(|relationship| relationship.id() == Some(id))
+                });
+                let relationship = match source_relationship {
+                    Some(relationship) => {
+                        let mut relationship = relationship.clone();
+                        relationship.set_attribute("Type", "Type", REL_WORKSHEET.to_owned());
+                        relationship
+                    }
+                    None => new_relationship(
+                        next_relationship_id(used_relationship_ids),
+                        REL_WORKSHEET,
+                        relative_to_xl(&source.path),
+                    ),
+                };
+                return PlannedSheet {
+                    origin: Some(origin),
+                    path: source.path.clone(),
+                    relationship,
+                    sheet_id: source.sheet_id,
+                    attributes: source.attributes.clone(),
+                };
+            }
+
+            let path = next_sheet_path(used_paths);
+            let relationship = new_relationship(
+                next_relationship_id(used_relationship_ids),
+                REL_WORKSHEET,
+                relative_to_xl(&path),
+            );
+            let sheet_id = next_sheet_id;
+            next_sheet_id = next_sheet_id.saturating_add(1);
+            PlannedSheet {
+                origin: None,
+                path,
+                relationship,
+                sheet_id,
+                attributes: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn plan_part(
+    source: Option<&PartReference>,
+    relationships: &[Relationship],
+    type_suffix: &str,
+    relationship_type: &str,
+    fallback_path: &str,
+    used_relationship_ids: &mut HashSet<String>,
+) -> PlannedPart {
+    if let Some(source) = source {
+        let source_relationship = source
+            .relationship_id
+            .as_deref()
+            .and_then(|id| {
+                relationships
+                    .iter()
+                    .find(|relationship| relationship.id() == Some(id))
+            })
+            .or_else(|| {
+                relationships
+                    .iter()
+                    .find(|relationship| relationship.has_type(type_suffix))
+            });
+        let relationship = match source_relationship {
+            Some(relationship) => {
+                let mut relationship = relationship.clone();
+                relationship.set_attribute("Type", "Type", relationship_type.to_owned());
+                relationship
+            }
+            None => new_relationship(
+                next_relationship_id(used_relationship_ids),
+                relationship_type,
+                relative_to_xl(&source.path),
+            ),
+        };
+        return PlannedPart {
+            path: source.path.clone(),
+            relationship,
+        };
+    }
+
+    PlannedPart {
+        path: fallback_path.to_owned(),
+        relationship: new_relationship(
+            next_relationship_id(used_relationship_ids),
+            relationship_type,
+            relative_to_xl(fallback_path),
+        ),
+    }
+}
+
+fn new_relationship(id: String, relationship_type: &str, target: String) -> Relationship {
+    Relationship {
+        attributes: vec![
+            XmlAttribute {
+                name: "Id".to_owned(),
+                value: id,
+            },
+            XmlAttribute {
+                name: "Type".to_owned(),
+                value: relationship_type.to_owned(),
+            },
+            XmlAttribute {
+                name: "Target".to_owned(),
+                value: target,
+            },
+        ],
+    }
+}
+
+fn next_relationship_id(used: &mut HashSet<String>) -> String {
+    let mut index = 1_u64;
+    loop {
+        let candidate = format!("rId{index}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn next_sheet_path(used: &mut HashSet<String>) -> String {
+    let mut index = 1_u64;
+    loop {
+        let path = format!("xl/worksheets/sheet{index}.xml");
+        if used.insert(normalized_part_name(&path)) {
+            return path;
+        }
+        index += 1;
+    }
+}
+
+fn relative_to_xl(path: &str) -> String {
+    path.trim_start_matches('/')
+        .strip_prefix("xl/")
+        .unwrap_or(path.trim_start_matches('/'))
+        .to_owned()
+}
+
+fn normalized_part_name(path: &str) -> String {
+    path.trim_start_matches('/').to_ascii_lowercase()
+}
+
+fn replace_optional_part(
+    parts: &mut PartStore,
+    source: Option<&PartReference>,
+    planned: Option<&PlannedPart>,
+    serialize: impl FnOnce() -> Result<Vec<u8>, ParseError>,
+) -> Result<(), ParseError> {
+    match (source, planned) {
+        (source, Some(planned)) => {
+            if let Some(source) = source
+                && source.path != planned.path
+            {
+                parts.remove(&source.path);
+            }
+            parts.set(planned.path.clone(), serialize()?);
+        }
+        (Some(source), None) => parts.remove(&source.path),
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+struct PartStore {
+    parts: Vec<Option<(String, Vec<u8>)>>,
+    positions: HashMap<String, usize>,
+}
+
+impl PartStore {
+    fn new(parts: Vec<(String, Vec<u8>)>) -> Self {
+        let positions = parts
+            .iter()
+            .enumerate()
+            .map(|(index, (path, _))| (normalized_part_name(path), index))
+            .collect();
+        Self {
+            parts: parts.into_iter().map(Some).collect(),
+            positions,
+        }
+    }
+
+    fn remove(&mut self, path: &str) {
+        if let Some(index) = self.positions.remove(&normalized_part_name(path)) {
+            self.parts[index] = None;
+        }
+    }
+
+    fn set(&mut self, path: String, bytes: Vec<u8>) {
+        let normalized = normalized_part_name(&path);
+        if let Some(index) = self.positions.get(&normalized).copied() {
+            let authored_path = self.parts[index]
+                .as_ref()
+                .map(|(path, _)| path.clone())
+                .unwrap_or(path);
+            self.parts[index] = Some((authored_path, bytes));
+        } else {
+            self.positions.insert(normalized, self.parts.len());
+            self.parts.push(Some((path, bytes)));
+        }
+    }
+
+    fn finish(self) -> Vec<(String, Vec<u8>)> {
+        self.parts.into_iter().flatten().collect()
+    }
+}
+
 /// run a builder against a fresh writer that already emitted the xml decl.
 fn doc<F>(f: F) -> Result<Vec<u8>, ParseError>
 where
@@ -78,6 +488,302 @@ where
     .map_err(xml_err)?;
     f(&mut w).map_err(xml_err)?;
     Ok(w.into_inner())
+}
+
+fn fragment<F>(f: F) -> Result<Vec<u8>, ParseError>
+where
+    F: FnOnce(&mut Writer<Vec<u8>>) -> io::Result<()>,
+{
+    let mut writer = Writer::new(Vec::new());
+    f(&mut writer).map_err(xml_err)?;
+    Ok(writer.into_inner())
+}
+
+fn merged_root_relationships(package: &PreservedPackage) -> Result<Vec<u8>, ParseError> {
+    let mut relationships = package.root_relationships.clone();
+    if !relationships
+        .iter()
+        .any(|relationship| relationship.has_type("officeDocument"))
+    {
+        let mut used = relationships
+            .iter()
+            .filter_map(Relationship::id)
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        relationships.push(new_relationship(
+            next_relationship_id(&mut used),
+            REL_OFFICE_DOCUMENT,
+            "xl/workbook.xml".to_owned(),
+        ));
+    }
+    relationships_xml(&relationships)
+}
+
+fn merged_workbook_relationships(
+    package: &PreservedPackage,
+    sheets: &[PlannedSheet],
+    shared_strings: Option<&PlannedPart>,
+    styles: Option<&PlannedPart>,
+    theme: Option<&PlannedPart>,
+) -> Result<Vec<u8>, ParseError> {
+    let planned = sheets
+        .iter()
+        .map(|sheet| &sheet.relationship)
+        .chain(shared_strings.map(|part| &part.relationship))
+        .chain(styles.map(|part| &part.relationship))
+        .chain(theme.map(|part| &part.relationship))
+        .collect::<Vec<_>>();
+    let planned_by_id = planned
+        .iter()
+        .filter_map(|relationship| relationship.id().map(|id| (id.to_owned(), *relationship)))
+        .collect::<HashMap<_, _>>();
+    let mut source_owned_ids = package
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.relationship_id.clone())
+        .collect::<HashSet<_>>();
+    source_owned_ids.extend(
+        [
+            package.shared_strings.as_ref(),
+            package.styles.as_ref(),
+            package.theme.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.relationship_id.clone()),
+    );
+
+    let mut emitted = HashSet::new();
+    let mut merged = Vec::new();
+    for source in &package.workbook_relationships {
+        let id = source.id();
+        if let Some(planned) = id.and_then(|id| planned_by_id.get(id))
+            && emitted.insert(id.unwrap().to_owned())
+        {
+            merged.push((*planned).clone());
+        } else if id.is_some_and(|id| source_owned_ids.contains(id))
+            || source.has_type("sharedStrings")
+            || source.has_type("styles")
+            || source.has_type("theme")
+        {
+        } else {
+            merged.push(source.clone());
+            if let Some(id) = id {
+                emitted.insert(id.to_owned());
+            }
+        }
+    }
+    for relationship in planned {
+        if let Some(id) = relationship.id()
+            && emitted.insert(id.to_owned())
+        {
+            merged.push(relationship.clone());
+        }
+    }
+    relationships_xml(&merged)
+}
+
+fn relationships_xml(relationships: &[Relationship]) -> Result<Vec<u8>, ParseError> {
+    doc(|writer| {
+        writer
+            .create_element("Relationships")
+            .with_attribute(("xmlns", NS_PKG_REL))
+            .write_inner_content(|writer| {
+                for relationship in relationships {
+                    write_empty_element(writer, "Relationship", &relationship.attributes)?;
+                }
+                Ok(())
+            })?;
+        Ok(())
+    })
+}
+
+fn merged_content_types(
+    package: &PreservedPackage,
+    sheets: &[PlannedSheet],
+    shared_strings: Option<&PlannedPart>,
+    styles: Option<&PlannedPart>,
+    theme: Option<&PlannedPart>,
+) -> Result<Vec<u8>, ParseError> {
+    let mut desired = BTreeMap::new();
+    desired.insert(
+        normalized_part_name("xl/workbook.xml"),
+        source_content_type(package, "xl/workbook.xml").unwrap_or(CT_WORKBOOK),
+    );
+    for sheet in sheets {
+        let content_type = sheet
+            .origin
+            .and_then(|origin| package.sheets.get(origin))
+            .and_then(|source| source_content_type(package, &source.path))
+            .unwrap_or(CT_WORKSHEET);
+        desired.insert(normalized_part_name(&sheet.path), content_type);
+    }
+    if let Some(part) = shared_strings {
+        desired.insert(
+            normalized_part_name(&part.path),
+            package
+                .shared_strings
+                .as_ref()
+                .and_then(|source| source_content_type(package, &source.path))
+                .unwrap_or(CT_SST),
+        );
+    }
+    if let Some(part) = styles {
+        desired.insert(
+            normalized_part_name(&part.path),
+            package
+                .styles
+                .as_ref()
+                .and_then(|source| source_content_type(package, &source.path))
+                .unwrap_or(CT_STYLES),
+        );
+    }
+    if let Some(part) = theme {
+        desired.insert(
+            normalized_part_name(&part.path),
+            package
+                .theme
+                .as_ref()
+                .and_then(|source| source_content_type(package, &source.path))
+                .unwrap_or(CT_THEME),
+        );
+    }
+
+    let mut source_owned = HashSet::from([normalized_part_name("xl/workbook.xml")]);
+    source_owned.extend(
+        package
+            .sheets
+            .iter()
+            .map(|sheet| normalized_part_name(&sheet.path)),
+    );
+    source_owned.extend(
+        [
+            package.shared_strings.as_ref(),
+            package.styles.as_ref(),
+            package.theme.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|part| normalized_part_name(&part.path)),
+    );
+
+    let mut entries = Vec::new();
+    let mut emitted_parts = HashSet::new();
+    let mut default_extensions = HashSet::new();
+    for entry in &package.content_types {
+        if entry.element == "Default" {
+            if let Some(extension) = entry.attribute("Extension") {
+                default_extensions.insert(extension.to_ascii_lowercase());
+            }
+            entries.push(entry.clone());
+            continue;
+        }
+        let Some(part_name) = entry.attribute("PartName") else {
+            entries.push(entry.clone());
+            continue;
+        };
+        let normalized = normalized_part_name(part_name);
+        if source_owned.contains(&normalized) {
+            if desired.contains_key(&normalized) && emitted_parts.insert(normalized) {
+                entries.push(entry.clone());
+            }
+        } else {
+            entries.push(entry.clone());
+        }
+    }
+
+    for (path, content_type) in desired {
+        if emitted_parts.insert(path.clone()) {
+            entries.push(ContentTypeEntry {
+                element: "Override".to_owned(),
+                attributes: vec![
+                    XmlAttribute {
+                        name: "PartName".to_owned(),
+                        value: format!("/{path}"),
+                    },
+                    XmlAttribute {
+                        name: "ContentType".to_owned(),
+                        value: content_type.to_owned(),
+                    },
+                ],
+            });
+        }
+    }
+    if default_extensions.insert("rels".to_owned()) {
+        entries.insert(
+            0,
+            ContentTypeEntry {
+                element: "Default".to_owned(),
+                attributes: vec![
+                    XmlAttribute {
+                        name: "Extension".to_owned(),
+                        value: "rels".to_owned(),
+                    },
+                    XmlAttribute {
+                        name: "ContentType".to_owned(),
+                        value: "application/vnd.openxmlformats-package.relationships+xml"
+                            .to_owned(),
+                    },
+                ],
+            },
+        );
+    }
+    if default_extensions.insert("xml".to_owned()) {
+        entries.insert(
+            default_extensions.contains("rels") as usize,
+            ContentTypeEntry {
+                element: "Default".to_owned(),
+                attributes: vec![
+                    XmlAttribute {
+                        name: "Extension".to_owned(),
+                        value: "xml".to_owned(),
+                    },
+                    XmlAttribute {
+                        name: "ContentType".to_owned(),
+                        value: "application/xml".to_owned(),
+                    },
+                ],
+            },
+        );
+    }
+
+    doc(|writer| {
+        writer
+            .create_element("Types")
+            .with_attribute(("xmlns", NS_CT))
+            .write_inner_content(|writer| {
+                for entry in &entries {
+                    write_empty_element(writer, &entry.element, &entry.attributes)?;
+                }
+                Ok(())
+            })?;
+        Ok(())
+    })
+}
+
+fn source_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<&'a str> {
+    let normalized = normalized_part_name(path);
+    package.content_types.iter().find_map(|entry| {
+        (entry.element == "Override"
+            && entry
+                .attribute("PartName")
+                .is_some_and(|part| normalized_part_name(part) == normalized))
+        .then(|| entry.attribute("ContentType"))
+        .flatten()
+    })
+}
+
+fn write_empty_element(
+    writer: &mut Writer<Vec<u8>>,
+    name: &str,
+    attributes: &[XmlAttribute],
+) -> io::Result<()> {
+    let mut element = BytesStart::new(name);
+    for attribute in attributes {
+        element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+    }
+    writer.write_event(Event::Empty(element))?;
+    Ok(())
 }
 
 fn content_types(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec<u8>, ParseError> {
@@ -180,6 +886,81 @@ fn workbook_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
     })
 }
 
+fn workbook_xml_with_template(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    sheets: &[PlannedSheet],
+) -> Result<Vec<u8>, ParseError> {
+    let workbook_pr =
+        if package.workbook_pr_attributes.is_some() || wb.date_system == DateSystem::V1904 {
+            let mut attributes = package.workbook_pr_attributes.clone().unwrap_or_default();
+            if wb.date_system == DateSystem::V1904 {
+                set_attribute(&mut attributes, "date1904", "date1904", "1".to_owned());
+            } else {
+                remove_attribute(&mut attributes, "date1904");
+            }
+            Some(fragment(|writer| {
+                write_empty_element(writer, "workbookPr", &attributes)
+            })?)
+        } else {
+            None
+        };
+    let sheets = Some(fragment(|writer| {
+        writer
+            .create_element("sheets")
+            .write_inner_content(|writer| {
+                for (sheet, plan) in wb.sheets.iter().zip(sheets) {
+                    let mut attributes = plan.attributes.clone();
+                    set_attribute(&mut attributes, "name", "name", sheet.name.clone());
+                    set_attribute(
+                        &mut attributes,
+                        "sheetId",
+                        "sheetId",
+                        plan.sheet_id.to_string(),
+                    );
+                    set_attribute(
+                        &mut attributes,
+                        "id",
+                        "r:id",
+                        plan.relationship.id().unwrap_or_default().to_owned(),
+                    );
+                    write_empty_element(writer, "sheet", &attributes)?;
+                }
+                Ok(())
+            })?;
+        Ok(())
+    })?);
+    Ok(package.workbook_template.render(
+        vec![("workbookPr", workbook_pr), ("sheets", sheets)],
+        workbook_child_rank,
+    ))
+}
+
+fn workbook_child_rank(name: &str) -> usize {
+    match name {
+        "fileVersion" => 0,
+        "fileSharing" => 1,
+        "workbookPr" => 2,
+        "workbookProtection" => 3,
+        "bookViews" => 4,
+        "sheets" => 5,
+        "functionGroups" => 6,
+        "externalReferences" => 7,
+        "definedNames" => 8,
+        "calcPr" => 9,
+        "oleSize" => 10,
+        "customWorkbookViews" => 11,
+        "pivotCaches" => 12,
+        "smartTagPr" => 13,
+        "smartTagTypes" => 14,
+        "webPublishing" => 15,
+        "fileRecoveryPr" => 16,
+        "webPublishObjects" => 17,
+        "extLst" => 18,
+        _ => usize::MAX,
+    }
+}
+
 fn workbook_rels(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("Relationships")
@@ -246,6 +1027,87 @@ fn shared_strings_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
 }
 
 fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
+    doc(|writer| {
+        writer
+            .create_element("worksheet")
+            .with_attribute(("xmlns", NS_MAIN))
+            .write_inner_content(|writer| {
+                write_cols(writer, sheet)?;
+                write_sheet_data(writer, sheet, wb)?;
+                write_merges(writer, sheet)?;
+                Ok(())
+            })?;
+        Ok(())
+    })
+}
+
+fn worksheet_xml_with_template(
+    sheet: &Sheet,
+    wb: &Workbook,
+    template: &XmlTemplate,
+) -> Result<Vec<u8>, ParseError> {
+    let columns = (!sheet.col_widths.is_empty())
+        .then(|| fragment(|writer| write_cols(writer, sheet)))
+        .transpose()?;
+    let sheet_data = Some(fragment(|writer| write_sheet_data(writer, sheet, wb))?);
+    let merges = (!sheet.merges.is_empty())
+        .then(|| fragment(|writer| write_merges(writer, sheet)))
+        .transpose()?;
+    Ok(template.render(
+        vec![
+            ("cols", columns),
+            ("sheetData", sheet_data),
+            ("mergeCells", merges),
+        ],
+        worksheet_child_rank,
+    ))
+}
+
+fn worksheet_child_rank(name: &str) -> usize {
+    match name {
+        "sheetPr" => 0,
+        "dimension" => 1,
+        "sheetViews" => 2,
+        "sheetFormatPr" => 3,
+        "cols" => 4,
+        "sheetData" => 5,
+        "sheetCalcPr" => 6,
+        "sheetProtection" => 7,
+        "protectedRanges" => 8,
+        "scenarios" => 9,
+        "autoFilter" => 10,
+        "sortState" => 11,
+        "dataConsolidate" => 12,
+        "customSheetViews" => 13,
+        "mergeCells" => 14,
+        "phoneticPr" => 15,
+        "conditionalFormatting" => 16,
+        "dataValidations" => 17,
+        "hyperlinks" => 18,
+        "printOptions" => 19,
+        "pageMargins" => 20,
+        "pageSetup" => 21,
+        "headerFooter" => 22,
+        "rowBreaks" => 23,
+        "colBreaks" => 24,
+        "customProperties" => 25,
+        "cellWatches" => 26,
+        "ignoredErrors" => 27,
+        "smartTags" => 28,
+        "drawing" => 29,
+        "legacyDrawing" => 30,
+        "legacyDrawingHF" => 31,
+        "picture" => 32,
+        "oleObjects" => 33,
+        "controls" => 34,
+        "webPublishItems" => 35,
+        "tableParts" => 36,
+        "extLst" => 37,
+        _ => usize::MAX,
+    }
+}
+
+fn write_sheet_data(writer: &mut Writer<Vec<u8>>, sheet: &Sheet, wb: &Workbook) -> io::Result<()> {
     let sst_index: HashMap<&str, usize> = wb
         .shared_strings
         .iter()
@@ -258,22 +1120,15 @@ fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
     rows.sort_unstable();
     rows.dedup();
 
-    doc(|w| {
-        w.create_element("worksheet")
-            .with_attribute(("xmlns", NS_MAIN))
-            .write_inner_content(|w| {
-                write_cols(w, sheet)?;
-                w.create_element("sheetData").write_inner_content(|w| {
-                    for &row in &rows {
-                        write_row(w, sheet, row, &sst_index)?;
-                    }
-                    Ok(())
-                })?;
-                write_merges(w, sheet)?;
-                Ok(())
-            })?;
-        Ok(())
-    })
+    writer
+        .create_element("sheetData")
+        .write_inner_content(|writer| {
+            for &row in &rows {
+                write_row(writer, sheet, row, &sst_index)?;
+            }
+            Ok(())
+        })?;
+    Ok(())
 }
 
 fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
@@ -426,6 +1281,54 @@ fn styles_xml(ss: &Stylesheet) -> Result<Vec<u8>, ParseError> {
             })?;
         Ok(())
     })
+}
+
+fn styles_xml_with_template(
+    stylesheet: &Stylesheet,
+    template: &XmlTemplate,
+) -> Result<Vec<u8>, ParseError> {
+    let num_fmts = (!stylesheet.num_fmts.is_empty())
+        .then(|| fragment(|writer| write_num_fmts(writer, stylesheet)))
+        .transpose()?;
+    let fonts = (!stylesheet.fonts.is_empty())
+        .then(|| fragment(|writer| write_fonts(writer, stylesheet)))
+        .transpose()?;
+    let fills = (!stylesheet.fills.is_empty())
+        .then(|| fragment(|writer| write_fills(writer, stylesheet)))
+        .transpose()?;
+    let borders = (!stylesheet.borders.is_empty())
+        .then(|| fragment(|writer| write_borders(writer, stylesheet)))
+        .transpose()?;
+    let cell_xfs = (!stylesheet.cell_xfs.is_empty())
+        .then(|| fragment(|writer| write_cell_xfs(writer, stylesheet)))
+        .transpose()?;
+    Ok(template.render(
+        vec![
+            ("numFmts", num_fmts),
+            ("fonts", fonts),
+            ("fills", fills),
+            ("borders", borders),
+            ("cellXfs", cell_xfs),
+        ],
+        stylesheet_child_rank,
+    ))
+}
+
+fn stylesheet_child_rank(name: &str) -> usize {
+    match name {
+        "numFmts" => 0,
+        "fonts" => 1,
+        "fills" => 2,
+        "borders" => 3,
+        "cellStyleXfs" => 4,
+        "cellXfs" => 5,
+        "cellStyles" => 6,
+        "dxfs" => 7,
+        "tableStyles" => 8,
+        "colors" => 9,
+        "extLst" => 10,
+        _ => usize::MAX,
+    }
 }
 
 fn write_num_fmts(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {

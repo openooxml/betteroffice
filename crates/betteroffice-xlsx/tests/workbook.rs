@@ -6,6 +6,7 @@ use betteroffice_xlsx::{
     NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId,
     StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use yrs::Update as YrsUpdate;
@@ -50,6 +51,141 @@ fn sample_parts() -> Vec<(String, Vec<u8>)> {
 
 fn sample_xlsx() -> Vec<u8> {
     ooxml_opc::rezip_parts(&sample_parts()).unwrap()
+}
+
+fn preservation_fixture_parts() -> Vec<(String, Vec<u8>)> {
+    let mut model = WorkbookModel::default();
+    model.shared_strings.push("original".to_owned());
+    model.styles.cell_xfs.push(Default::default());
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Text {
+                value: "original".to_owned(),
+            },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B2"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Data" sheetId="7" r:id="rId1"/></sheets><definedNames><definedName name="NamedCell">Data!$A$1</definedName></definedNames><calcPr calcId="191029"/></workbook>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetPr><tabColor rgb="FF4472C4"/></sheetPr><dimension ref="A1:B2"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="B2"><v>1</v></c></row></sheetData><autoFilter ref="A1:B2"/><conditionalFormatting sqref="B2"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="whole" sqref="B2"><formula1>0</formula1></dataValidation></dataValidations><hyperlinks><hyperlink ref="B2" r:id="rIdHyperlink"/></hyperlinks><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup orientation="landscape"/><drawing r:id="rIdDrawing"/><legacyDrawing r:id="rIdVml"/><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/><Relationship Id="rIdVml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/><Relationship Id="rIdHyperlink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid" TargetMode="External"/></Relationships>"#.to_vec(),
+    ));
+    parts.extend([
+        (
+            "xl/drawings/drawing1.xml".to_owned(),
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:row>2</xdr:row></xdr:to><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#.to_vec(),
+        ),
+        (
+            "xl/tables/table1.xml".to_owned(),
+            br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Table1" displayName="Table1" ref="A1:B2"><autoFilter ref="A1:B2"/><tableColumns count="2"><tableColumn id="1" name="Name"/><tableColumn id="2" name="Value"/></tableColumns></table>"#.to_vec(),
+        ),
+        (
+            "xl/comments1.xml".to_owned(),
+            br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>BetterOffice</author></authors><commentList><comment ref="B2" authorId="0"><text><t>keep me</t></text></comment></commentList></comments>"#.to_vec(),
+        ),
+        (
+            "xl/drawings/vmlDrawing1.vml".to_owned(),
+            br#"<xml xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="_x0000_s1025"/></xml>"#.to_vec(),
+        ),
+        (
+            "xl/calcChain.xml".to_owned(),
+            br#"<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="B2" i="1"/></calcChain>"#.to_vec(),
+        ),
+        (
+            "xl/externalLinks/externalLink1.xml".to_owned(),
+            br#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook/></externalLink>"#.to_vec(),
+        ),
+        (
+            "docProps/core.xml".to_owned(),
+            br#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"><cp:revision>9</cp:revision></cp:coreProperties>"#.to_vec(),
+        ),
+        (
+            "customXml/item1.xml".to_owned(),
+            br#"<custom fidelity="byte-identical">payload</custom>"#.to_vec(),
+        ),
+    ]);
+
+    let workbook_rels = test_part_text(&parts, "xl/_rels/workbook.xml.rels")
+        .replace(
+            "</Relationships>",
+            r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/><Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/></Relationships>"#,
+        );
+    set_test_part(
+        &mut parts,
+        "xl/_rels/workbook.xml.rels",
+        workbook_rels.into_bytes(),
+    );
+    let root_rels = test_part_text(&parts, "_rels/.rels").replace(
+        "</Relationships>",
+        r#"<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#,
+    );
+    set_test_part(&mut parts, "_rels/.rels", root_rels.into_bytes());
+    let content_types = test_part_text(&parts, "[Content_Types].xml")
+        .replacen(
+            "<Override",
+            r#"<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/><Override"#,
+            1,
+        )
+        .replace(
+            "</Types>",
+            r#"<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/><Override PartName="/xl/comments1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml"/><Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/><Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#,
+        );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        content_types.into_bytes(),
+    );
+    let styles = test_part_text(&parts, "xl/styles.xml").replace(
+        "</styleSheet>",
+        r#"<dxfs count="1"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></dxf></dxfs><tableStyles count="0" defaultTableStyle="TableStyleMedium2"/></styleSheet>"#,
+    );
+    set_test_part(&mut parts, "xl/styles.xml", styles.into_bytes());
+    parts
+}
+
+fn preservation_fixture() -> Vec<u8> {
+    ooxml_opc::rezip_parts(&preservation_fixture_parts()).unwrap()
+}
+
+fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
+    parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
+}
+
+fn test_part_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
+    String::from_utf8(
+        parts
+            .iter()
+            .find(|(name, _)| name == path)
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap()
+}
+
+fn package_map(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    ooxml_opc::unzip_parts(bytes).unwrap().into_iter().collect()
 }
 
 fn overlapping_merge_parts() -> Vec<(String, Vec<u8>)> {
@@ -2445,4 +2581,175 @@ fn collaboration_decoding_validates_malformed_and_oversized_payloads() {
     ));
     let max_client = Workbook::open_collaborative(&bytes, MAX_COLLABORATION_CLIENT_ID).unwrap();
     assert_eq!(max_client.client_id(), MAX_COLLABORATION_CLIENT_ID);
+}
+
+#[test]
+fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
+    let original = preservation_fixture();
+    let before_order = ooxml_opc::unzip_parts(&original)
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after_order = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    let after = package_map(&saved);
+
+    assert_eq!(after_order, before_order);
+    for path in before.keys() {
+        assert!(after.contains_key(path), "missing {path}");
+    }
+    let owned = [
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+        "xl/sharedStrings.xml",
+        "xl/styles.xml",
+        "xl/theme/theme1.xml",
+        "xl/worksheets/sheet1.xml",
+    ];
+    for (path, bytes) in &before {
+        if !owned.contains(&path.as_str()) {
+            assert_eq!(&after[path], bytes, "changed {path}");
+        }
+    }
+
+    let workbook_xml = String::from_utf8(after["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
+    let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    let fragments = [
+        "<sheetViews>",
+        "<autoFilter",
+        "<conditionalFormatting",
+        "<dataValidations",
+        "<hyperlinks>",
+        "<pageSetup",
+        "<drawing",
+        "<legacyDrawing",
+        "<tableParts",
+    ];
+    let positions = fragments
+        .iter()
+        .map(|fragment| worksheet.find(fragment).unwrap())
+        .collect::<Vec<_>>();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(worksheet.contains(r#"state="frozen""#));
+
+    let content_types = String::from_utf8(after["[Content_Types].xml"].clone()).unwrap();
+    for part in [
+        "/xl/drawings/drawing1.xml",
+        "/xl/tables/table1.xml",
+        "/xl/comments1.xml",
+        "/xl/calcChain.xml",
+        "/xl/externalLinks/externalLink1.xml",
+        "/docProps/core.xml",
+    ] {
+        assert!(
+            content_types.contains(part),
+            "missing content type for {part}"
+        );
+    }
+    let workbook_rels = String::from_utf8(after["xl/_rels/workbook.xml.rels"].clone()).unwrap();
+    assert!(workbook_rels.contains(r#"Id="rId9""#));
+    assert!(workbook_rels.contains(r#"Id="rId12""#));
+    let styles = String::from_utf8(after["xl/styles.xml"].clone()).unwrap();
+    assert!(styles.contains("<dxfs"));
+    assert!(styles.contains("<tableStyles"));
+
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("A1"))
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "original".to_owned()
+        }
+    );
+    assert_eq!(
+        reopened
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("B2"))
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "edited".to_owned()
+        }
+    );
+}
+
+#[test]
+fn preserved_package_save_reaches_a_part_fixed_point() {
+    let original = preservation_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "fixed",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let first = workbook.save().unwrap();
+    let second = Workbook::open(&first).unwrap().save().unwrap();
+    assert_eq!(
+        ooxml_opc::unzip_parts(&first).unwrap(),
+        ooxml_opc::unzip_parts(&second).unwrap()
+    );
+}
+
+#[test]
+fn collaborative_materialization_retains_source_package() {
+    let original = preservation_fixture();
+    let before = package_map(&original);
+    let mut left = Workbook::open_collaborative(&original, 1201).unwrap();
+    let mut right = Workbook::open_collaborative(&original, 1202).unwrap();
+    left.edit_cell(
+        SheetId(0),
+        cell("B2"),
+        "remote",
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    let after = package_map(&right.save().unwrap());
+
+    for path in [
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        "xl/drawings/drawing1.xml",
+        "xl/tables/table1.xml",
+        "xl/comments1.xml",
+        "xl/drawings/vmlDrawing1.vml",
+        "xl/calcChain.xml",
+        "xl/externalLinks/externalLink1.xml",
+        "docProps/core.xml",
+        "customXml/item1.xml",
+    ] {
+        assert_eq!(after[path], before[path], "changed {path}");
+    }
 }
