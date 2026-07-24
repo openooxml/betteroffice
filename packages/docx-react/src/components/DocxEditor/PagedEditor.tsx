@@ -85,6 +85,7 @@ import {
   pluginOverlaysStyles,
 } from './internals/styles';
 import { viewportMinHeightPx } from './internals/scrollUtils';
+import type { LayoutUpdateOrigin } from './internals/viewportAnchoring';
 import {
   createCanvasHostProjector,
   createRenderedDomContext,
@@ -614,7 +615,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]
     );
-    const { layout, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
+    const { layout, layoutUpdateOrigin, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
       document,
       session: yrsCore.session,
       renderEnv: yrsRenderEnv,
@@ -690,12 +691,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       []
     );
-    const refreshYrsLayout = useCallback((): void => {
-      yrsProjectionVersionRef.current += 1;
-      syncCoordinator.incrementStateSeq();
-      syncCoordinator.requestRender();
-      scheduleLayout();
-    }, [scheduleLayout, syncCoordinator]);
+    const refreshYrsLayout = useCallback(
+      (origin: LayoutUpdateOrigin): void => {
+        yrsProjectionVersionRef.current += 1;
+        syncCoordinator.incrementStateSeq();
+        syncCoordinator.requestRender();
+        scheduleLayout(origin);
+      },
+      [scheduleLayout, syncCoordinator]
+    );
 
     /**
      * Publish sticky yrs selection geometry and refresh the yrs-backed layout.
@@ -705,7 +709,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         selection: YrsDisplaySelection,
         docChanged: boolean,
         residentLayoutReady = false,
-        residentCaretReady = false
+        residentCaretReady = false,
+        updateOrigin: LayoutUpdateOrigin = 'local'
       ): void => {
         const session = yrsCore.session;
         if (session) {
@@ -775,7 +780,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // later from a projection rebuild.
         if (!residentCaretReady) updateSelectionOverlay();
         if (docChanged && !residentLayoutReady) {
-          refreshYrsLayout();
+          refreshYrsLayout(updateOrigin);
         }
         if (docChanged) {
           // Compatibility callbacks stay off the synchronous input path.
@@ -816,13 +821,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [collaboration?.presence, yrsCore.session]);
 
     const syncYrsInputState = useCallback(
-      (docChanged: boolean): boolean => {
+      (docChanged: boolean, origin: LayoutUpdateOrigin = 'local'): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
           yrsCore.publishDirectInput();
         }
-        handleYrsStateChange(displaySelection, docChanged);
+        handleYrsStateChange(displaySelection, docChanged, false, false, origin);
         return true;
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
@@ -832,7 +837,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       const session = yrsCore.session;
       if (!session) return;
       return session.onUpdate((_update, origin) => {
-        if (origin === 'remote') syncYrsInputState(true);
+        if (origin === 'remote') syncYrsInputState(true, origin);
       });
     }, [syncYrsInputState, yrsCore.session]);
 
@@ -1632,6 +1637,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           displayListFrameEpoch={displayListFrameEpoch}
           residentCaret={residentCaret}
           residentCaretAuthoritative={residentCaretAuthoritative}
+          layoutUpdateOrigin={layoutUpdateOrigin}
           canvasHostRef={canvasHostRef ?? pagesContainerRef}
           onStateChange={handleYrsStateChange}
           onDirectInput={publishYrsDirectInput}

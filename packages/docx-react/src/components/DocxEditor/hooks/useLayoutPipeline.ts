@@ -21,10 +21,33 @@ import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import {
   captureDisplayListScrollAnchor,
+  captureDisplayListViewportAnchor,
   restoreDisplayListScrollAnchor,
+  restoreDisplayListViewportAnchor,
   restoreScrollSnapshot,
   type DisplayListScrollAnchor,
+  type DisplayListViewportAnchor,
 } from '../internals/scrollRestore';
+import type { LayoutUpdateOrigin } from '../internals/viewportAnchoring';
+
+interface SelectionScrollRestore {
+  kind: 'selection';
+  anchor: DisplayListScrollAnchor;
+}
+
+interface ViewportScrollRestore {
+  kind: 'viewport';
+  anchor: DisplayListViewportAnchor;
+}
+
+type PendingScrollRestore = SelectionScrollRestore | ViewportScrollRestore;
+
+function mergeLayoutUpdateOrigin(
+  current: LayoutUpdateOrigin | null,
+  next: LayoutUpdateOrigin
+): LayoutUpdateOrigin {
+  return current === 'local' || next === 'local' ? 'local' : 'remote';
+}
 
 export interface UseLayoutPipelineOptions {
   document: Document | null;
@@ -69,8 +92,9 @@ export interface UseLayoutPipelineReturn {
   layout: Layout | null;
   blocks: LayoutBlock[];
   measures: BlockExtent[];
+  layoutUpdateOrigin: LayoutUpdateOrigin;
   runLayoutPipeline: () => void;
-  scheduleLayout: () => void;
+  scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
 }
 
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
@@ -128,7 +152,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   // Scroll-restore plumbing. `pendingScrollRestoreRef` is read by both the
   // pipeline and the post-commit useLayoutEffect below.
-  const pendingScrollRestoreRef = useRef<DisplayListScrollAnchor | null>(null);
+  const pendingScrollRestoreRef = useRef<PendingScrollRestore | null>(null);
+  const pendingLayoutOriginRef = useRef<LayoutUpdateOrigin | null>(null);
+  const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('local');
 
   // =========================================================================
   // Layout Pipeline
@@ -136,12 +162,18 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const runLayoutPipeline = useCallback(
     () => {
+      const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
+      pendingLayoutOriginRef.current = null;
       const pipelineStart = performance.now();
 
       const currentEpoch = syncCoordinator.getStateSeq();
       syncCoordinator.onLayoutStart();
 
       if (deferLayoutPassRef.current() || !session) {
+        pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+          pendingLayoutOriginRef.current,
+          layoutUpdateOrigin
+        );
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -157,6 +189,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         console.error('[PagedEditor] Resident font preflight error:', error);
       }
       if (!measurement) {
+        pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+          pendingLayoutOriginRef.current,
+          layoutUpdateOrigin
+        );
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
@@ -174,16 +210,29 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         const queries = displayListQueriesRef.current;
         const anchor =
           scrollParent?.isConnected && interactionHost && queries
-            ? captureDisplayListScrollAnchor(
-                queries,
-                interactionHost,
-                scrollParent,
-                getSelectionHead?.() ?? 0
-              )
+            ? layoutUpdateOrigin === 'remote'
+              ? {
+                  kind: 'viewport' as const,
+                  anchor: captureDisplayListViewportAnchor(
+                    queries,
+                    interactionHost,
+                    scrollParent
+                  ),
+                }
+              : {
+                  kind: 'selection' as const,
+                  anchor: captureDisplayListScrollAnchor(
+                    queries,
+                    interactionHost,
+                    scrollParent,
+                    getSelectionHead?.() ?? 0
+                  ),
+                }
             : null;
 
         setBlocks(newBlocks);
         setMeasures(newMeasures);
+        layoutUpdateOriginRef.current = layoutUpdateOrigin;
         setLayout(newLayout);
 
         const vp = viewportLayoutRef.current;
@@ -236,7 +285,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     const pagesEl = pagesContainerRef.current;
     const scrollParent =
       getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
-    if (scrollParent?.isConnected) restoreScrollSnapshot(pending, scrollParent);
+    if (scrollParent?.isConnected) restoreScrollSnapshot(pending.anchor, scrollParent);
   }, [layout, getScrollContainer, pagesContainerRef]);
 
   // A new immutable display-list/query facade is the geometry commit signal.
@@ -248,11 +297,21 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
     if (!pending || !displayListQueries || !host || !scrollParent?.isConnected) return;
     pendingScrollRestoreRef.current = null;
-    restoreDisplayListScrollAnchor(pending, displayListQueries, host, scrollParent);
-    const rafId = requestAnimationFrame(() => {
-      if (scrollParent.isConnected) {
-        restoreDisplayListScrollAnchor(pending, displayListQueries, host, scrollParent);
+    const restore = (): void => {
+      if (pending.kind === 'viewport') {
+        restoreDisplayListViewportAnchor(
+          pending.anchor,
+          displayListQueries,
+          host,
+          scrollParent
+        );
+      } else {
+        restoreDisplayListScrollAnchor(pending.anchor, displayListQueries, host, scrollParent);
       }
+    };
+    restore();
+    const rafId = requestAnimationFrame(() => {
+      if (scrollParent.isConnected) restore();
     });
     return () => cancelAnimationFrame(rafId);
   }, [displayListQueries, getScrollContainer, interactionPageHostRef, pagesContainerRef]);
@@ -271,11 +330,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const runRef = useRef(runLayoutPipeline);
   runRef.current = runLayoutPipeline;
   const schedulerRef = useRef<number | null>(null);
-  const scheduleLayout = useCallback(() => {
+  const scheduleLayout = useCallback((origin: LayoutUpdateOrigin = 'local') => {
+    pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
+      pendingLayoutOriginRef.current,
+      origin
+    );
     if (schedulerRef.current != null) return;
     schedulerRef.current = requestAnimationFrame(() => {
       schedulerRef.current = null;
-      runRef.current();
+      if (pendingLayoutOriginRef.current) runRef.current();
     });
   }, []);
 
@@ -290,6 +353,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     layout,
     blocks,
     measures,
+    layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
   };
