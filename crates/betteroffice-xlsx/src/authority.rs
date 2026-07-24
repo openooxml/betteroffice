@@ -29,6 +29,8 @@ const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
+const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
+const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const SCHEMA_VERSION: i64 = 5;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
@@ -86,6 +88,9 @@ struct WorkbookBase {
     date_system: DateSystem,
     defined_names: Vec<DefinedName>,
     fingerprint: String,
+    fingerprints: BTreeMap<i64, Vec<String>>,
+    freeze_panes: Vec<Option<FreezePane>>,
+    hyperlinks: Vec<Vec<Hyperlink>>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
 }
@@ -93,14 +98,37 @@ struct WorkbookBase {
 impl WorkbookBase {
     fn from_model(model: &WorkbookModel) -> Result<Self, String> {
         let (fingerprint, bootstrap_client_id) = fingerprint_model(model)?;
+        let mut fingerprints = BTreeMap::new();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (version_fingerprint, _) = fingerprint_model_for_schema(model, version)?;
+            fingerprints.insert(version, vec![version_fingerprint]);
+        }
+        let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
+        let version_3 = fingerprints.get_mut(&3).unwrap();
+        if !version_3.contains(&defined_names_v3) {
+            version_3.push(defined_names_v3);
+        }
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
             defined_names: model.defined_names.clone(),
             fingerprint,
+            fingerprints,
+            freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
+            hyperlinks: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.hyperlinks.clone())
+                .collect(),
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
         })
+    }
+
+    fn accepts_fingerprint(&self, version: i64, fingerprint: &str) -> bool {
+        self.fingerprints
+            .get(&version)
+            .is_some_and(|accepted| accepted.iter().any(|value| value == fingerprint))
     }
 
     fn workbook(&self) -> WorkbookModel {
@@ -345,14 +373,19 @@ impl WorkbookAuthority {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
-        let after = staged.encode_state_as_update_v1();
-        let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
-        let after_vector = staged.doc.transact().state_vector();
-        let state_vector_entries = after_vector.len();
         let pending = {
             let txn = staged.doc.transact();
             txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
         };
+        if let Err(error) = staged.upgrade_schema()
+            && !pending
+        {
+            return Err(AuthorityError::InvalidState(error));
+        }
+        let after = staged.encode_state_as_update_v1();
+        let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
+        let after_vector = staged.doc.transact().state_vector();
+        let state_vector_entries = after_vector.len();
         if pending {
             let (current_model, current_structure) = self
                 .strict_materialize()
@@ -531,6 +564,79 @@ impl WorkbookAuthority {
         self.materialize_internal(true)
     }
 
+    fn upgrade_schema(&self) -> Result<bool, String> {
+        let version = self.schema_version()?;
+        validate_schema_version(version)?;
+        self.deduplicate_sheet_order()?;
+        if version == SCHEMA_VERSION {
+            return Ok(false);
+        }
+        let (model, structure) = self.materialize_internal(false)?;
+        let features = structure
+            .sheet_keys
+            .iter()
+            .zip(&model.sheets)
+            .map(|(key, sheet)| {
+                serde_json::to_string(&sheet.hyperlinks)
+                    .map(|hyperlinks| (key.clone(), (sheet.freeze_pane, hyperlinks)))
+                    .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let keys = sheets.keys(&txn).map(str::to_string).collect::<Vec<_>>();
+        for key in keys {
+            let sheet = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("sheet {key} is not a map"))?;
+            let (freeze_pane, hyperlinks) = features
+                .get(&key)
+                .map(|(freeze_pane, hyperlinks)| (*freeze_pane, hyperlinks.as_str()))
+                .unwrap_or((None, "[]"));
+            if version < FREEZE_PANE_SCHEMA_VERSION {
+                sheet.try_update(&mut txn, FREEZE_PANE, freeze_pane_to_any(freeze_pane));
+            }
+            if version < SCHEMA_VERSION {
+                sheet.try_update(&mut txn, HYPERLINKS, hyperlinks);
+            }
+        }
+        let meta = txn
+            .get_map(META)
+            .ok_or_else(|| "missing workbook metadata".to_string())?;
+        meta.try_update(&mut txn, BASE_FINGERPRINT, self.base.fingerprint.as_str());
+        meta.try_update(&mut txn, "schemaVersion", SCHEMA_VERSION);
+        Ok(true)
+    }
+
+    fn deduplicate_sheet_order(&self) -> Result<(), String> {
+        let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let order = txn
+            .get_array(SHEET_ORDER)
+            .ok_or_else(|| "missing sheet order".to_string())?;
+        let keys = sheet_keys(&order, &txn)?;
+        let mut seen = HashSet::with_capacity(keys.len());
+        let duplicates = keys
+            .iter()
+            .enumerate()
+            .filter_map(|(index, key)| (!seen.insert(key)).then_some(index))
+            .collect::<Vec<_>>();
+        for index in duplicates.into_iter().rev() {
+            order.remove(&mut txn, yrs_index(index)?);
+        }
+        Ok(())
+    }
+
+    fn schema_version(&self) -> Result<i64, String> {
+        let txn = self.doc.transact();
+        txn.get_map(META)
+            .and_then(|meta| meta.get(&txn, "schemaVersion"))
+            .and_then(|value| value.cast::<i64>().ok())
+            .ok_or_else(|| "missing schema version".to_string())
+    }
+
     fn materialize_internal(
         &self,
         strict: bool,
@@ -554,14 +660,12 @@ impl WorkbookAuthority {
             .get(&txn, "schemaVersion")
             .and_then(|value| value.cast::<i64>().ok())
             .ok_or_else(|| "missing schema version".to_string())?;
-        if version != SCHEMA_VERSION {
-            return Err(format!("unsupported schema version {version}"));
-        }
+        validate_schema_version(version)?;
         let fingerprint = meta
             .get(&txn, BASE_FINGERPRINT)
             .and_then(|value| value.cast::<String>().ok())
             .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
-        if fingerprint != self.base.fingerprint {
+        if !self.base.accepts_fingerprint(version, &fingerprint) {
             return Err("workbook base fingerprint does not match shared state".to_string());
         }
         let generation = structure_generation(&meta, &txn)?;
@@ -581,7 +685,8 @@ impl WorkbookAuthority {
         let mut seen = HashSet::with_capacity(keys.len());
         let mut model = self.base.workbook();
         model.styles = styles;
-        for key in &keys {
+        let expected_sheet_keys = sheet_schema_keys(version);
+        for (index, key) in keys.iter().enumerate() {
             if !seen.insert(key.clone()) {
                 return Err(format!("duplicate sheet key {key}"));
             }
@@ -593,22 +698,25 @@ impl WorkbookAuthority {
                 require_map_keys(
                     &sheet_map,
                     &txn,
-                    &[
-                        COL_WIDTHS,
-                        CONTENTS,
-                        FREEZE_PANE,
-                        HYPERLINKS,
-                        MERGES,
-                        NAME,
-                        ROW_HEIGHTS,
-                        STYLES,
-                    ],
+                    expected_sheet_keys,
                     &format!("sheet {key}"),
                 )?;
             }
-            model
-                .sheets
-                .push(materialize_sheet(&sheet_map, &txn, &style_indices)?);
+            let freeze_pane = self.base.freeze_panes.get(index).copied().flatten();
+            let hyperlinks = self
+                .base
+                .hyperlinks
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            model.sheets.push(materialize_sheet(
+                &sheet_map,
+                &txn,
+                &style_indices,
+                version,
+                freeze_pane,
+                hyperlinks,
+            )?);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
@@ -625,19 +733,10 @@ impl WorkbookAuthority {
                 require_map_keys(
                     &sheet_map,
                     &txn,
-                    &[
-                        COL_WIDTHS,
-                        CONTENTS,
-                        FREEZE_PANE,
-                        HYPERLINKS,
-                        MERGES,
-                        NAME,
-                        ROW_HEIGHTS,
-                        STYLES,
-                    ],
+                    expected_sheet_keys,
                     &format!("inactive sheet {key}"),
                 )?;
-                materialize_sheet(&sheet_map, &txn, &style_indices)?;
+                materialize_sheet(&sheet_map, &txn, &style_indices, version, None, &[])?;
             }
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
@@ -2139,6 +2238,9 @@ fn materialize_sheet<T: ReadTxn>(
     sheet_map: &MapRef,
     txn: &T,
     style_indices: &BTreeMap<String, Option<u32>>,
+    version: i64,
+    fallback_freeze_pane: Option<FreezePane>,
+    fallback_hyperlinks: &[Hyperlink],
 ) -> Result<Sheet, String> {
     let name = sheet_map
         .get(txn, NAME)
@@ -2180,12 +2282,15 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
-    sheet.freeze_pane = match sheet_map.get(txn, FREEZE_PANE) {
-        Some(Out::Any(value)) => freeze_pane_from_any(&value)?,
-        _ => return Err("sheet is missing freeze pane".to_string()),
+    sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
+        (FREEZE_PANE_SCHEMA_VERSION.., _) => {
+            return Err("sheet is missing freeze pane".to_string());
+        }
+        _ => fallback_freeze_pane,
     };
-    sheet.hyperlinks = match sheet_map.get(txn, HYPERLINKS) {
-        Some(value) => {
+    sheet.hyperlinks = match (version, sheet_map.get(txn, HYPERLINKS)) {
+        (SCHEMA_VERSION.., Some(value)) => {
             let json = value
                 .cast::<String>()
                 .map_err(|_| "sheet hyperlinks are not a string".to_string())?;
@@ -2194,7 +2299,8 @@ fn materialize_sheet<T: ReadTxn>(
             validate_hyperlinks(&hyperlinks)?;
             hyperlinks
         }
-        None => return Err("sheet is missing hyperlinks".to_string()),
+        (SCHEMA_VERSION.., None) => return Err("sheet is missing hyperlinks".to_string()),
+        _ => fallback_hyperlinks.to_vec(),
     };
     sheet.merges = match sheet_map.get(txn, MERGES) {
         Some(Out::Any(value)) => merges_from_any(&value)?,
@@ -2268,6 +2374,44 @@ fn structure_generation<T: ReadTxn>(meta: &MapRef, txn: &T) -> Result<i64, Strin
         return Err("structure generation is negative".to_string());
     }
     Ok(generation)
+}
+
+fn validate_schema_version(version: i64) -> Result<(), String> {
+    if (MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&version) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unsupported schema version {version}; supported versions are {MIN_SUPPORTED_SCHEMA_VERSION} through {SCHEMA_VERSION}"
+        ))
+    }
+}
+
+fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
+    const V3: &[&str] = &[COL_WIDTHS, CONTENTS, MERGES, NAME, ROW_HEIGHTS, STYLES];
+    const V4: &[&str] = &[
+        COL_WIDTHS,
+        CONTENTS,
+        FREEZE_PANE,
+        MERGES,
+        NAME,
+        ROW_HEIGHTS,
+        STYLES,
+    ];
+    const V5: &[&str] = &[
+        COL_WIDTHS,
+        CONTENTS,
+        FREEZE_PANE,
+        HYPERLINKS,
+        MERGES,
+        NAME,
+        ROW_HEIGHTS,
+        STYLES,
+    ];
+    match version {
+        MIN_SUPPORTED_SCHEMA_VERSION => V3,
+        FREEZE_PANE_SCHEMA_VERSION => V4,
+        _ => V5,
+    }
 }
 
 fn require_root_keys<T: ReadTxn>(txn: &T, expected: &[&str]) -> Result<(), String> {
@@ -2607,14 +2751,39 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
 }
 
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
+    fingerprint_model_for_schema(model, SCHEMA_VERSION)
+}
+
+fn fingerprint_model_for_schema(
+    model: &WorkbookModel,
+    schema_version: i64,
+) -> Result<(String, u64), String> {
+    fingerprint_model_with_schema(model, schema_version, schema_version >= 4)
+}
+
+fn fingerprint_model_with_schema(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+) -> Result<(String, u64), String> {
+    validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
-    hasher.update(b"betteroffice-xlsx-yrs-v5");
-    let base = serde_json::to_vec(&(
-        model.date_system,
-        &model.defined_names,
-        &model.shared_strings,
-        &model.styles,
-    ))
+    let domain = match schema_version {
+        3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
+        4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v5".as_slice(),
+    };
+    hasher.update(domain);
+    let base = if include_defined_names {
+        serde_json::to_vec(&(
+            model.date_system,
+            &model.defined_names,
+            &model.shared_strings,
+            &model.styles,
+        ))
+    } else {
+        serde_json::to_vec(&(model.date_system, &model.shared_strings, &model.styles))
+    }
     .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);
     hash_u64(&mut hasher, model.sheets.len() as u64);
@@ -2655,18 +2824,22 @@ fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
             hash_u32(&mut hasher, row);
             hash_u64(&mut hasher, height.to_bits());
         }
-        match sheet.freeze_pane {
-            Some(pane) => {
-                hasher.update([1]);
-                hash_u32(&mut hasher, pane.rows);
-                hash_u32(&mut hasher, pane.cols);
-                hash_cell_ref(&mut hasher, pane.top_left);
+        if schema_version >= FREEZE_PANE_SCHEMA_VERSION {
+            match sheet.freeze_pane {
+                Some(pane) => {
+                    hasher.update([1]);
+                    hash_u32(&mut hasher, pane.rows);
+                    hash_u32(&mut hasher, pane.cols);
+                    hash_cell_ref(&mut hasher, pane.top_left);
+                }
+                None => hasher.update([0]),
             }
-            None => hasher.update([0]),
         }
-        let hyperlinks = serde_json::to_vec(&sheet.hyperlinks)
-            .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
-        hash_bytes(&mut hasher, &hyperlinks);
+        if schema_version >= SCHEMA_VERSION {
+            let hyperlinks = serde_json::to_vec(&sheet.hyperlinks)
+                .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
+            hash_bytes(&mut hasher, &hyperlinks);
+        }
     }
     let digest = hasher.finalize();
     let fingerprint = format!("{digest:x}");
@@ -2771,6 +2944,57 @@ mod tests {
         model
     }
 
+    fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
+        let base = WorkbookBase::from_model(model).unwrap();
+        let (_, client_id) =
+            fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
+        let doc = Doc::with_client_id(client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        seed(&doc, &base, model, &keys).unwrap();
+        {
+            let (fingerprint, _) =
+                fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
+            let mut txn = doc.transact_mut_with("test:legacy-schema");
+            let meta = txn.get_map(META).unwrap();
+            meta.try_update(&mut txn, BASE_FINGERPRINT, fingerprint);
+            meta.try_update(&mut txn, "schemaVersion", version);
+            let sheets = txn.get_map(SHEETS).unwrap();
+            for key in keys {
+                let sheet = sheets
+                    .get(&txn, &key)
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .unwrap();
+                if version < SCHEMA_VERSION {
+                    sheet.remove(&mut txn, HYPERLINKS);
+                }
+                if version < FREEZE_PANE_SCHEMA_VERSION {
+                    sheet.remove(&mut txn, FREEZE_PANE);
+                }
+            }
+        }
+        doc.transact()
+            .encode_state_as_update_v1(&StateVector::default())
+    }
+
+    fn authority_from_update(
+        model: &WorkbookModel,
+        update: &[u8],
+        client_id: u64,
+    ) -> WorkbookAuthority {
+        let doc = Doc::with_client_id(client_id);
+        hydrate_doc(&doc, update).unwrap();
+        WorkbookAuthority {
+            doc,
+            base: WorkbookBase::from_model(model).unwrap(),
+            history: SheetOrderHistory::default(),
+            next_sheet_id: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+
     #[test]
     fn deterministic_bootstrap_round_trips_formula_fallbacks() {
         let model = rich_model();
@@ -2785,6 +3009,56 @@ mod tests {
         assert_eq!(
             left.encode_state_as_update_v1(),
             right.encode_state_as_update_v1()
+        );
+    }
+
+    #[test]
+    fn known_schema_versions_materialize_and_upgrade_to_current() {
+        let model = rich_model();
+        for (index, (version, include_defined_names)) in
+            [(3, false), (3, true), (4, true)].into_iter().enumerate()
+        {
+            let update = legacy_update(&model, version, include_defined_names);
+            let authority = authority_from_update(&model, &update, 101 + index as u64);
+            assert_eq!(authority.strict_materialize().unwrap().0, model);
+
+            let staged = authority.stage_updates_v1(&[Update::EMPTY_V1]).unwrap();
+            assert!(staged.effective);
+            authority.apply_update_v1(&staged.commit_update).unwrap();
+            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.strict_materialize().unwrap().0, model);
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_merges_into_current_bootstrap() {
+        let model = rich_model();
+        for (version, include_defined_names) in [(3, false), (3, true), (4, true)] {
+            let update = legacy_update(&model, version, include_defined_names);
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, 108).unwrap();
+            let staged = authority.stage_updates_v1(&[&update]).unwrap();
+            assert_eq!(staged.model, model);
+            authority.apply_update_v1(&staged.commit_update).unwrap();
+            assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
+            assert_eq!(authority.strict_materialize().unwrap().0, model);
+        }
+    }
+
+    #[test]
+    fn unknown_schema_version_reports_supported_range() {
+        let model = rich_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 110).unwrap();
+        {
+            let mut txn = authority.doc.transact_mut_with("test:unknown-schema");
+            let meta = txn.get_map(META).unwrap();
+            meta.try_update(&mut txn, "schemaVersion", SCHEMA_VERSION + 1);
+        }
+        let AuthorityError::InvalidState(error) = authority.materialize().unwrap_err() else {
+            panic!("expected invalid state");
+        };
+        assert_eq!(
+            error,
+            "unsupported schema version 6; supported versions are 3 through 5"
         );
     }
 
