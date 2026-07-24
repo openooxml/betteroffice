@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  MAX_AWARENESS_CURSOR_BYTES,
+  MAX_AWARENESS_ENTRIES_PER_UPDATE,
+  MAX_AWARENESS_STRING_LENGTH,
+  MAX_AWARENESS_TRACKED_PEERS,
+} from './awareness';
+import {
   decodeAwarenessUpdate,
   decodeMessages,
   encodeAwarenessMessage,
@@ -148,6 +154,96 @@ describe('collaboration protocol decoding', () => {
     ]);
 
     expect(decodeAwarenessUpdate(update)[0]?.state?.user.color).toBe('#A142F4');
+  });
+
+  it('discards over-limit states while keeping valid awareness entries', () => {
+    const valid = {
+      clientId: 12,
+      clock: 1,
+      state: {
+        user: { name: 'Bright Fox', color: '#137333' },
+        cursor: null,
+      },
+    };
+    const discarded: ProtocolError[] = [];
+    const update = encodeAwarenessUpdate([
+      {
+        clientId: 10,
+        clock: 1,
+        state: {
+          user: {
+            name: 'n'.repeat(MAX_AWARENESS_STRING_LENGTH + 1),
+            color: '#000000',
+          },
+          cursor: null,
+        },
+      },
+      valid,
+      {
+        clientId: 14,
+        clock: 1,
+        state: {
+          user: { name: 'Large Cursor', color: '#000000' },
+          cursor: {
+            story: 'body',
+            anchor: new Uint8Array(MAX_AWARENESS_CURSOR_BYTES + 1),
+            head: Uint8Array.of(1),
+          },
+        },
+      },
+    ]);
+
+    expect(
+      decodeAwarenessUpdate(update, {
+        onDiscard: (error) => discarded.push(error),
+      })
+    ).toEqual([valid]);
+    expect(discarded.map((error) => error.message)).toEqual([
+      `Awareness user name exceeds ${MAX_AWARENESS_STRING_LENGTH} characters`,
+      `Awareness cursor anchor exceeds ${MAX_AWARENESS_CURSOR_BYTES} bytes`,
+    ]);
+  });
+
+  it('caps entries per update and total tracked peers', () => {
+    const flood = Array.from({ length: MAX_AWARENESS_ENTRIES_PER_UPDATE + 2 }, (_, index) => ({
+      clientId: index + 10,
+      clock: 1,
+      state: null,
+    }));
+    const frameDiscards: ProtocolError[] = [];
+    const decoded = decodeAwarenessUpdate(encodeAwarenessUpdate(flood), {
+      onDiscard: (error) => frameDiscards.push(error),
+    });
+
+    expect(decoded).toHaveLength(MAX_AWARENESS_ENTRIES_PER_UPDATE);
+    expect(frameDiscards.map((error) => error.message)).toEqual([
+      `Awareness update exceeds ${MAX_AWARENESS_ENTRIES_PER_UPDATE} entries`,
+    ]);
+
+    const tracked = new Set(
+      Array.from({ length: MAX_AWARENESS_TRACKED_PEERS }, (_, index) => index + 10)
+    );
+    const peerDiscards: ProtocolError[] = [];
+    const existing = flood[0];
+    expect(
+      decodeAwarenessUpdate(
+        encodeAwarenessUpdate([
+          existing,
+          {
+            clientId: MAX_AWARENESS_TRACKED_PEERS + 100,
+            clock: 1,
+            state: null,
+          },
+        ]),
+        {
+          trackedClientIds: tracked,
+          onDiscard: (error) => peerDiscards.push(error),
+        }
+      )
+    ).toEqual([existing]);
+    expect(peerDiscards.map((error) => error.message)).toEqual([
+      `Awareness peer limit of ${MAX_AWARENESS_TRACKED_PEERS} reached`,
+    ]);
   });
 
   it('rejects overflowing and non-canonical varUints', () => {

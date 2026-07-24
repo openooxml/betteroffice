@@ -20,6 +20,8 @@ const PRESENCE_COLOR_PATTERN = /^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/;
 
 export const MAX_AWARENESS_STRING_LENGTH = 1024;
 export const MAX_AWARENESS_CURSOR_BYTES = 1024;
+export const MAX_AWARENESS_ENTRIES_PER_UPDATE = 1024;
+export const MAX_AWARENESS_TRACKED_PEERS = 1024;
 
 export function resolvePresenceColor(clientId: number, color: unknown): string {
   if (typeof color === 'string' && PRESENCE_COLOR_PATTERN.test(color)) return color;
@@ -116,6 +118,7 @@ export function reduceAwarenessEntries(
   for (const entry of entries) {
     if (entry.clientId === localClientId) continue;
     const previous = records.get(entry.clientId);
+    if (!previous && records.size >= MAX_AWARENESS_TRACKED_PEERS) continue;
     if (previous && entry.clock <= previous.clock) {
       if (entry.clock === previous.clock && now > previous.lastSeenAt) {
         if (records === current) records = new Map(current);
@@ -156,6 +159,9 @@ export function reduceTypingInference(
     return { records: current, peersChanged: false };
   }
   const previous = current.get(inference.clientId);
+  if (!previous && current.size >= MAX_AWARENESS_TRACKED_PEERS) {
+    return { records: current, peersChanged: false };
+  }
   const records = new Map(current);
   records.set(inference.clientId, {
     clientId: inference.clientId,

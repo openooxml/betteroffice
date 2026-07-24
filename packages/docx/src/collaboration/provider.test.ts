@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  MAX_AWARENESS_CURSOR_BYTES,
+  MAX_AWARENESS_ENTRIES_PER_UPDATE,
+  MAX_AWARENESS_STRING_LENGTH,
+  MAX_AWARENESS_TRACKED_PEERS,
+} from './awareness';
+import {
   decodeAwarenessUpdate,
   decodeMessages,
   encodeAwarenessMessage,
@@ -385,10 +391,7 @@ describe('CollaborationProvider awareness', () => {
     const { provider, replica, transport } = open();
     const errors: CollaborationError[] = [];
     provider.onError((error) => errors.push(error));
-    transport.emit({
-      type: 'message',
-      data: encodeSyncStep2(Uint8Array.of(4)),
-    });
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
 
     transport.emit({
       type: 'message',
@@ -400,6 +403,169 @@ describe('CollaborationProvider awareness', () => {
     expect(transport.disconnectCount).toBe(0);
     expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(9)]);
     expect(errors.map((error) => error.code)).toEqual(['protocol']);
+  });
+
+  it('discards an overlength remote name without interrupting document sync', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeAwarenessMessage([
+          {
+            clientId: 8,
+            clock: 1,
+            state: {
+              user: {
+                name: 'n'.repeat(MAX_AWARENESS_STRING_LENGTH + 1),
+                color: '#137333',
+              },
+              cursor: null,
+            },
+          },
+          {
+            clientId: 9,
+            clock: 1,
+            state: {
+              user: { name: 'Valid Peer', color: '#137333' },
+              cursor: null,
+            },
+          },
+        ]),
+        encodeUpdate(Uint8Array.of(9))
+      ),
+    });
+
+    expect(provider.peers.map((peer) => peer.clientId)).toEqual([9]);
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(9)]);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Awareness user name exceeds');
+    provider.destroy();
+  });
+
+  it('discards an oversized remote cursor without interrupting document sync', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeAwarenessMessage([
+          {
+            clientId: 8,
+            clock: 1,
+            state: {
+              user: { name: 'Large Cursor', color: '#137333' },
+              cursor: {
+                story: 'body',
+                anchor: new Uint8Array(MAX_AWARENESS_CURSOR_BYTES + 1),
+                head: Uint8Array.of(1),
+              },
+            },
+          },
+          {
+            clientId: 9,
+            clock: 1,
+            state: {
+              user: { name: 'Valid Peer', color: '#137333' },
+              cursor: null,
+            },
+          },
+        ]),
+        encodeUpdate(Uint8Array.of(9))
+      ),
+    });
+
+    expect(provider.peers.map((peer) => peer.clientId)).toEqual([9]);
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(9)]);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Awareness cursor anchor exceeds');
+    provider.destroy();
+  });
+
+  it('caps an awareness entry flood without interrupting document sync', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+    const entries = Array.from({ length: MAX_AWARENESS_ENTRIES_PER_UPDATE + 1 }, (_, index) => ({
+      clientId: index + 10,
+      clock: 1,
+      state: {
+        user: { name: 'Peer', color: '#137333' },
+        cursor: null,
+      },
+    }));
+
+    transport.emit({
+      type: 'message',
+      data: concat(encodeAwarenessMessage(entries), encodeUpdate(Uint8Array.of(9))),
+    });
+
+    expect(provider.peers).toHaveLength(MAX_AWARENESS_ENTRIES_PER_UPDATE);
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(9)]);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Awareness update exceeds');
+    provider.destroy();
+  });
+
+  it('caps total tracked peers without interrupting document sync', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({
+      type: 'message',
+      data: encodeSyncStep2(Uint8Array.of(4)),
+    });
+    const entries = Array.from({ length: MAX_AWARENESS_TRACKED_PEERS }, (_, index) => ({
+      clientId: index + 10,
+      clock: 1,
+      state: {
+        user: { name: 'Peer', color: '#137333' },
+        cursor: null,
+      },
+    }));
+    transport.emit({ type: 'message', data: encodeAwarenessMessage(entries) });
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeAwarenessMessage([
+          {
+            clientId: MAX_AWARENESS_TRACKED_PEERS + 10,
+            clock: 1,
+            state: {
+              user: { name: 'Excess Peer', color: '#137333' },
+              cursor: null,
+            },
+          },
+        ]),
+        encodeUpdate(Uint8Array.of(9))
+      ),
+    });
+
+    expect(provider.peers).toHaveLength(MAX_AWARENESS_TRACKED_PEERS);
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(9)]);
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Awareness peer limit');
+    provider.destroy();
   });
 
   it('coalesces cursor movement and keeps typing updates local', async () => {

@@ -544,11 +544,16 @@ export class CollaborationProvider {
         case 'update':
           this.applyRemoteUpdate(token, message.update, true);
           break;
-        case 'awareness':
+        case 'awareness': {
+          const discarded: unknown[] = [];
           try {
             const reduction = reduceAwarenessEntries(
               this.awarenessRecords,
-              decodeAwarenessUpdate(message.update),
+              decodeAwarenessUpdate(message.update, {
+                trackedClientIds: this.awarenessRecords.keys(),
+                localClientId: this.replica.clientId,
+                onDiscard: (error) => discarded.push(error),
+              }),
               this.replica.clientId,
               nowMs()
             );
@@ -557,7 +562,11 @@ export class CollaborationProvider {
           } catch (cause) {
             this.report(normalizeError('protocol', 'Failed to apply awareness update', cause));
           }
+          for (const cause of discarded) {
+            this.report(normalizeError('protocol', 'Discarded over-limit awareness data', cause));
+          }
           break;
+        }
         case 'auth':
           this.failConnection(
             token,
