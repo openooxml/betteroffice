@@ -1651,6 +1651,23 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
     if model.sheets.is_empty() {
         return Err(Error::NoSheets);
     }
+    for defined in &model.defined_names {
+        if defined
+            .local_sheet
+            .is_some_and(|sheet| sheet.0 as usize >= model.sheets.len())
+        {
+            return Err(Error::InvalidOperation(format!(
+                "defined name {} has an invalid sheet scope",
+                defined.name
+            )));
+        }
+        if defined.formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES {
+            return Err(Error::InvalidOperation(format!(
+                "defined name {} has a formula above the length limit",
+                defined.name
+            )));
+        }
+    }
     let mut names = HashSet::with_capacity(model.sheets.len());
     for sheet in &model.sheets {
         validate_sheet_name(&sheet.name)?;

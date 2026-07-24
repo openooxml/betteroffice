@@ -174,10 +174,35 @@ fn workbook_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
                     }
                     Ok(())
                 })?;
+                write_defined_names(w, wb)?;
                 Ok(())
             })?;
         Ok(())
     })
+}
+
+fn write_defined_names(w: &mut Writer<Vec<u8>>, wb: &Workbook) -> io::Result<()> {
+    if wb.defined_names.is_empty() {
+        return Ok(());
+    }
+    w.create_element("definedNames").write_inner_content(|w| {
+        for defined in &wb.defined_names {
+            let mut element = BytesStart::new("definedName");
+            element.push_attribute(("name", defined.name.as_str()));
+            let local_sheet = defined.local_sheet.map(|sheet| sheet.0.to_string());
+            if let Some(local_sheet) = &local_sheet {
+                element.push_attribute(("localSheetId", local_sheet.as_str()));
+            }
+            if defined.hidden {
+                element.push_attribute(("hidden", "1"));
+            }
+            w.write_event(Event::Start(element))?;
+            w.write_event(Event::Text(BytesText::new(&defined.formula)))?;
+            w.write_event(Event::End(BytesEnd::new("definedName")))?;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn workbook_rels(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec<u8>, ParseError> {

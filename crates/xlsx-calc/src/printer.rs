@@ -82,6 +82,7 @@ impl Expr {
             Expr::Range { sheet, range } => {
                 format!("{}{}", sheet_prefix(sheet), range.to_a1())
             }
+            Expr::Name { scope, name } => format!("{}{name}", sheet_prefix(scope)),
             Expr::Unary { op, expr } => {
                 // 6 > every binary bp: unary minus binds tighter than all binary ops
                 let inner = expr.print(6);
@@ -131,6 +132,7 @@ mod tests {
             "10%",
             "(1+2)%",
             "NOT(TRUE)",
+            "TaxRate*'Input Sheet'!LocalRate",
             "1<=2",
             "\"he said \"\"hi\"\"\"",
             "1-2-3",

@@ -2,7 +2,9 @@
 //! matches local element names, so fixtures omit namespace declarations.
 
 use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
-use xlsx_model::{Cell, CellRef, CellValue, DateSystem, ErrorValue, Workbook};
+use xlsx_model::{
+    Cell, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, SheetId, Workbook,
+};
 
 use crate::{ParseError, parse_workbook, serialize_workbook};
 
@@ -132,6 +134,47 @@ fn honors_1904_date_system() {
 }
 
 #[test]
+fn parses_and_round_trips_scoped_defined_names() {
+    let mut parts = package("<sheetData/>", &[], false);
+    let workbook = br#"
+        <workbook>
+            <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+            <definedNames>
+                <definedName name="TaxRate">0.19</definedName>
+                <definedName name="Input" localSheetId="0" hidden="1">Sheet1!$B$2</definedName>
+            </definedNames>
+        </workbook>
+    "#;
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/workbook.xml")
+        .unwrap()
+        .1 = workbook.to_vec();
+
+    let parsed = parse_workbook(&parts).unwrap();
+    assert_eq!(
+        parsed.defined_names,
+        vec![
+            DefinedName {
+                name: "TaxRate".into(),
+                formula: "0.19".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "Input".into(),
+                formula: "Sheet1!$B$2".into(),
+                local_sheet: Some(SheetId(0)),
+                hidden: true,
+            },
+        ]
+    );
+
+    let reparsed = parse_workbook(&serialize_workbook(&parsed).unwrap()).unwrap();
+    assert_eq!(reparsed.defined_names, parsed.defined_names);
+}
+
+#[test]
 fn skips_unknown_elements() {
     let body = r#"
         <extLst><ext uri="whatever"><custom><deep/></custom></ext></extLst>
@@ -220,6 +263,7 @@ type Snapshot = (
     )>,
     DateSystem,
     Vec<String>,
+    Vec<DefinedName>,
 );
 
 fn snapshot(wb: &Workbook) -> Snapshot {
@@ -237,7 +281,12 @@ fn snapshot(wb: &Workbook) -> Snapshot {
             (s.name.clone(), cells, merges, widths, heights)
         })
         .collect();
-    (sheets, wb.date_system, wb.shared_strings.clone())
+    (
+        sheets,
+        wb.date_system,
+        wb.shared_strings.clone(),
+        wb.defined_names.clone(),
+    )
 }
 
 #[test]

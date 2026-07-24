@@ -228,7 +228,7 @@ fn sort_key(a: &(SheetId, CellRef), b: &(SheetId, CellRef)) -> std::cmp::Orderin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{Cell, Sheet};
+    use xlsx_model::{Cell, DefinedName, Sheet};
 
     fn a1(s: &str) -> CellRef {
         CellRef::parse_a1(s).unwrap()
@@ -339,6 +339,53 @@ mod tests {
         let r = recalc_after(&mut wb, &mut graph, &[(s1, a1("A1"))], None);
         assert_eq!(value(&wb, s2, "A1"), num(16.0));
         assert_eq!(r.changed, vec![(s2, a1("A1"))]);
+    }
+
+    #[test]
+    fn defined_name_range_recalculates_from_its_dependencies() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Formula"));
+        wb.sheets.push(Sheet::new("Data"));
+        wb.defined_names.push(DefinedName {
+            name: "Inputs".into(),
+            formula: "Data!$A$1:$A$3".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        for (cell, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0)] {
+            put_num(&mut wb, SheetId(1), cell, value);
+        }
+        put_formula(&mut wb, SheetId(0), "A1", "SUM(Inputs)");
+
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, SheetId(0), "A1"), num(6.0));
+
+        put_num(&mut wb, SheetId(1), "A2", 20.0);
+        let result = recalc_after(&mut wb, &mut graph, &[(SheetId(1), a1("A2"))], None);
+        assert_eq!(value(&wb, SheetId(0), "A1"), num(24.0));
+        assert_eq!(result.changed, vec![(SheetId(0), a1("A1"))]);
+    }
+
+    #[test]
+    fn unknown_defined_name_replaces_stale_cache_with_name_error() {
+        let (mut wb, sheet) = one_sheet();
+        wb.sheet_mut(sheet).unwrap().set_cell(
+            a1("A1"),
+            Cell {
+                value: num(99.0),
+                formula: Some("MissingName+1".into()),
+                style: None,
+            },
+        );
+
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, sheet, "A1"),
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Name
+            }
+        );
+        assert_eq!(result.changed, vec![(sheet, a1("A1"))]);
     }
 
     #[test]

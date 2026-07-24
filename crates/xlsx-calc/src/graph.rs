@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xlsx_model::{CellRange, CellRef, ColId, RowId, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
 use crate::deps::references;
 use crate::parser::{Expr, parse_formula};
@@ -37,6 +37,7 @@ const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 pub struct DepGraph {
     /// sheet name -> id, snapshot at build time.
     names: HashMap<String, SheetId>,
+    defined_names: Vec<DefinedName>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
     deps: HashMap<NodeKey, Vec<(SheetId, CellRange)>>,
     /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
@@ -57,6 +58,7 @@ impl DepGraph {
             .collect();
         let mut g = DepGraph {
             names,
+            defined_names: wb.defined_names.clone(),
             deps: HashMap::new(),
             by_sheet: HashMap::new(),
             volatile: HashSet::new(),
@@ -132,7 +134,7 @@ impl DepGraph {
         for (sid, range) in &edges {
             self.by_sheet.entry(*sid).or_default().push((*range, key));
         }
-        if is_volatile(&expr) {
+        if self.is_volatile(key.sheet, &expr, &mut HashSet::new()) {
             self.volatile.insert(key);
         }
         self.deps.insert(key, edges);
@@ -155,6 +157,18 @@ impl DepGraph {
     fn resolve_edges(&self, owner: SheetId, expr: &Expr) -> Vec<(SheetId, CellRange)> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        self.add_references(owner, expr, &mut out, &mut seen);
+        self.add_defined_name_references(owner, expr, &mut out, &mut seen, &mut HashSet::new());
+        out
+    }
+
+    fn add_references(
+        &self,
+        owner: SheetId,
+        expr: &Expr,
+        out: &mut Vec<(SheetId, CellRange)>,
+        seen: &mut HashSet<(SheetId, u32, u32, u32, u32)>,
+    ) {
         for (sheet, range) in references(expr) {
             let sid = match sheet {
                 None => owner,
@@ -174,20 +188,136 @@ impl DepGraph {
                 out.push((sid, range));
             }
         }
-        out
     }
-}
 
-/// true if any function in the tree is volatile (case-insensitive name match).
-fn is_volatile(expr: &Expr) -> bool {
-    match expr {
-        Expr::FuncCall { name, args } => {
-            let upper = name.to_ascii_uppercase();
-            VOLATILE_FNS.contains(&upper.as_str()) || args.iter().any(is_volatile)
+    fn add_defined_name_references(
+        &self,
+        owner: SheetId,
+        expr: &Expr,
+        out: &mut Vec<(SheetId, CellRange)>,
+        seen: &mut HashSet<(SheetId, u32, u32, u32, u32)>,
+        name_stack: &mut HashSet<(SheetId, String)>,
+    ) {
+        match expr {
+            Expr::Name { scope, name } => {
+                let Some((lookup_sheet, defined)) = self.resolve_defined_name(owner, scope, name)
+                else {
+                    return;
+                };
+                let key = (lookup_sheet, name.to_lowercase());
+                if !name_stack.insert(key.clone()) {
+                    return;
+                }
+                if let Ok(expression) = parse_formula(
+                    defined
+                        .formula
+                        .strip_prefix('=')
+                        .unwrap_or(&defined.formula),
+                ) {
+                    let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+                    self.add_references(definition_sheet, &expression, out, seen);
+                    self.add_defined_name_references(
+                        definition_sheet,
+                        &expression,
+                        out,
+                        seen,
+                        name_stack,
+                    );
+                }
+                name_stack.remove(&key);
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => {
+                self.add_defined_name_references(owner, expr, out, seen, name_stack);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.add_defined_name_references(owner, lhs, out, seen, name_stack);
+                self.add_defined_name_references(owner, rhs, out, seen, name_stack);
+            }
+            Expr::FuncCall { args, .. } => {
+                for argument in args {
+                    self.add_defined_name_references(owner, argument, out, seen, name_stack);
+                }
+            }
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Ref { .. }
+            | Expr::Range { .. } => {}
         }
-        Expr::Unary { expr, .. } | Expr::Percent(expr) => is_volatile(expr),
-        Expr::Binary { lhs, rhs, .. } => is_volatile(lhs) || is_volatile(rhs),
-        _ => false,
+    }
+
+    fn resolve_defined_name<'a>(
+        &'a self,
+        owner: SheetId,
+        scope: &Option<String>,
+        name: &str,
+    ) -> Option<(SheetId, &'a DefinedName)> {
+        let lookup_sheet = match scope {
+            Some(scope) => *self.names.get(&scope.to_lowercase())?,
+            None => owner,
+        };
+        let defined = self
+            .defined_names
+            .iter()
+            .find(|defined| {
+                defined.local_sheet == Some(lookup_sheet) && defined.name.eq_ignore_ascii_case(name)
+            })
+            .or_else(|| {
+                self.defined_names.iter().find(|defined| {
+                    defined.local_sheet.is_none() && defined.name.eq_ignore_ascii_case(name)
+                })
+            })?;
+        Some((lookup_sheet, defined))
+    }
+
+    fn is_volatile(
+        &self,
+        owner: SheetId,
+        expr: &Expr,
+        name_stack: &mut HashSet<(SheetId, String)>,
+    ) -> bool {
+        match expr {
+            Expr::FuncCall { name, args } => {
+                let upper = name.to_ascii_uppercase();
+                VOLATILE_FNS.contains(&upper.as_str())
+                    || args
+                        .iter()
+                        .any(|argument| self.is_volatile(owner, argument, name_stack))
+            }
+            Expr::Name { scope, name } => {
+                let Some((lookup_sheet, defined)) = self.resolve_defined_name(owner, scope, name)
+                else {
+                    return false;
+                };
+                let key = (lookup_sheet, name.to_lowercase());
+                if !name_stack.insert(key.clone()) {
+                    return false;
+                }
+                let volatile = parse_formula(
+                    defined
+                        .formula
+                        .strip_prefix('=')
+                        .unwrap_or(&defined.formula),
+                )
+                .is_ok_and(|expression| {
+                    self.is_volatile(
+                        defined.local_sheet.unwrap_or(lookup_sheet),
+                        &expression,
+                        name_stack,
+                    )
+                });
+                name_stack.remove(&key);
+                volatile
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => {
+                self.is_volatile(owner, expr, name_stack)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_volatile(owner, lhs, name_stack) || self.is_volatile(owner, rhs, name_stack)
+            }
+            _ => false,
+        }
     }
 }
 
@@ -328,6 +458,35 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn defined_name_edges_and_volatility_are_expanded() {
+        let mut wb = wb2();
+        wb.defined_names.extend([
+            DefinedName {
+                name: "Inputs".into(),
+                formula: "Data!A1:A3".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "Clock".into(),
+                formula: "NOW()".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+        ]);
+        let sheet = wb.sheet_mut(SheetId(0)).unwrap();
+        sheet.set_cell(a1("B1"), formula_cell("SUM(Inputs)"));
+        sheet.set_cell(a1("B2"), formula_cell("Clock"));
+
+        let graph = DepGraph::build(&wb);
+        assert_eq!(deps_a1(&graph, "Data", "A2", &wb), vec!["Sheet1!B1"]);
+        assert_eq!(
+            graph.volatile_cells().collect::<Vec<_>>(),
+            vec![(SheetId(0), a1("B2"))]
         );
     }
 }

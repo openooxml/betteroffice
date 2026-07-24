@@ -5,13 +5,16 @@ use std::collections::BTreeMap;
 
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, CellValue, DateSystem, ErrorValue, Sheet, Workbook};
+use xlsx_model::{
+    Cell, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, Sheet, SheetId,
+    Workbook,
+};
 
 use crate::styles::parse_stylesheet;
 use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
 };
-use crate::{MAX_CELLS, MAX_SHARED_STRINGS, ParseError};
+use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_SHARED_STRINGS, ParseError};
 
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
@@ -47,6 +50,7 @@ pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseErro
     Ok(Workbook {
         sheets,
         date_system: meta.date_system,
+        defined_names: meta.defined_names,
         shared_strings,
         styles,
     })
@@ -101,6 +105,7 @@ struct SheetEntry {
 struct WorkbookMeta {
     date_system: DateSystem,
     sheets: Vec<SheetEntry>,
+    defined_names: Vec<DefinedName>,
 }
 
 /// read sheet order/names, the r:id linking each to a worksheet part, and the
@@ -111,6 +116,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
     let mut sheets = Vec::new();
+    let mut defined_names = Vec::new();
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -127,6 +133,23 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
                 }
+                b"definedName" => {
+                    if defined_names.len() >= MAX_DEFINED_NAMES {
+                        return Err(ParseError::TooManyDefinedNames);
+                    }
+                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let local_sheet = attr(&e, b"localSheetId")?
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .map(SheetId);
+                    let hidden = attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value));
+                    let formula = collect_text(&mut reader, &mut buf, &mut depth)?;
+                    defined_names.push(DefinedName {
+                        name,
+                        formula,
+                        local_sheet,
+                        hidden,
+                    });
+                }
                 _ => {}
             },
             Event::Eof => break,
@@ -136,6 +159,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     Ok(WorkbookMeta {
         date_system,
         sheets,
+        defined_names,
     })
 }
 

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, ErrorValue, MAX_COLS, MAX_ROWS,
-    Sheet, SheetId, Stylesheet, Workbook as WorkbookModel,
+    Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, MAX_COLS,
+    MAX_ROWS, Sheet, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -78,6 +78,7 @@ pub(crate) enum AuthorityError {
 struct WorkbookBase {
     bootstrap_client_id: u64,
     date_system: DateSystem,
+    defined_names: Vec<DefinedName>,
     fingerprint: String,
     shared_strings: Vec<String>,
     styles: Stylesheet,
@@ -89,6 +90,7 @@ impl WorkbookBase {
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
+            defined_names: model.defined_names.clone(),
             fingerprint,
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
@@ -99,6 +101,7 @@ impl WorkbookBase {
         WorkbookModel {
             sheets: Vec::new(),
             date_system: self.date_system,
+            defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
         }
@@ -2450,8 +2453,13 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     let mut hasher = Sha256::new();
     hasher.update(b"betteroffice-xlsx-yrs-v3");
-    let base = serde_json::to_vec(&(model.date_system, &model.shared_strings, &model.styles))
-        .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
+    let base = serde_json::to_vec(&(
+        model.date_system,
+        &model.defined_names,
+        &model.shared_strings,
+        &model.styles,
+    ))
+    .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);
     hash_u64(&mut hasher, model.sheets.len() as u64);
     for sheet in &model.sheets {
@@ -2575,6 +2583,12 @@ mod tests {
             shared_strings: vec!["hello".into()],
             ..WorkbookModel::default()
         };
+        model.defined_names.push(DefinedName {
+            name: "Answer".into(),
+            formula: "Data!A1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
         model.styles.cell_xfs.push(Xf::default());
         model.sheets.push(first);
         model.sheets.push(Sheet::new("Second"));

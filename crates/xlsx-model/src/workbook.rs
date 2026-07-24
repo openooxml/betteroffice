@@ -3,10 +3,20 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 use crate::addr::{CellRange, CellRef, ColId, RowId, SheetId};
 use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefinedName {
+    pub name: String,
+    pub formula: String,
+    pub local_sheet: Option<SheetId>,
+    pub hidden: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Cell {
@@ -88,6 +98,7 @@ impl Sheet {
 pub struct Workbook {
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
+    pub defined_names: Vec<DefinedName>,
     /// shared string table as parsed; kept for round-trip fidelity.
     pub shared_strings: Vec<String>,
     /// parsed style tables + theme; a cell's `style` indexes `styles.cell_xfs`.
@@ -111,6 +122,19 @@ impl Workbook {
             .find(|(_, sheet)| sheet.name.to_lowercase() == name)
             .map(|(i, s)| (SheetId(i as u32), s))
     }
+
+    pub fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
+        self.defined_names
+            .iter()
+            .find(|defined| {
+                defined.local_sheet == Some(sheet) && defined.name.eq_ignore_ascii_case(name)
+            })
+            .or_else(|| {
+                self.defined_names.iter().find(|defined| {
+                    defined.local_sheet.is_none() && defined.name.eq_ignore_ascii_case(name)
+                })
+            })
+    }
 }
 
 /// read access the calc engine evaluates through.
@@ -118,6 +142,9 @@ pub trait CellProvider {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
+    fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
+        None
+    }
 }
 
 impl CellProvider for Workbook {
@@ -134,6 +161,10 @@ impl CellProvider for Workbook {
 
     fn sheet_id(&self, name: &str) -> Option<SheetId> {
         self.sheet_by_name(name).map(|(id, _)| id)
+    }
+
+    fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
+        self.defined_name(sheet, name)
     }
 }
 
@@ -174,6 +205,12 @@ mod tests {
     fn workbook_cell_provider() {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
+        wb.defined_names.push(DefinedName {
+            name: "Answer".into(),
+            formula: "A1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
         let a1 = CellRef::parse_a1("A1").unwrap();
         wb.sheet_mut(SheetId(0)).unwrap().set_cell(
             a1,
@@ -193,6 +230,41 @@ mod tests {
             CellValue::Empty
         );
         assert!(wb.sheet_id("Nope").is_none());
+        assert_eq!(
+            CellProvider::defined_name(&wb, id, "answer").map(|defined| defined.formula.as_str()),
+            Some("A1")
+        );
+    }
+
+    #[test]
+    fn local_defined_name_shadows_workbook_name() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.defined_names.extend([
+            DefinedName {
+                name: "Rate".into(),
+                formula: "1".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "rate".into(),
+                formula: "2".into(),
+                local_sheet: Some(SheetId(0)),
+                hidden: false,
+            },
+        ]);
+
+        assert_eq!(
+            wb.defined_name(SheetId(0), "RATE")
+                .map(|defined| defined.formula.as_str()),
+            Some("2")
+        );
+        assert_eq!(
+            wb.defined_name(SheetId(1), "RATE")
+                .map(|defined| defined.formula.as_str()),
+            Some("1")
+        );
     }
 
     #[test]

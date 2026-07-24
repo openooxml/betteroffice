@@ -1,10 +1,11 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DrawCmd, Error,
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
-    NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId,
-    StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DefinedName,
+    DrawCmd, Error, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind, NumberFormatMutation, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch, UpdateOrigin, Viewport,
+    Workbook, WorkbookModel,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -102,6 +103,65 @@ fn open_and_recalculation_are_explicit() {
         .edit_cell(SheetId(0), cell("A1"), "20", CalculationOptions::default())
         .unwrap();
     assert_eq!(result.changed[0].cell, cell("B1"));
+}
+
+#[test]
+fn defined_names_survive_the_facade_and_drive_incremental_recalculation() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 4.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 99.0 },
+            formula: Some("A1*Rate".into()),
+            style: None,
+        },
+    );
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+    model.defined_names.push(DefinedName {
+        name: "Rate".into(),
+        formula: "2".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("B1"))
+            .unwrap()
+            .value,
+        CellValue::Number { value: 8.0 }
+    );
+    let result = workbook
+        .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
+    assert_eq!(result.changed[0].cell, cell("B1"));
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("B1"))
+            .unwrap()
+            .value,
+        CellValue::Number { value: 10.0 }
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
 }
 
 #[test]

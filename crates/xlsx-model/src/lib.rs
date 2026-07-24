@@ -15,4 +15,4 @@ pub use styles::{
     NumberFormat, Stylesheet, Theme, VAlign, Xf,
 };
 pub use value::{CellValue, ErrorValue};
-pub use workbook::{Cell, CellProvider, Sheet, Workbook};
+pub use workbook::{Cell, CellProvider, DefinedName, Sheet, Workbook};
