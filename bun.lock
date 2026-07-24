@@ -11,7 +11,7 @@
     },
     "apps/demo": {
       "name": "@betteroffice/demo",
-      "version": "0.0.5",
+      "version": "0.0.6",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-fonts": "workspace:*",
@@ -24,7 +24,7 @@
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "lucide-react": "^1.23.0",
-        "next": "^16.2.11",
+        "next": "16.2.11",
         "radix-ui": "^1.6.1",
         "react": "^19.2.7",
         "react-dom": "^19.2.7",
@@ -51,7 +51,7 @@
         "fumadocs-mdx": "15.0.13",
         "fumadocs-ui": "npm:@fumadocs/base-ui@16.10.7",
         "lucide-react": "^1.23.0",
-        "next": "^16.2.11",
+        "next": "16.2.11",
         "react": "^19.2.7",
         "react-dom": "^19.2.7",
       },
@@ -96,7 +96,7 @@
         "clsx": "^2.1.1",
         "lucide-react": "^1.23.0",
         "motion": "^12.42.2",
-        "next": "^16.2.11",
+        "next": "16.2.11",
         "radix-ui": "^1.6.1",
         "react": "^19.2.7",
         "react-dom": "^19.2.7",
@@ -116,11 +116,11 @@
     },
     "crates": {
       "name": "@betteroffice/rust-crates",
-      "version": "0.0.2",
+      "version": "0.0.3",
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "devDependencies": {
         "@betteroffice/drawingml": "workspace:*",
         "@types/bun": "^1.0.0",
@@ -131,7 +131,7 @@
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "devDependencies": {
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
@@ -139,7 +139,7 @@
     },
     "packages/docx-react": {
       "name": "@betteroffice/docx-react",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-i18n": "workspace:*",
@@ -230,7 +230,7 @@
     },
     "packages/xlsx": {
       "name": "@betteroffice/xlsx",
-      "version": "0.0.6",
+      "version": "0.0.7",
       "devDependencies": {
         "@types/bun": "^1.3.14",
         "@types/node": "^26.0.0",
@@ -240,7 +240,7 @@
     },
     "packages/xlsx-i18n": {
       "name": "@betteroffice/xlsx-i18n",
-      "version": "0.0.6",
+      "version": "0.0.7",
       "devDependencies": {
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
@@ -248,7 +248,7 @@
     },
     "packages/xlsx-react": {
       "name": "@betteroffice/xlsx-react",
-      "version": "0.0.6",
+      "version": "0.0.7",
       "dependencies": {
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-i18n": "workspace:*",
@@ -273,8 +273,8 @@
   "overrides": {
     "@hono/node-server": "2.0.10",
     "esbuild": "0.28.1",
-    "fast-uri": "^3.1.4",
-    "postcss": "8.5.16",
+    "fast-uri": "3.1.4",
+    "postcss": "8.5.23",
     "sharp": "^0.35.0",
   },
   "packages": {
@@ -1578,7 +1578,7 @@
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 
-    "js-yaml": ["js-yaml@5.2.1", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.mjs" } }, "sha512-zfLtNfQqxVqq3uaTqSkh4x4hZw3KHobGUA0fJUj4wawW8bsQLTVqpHdXSIzidh7o+4lEW36tANuAGdaFx6Zgnw=="],
+    "js-yaml": ["js-yaml@5.2.2", "", { "dependencies": { "argparse": "^2.0.1" }, "bin": { "js-yaml": "bin/js-yaml.mjs" } }, "sha512-dayzUzKkJ1MkuUtZglSebU43utNXH0OWQByK9rKOOuYIO8M5TV1y+n8ALMdG0rdzBnfNkOmZEqrURepb0ejqBw=="],
 
     "jsesc": ["jsesc@3.1.0", "", { "bin": { "jsesc": "bin/jsesc" } }, "sha512-/sM3dO2FOzXjKQhJuo0Q173wf2KOo8t4I8vHy6lF9poUp7bKT0/NHE8fPX23PwfhnykfqnC2xRxOnVw5XuGIaA=="],
 
@@ -1796,7 +1796,7 @@
 
     "mz": ["mz@2.7.0", "", { "dependencies": { "any-promise": "^1.0.0", "object-assign": "^4.0.1", "thenify-all": "^1.0.0" } }, "sha512-z81GNO7nnYMEhrGh9LeymoE4+Yr0Wn5McHIZMK5cfQCl+NDX08sCZgUc9/6MHni9IWuFLm1Z3HTCXu2z9fN62Q=="],
 
-    "nanoid": ["nanoid@3.3.15", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-y7Wygv/7mEOvxTuEQDB8StXdMRBWf1kR/tlhAzBRUFkB2jfcLOAxO/SHmOO2zgz1pVgK29/kyupn059/bCHdjA=="],
+    "nanoid": ["nanoid@3.3.16", "", { "bin": { "nanoid": "bin/nanoid.cjs" } }, "sha512-bzlKTyNJ7+LdGIIwy8ijFpIqEQIvafahV7eYykJ8Cvh42EdJeODoJ6gUJXpQJvej1BddH8OqTXZNE/KfbWAu8Q=="],
 
     "negotiator": ["negotiator@1.0.0", "", {}, "sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg=="],
 
@@ -1898,7 +1898,7 @@
 
     "pkg-up": ["pkg-up@3.1.0", "", { "dependencies": { "find-up": "^3.0.0" } }, "sha512-nDywThFk1i4BQK4twPQ6TA4RT8bDY96yeuCVBWL3ePARCiEKDRSrNGbFIgUJpLp+XeIR65v8ra7WuJOFUBtkMA=="],
 
-    "postcss": ["postcss@8.5.16", "", { "dependencies": { "nanoid": "^3.3.12", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-vuwillviilfKZsg0VGj5R/YwwcHx4SLsIOI/7K6mQkWx+l5cUHTjj5g0AasTBcyXsbfTgrwsUNmVUb5xVwyPwg=="],
+    "postcss": ["postcss@8.5.23", "", { "dependencies": { "nanoid": "^3.3.16", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg=="],
 
     "postcss-import": ["postcss-import@15.1.0", "", { "dependencies": { "postcss-value-parser": "^4.0.0", "read-cache": "^1.0.0", "resolve": "^1.1.7" }, "peerDependencies": { "postcss": "^8.0.0" } }, "sha512-hpr+J05B2FVYUAXHeK1YyI267J/dDDhMU6B6civm8hSY1jYJnBXxzKDKDswzJmtLHryrjhnDjqqp/49t8FALew=="],
 
