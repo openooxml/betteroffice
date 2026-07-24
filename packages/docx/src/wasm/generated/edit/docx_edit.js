@@ -734,6 +734,26 @@ export class EditSession {
         return v1;
     }
     /**
+     * Encodes one paragraph location as a sticky position.
+     * @param {string} story
+     * @param {string} para_id
+     * @param {number} offset
+     * @returns {Uint8Array}
+     */
+    encode_sticky_position(story, para_id, offset) {
+        const ptr0 = passStringToWasm0(story, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(para_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.editsession_encode_sticky_position(this.__wbg_ptr, ptr0, len0, ptr1, len1, offset);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
+    }
+    /**
      * @returns {string}
      */
     encoded_selection() {
@@ -1573,6 +1593,34 @@ export class EditSession {
             return getStringFromWasm0(ptr4, len4);
         } finally {
             wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
+     * Resolves one encoded sticky position to a paragraph location.
+     * @param {string} story
+     * @param {Uint8Array} position
+     * @returns {string}
+     */
+    resolve_sticky_position(story, position) {
+        let deferred4_0;
+        let deferred4_1;
+        try {
+            const ptr0 = passStringToWasm0(story, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(position, wasm.__wbindgen_malloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.editsession_resolve_sticky_position(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var ptr3 = ret[0];
+            var len3 = ret[1];
+            if (ret[3]) {
+                ptr3 = 0; len3 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred4_0 = ptr3;
+            deferred4_1 = len3;
+            return getStringFromWasm0(ptr3, len3);
+        } finally {
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
         }
     }
     /**

@@ -14,7 +14,12 @@ import type {
   ResidentFontRequirement,
   ResidentMeasurementConfig,
 } from '@betteroffice/docx/layout';
-import type { YrsRenderEnv, YrsSession } from '@betteroffice/docx/yrs';
+import type {
+  YrsLoc,
+  YrsRenderEnv,
+  YrsSession,
+  YrsStickyPosition,
+} from '@betteroffice/docx/yrs';
 
 import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
@@ -28,7 +33,11 @@ import {
   type DisplayListScrollAnchor,
   type DisplayListViewportAnchor,
 } from '../internals/scrollRestore';
-import type { LayoutUpdateOrigin } from '../internals/viewportAnchoring';
+import {
+  mergeLayoutUpdateOrigin,
+  PendingScrollRestoreController,
+  type LayoutUpdateOrigin,
+} from '../internals/viewportAnchoring';
 
 interface SelectionScrollRestore {
   kind: 'selection';
@@ -42,11 +51,9 @@ interface ViewportScrollRestore {
 
 type PendingScrollRestore = SelectionScrollRestore | ViewportScrollRestore;
 
-function mergeLayoutUpdateOrigin(
-  current: LayoutUpdateOrigin | null,
-  next: LayoutUpdateOrigin
-): LayoutUpdateOrigin {
-  return current === 'local' || next === 'local' ? 'local' : 'remote';
+interface CurrentViewportAnchor {
+  anchor: DisplayListViewportAnchor;
+  navigationEpoch: number;
 }
 
 export interface UseLayoutPipelineOptions {
@@ -80,6 +87,8 @@ export interface UseLayoutPipelineOptions {
   viewportLayoutRef: React.RefObject<HTMLDivElement | null>;
   /** Current display-list position used to preserve the scroll anchor. */
   getSelectionHead?: () => number;
+  displayPositionToYrsLoc?: (position: number) => YrsLoc | null;
+  yrsLocToDisplayPosition?: (loc: YrsLoc) => number | null;
   syncCoordinator: LayoutSelectionGate;
   getScrollContainer: () => HTMLDivElement | null;
   onTotalPagesChange?: (totalPages: number) => void;
@@ -95,6 +104,7 @@ export interface UseLayoutPipelineReturn {
   layoutUpdateOrigin: LayoutUpdateOrigin;
   runLayoutPipeline: () => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
+  cancelPendingScrollRestore: () => void;
 }
 
 export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipelineReturn {
@@ -111,6 +121,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     pagesContainerRef,
     viewportLayoutRef,
     getSelectionHead,
+    displayPositionToYrsLoc,
+    yrsLocToDisplayPosition,
     syncCoordinator,
     getScrollContainer,
     onTotalPagesChange,
@@ -134,11 +146,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // layout, and creates a display-list -> layout feedback loop.
   const displayListQueriesRef = useRef(displayListQueries);
   const deferLayoutPassRef = useRef(deferLayoutPass);
+  const displayPositionToYrsLocRef = useRef(displayPositionToYrsLoc);
+  const yrsLocToDisplayPositionRef = useRef(yrsLocToDisplayPosition);
   onTotalPagesChangeRef.current = onTotalPagesChange;
   onLayoutComputedRef.current = onLayoutComputed;
   onAnchorPositionsChangeRef.current = onAnchorPositionsChange;
   displayListQueriesRef.current = displayListQueries;
   deferLayoutPassRef.current = deferLayoutPass;
+  displayPositionToYrsLocRef.current = displayPositionToYrsLoc;
+  yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
 
   // Total-pages notifier — fires only when count changes (including N → 0).
   const lastTotalPagesRef = useRef<number>(0);
@@ -150,11 +166,68 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     onTotalPagesChangeRef.current?.(total);
   }, [layout]);
 
-  // Scroll-restore plumbing. `pendingScrollRestoreRef` is read by both the
-  // pipeline and the post-commit useLayoutEffect below.
-  const pendingScrollRestoreRef = useRef<PendingScrollRestore | null>(null);
+  const scrollRestoreControllerRef =
+    useRef<PendingScrollRestoreController<PendingScrollRestore> | null>(null);
+  if (!scrollRestoreControllerRef.current) {
+    scrollRestoreControllerRef.current =
+      new PendingScrollRestoreController<PendingScrollRestore>();
+  }
+  const scrollRestoreController = scrollRestoreControllerRef.current;
+  const navigationEpochRef = useRef(0);
+  const cancelPendingScrollRestore = useCallback(() => {
+    navigationEpochRef.current += 1;
+    scrollRestoreController.cancel();
+  }, [scrollRestoreController]);
+  const currentViewportAnchorRef = useRef<CurrentViewportAnchor | null>(null);
+  const viewportAnchorSessionRef = useRef(session);
+  const viewportAnchorCaptureReadyRef = useRef(true);
+  const expectedScrollTopRef = useRef<number | null>(null);
+  if (viewportAnchorSessionRef.current !== session) {
+    viewportAnchorSessionRef.current = session;
+    currentViewportAnchorRef.current = null;
+  }
   const pendingLayoutOriginRef = useRef<LayoutUpdateOrigin | null>(null);
   const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('local');
+
+  const captureViewportPosition = useCallback(
+    (position: number, paraId: string) => {
+      const loc = displayPositionToYrsLocRef.current?.(position);
+      if (!session || !loc || loc.paraId !== paraId) return null;
+      try {
+        return session.encodeStickyPosition(loc);
+      } catch {
+        return null;
+      }
+    },
+    [session]
+  );
+  const resolveViewportPosition = useCallback(
+    (position: YrsStickyPosition, paraId: string) => {
+      const loc = session?.resolveStickyPosition(position);
+      if (!loc || loc.paraId !== paraId) return null;
+      return yrsLocToDisplayPositionRef.current?.(loc) ?? null;
+    },
+    [session]
+  );
+  const captureCurrentViewportAnchor = useCallback(() => {
+    const queries = displayListQueriesRef.current;
+    const pagesEl = pagesContainerRef.current;
+    const host = interactionPageHostRef?.current ?? pagesEl;
+    const scrollParent =
+      getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
+    const anchor =
+      queries && host && scrollParent?.isConnected
+        ? captureDisplayListViewportAnchor(queries, host, scrollParent, captureViewportPosition)
+        : null;
+    currentViewportAnchorRef.current = anchor
+      ? { anchor, navigationEpoch: navigationEpochRef.current }
+      : null;
+  }, [
+    captureViewportPosition,
+    getScrollContainer,
+    interactionPageHostRef,
+    pagesContainerRef,
+  ]);
 
   // =========================================================================
   // Layout Pipeline
@@ -164,6 +237,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     () => {
       const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
       pendingLayoutOriginRef.current = null;
+      if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
       const pipelineStart = performance.now();
 
       const currentEpoch = syncCoordinator.getStateSeq();
@@ -208,17 +282,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
         const interactionHost = interactionPageHostRef?.current ?? pagesEl;
         const queries = displayListQueriesRef.current;
+        const currentViewportAnchor = currentViewportAnchorRef.current;
         const anchor =
           scrollParent?.isConnected && interactionHost && queries
             ? layoutUpdateOrigin === 'remote'
-              ? {
-                  kind: 'viewport' as const,
-                  anchor: captureDisplayListViewportAnchor(
-                    queries,
-                    interactionHost,
-                    scrollParent
-                  ),
-                }
+              ? currentViewportAnchor?.navigationEpoch === navigationEpochRef.current
+                ? {
+                    kind: 'viewport' as const,
+                    anchor: currentViewportAnchor.anchor,
+                  }
+                : null
               : {
                   kind: 'selection' as const,
                   anchor: captureDisplayListScrollAnchor(
@@ -230,6 +303,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                 }
             : null;
 
+        viewportAnchorCaptureReadyRef.current = false;
         setBlocks(newBlocks);
         setMeasures(newMeasures);
         layoutUpdateOriginRef.current = layoutUpdateOrigin;
@@ -241,7 +315,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           vp.style.minHeight = `${mh}px`;
           vp.style.marginBottom = zoom !== 1 ? `${mh * (zoom - 1)}px` : '';
         }
-        pendingScrollRestoreRef.current = scrollParent?.isConnected ? anchor : null;
+        if (scrollParent?.isConnected && anchor) {
+          scrollRestoreController.capture(anchor);
+        } else {
+          scrollRestoreController.cancel();
+        }
 
         const totalTime = performance.now() - pipelineStart;
         if (totalTime > 2000) {
@@ -275,46 +353,125 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       interactionPageHostRef,
       pagesContainerRef,
       viewportLayoutRef,
+      scrollRestoreController,
     ]
   );
 
   // Hold the exact scrollTop while the next display-list commit is built.
   useLayoutEffect(() => {
-    const pending = pendingScrollRestoreRef.current;
-    if (!pending) return;
+    const ticket = scrollRestoreController.peek();
+    if (!ticket) return;
     const pagesEl = pagesContainerRef.current;
     const scrollParent =
       getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
-    if (scrollParent?.isConnected) restoreScrollSnapshot(pending.anchor, scrollParent);
-  }, [layout, getScrollContainer, pagesContainerRef]);
+    if (scrollParent?.isConnected) {
+      scrollRestoreController.run(ticket, () => {
+        restoreScrollSnapshot(ticket.value.anchor, scrollParent);
+        expectedScrollTopRef.current = scrollParent.scrollTop;
+      });
+    }
+  }, [layout, getScrollContainer, pagesContainerRef, scrollRestoreController]);
 
   // A new immutable display-list/query facade is the geometry commit signal.
   useLayoutEffect(() => {
-    const pending = pendingScrollRestoreRef.current;
+    const ticket = scrollRestoreController.peek();
     const pagesEl = pagesContainerRef.current;
     const host = interactionPageHostRef?.current ?? pagesEl;
     const scrollParent =
       getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
-    if (!pending || !displayListQueries || !host || !scrollParent?.isConnected) return;
-    pendingScrollRestoreRef.current = null;
+    if (!ticket || !displayListQueries || !host || !scrollParent?.isConnected) return;
+    const pending = scrollRestoreController.take();
+    if (!pending) return;
     const restore = (): void => {
-      if (pending.kind === 'viewport') {
+      if (pending.value.kind === 'viewport') {
         restoreDisplayListViewportAnchor(
-          pending.anchor,
+          pending.value.anchor,
+          displayListQueries,
+          host,
+          scrollParent,
+          resolveViewportPosition
+        );
+      } else {
+        restoreDisplayListScrollAnchor(
+          pending.value.anchor,
           displayListQueries,
           host,
           scrollParent
         );
-      } else {
-        restoreDisplayListScrollAnchor(pending.anchor, displayListQueries, host, scrollParent);
       }
+      expectedScrollTopRef.current = scrollParent.scrollTop;
     };
-    restore();
+    if (!scrollRestoreController.run(pending, restore)) return;
     const rafId = requestAnimationFrame(() => {
-      if (scrollParent.isConnected) restore();
+      if (scrollParent.isConnected) scrollRestoreController.run(pending, restore);
     });
     return () => cancelAnimationFrame(rafId);
-  }, [displayListQueries, getScrollContainer, interactionPageHostRef, pagesContainerRef]);
+  }, [
+    displayListQueries,
+    getScrollContainer,
+    interactionPageHostRef,
+    pagesContainerRef,
+    resolveViewportPosition,
+    scrollRestoreController,
+  ]);
+
+  useLayoutEffect(() => {
+    if (!displayListQueries) return;
+    viewportAnchorCaptureReadyRef.current = true;
+    captureCurrentViewportAnchor();
+    const rafId = requestAnimationFrame(() => {
+      captureCurrentViewportAnchor();
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [captureCurrentViewportAnchor, displayListQueries]);
+
+  useEffect(() => {
+    const pagesEl = pagesContainerRef.current;
+    const scrollParent =
+      getScrollContainer() ?? (pagesEl ? findVerticalScrollParentOrRoot(pagesEl) : null);
+    if (!scrollParent) return;
+    scrollParent.addEventListener('wheel', cancelPendingScrollRestore, {
+      capture: true,
+      passive: true,
+    });
+    scrollParent.addEventListener('touchstart', cancelPendingScrollRestore, {
+      capture: true,
+      passive: true,
+    });
+    scrollParent.addEventListener('pointerdown', cancelPendingScrollRestore, {
+      capture: true,
+      passive: true,
+    });
+    let captureTimer: ReturnType<typeof setTimeout> | null = null;
+    const captureAfterScroll = (): void => {
+      const expectedScrollTop = expectedScrollTopRef.current;
+      expectedScrollTopRef.current = null;
+      if (
+        expectedScrollTop == null ||
+        Math.abs(scrollParent.scrollTop - expectedScrollTop) > 0.5
+      ) {
+        cancelPendingScrollRestore();
+      }
+      if (captureTimer !== null) clearTimeout(captureTimer);
+      captureTimer = setTimeout(() => {
+        captureTimer = null;
+        if (viewportAnchorCaptureReadyRef.current) captureCurrentViewportAnchor();
+      }, 80);
+    };
+    scrollParent.addEventListener('scroll', captureAfterScroll, { passive: true });
+    return () => {
+      scrollParent.removeEventListener('wheel', cancelPendingScrollRestore, true);
+      scrollParent.removeEventListener('touchstart', cancelPendingScrollRestore, true);
+      scrollParent.removeEventListener('pointerdown', cancelPendingScrollRestore, true);
+      scrollParent.removeEventListener('scroll', captureAfterScroll);
+      if (captureTimer !== null) clearTimeout(captureTimer);
+    };
+  }, [
+    cancelPendingScrollRestore,
+    captureCurrentViewportAnchor,
+    getScrollContainer,
+    pagesContainerRef,
+  ]);
 
   // =========================================================================
   // Coalesced Layout (rAF throttle)
@@ -331,6 +488,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   runRef.current = runLayoutPipeline;
   const schedulerRef = useRef<number | null>(null);
   const scheduleLayout = useCallback((origin: LayoutUpdateOrigin = 'local') => {
+    if (origin === 'local') scrollRestoreController.cancel();
     pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
       pendingLayoutOriginRef.current,
       origin
@@ -340,7 +498,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       schedulerRef.current = null;
       if (pendingLayoutOriginRef.current) runRef.current();
     });
-  }, []);
+  }, [scrollRestoreController]);
 
   // Clean up pending rAF on unmount
   useEffect(() => {
@@ -356,5 +514,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,
+    cancelPendingScrollRestore,
   };
 }

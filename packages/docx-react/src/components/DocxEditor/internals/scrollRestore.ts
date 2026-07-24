@@ -4,6 +4,7 @@ import {
   type DisplayListRect,
   type DisplayListVisualLine,
 } from '@betteroffice/docx/layout/render';
+import type { YrsStickyPosition } from '@betteroffice/docx/yrs';
 import {
   computeViewportAnchoredScrollTop,
   type ViewportAnchorSnapshot,
@@ -19,7 +20,7 @@ export interface DisplayListScrollAnchor {
 interface ParagraphViewportTarget {
   kind: 'paragraph';
   paraId: string;
-  relativePosition: number;
+  position: YrsStickyPosition;
 }
 
 interface PageViewportTarget {
@@ -36,6 +37,16 @@ interface PageProjection {
   top: number;
   scaleY: number;
 }
+
+export type CaptureViewportPosition = (
+  displayPosition: number,
+  paraId: string
+) => YrsStickyPosition | null;
+
+export type ResolveViewportPosition = (
+  position: YrsStickyPosition,
+  paraId: string
+) => number | null;
 
 function pageProjection(
   queries: DisplayListQueries,
@@ -81,17 +92,19 @@ function visualLineOrder(left: DisplayListVisualLine, right: DisplayListVisualLi
 
 function paragraphTargetLine(
   queries: DisplayListQueries,
-  target: ParagraphViewportTarget
+  target: ParagraphViewportTarget,
+  resolvePosition: ResolveViewportPosition
 ): DisplayListVisualLine | null {
   const lines = queries
     .visualLines()
     .filter((line) => line.paraId === target.paraId)
     .sort(visualLineOrder);
   if (lines.length === 0) return null;
+  const position = resolvePosition(target.position, target.paraId);
+  if (position == null) return null;
   const paragraphStart = Math.min(...lines.map((line) => line.from));
-  const position = paragraphStart + target.relativePosition;
   const paragraphEnd = Math.max(...lines.map((line) => line.to));
-  if (position > paragraphEnd) return null;
+  if (position < paragraphStart || position > paragraphEnd) return null;
   return (
     lines.find((line) => line.from === position) ??
     lines.find((line) => line.from < position && position <= line.to) ??
@@ -104,12 +117,13 @@ function paragraphTargetLine(
 function viewportTargetClientY(
   anchor: DisplayListViewportAnchor,
   queries: DisplayListQueries,
-  host: HTMLElement
+  host: HTMLElement,
+  resolvePosition: ResolveViewportPosition
 ): number | null {
   const target = anchor.target;
   if (!target) return null;
   if (target.kind === 'paragraph') {
-    const line = paragraphTargetLine(queries, target);
+    const line = paragraphTargetLine(queries, target, resolvePosition);
     return line ? (projectedRectClientY(queries, host, line)?.top ?? null) : null;
   }
   const pageRect = resolveDisplayPageClientRect(host, queries, target.pageIndex);
@@ -122,7 +136,8 @@ function visibleParagraphAnchor(
   queries: DisplayListQueries,
   host: HTMLElement,
   viewport: DOMRect,
-  lines: readonly DisplayListVisualLine[]
+  lines: readonly DisplayListVisualLine[],
+  capturePosition: CaptureViewportPosition
 ): { target: ParagraphViewportTarget; clientY: number } | null {
   let selected: { line: DisplayListVisualLine; clientY: number } | null = null;
   const projectionCache = new Map<number, PageProjection | null>();
@@ -135,16 +150,13 @@ function visibleParagraphAnchor(
     }
   }
   if (!selected?.line.paraId) return null;
-  const paragraphStart = Math.min(
-    ...lines
-      .filter((line) => line.paraId === selected.line.paraId)
-      .map((line) => line.from)
-  );
+  const position = capturePosition(selected.line.from, selected.line.paraId);
+  if (!position) return null;
   return {
     target: {
       kind: 'paragraph',
       paraId: selected.line.paraId,
-      relativePosition: Math.max(0, selected.line.from - paragraphStart),
+      position,
     },
     clientY: selected.clientY,
   };
@@ -203,7 +215,8 @@ export function captureDisplayListScrollAnchor(
 export function captureDisplayListViewportAnchor(
   queries: DisplayListQueries,
   host: HTMLElement,
-  scrollParent: HTMLElement
+  scrollParent: HTMLElement,
+  capturePosition: CaptureViewportPosition
 ): DisplayListViewportAnchor {
   if (!scrollParent.style.overflowAnchor) {
     scrollParent.style.setProperty('overflow-anchor', 'none');
@@ -211,7 +224,7 @@ export function captureDisplayListViewportAnchor(
   const viewport = scrollParent.getBoundingClientRect();
   const lines = queries.visualLines();
   const resolved =
-    visibleParagraphAnchor(queries, host, viewport, lines) ??
+    visibleParagraphAnchor(queries, host, viewport, lines, capturePosition) ??
     visiblePageAnchor(queries, host, viewport);
   return {
     target: resolved?.target ?? null,
@@ -240,9 +253,10 @@ export function restoreDisplayListViewportAnchor(
   anchor: DisplayListViewportAnchor,
   queries: DisplayListQueries,
   host: HTMLElement,
-  scrollParent: HTMLElement
+  scrollParent: HTMLElement,
+  resolvePosition: ResolveViewportPosition
 ): void {
-  const clientY = viewportTargetClientY(anchor, queries, host);
+  const clientY = viewportTargetClientY(anchor, queries, host, resolvePosition);
   const scrollerTop = scrollParent.getBoundingClientRect().top;
   const nextTargetTop =
     clientY == null ? null : scrollParent.scrollTop + clientY - scrollerTop;

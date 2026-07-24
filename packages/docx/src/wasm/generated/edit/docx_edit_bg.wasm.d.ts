@@ -39,6 +39,7 @@ export const editsession_drain_update_event: (a: number) => [number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
 export const editsession_encode_state_vector: (a: number) => [number, number];
+export const editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const editsession_encoded_selection: (a: number) => [number, number, number, number];
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -72,6 +73,7 @@ export const editsession_replace_range: (a: number, b: number, c: number, d: num
 export const editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_selection: (a: number) => [number, number, number, number];
 export const editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

@@ -166,6 +166,10 @@ export class EditSession {
      */
     encode_state(): Uint8Array;
     encode_state_vector(): Uint8Array;
+    /**
+     * Encodes one paragraph location as a sticky position.
+     */
+    encode_sticky_position(story: string, para_id: string, offset: number): Uint8Array;
     encoded_selection(): string;
     /**
      * Applies a set-valued, tri-state inline formatting delta over
@@ -316,6 +320,10 @@ export class EditSession {
      */
     resolve_comment(comment_id: string): string;
     resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string;
+    /**
+     * Resolves one encoded sticky position to a paragraph location.
+     */
+    resolve_sticky_position(story: string, position: Uint8Array): string;
     /**
      * Parses a DOCX, seeds its stories, and returns thin host metadata.
      */
@@ -634,6 +642,7 @@ export interface InitOutput {
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];
+    readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -667,6 +676,7 @@ export interface InitOutput {
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

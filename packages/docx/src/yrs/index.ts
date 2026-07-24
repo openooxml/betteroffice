@@ -61,6 +61,12 @@ export interface YrsLoc {
   offset: number;
 }
 
+/** One binary Yrs position that transforms with collaborative edits. */
+export interface YrsStickyPosition {
+  story: string;
+  encoded: Uint8Array;
+}
+
 /** A paragraph-addressed position without the story (used inside {@link YrsStoryRange}). */
 export interface YrsParaOffset {
   paraId: string;
@@ -721,6 +727,10 @@ export interface YrsSession extends CollaborationReplica {
 
   // -- local input state --
 
+  /** Encode one location as a binary Yrs sticky position. */
+  encodeStickyPosition(loc: YrsLoc): YrsStickyPosition;
+  /** Resolve a binary Yrs sticky position against this replica. */
+  resolveStickyPosition(position: YrsStickyPosition): YrsLoc | null;
   /** Store this peer's awareness selection as sticky positions. */
   setSelection(anchor: YrsLoc, head?: YrsLoc): void;
   /** Resolve this peer's current sticky selection, or null before initialization. */
@@ -1285,6 +1295,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       };
     },
 
+    encodeStickyPosition: (loc) => ({
+      story: loc.story,
+      encoded: session.encode_sticky_position(loc.story, loc.paraId, loc.offset),
+    }),
+    resolveStickyPosition: (position) => {
+      try {
+        return JSON.parse(
+          session.resolve_sticky_position(position.story, position.encoded)
+        ) as YrsLoc;
+      } catch {
+        return null;
+      }
+    },
     setSelection: (anchor, head = anchor) => {
       if (anchor.story !== head.story) throw new Error('yrs selection must stay inside one story');
       session.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);

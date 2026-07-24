@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   computeViewportAnchoredScrollTop,
+  mergeLayoutUpdateOrigin,
   shouldScrollCaretIntoView,
   type ViewportAnchorSnapshot,
 } from './viewportAnchoring';
@@ -35,5 +36,16 @@ describe('shouldScrollCaretIntoView', () => {
 
   test('allows a local selection action after a remote relayout', () => {
     expect(shouldScrollCaretIntoView('remote', true)).toBe(true);
+  });
+});
+
+describe('mergeLayoutUpdateOrigin', () => {
+  test('preserves a remote origin through coalescing', () => {
+    expect(mergeLayoutUpdateOrigin(null, 'remote')).toBe('remote');
+    expect(mergeLayoutUpdateOrigin('remote', 'remote')).toBe('remote');
+  });
+
+  test('lets a newer local update supersede a pending remote restore', () => {
+    expect(mergeLayoutUpdateOrigin('remote', 'local')).toBe('local');
   });
 });
