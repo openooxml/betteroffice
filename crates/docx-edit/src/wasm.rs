@@ -1414,6 +1414,17 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    pub fn display_vertical_move_json(
+        &self,
+        position: f64,
+        direction: &str,
+        goal_x: f64,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .display_vertical_move_json(position as i64, direction, goal_x)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Body range geometry without a display-list JSON round trip.
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
         self.engine

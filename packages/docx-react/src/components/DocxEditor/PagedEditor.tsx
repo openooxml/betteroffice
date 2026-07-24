@@ -91,6 +91,7 @@ import {
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
@@ -303,6 +304,7 @@ export interface PagedEditorProps {
    * through Rust queries over the display list.
    */
   displayListQueries?: DisplayListQueries | null;
+  resolveDisplayListQueries?: ResolveDisplayListQueries;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -467,6 +469,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       measurementFontProvider,
       rustFontChainsProviderRef,
       displayListQueries = null,
+      resolveDisplayListQueries,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -533,8 +536,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (!map) return null;
         const local = yrsLocToLocalDisplayPosition(map, loc);
         const rootStory = loc.story.startsWith('hf:') ? activeYrsRootStory : 'body';
-        if (loc.story === rootStory) return local;
-        return getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ?? null;
+        return (
+          getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
+          (loc.story === rootStory ? local : null)
+        );
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]
     );
@@ -1241,6 +1246,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [yrsCore.session]
     );
     getYrsPositionProjectionRef.current = getYrsPositionProjection;
+    const resolveYrsDisplayTarget = useCallback(
+      (position: number) => {
+        const target = getYrsPositionProjection(activeYrsRootStory)?.targetAt(position);
+        return target
+          ? { story: target.story, displayPosition: target.displayPosition }
+          : null;
+      },
+      [activeYrsRootStory, getYrsPositionProjection]
+    );
 
     // Pointer routing — every mouse path on the visible pages: cursor
     // placement, drag-to-select (with cell-selection promotion), table
@@ -1608,9 +1622,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           author={author}
           inputPositionMap={yrsInputPositionMap}
           displayPositionToLoc={yrsDisplayPositionToLoc}
+          resolveDisplayTarget={resolveYrsDisplayTarget}
           locToDisplayPosition={yrsLocToDisplayPosition}
           nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
+          resolveDisplayListQueries={
+            activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
+          }
           displayListFrameEpoch={displayListFrameEpoch}
           residentCaret={residentCaret}
           residentCaretAuthoritative={residentCaretAuthoritative}

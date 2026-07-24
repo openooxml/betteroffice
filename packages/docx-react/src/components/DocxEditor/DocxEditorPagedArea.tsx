@@ -15,6 +15,7 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
 } from '../InlineHeaderFooterEditor';
@@ -106,6 +107,7 @@ export function DocxEditorPagedArea({
   applyResidentInput,
   applyResidentDelete,
   displayListQueries,
+  resolveDisplayListQueries,
   canvasDisplayList,
   displayListFrameEpoch,
   residentCaret,
@@ -195,6 +197,7 @@ export function DocxEditorPagedArea({
   ) => Promise<ResidentFrameApplyResult | null>;
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
+  resolveDisplayListQueries?: ResolveDisplayListQueries;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -431,6 +434,7 @@ export function DocxEditorPagedArea({
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
+        resolveDisplayListQueries={resolveDisplayListQueries}
         canvasDisplayList={canvasDisplayList}
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}

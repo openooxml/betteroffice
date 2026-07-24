@@ -48,6 +48,11 @@ import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from 
 /** Query surface implemented by the editing wasm over its resident list. */
 export interface ResidentDisplayListQueryEngine {
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
+  displayVerticalMoveJson(
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
@@ -70,6 +75,11 @@ export interface DisplayListRegionHit {
   region: DisplayListHitRegion;
   rId?: string;
   pos: number | null;
+}
+
+export interface DisplayListVerticalMove {
+  position: number;
+  goalX: number;
 }
 
 /** one highlight rectangle of a PM range, page-local px */
@@ -150,6 +160,11 @@ export interface DisplayListQueries {
   ): DisplayListImageGeometry | null;
   /** region-aware point → doc position (page-local coordinates) */
   hitTestRegions(pageIndex: number, x: number, y: number): DisplayListRegionHit | null;
+  verticalMove(
+    position: number,
+    direction: 'up' | 'down',
+    goalX?: number
+  ): DisplayListVerticalMove | null;
   /** body PM range → highlight rects */
   rangeRects(from: number, to: number): DisplayListRect[];
   /**
@@ -499,6 +514,32 @@ export function createDisplayListQueries(
       'range_rects'
     );
     return parseQuery(raw, [], 'range_rects');
+  };
+
+  const verticalMove = (
+    position: number,
+    direction: 'up' | 'down',
+    goalX?: number
+  ): DisplayListVerticalMove | null => {
+    const resolvedGoalX = goalX ?? Number.NaN;
+    if (resident) {
+      return parseQuery(
+        residentQuery(
+          () => resident.displayVerticalMoveJson(position, direction, resolvedGoalX),
+          'vertical_move'
+        ),
+        null,
+        'vertical_move'
+      );
+    }
+    if (!eng?.verticalMoveJson) return null;
+    const raw = runQuery(
+      eng.verticalMoveByHandle &&
+        ((h: number) => eng!.verticalMoveByHandle!(h, position, direction, resolvedGoalX)),
+      () => eng!.verticalMoveJson!(getJson(), position, direction, resolvedGoalX),
+      'vertical_move'
+    );
+    return parseQuery(raw, null, 'vertical_move');
   };
 
   const hfRangeRects = (
@@ -862,6 +903,7 @@ export function createDisplayListQueries(
     imageAtPoint,
     imageByPos,
     hitTestRegions,
+    verticalMove,
     rangeRects,
     hfRangeRects,
     hfCaretRects,
@@ -907,6 +949,8 @@ function isResidentQueryEngine(
 ): engine is ResidentDisplayListQueryEngine {
   return (
     typeof (engine as ResidentDisplayListQueryEngine | undefined)?.displayHitTestRegionsJson ===
+      'function' &&
+    typeof (engine as ResidentDisplayListQueryEngine | undefined)?.displayVerticalMoveJson ===
       'function' &&
     typeof (engine as ResidentDisplayListQueryEngine | undefined)?.displayRangeRectsJson ===
       'function' &&

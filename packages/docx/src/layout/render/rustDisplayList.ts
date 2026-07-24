@@ -204,6 +204,11 @@ export interface RustDisplayListEngine {
   /** One-owner ordinary input path; available on the resident editing engine. */
   applyInput?(text: string, expectedFrameEpoch: number): Uint8Array;
   displayHitTestRegionsJson?(pageIndex: number, x: number, y: number): string;
+  displayVerticalMoveJson?(
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   displayRangeRectsJson?(from: number, to: number): string;
   displayRangeRectsRegionJson?(
     region: 'body' | 'header' | 'footer',
@@ -254,6 +259,13 @@ export class RustDisplayListSourceError extends Error {
 export interface RustDisplayListQueryEngine {
   /** region-aware hit test → `{"region","rId"?,"pos"}` or `"null"` JSON */
   hitTestRegionsJson(displayList: string, pageIndex: number, x: number, y: number): string;
+  /** closest caret position on the adjacent visual line */
+  verticalMoveJson?(
+    displayList: string,
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   /** body PM range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
   /**
@@ -284,6 +296,13 @@ export interface RustDisplayListQueryEngine {
   hasDisplayListUpdate?(): boolean;
   /** region-aware hit test against a stored display list (by handle) */
   hitTestRegionsByHandle?(handle: number, pageIndex: number, x: number, y: number): string;
+  /** adjacent visual-line move against a stored display list */
+  verticalMoveByHandle?(
+    handle: number,
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   /** body PM range against a stored display list (by handle) */
   rangeRectsByHandle?(handle: number, from: number, to: number): string;
   /** region-aware PM range against a stored display list (by handle) */
@@ -304,6 +323,7 @@ function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngin
     return {
     buildDisplayListJson: m.buildDisplayListJson,
     hitTestRegionsJson: m.hitTestRegionsJson,
+    verticalMoveJson: m.verticalMoveJson,
     rangeRectsJson: m.rangeRectsJson,
     rangeRectsRegionJson: m.rangeRectsRegionJson,
     hasRangeRectsRegion: m.hasRangeRectsRegion,
@@ -313,6 +333,7 @@ function loadEngine(): Promise<RustDisplayListEngine & RustDisplayListQueryEngin
     updateDisplayList: m.updateDisplayList,
     hasDisplayListUpdate: m.hasDisplayListUpdate,
     hitTestRegionsByHandle: m.hitTestRegionsByHandle,
+    verticalMoveByHandle: m.verticalMoveByHandle,
     rangeRectsByHandle: m.rangeRectsByHandle,
     rangeRectsRegionByHandle: m.rangeRectsRegionByHandle,
   };

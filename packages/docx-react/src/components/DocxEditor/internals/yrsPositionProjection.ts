@@ -34,7 +34,12 @@ interface StoryProjection {
   size: number;
   depth: number;
   cell?: YrsCellLoc;
-  paragraphs: Array<{ paraId: string; displayStart: number; length: number }>;
+  paragraphs: Array<{
+    paraId: string;
+    displayStart: number;
+    inputStart: number;
+    length: number;
+  }>;
   tables: YrsProjectedTable[];
 }
 
@@ -111,7 +116,7 @@ export class YrsPositionProjection {
     }
     return {
       story: target?.story ?? this.rootStory,
-      displayPosition: Math.max(0, position - (target?.contentStart ?? 0)),
+      displayPosition: target ? this.inputPositionAt(target, position) : 0,
       ...(target?.cell ? { cell: target.cell } : {}),
     };
   }
@@ -172,6 +177,7 @@ export class YrsPositionProjection {
     let cursor = 0;
     let inlineLength = 0;
     let paragraphStart = 0;
+    let inputStart = 0;
     let tableIndex = 0;
     for (const segment of segments) {
       if (segment.kind === 'text') {
@@ -192,8 +198,10 @@ export class YrsPositionProjection {
         story.paragraphs.push({
           paraId: segment.paraId,
           displayStart: paragraphStart,
+          inputStart,
           length: inlineLength,
         });
+        inputStart += nodeSize;
         cursor = paragraphStart + nodeSize;
         paragraphStart = cursor;
         inlineLength = 0;
@@ -253,6 +261,20 @@ export class YrsPositionProjection {
 
     story.size = Math.max(cursor, paragraphStart + (inlineLength > 0 ? inlineLength + 2 : 0));
     return story;
+  }
+
+  private inputPositionAt(story: StoryProjection, position: number): number {
+    const projected = Math.max(0, position - story.contentStart);
+    let paragraph = story.paragraphs[0];
+    for (const candidate of story.paragraphs) {
+      if (candidate.displayStart > projected) break;
+      paragraph = candidate;
+    }
+    if (!paragraph) return 0;
+    return (
+      paragraph.inputStart +
+      Math.min(Math.max(0, projected - paragraph.displayStart), paragraph.length + 1)
+    );
   }
 
   private buildTable(

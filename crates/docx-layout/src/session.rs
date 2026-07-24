@@ -25,7 +25,10 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 
 use crate::display_list::{DisplayList, DisplayPage};
-use crate::hit::{hit_test_regions, parse_region, range_rects, range_rects_in_region};
+use crate::hit::{
+    VerticalDirection, hit_test_regions, parse_region, range_rects, range_rects_in_region,
+    vertical_move,
+};
 
 /// Upper bound on concurrently-open handles. The facade keeps exactly one live,
 /// so this only ever trips when a caller leaks handles; the oldest is then
@@ -206,6 +209,32 @@ pub fn hit_test_regions_by_handle(
     })
 }
 
+pub fn vertical_move_by_handle(
+    handle: u32,
+    position: i64,
+    direction: &str,
+    goal_x: f64,
+) -> Result<String, String> {
+    SESSIONS.with(|s| {
+        let sessions = s.borrow();
+        let dl = sessions
+            .get(handle)
+            .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
+        let direction = match direction {
+            "up" => VerticalDirection::Up,
+            "down" => VerticalDirection::Down,
+            other => return Err(format!("unknown vertical direction {other:?}")),
+        };
+        serde_json::to_string(&vertical_move(
+            dl,
+            position,
+            direction,
+            goal_x.is_finite().then_some(goal_x),
+        ))
+        .map_err(|e| format!("serialize: {e}"))
+    })
+}
+
 /// Range rects against a stored display list — the by-handle twin of
 /// [`crate::hit::range_rects_json`]. `Err` on an unknown handle.
 pub fn range_rects_by_handle(handle: u32, from: i64, to: i64) -> Result<String, String> {
@@ -250,7 +279,7 @@ pub fn open_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hit::{hit_test_regions_json, range_rects_json};
+    use crate::hit::{hit_test_regions_json, range_rects_json, vertical_move_json};
 
     // a minimal one-page display list with a single positioned text primitive,
     // enough to exercise both a real hit and a range rect
@@ -297,6 +326,10 @@ mod tests {
             let by_json = range_rects_json(SAMPLE, from, to).unwrap();
             assert_eq!(by_handle, by_json, "range ({from},{to}) differs");
         }
+        assert_eq!(
+            vertical_move_by_handle(handle, 3, "down", f64::NAN).unwrap(),
+            vertical_move_json(SAMPLE, 3, "down", f64::NAN).unwrap()
+        );
 
         // an out-of-range page returns "null", same as the JSON-arg export
         assert_eq!(

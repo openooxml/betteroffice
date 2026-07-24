@@ -117,6 +117,10 @@ export function register_measure_font(bytes: Uint8Array): number;
  */
 export function update_display_list(handle: number, update: string): void;
 
+export function vertical_move_by_handle(handle: number, position: number, direction: string, goal_x: number): string;
+
+export function vertical_move_json(display_list: string, position: number, direction: string, goal_x: number): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -135,6 +139,8 @@ export interface InitOutput {
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
+    readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly close_display_list: (a: number) => void;
     readonly clear_measure_fonts: () => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
