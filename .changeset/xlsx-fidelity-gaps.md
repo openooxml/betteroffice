@@ -1,5 +1,6 @@
 ---
 "@betteroffice/xlsx": minor
+"@betteroffice/xlsx-react": minor
 "@betteroffice/rust-crates": patch
 ---
 
