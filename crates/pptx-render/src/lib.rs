@@ -157,7 +157,11 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                 text,
             } => {
                 let transform = transform(&base);
-                let path = geometry_path(&geometry, &adjust_values);
+                let path = geometry_path(
+                    &geometry,
+                    &adjust_values,
+                    f64::from(base.rect.w) / f64::from(base.rect.h),
+                );
                 primitives.push(Primitive::Shape {
                     object_id: base.id,
                     shape_id: None,
@@ -222,13 +226,16 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
 fn geometry_path(
     geometry: &str,
     adjust_values: &BTreeMap<String, f32>,
+    aspect_ratio: f64,
 ) -> Vec<ooxml_drawingml::GeometryPathCommand> {
     let adjustments = adjust_values
         .iter()
         .map(|(key, value)| (key.clone(), f64::from(*value)))
         .collect();
-    ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments)
-        .or_else(|| ooxml_drawingml::preset_geometry_to_path("rect", &Default::default()))
+    ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
+        .or_else(|| {
+            ooxml_drawingml::preset_geometry_to_path("rect", &Default::default(), aspect_ratio)
+        })
         .unwrap_or_default()
 }
 
@@ -340,6 +347,10 @@ mod tests {
             serde_json::from_str(&compile_json(json).expect("compile")).expect("display list json");
         assert_eq!(output["contractVersion"], CONTRACT_VERSION);
         assert_eq!(output["primitives"][0]["kind"], "shape");
+        let rx = output["primitives"][0]["path"][0]["x"].as_f64().unwrap();
+        let ry = output["primitives"][0]["path"][2]["y"].as_f64().unwrap();
+        assert!((rx * 300.0 - ry * 80.0).abs() < 1e-9);
+        assert!((ry - 0.2).abs() < 1e-6);
         assert_eq!(output["primitives"][1]["kind"], "textBox");
         assert_eq!(output["primitives"][1]["objectId"], 7);
         assert_eq!(output["primitives"][1]["anchor"], "center");

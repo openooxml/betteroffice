@@ -56,7 +56,7 @@ export function EditableCombobox({
       const target = event.target as Node;
       if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) close();
     };
-    const onKeyDown = (event: KeyboardEvent) => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === 'Escape') {
         setDraft(value);
         close();
@@ -123,7 +123,7 @@ export function EditableCombobox({
         }}
         style={{
           appearance: 'none',
-          width: `calc(100% - 22px)`,
+          width: 'calc(100% - 22px)',
           height: 26,
           padding: '0 2px 0 7px',
           border: 0,
