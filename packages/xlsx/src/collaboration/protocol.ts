@@ -1,5 +1,9 @@
 import type { AwarenessPayload, AwarenessUpdate } from './types';
-import { normalizeAwarenessColor } from './awareness';
+import {
+  MAX_AWARENESS_NAME_LENGTH,
+  MAX_AWARENESS_SHEET_LENGTH,
+  normalizeAwarenessColor,
+} from './awareness';
 
 export const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024 + 16;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
@@ -159,8 +163,10 @@ function awarenessPayload(value: unknown, clientId: number): AwarenessPayload | 
     throw new ProtocolError('Awareness state must contain a user');
   }
   const { name, color } = value.user;
-  if (typeof name !== 'string' || name.length === 0 || name.length > 128) {
-    throw new ProtocolError('Awareness user name must contain 1 to 128 characters');
+  if (typeof name !== 'string' || name.length === 0 || name.length > MAX_AWARENESS_NAME_LENGTH) {
+    throw new ProtocolError(
+      `Awareness user name must contain 1 to ${MAX_AWARENESS_NAME_LENGTH} characters`
+    );
   }
   const normalizedColor = normalizeAwarenessColor(color, clientId);
 
@@ -171,8 +177,10 @@ function awarenessPayload(value: unknown, clientId: number): AwarenessPayload | 
   if (!isObject(cursor) || typeof cursor.sheet !== 'string') {
     throw new ProtocolError('Awareness cursor must contain a sheet identifier');
   }
-  if (cursor.sheet.length === 0 || cursor.sheet.length > 256) {
-    throw new ProtocolError('Awareness sheet identifier must contain 1 to 256 characters');
+  if (cursor.sheet.length === 0 || cursor.sheet.length > MAX_AWARENESS_SHEET_LENGTH) {
+    throw new ProtocolError(
+      `Awareness sheet identifier must contain 1 to ${MAX_AWARENESS_SHEET_LENGTH} characters`
+    );
   }
   return {
     user: { name, color: normalizedColor },

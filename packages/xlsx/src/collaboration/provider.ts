@@ -16,6 +16,7 @@ import {
   AWARENESS_PEER_TIMEOUT_MS,
   awarenessPeers,
   expireAwarenessPeers,
+  MAX_AWARENESS_SHEET_LENGTH,
   normalizeCollaborationUser,
   type AwarenessPeerStore,
 } from './awareness';
@@ -73,6 +74,26 @@ function unrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof set
   handle.unref?.();
 }
 
+function encodableCell(cell: AwarenessCursor['anchor'] | undefined): boolean {
+  return (
+    !!cell &&
+    Number.isSafeInteger(cell.row) &&
+    cell.row >= 0 &&
+    Number.isSafeInteger(cell.col) &&
+    cell.col >= 0
+  );
+}
+
+function encodableCursor(cursor: AwarenessCursor): boolean {
+  return (
+    typeof cursor.sheet === 'string' &&
+    cursor.sheet.length > 0 &&
+    cursor.sheet.length <= MAX_AWARENESS_SHEET_LENGTH &&
+    encodableCell(cursor.anchor) &&
+    encodableCell(cursor.head)
+  );
+}
+
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
   private readonly transport: CollaborationTransport;
@@ -101,6 +122,7 @@ export class CollaborationProvider {
   private transportCleanup: Promise<void> | undefined;
   private statusRevision = 0;
   private awarenessClock = 0;
+  private reportedClockExhaustion = false;
   private awarenessCursor: AwarenessCursor | null = null;
   private lastAwarenessSentAt = Number.NEGATIVE_INFINITY;
   private awarenessBroadcastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -308,13 +330,23 @@ export class CollaborationProvider {
 
   setCursor(cursor: AwarenessCursor | null): void {
     if (this.isDestroyed) return;
-    this.awarenessCursor = cursor
-      ? {
-          sheet: cursor.sheet,
-          anchor: { ...cursor.anchor },
-          head: { ...cursor.head },
-        }
-      : null;
+    const encodable = cursor ? encodableCursor(cursor) : false;
+    this.awarenessCursor =
+      cursor && encodable
+        ? {
+            sheet: cursor.sheet,
+            anchor: { ...cursor.anchor },
+            head: { ...cursor.head },
+          }
+        : null;
+    if (cursor && !encodable) {
+      this.report(
+        new CollaborationError(
+          'protocol',
+          `Awareness cursor needs a sheet identifier of 1 to ${MAX_AWARENESS_SHEET_LENGTH} characters and non-negative cell coordinates; cursor dropped`
+        )
+      );
+    }
     if (!this.isOpen || !this.wantsConnection) return;
 
     const remaining =
@@ -459,18 +491,24 @@ export class CollaborationProvider {
 
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
-      if (!this.isCurrent(token) || !this.isOpen) return;
-      this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
-      if (!this.isCurrent(token) || !this.isOpen) return;
-      if (!this.hasPublishedAwarenessForOpen) this.publishAwareness();
-      if (!this.isCurrent(token) || !this.isOpen) return;
-      this.startAwarenessTimers();
     } catch (cause) {
       this.failConnection(
         token,
         normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
       );
+      return;
     }
+    if (!this.isCurrent(token) || !this.isOpen) return;
+
+    try {
+      this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
+    } catch (cause) {
+      this.report(normalizeError('protocol', 'Failed to encode awareness query', cause));
+    }
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    if (!this.hasPublishedAwarenessForOpen) this.publishAwareness();
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    this.startAwarenessTimers();
   }
 
   private handleMessage(token: number, data: Uint8Array): void {
@@ -596,13 +634,10 @@ export class CollaborationProvider {
       clearTimeout(this.awarenessBroadcastTimer);
       this.awarenessBroadcastTimer = undefined;
     }
-    const token = this.epoch;
     if (this.awarenessClock >= Number.MAX_SAFE_INTEGER) {
-      if (delivery === 'queued') {
-        this.failConnection(
-          token,
-          new CollaborationError('protocol', 'Awareness clock exhausted')
-        );
+      if (delivery === 'queued' && !this.reportedClockExhaustion) {
+        this.reportedClockExhaustion = true;
+        this.report(new CollaborationError('protocol', 'Awareness clock exhausted'));
       }
       return;
     }
@@ -630,10 +665,7 @@ export class CollaborationProvider {
       this.lastAwarenessSentAt = Date.now();
     } catch (cause) {
       if (delivery === 'queued') {
-        this.failConnection(
-          token,
-          normalizeError('protocol', 'Failed to encode awareness update', cause)
-        );
+        this.report(normalizeError('protocol', 'Failed to encode awareness update', cause));
       }
     }
   }

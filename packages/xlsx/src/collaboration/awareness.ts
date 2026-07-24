@@ -13,6 +13,8 @@ export const AWARENESS_PEER_TIMEOUT_MS = 45_000;
 export const AWARENESS_LABEL_DURATION_MS = 3_000;
 export const XLSX_MAX_ROWS = 1_048_576;
 export const XLSX_MAX_COLUMNS = 16_384;
+export const MAX_AWARENESS_NAME_LENGTH = 128;
+export const MAX_AWARENESS_SHEET_LENGTH = 256;
 
 export const AWARENESS_COLORS = [
   '#0B57D0',
@@ -97,7 +99,7 @@ export function normalizeCollaborationUser(
   user: CollaborationUserOptions | undefined,
   clientId: number
 ): CollaborationUser {
-  const name = user?.name.trim().slice(0, 128) || 'Anonymous';
+  const name = user?.name.trim().slice(0, MAX_AWARENESS_NAME_LENGTH) || 'Anonymous';
   return {
     name,
     color: normalizeAwarenessColor(user?.color, clientId),
