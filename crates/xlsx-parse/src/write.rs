@@ -30,6 +30,8 @@ const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml"
 const REL_STYLES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
 const REL_THEME: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme";
+const REL_HYPERLINK: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 const NS_DML: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 
 /// serialize a workbook to opc parts in a fixed, deterministic order.
@@ -60,6 +62,16 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
             format!("xl/worksheets/sheet{}.xml", i + 1),
             worksheet_xml(sheet, wb)?,
         ));
+        if sheet
+            .hyperlinks
+            .iter()
+            .any(|link| link.external_target.is_some())
+        {
+            parts.push((
+                format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1),
+                worksheet_rels_xml(sheet)?,
+            ));
+        }
     }
     Ok(parts)
 }
@@ -174,10 +186,35 @@ fn workbook_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
                     }
                     Ok(())
                 })?;
+                write_defined_names(w, wb)?;
                 Ok(())
             })?;
         Ok(())
     })
+}
+
+fn write_defined_names(w: &mut Writer<Vec<u8>>, wb: &Workbook) -> io::Result<()> {
+    if wb.defined_names.is_empty() {
+        return Ok(());
+    }
+    w.create_element("definedNames").write_inner_content(|w| {
+        for defined in &wb.defined_names {
+            let mut element = BytesStart::new("definedName");
+            element.push_attribute(("name", defined.name.as_str()));
+            let local_sheet = defined.local_sheet.map(|sheet| sheet.0.to_string());
+            if let Some(local_sheet) = &local_sheet {
+                element.push_attribute(("localSheetId", local_sheet.as_str()));
+            }
+            if defined.hidden {
+                element.push_attribute(("hidden", "1"));
+            }
+            w.write_event(Event::Start(element))?;
+            w.write_event(Event::Text(BytesText::new(&defined.formula)))?;
+            w.write_event(Event::End(BytesEnd::new("definedName")))?;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn workbook_rels(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec<u8>, ParseError> {
@@ -259,21 +296,125 @@ fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
     rows.dedup();
 
     doc(|w| {
-        w.create_element("worksheet")
-            .with_attribute(("xmlns", NS_MAIN))
+        let mut root = BytesStart::new("worksheet");
+        root.push_attribute(("xmlns", NS_MAIN));
+        if sheet
+            .hyperlinks
+            .iter()
+            .any(|link| link.external_target.is_some())
+        {
+            root.push_attribute(("xmlns:r", NS_R));
+        }
+        w.write_event(Event::Start(root))?;
+        write_sheet_views(w, sheet)?;
+        write_cols(w, sheet)?;
+        w.create_element("sheetData").write_inner_content(|w| {
+            for &row in &rows {
+                write_row(w, sheet, row, &sst_index)?;
+            }
+            Ok(())
+        })?;
+        write_merges(w, sheet)?;
+        write_hyperlinks(w, sheet)?;
+        w.write_event(Event::End(BytesEnd::new("worksheet")))?;
+        Ok(())
+    })
+}
+
+fn write_hyperlinks(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
+    if sheet.hyperlinks.is_empty() {
+        return Ok(());
+    }
+    w.create_element("hyperlinks").write_inner_content(|w| {
+        let mut external_index = 0;
+        for link in &sheet.hyperlinks {
+            let mut element = BytesStart::new("hyperlink");
+            let reference = link.range.to_a1();
+            element.push_attribute(("ref", reference.as_str()));
+            let relationship_id = link.external_target.as_ref().map(|_| {
+                external_index += 1;
+                format!("rIdHyperlink{external_index}")
+            });
+            if let Some(relationship_id) = &relationship_id {
+                element.push_attribute(("r:id", relationship_id.as_str()));
+            }
+            if let Some(location) = &link.location {
+                element.push_attribute(("location", location.as_str()));
+            }
+            if let Some(tooltip) = &link.tooltip {
+                element.push_attribute(("tooltip", tooltip.as_str()));
+            }
+            if let Some(display) = &link.display {
+                element.push_attribute(("display", display.as_str()));
+            }
+            w.write_event(Event::Empty(element))?;
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn worksheet_rels_xml(sheet: &Sheet) -> Result<Vec<u8>, ParseError> {
+    doc(|w| {
+        w.create_element("Relationships")
+            .with_attribute(("xmlns", NS_PKG_REL))
             .write_inner_content(|w| {
-                write_cols(w, sheet)?;
-                w.create_element("sheetData").write_inner_content(|w| {
-                    for &row in &rows {
-                        write_row(w, sheet, row, &sst_index)?;
-                    }
-                    Ok(())
-                })?;
-                write_merges(w, sheet)?;
+                let mut external_index = 0;
+                for link in &sheet.hyperlinks {
+                    let Some(target) = &link.external_target else {
+                        continue;
+                    };
+                    external_index += 1;
+                    let relationship_id = format!("rIdHyperlink{external_index}");
+                    w.create_element("Relationship")
+                        .with_attribute(("Id", relationship_id.as_str()))
+                        .with_attribute(("Type", REL_HYPERLINK))
+                        .with_attribute(("Target", target.as_str()))
+                        .with_attribute(("TargetMode", "External"))
+                        .write_empty()?;
+                }
                 Ok(())
             })?;
         Ok(())
     })
+}
+
+fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
+    let Some(pane) = sheet.freeze_pane else {
+        return Ok(());
+    };
+    w.create_element("sheetViews").write_inner_content(|w| {
+        w.create_element("sheetView")
+            .with_attribute(("workbookViewId", "0"))
+            .write_inner_content(|w| {
+                let mut element = BytesStart::new("pane");
+                let x_split = pane.cols.to_string();
+                let y_split = pane.rows.to_string();
+                if pane.cols > 0 {
+                    element.push_attribute(("xSplit", x_split.as_str()));
+                }
+                if pane.rows > 0 {
+                    element.push_attribute(("ySplit", y_split.as_str()));
+                }
+                let top_left = CellRef::new(pane.top_left.row, pane.top_left.col).to_a1();
+                element.push_attribute(("topLeftCell", top_left.as_str()));
+                element.push_attribute(("activePane", active_pane(pane.rows, pane.cols)));
+                element.push_attribute(("state", "frozen"));
+                w.write_event(Event::Empty(element))?;
+                Ok(())
+            })?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn active_pane(rows: u32, cols: u32) -> &'static str {
+    match (rows > 0, cols > 0) {
+        (true, true) => "bottomRight",
+        (true, false) => "bottomLeft",
+        (false, true) => "topRight",
+        (false, false) => "topLeft",
+    }
 }
 
 fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {

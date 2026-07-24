@@ -19,6 +19,10 @@ struct SheetInfo {
     active_sheet: u32,
     content_width: f32,
     content_height: f32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+    initial_scroll_x: f32,
+    initial_scroll_y: f32,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +56,12 @@ struct CellArgs {
     sheet: u32,
     row: u32,
     col: u32,
+}
+
+#[derive(Serialize)]
+struct CellPosition {
+    x: f32,
+    y: f32,
 }
 
 #[derive(Deserialize)]
@@ -373,6 +383,16 @@ impl Session {
         .map_err(|error| error.to_string())
     }
 
+    pub fn cell_position_json(&self, args: &str) -> Result<String, String> {
+        let args: CellArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
+        let (x, y) = self
+            .workbook
+            .cell_scroll_position(SheetId(args.sheet), CellRef::new(args.row, args.col))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&CellPosition { x, y }).map_err(|error| error.to_string())
+    }
+
     pub fn range_cells_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
@@ -569,6 +589,10 @@ impl Session {
                 active_sheet: info.active_sheet.0,
                 content_width: info.content_width,
                 content_height: info.content_height,
+                frozen_rows: info.frozen_rows,
+                frozen_cols: info.frozen_cols,
+                initial_scroll_x: info.initial_scroll_x,
+                initial_scroll_y: info.initial_scroll_y,
             })
             .map_err(|error| error.to_string())
     }
@@ -708,6 +732,18 @@ mod tests {
         let info = session.sheet_info_json().unwrap();
         assert!(info.contains(r#""sheetNames":["Data","Empty"]"#));
         assert!(info.contains(r#""activeSheet":0"#));
+        assert!(info.contains(r#""frozenRows":0"#));
+        assert!(info.contains(r#""frozenCols":0"#));
+        assert!(info.contains(r#""initialScrollX":0.0"#));
+        assert!(info.contains(r#""initialScrollY":0.0"#));
+        let position: serde_json::Value = serde_json::from_str(
+            &session
+                .cell_position_json(r#"{"sheet":0,"row":3,"col":2}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(position["x"].as_f64().unwrap() > 0.0);
+        assert!(position["y"].as_f64().unwrap() > 0.0);
         assert_eq!(
             session.calculation_status_json().unwrap(),
             r#"{"limitedCells":[]}"#

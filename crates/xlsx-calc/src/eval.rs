@@ -1,16 +1,17 @@
 //! tree-walking evaluator; reads cells only through `xlsx_model::CellProvider`.
 //! coercion follows excel; errors propagate leftmost-first.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, ErrorValue, SheetId};
+use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
 use crate::parser::{BinaryOp, Expr, UnaryOp};
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
+const MAX_DEFINED_NAME_DEPTH: usize = 100;
 
 pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
@@ -40,9 +41,10 @@ pub struct EvalContext<'a> {
     pub sheet: SheetId,
     /// wall-clock as an excel date serial; `None` -> TODAY()/NOW() return #VALUE!.
     pub now_serial: Option<f64>,
-    remaining_cell_visits: Cell<u64>,
-    exhausted: Cell<bool>,
-    unhandled_budget_errors: Cell<u64>,
+    remaining_cell_visits: Rc<Cell<u64>>,
+    exhausted: Rc<Cell<bool>>,
+    unhandled_budget_errors: Rc<Cell<u64>>,
+    defined_name_stack: Rc<RefCell<Vec<(SheetId, String)>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
 }
 
@@ -52,9 +54,10 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: None,
-            remaining_cell_visits: Cell::new(MAX_EVALUATION_CELL_VISITS),
-            exhausted: Cell::new(false),
-            unhandled_budget_errors: Cell::new(0),
+            remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            exhausted: Rc::new(Cell::new(false)),
+            unhandled_budget_errors: Rc::new(Cell::new(0)),
+            defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             shared_budget: None,
         }
     }
@@ -64,9 +67,10 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: Some(now_serial),
-            remaining_cell_visits: Cell::new(MAX_EVALUATION_CELL_VISITS),
-            exhausted: Cell::new(false),
-            unhandled_budget_errors: Cell::new(0),
+            remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            exhausted: Rc::new(Cell::new(false)),
+            unhandled_budget_errors: Rc::new(Cell::new(0)),
+            defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             shared_budget: None,
         }
     }
@@ -80,10 +84,24 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: None,
-            remaining_cell_visits: Cell::new(MAX_EVALUATION_CELL_VISITS),
-            exhausted: Cell::new(false),
-            unhandled_budget_errors: Cell::new(0),
+            remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
+            exhausted: Rc::new(Cell::new(false)),
+            unhandled_budget_errors: Rc::new(Cell::new(0)),
+            defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             shared_budget: Some(budget),
+        }
+    }
+
+    fn for_sheet(&self, sheet: SheetId) -> Self {
+        Self {
+            provider: self.provider,
+            sheet,
+            now_serial: self.now_serial,
+            remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
+            exhausted: Rc::clone(&self.exhausted),
+            unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
+            defined_name_stack: Rc::clone(&self.defined_name_stack),
+            shared_budget: self.shared_budget.clone(),
         }
     }
 
@@ -164,6 +182,7 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } => err(ErrorValue::Value),
+        Expr::Name { scope, name } => evaluate_defined_name(scope, name, ctx),
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
         Expr::Percent(inner) => match to_number(&evaluate(inner, ctx)) {
@@ -175,6 +194,46 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             None => err(ErrorValue::Name),
         },
     }
+}
+
+fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
+    match with_defined_name(scope, name, ctx, evaluate) {
+        Ok(value) => value,
+        Err(error) => err(error),
+    }
+}
+
+fn with_defined_name<T>(
+    scope: &Option<String>,
+    name: &str,
+    ctx: &EvalContext<'_>,
+    evaluate_definition: impl FnOnce(&Expr, &EvalContext<'_>) -> T,
+) -> Result<T, ErrorValue> {
+    let lookup_sheet = match scope {
+        Some(scope) => ctx.provider.sheet_id(scope).ok_or(ErrorValue::Ref)?,
+        None => ctx.sheet,
+    };
+    let key = (lookup_sheet, name.to_lowercase());
+    {
+        let stack = ctx.defined_name_stack.borrow();
+        if stack.len() >= MAX_DEFINED_NAME_DEPTH || stack.contains(&key) {
+            return Err(ErrorValue::Name);
+        }
+    }
+    let defined = ctx
+        .provider
+        .defined_name(lookup_sheet, name)
+        .ok_or(ErrorValue::Name)?;
+    let formula = defined
+        .formula
+        .strip_prefix('=')
+        .unwrap_or(&defined.formula);
+    let expression = crate::parse_formula(formula).map_err(|_| ErrorValue::Name)?;
+    let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+    ctx.defined_name_stack.borrow_mut().push(key);
+    let value = evaluate_definition(&expression, &ctx.for_sheet(definition_sheet));
+    ctx.defined_name_stack.borrow_mut().pop();
+    Ok(value)
 }
 
 /// resolve a possibly sheet-qualified cell reference to its stored value.
@@ -384,31 +443,6 @@ pub(crate) fn format_number(n: f64) -> String {
     format!("{n}")
 }
 
-/// expand a range argument into its cell values (bounded rectangle, row-major).
-pub(crate) fn range_values(
-    sheet: &Option<String>,
-    range: &CellRange,
-    ctx: &EvalContext<'_>,
-) -> Result<Vec<CellValue>, ErrorValue> {
-    let sid = match sheet {
-        Some(name) => ctx.provider.sheet_id(name).ok_or(ErrorValue::Ref)?,
-        None => ctx.sheet,
-    };
-    let count = range_cell_count(range).ok_or(ErrorValue::Num)?;
-    if !ctx.consume_cells(count) {
-        return Err(ErrorValue::Num);
-    }
-    let mut out = Vec::with_capacity(usize::try_from(count).map_err(|_| ErrorValue::Num)?);
-    for row in range.start.row..=range.end.row {
-        for col in range.start.col..=range.end.col {
-            out.push(normalize_provider_value(
-                ctx.provider.value(sid, CellRef::new(row, col)),
-            ));
-        }
-    }
-    Ok(out)
-}
-
 /// a resolved rectangular reference: absolute top-left plus dimensions on a
 /// known sheet, for positional access by function modules.
 pub(crate) struct Area {
@@ -476,14 +510,9 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             rows: (range.end.row - range.start.row + 1) as usize,
             cols: (range.end.col - range.start.col + 1) as usize,
         }),
+        Expr::Name { scope, name } => with_defined_name(scope, name, ctx, as_area).ok().flatten(),
         _ => None,
     }
-}
-
-fn range_cell_count(range: &CellRange) -> Option<u64> {
-    let rows = u64::from(range.end.row - range.start.row + 1);
-    let cols = u64::from(range.end.col - range.start.col + 1);
-    rows.checked_mul(cols)
 }
 
 fn normalize_provider_value(value: CellValue) -> CellValue {
@@ -500,7 +529,76 @@ fn normalize_provider_value(value: CellValue) -> CellValue {
 mod tests {
     use super::*;
     use crate::parse_formula;
-    use xlsx_model::{Sheet, Workbook};
+    use xlsx_model::{Cell, DefinedName, Sheet, Workbook};
+
+    fn number(value: f64) -> Cell {
+        Cell {
+            value: CellValue::Number { value },
+            ..Cell::default()
+        }
+    }
+
+    #[test]
+    fn evaluates_workbook_and_sheet_scoped_names() {
+        let mut workbook = Workbook::default();
+        let mut data = Sheet::new("Data");
+        data.set_cell(CellRef::parse_a1("A1").unwrap(), number(7.0));
+        let mut other = Sheet::new("Other");
+        other.set_cell(CellRef::parse_a1("A1").unwrap(), number(11.0));
+        workbook.sheets.extend([data, other]);
+        workbook.defined_names.extend([
+            DefinedName {
+                name: "Input".into(),
+                formula: "Data!$A$1".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "Input".into(),
+                formula: "$A$1".into(),
+                local_sheet: Some(SheetId(1)),
+                hidden: false,
+            },
+        ]);
+
+        let workbook_value = parse_formula("Input*2").unwrap();
+        assert_eq!(
+            evaluate(&workbook_value, &EvalContext::new(&workbook, SheetId(0))),
+            CellValue::Number { value: 14.0 }
+        );
+        assert_eq!(
+            evaluate(&workbook_value, &EvalContext::new(&workbook, SheetId(1))),
+            CellValue::Number { value: 22.0 }
+        );
+        let qualified = parse_formula("Data!Input").unwrap();
+        assert_eq!(
+            evaluate(&qualified, &EvalContext::new(&workbook, SheetId(1))),
+            CellValue::Number { value: 7.0 }
+        );
+    }
+
+    #[test]
+    fn unknown_and_recursive_names_return_name_error() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        workbook.defined_names.push(DefinedName {
+            name: "Loop".into(),
+            formula: "Loop+1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        for formula in ["Missing", "Loop"] {
+            assert_eq!(
+                evaluate(
+                    &parse_formula(formula).unwrap(),
+                    &EvalContext::new(&workbook, SheetId(0))
+                ),
+                CellValue::Error {
+                    value: ErrorValue::Name
+                }
+            );
+        }
+    }
 
     #[test]
     fn rejects_ranges_over_the_evaluation_budget() {

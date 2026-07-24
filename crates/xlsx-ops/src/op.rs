@@ -2,7 +2,9 @@
 //! mirror of the model's non-serde `Cell`, provenance tags, and transactions.
 
 use serde::{Deserialize, Serialize};
-use xlsx_model::{Cell, CellRange, CellRef, CellValue, ColId, RowId, SheetId};
+use xlsx_model::{
+    Cell, CellRange, CellRef, CellValue, ColId, FreezePane, Hyperlink, RowId, SheetId,
+};
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
 
@@ -87,6 +89,15 @@ pub enum Op {
         sheet: SheetId,
         row: RowId,
         height: Option<f64>,
+    },
+    SetFreezePane {
+        sheet: SheetId,
+        pane: Option<FreezePane>,
+    },
+    #[doc(hidden)]
+    SetHyperlinks {
+        sheet: SheetId,
+        hyperlinks: Vec<Hyperlink>,
     },
     MergeCells {
         sheet: SheetId,

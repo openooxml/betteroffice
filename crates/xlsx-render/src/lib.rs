@@ -5,19 +5,21 @@ pub mod display_list;
 pub mod geometry;
 pub mod region;
 
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 use xlsx_model::numfmt::{builtin_format_code, format_value};
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet, Theme};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::Sheet;
-use xlsx_model::{CellRange, CellRef, Fill, HAlign, SheetId, VAlign, Workbook};
+use xlsx_model::{CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetId, VAlign, Workbook};
 
-pub use display_list::{Align, DisplayList, DrawCmd, GridMeta, Rect, scaled};
+pub use display_list::{Align, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, Rect, scaled};
 pub use geometry::GridGeometry;
 pub use region::{viewport_for_range, viewport_for_used_range};
 
-/// a scrolled window into a sheet, in pixels from the sheet origin.
+/// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Viewport {
     pub x: f32,
@@ -30,7 +32,10 @@ const BACKGROUND_COLOR: &str = "#ffffff";
 const GRIDLINE_COLOR: &str = "#d4d4d4";
 const TEXT_COLOR: &str = "#000000";
 const BORDER_COLOR: &str = "#000000";
+const PANE_DIVIDER_COLOR: &str = "#8a8a8a";
+const HYPERLINK_COLOR: &str = "#0563c1";
 const GRIDLINE_WIDTH: f32 = 1.0;
+const PANE_DIVIDER_WIDTH: f32 = 2.0;
 const FONT_SIZE_PT: f32 = 11.0;
 const TEXT_PAD_PX: f32 = 2.0;
 // rough calibri-like ascent/descent as fractions of the font size.
@@ -66,8 +71,163 @@ struct GhostFont {
     underline: bool,
 }
 
+#[derive(Clone, Copy)]
+struct AxisTrack {
+    index: u32,
+    raw_start: f32,
+    start: f32,
+    end: f32,
+    pinned: bool,
+}
+
+struct AxisLayout {
+    tracks: Vec<AxisTrack>,
+    ranges: Vec<Range<u32>>,
+    divider: Option<f32>,
+    frozen: u32,
+    scroll: f32,
+}
+
+#[derive(Clone, Copy)]
+struct AxisSpan {
+    raw_start: f32,
+    raw_end: f32,
+    start: f32,
+    end: f32,
+}
+
+impl AxisLayout {
+    fn new(
+        limit: u32,
+        frozen: u32,
+        scroll: f32,
+        extent: f32,
+        edge: impl Fn(u32) -> f32,
+        at: impl Fn(f32) -> u32,
+    ) -> Self {
+        let frozen = frozen.min(limit);
+        let scroll = if frozen > 0 { scroll.max(0.0) } else { scroll };
+        let frozen_extent = edge(frozen);
+        let mut tracks = Vec::new();
+        if frozen > 0 {
+            for index in 0..frozen {
+                let start = edge(index);
+                if start >= extent {
+                    break;
+                }
+                tracks.push(AxisTrack {
+                    index,
+                    raw_start: start,
+                    start,
+                    end: edge(index + 1),
+                    pinned: true,
+                });
+            }
+        }
+
+        if frozen < limit && frozen_extent < extent {
+            let body_extent = extent - frozen_extent;
+            let origin = frozen_extent + scroll;
+            let first = at(origin).max(frozen).min(limit - 1);
+            let last = at(origin + body_extent).max(first).min(limit - 1);
+            for index in first..=last {
+                let raw_start = edge(index) - scroll;
+                let raw_end = edge(index + 1) - scroll;
+                tracks.push(AxisTrack {
+                    index,
+                    raw_start,
+                    start: if frozen > 0 && index == first {
+                        raw_start.max(frozen_extent)
+                    } else {
+                        raw_start
+                    },
+                    end: raw_end,
+                    pinned: false,
+                });
+            }
+        }
+
+        let mut ranges: Vec<Range<u32>> = Vec::new();
+        for track in &tracks {
+            match ranges.last_mut() {
+                Some(range) if range.end == track.index => range.end += 1,
+                _ => ranges.push(track.index..track.index + 1),
+            }
+        }
+        Self {
+            tracks,
+            ranges,
+            divider: (frozen > 0 && frozen_extent < extent).then_some(frozen_extent),
+            frozen,
+            scroll,
+        }
+    }
+
+    fn start(&self) -> u32 {
+        self.tracks.first().map_or(0, |track| track.index)
+    }
+
+    fn indices(&self) -> Option<Vec<u32>> {
+        let start = self.start();
+        self.tracks
+            .iter()
+            .enumerate()
+            .any(|(offset, track)| track.index != start + offset as u32)
+            .then(|| self.tracks.iter().map(|track| track.index).collect())
+    }
+
+    fn offsets(&self) -> Vec<f32> {
+        let Some(first) = self.tracks.first() else {
+            return Vec::new();
+        };
+        std::iter::once(first.start)
+            .chain(self.tracks.iter().map(|track| track.end))
+            .collect()
+    }
+
+    fn contains(&self, index: u32) -> bool {
+        self.tracks
+            .binary_search_by_key(&index, |track| track.index)
+            .is_ok()
+    }
+
+    fn intersects(&self, start: u32, end: u32) -> bool {
+        self.tracks
+            .iter()
+            .any(|track| (start..=end).contains(&track.index))
+    }
+
+    fn span(&self, start: u32, end: u32, edge: impl Fn(u32) -> f32) -> Option<AxisSpan> {
+        let first = self
+            .tracks
+            .binary_search_by_key(&start, |track| track.index)
+            .ok()?;
+        let track = self.tracks[first];
+        let raw_end = if track.pinned {
+            edge(end.saturating_add(1).min(self.frozen))
+        } else {
+            edge(end.saturating_add(1)) - self.scroll
+        };
+        Some(AxisSpan {
+            raw_start: track.raw_start,
+            raw_end,
+            start: track.start,
+            end: raw_end,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CellBox {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    clip: Rect,
+}
+
 /// build the display list for one viewport of one sheet. commands are emitted
-/// background -> fills -> gridlines -> borders -> text, each layer painting over the previous.
+/// background -> fills -> gridlines -> borders -> text -> pane dividers.
 pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) -> DisplayList {
     build_display_list_with_ghosts(wb, sheet, viewport, &[])
 }
@@ -96,31 +256,67 @@ pub fn build_display_list_with_ghosts(
             height: viewport.height,
             commands,
             grid: GridMeta::default(),
+            hyperlinks: Vec::new(),
         };
     };
 
     let styles = &wb.styles;
     let theme = &styles.theme;
+    let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
     let geom = GridGeometry::new(sheet_ref);
-    let (rows, cols) = geom.viewport_range(viewport);
+    let (frozen_rows, frozen_cols) = sheet_ref
+        .freeze_pane
+        .map_or((0, 0), |pane| (pane.rows, pane.cols));
+    let rows = AxisLayout::new(
+        MAX_ROWS,
+        frozen_rows,
+        viewport.y,
+        viewport.height,
+        |row| geom.row_y(row),
+        |y| geom.row_at_y(y),
+    );
+    let cols = AxisLayout::new(
+        MAX_COLS,
+        frozen_cols,
+        viewport.x,
+        viewport.width,
+        |col| geom.col_x(col),
+        |x| geom.col_at_x(x),
+    );
 
     let grid = GridMeta {
-        start_row: rows.start,
-        start_col: cols.start,
-        row_offsets: (rows.start..=rows.end)
-            .map(|r| geom.row_y(r) - viewport.y)
-            .collect(),
-        col_offsets: (cols.start..=cols.end)
-            .map(|c| geom.col_x(c) - viewport.x)
-            .collect(),
+        start_row: rows.start(),
+        start_col: cols.start(),
+        row_indices: rows.indices(),
+        col_indices: cols.indices(),
+        row_offsets: rows.offsets(),
+        col_offsets: cols.offsets(),
     };
+    let hyperlinks = sheet_ref
+        .hyperlinks
+        .iter()
+        .filter(|link| {
+            rows.intersects(link.range.start.row, link.range.end.row)
+                && cols.intersects(link.range.start.col, link.range.end.col)
+        })
+        .map(|link| HyperlinkRegion {
+            top: link.range.start.row,
+            left: link.range.start.col,
+            bottom: link.range.end.row,
+            right: link.range.end.col,
+            external_target: link.external_target.clone(),
+            location: link.location.clone(),
+            tooltip: link.tooltip.clone(),
+        })
+        .collect();
+    let anchors = visible_anchors(sheet_ref, &rows, &cols);
     let changed_ghost_cells: std::collections::HashSet<(u32, u32)> = ghosts
         .iter()
         .filter(|g| g.old_text != g.new_text)
         .map(|g| (g.row, g.col))
         .collect();
 
-    for (at, cell) in visible_anchors(sheet_ref, &rows, &cols) {
+    for &(at, cell) in &anchors {
         let Some(style) = cell.style else { continue };
         let Some(Fill::Solid(color)) = styles.fill_for(style) else {
             continue;
@@ -128,22 +324,26 @@ pub fn build_display_list_with_ghosts(
         let Some(hex) = color.resolve(theme) else {
             continue;
         };
-        let (x, y, w, h) = cell_box(&geom, viewport, sheet_ref, at);
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+            continue;
+        };
+        let clip = cell_box.clip;
         commands.push(DrawCmd::FillRect {
-            x,
-            y,
-            w,
-            h,
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
             color: hex,
         });
     }
 
-    let top = geom.row_y(rows.start) - viewport.y;
-    let bottom = geom.row_y(rows.end) - viewport.y;
-    let left = geom.col_x(cols.start) - viewport.x;
-    let right = geom.col_x(cols.end) - viewport.x;
-    for c in cols.start..=cols.end {
-        let x = geom.col_x(c) - viewport.x;
+    let row_offsets = rows.offsets();
+    let col_offsets = cols.offsets();
+    let top = row_offsets.first().copied().unwrap_or(0.0);
+    let bottom = row_offsets.last().copied().unwrap_or(0.0);
+    let left = col_offsets.first().copied().unwrap_or(0.0);
+    let right = col_offsets.last().copied().unwrap_or(0.0);
+    for &x in &col_offsets {
         commands.push(DrawCmd::Line {
             x1: x,
             y1: top,
@@ -154,8 +354,7 @@ pub fn build_display_list_with_ghosts(
             style: None,
         });
     }
-    for r in rows.start..=rows.end {
-        let y = geom.row_y(r) - viewport.y;
+    for &y in &row_offsets {
         commands.push(DrawCmd::Line {
             x1: left,
             y1: y,
@@ -167,7 +366,7 @@ pub fn build_display_list_with_ghosts(
         });
     }
 
-    for (at, cell) in visible_anchors(sheet_ref, &rows, &cols) {
+    for &(at, cell) in &anchors {
         let Some(style) = cell.style else { continue };
         let Some(border) = styles.border_for(style) else {
             continue;
@@ -175,7 +374,8 @@ pub fn build_display_list_with_ghosts(
         emit_borders(
             &mut commands,
             &geom,
-            viewport,
+            &rows,
+            &cols,
             sheet_ref,
             styles,
             theme,
@@ -184,15 +384,29 @@ pub fn build_display_list_with_ghosts(
         );
     }
 
-    for (at, cell) in visible_anchors(sheet_ref, &rows, &cols) {
+    for &(at, cell) in &anchors {
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
-        let Some((text, color)) = cell_display_text(styles, wb.date_system, cell) else {
+        let hyperlink = sheet_ref.hyperlink_at(at);
+        let Some((text, color)) = cell_display_text(styles, wb.date_system, cell).or_else(|| {
+            hyperlink
+                .filter(|link| link.range.start == at)
+                .and_then(|link| link.display.clone())
+                .filter(|display| !display.is_empty())
+                .map(|display| (display, hyperlink_color.to_string()))
+        }) else {
             continue;
         };
+        let color = if hyperlink.is_some() {
+            hyperlink_color.to_string()
+        } else {
+            color
+        };
 
-        let (cx0, cy0, cw, ch) = cell_box(&geom, viewport, sheet_ref, at);
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+            continue;
+        };
         let font = cell.style.and_then(|s| styles.font_for(s));
         let size = font
             .and_then(|f| f.size_pt)
@@ -205,11 +419,11 @@ pub fn build_display_list_with_ghosts(
             .and_then(|a| a.v);
 
         let tx = match align {
-            Align::Left => cx0 + TEXT_PAD_PX,
-            Align::Right => cx0 + cw - TEXT_PAD_PX,
-            Align::Center => cx0 + cw / 2.0,
+            Align::Left => cell_box.x + TEXT_PAD_PX,
+            Align::Right => cell_box.x + cell_box.w - TEXT_PAD_PX,
+            Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = baseline_y(cy0, ch, size, valign);
+        let ty = baseline_y(cell_box.y, cell_box.h, size, valign);
 
         commands.push(DrawCmd::Text {
             x: tx,
@@ -217,16 +431,11 @@ pub fn build_display_list_with_ghosts(
             text,
             font_size: size,
             color,
-            clip: Rect {
-                x: cx0,
-                y: cy0,
-                w: cw,
-                h: ch,
-            },
+            clip: cell_box.clip,
             align,
             bold: font.is_some_and(|f| f.bold),
             italic: font.is_some_and(|f| f.italic),
-            underline: font.is_some_and(|f| f.underline),
+            underline: hyperlink.is_some() || font.is_some_and(|f| f.underline),
             strike: font.is_some_and(|f| f.strike),
             highlight: None,
             dashed_underline: false,
@@ -235,8 +444,38 @@ pub fn build_display_list_with_ghosts(
         });
     }
 
+    for link in &sheet_ref.hyperlinks {
+        let at = link.range.start;
+        if sheet_ref.cell(at).is_some() || !rows.contains(at.row) || !cols.contains(at.col) {
+            continue;
+        }
+        let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
+            continue;
+        };
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+            continue;
+        };
+        commands.push(DrawCmd::Text {
+            x: cell_box.x + TEXT_PAD_PX,
+            y: baseline_y(cell_box.y, cell_box.h, FONT_SIZE_PT, None),
+            text: text.clone(),
+            font_size: FONT_SIZE_PT,
+            color: hyperlink_color.to_string(),
+            clip: cell_box.clip,
+            align: Align::Left,
+            bold: false,
+            italic: false,
+            underline: true,
+            strike: false,
+            highlight: None,
+            dashed_underline: false,
+            font_family: None,
+            ghost: false,
+        });
+    }
+
     for ghost in ghosts {
-        if !rows.contains(&ghost.row) || !cols.contains(&ghost.col) {
+        if !rows.contains(ghost.row) || !cols.contains(ghost.col) {
             continue;
         }
         let at = CellRef::new(ghost.row, ghost.col);
@@ -252,9 +491,34 @@ pub fn build_display_list_with_ghosts(
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
         };
-        let bx = cell_box(&geom, viewport, sheet_ref, at);
+        let Some(bx) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+            continue;
+        };
         let align = resolve_align_with_value(styles, cell, &ghost.alignment_value);
         emit_ghost(&mut commands, ghost, bx, font, align);
+    }
+
+    if let Some(x) = cols.divider {
+        commands.push(DrawCmd::Line {
+            x1: x,
+            y1: 0.0,
+            x2: x,
+            y2: viewport.height,
+            width: PANE_DIVIDER_WIDTH,
+            color: PANE_DIVIDER_COLOR.to_string(),
+            style: None,
+        });
+    }
+    if let Some(y) = rows.divider {
+        commands.push(DrawCmd::Line {
+            x1: 0.0,
+            y1: y,
+            x2: viewport.width,
+            y2: y,
+            width: PANE_DIVIDER_WIDTH,
+            color: PANE_DIVIDER_COLOR.to_string(),
+            style: None,
+        });
     }
 
     DisplayList {
@@ -262,6 +526,7 @@ pub fn build_display_list_with_ghosts(
         height: viewport.height,
         commands,
         grid,
+        hyperlinks,
     }
 }
 
@@ -269,7 +534,7 @@ pub fn build_display_list_with_ghosts(
 fn emit_ghost(
     commands: &mut Vec<DrawCmd>,
     ghost: &GhostEdit,
-    (cx0, cy0, cw, ch): (f32, f32, f32, f32),
+    cell_box: CellBox,
     font: GhostFont,
     single_align: Align,
 ) {
@@ -279,12 +544,8 @@ fn emit_ghost(
         return;
     }
 
-    let clip = Rect {
-        x: cx0,
-        y: cy0,
-        w: cw,
-        h: ch,
-    };
+    let (cx0, cy0, cw, ch) = (cell_box.x, cell_box.y, cell_box.w, cell_box.h);
+    let clip = cell_box.clip;
     let x = cx0 + TEXT_PAD_PX;
     let avail = (cw - 2.0 * TEXT_PAD_PX).max(0.0);
     let full_size = font.size;
@@ -424,15 +685,22 @@ fn ellipsize(text: &str, budget: f32, size: f32) -> String {
 /// (only a merge's anchor draws). yields `(anchor, cell)` in row-major order.
 fn visible_anchors<'a>(
     sheet: &'a Sheet,
-    rows: &'a std::ops::Range<u32>,
-    cols: &'a std::ops::Range<u32>,
-) -> impl Iterator<Item = (CellRef, &'a xlsx_model::Cell)> {
-    sheet.iter_cells_in_rect(rows.clone(), cols.clone()).filter(
-        move |(at, _)| match covering_merge(&sheet.merges, *at) {
-            Some(m) => m.start == *at,
-            None => true,
-        },
-    )
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+) -> Vec<(CellRef, &'a xlsx_model::Cell)> {
+    let mut cells = Vec::new();
+    for row_range in &rows.ranges {
+        for col_range in &cols.ranges {
+            cells.extend(sheet.iter_cells_in_rect(row_range.clone(), col_range.clone()));
+        }
+    }
+    cells.sort_unstable_by_key(|(at, _)| (at.row, at.col));
+    cells.dedup_by_key(|(at, _)| (at.row, at.col));
+    cells.retain(|(at, _)| match covering_merge(&sheet.merges, *at) {
+        Some(merge) => merge.start == *at,
+        None => true,
+    });
+    cells
 }
 
 /// the merge (if any) that covers a cell.
@@ -444,19 +712,29 @@ fn covering_merge(merges: &[CellRange], at: CellRef) -> Option<CellRange> {
 /// when `at` anchors one.
 fn cell_box(
     geom: &GridGeometry,
-    viewport: &Viewport,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
     sheet: &Sheet,
     at: CellRef,
-) -> (f32, f32, f32, f32) {
+) -> Option<CellBox> {
     let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
-        Some(m) => (m.end.col + 1, m.end.row + 1),
-        None => (at.col + 1, at.row + 1),
+        Some(merge) => (merge.end.col, merge.end.row),
+        None => (at.col, at.row),
     };
-    let x = geom.col_x(at.col) - viewport.x;
-    let y = geom.row_y(at.row) - viewport.y;
-    let w = (geom.col_x(end_col) - viewport.x) - x;
-    let h = (geom.row_y(end_row) - viewport.y) - y;
-    (x, y, w, h)
+    let col = cols.span(at.col, end_col, |column| geom.col_x(column))?;
+    let row = rows.span(at.row, end_row, |row| geom.row_y(row))?;
+    Some(CellBox {
+        x: col.raw_start,
+        y: row.raw_start,
+        w: col.raw_end - col.raw_start,
+        h: row.raw_end - row.raw_start,
+        clip: Rect {
+            x: col.start,
+            y: row.start,
+            w: col.end - col.start,
+            h: row.end - row.start,
+        },
+    })
 }
 
 /// display string and resolved font color for a cell, or `None` when it renders
@@ -555,35 +833,51 @@ fn baseline_y(cy0: f32, ch: f32, size: f32, valign: Option<VAlign>) -> f32 {
 fn emit_borders(
     commands: &mut Vec<DrawCmd>,
     geom: &GridGeometry,
-    viewport: &Viewport,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
     sheet: &Sheet,
     styles: &Stylesheet,
     theme: &Theme,
     at: CellRef,
     border: &Border,
 ) {
-    let (x, y, w, h) = cell_box(geom, viewport, sheet, at);
-    let (x2, y2) = (x + w, y + h);
+    let Some(cell_box) = cell_box(geom, rows, cols, sheet, at) else {
+        return;
+    };
+    let (x, y) = (cell_box.x, cell_box.y);
+    let (x2, y2) = (x + cell_box.w, y + cell_box.h);
+    let clip = cell_box.clip;
+    let (clip_x2, clip_y2) = (clip.x + clip.w, clip.y + clip.h);
     let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
         Some(m) => (m.end.col, m.end.row),
         None => (at.col, at.row),
     };
 
-    if let Some(edge) = &border.top {
-        commands.push(border_line(x, y, x2, y, edge, theme));
+    if let Some(edge) = &border.top
+        && y >= clip.y
+        && y <= clip_y2
+    {
+        commands.push(border_line(clip.x, y, clip_x2, y, edge, theme));
     }
-    if let Some(edge) = &border.left {
-        commands.push(border_line(x, y, x, y2, edge, theme));
+    if let Some(edge) = &border.left
+        && x >= clip.x
+        && x <= clip_x2
+    {
+        commands.push(border_line(x, clip.y, x, clip_y2, edge, theme));
     }
     if let Some(edge) = &border.bottom
+        && y2 >= clip.y
+        && y2 <= clip_y2
         && !neighbor_edge(sheet, styles, end_row + 1, at.col, |b| b.top.is_some())
     {
-        commands.push(border_line(x, y2, x2, y2, edge, theme));
+        commands.push(border_line(clip.x, y2, clip_x2, y2, edge, theme));
     }
     if let Some(edge) = &border.right
+        && x2 >= clip.x
+        && x2 <= clip_x2
         && !neighbor_edge(sheet, styles, at.row, end_col + 1, |b| b.left.is_some())
     {
-        commands.push(border_line(x2, y, x2, y2, edge, theme));
+        commands.push(border_line(x2, clip.y, x2, clip_y2, edge, theme));
     }
 }
 
@@ -638,7 +932,8 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::workbook::{Cell, Sheet};
+    use xlsx_model::Hyperlink;
+    use xlsx_model::workbook::{Cell, FreezePane, Sheet};
 
     fn text_cell(s: &str) -> Cell {
         Cell {
@@ -705,6 +1000,58 @@ mod tests {
     }
 
     #[test]
+    fn renders_hyperlink_indication_and_hit_regions() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Website"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A1:B1").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: Some("Open site".into()),
+            display: None,
+        });
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C3").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 120.0,
+            },
+        );
+
+        assert_eq!(dl.hyperlinks.len(), 2);
+        assert_eq!(dl.hyperlinks[0].right, 1);
+        assert_eq!(dl.hyperlinks[0].tooltip.as_deref(), Some("Open site"));
+        let text = dl
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    text,
+                    color,
+                    underline,
+                    ..
+                } => Some((text.as_str(), color.as_str(), *underline)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(text.contains(&("Website", HYPERLINK_COLOR, true)));
+        assert!(text.contains(&("Jump", HYPERLINK_COLOR, true)));
+    }
+
+    #[test]
     fn grid_meta_covers_visible_boundaries() {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
@@ -721,10 +1068,92 @@ mod tests {
 
         assert_eq!(dl.grid.start_col, 1);
         assert_eq!(dl.grid.start_row, 2);
+        assert_eq!(dl.grid.col_indices, None);
+        assert_eq!(dl.grid.row_indices, None);
         assert_eq!(dl.grid.col_offsets.len(), 4);
         assert_eq!(dl.grid.row_offsets.len(), 3);
         assert!((dl.grid.col_offsets[0] - (dc * 1.0 - vp.x)).abs() < 0.01);
         assert!((dl.grid.row_offsets[0] - (dr * 2.0 - vp.y)).abs() < 0.01);
+    }
+
+    #[test]
+    fn frozen_tracks_stay_pinned_while_the_body_scrolls() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(4, 3)));
+        sheet.set_cell(CellRef::new(0, 0), text_cell("pinned"));
+        sheet.set_cell(CellRef::new(4, 3), text_cell("body"));
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let dr = geometry::row_pt_to_px(geometry::DEFAULT_ROW_HEIGHT_PT);
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: dc * 2.0,
+                y: dr * 3.0,
+                width: dc * 3.0,
+                height: dr * 3.0,
+            },
+        );
+
+        assert_eq!(dl.grid.start_col, 0);
+        assert_eq!(dl.grid.start_row, 0);
+        assert_eq!(dl.grid.col_indices.as_deref(), Some(&[0, 3, 4, 5][..]));
+        assert_eq!(dl.grid.row_indices.as_deref(), Some(&[0, 4, 5, 6][..]));
+        assert_eq!(
+            dl.grid.col_offsets,
+            vec![0.0, dc, dc * 2.0, dc * 3.0, dc * 4.0]
+        );
+        assert_eq!(
+            dl.grid.row_offsets,
+            vec![0.0, dr, dr * 2.0, dr * 3.0, dr * 4.0]
+        );
+
+        let clips = dl
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text { text, clip, .. } => Some((text.as_str(), *clip)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            clips[0],
+            (
+                "pinned",
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: dc,
+                    h: dr
+                }
+            )
+        );
+        assert_eq!(
+            clips[1],
+            (
+                "body",
+                Rect {
+                    x: dc,
+                    y: dr,
+                    w: dc,
+                    h: dr
+                }
+            )
+        );
+        assert!(dl.commands.iter().any(|command| matches!(
+            command,
+            DrawCmd::Line { x1, x2, width, color, .. }
+                if *x1 == dc && *x2 == dc && *width == PANE_DIVIDER_WIDTH
+                    && color == PANE_DIVIDER_COLOR
+        )));
+        assert!(dl.commands.iter().any(|command| matches!(
+            command,
+            DrawCmd::Line { y1, y2, width, color, .. }
+                if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
+                    && color == PANE_DIVIDER_COLOR
+        )));
     }
 
     fn ghost(row: u32, col: u32, old: &str, new: &str) -> GhostEdit {

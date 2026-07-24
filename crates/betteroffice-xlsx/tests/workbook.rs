@@ -1,10 +1,11 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DrawCmd, Error,
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
-    NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId,
-    StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DefinedName,
+    DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
+    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind,
+    NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -102,6 +103,182 @@ fn open_and_recalculation_are_explicit() {
         .edit_cell(SheetId(0), cell("A1"), "20", CalculationOptions::default())
         .unwrap();
     assert_eq!(result.changed[0].cell, cell("B1"));
+}
+
+#[test]
+fn defined_names_survive_the_facade_and_drive_incremental_recalculation() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 4.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 99.0 },
+            formula: Some("A1*Rate".into()),
+            style: None,
+        },
+    );
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+    model.defined_names.push(DefinedName {
+        name: "Rate".into(),
+        formula: "2".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("B1"))
+            .unwrap()
+            .value,
+        CellValue::Number { value: 8.0 }
+    );
+    let result = workbook
+        .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
+    assert_eq!(result.changed[0].cell, cell("B1"));
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("B1"))
+            .unwrap()
+            .value,
+        CellValue::Number { value: 10.0 }
+    );
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
+}
+
+#[test]
+fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
+    let mut sheet = Sheet::new("Data");
+    sheet.freeze_pane = Some(FreezePane::new(1, 1, cell("D5")));
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Text {
+                value: "pinned".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("D5"),
+        Cell {
+            value: CellValue::Text {
+                value: "body".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    let geometry = GridGeometry::new(&sheet);
+    let expected_x = geometry.col_x(3) - geometry.col_x(1);
+    let expected_y = geometry.row_y(4) - geometry.row_y(1);
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+
+    let workbook = Workbook::from_model(model).unwrap();
+    let info = workbook.sheet_info().unwrap();
+    assert_eq!((info.frozen_rows, info.frozen_cols), (1, 1));
+    assert_eq!(
+        (info.initial_scroll_x, info.initial_scroll_y),
+        (expected_x, expected_y)
+    );
+    let display = workbook
+        .display_list(&Viewport {
+            x: info.initial_scroll_x,
+            y: info.initial_scroll_y,
+            width: 300.0,
+            height: 120.0,
+        })
+        .unwrap();
+    assert_eq!(display.grid.col_indices.as_deref().unwrap()[..2], [0, 3]);
+    assert_eq!(display.grid.row_indices.as_deref().unwrap()[..2], [0, 4]);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.sheet(SheetId(0)).unwrap().freeze_pane,
+        workbook.sheet(SheetId(0)).unwrap().freeze_pane
+    );
+}
+
+#[test]
+fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("B2"),
+        Cell {
+            value: CellValue::Text {
+                value: "Website".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::parse_a1("B2:C2").unwrap(),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: Some("Open site".into()),
+        display: None,
+    });
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::parse_a1("D4").unwrap(),
+        external_target: None,
+        location: Some("Data!A1".into()),
+        tooltip: None,
+        display: Some("Jump".into()),
+    });
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+
+    let workbook = Workbook::from_model(model).unwrap();
+    let display = workbook
+        .display_list(&Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 120.0,
+        })
+        .unwrap();
+    assert_eq!(display.hyperlinks.len(), 2);
+    assert_eq!(
+        display.hyperlinks[0].external_target.as_deref(),
+        Some("https://example.com")
+    );
+    assert!(display.commands.iter().any(|command| matches!(
+        command,
+        DrawCmd::Text {
+            text,
+            color,
+            underline: true,
+            ..
+        } if text == "Website" && color == "#0563c1"
+    )));
+    let (x, y) = workbook
+        .cell_scroll_position(SheetId(0), cell("D4"))
+        .unwrap();
+    assert!(x > 0.0 && y > 0.0);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.sheet(SheetId(0)).unwrap().hyperlinks,
+        workbook.sheet(SheetId(0)).unwrap().hyperlinks
+    );
 }
 
 #[test]

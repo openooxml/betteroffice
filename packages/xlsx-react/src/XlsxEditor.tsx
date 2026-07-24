@@ -14,6 +14,7 @@ import {
   cellRect,
   extendTo,
   fromTsv,
+  hyperlinkAtCell,
   initWasm,
   isPngExportAvailable,
   isProposalsAvailable,
@@ -21,9 +22,11 @@ import {
   normalizeRange,
   openWorkbook,
   paintDisplayList,
+  parseHyperlinkLocation,
   rangeRect,
   selectionAt,
   selectionKeyReducer,
+  safeExternalHyperlink,
   StaleProposalError,
   toTsv,
 } from '@betteroffice/xlsx';
@@ -356,7 +359,9 @@ function XlsxEditorContent({
   const rafRef = useRef<number | null>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
+  const clickStartRef = useRef<CellAddr | null>(null);
   const suppressBlurRef = useRef(false);
+  const pendingSheetViewRef = useRef(false);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -444,6 +449,7 @@ function XlsxEditorContent({
     setBorderColorChoice(undefined);
     setCapturedFormat(null);
     paintSourceRef.current = null;
+    pendingSheetViewRef.current = false;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -489,6 +495,7 @@ function XlsxEditorContent({
               setError(e instanceof Error ? e.message : String(e));
             }
           });
+          pendingSheetViewRef.current = true;
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
           setCollaborationReplica(handle);
@@ -530,6 +537,15 @@ function XlsxEditorContent({
     collaborationInitialUpdate,
     refreshProposals,
   ]);
+
+  useEffect(() => {
+    if (!sheetInfo || !pendingSheetViewRef.current) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    pendingSheetViewRef.current = false;
+    scroll.scrollLeft = sheetInfo.initialScrollX * zoom;
+    scroll.scrollTop = sheetInfo.initialScrollY * zoom;
+  }, [sheetInfo, zoom]);
 
   useEffect(() => {
     if (!collaborationOnReplica || !collaborationReplica) return;
@@ -1218,31 +1234,121 @@ function XlsxEditorContent({
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!selection) return;
+      if (!selection || editing) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) return;
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
       else setSelection(selectionAt(addr));
+      clickStartRef.current = addr;
       draggingRef.current = true;
       setDragging(true);
       focusContainer();
     },
-    [selection, pointToCell, limits, focusContainer]
+    [editing, selection, pointToCell, limits, focusContainer]
   );
 
   const onMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (!draggingRef.current) return;
+    (e: React.MouseEvent<HTMLDivElement>) => {
       const addr = pointToCell(e.clientX, e.clientY);
-      if (!addr) return;
+      if (!addr) {
+        if (!draggingRef.current) {
+          e.currentTarget.style.cursor = 'default';
+          e.currentTarget.title = '';
+        }
+        return;
+      }
+      if (!draggingRef.current) {
+        const hyperlink = frameRef.current
+          ? hyperlinkAtCell(frameRef.current, addr.row, addr.col)
+          : null;
+        e.currentTarget.style.cursor = hyperlink ? 'pointer' : 'default';
+        e.currentTarget.title = hyperlink?.tooltip ?? '';
+        return;
+      }
       setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
     },
     [pointToCell, limits]
   );
 
-  const onDoubleClick = useCallback(() => {
-    if (selection) openEditor();
-  }, [selection, openEditor]);
+  const activateHyperlink = useCallback(
+    (addr: CellAddr): boolean => {
+      const handle = handleRef.current;
+      const currentFrame = frameRef.current;
+      if (!handle || !currentFrame || !sheetInfo) return false;
+      const hyperlink = hyperlinkAtCell(currentFrame, addr.row, addr.col);
+      if (!hyperlink) return false;
+      const href = safeExternalHyperlink(hyperlink);
+      if (href) {
+        window.open(href, '_blank', 'noopener,noreferrer');
+        return true;
+      }
+      if (!hyperlink.location) return true;
+      const currentName = sheetInfo.sheetNames[activeSheet] ?? '';
+      const destination = parseHyperlinkLocation(hyperlink.location, currentName);
+      if (!destination) return true;
+      const targetSheet = sheetInfo.sheetNames.findIndex(
+        (name) => name.toLowerCase() === destination.sheetName.toLowerCase()
+      );
+      if (targetSheet < 0) return true;
+      try {
+        handle.setActiveSheet(targetSheet);
+        const position = handle.cellPosition(targetSheet, destination.row, destination.col);
+        setSheetInfo(handle.sheetInfo());
+        requestAnimationFrame(() => {
+          const scroll = scrollRef.current;
+          if (!scroll) return;
+          scroll.scrollLeft = position.x * zoom;
+          scroll.scrollTop = position.y * zoom;
+        });
+        setSelection(selectionAt({ row: destination.row, col: destination.col }));
+        setEditing(null);
+        setFormulaDraft(null);
+        setCapturedFormat(null);
+        paintSourceRef.current = null;
+        setError(null);
+      } catch (error) {
+        setError(error instanceof Error ? error.message : String(error));
+      }
+      return true;
+    },
+    [activeSheet, sheetInfo, zoom]
+  );
+
+  const onClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (editing) {
+        clickStartRef.current = null;
+        return;
+      }
+      const addr = pointToCell(e.clientX, e.clientY);
+      const start = clickStartRef.current;
+      clickStartRef.current = null;
+      if (!addr || !start || addr.row !== start.row || addr.col !== start.col) return;
+      activateHyperlink(addr);
+    },
+    [activateHyperlink, editing, pointToCell]
+  );
+
+  const onDoubleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (editing) return;
+      const addr = pointToCell(e.clientX, e.clientY);
+      if (
+        addr &&
+        frameRef.current &&
+        hyperlinkAtCell(frameRef.current, addr.row, addr.col)
+      ) {
+        return;
+      }
+      if (selection) openEditor();
+    },
+    [editing, openEditor, pointToCell, selection]
+  );
+
+  const onMouseLeave = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.currentTarget.style.cursor = 'default';
+    e.currentTarget.title = '';
+  }, []);
 
   const grid = frame?.grid;
   const selRect = grid && selection ? rangeRect(grid, normalizeRange(selection)) : null;
@@ -1270,11 +1376,7 @@ function XlsxEditorContent({
     if (!handle) return;
     try {
       handle.setActiveSheet(index);
-      const scroll = scrollRef.current;
-      if (scroll) {
-        scroll.scrollLeft = 0;
-        scroll.scrollTop = 0;
-      }
+      pendingSheetViewRef.current = true;
       setSelection(selectionAt({ row: 0, col: 0 }));
       setEditing(null);
       setFormulaDraft(null);
@@ -1437,6 +1539,8 @@ function XlsxEditorContent({
         onKeyDown={onKeyDown}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
+        onMouseLeave={onMouseLeave}
+        onClick={onClick}
         onDoubleClick={onDoubleClick}
         style={{ position: 'relative', flex: 1, overflow: 'auto', minHeight: 0, outline: 'none' }}
       >

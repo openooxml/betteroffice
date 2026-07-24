@@ -3,9 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{
-    EvalContext, err, evaluate, num, parse_num, range_values, resolve_ref, to_number,
-};
+use crate::eval::{EvalContext, as_area, err, evaluate, num, parse_num, to_number};
 use crate::parser::Expr;
 
 pub mod criteria;
@@ -144,16 +142,13 @@ pub(crate) fn collect_numbers(
 ) -> Result<Vec<f64>, ErrorValue> {
     let mut nums = Vec::new();
     for arg in args {
-        match arg {
-            Expr::Range { sheet, range } => {
-                for v in range_values(sheet, range, ctx)? {
-                    push_reference_number(&mut nums, v)?;
+        match as_area(arg, ctx) {
+            Some(area) => {
+                for value in area.values(ctx)? {
+                    push_reference_number(&mut nums, value)?;
                 }
             }
-            Expr::Ref { sheet, cell } => {
-                push_reference_number(&mut nums, resolve_ref(sheet, *cell, ctx))?;
-            }
-            _ => match evaluate(arg, ctx) {
+            None => match evaluate(arg, ctx) {
                 CellValue::Number { value } => nums.push(value),
                 CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
                 CellValue::Empty => {}

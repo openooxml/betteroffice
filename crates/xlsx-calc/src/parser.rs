@@ -26,6 +26,10 @@ pub enum Expr {
         sheet: Option<String>,
         range: CellRange,
     },
+    Name {
+        scope: Option<String>,
+        name: String,
+    },
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -216,12 +220,17 @@ impl Parser<'_> {
                 self.expect(&TokKind::RParen, "')'")?;
                 Ok(inner)
             }
-            TokKind::Ident(name) => self.func_call(name, depth),
+            TokKind::Ident(name)
+                if matches!(self.peek().map(|token| &token.kind), Some(TokKind::LParen)) =>
+            {
+                self.func_call(name, depth)
+            }
+            TokKind::Ident(name) => Ok(ParsedExpr::leaf(Expr::Name { scope: None, name })),
+            TokKind::Name { scope, name } => Ok(ParsedExpr::leaf(Expr::Name { scope, name })),
             other => Err(ParseError::new(pos, format!("unexpected token {other:?}"))),
         }
     }
 
-    /// a bare name must be a function call; defined names are not supported.
     fn func_call(&mut self, name: String, depth: usize) -> Result<ParsedExpr, ParseError> {
         self.expect(&TokKind::LParen, "'(' after function name")?;
         let mut args = Vec::new();
@@ -401,9 +410,27 @@ mod tests {
 
     #[test]
     fn rejects_malformed_input() {
-        for src in ["", "1+", "(1", "1 2", "SUM(1,)", "FOO", "*1", ")"] {
+        for src in ["", "1+", "(1", "1 2", "SUM(1,)", "*1", ")"] {
             assert!(parse_formula(src).is_err(), "should reject {src:?}");
         }
+    }
+
+    #[test]
+    fn parses_defined_names() {
+        assert_eq!(
+            parse("TaxRate+Sheet1!LocalRate"),
+            bin(
+                BinaryOp::Add,
+                Expr::Name {
+                    scope: None,
+                    name: "TaxRate".into(),
+                },
+                Expr::Name {
+                    scope: Some("Sheet1".into()),
+                    name: "LocalRate".into(),
+                },
+            )
+        );
     }
 
     #[test]

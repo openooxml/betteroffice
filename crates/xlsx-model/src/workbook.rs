@@ -3,10 +3,46 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 use crate::addr::{CellRange, CellRef, ColId, RowId, SheetId};
 use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreezePane {
+    pub rows: RowId,
+    pub cols: ColId,
+    pub top_left: CellRef,
+}
+
+impl FreezePane {
+    pub fn new(rows: RowId, cols: ColId, top_left: CellRef) -> Self {
+        Self {
+            rows,
+            cols,
+            top_left,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefinedName {
+    pub name: String,
+    pub formula: String,
+    pub local_sheet: Option<SheetId>,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hyperlink {
+    pub range: CellRange,
+    pub external_target: Option<String>,
+    pub location: Option<String>,
+    pub tooltip: Option<String>,
+    pub display: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Cell {
@@ -21,6 +57,8 @@ pub struct Cell {
 pub struct Sheet {
     pub name: String,
     cells: BTreeMap<(RowId, ColId), Cell>,
+    pub freeze_pane: Option<FreezePane>,
+    pub hyperlinks: Vec<Hyperlink>,
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
@@ -67,15 +105,30 @@ impl Sheet {
         })
     }
 
+    pub fn hyperlink_at(&self, at: CellRef) -> Option<&Hyperlink> {
+        self.hyperlinks.iter().find(|link| link.range.contains(at))
+    }
+
     pub fn used_range(&self) -> Option<CellRange> {
-        let mut it = self.cells.keys();
-        let &(r0, c0) = it.next()?;
-        let (mut min_r, mut max_r, mut min_c, mut max_c) = (r0, r0, c0, c0);
-        for &(r, c) in it {
+        let mut bounds = self
+            .cells
+            .keys()
+            .map(|&(row, col)| CellRange::new(CellRef::new(row, col), CellRef::new(row, col)))
+            .chain(self.hyperlinks.iter().map(|link| link.range));
+        let first = bounds.next()?;
+        let (mut min_r, mut max_r, mut min_c, mut max_c) = (
+            first.start.row,
+            first.end.row,
+            first.start.col,
+            first.end.col,
+        );
+        for range in bounds {
+            let r = range.start.row;
+            let c = range.start.col;
             min_r = min_r.min(r);
-            max_r = max_r.max(r);
+            max_r = max_r.max(range.end.row);
             min_c = min_c.min(c);
-            max_c = max_c.max(c);
+            max_c = max_c.max(range.end.col);
         }
         Some(CellRange::new(
             CellRef::new(min_r, min_c),
@@ -88,6 +141,7 @@ impl Sheet {
 pub struct Workbook {
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
+    pub defined_names: Vec<DefinedName>,
     /// shared string table as parsed; kept for round-trip fidelity.
     pub shared_strings: Vec<String>,
     /// parsed style tables + theme; a cell's `style` indexes `styles.cell_xfs`.
@@ -111,6 +165,19 @@ impl Workbook {
             .find(|(_, sheet)| sheet.name.to_lowercase() == name)
             .map(|(i, s)| (SheetId(i as u32), s))
     }
+
+    pub fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
+        self.defined_names
+            .iter()
+            .find(|defined| {
+                defined.local_sheet == Some(sheet) && defined.name.eq_ignore_ascii_case(name)
+            })
+            .or_else(|| {
+                self.defined_names.iter().find(|defined| {
+                    defined.local_sheet.is_none() && defined.name.eq_ignore_ascii_case(name)
+                })
+            })
+    }
 }
 
 /// read access the calc engine evaluates through.
@@ -118,6 +185,9 @@ pub trait CellProvider {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
+    fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
+        None
+    }
 }
 
 impl CellProvider for Workbook {
@@ -134,6 +204,10 @@ impl CellProvider for Workbook {
 
     fn sheet_id(&self, name: &str) -> Option<SheetId> {
         self.sheet_by_name(name).map(|(id, _)| id)
+    }
+
+    fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
+        self.defined_name(sheet, name)
     }
 }
 
@@ -174,6 +248,12 @@ mod tests {
     fn workbook_cell_provider() {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
+        wb.defined_names.push(DefinedName {
+            name: "Answer".into(),
+            formula: "A1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
         let a1 = CellRef::parse_a1("A1").unwrap();
         wb.sheet_mut(SheetId(0)).unwrap().set_cell(
             a1,
@@ -193,6 +273,41 @@ mod tests {
             CellValue::Empty
         );
         assert!(wb.sheet_id("Nope").is_none());
+        assert_eq!(
+            CellProvider::defined_name(&wb, id, "answer").map(|defined| defined.formula.as_str()),
+            Some("A1")
+        );
+    }
+
+    #[test]
+    fn local_defined_name_shadows_workbook_name() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.defined_names.extend([
+            DefinedName {
+                name: "Rate".into(),
+                formula: "1".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "rate".into(),
+                formula: "2".into(),
+                local_sheet: Some(SheetId(0)),
+                hidden: false,
+            },
+        ]);
+
+        assert_eq!(
+            wb.defined_name(SheetId(0), "RATE")
+                .map(|defined| defined.formula.as_str()),
+            Some("2")
+        );
+        assert_eq!(
+            wb.defined_name(SheetId(1), "RATE")
+                .map(|defined| defined.formula.as_str()),
+            Some("1")
+        );
     }
 
     #[test]
@@ -215,5 +330,30 @@ mod tests {
         let mut reversed = 1..2;
         std::mem::swap(&mut reversed.start, &mut reversed.end);
         assert_eq!(sheet.iter_cells_in_rect(0..3, reversed).count(), 0);
+    }
+
+    #[test]
+    fn hyperlinks_are_addressable_and_extend_the_used_range() {
+        let mut sheet = Sheet::new("Data");
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C4:D5").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: Some("Example".into()),
+        });
+
+        assert_eq!(sheet.used_range().unwrap().to_a1(), "C4:D5");
+        assert_eq!(
+            sheet
+                .hyperlink_at(CellRef::parse_a1("D5").unwrap())
+                .and_then(|link| link.display.as_deref()),
+            Some("Example")
+        );
+        assert!(
+            sheet
+                .hyperlink_at(CellRef::parse_a1("A1").unwrap())
+                .is_none()
+        );
     }
 }

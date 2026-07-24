@@ -6,7 +6,7 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, Fill, HAlign,
-    MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
+    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -35,6 +35,8 @@ use crate::{RenderOptions, RenderedPng};
 const MAX_RANGE_CELLS: u64 = 100_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
+const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
+const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
 /// Largest browser-safe collaboration client identifier.
@@ -419,12 +421,32 @@ impl Workbook {
     pub fn sheet_info(&self) -> Result<SheetInfo> {
         let sheet = self.sheet(self.active_sheet)?;
         let geometry = GridGeometry::new(sheet);
-        let (content_width, content_height) = match sheet.used_range() {
-            Some(range) => (
-                geometry.col_x(range.end.col.saturating_add(2).min(MAX_COLS)),
-                geometry.row_y(range.end.row.saturating_add(2).min(MAX_ROWS)),
-            ),
-            None => (geometry.col_x(26), geometry.row_y(50)),
+        let used_range = sheet.used_range();
+        let mut content_col = used_range
+            .map_or(26, |range| range.end.col.saturating_add(2))
+            .min(MAX_COLS);
+        let mut content_row = used_range
+            .map_or(50, |range| range.end.row.saturating_add(2))
+            .min(MAX_ROWS);
+        let (frozen_rows, frozen_cols, initial_scroll_x, initial_scroll_y) = match sheet.freeze_pane
+        {
+            Some(pane) => {
+                content_col = content_col
+                    .max(pane.cols.saturating_add(1))
+                    .max(pane.top_left.col.saturating_add(2))
+                    .min(MAX_COLS);
+                content_row = content_row
+                    .max(pane.rows.saturating_add(1))
+                    .max(pane.top_left.row.saturating_add(2))
+                    .min(MAX_ROWS);
+                (
+                    pane.rows,
+                    pane.cols,
+                    (geometry.col_x(pane.top_left.col) - geometry.col_x(pane.cols)).max(0.0),
+                    (geometry.row_y(pane.top_left.row) - geometry.row_y(pane.rows)).max(0.0),
+                )
+            }
+            None => (0, 0, 0.0, 0.0),
         };
         Ok(SheetInfo {
             sheet_names: self
@@ -434,9 +456,26 @@ impl Workbook {
                 .map(|sheet| sheet.name.clone())
                 .collect(),
             active_sheet: self.active_sheet,
-            content_width,
-            content_height,
+            content_width: geometry.col_x(content_col),
+            content_height: geometry.row_y(content_row),
+            frozen_rows,
+            frozen_cols,
+            initial_scroll_x,
+            initial_scroll_y,
         })
+    }
+
+    pub fn cell_scroll_position(&self, sheet: SheetId, cell: CellRef) -> Result<(f32, f32)> {
+        validate_cell_ref(cell)?;
+        let sheet = self.sheet(sheet)?;
+        let geometry = GridGeometry::new(sheet);
+        let (frozen_rows, frozen_cols) = sheet
+            .freeze_pane
+            .map_or((0, 0), |pane| (pane.rows, pane.cols));
+        Ok((
+            (geometry.col_x(cell.col) - geometry.col_x(frozen_cols)).max(0.0),
+            (geometry.row_y(cell.row) - geometry.row_y(frozen_rows)).max(0.0),
+        ))
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
@@ -1651,8 +1690,37 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
     if model.sheets.is_empty() {
         return Err(Error::NoSheets);
     }
+    for defined in &model.defined_names {
+        if defined
+            .local_sheet
+            .is_some_and(|sheet| sheet.0 as usize >= model.sheets.len())
+        {
+            return Err(Error::InvalidOperation(format!(
+                "defined name {} has an invalid sheet scope",
+                defined.name
+            )));
+        }
+        if defined.formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES {
+            return Err(Error::InvalidOperation(format!(
+                "defined name {} has a formula above the length limit",
+                defined.name
+            )));
+        }
+    }
     let mut names = HashSet::with_capacity(model.sheets.len());
     for sheet in &model.sheets {
+        if let Some(pane) = sheet.freeze_pane
+            && (pane.rows > MAX_ROWS
+                || pane.cols > MAX_COLS
+                || pane.top_left.row >= MAX_ROWS
+                || pane.top_left.col >= MAX_COLS)
+        {
+            return Err(Error::InvalidOperation(format!(
+                "sheet {} has an invalid freeze pane",
+                sheet.name
+            )));
+        }
+        validate_hyperlinks(&sheet.hyperlinks)?;
         validate_sheet_name(&sheet.name)?;
         if !names.insert(sheet.name.to_lowercase()) {
             return Err(Error::InvalidOperation(format!(
@@ -1776,6 +1844,23 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 )));
             }
         }
+        Op::SetFreezePane { sheet, pane } => {
+            require_sheet(model, *sheet)?;
+            if pane.is_some_and(|pane| {
+                pane.rows > MAX_ROWS
+                    || pane.cols > MAX_COLS
+                    || pane.top_left.row >= MAX_ROWS
+                    || pane.top_left.col >= MAX_COLS
+            }) {
+                return Err(Error::InvalidOperation(
+                    "freeze pane is out of range".to_string(),
+                ));
+            }
+        }
+        Op::SetHyperlinks { sheet, hyperlinks } => {
+            require_sheet(model, *sheet)?;
+            validate_hyperlinks(hyperlinks)?;
+        }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
             validate_range(*range)?;
@@ -1831,7 +1916,11 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .merges
                 .iter()
                 .any(|range| range.end.row >= at && range.end.row >= cutoff);
-            if loses_cells || loses_heights || loses_merges {
+            let loses_hyperlinks = sheet
+                .hyperlinks
+                .iter()
+                .any(|link| link.range.end.row >= at && link.range.end.row >= cutoff);
+            if loses_cells || loses_heights || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "row insertion would discard content at the sheet boundary".to_string(),
                 ));
@@ -1853,7 +1942,11 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .merges
                 .iter()
                 .any(|range| range.end.col >= at && range.end.col >= cutoff);
-            if loses_cells || loses_widths || loses_merges {
+            let loses_hyperlinks = sheet
+                .hyperlinks
+                .iter()
+                .any(|link| link.range.end.col >= at && link.range.end.col >= cutoff);
+            if loses_cells || loses_widths || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "column insertion would discard content at the sheet boundary".to_string(),
                 ));
@@ -1898,6 +1991,46 @@ fn validate_range(range: CellRange) -> Result<()> {
         return Err(Error::InvalidOperation(
             "range start must be above and left of range end".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {
+    if hyperlinks.len() > MAX_HYPERLINKS_PER_SHEET {
+        return Err(Error::InvalidOperation(
+            "sheet contains too many hyperlinks".to_string(),
+        ));
+    }
+    for hyperlink in hyperlinks {
+        validate_range(hyperlink.range)?;
+        if hyperlink
+            .external_target
+            .as_deref()
+            .is_none_or(|value| value.is_empty())
+            && hyperlink
+                .location
+                .as_deref()
+                .is_none_or(|value| value.is_empty())
+        {
+            return Err(Error::InvalidOperation(
+                "hyperlink must have a destination".to_string(),
+            ));
+        }
+        for value in [
+            &hyperlink.external_target,
+            &hyperlink.location,
+            &hyperlink.tooltip,
+            &hyperlink.display,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > MAX_HYPERLINK_FIELD_BYTES {
+                return Err(Error::InvalidOperation(
+                    "hyperlink field exceeds its length limit".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2158,8 +2291,12 @@ fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<()> {
         return Err(Error::InvalidViewport);
     }
     let (rows, columns) = geometry.viewport_range(viewport);
-    let row_count = u64::from(rows.end - rows.start);
-    let column_count = u64::from(columns.end - columns.start);
+    let (frozen_rows, frozen_cols) = sheet
+        .freeze_pane
+        .map_or((0, 0), |pane| (pane.rows, pane.cols));
+    let row_count = u64::from(rows.end - rows.start).saturating_add(u64::from(frozen_rows));
+    let column_count =
+        u64::from(columns.end - columns.start).saturating_add(u64::from(frozen_cols));
     let cells = row_count.saturating_mul(column_count);
     if cells > MAX_DISPLAY_CELLS {
         return Err(Error::DisplayTooLarge {
@@ -2210,6 +2347,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
+            | Op::SetHyperlinks { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }

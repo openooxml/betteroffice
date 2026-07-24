@@ -4,7 +4,7 @@
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
-    EvalContext, MAX_CELL_TEXT_CHARS, boolean, err, evaluate, num, parse_num, range_values, text,
+    EvalContext, MAX_CELL_TEXT_CHARS, as_area, boolean, err, evaluate, num, parse_num, text,
     to_number, to_text,
 };
 use crate::parser::Expr;
@@ -377,12 +377,12 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut output_chars = 0;
     let mut first = true;
     for arg in &args[2..] {
-        let values = match arg {
-            Expr::Range { sheet, range } => match range_values(sheet, range, ctx) {
+        let values = match as_area(arg, ctx) {
+            Some(area) => match area.values(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            _ => vec![evaluate(arg, ctx)],
+            None => vec![evaluate(arg, ctx)],
         };
         for v in values {
             let empty = matches!(v, CellValue::Empty)
@@ -412,12 +412,12 @@ pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut out = String::new();
     let mut output_chars = 0;
     for arg in args {
-        let values = match arg {
-            Expr::Range { sheet, range } => match range_values(sheet, range, ctx) {
+        let values = match as_area(arg, ctx) {
+            Some(area) => match area.values(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            _ => vec![evaluate(arg, ctx)],
+            None => vec![evaluate(arg, ctx)],
         };
         for v in values {
             match to_text(&v) {

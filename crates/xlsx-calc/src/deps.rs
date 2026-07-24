@@ -45,7 +45,7 @@ fn walk(
                 walk(arg, out, seen);
             }
         }
-        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => {}
+        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name { .. } => {}
     }
 }
 

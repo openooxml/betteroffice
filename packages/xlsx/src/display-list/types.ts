@@ -110,8 +110,20 @@ export type DrawCmd = FillRectCmd | LineCmd | TextCmd;
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  rowIndices?: number[];
+  colIndices?: number[];
   rowOffsets: number[];
   colOffsets: number[];
+}
+
+export interface HyperlinkRegion {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+  externalTarget?: string;
+  location?: string;
+  tooltip?: string;
 }
 
 /**
@@ -124,4 +136,5 @@ export interface DisplayList {
   height: number;
   commands: DrawCmd[];
   grid?: GridMeta;
+  hyperlinks?: HyperlinkRegion[];
 }
