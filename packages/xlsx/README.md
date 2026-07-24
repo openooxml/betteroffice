@@ -57,12 +57,15 @@ proposal as one undo step and recalcs dependents, and throws
 staged.
 
 ```ts
-const proposal = workbook.propose("copilot", "add totals", [
-  { sheet: 0, row: 9, col: 2, input: "=SUM(C1:C9)" },
-]);
+import { isProposalsAvailable } from "@betteroffice/xlsx";
 
-workbook.listProposals(); // pending proposals, oldest first
-workbook.acceptProposal(proposal.id); // or workbook.rejectProposal(proposal.id)
+if (isProposalsAvailable()) {
+  const proposal = workbook.propose("copilot", "add totals", [
+    { sheet: 0, row: 9, col: 2, input: "=SUM(C1:C9)" },
+  ]);
+  workbook.listProposals(); // pending proposals, oldest first
+  workbook.acceptProposal(proposal.id); // or workbook.rejectProposal(proposal.id)
+}
 ```
 
 The React editor paints pending proposals as in-cell tracked-change ghosts with

@@ -84,11 +84,13 @@ review panel where the human accepts or rejects. The full proposal API lives in
 [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx).
 
 ```tsx
+import { isProposalsAvailable } from "@betteroffice/xlsx";
 import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
 
 <XlsxEditor
   file={file}
   onReady={({ handle, refreshProposals }: XlsxEditorApi) => {
+    if (!isProposalsAvailable()) return;
     handle.propose("copilot", "add totals", [
       { sheet: 0, row: 9, col: 2, input: "=SUM(C1:C9)" },
     ]);
