@@ -1150,6 +1150,22 @@ export class EditSession {
         }
     }
     /**
+     * Materializes the retained canonical package for compatibility APIs.
+     * @returns {string | undefined}
+     */
+    materialize_docx() {
+        const ret = wasm.editsession_materialize_docx(this.__wbg_ptr);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
      * Paragraph-measure compatibility export on the resident engine module.
      * @param {string} input
      * @returns {string}
@@ -1248,6 +1264,32 @@ export class EditSession {
         this.__wbg_ptr = ret[0];
         EditSessionFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Parses a DOCX and optionally seeds its editable stories.
+     * @param {Uint8Array} bytes
+     * @param {boolean} seed_stories
+     * @returns {string}
+     */
+    open_docx(bytes, seed_stories) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.editsession_open_docx(this.__wbg_ptr, ptr0, len0, seed_stories);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
     }
     /**
      * Resolve one glyph outline from the session's resident font store.
@@ -1505,6 +1547,31 @@ export class EditSession {
             return getStringFromWasm0(ptr4, len4);
         } finally {
             wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
+     * Parses a DOCX, seeds its stories, and returns thin host metadata.
+     * @param {Uint8Array} bytes
+     * @returns {string}
+     */
+    seed_from_docx(bytes) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.editsession_seed_from_docx(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
     }
     /**

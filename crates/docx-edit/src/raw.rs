@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
-use yrs::{Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text};
+use yrs::{
+    Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TransactionMut,
+};
 
 use crate::op::{OpError, OpResult};
 use crate::{COMMENTS, EditCtx, EditingDoc, KIND_KEY, anchor_value, out_len, story_ref};
@@ -95,99 +97,115 @@ impl EditingDoc {
     /// bridge bug fails loudly (typed error) rather than corrupting the CRDT.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
         let mut txn = self.transact_for(ctx);
-        let story = story_ref(&txn, story_id).map_err(OpError::from)?;
-        for op in ops {
-            match op {
-                RawOp::Insert { index, text, attrs } => {
-                    guard_index(&story, &txn, index)?;
-                    story.insert_with_attributes(&mut txn, index, &text, attrs);
-                }
-                RawOp::Delete { index, len } => {
-                    guard_range(&story, &txn, index, len)?;
-                    story.remove_range(&mut txn, index, len);
-                }
-                RawOp::Format { index, len, attrs } => {
-                    guard_range(&story, &txn, index, len)?;
-                    if len > 0 {
-                        story.format(&mut txn, index, len, attrs);
-                    }
-                }
-                RawOp::InsertEmbed {
-                    index,
-                    kind,
-                    payload,
-                    attrs,
-                } => {
-                    guard_index(&story, &txn, index)?;
-                    let embed = story.insert_embed_with_attributes(
-                        &mut txn,
-                        index,
-                        MapPrelim::default(),
-                        attrs,
-                    );
-                    embed.insert(&mut txn, KIND_KEY, kind.as_str());
-                    for (key, value) in payload {
-                        embed.insert(&mut txn, key, value);
-                    }
-                }
-                RawOp::SetEmbedAttr { index, key, value } => {
-                    let embed = embed_at(&story, &txn, index)?;
-                    embed.insert(&mut txn, key, value);
-                }
-                RawOp::SetComment {
-                    id,
-                    ranges,
-                    author,
-                    date,
-                    body,
-                } => {
-                    if ranges.is_empty() {
-                        return Err(OpError::InvalidComment(
-                            "at least one anchored range is required".into(),
-                        ));
-                    }
-                    let mut anchors = Vec::with_capacity(ranges.len());
-                    for (start, end) in ranges {
-                        let len = end
-                            .checked_sub(start)
-                            .filter(|len| *len > 0)
-                            .ok_or(OpError::InvalidRange { start, end })?;
-                        guard_range(&story, &txn, start, len)?;
-                        let start_anchor = story
-                            .sticky_index(&mut txn, start, Assoc::After)
-                            .ok_or_else(|| {
-                                OpError::InvalidComment("start anchor could not be made".into())
-                            })?;
-                        let end_anchor = story
-                            .sticky_index(&mut txn, end, Assoc::Before)
-                            .ok_or_else(|| {
-                                OpError::InvalidComment("end anchor could not be made".into())
-                            })?;
-                        anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));
-                    }
-                    let comments = txn
-                        .get_map(COMMENTS)
-                        .expect("comments root is declared by EditingDoc::new");
-                    let comment = comments.insert(&mut txn, id.as_str(), MapPrelim::default());
-                    comment.insert(&mut txn, "author", author.as_str());
-                    comment.insert(&mut txn, "date", date.as_str());
-                    comment.insert(&mut txn, "parentId", Any::Null);
-                    comment.insert(&mut txn, "done", false);
-                    comment.insert(&mut txn, "body", body);
-                    comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
-                }
-                RawOp::RemoveComment { id } => {
-                    let comments = txn
-                        .get_map(COMMENTS)
-                        .expect("comments root is declared by EditingDoc::new");
-                    if comments.remove(&mut txn, &id).is_none() {
-                        return Err(OpError::UnknownComment(id));
-                    }
-                }
-            }
+        apply_raw_ops_to_story(&mut txn, story_id, ops)
+    }
+
+    pub(crate) fn apply_raw_story_batches(
+        &self,
+        batches: Vec<(String, Vec<RawOp>)>,
+        ctx: &EditCtx,
+    ) -> OpResult<()> {
+        let mut txn = self.transact_for(ctx);
+        for (story_id, ops) in batches {
+            apply_raw_ops_to_story(&mut txn, &story_id, ops)?;
         }
         Ok(())
     }
+}
+
+fn apply_raw_ops_to_story(
+    txn: &mut TransactionMut<'_>,
+    story_id: &str,
+    ops: Vec<RawOp>,
+) -> OpResult<()> {
+    let story = story_ref(txn, story_id).map_err(OpError::from)?;
+    for op in ops {
+        match op {
+            RawOp::Insert { index, text, attrs } => {
+                guard_index(&story, txn, index)?;
+                story.insert_with_attributes(txn, index, &text, attrs);
+            }
+            RawOp::Delete { index, len } => {
+                guard_range(&story, txn, index, len)?;
+                story.remove_range(txn, index, len);
+            }
+            RawOp::Format { index, len, attrs } => {
+                guard_range(&story, txn, index, len)?;
+                if len > 0 {
+                    story.format(txn, index, len, attrs);
+                }
+            }
+            RawOp::InsertEmbed {
+                index,
+                kind,
+                payload,
+                attrs,
+            } => {
+                guard_index(&story, txn, index)?;
+                let embed =
+                    story.insert_embed_with_attributes(txn, index, MapPrelim::default(), attrs);
+                embed.insert(txn, KIND_KEY, kind.as_str());
+                for (key, value) in payload {
+                    embed.insert(txn, key, value);
+                }
+            }
+            RawOp::SetEmbedAttr { index, key, value } => {
+                let embed = embed_at(&story, txn, index)?;
+                embed.insert(txn, key, value);
+            }
+            RawOp::SetComment {
+                id,
+                ranges,
+                author,
+                date,
+                body,
+            } => {
+                if ranges.is_empty() {
+                    return Err(OpError::InvalidComment(
+                        "at least one anchored range is required".into(),
+                    ));
+                }
+                let mut anchors = Vec::with_capacity(ranges.len());
+                for (start, end) in ranges {
+                    let len = end
+                        .checked_sub(start)
+                        .filter(|len| *len > 0)
+                        .ok_or(OpError::InvalidRange { start, end })?;
+                    guard_range(&story, txn, start, len)?;
+                    let start_anchor =
+                        story
+                            .sticky_index(txn, start, Assoc::After)
+                            .ok_or_else(|| {
+                                OpError::InvalidComment("start anchor could not be made".into())
+                            })?;
+                    let end_anchor =
+                        story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
+                            OpError::InvalidComment("end anchor could not be made".into())
+                        })?;
+                    anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));
+                }
+                let comments = txn
+                    .get_map(COMMENTS)
+                    .expect("comments root is declared by EditingDoc::new");
+                let comment = comments.insert(txn, id.as_str(), MapPrelim::default());
+                comment.insert(txn, "author", author.as_str());
+                comment.insert(txn, "date", date.as_str());
+                comment.insert(txn, "parentId", Any::Null);
+                comment.insert(txn, "done", false);
+                comment.insert(txn, "body", body);
+                comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
+            }
+            RawOp::RemoveComment { id } => {
+                let comments = txn
+                    .get_map(COMMENTS)
+                    .expect("comments root is declared by EditingDoc::new");
+                if comments.remove(txn, &id).is_none() {
+                    return Err(OpError::UnknownComment(id));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn guard_index<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<()> {

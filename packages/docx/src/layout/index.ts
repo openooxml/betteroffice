@@ -19,6 +19,14 @@ export * from './measure';
 // (`layout/render/displayListQueries.ts`, `layout/render/canvasPointer.ts`);
 // only these value shapes remain adapter-facing.
 export type { SelectionRect, CaretPosition } from './geometry/selectionTypes';
+export type {
+  DrawingScene,
+  DrawingSceneNode,
+  ShapeEffect,
+  ShapeFillPaint,
+  ShapeStrokePaint,
+  ShapeTextBodyProperties,
+} from './drawing';
 
 export {
   computeHfCaretRectsFromDisplayList,

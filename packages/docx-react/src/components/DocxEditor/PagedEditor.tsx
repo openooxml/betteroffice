@@ -92,7 +92,7 @@ import {
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
-import { useYrsCoreSession } from './hooks/useYrsCoreSession';
+import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi } from './hooks/usePagedScrollApi';
@@ -165,8 +165,8 @@ function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsI
 export interface PagedEditorProps {
   /** The document to edit. */
   document: Document | null;
-  /** Source document used only when seeding a replacement yrs session. */
-  yrsSeedDocument?: Document | null;
+  /** The parent-owned authoritative editing session. */
+  yrsCore: YrsCoreSession;
   /** Collaboration identity and replica lifecycle callback. */
   collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
@@ -191,8 +191,8 @@ export interface PagedEditorProps {
   pageGap?: number;
   /** Zoom level (1 = 100%). */
   zoom?: number;
-  /** Callback when document changes. */
-  onDocumentChange?: (document: Document) => void;
+  /** Callback when Yrs content changes. */
+  onYrsContentChange?: () => void;
   /** Callback when the native Yrs undo/redo availability changes. */
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   /** Callback when selection changes. */
@@ -419,7 +419,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
   function PagedEditor(props, ref) {
     const {
       document,
-      yrsSeedDocument = document,
+      yrsCore,
       collaboration,
       styles,
       theme: _theme,
@@ -430,7 +430,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly = false,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
-      onDocumentChange,
+      onYrsContentChange,
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
@@ -504,7 +504,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
-    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument, collaboration);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
@@ -544,14 +543,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
     const onYrsHfSelectionChangeRef = useRef(onYrsHfSelectionChange);
-    const onDocumentChangeRef = useRef(onDocumentChange);
+    const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
     const onReadyRef = useRef(onReady);
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
     onYrsHfSelectionChangeRef.current = onYrsHfSelectionChange;
-    onDocumentChangeRef.current = onDocumentChange;
+    onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
     onReadyRef.current = onReady;
 
@@ -774,17 +773,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           refreshYrsLayout();
         }
         if (docChanged) {
-          // Projecting the complete document is intentionally kept off the
-          // synchronous input path. Besides being unnecessary for canvas
-          // rendering, doing it once per key starves the browser event loop on
-          // larger documents. Coalesce host onChange notifications instead.
+          // Compatibility callbacks stay off the synchronous input path.
           if (documentChangeTimerRef.current !== null) {
             clearTimeout(documentChangeTimerRef.current);
           }
           documentChangeTimerRef.current = setTimeout(() => {
             documentChangeTimerRef.current = null;
-            const projected = yrsCore.documentFromYrs();
-            if (projected) onDocumentChangeRef.current?.(projected);
+            onYrsContentChangeRef.current?.();
           }, 100);
         }
       },
@@ -794,7 +789,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         hfEditRId,
         refreshYrsLayout,
         updateSelectionOverlay,
-        yrsCore.documentFromYrs,
         yrsCore.inputPositionMap,
         yrsCore.session,
       ]

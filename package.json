@@ -40,7 +40,7 @@
     "deploy": "bun run --filter './apps/web' deploy",
     "cf-typegen": "bun run --filter './apps/web' cf-typegen",
     "build:docx-wasm": "bun scripts/build-docx-wasm.ts",
-    "build:docx": "bun run --filter '@betteroffice/drawingml' build && bun run --filter '@betteroffice/docx-i18n' build && bun run --filter '@betteroffice/docx' build && bun run --filter '@betteroffice/docx-react' build"
+    "build:docx": "bun run --filter '@betteroffice/docx-i18n' build && bun run --filter '@betteroffice/docx' build && bun run --filter '@betteroffice/docx-react' build"
   },
   "license": "Apache-2.0",
   "homepage": "https://betteroffice.dev",

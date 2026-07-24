@@ -240,6 +240,10 @@ export class EditSession {
      */
     locate_paragraph(story: string, para_id: string): string;
     /**
+     * Materializes the retained canonical package for compatibility APIs.
+     */
+    materialize_docx(): string | undefined;
+    /**
      * Paragraph-measure compatibility export on the resident engine module.
      */
     measure_paragraph_json(input: string): string;
@@ -258,6 +262,10 @@ export class EditSession {
      * the host allocates it (yjs-style random 32-bit ids are fine).
      */
     constructor(client_id: number);
+    /**
+     * Parses a DOCX and optionally seeds its editable stories.
+     */
+    open_docx(bytes: Uint8Array, seed_stories: boolean): string;
     /**
      * Resolve one glyph outline from the session's resident font store.
      */
@@ -307,6 +315,10 @@ export class EditSession {
      */
     resolve_comment(comment_id: string): string;
     resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string;
+    /**
+     * Parses a DOCX, seeds its stories, and returns thin host metadata.
+     */
+    seed_from_docx(bytes: Uint8Array): string;
     /**
      * Resolves this peer's current sticky selection as two public Locs, or
      * `null` before the host establishes an initial selection.
@@ -632,10 +644,12 @@ export interface InitOutput {
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
+    readonly editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
@@ -647,6 +661,7 @@ export interface InitOutput {
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

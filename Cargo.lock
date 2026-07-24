@@ -80,7 +80,9 @@ name = "betteroffice-docx-edit"
 version = "0.0.3"
 dependencies = [
  "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
  "js-sys",
+ "ryu-js",
  "serde",
  "serde_json",
  "unicode-segmentation",

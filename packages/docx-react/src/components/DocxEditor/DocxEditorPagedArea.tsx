@@ -33,6 +33,7 @@ import type { RenderedDomContext } from '../../plugin-api/types';
 import type { YrsToolbarSelection } from './yrsToolbar';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from './types';
+import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 
 /**
  * Body of the editor: the paged ProseMirror host, its sidebar overlay
@@ -51,7 +52,7 @@ export function DocxEditorPagedArea({
   editorContentRef,
   // Document + section
   document,
-  yrsSeedDocument,
+  yrsCore,
   collaboration,
   theme,
   initialSectionProperties,
@@ -71,7 +72,7 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
-  onDocumentChange,
+  onYrsContentChange,
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
@@ -130,8 +131,7 @@ export function DocxEditorPagedArea({
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   document: Document | null;
-  /** Source document for replacing the yrs session on an actual load. */
-  yrsSeedDocument: Document | null;
+  yrsCore: YrsCoreSession;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -149,7 +149,7 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
-  onDocumentChange: (doc: Document) => void;
+  onYrsContentChange: () => void;
   onYrsHistoryChange: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
@@ -382,7 +382,7 @@ export function DocxEditorPagedArea({
       <PagedEditor
         ref={pagedEditorRef}
         document={document}
-        yrsSeedDocument={yrsSeedDocument}
+        yrsCore={yrsCore}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
@@ -405,7 +405,7 @@ export function DocxEditorPagedArea({
         // context menu) through the active-surface helper directly.
         zoom={zoom}
         readOnly={readOnly}
-        onDocumentChange={onDocumentChange}
+        onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}

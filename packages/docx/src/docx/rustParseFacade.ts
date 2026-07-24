@@ -40,7 +40,10 @@ export function parseDocumentWithRust(
 }
 
 export function decodeS9Envelope(json: string, originalBuffer: ArrayBuffer): RustS9Result {
-  const value: unknown = JSON.parse(json);
+  return decodeS9EnvelopeValue(JSON.parse(json), originalBuffer);
+}
+
+export function decodeS9EnvelopeValue(value: unknown, originalBuffer: ArrayBuffer): RustS9Result {
   assertSafeTree(value, 'wire');
   const envelope = objectAt(value, 'wire');
   exactKeys(
@@ -99,7 +102,10 @@ export function decodeS9Envelope(json: string, originalBuffer: ArrayBuffer): Rus
 
 function decodeS9Document(value: unknown, originalBuffer: ArrayBuffer): Document {
   const wireDocument = objectAt(value, 'wire.document');
-  exactKeys(wireDocument, ['package', 'warnings'], 'wire.document', ['warnings']);
+  exactKeys(wireDocument, ['package', 'templateVariables', 'warnings'], 'wire.document', [
+    'templateVariables',
+    'warnings',
+  ]);
   const pkg = decodeS9Package(wireDocument.package);
   const document: Document = { package: pkg, originalBuffer };
   if (wireDocument.warnings !== undefined) {

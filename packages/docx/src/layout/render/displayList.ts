@@ -5,6 +5,8 @@
 // space as Layout. v0 carries shaped-by-browser text runs (string + CSS font);
 // phase 2 (docx-text) adds glyph-run primitives without breaking consumers.
 
+import type { DrawingScene, ShapeTextBodyProperties } from '../drawing';
+
 export interface DisplayList {
   /** Contract version. Undefined reads as legacy version 0. */
   contractVersion?: number;
@@ -678,9 +680,9 @@ export interface ShapePrimitive extends DocAttrs {
   /** Effect extents in page px. Undefined = zero. */
   effectExtent?: { top?: number; right?: number; bottom?: number; left?: number };
   /** Versioned heterogeneous DrawingML group/canvas scene. */
-  drawingScene?: import('../../types/content/shape').DrawingScene;
+  drawingScene?: DrawingScene;
   /** Full DrawingML `a:bodyPr` projection for shape text. */
-  textBodyProperties?: import('../../types/content/shape').ShapeTextBodyProperties;
+  textBodyProperties?: ShapeTextBodyProperties;
 }
 
 export interface DecorationPrimitive extends DocAttrs {

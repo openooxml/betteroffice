@@ -54,10 +54,12 @@ export const editsession_layout_font_requirements_json: (a: number, b: number, c
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_materialize_docx: (a: number) => [number, number, number, number];
 export const editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_new: (a: number) => [number, number, number];
+export const editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
@@ -69,6 +71,7 @@ export const editsession_replace_range: (a: number, b: number, c: number, d: num
 export const editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+export const editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_selection: (a: number) => [number, number, number, number];
 export const editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

@@ -15,6 +15,8 @@
  */
 
 import type { EditSession } from './wasm/index';
+import type { Document } from '../types/document';
+import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -37,6 +39,13 @@ export {
 } from './residentCaret';
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
+
+export interface YrsDocxHost {
+  document: Document;
+  referencedFonts: string[];
+  embeddedFonts: Map<string, ArrayBuffer>;
+  fontTableRelationshipsXml?: string;
+}
 
 /** Durable authorship metadata for one suggested (tracked-change) operation. */
 export interface YrsAuthor {
@@ -675,6 +684,12 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
+  /** Parses a DOCX, seeds its stories, and returns thin host metadata. */
+  seedFromDocx(bytes: Uint8Array): YrsDocxHost;
+  /** Parses a DOCX and optionally seeds its stories. */
+  openDocx(bytes: Uint8Array, seedStories: boolean): YrsDocxHost;
+  /** Materializes the retained canonical package for compatibility APIs. */
+  materializeDocx(): Document | null;
   /**
    * Seeds stories from parsed content (S1 scaffold; the real
    * `load(ParsedDocument)` lands with the ops track). Returns paraIds per
@@ -929,6 +944,40 @@ function wireRanges(ranges: readonly YrsStoryRange[]): string {
   );
 }
 
+function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  ) {
+    return bytes.buffer;
+  }
+  return bytes.slice().buffer as ArrayBuffer;
+}
+
+function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
+  const value: unknown = JSON.parse(json);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('DOCX host metadata must be an object');
+  }
+  const wire = value as Record<string, unknown>;
+  if (
+    !Array.isArray(wire.referencedFonts) ||
+    !wire.referencedFonts.every((name) => typeof name === 'string')
+  ) {
+    throw new TypeError('DOCX host referencedFonts must be a string array');
+  }
+  const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
+  return {
+    document: result.document,
+    referencedFonts: wire.referencedFonts,
+    embeddedFonts: result.embeddedFonts,
+    ...(result.fontTableRelationshipsXml === undefined
+      ? {}
+      : { fontTableRelationshipsXml: result.fontTableRelationshipsXml }),
+  };
+}
+
 function wrapSession(session: EditSession, clientId: number): YrsSession {
   const listeners = new Map<
     number,
@@ -956,6 +1005,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutRevision = 0;
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
+  let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -1059,6 +1109,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     pendingUpdates.length = 0;
     session.clear_update_observer();
     observing = false;
+  };
+
+  const openDocx = (bytes: Uint8Array, seedStories: boolean): YrsDocxHost => {
+    const source = bytes.slice();
+    const json = mutate(() => session.open_docx(source, seedStories));
+    const host = decodeDocxHost(json, source);
+    docxSource = source;
+    return host;
   };
 
   return {
@@ -1176,6 +1234,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
 
     loadState: (update) => mutate(() => session.load(update)),
+    seedFromDocx: (bytes) => openDocx(bytes, true),
+    openDocx,
+    materializeDocx: () => {
+      const source = docxSource;
+      const json = session.materialize_docx();
+      if (!source || json === undefined) return null;
+      return decodeS9Envelope(json, docxSourceBuffer(source)).document;
+    },
     loadStories: (stories) =>
       mutate(
         () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>

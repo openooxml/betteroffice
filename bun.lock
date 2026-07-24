@@ -11,7 +11,7 @@
     },
     "apps/demo": {
       "name": "@betteroffice/demo",
-      "version": "0.0.5",
+      "version": "0.0.6",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-fonts": "workspace:*",
@@ -116,13 +116,12 @@
     },
     "crates": {
       "name": "@betteroffice/rust-crates",
-      "version": "0.0.2",
+      "version": "0.0.3",
     },
     "packages/docx": {
       "name": "@betteroffice/docx",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "devDependencies": {
-        "@betteroffice/drawingml": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "tsup": "^8.0.1",
@@ -131,7 +130,7 @@
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "devDependencies": {
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
@@ -139,7 +138,7 @@
     },
     "packages/docx-react": {
       "name": "@betteroffice/docx-react",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
         "@betteroffice/docx-i18n": "workspace:*",
@@ -171,14 +170,6 @@
         "react",
         "react-dom",
       ],
-    },
-    "packages/drawingml": {
-      "name": "@betteroffice/drawingml",
-      "version": "0.0.1",
-      "devDependencies": {
-        "tsup": "^8.0.1",
-        "typescript": "^6.0.3",
-      },
     },
     "packages/fonts": {
       "name": "@betteroffice/docx-fonts",
@@ -227,7 +218,7 @@
     },
     "packages/xlsx": {
       "name": "@betteroffice/xlsx",
-      "version": "0.0.6",
+      "version": "0.0.7",
       "devDependencies": {
         "@types/bun": "^1.3.14",
         "@types/node": "^26.0.0",
@@ -237,7 +228,7 @@
     },
     "packages/xlsx-i18n": {
       "name": "@betteroffice/xlsx-i18n",
-      "version": "0.0.6",
+      "version": "0.0.7",
       "devDependencies": {
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
@@ -245,7 +236,7 @@
     },
     "packages/xlsx-react": {
       "name": "@betteroffice/xlsx-react",
-      "version": "0.0.6",
+      "version": "0.0.7",
       "dependencies": {
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-i18n": "workspace:*",
@@ -459,8 +450,6 @@
     "@betteroffice/docx-i18n": ["@betteroffice/docx-i18n@workspace:packages/docx-i18n"],
 
     "@betteroffice/docx-react": ["@betteroffice/docx-react@workspace:packages/docx-react"],
-
-    "@betteroffice/drawingml": ["@betteroffice/drawingml@workspace:packages/drawingml"],
 
     "@betteroffice/pptx": ["@betteroffice/pptx@workspace:packages/pptx"],
 

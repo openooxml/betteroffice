@@ -52,13 +52,6 @@ export function parse_docx_s9(data: Uint8Array, options_json: string): string;
 export function parse_relationships_xml(xml: Uint8Array, part_path: string): string;
 
 /**
- * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
- */
-export function rezip_docx(entries: any): Uint8Array;
-
-export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
-
-/**
  * Legacy staged Rust S10 serializer entry retained for ABI compatibility.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -72,11 +65,6 @@ export function serialize_docx_s11(request_json: string): string;
  * Legacy staged Rust S12 serializer entry retained for ABI compatibility.
  */
 export function serialize_docx_s12(request_json: string): string;
-
-/**
- * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
- */
-export function unzip_docx(data: Uint8Array): any;
 
 /**
  * S13 production-capable package writer: typed model + original package -> DOCX.
@@ -101,16 +89,11 @@ export interface InitOutput {
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly rezip_docx: (a: any) => [number, number, number, number];
-    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly unzip_docx: (a: number, b: number) => [number, number, number];
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_exn_store: (a: number) => void;
-    readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
 }
 

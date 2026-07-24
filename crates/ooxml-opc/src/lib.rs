@@ -10,7 +10,9 @@
 use std::collections::HashSet;
 use std::io::{Cursor, Read, Write};
 
+#[cfg(feature = "wasm")]
 use js_sys::{Object, Reflect, Uint8Array};
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 mod sanitize;
@@ -148,6 +150,7 @@ pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
 }
 
 /// Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn unzip_docx(data: &[u8]) -> Result<JsValue, JsValue> {
     let parts = unzip_parts(data).map_err(|e| JsValue::from_str(&e))?;
@@ -160,6 +163,7 @@ pub fn unzip_docx(data: &[u8]) -> Result<JsValue, JsValue> {
 }
 
 /// Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn rezip_docx(entries: JsValue) -> Result<Vec<u8>, JsValue> {
     let obj: Object = entries
@@ -178,6 +182,7 @@ pub fn rezip_docx(entries: JsValue) -> Result<Vec<u8>, JsValue> {
     rezip_parts(&collected).map_err(|e| JsValue::from_str(&e))
 }
 
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = sanitizeOoxml)]
 pub fn sanitize_ooxml(data: &[u8], expected_format: &str) -> Result<Vec<u8>, JsValue> {
     sanitize_package_for_format(data, expected_format).map_err(|error| JsValue::from_str(&error))
