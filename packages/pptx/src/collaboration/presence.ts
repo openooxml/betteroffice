@@ -9,6 +9,7 @@ export const PRESENCE_CURSOR_INTERVAL_MS = 80;
 export const PRESENCE_HEARTBEAT_MS = 20_000;
 export const PRESENCE_EXPIRY_MS = 45_000;
 export const PRESENCE_LABEL_DURATION_MS = 3_000;
+export const MAX_AWARENESS_STRING_LENGTH = 1024;
 
 export const PRESENCE_COLORS = [
   '#B3261E',
@@ -51,7 +52,9 @@ export function presenceUser(
   if (user?.color !== undefined && typeof user.color !== 'string') {
     throw new TypeError('Collaboration user color must be a string');
   }
-  const name = user?.name.trim() || `Guest ${clientId.toString(36).toUpperCase()}`;
+  const name =
+    user?.name.trim().slice(0, MAX_AWARENESS_STRING_LENGTH) ||
+    `Guest ${clientId.toString(36).toUpperCase()}`;
   const color = sanitizePresenceColor(clientId, user?.color);
   return { name, color };
 }

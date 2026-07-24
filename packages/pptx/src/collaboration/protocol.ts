@@ -1,4 +1,8 @@
-import { sanitizePresenceColor, type AwarenessUpdateEntry } from './presence';
+import {
+  MAX_AWARENESS_STRING_LENGTH,
+  sanitizePresenceColor,
+  type AwarenessUpdateEntry,
+} from './presence';
 import type { PptxPresenceCursor, PptxPresenceState } from './types';
 
 export const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
@@ -15,7 +19,6 @@ const SYNC_UPDATE = 2;
 
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
-const MAX_AWARENESS_STRING_LENGTH = 1024;
 
 export type DecodedProtocolMessage =
   | { type: 'sync-step-1'; stateVector: Uint8Array }

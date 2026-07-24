@@ -10,6 +10,7 @@ import {
   encodeUpdate,
 } from './protocol';
 import {
+  MAX_AWARENESS_STRING_LENGTH,
   PRESENCE_CURSOR_INTERVAL_MS,
   PRESENCE_EXPIRY_MS,
   PRESENCE_HEARTBEAT_MS,
@@ -95,6 +96,13 @@ function normalizeCursor(cursor: PptxPresenceCursor | null): PptxPresenceCursor 
     : { slideId: cursor.slideId };
 }
 
+function encodableCursor(cursor: PptxPresenceCursor): boolean {
+  return (
+    cursor.slideId.length <= MAX_AWARENESS_STRING_LENGTH &&
+    (cursor.shapeId === undefined || cursor.shapeId.length <= MAX_AWARENESS_STRING_LENGTH)
+  );
+}
+
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
   private readonly transport: CollaborationTransport;
@@ -122,6 +130,7 @@ export class CollaborationProvider {
   private queuedBytes = 0;
   private isFlushing = false;
   private localClock = 0;
+  private reportedClockExhaustion = false;
   private localCursor: PptxPresenceCursor | null = null;
   private lastAwarenessSentAt = 0;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
@@ -181,7 +190,16 @@ export class CollaborationProvider {
 
   setCursor(cursor: PptxPresenceCursor | null): void {
     if (this.isDestroyed) return;
-    const next = normalizeCursor(cursor);
+    const normalized = normalizeCursor(cursor);
+    const next = !normalized || encodableCursor(normalized) ? normalized : null;
+    if (normalized && !next) {
+      this.report(
+        new CollaborationError(
+          'protocol',
+          `Presence cursor identifiers exceed ${MAX_AWARENESS_STRING_LENGTH} characters; cursor dropped`
+        )
+      );
+    }
     if (samePresenceCursor(this.localCursor, next)) return;
     this.localCursor = next;
     if (this.isOpen && this.wantsConnection) this.scheduleCursorBroadcast();
@@ -452,10 +470,7 @@ export class CollaborationProvider {
     try {
       this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
     } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('protocol', 'Failed to encode awareness query', cause)
-      );
+      this.report(normalizeError('protocol', 'Failed to encode awareness query', cause));
     }
   }
 
@@ -587,12 +602,13 @@ export class CollaborationProvider {
 
   private broadcastLocalPresence(leaving: boolean): void {
     if (!this.isOpen || this.isDestroyed || !this.wantsConnection) return;
-    const token = this.epoch;
     if (this.localClock >= Number.MAX_SAFE_INTEGER) {
-      this.failConnection(
-        token,
-        new CollaborationError('protocol', 'Awareness clock exceeds Number.MAX_SAFE_INTEGER')
-      );
+      if (!this.reportedClockExhaustion) {
+        this.reportedClockExhaustion = true;
+        this.report(
+          new CollaborationError('protocol', 'Awareness clock exceeds Number.MAX_SAFE_INTEGER')
+        );
+      }
       return;
     }
     this.localClock += 1;
@@ -616,10 +632,7 @@ export class CollaborationProvider {
       if (leaving) this.sendLeaveFrameBestEffort(frame);
       else this.sendFrame(frame);
     } catch (cause) {
-      this.failConnection(
-        token,
-        normalizeError('protocol', 'Failed to encode awareness update', cause)
-      );
+      this.report(normalizeError('protocol', 'Failed to encode awareness update', cause));
     }
   }
 
