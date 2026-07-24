@@ -1,4 +1,4 @@
 [install]
 minimumReleaseAge = 604800
-# fast-uri: security patch for GHSA-v2hh-gcrm-f6hx
-minimumReleaseAgeExcludes = ["fast-uri", "next"]
+# security patches newer than the release-age window
+minimumReleaseAgeExcludes = ["fast-uri", "next", "postcss", "js-yaml"]
