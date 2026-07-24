@@ -8,10 +8,18 @@ function page(pageIndex: number): DisplayPage {
 }
 
 function fakeEngine() {
-  const calls = { open: 0, update: 0, close: 0, rangeByHandle: 0, rangeJson: 0 };
+  const calls = {
+    open: 0,
+    update: 0,
+    close: 0,
+    rangeByHandle: 0,
+    rangeJson: 0,
+    verticalByHandle: 0,
+  };
   let nextHandle = 1;
   const engine: RustDisplayListQueryEngine = {
     hitTestRegionsJson: () => 'null',
+    verticalMoveJson: () => 'null',
     rangeRectsJson: () => {
       calls.rangeJson += 1;
       return '[]';
@@ -31,6 +39,10 @@ function fakeEngine() {
     rangeRectsByHandle: () => {
       calls.rangeByHandle += 1;
       return '[]';
+    },
+    verticalMoveByHandle: () => {
+      calls.verticalByHandle += 1;
+      return '{"position":2,"goalX":24}';
     },
   };
   return { engine, calls };
@@ -82,5 +94,13 @@ describe('createDisplayListQueries handle lifecycle', () => {
     first.rangeRects(0, 1);
     expect(calls.open).toBe(1);
     expect(calls.rangeJson).toBe(1);
+  });
+
+  test('routes vertical movement through the retained handle', () => {
+    const { engine, calls } = fakeEngine();
+    const queries = createDisplayListQueries({ pages: [page(0)] }, engine);
+    expect(queries.verticalMove(1, 'down')).toEqual({ position: 2, goalX: 24 });
+    expect(calls.open).toBe(1);
+    expect(calls.verticalByHandle).toBe(1);
   });
 });

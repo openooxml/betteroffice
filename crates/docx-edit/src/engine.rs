@@ -22,7 +22,7 @@ use docx_layout::header_footer::{
     HeaderFooterVariant, extend_body_margins, measure_header_footer,
     resolve_header_footer_field_widths,
 };
-use docx_layout::hit::{CaretRect, HitRegion};
+use docx_layout::hit::{CaretRect, HitRegion, VerticalDirection};
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
@@ -1910,6 +1910,29 @@ impl EngineSession {
         self.with_display_list(|list| docx_layout::hit::hit_test_regions(list, page_index, x, y))
             .ok_or_else(|| "resident display list is not built".to_owned())
             .and_then(|hit| serde_json::to_string(&hit).map_err(|error| error.to_string()))
+    }
+
+    pub fn display_vertical_move_json(
+        &self,
+        position: i64,
+        direction: &str,
+        goal_x: f64,
+    ) -> Result<String, String> {
+        let direction = match direction {
+            "up" => VerticalDirection::Up,
+            "down" => VerticalDirection::Down,
+            other => return Err(format!("unknown vertical direction {other:?}")),
+        };
+        self.with_display_list(|list| {
+            docx_layout::hit::vertical_move(
+                list,
+                position,
+                direction,
+                goal_x.is_finite().then_some(goal_x),
+            )
+        })
+        .ok_or_else(|| "resident display list is not built".to_owned())
+        .and_then(|movement| serde_json::to_string(&movement).map_err(|error| error.to_string()))
     }
 
     /// Body range geometry directly against the resident display list.

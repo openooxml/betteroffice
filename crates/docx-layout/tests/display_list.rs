@@ -12,7 +12,7 @@ use docx_layout::display_list::{
     RevisionKind, ShapePathCommand, StructuralRevisionKind, StructuralRevisionScope, TableCellRef,
     build_display_list_json,
 };
-use docx_layout::hit::{caret_rect, hit_test, range_rects};
+use docx_layout::hit::{VerticalDirection, caret_rect, hit_test, range_rects, vertical_move};
 
 const DEMO_FIXTURE: &str =
     include_str!("../../../packages/docx/src/layout/render/__fixtures__/displayList.demo.json");
@@ -200,6 +200,11 @@ fn build(name: &str) -> DisplayList {
     serde_json::from_str(&json).unwrap()
 }
 
+fn snapshot(name: &str) -> DisplayList {
+    let json = std::fs::read_to_string(fixture_path(name, "displaylist")).unwrap();
+    serde_json::from_str(&json).unwrap()
+}
+
 // single-page-multi-paragraph: three one-line paragraphs at y 96/120/144,
 // x 96, widths 120/130/120, pm spans [1,16] [18,34] [36,51]
 #[test]
@@ -237,6 +242,102 @@ fn hit_test_reaches_content_on_later_pages() {
     // page 2's first paragraph is block 8 (pm 121..133), painted at y 96
     let pos = hit_test(&dl, 1, 100.0, 150.0).unwrap();
     assert!(pos >= 121, "page-2 hit resolved into page-1 content: {pos}");
+}
+
+#[test]
+fn vertical_move_follows_wrapped_lines_and_preserves_goal_x() {
+    let dl = snapshot("mixed-run-line-segments");
+    let down = vertical_move(&dl, 4, VerticalDirection::Down, None).unwrap();
+    assert!((10..=26).contains(&down.position));
+
+    let up = vertical_move(&dl, down.position, VerticalDirection::Up, Some(down.goal_x)).unwrap();
+    assert_eq!(up.position, 4);
+    assert_eq!(up.goal_x, down.goal_x);
+}
+
+#[test]
+fn vertical_move_crosses_paragraphs_columns_and_pages() {
+    let paragraphs = snapshot("single-page-multi-paragraph");
+    let second = vertical_move(&paragraphs, 8, VerticalDirection::Down, None).unwrap();
+    assert!((18..=34).contains(&second.position));
+
+    let columns = snapshot("column-break-in-multi-column");
+    let right_column = vertical_move(&columns, 5, VerticalDirection::Down, None).unwrap();
+    assert!((14..=26).contains(&right_column.position));
+
+    let pages = snapshot("multi-page-paragraph-overflow");
+    let next_page = vertical_move(&pages, 112, VerticalDirection::Down, None).unwrap();
+    assert!((121..=132).contains(&next_page.position));
+}
+
+#[test]
+fn vertical_move_uses_table_rows_as_visual_lines() {
+    let text = |value: &str,
+                x: f64,
+                baseline: f64,
+                doc_start: i64,
+                doc_end: i64,
+                cell: Option<(u64, u64)>| {
+        let mut primitive = serde_json::json!({
+            "kind": "text",
+            "text": value,
+            "x": x,
+            "baselineY": baseline,
+            "width": 80,
+            "font": "400 16px Calibri",
+            "color": "#000000",
+            "docStart": doc_start,
+            "docEnd": doc_end,
+            "blockId": doc_start
+        });
+        if let Some((row, col)) = cell {
+            primitive["cell"] = serde_json::json!({
+                "row": row,
+                "col": col,
+                "rowSpan": 1,
+                "colSpan": 1
+            });
+            primitive["table"] = serde_json::json!({
+                "tableId": "table-1",
+                "rowStart": 0,
+                "rowEnd": 2,
+                "rowCount": 2,
+                "columnCount": 2
+            });
+        }
+        primitive
+    };
+    let dl: DisplayList = serde_json::from_value(serde_json::json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 500,
+            "height": 500,
+            "columnBounds": [{"x": 80, "y": 80, "width": 340, "height": 340}],
+            "primitives": [
+                text("left", 100.0, 120.0, 1, 5, Some((0, 0))),
+                text("below", 100.0, 150.0, 20, 25, Some((1, 0))),
+                text("right", 220.0, 120.0, 10, 15, Some((0, 1))),
+                text("below", 220.0, 150.0, 30, 35, Some((1, 1))),
+                text("after", 100.0, 190.0, 40, 45, None)
+            ]
+        }]
+    }))
+    .unwrap();
+
+    let next_row = vertical_move(&dl, 2, VerticalDirection::Down, None).unwrap();
+    assert!((20..=25).contains(&next_row.position));
+
+    let after_table = vertical_move(&dl, 32, VerticalDirection::Down, None).unwrap();
+    assert!((40..=45).contains(&after_table.position));
+
+    let into_table = vertical_move(
+        &dl,
+        after_table.position,
+        VerticalDirection::Up,
+        Some(240.0),
+    )
+    .unwrap();
+    assert!((30..=35).contains(&into_table.position));
 }
 
 #[test]

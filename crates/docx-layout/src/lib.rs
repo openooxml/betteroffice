@@ -348,6 +348,17 @@ pub fn hit_test_json(
     hit::hit_test_json(display_list, page_index as usize, x, y).map_err(|e| JsValue::from_str(&e))
 }
 
+#[wasm_bindgen]
+pub fn vertical_move_json(
+    display_list: &str,
+    position: f64,
+    direction: &str,
+    goal_x: f64,
+) -> Result<String, JsValue> {
+    hit::vertical_move_json(display_list, position as i64, direction, goal_x)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 /// wasm wrapper over [`hit::range_rects_json`]: display-list JSON + PM range
 /// in, JSON array of page-local rects out.
 #[wasm_bindgen]
@@ -432,6 +443,17 @@ pub fn hit_test_regions_by_handle(
     y: f64,
 ) -> Result<String, JsValue> {
     session::hit_test_regions_by_handle(handle, page_index as usize, x, y)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen]
+pub fn vertical_move_by_handle(
+    handle: u32,
+    position: f64,
+    direction: &str,
+    goal_x: f64,
+) -> Result<String, JsValue> {
+    session::vertical_move_by_handle(handle, position as i64, direction, goal_x)
         .map_err(|e| JsValue::from_str(&e))
 }
 

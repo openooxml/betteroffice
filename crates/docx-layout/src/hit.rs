@@ -24,7 +24,7 @@
 //! over the run width (the v0 display list distributes advances the same way,
 //! so hit-testing and painting agree by construction).
 
-use crate::display_list::{DisplayList, HfRegion, Primitive};
+use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive};
 use serde::Serialize;
 
 /// vertical slack when matching a pointer to a span's band, mirrors the ±4px
@@ -33,6 +33,8 @@ const BAND_SLACK: f64 = 4.0;
 
 /// width of the selection sliver drawn for a blank line (BLANK_LINE_SELECTION_WIDTH_PX)
 const BLANK_LINE_SELECTION_WIDTH: f64 = 4.0;
+
+const LINE_CENTER_EPSILON: f64 = 0.5;
 
 /// parse the px size out of a CSS font shorthand ("700 16px Calibri, ...")
 fn font_px(font: &str) -> f64 {
@@ -53,8 +55,10 @@ fn font_px(font: &str) -> f64 {
 /// display-list flag flips rendering, never caret placement.
 struct TextHit<'a> {
     text: &'a str,
+    attrs: &'a DocAttrs,
     x: f64,
     width: f64,
+    baseline: f64,
     top: f64,
     bottom: f64,
     doc_start: i64,
@@ -73,8 +77,10 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
                 let baseline = t.baseline_y.as_f64().unwrap_or(0.0);
                 out.push(TextHit {
                     text: &t.text,
+                    attrs: &t.attrs,
                     x: t.x.as_f64().unwrap_or(0.0),
                     width: t.width.as_f64().unwrap_or(0.0),
+                    baseline,
                     top: baseline - fp,
                     bottom: baseline + fp * 0.25,
                     doc_start: ds,
@@ -109,8 +115,10 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
                 let width = (right - min_x).max(0.0);
                 out.push(TextHit {
                     text: &g.text,
+                    attrs: &g.attrs,
                     x: min_x,
                     width,
+                    baseline,
                     top: baseline - fp,
                     bottom: baseline + fp * 0.25,
                     doc_start: ds,
@@ -136,6 +144,170 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
     let unit = (ratio * units as f64).round() as i64;
     // map char index to PM offset (1:1 for text runs; clamp into the span)
     (hit.doc_start + unit).min(hit.doc_end)
+}
+
+fn same_line_owner(left: &TextHit<'_>, right: &TextHit<'_>) -> bool {
+    match (&left.attrs.table, &right.attrs.table) {
+        (Some(left), Some(right)) => return left.table_id == right.table_id,
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
+    if left.attrs.cell != right.attrs.cell {
+        return false;
+    }
+    if left.attrs.para_id.is_some() || right.attrs.para_id.is_some() {
+        return left.attrs.para_id == right.attrs.para_id;
+    }
+    if left.attrs.block_key.is_some() || right.attrs.block_key.is_some() {
+        return left.attrs.block_key == right.attrs.block_key;
+    }
+    if left.attrs.block_id.is_some() || right.attrs.block_id.is_some() {
+        return left.attrs.block_id == right.attrs.block_id;
+    }
+    left.doc_end == right.doc_start
+}
+
+struct VisualLine<'a> {
+    page_index: usize,
+    column_index: usize,
+    baseline: f64,
+    hits: Vec<TextHit<'a>>,
+}
+
+impl VisualLine<'_> {
+    fn contains_position(&self, position: i64) -> bool {
+        self.hits
+            .iter()
+            .any(|hit| position >= hit.doc_start && position <= hit.doc_end)
+    }
+
+    fn center(&self) -> f64 {
+        let top = self
+            .hits
+            .iter()
+            .map(|hit| hit.top)
+            .fold(f64::INFINITY, f64::min);
+        let bottom = self
+            .hits
+            .iter()
+            .map(|hit| hit.bottom)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (top + bottom) / 2.0
+    }
+
+    fn position_at_x(&self, x: f64) -> i64 {
+        let mut best: Option<(f64, i64)> = None;
+        for hit in &self.hits {
+            let (distance, position) = if x < hit.x {
+                (hit.x - x, hit.doc_start)
+            } else if x > hit.x + hit.width {
+                (x - (hit.x + hit.width), hit.doc_end)
+            } else {
+                (0.0, position_in_run(hit, x))
+            };
+            if best.is_none_or(|current| distance < current.0) {
+                best = Some((distance, position));
+            }
+        }
+        best.expect("a visual line has at least one hit").1
+    }
+}
+
+fn visual_lines(dl: &DisplayList) -> Vec<VisualLine<'_>> {
+    let mut lines: Vec<VisualLine<'_>> = Vec::new();
+    for (page_index, page) in dl.pages.iter().enumerate() {
+        for hit in text_hits(&page.primitives) {
+            let center_x = hit.x + hit.width / 2.0;
+            let column_index = page
+                .column_bounds
+                .iter()
+                .position(|bounds| {
+                    let x = bounds.x.as_f64().unwrap_or(0.0);
+                    let width = bounds.width.as_f64().unwrap_or(0.0);
+                    center_x >= x && center_x <= x + width
+                })
+                .unwrap_or(0);
+            let matching_line = lines.iter().position(|line| {
+                line.page_index == page_index
+                    && line.column_index == column_index
+                    && (line.baseline - hit.baseline).abs() <= LINE_CENTER_EPSILON
+                    && line
+                        .hits
+                        .first()
+                        .is_some_and(|previous| same_line_owner(previous, &hit))
+            });
+            if let Some(index) = matching_line {
+                lines[index].hits.push(hit);
+            } else {
+                lines.push(VisualLine {
+                    page_index,
+                    column_index,
+                    baseline: hit.baseline,
+                    hits: vec![hit],
+                });
+            }
+        }
+    }
+    lines.sort_by(|left, right| {
+        left.page_index
+            .cmp(&right.page_index)
+            .then(left.column_index.cmp(&right.column_index))
+            .then(left.baseline.total_cmp(&right.baseline))
+    });
+    lines
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerticalDirection {
+    Up,
+    Down,
+}
+
+impl VerticalDirection {
+    fn parse(direction: &str) -> Result<Self, String> {
+        match direction {
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            other => Err(format!("unknown vertical direction {other:?}")),
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VerticalMove {
+    pub position: i64,
+    pub goal_x: f64,
+}
+
+pub fn vertical_move(
+    dl: &DisplayList,
+    position: i64,
+    direction: VerticalDirection,
+    goal_x: Option<f64>,
+) -> Option<VerticalMove> {
+    let caret = caret_rect(dl, position)?;
+    let goal_x = goal_x.filter(|x| x.is_finite()).unwrap_or(caret.x);
+    let lines = visual_lines(dl);
+    let caret_center = caret.y + caret.height / 2.0;
+    let current = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.page_index == caret.page_index && line.contains_position(position))
+        .min_by(|(_, left), (_, right)| {
+            (left.center() - caret_center)
+                .abs()
+                .total_cmp(&(right.center() - caret_center).abs())
+        })
+        .map(|(index, _)| index)?;
+    let target = match direction {
+        VerticalDirection::Up => current.checked_sub(1),
+        VerticalDirection::Down => current.checked_add(1).filter(|index| *index < lines.len()),
+    };
+    Some(VerticalMove {
+        position: target.map_or(position, |index| lines[index].position_at_x(goal_x)),
+        goal_x,
+    })
 }
 
 /// PM position under a page-local point, or None when the page has no
@@ -474,6 +646,23 @@ pub fn hit_test_json(
         Some(pos) => Ok(pos.to_string()),
         None => Ok("null".to_string()),
     }
+}
+
+pub fn vertical_move_json(
+    display_list: &str,
+    position: i64,
+    direction: &str,
+    goal_x: f64,
+) -> Result<String, String> {
+    let dl: DisplayList = serde_json::from_str(display_list).map_err(|e| format!("parse: {e}"))?;
+    let direction = VerticalDirection::parse(direction)?;
+    serde_json::to_string(&vertical_move(
+        &dl,
+        position,
+        direction,
+        goal_x.is_finite().then_some(goal_x),
+    ))
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 /// `range_rects` over serialized inputs; returns a JSON array of rects

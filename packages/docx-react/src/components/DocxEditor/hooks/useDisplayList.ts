@@ -680,6 +680,7 @@ function residentDisplayListQueryEngine(
   engine: RustDisplayListEngine | null | undefined
 ): ResidentDisplayListQueryEngine | undefined {
   return engine?.displayHitTestRegionsJson &&
+    engine.displayVerticalMoveJson &&
     engine.displayRangeRectsJson &&
     engine.displayRangeRectsRegionJson
     ? (engine as ResidentDisplayListQueryEngine)

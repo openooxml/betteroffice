@@ -1241,6 +1241,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [yrsCore.session]
     );
     getYrsPositionProjectionRef.current = getYrsPositionProjection;
+    const resolveYrsDisplayTarget = useCallback(
+      (position: number) => {
+        const target = getYrsPositionProjection(activeYrsRootStory)?.targetAt(position);
+        return target
+          ? { story: target.story, displayPosition: target.displayPosition }
+          : null;
+      },
+      [activeYrsRootStory, getYrsPositionProjection]
+    );
 
     // Pointer routing — every mouse path on the visible pages: cursor
     // placement, drag-to-select (with cell-selection promotion), table
@@ -1608,6 +1617,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           author={author}
           inputPositionMap={yrsInputPositionMap}
           displayPositionToLoc={yrsDisplayPositionToLoc}
+          resolveDisplayTarget={resolveYrsDisplayTarget}
           locToDisplayPosition={yrsLocToDisplayPosition}
           nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}

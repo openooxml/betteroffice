@@ -670,6 +670,11 @@ export interface YrsSession extends CollaborationReplica {
   residentWorkerProbe(): { layoutRevision: number } | null;
   /** Resident display-list hit/range queries; results are small JSON records. */
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
+  displayVerticalMoveJson(
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
@@ -1228,6 +1233,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     displayHitTestRegionsJson: (pageIndex, x, y) =>
       session.display_hit_test_regions_json(pageIndex, x, y),
+    displayVerticalMoveJson: (position, direction, goalX) =>
+      session.display_vertical_move_json(position, direction, goalX),
     displayRangeRectsJson: (from, to) => session.display_range_rects_json(from, to),
     displayRangeRectsRegionJson: (region, rId, from, to) =>
       session.display_range_rects_region_json(region, rId, from, to),
