@@ -1,5 +1,6 @@
 ---
 "@betteroffice/docx": patch
+"@betteroffice/docx-react": patch
 "@betteroffice/rust-crates": patch
 ---
 
