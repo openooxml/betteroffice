@@ -21,6 +21,7 @@ import {
   restoreDisplayListViewportAnchor,
 } from './scrollRestore';
 import { PendingScrollRestoreController } from './viewportAnchoring';
+import { YrsPositionProjection } from './yrsPositionProjection';
 
 const WASM = resolve(
   import.meta.dir,
@@ -93,10 +94,10 @@ function queries(lines: readonly DisplayListVisualLine[]): DisplayListQueries {
   } as unknown as DisplayListQueries;
 }
 
-function inputMap(session: YrsSession) {
+function inputMap(session: YrsSession, story = 'body') {
   return createYrsInputPositionMap(
-    'body',
-    session.paragraphs('body').map((paragraph) => ({
+    story,
+    session.paragraphs(story).map((paragraph) => ({
       paraId: paragraph.paraId,
       length: paragraph.text.length,
     }))
@@ -242,6 +243,77 @@ describe('display-list viewport restore integration', () => {
           return loc?.paraId === expectedParaId
             ? yrsLocToDisplayPosition(inputMap(local), loc)
             : null;
+        }
+      );
+
+      expect(scroller.scrollTop).toBe(700);
+    } finally {
+      local.destroy();
+      remote.destroy();
+    }
+  });
+
+  test('projects a table-cell anchor through a remote edit above it', async () => {
+    const local = await createYrsSession({ clientId: 70_003 });
+    const remote = await createYrsSession({ clientId: 70_004 });
+    try {
+      const receipt = local.loadStories([
+        {
+          storyId: 'body',
+          paragraphs: [{ text: 'before' }, { text: 'after' }],
+        },
+      ]);
+      const table = local.insertTable(
+        { story: 'body', paraId: receipt.body[1], offset: 0 },
+        1,
+        1
+      );
+      const cellStory = table.createdStoryIds[0];
+      const cellParaId = local.paragraphs(cellStory)[0].paraId;
+      local.insertText({ story: cellStory, paraId: cellParaId, offset: 0 }, 'cell anchor');
+      remote.loadState(local.encodeState());
+
+      const beforeProjection = new YrsPositionProjection(local, 'body');
+      const beforePosition = beforeProjection.positionForLoc({
+        story: cellStory,
+        paraId: cellParaId,
+        offset: 0,
+      });
+      expect(beforePosition).not.toBeNull();
+
+      const host = pageHost();
+      const scroller = scrollParent();
+      const anchor = captureDisplayListViewportAnchor(
+        queries([visualLine(cellParaId, beforePosition!, beforePosition! + 11, 60)]),
+        host,
+        scroller,
+        (displayPosition, expectedParaId) => {
+          const target = beforeProjection.targetAt(displayPosition);
+          const loc = displayPositionToYrsLoc(inputMap(local, target.story), target.displayPosition);
+          return loc?.paraId === expectedParaId ? local.encodeStickyPosition(loc) : null;
+        }
+      );
+      const vector = local.encodeStateVector();
+
+      remote.insertText({ story: 'body', paraId: receipt.body[0], offset: 0 }, 'remote ');
+      local.applyUpdate(remote.encodeStateAsUpdate(vector));
+
+      const afterProjection = new YrsPositionProjection(local, 'body');
+      const afterPosition = afterProjection.positionForLoc({
+        story: cellStory,
+        paraId: cellParaId,
+        offset: 0,
+      });
+      expect(afterPosition).toBe(beforePosition! + 7);
+
+      restoreDisplayListViewportAnchor(
+        anchor,
+        queries([visualLine(cellParaId, afterPosition!, afterPosition! + 11, 160)]),
+        host,
+        scroller,
+        (position, expectedParaId) => {
+          const loc = local.resolveStickyPosition(position);
+          return loc?.paraId === expectedParaId ? afterProjection.positionForLoc(loc) : null;
         }
       );
 

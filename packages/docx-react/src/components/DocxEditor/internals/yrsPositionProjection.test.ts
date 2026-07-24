@@ -63,10 +63,12 @@ describe('YrsPositionProjection', () => {
       story: 'body:t0:r0c0',
       displayPosition: 1,
     });
-    expect(displayPositionToYrsLoc(map, target.displayPosition)).toEqual({
+    const loc = displayPositionToYrsLoc(map, target.displayPosition);
+    expect(loc).toEqual({
       story: 'body:t0:r0c0',
       paraId: 'cell:p0',
       offset: 0,
     });
+    expect(projection.positionForLoc(loc!)).toBe(12);
   });
 });

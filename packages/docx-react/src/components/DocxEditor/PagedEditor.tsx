@@ -553,6 +553,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       [yrsCore.displayPositionToLoc]
     );
+    const yrsLocToViewportDisplayPosition = useCallback(
+      (loc: YrsLoc): number | null =>
+        getYrsPositionProjectionRef.current('body')?.positionForLoc(loc) ??
+        (loc.story === 'body' ? yrsLocToDisplayPosition(loc) : null),
+      [yrsLocToDisplayPosition]
+    );
     // Store callbacks in refs to avoid infinite re-render loops
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
@@ -644,7 +650,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       viewportLayoutRef,
       getSelectionHead: getYrsSelectionHead,
       displayPositionToYrsLoc: displayPositionToViewportLoc,
-      yrsLocToDisplayPosition,
+      yrsLocToDisplayPosition: yrsLocToViewportDisplayPosition,
       syncCoordinator,
       getScrollContainer,
       onTotalPagesChange,
