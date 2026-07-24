@@ -103,9 +103,6 @@ pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
         let mut hyperlinks = sheet.hyperlinks.clone();
         let mut changed_sheet = false;
         for hyperlink in &mut hyperlinks {
-            if hyperlink.external_target.is_some() {
-                continue;
-            }
             let Some(location) = &hyperlink.location else {
                 continue;
             };

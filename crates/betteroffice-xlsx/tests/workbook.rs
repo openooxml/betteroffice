@@ -282,6 +282,41 @@ fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
 }
 
 #[test]
+fn combined_hyperlink_location_remaps_and_round_trips() {
+    let mut source = Sheet::new("Source");
+    source.hyperlinks.push(Hyperlink {
+        range: CellRange::parse_a1("B2").unwrap(),
+        external_target: Some("https://example.com/report".into()),
+        location: Some("Target!A3".into()),
+        tooltip: None,
+        display: Some("Open report".into()),
+    });
+    let mut model = WorkbookModel::default();
+    model.sheets.push(source);
+    model.sheets.push(Sheet::new("Target"));
+    let mut workbook = Workbook::from_model(model).unwrap();
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(1),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let hyperlink = &reopened.sheet(SheetId(0)).unwrap().hyperlinks[0];
+    assert_eq!(
+        hyperlink.external_target.as_deref(),
+        Some("https://example.com/report")
+    );
+    assert_eq!(hyperlink.location.as_deref(), Some("Target!A4"));
+}
+
+#[test]
 fn edits_recalculate_render_and_round_trip() {
     let mut workbook =
         Workbook::open_recalculated(&sample_xlsx(), CalculationOptions::default()).unwrap();

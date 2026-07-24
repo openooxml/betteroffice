@@ -647,9 +647,6 @@ fn rename_hyperlink_locations(wb: &mut Workbook, old_name: &str, new_name: &str)
         let mut changed = false;
         let mut hyperlinks = sheet.hyperlinks.clone();
         for hyperlink in &mut hyperlinks {
-            if hyperlink.external_target.is_some() {
-                continue;
-            }
             let Some(location) = &hyperlink.location else {
                 continue;
             };
@@ -934,7 +931,7 @@ mod tests {
         let mut wb = wb_one_sheet();
         wb.sheets[0].hyperlinks.push(Hyperlink {
             range: CellRange::parse_a1("A1").unwrap(),
-            external_target: None,
+            external_target: Some("https://example.com/report".into()),
             location: Some("Target!A3".into()),
             tooltip: None,
             display: Some("Jump".into()),
@@ -961,6 +958,10 @@ mod tests {
         assert_eq!(
             wb.sheets[0].hyperlinks[0].location.as_deref(),
             Some("Target!A5")
+        );
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].external_target.as_deref(),
+            Some("https://example.com/report")
         );
         assert_eq!(wb.sheets[1].hyperlinks[0].range.to_a1(), "A1:A6");
         for operation in &inverse.0 {
@@ -998,6 +999,10 @@ mod tests {
         assert_eq!(
             wb.sheets[0].hyperlinks[0].location.as_deref(),
             Some("'New Target'!A3")
+        );
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].external_target.as_deref(),
+            Some("https://example.com/report")
         );
         for operation in &inverse.0 {
             apply(&mut wb, operation).unwrap();
