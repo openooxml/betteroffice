@@ -385,7 +385,7 @@ impl LayoutBuilder<'_> {
                     w: rect.w,
                     h: rect.h,
                     geometry: shape.geometry.clone(),
-                    path: geometry_path(&shape.geometry),
+                    path: geometry_path(&shape.geometry, f64::from(rect.w) / f64::from(rect.h)),
                     adjust_values: BTreeMap::new(),
                     fill,
                     stroke: outline,
@@ -485,7 +485,7 @@ impl LayoutBuilder<'_> {
                     w: rect.w,
                     h: rect.h,
                     geometry: value.geometry.clone(),
-                    path: geometry_path(&value.geometry),
+                    path: geometry_path(&value.geometry, f64::from(rect.w) / f64::from(rect.h)),
                     adjust_values: BTreeMap::new(),
                     fill: value.fill.as_ref().and_then(|fill| paint(fill, self.theme)),
                     stroke: value
@@ -1730,9 +1730,9 @@ fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
     })
 }
 
-fn geometry_path(geometry: &str) -> Vec<ooxml_drawingml::GeometryPathCommand> {
-    preset_geometry_to_path(geometry, &HashMap::new())
-        .or_else(|| preset_geometry_to_path("rect", &HashMap::new()))
+fn geometry_path(geometry: &str, aspect_ratio: f64) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    preset_geometry_to_path(geometry, &HashMap::new(), aspect_ratio)
+        .or_else(|| preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio))
         .unwrap_or_default()
 }
 

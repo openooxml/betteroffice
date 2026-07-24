@@ -166,7 +166,7 @@ fn collect_scene_shapes(
             if source.local_name() == "cxnSp" && find_descendant(source, "prstGeom", 0).is_none() {
                 shape.shape_type = "straightConnector1".to_owned();
                 shape.geometry_path =
-                    preset_geometry_to_path("straightConnector1", &HashMap::new());
+                    preset_geometry_to_path("straightConnector1", &HashMap::new(), 1.0);
             }
             let paragraphs = parse_drawing_text_body(source.child_by_local_name("txBody"));
             if !paragraphs.is_empty() {
