@@ -25,7 +25,13 @@
 use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive, TableCellRef};
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
+
+#[cfg(test)]
+thread_local! {
+    static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// vertical slack when matching a pointer to a span's band, mirrors the ±4px
 /// tolerance in the DOM HF fallback resolver
@@ -180,84 +186,91 @@ fn glyph_caret_stops(
     stops
 }
 
-fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
-    let mut out = Vec::new();
-    for p in prims {
-        match p {
-            Primitive::Text(t) => {
-                let (Some(ds), Some(de)) = (t.attrs.doc_start, t.attrs.doc_end) else {
-                    continue; // unpositioned re-paints (vmerge continuations) never win a hit
-                };
-                let fp = font_px(&t.font);
-                let baseline = t.baseline_y.as_f64().unwrap_or(0.0);
-                let x = t.x.as_f64().unwrap_or(0.0);
-                let width = t.width.as_f64().unwrap_or(0.0);
-                out.push(TextHit {
-                    attrs: &t.attrs,
-                    x,
-                    width,
-                    baseline,
-                    top: baseline - fp,
-                    bottom: baseline + fp * 0.25,
-                    doc_start: ds,
-                    doc_end: de,
-                    caret_stops: text_caret_stops(
-                        &t.text,
-                        x,
-                        width,
-                        is_rtl(&t.attrs, t.rtl),
-                        ds,
-                        de,
-                    ),
-                });
-            }
-            Primitive::GlyphRun(g) => {
-                let (Some(ds), Some(de)) = (g.attrs.doc_start, g.attrs.doc_end) else {
-                    continue;
-                };
-                if g.glyphs.is_empty() {
-                    continue;
-                }
-                let fp = g.size;
-                // baseline / extent are derived from the real glyph geometry:
-                // each PlacedGlyph carries its pen advance, so the run's left edge
-                // is the min glyph x and its right edge is the trailing glyph's
-                // `x + advance` (F3 — no more uniform trailing-advance estimate
-                // that drifted ~3px on mixed-font lines). Marks sit above the
-                // baseline (smaller y), so the max glyph y is the base baseline.
-                let baseline = g
-                    .glyphs
-                    .iter()
-                    .map(|gl| gl.y)
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let min_x = g.glyphs.iter().map(|gl| gl.x).fold(f64::INFINITY, f64::min);
-                let right = g
-                    .glyphs
-                    .iter()
-                    .map(|gl| gl.x + gl.advance)
-                    .fold(f64::NEG_INFINITY, f64::max);
-                let width = (right - min_x).max(0.0);
-                let rtl = is_rtl(&g.attrs, g.rtl);
-                let mut caret_stops = glyph_caret_stops(&g.text, &g.glyphs, rtl, ds, de);
-                if caret_stops.is_empty() {
-                    caret_stops = text_caret_stops(&g.text, min_x, width, rtl, ds, de);
-                }
-                out.push(TextHit {
-                    attrs: &g.attrs,
-                    x: min_x,
-                    width,
-                    baseline,
-                    top: baseline - fp,
-                    bottom: baseline + fp * 0.25,
-                    doc_start: ds,
-                    doc_end: de,
-                    caret_stops,
-                });
-            }
-            _ => {}
+fn text_doc_range(primitive: &Primitive) -> Option<(i64, i64)> {
+    match primitive {
+        Primitive::Text(text) => Some((text.attrs.doc_start?, text.attrs.doc_end?)),
+        Primitive::GlyphRun(run) if !run.glyphs.is_empty() => {
+            Some((run.attrs.doc_start?, run.attrs.doc_end?))
         }
+        _ => None,
     }
-    out
+}
+
+fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
+    match primitive {
+        Primitive::Text(t) => {
+            let (Some(ds), Some(de)) = (t.attrs.doc_start, t.attrs.doc_end) else {
+                return None;
+            };
+            #[cfg(test)]
+            TEXT_HIT_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+            let fp = font_px(&t.font);
+            let baseline = t.baseline_y.as_f64().unwrap_or(0.0);
+            let x = t.x.as_f64().unwrap_or(0.0);
+            let width = t.width.as_f64().unwrap_or(0.0);
+            Some(TextHit {
+                attrs: &t.attrs,
+                x,
+                width,
+                baseline,
+                top: baseline - fp,
+                bottom: baseline + fp * 0.25,
+                doc_start: ds,
+                doc_end: de,
+                caret_stops: text_caret_stops(&t.text, x, width, is_rtl(&t.attrs, t.rtl), ds, de),
+            })
+        }
+        Primitive::GlyphRun(g) => {
+            let (Some(ds), Some(de)) = (g.attrs.doc_start, g.attrs.doc_end) else {
+                return None;
+            };
+            if g.glyphs.is_empty() {
+                return None;
+            }
+            #[cfg(test)]
+            TEXT_HIT_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+            let fp = g.size;
+            // baseline / extent are derived from the real glyph geometry:
+            // each PlacedGlyph carries its pen advance, so the run's left edge
+            // is the min glyph x and its right edge is the trailing glyph's
+            // `x + advance` (F3 — no more uniform trailing-advance estimate
+            // that drifted ~3px on mixed-font lines). Marks sit above the
+            // baseline (smaller y), so the max glyph y is the base baseline.
+            let baseline = g
+                .glyphs
+                .iter()
+                .map(|gl| gl.y)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let min_x = g.glyphs.iter().map(|gl| gl.x).fold(f64::INFINITY, f64::min);
+            let right = g
+                .glyphs
+                .iter()
+                .map(|gl| gl.x + gl.advance)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let width = (right - min_x).max(0.0);
+            let rtl = is_rtl(&g.attrs, g.rtl);
+            let mut caret_stops = glyph_caret_stops(&g.text, &g.glyphs, rtl, ds, de);
+            if caret_stops.is_empty() {
+                caret_stops = text_caret_stops(&g.text, min_x, width, rtl, ds, de);
+            }
+            Some(TextHit {
+                attrs: &g.attrs,
+                x: min_x,
+                width,
+                baseline,
+                top: baseline - fp,
+                bottom: baseline + fp * 0.25,
+                doc_start: ds,
+                doc_end: de,
+                caret_stops,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
+    prims.iter().filter_map(text_hit).collect()
 }
 
 fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
@@ -401,9 +414,13 @@ impl VisualLine<'_> {
     }
 }
 
-fn visual_lines(dl: &DisplayList) -> Vec<VisualLine<'_>> {
+fn visual_lines(dl: &DisplayList, page_range: Range<usize>) -> Vec<VisualLine<'_>> {
     let mut lines: Vec<VisualLine<'_>> = Vec::new();
-    for (page_index, page) in dl.pages.iter().enumerate() {
+    for page_index in page_range {
+        let Some(page) = dl.pages.get(page_index) else {
+            continue;
+        };
+        let page_lines_start = lines.len();
         for hit in text_hits(&page.primitives) {
             let center_x = hit.x + hit.width / 2.0;
             let column_index = page
@@ -415,15 +432,18 @@ fn visual_lines(dl: &DisplayList) -> Vec<VisualLine<'_>> {
                     center_x >= x && center_x <= x + width
                 })
                 .unwrap_or(0);
-            let matching_line = lines.iter().position(|line| {
-                line.page_index == page_index
-                    && line.column_index == column_index
-                    && line.hits.first().is_some_and(|previous| {
-                        same_line_owner(previous, &hit)
-                            && (previous.attrs.line_index.is_some()
-                                || (previous.baseline - hit.baseline).abs() <= LINE_CENTER_EPSILON)
-                    })
-            });
+            let matching_line = lines[page_lines_start..]
+                .iter()
+                .position(|line| {
+                    line.column_index == column_index
+                        && line.hits.first().is_some_and(|previous| {
+                            same_line_owner(previous, &hit)
+                                && (previous.attrs.line_index.is_some()
+                                    || (previous.baseline - hit.baseline).abs()
+                                        <= LINE_CENTER_EPSILON)
+                        })
+                })
+                .map(|index| page_lines_start + index);
             if let Some(index) = matching_line {
                 lines[index].hits.push(hit);
             } else {
@@ -557,7 +577,9 @@ pub fn vertical_move(
 ) -> Option<VerticalMove> {
     let caret = caret_rect(dl, position)?;
     let goal_x = goal_x.filter(|x| x.is_finite()).unwrap_or(caret.x);
-    let lines = visual_lines(dl);
+    let first_page = caret.page_index.saturating_sub(1);
+    let last_page = caret.page_index.saturating_add(2).min(dl.pages.len());
+    let lines = visual_lines(dl, first_page..last_page);
     let caret_center = caret.y + caret.height / 2.0;
     let current = lines
         .iter()
@@ -808,14 +830,17 @@ pub fn range_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
 
 pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
     for (page_index, page) in dl.pages.iter().enumerate() {
-        let hits = text_hits(&page.primitives);
-        if let Some(hit) = hits.iter().find(|hit| {
-            (hit.doc_start == hit.doc_end && pos == hit.doc_start)
-                || (pos >= hit.doc_start && pos < hit.doc_end)
+        if let Some(hit) = page.primitives.iter().find_map(|primitive| {
+            let (start, end) = text_doc_range(primitive)?;
+            if (start == end && pos == start) || (pos >= start && pos < end) {
+                text_hit(primitive)
+            } else {
+                None
+            }
         }) {
             return Some(CaretRect {
                 page_index,
-                x: x_at_position(hit, pos),
+                x: x_at_position(&hit, pos),
                 y: hit.top,
                 height: hit.bottom - hit.top,
             });
@@ -854,15 +879,17 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
                 height: image.h.as_f64().unwrap_or(0.0),
             });
         }
-        let hits = text_hits(&page.primitives);
-        if let Some(hit) = hits
-            .iter()
-            .rev()
-            .find(|hit| pos > hit.doc_start && pos <= hit.doc_end)
-        {
+        if let Some(hit) = page.primitives.iter().rev().find_map(|primitive| {
+            let (start, end) = text_doc_range(primitive)?;
+            if pos > start && pos <= end {
+                text_hit(primitive)
+            } else {
+                None
+            }
+        }) {
             return Some(CaretRect {
                 page_index,
-                x: x_at_position(hit, pos),
+                x: x_at_position(&hit, pos),
                 y: hit.top,
                 height: hit.bottom - hit.top,
             });
@@ -995,5 +1022,47 @@ pub fn hit_test_regions_json(
     match hit_test_regions(&dl, page_index, x, y) {
         Some(hit) => serde_json::to_string(&hit).map_err(|e| format!("serialize: {e}")),
         None => Ok("null".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vertical_move_materializes_hits_only_for_neighboring_pages() {
+        let pages: Vec<serde_json::Value> = (0..500)
+            .map(|page_index| {
+                let doc_start = page_index * 10 + 1;
+                serde_json::json!({
+                    "pageIndex": page_index,
+                    "width": 500,
+                    "height": 500,
+                    "columnBounds": [{"x": 80, "y": 80, "width": 340, "height": 340}],
+                    "primitives": [{
+                        "kind": "text",
+                        "text": "x",
+                        "x": 100,
+                        "baselineY": 100,
+                        "width": 10,
+                        "font": "400 16px Calibri",
+                        "color": "#000000",
+                        "docStart": doc_start,
+                        "docEnd": doc_start + 1,
+                        "blockId": page_index,
+                        "lineIndex": 0
+                    }]
+                })
+            })
+            .collect();
+        let display_list: DisplayList =
+            serde_json::from_value(serde_json::json!({ "pages": pages })).unwrap();
+
+        TEXT_HIT_BUILD_COUNT.with(|count| count.set(0));
+        let movement = vertical_move(&display_list, 2501, VerticalDirection::Down, None).unwrap();
+        let hit_builds = TEXT_HIT_BUILD_COUNT.with(std::cell::Cell::get);
+
+        assert_eq!(movement.position, 2511);
+        assert_eq!(hit_builds, 4);
     }
 }
