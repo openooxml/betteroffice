@@ -533,8 +533,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (!map) return null;
         const local = yrsLocToLocalDisplayPosition(map, loc);
         const rootStory = loc.story.startsWith('hf:') ? activeYrsRootStory : 'body';
-        if (loc.story === rootStory) return local;
-        return getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ?? null;
+        return (
+          getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
+          (loc.story === rootStory ? local : null)
+        );
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]
     );

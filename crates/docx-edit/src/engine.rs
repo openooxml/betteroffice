@@ -2939,4 +2939,64 @@ mod tests {
             "[]"
         );
     }
+
+    #[test]
+    fn demo_hit_test_reaches_paragraph_after_table() {
+        let engine = EngineSession::new(18);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            include_bytes!("../../../apps/demo/public/betteroffice-demo.docx"),
+        )
+        .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "measurement": {
+                "fontChains": {},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": false
+            },
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        engine.build_display_list_json(&output).unwrap();
+
+        let target = engine
+            .with_display_list(|list| {
+                list.pages
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(page_index, page)| {
+                        page.primitives.iter().filter_map(move |primitive| {
+                            let docx_layout::display_list::Primitive::Text(text) = primitive else {
+                                return None;
+                            };
+                            (text.text == "Why it matters").then(|| {
+                                (
+                                    page_index,
+                                    text.x.as_f64().unwrap() + text.width.as_f64().unwrap() / 2.0,
+                                    text.baseline_y.as_f64().unwrap(),
+                                    text.attrs.doc_start.unwrap(),
+                                    text.attrs.doc_end.unwrap(),
+                                )
+                            })
+                        })
+                    })
+                    .next()
+            })
+            .flatten()
+            .expect("demo paragraph after table is positioned");
+        let hit: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_hit_test_regions_json(target.0, target.1, target.2)
+                .unwrap(),
+        )
+        .unwrap();
+        let position = hit["pos"].as_i64().expect("body hit has a position");
+
+        assert_eq!(hit["region"], "body");
+        assert!((target.3..=target.4).contains(&position));
+    }
 }
