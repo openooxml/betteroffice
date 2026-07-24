@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { InputOperationQueue } from '../inputOperationQueue';
 import { DisplayListQueryEpochGate } from './displayListQueryEpochGate';
 
 const queries = (pageIndex: number) =>
@@ -48,5 +49,36 @@ describe('DisplayListQueryEpochGate', () => {
 
     gate.publish(expected);
     expect(await pending).toBe(expected);
+  });
+
+  test('releases the input queue when the next snapshot is frameless', async () => {
+    const failures: unknown[] = [];
+    const applied: string[] = [];
+    const queue = new InputOperationQueue((error) => failures.push(error));
+    const gate = new DisplayListQueryEpochGate();
+    gate.publish({ queries: queries(5), frameEpoch: 5 });
+
+    queue.enqueue(async () => {
+      const snapshot = await gate.resolve(7);
+      expect(snapshot?.frameEpoch).toBeNull();
+      applied.push('move');
+    });
+    queue.enqueue(() => {
+      applied.push('input');
+    });
+
+    gate.publish({ queries: queries(6), frameEpoch: null });
+    await queue.idle();
+
+    expect(failures).toEqual([]);
+    expect(applied).toEqual(['move', 'input']);
+  });
+
+  test('falls back to the current snapshot when publications stall', async () => {
+    const gate = new DisplayListQueryEpochGate(1);
+    const current = { queries: queries(5), frameEpoch: 5 };
+    gate.publish(current);
+
+    expect(await gate.resolve(7)).toBe(current);
   });
 });
