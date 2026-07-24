@@ -13,6 +13,7 @@ name = "ooxml_opc"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = ["wasm"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
