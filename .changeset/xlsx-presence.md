@@ -1,5 +1,6 @@
 ---
 "@betteroffice/xlsx": patch
+"@betteroffice/xlsx-react": patch
 "@betteroffice/rust-crates": patch
 ---
 
