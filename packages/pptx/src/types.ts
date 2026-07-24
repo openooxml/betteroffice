@@ -39,6 +39,27 @@ export interface StorySnapshot {
 
 export type ShapeKind = 'shape' | 'picture' | 'graphicFrame' | 'group';
 
+export interface ColorValue {
+  rgb?: string;
+  themeColor?: string;
+  themeTint?: string;
+  themeShade?: string;
+  auto?: boolean;
+}
+
+export interface ShapeFill {
+  type: string;
+  color?: ColorValue;
+}
+
+export interface ShapeOutline {
+  width?: number;
+  color?: ColorValue;
+  style?: string;
+  cap?: string;
+  join?: string;
+}
+
 export interface ShapeSnapshot {
   id: string;
   sourceId: number;
@@ -52,9 +73,10 @@ export interface ShapeSnapshot {
   flipH: boolean;
   flipV: boolean;
   geometry: string;
+  adjustValues: Record<string, number>;
   placeholder: unknown | null;
-  fill: unknown | null;
-  outline: unknown | null;
+  fill: ShapeFill | null;
+  outline: ShapeOutline | null;
   mediaPartPath: string | null;
   graphic: unknown | null;
   textStories: StorySnapshot[];
@@ -113,6 +135,39 @@ export interface ShapeDraft {
   rect: ShapeRect;
   text: string;
   style: TextStyle;
+}
+
+export interface PresetShapeDraft {
+  name: string;
+  geometry: string;
+  rect: ShapeRect;
+  fill?: string | null;
+}
+
+export interface ShapeStroke {
+  color?: string;
+  widthPt?: number;
+}
+
+export interface ShapeFillReceipt {
+  slideId: string;
+  shapeId: string;
+  before: string | null;
+  after: string | null;
+}
+
+export interface ShapeStrokeReceipt {
+  slideId: string;
+  shapeId: string;
+  before: ShapeStroke | null;
+  after: ShapeStroke | null;
+}
+
+export interface ShapeAdjustReceipt {
+  slideId: string;
+  shapeId: string;
+  before: Record<string, number>;
+  after: Record<string, number>;
 }
 
 export interface HistoryResult {

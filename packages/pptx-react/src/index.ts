@@ -9,11 +9,15 @@ export { EditorToolbar } from './components/EditorToolbar';
 export {
   Toolbar,
   PptxToolbar,
+  SHAPE_PRESETS,
   type ToolbarProps,
   type SelectionFormatting,
   type FormattingAction,
+  type ShapeFormatting,
+  type ShapeFormattingAction,
   type SlideLayoutOption,
   type PptxEditorTool,
+  type PptxShapePreset,
   type PptxZoom,
 } from './components/Toolbar';
 export {

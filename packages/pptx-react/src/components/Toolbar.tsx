@@ -1,5 +1,6 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { useTranslation } from '../i18n';
 import { EditorToolbarContext } from './EditorToolbarContext';
 import { ColorPicker } from './ui/ColorPicker';
@@ -14,7 +15,28 @@ import {
   toolbarColors,
 } from './ui/ToolbarPrimitives';
 
-export type PptxEditorTool = 'select' | 'textBox';
+export const SHAPE_PRESETS = [
+  { geometry: 'rect', labelKey: 'toolbar.shapes.rect' },
+  { geometry: 'roundRect', labelKey: 'toolbar.shapes.roundRect' },
+  { geometry: 'ellipse', labelKey: 'toolbar.shapes.ellipse' },
+  { geometry: 'triangle', labelKey: 'toolbar.shapes.triangle' },
+  { geometry: 'rtTriangle', labelKey: 'toolbar.shapes.rtTriangle' },
+  { geometry: 'diamond', labelKey: 'toolbar.shapes.diamond' },
+  { geometry: 'parallelogram', labelKey: 'toolbar.shapes.parallelogram' },
+  { geometry: 'trapezoid', labelKey: 'toolbar.shapes.trapezoid' },
+  { geometry: 'pentagon', labelKey: 'toolbar.shapes.pentagon' },
+  { geometry: 'hexagon', labelKey: 'toolbar.shapes.hexagon' },
+  { geometry: 'octagon', labelKey: 'toolbar.shapes.octagon' },
+  { geometry: 'star5', labelKey: 'toolbar.shapes.star5' },
+  { geometry: 'rightArrow', labelKey: 'toolbar.shapes.rightArrow' },
+  { geometry: 'leftArrow', labelKey: 'toolbar.shapes.leftArrow' },
+  { geometry: 'upArrow', labelKey: 'toolbar.shapes.upArrow' },
+  { geometry: 'downArrow', labelKey: 'toolbar.shapes.downArrow' },
+  { geometry: 'chevron', labelKey: 'toolbar.shapes.chevron' },
+] as const satisfies ReadonlyArray<{ geometry: string; labelKey: TranslationKey }>;
+
+export type PptxShapePreset = (typeof SHAPE_PRESETS)[number]['geometry'];
+export type PptxEditorTool = 'select' | 'textBox' | `shape:${PptxShapePreset}`;
 export type PptxZoom = number | 'fit';
 
 export interface SelectionFormatting {
@@ -34,6 +56,20 @@ export type FormattingAction =
   | { type: 'fontSize'; value: number }
   | { type: 'textColor'; value: string };
 
+export interface ShapeFormatting {
+  geometry?: string;
+  fillColor?: string | null;
+  strokeColor?: string | null;
+  strokeWidthPt?: number | null;
+  adjustments?: Record<string, number>;
+}
+
+export type ShapeFormattingAction =
+  | { type: 'fillColor'; value: string | null }
+  | { type: 'strokeColor'; value: string | null }
+  | { type: 'strokeWidth'; value: number | null }
+  | { type: 'adjust'; name: string; value: number };
+
 export interface SlideLayoutOption {
   partPath: string | null;
   label?: string;
@@ -43,6 +79,9 @@ export interface ToolbarProps {
   currentFormatting?: SelectionFormatting;
   textSelectionActive?: boolean;
   onFormat?: (action: FormattingAction) => void;
+  currentShapeFormatting?: ShapeFormatting;
+  shapeSelectionActive?: boolean;
+  onShapeFormat?: (action: ShapeFormattingAction) => void;
   onInsertSlide?: (layoutPartPath?: string | null) => void;
   slideLayouts?: readonly SlideLayoutOption[];
   currentLayoutPartPath?: string | null;
@@ -79,6 +118,8 @@ const DEFAULT_FONT_FAMILIES = [
   'Verdana',
 ] as const;
 const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72] as const;
+const BORDER_WIDTHS = [1, 2, 3, 4, 8] as const;
+const CORNER_RADIUS_OPTIONS = [0, 10, 17, 25, 33, 50] as const;
 
 function stripUndefined<T extends object>(value: T): Partial<T> {
   const result: Partial<T> = {};
@@ -104,6 +145,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
     currentFormatting = {},
     textSelectionActive = false,
     onFormat,
+    currentShapeFormatting = {},
+    shapeSelectionActive = false,
+    onShapeFormat,
     onInsertSlide,
     slideLayouts = [],
     currentLayoutPartPath,
@@ -125,6 +169,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [rootWidth, setRootWidth] = useState(Number.POSITIVE_INFINITY);
   const formattingEnabled = !disabled && textSelectionActive && Boolean(onFormat);
+  const shapeFormattingEnabled = !disabled && shapeSelectionActive && Boolean(onShapeFormat);
   const slideEnabled = !disabled && Boolean(onInsertSlide);
   const toolEnabled = !disabled && Boolean(onToolChange);
   const fontSize = currentFormatting.fontSize ?? 24;
@@ -158,6 +203,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
 
   const apply = (action: FormattingAction) => {
     if (formattingEnabled) onFormat?.(action);
+  };
+  const applyShape = (action: ShapeFormattingAction) => {
+    if (shapeFormattingEnabled) onShapeFormat?.(action);
   };
 
   const sections: ToolbarSection[] = [
@@ -260,7 +308,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     },
     {
       key: 'tools',
-      width: 75,
+      width: 127,
       node: (
         <>
           <ToolbarSeparator />
@@ -283,6 +331,64 @@ export function Toolbar(explicitProps: ToolbarProps) {
             >
               <ToolbarIcon name="textBox" />
             </ToolbarButton>
+            <ToolbarDropdown
+              title={t('toolbar.shapeTool')}
+              active={activeTool.startsWith('shape:')}
+              disabled={!toolEnabled}
+              menuWidth={264}
+              testId="pptx-tool-shape"
+              style={{ minWidth: 46, padding: '0 4px' }}
+              trigger={
+                <>
+                  <ToolbarIcon name="shape" />
+                  <ToolbarIcon name="chevronDown" size={11} />
+                </>
+              }
+            >
+              {(close) => (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(5, 44px)',
+                    gap: 4,
+                    padding: 2,
+                  }}
+                >
+                  {SHAPE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.geometry}
+                      type="button"
+                      role="menuitem"
+                      data-testid={`pptx-shape-${preset.geometry}`}
+                      aria-label={t(preset.labelKey)}
+                      title={t(preset.labelKey)}
+                      onClick={() => {
+                        onToolChange?.(`shape:${preset.geometry}`);
+                        close();
+                      }}
+                      style={{
+                        appearance: 'none',
+                        display: 'grid',
+                        placeItems: 'center',
+                        width: 44,
+                        height: 38,
+                        padding: 5,
+                        border: `1px solid ${toolbarColors.border}`,
+                        borderRadius: 4,
+                        background:
+                          activeTool === `shape:${preset.geometry}`
+                            ? toolbarColors.active
+                            : toolbarColors.surface,
+                        color: toolbarColors.text,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <ShapePresetIcon geometry={preset.geometry} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </ToolbarDropdown>
           </ToolbarGroup>
         </>
       ),
@@ -419,6 +525,101 @@ export function Toolbar(explicitProps: ToolbarProps) {
         </>
       ),
     },
+    {
+      key: 'shape-formatting',
+      width: currentShapeFormatting.geometry === 'roundRect' ? 244 : 172,
+      node: (
+        <>
+          <ToolbarSeparator />
+          <ToolbarGroup label={t('toolbar.groups.shape')}>
+            <ColorPicker
+              value={currentShapeFormatting.fillColor ?? '#d9eaf7'}
+              label={t('toolbar.fillColor')}
+              clearLabel={t('toolbar.noFill')}
+              icon="fillColor"
+              none={!currentShapeFormatting.fillColor}
+              disabled={!shapeFormattingEnabled}
+              onChange={(value) => applyShape({ type: 'fillColor', value })}
+              onClear={() => applyShape({ type: 'fillColor', value: null })}
+              testId="pptx-shape-fill"
+            />
+            <ColorPicker
+              value={currentShapeFormatting.strokeColor ?? '#202124'}
+              label={t('toolbar.borderColor')}
+              clearLabel={t('toolbar.noBorder')}
+              icon="borderColor"
+              none={!currentShapeFormatting.strokeColor}
+              disabled={!shapeFormattingEnabled}
+              onChange={(value) => applyShape({ type: 'strokeColor', value })}
+              onClear={() => applyShape({ type: 'strokeColor', value: null })}
+              testId="pptx-shape-border-color"
+            />
+            <ToolbarDropdown
+              title={t('toolbar.borderWidth')}
+              disabled={!shapeFormattingEnabled}
+              menuWidth={170}
+              testId="pptx-shape-border-width"
+              trigger={<ToolbarIcon name="borderWidth" />}
+            >
+              {(close) => (
+                <>
+                  <ToolbarMenuItem
+                    label={t('toolbar.noBorder')}
+                    selected={currentShapeFormatting.strokeWidthPt === null}
+                    onClick={() => applyShape({ type: 'strokeWidth', value: null })}
+                    close={close}
+                  />
+                  {BORDER_WIDTHS.map((width) => (
+                    <ToolbarMenuItem
+                      key={width}
+                      label={t('toolbar.borderWidthValue', { width })}
+                      selected={currentShapeFormatting.strokeWidthPt === width}
+                      icon={
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            width: 18,
+                            borderTop: `${Math.min(width, 5)}px solid currentColor`,
+                          }}
+                        />
+                      }
+                      onClick={() => applyShape({ type: 'strokeWidth', value: width })}
+                      close={close}
+                    />
+                  ))}
+                </>
+              )}
+            </ToolbarDropdown>
+            {currentShapeFormatting.geometry === 'roundRect' ? (
+              <EditableCombobox
+                value={`${Math.round(
+                  (currentShapeFormatting.adjustments?.adj ?? 0.166_67) * 100
+                )}%`}
+                options={CORNER_RADIUS_OPTIONS.map((value) => ({
+                  value: String(value),
+                  label: `${value}%`,
+                }))}
+                label={t('toolbar.cornerRadius')}
+                disabled={!shapeFormattingEnabled}
+                onCommit={(value) => {
+                  const percent = Number.parseFloat(value.replace('%', ''));
+                  if (Number.isFinite(percent)) {
+                    applyShape({
+                      type: 'adjust',
+                      name: 'adj',
+                      value: Math.max(0, Math.min(50, percent)) / 100,
+                    });
+                  }
+                }}
+                width={68}
+                inputStyle={{ textAlign: 'center' }}
+                testId="pptx-shape-corner-radius"
+              />
+            ) : null}
+          </ToolbarGroup>
+        </>
+      ),
+    },
   ];
 
   if (children) sections.push({ key: 'custom', width: 40, node: children });
@@ -494,3 +695,39 @@ export function Toolbar(explicitProps: ToolbarProps) {
 }
 
 export { Toolbar as PptxToolbar };
+
+function ShapePresetIcon({ geometry }: { geometry: PptxShapePreset }) {
+  const path = {
+    rect: 'M3 5h18v14H3Z',
+    roundRect: 'M7 5h10a4 4 0 0 1 4 4v6a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4Z',
+    ellipse: 'M3 12a9 7 0 1 0 18 0 9 7 0 1 0-18 0',
+    triangle: 'm12 4 9 16H3Z',
+    rtTriangle: 'M4 4v16h16Z',
+    diamond: 'm12 3 9 9-9 9-9-9Z',
+    parallelogram: 'M7 5h14l-4 14H3Z',
+    trapezoid: 'M7 5h10l4 14H3Z',
+    pentagon: 'm12 3 9 7-4 11H7L3 10Z',
+    hexagon: 'm7 4 10 0 5 8-5 8H7l-5-8Z',
+    octagon: 'm7 3 10 0 4 4v10l-4 4H7l-4-4V7Z',
+    star5: 'm12 2.5 2.8 6 6.5.6-5 4.3 1.6 6.4-5.7-3.4-5.7 3.4 1.6-6.4-5-4.3 6.5-.6Z',
+    rightArrow: 'M3 8h11V4l7 8-7 8v-4H3Z',
+    leftArrow: 'm21 8H10V4l-7 8 7 8v-4h11Z',
+    upArrow: 'M8 21V10H4l8-7 8 7h-4v11Z',
+    downArrow: 'M8 3v11H4l8 7 8-7h-4V3Z',
+    chevron: 'M4 4h9l7 8-7 8H4l7-8Z',
+  }[geometry];
+  return (
+    <svg
+      width="30"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="rgba(60, 64, 67, 0.08)"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={path} />
+    </svg>
+  );
+}

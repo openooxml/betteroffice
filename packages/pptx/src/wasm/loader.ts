@@ -13,9 +13,14 @@ import type {
   DeckSnapshot,
   HistoryResult,
   HitTestResult,
+  PresetShapeDraft,
   PptxFontFace,
+  ShapeAdjustReceipt,
   ShapeDraft,
+  ShapeFillReceipt,
   ShapeReceipt,
+  ShapeStroke,
+  ShapeStrokeReceipt,
   SlideDisplayList,
   SlideReceipt,
   StorySnapshot,
@@ -49,6 +54,18 @@ export interface PresentationHandle extends CollaborationReplica {
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
+  addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
+  setShapeFill(slideId: string, shapeId: string, color: string | null): ShapeFillReceipt;
+  setShapeStroke(
+    slideId: string,
+    shapeId: string,
+    stroke: ShapeStroke
+  ): ShapeStrokeReceipt;
+  setShapeAdjust(
+    slideId: string,
+    shapeId: string,
+    adjustments: Record<string, number>
+  ): ShapeAdjustReceipt;
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
   moveShape(slideId: string, shapeId: string, x: number, y: number): TransformReceipt;
   resizeShape(slideId: string, shapeId: string, width: number, height: number): TransformReceipt;
@@ -282,6 +299,27 @@ export function openPresentation(
     },
     addTextBox(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addTextBoxJson(JSON.stringify({ slideId, draft })), true);
+    },
+    addShape(slideId, draft): ShapeReceipt {
+      return jsonWasmCall(() => doc.addShapeJson(JSON.stringify({ slideId, draft })), true);
+    },
+    setShapeFill(slideId, shapeId, color): ShapeFillReceipt {
+      return jsonWasmCall(
+        () => doc.setShapeFillJson(JSON.stringify({ slideId, shapeId, color })),
+        true
+      );
+    },
+    setShapeStroke(slideId, shapeId, stroke): ShapeStrokeReceipt {
+      return jsonWasmCall(
+        () => doc.setShapeStrokeJson(JSON.stringify({ slideId, shapeId, stroke })),
+        true
+      );
+    },
+    setShapeAdjust(slideId, shapeId, adjustments): ShapeAdjustReceipt {
+      return jsonWasmCall(
+        () => doc.setShapeAdjustJson(JSON.stringify({ slideId, shapeId, adjustments })),
+        true
+      );
     },
     removeShape(slideId, shapeId): ShapeReceipt {
       return jsonWasmCall(

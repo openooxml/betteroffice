@@ -385,8 +385,16 @@ impl LayoutBuilder<'_> {
                     w: rect.w,
                     h: rect.h,
                     geometry: shape.geometry.clone(),
-                    path: geometry_path(&shape.geometry, f64::from(rect.w) / f64::from(rect.h)),
-                    adjust_values: BTreeMap::new(),
+                    path: geometry_path(
+                        &shape.geometry,
+                        &shape.adjust_values,
+                        f64::from(rect.w) / f64::from(rect.h),
+                    ),
+                    adjust_values: shape
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
                     fill,
                     stroke: outline,
                     transform,
@@ -485,8 +493,16 @@ impl LayoutBuilder<'_> {
                     w: rect.w,
                     h: rect.h,
                     geometry: value.geometry.clone(),
-                    path: geometry_path(&value.geometry, f64::from(rect.w) / f64::from(rect.h)),
-                    adjust_values: BTreeMap::new(),
+                    path: geometry_path(
+                        &value.geometry,
+                        &value.adjust_values,
+                        f64::from(rect.w) / f64::from(rect.h),
+                    ),
+                    adjust_values: value
+                        .adjust_values
+                        .iter()
+                        .map(|(name, value)| (name.clone(), *value as f32))
+                        .collect(),
                     fill: value.fill.as_ref().and_then(|fill| paint(fill, self.theme)),
                     stroke: value
                         .outline
@@ -1730,8 +1746,16 @@ fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
     })
 }
 
-fn geometry_path(geometry: &str, aspect_ratio: f64) -> Vec<ooxml_drawingml::GeometryPathCommand> {
-    preset_geometry_to_path(geometry, &HashMap::new(), aspect_ratio)
+fn geometry_path(
+    geometry: &str,
+    adjustments: &BTreeMap<String, f64>,
+    aspect_ratio: f64,
+) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    let adjustments = adjustments
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+    preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
         .or_else(|| preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio))
         .unwrap_or_default()
 }
@@ -2016,6 +2040,7 @@ mod tests {
             flip_h: false,
             flip_v: false,
             geometry: "rect".to_owned(),
+            adjust_values: BTreeMap::new(),
             placeholder: Some(title.clone()),
             fill: None,
             outline: None,
@@ -2040,6 +2065,7 @@ mod tests {
                 },
             },
             geometry: "rect".to_owned(),
+            adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
             text: None,

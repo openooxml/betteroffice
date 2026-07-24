@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, ShapeDraft, ShapeReceipt, SlideReceipt, StorySnapshot,
+    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
+    ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot,
     TextReceipt, TextStyle, TextStylePatch, TransformReceipt,
 };
 use pptx_parse::{
@@ -122,6 +125,51 @@ impl Presentation {
         draft: &ShapeDraft,
     ) -> Result<ShapeReceipt> {
         Ok(self.session.add_text_box(context, slide_id, draft)?)
+    }
+
+    pub fn add_shape(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        draft: &PresetShapeDraft,
+    ) -> Result<ShapeReceipt> {
+        Ok(self.session.add_shape(context, slide_id, draft)?)
+    }
+
+    pub fn set_shape_fill(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        color: Option<&str>,
+    ) -> Result<ShapeFillReceipt> {
+        Ok(self
+            .session
+            .set_shape_fill(context, slide_id, shape_id, color)?)
+    }
+
+    pub fn set_shape_stroke(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        stroke: &ShapeStroke,
+    ) -> Result<ShapeStrokeReceipt> {
+        Ok(self
+            .session
+            .set_shape_stroke(context, slide_id, shape_id, stroke)?)
+    }
+
+    pub fn set_shape_adjust(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        adjustments: &BTreeMap<String, f64>,
+    ) -> Result<ShapeAdjustReceipt> {
+        Ok(self
+            .session
+            .set_shape_adjust(context, slide_id, shape_id, adjustments)?)
     }
 
     pub fn remove_shape(

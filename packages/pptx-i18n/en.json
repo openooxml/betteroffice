@@ -21,7 +21,8 @@
       "zoom": "Zoom",
       "tools": "Tools",
       "font": "Font",
-      "text": "Text formatting"
+      "text": "Text formatting",
+      "shape": "Shape formatting"
     },
     "newSlide": "New slide",
     "newSlideWithLayout": "New slide with layout",
@@ -32,6 +33,7 @@
     "zoomValue": "Zoom: {value}",
     "selectToolShortcut": "Select (Esc)",
     "textBoxTool": "Text box",
+    "shapeTool": "Shape",
     "fontFamily": "Font family",
     "mixed": "Mixed",
     "decreaseFontSize": "Decrease font size",
@@ -40,7 +42,33 @@
     "italicShortcut": "Italic (⌘I)",
     "underline": "Underline",
     "underlineShortcut": "Underline (⌘U)",
-    "more": "More"
+    "more": "More",
+    "fillColor": "Fill color",
+    "noFill": "No fill",
+    "borderColor": "Border color",
+    "borderWidth": "Border width",
+    "borderWidthValue": "{width} pt",
+    "noBorder": "No border",
+    "cornerRadius": "Corner radius",
+    "shapes": {
+      "rect": "Rectangle",
+      "roundRect": "Rounded rectangle",
+      "ellipse": "Ellipse",
+      "triangle": "Triangle",
+      "rtTriangle": "Right triangle",
+      "diamond": "Diamond",
+      "parallelogram": "Parallelogram",
+      "trapezoid": "Trapezoid",
+      "pentagon": "Pentagon",
+      "hexagon": "Hexagon",
+      "octagon": "Octagon",
+      "star5": "5-point star",
+      "rightArrow": "Right arrow",
+      "leftArrow": "Left arrow",
+      "upArrow": "Up arrow",
+      "downArrow": "Down arrow",
+      "chevron": "Chevron"
+    }
   },
   "slides": {
     "panelLabel": "Slides",

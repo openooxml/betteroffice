@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, LineEnd, ShapeFill, ShapeOutline};
 
 use crate::PptxError;
@@ -122,6 +124,7 @@ fn parse_shape(
             properties.and_then(|value| value.child("xfrm")),
         ),
         geometry: parse_geometry(properties),
+        adjust_values: parse_adjust_values(properties),
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
         text: element
@@ -318,6 +321,22 @@ fn parse_geometry(properties: Option<&XmlElement>) -> String {
                 .map(|_| "custom".to_owned())
         })
         .unwrap_or_else(|| "rect".to_owned())
+}
+
+fn parse_adjust_values(properties: Option<&XmlElement>) -> BTreeMap<String, f64> {
+    properties
+        .and_then(|value| value.child("prstGeom"))
+        .and_then(|value| value.child("avLst"))
+        .into_iter()
+        .flat_map(XmlElement::child_elements)
+        .filter(|value| value.local_name() == "gd")
+        .filter_map(|value| {
+            let name = value.attribute("name")?;
+            let formula = value.attribute("fmla")?;
+            let raw = formula.strip_prefix("val ")?.parse::<f64>().ok()?;
+            raw.is_finite().then(|| (name.to_owned(), raw / 100_000.0))
+        })
+        .collect()
 }
 
 fn parse_background(element: &XmlElement) -> Option<ShapeFill> {
@@ -712,7 +731,7 @@ mod tests {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
-            br#"<p:sld><p:cSld name="Test"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="roundRect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr><p:txBody><a:bodyPr anchor="ctr"><a:normAutofit fontScale="85000" lnSpcReduction="12000"/></a:bodyPr><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            br#"<p:sld><p:cSld name="Test"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 20000"/></a:avLst></a:prstGeom><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr><p:txBody><a:bodyPr anchor="ctr"><a:normAutofit fontScale="85000" lnSpcReduction="12000"/></a:bodyPr><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
             "ppt/slides/slide1.xml",
             &mut budget,
         )
@@ -722,6 +741,7 @@ mod tests {
             panic!("expected shape");
         };
         assert_eq!(shape.geometry, "roundRect");
+        assert_eq!(shape.adjust_values.get("adj"), Some(&0.2));
         assert_eq!(shape.base.transform.width, 3);
         assert_eq!(
             shape.text.as_ref().unwrap().autofit,

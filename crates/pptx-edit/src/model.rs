@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
 use pptx_parse::{GraphicFrameData, Placeholder};
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,7 @@ pub struct ShapeSnapshot {
     pub flip_h: bool,
     pub flip_v: bool,
     pub geometry: String,
+    pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
@@ -192,6 +195,49 @@ pub struct ShapeDraft {
     pub rect: ShapeRect,
     pub text: String,
     pub style: TextStyle,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetShapeDraft {
+    pub name: String,
+    pub geometry: String,
+    pub rect: ShapeRect,
+    pub fill: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeStroke {
+    pub color: Option<String>,
+    pub width_pt: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeFillReceipt {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeStrokeReceipt {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub before: Option<ShapeStroke>,
+    pub after: Option<ShapeStroke>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeAdjustReceipt {
+    pub slide_id: String,
+    pub shape_id: String,
+    pub before: BTreeMap<String, f64>,
+    pub after: BTreeMap<String, f64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

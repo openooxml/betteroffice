@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -6,8 +6,8 @@ use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, ShapeDraft, TextStyle, TextStylePatch, UpdateEvent,
-    UpdateOrigin,
+    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeStroke, TextStyle,
+    TextStylePatch, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -91,6 +91,13 @@ struct AddTextBoxArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AddShapeArgs {
+    slide_id: String,
+    draft: PresetShapeDraft,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ShapeArgs {
     slide_id: String,
     shape_id: String,
@@ -112,6 +119,31 @@ struct ResizeShapeArgs {
     shape_id: String,
     width: i64,
     height: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeFillArgs {
+    slide_id: String,
+    shape_id: String,
+    color: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeStrokeArgs {
+    slide_id: String,
+    shape_id: String,
+    #[serde(default)]
+    stroke: ShapeStroke,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeAdjustArgs {
+    slide_id: String,
+    shape_id: String,
+    adjustments: BTreeMap<String, f64>,
 }
 
 #[derive(Serialize)]
@@ -343,6 +375,16 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = addShapeJson)]
+    pub fn add_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: AddShapeArgs = parse_args(args)?;
+        json(
+            self.session
+                .add_shape(&local_context(), &args.slide_id, &args.draft)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = removeShapeJson)]
     pub fn remove_shape_json(&self, args: &str) -> Result<String, JsValue> {
         let args: ShapeArgs = parse_args(args)?;
@@ -380,6 +422,51 @@ impl PptxDocument {
                     &args.shape_id,
                     args.width,
                     args.height,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setShapeFillJson)]
+    pub fn set_shape_fill_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetShapeFillArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_shape_fill(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    args.color.as_deref(),
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setShapeStrokeJson)]
+    pub fn set_shape_stroke_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetShapeStrokeArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_shape_stroke(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    &args.stroke,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setShapeAdjustJson)]
+    pub fn set_shape_adjust_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetShapeAdjustArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_shape_adjust(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.shape_id,
+                    &args.adjustments,
                 )
                 .map_err(js_error)?,
         )

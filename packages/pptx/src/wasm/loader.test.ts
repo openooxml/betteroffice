@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { PresentationHandle, StorySnapshot, TextBoxPrimitive } from '../index';
+import type {
+  PresentationHandle,
+  ShapePrimitive,
+  StorySnapshot,
+  TextBoxPrimitive,
+} from '../index';
 import { initWasm, openPresentation } from '../index';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -83,7 +88,68 @@ describe('PPTX wasm boundary', () => {
     )).toBe(false);
     unsubscribe();
   });
+
+  test('inserts and styles preset shapes with undo and redo', () => {
+    const slide = handle.snapshot().slides[0];
+    const receipt = handle.addShape(slide.id, {
+      name: 'Styled rounded rectangle',
+      geometry: 'roundRect',
+      rect: { x: 900_000, y: 1_000_000, width: 3_100_000, height: 1_400_000 },
+      fill: '#D9EAF7',
+    });
+    expect(shapeSnapshot(receipt.shapeId).geometry).toBe('roundRect');
+    expect(handle.undo().snapshot.slides[0].shapes.some(
+      (shape) => shape.id === receipt.shapeId
+    )).toBe(false);
+    expect(handle.redo().snapshot.slides[0].shapes.some(
+      (shape) => shape.id === receipt.shapeId
+    )).toBe(true);
+
+    handle.setShapeFill(slide.id, receipt.shapeId, '#3367D6');
+    expect(shapeSnapshot(receipt.shapeId).fill?.color?.rgb).toBe('3367D6');
+    expect(handle.undo().applied).toBe(true);
+    expect(shapeSnapshot(receipt.shapeId).fill?.color?.rgb).toBe('D9EAF7');
+    expect(handle.redo().applied).toBe(true);
+
+    handle.setShapeStroke(slide.id, receipt.shapeId, {
+      color: '#EA4335',
+      widthPt: 3,
+    });
+    expect(shapeSnapshot(receipt.shapeId).outline?.width).toBe(38_100);
+    expect(handle.undo().applied).toBe(true);
+    expect(shapeSnapshot(receipt.shapeId).outline).toBeNull();
+    expect(handle.redo().applied).toBe(true);
+
+    handle.setShapeAdjust(slide.id, receipt.shapeId, { adj: 0.32 });
+    expect(shapeSnapshot(receipt.shapeId).adjustValues.adj).toBe(0.32);
+    expect(handle.undo().applied).toBe(true);
+    expect(shapeSnapshot(receipt.shapeId).adjustValues.adj).toBeCloseTo(0.16667);
+    expect(handle.redo().applied).toBe(true);
+
+    const primitive = handle.layoutSlide(0).primitives.find(
+      (candidate): candidate is ShapePrimitive =>
+        candidate.kind === 'shape' && candidate.shapeId === receipt.shapeId
+    );
+    expect(primitive?.fill).toEqual({ kind: 'solid', color: '#3367D6' });
+    expect(primitive?.stroke?.color).toBe('#EA4335');
+    expect(primitive?.adjustValues?.adj).toBeCloseTo(0.32);
+
+    handle.setShapeFill(slide.id, receipt.shapeId, null);
+    handle.setShapeStroke(slide.id, receipt.shapeId, {});
+    const cleared = handle.layoutSlide(0).primitives.find(
+      (candidate): candidate is ShapePrimitive =>
+        candidate.kind === 'shape' && candidate.shapeId === receipt.shapeId
+    );
+    expect(cleared?.fill).toBeUndefined();
+    expect(cleared?.stroke).toBeUndefined();
+  });
 });
+
+function shapeSnapshot(shapeId: string) {
+  const shape = handle.snapshot().slides[0].shapes.find((candidate) => candidate.id === shapeId);
+  if (!shape) throw new Error(`shape ${shapeId} was not found`);
+  return shape;
+}
 
 function firstStory(shapes: Array<{ textStories: StorySnapshot[]; children: unknown[] }>): StorySnapshot {
   for (const shape of shapes) {
