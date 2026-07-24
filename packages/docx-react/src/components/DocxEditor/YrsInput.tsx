@@ -246,7 +246,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
   const resolveDisplayListQueriesRef = useRef(resolveDisplayListQueries);
-  const lastCaretScrollSelectionEpochRef = useRef<number | null>(null);
+  // Sticky (not display-position) selection the caret-into-view step last acted
+  // on. `undefined` is the pre-mount sentinel; display positions shift under a
+  // remote insert above the caret while sticky locs do not, so comparing locs is
+  // what keeps a viewer's viewport still during someone else's edit.
+  const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -1218,8 +1222,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         ? current
         : { left: nextLeft, top: nextTop, height: nextHeight }
     );
-    const selectionChanged = lastCaretScrollSelectionEpochRef.current !== selectionEpoch;
-    lastCaretScrollSelectionEpochRef.current = selectionEpoch;
+    const stickySelection = session?.selection() ?? null;
+    const previousStickySelection = lastCaretScrollSelectionRef.current;
+    lastCaretScrollSelectionRef.current = stickySelection;
+    const selectionChanged =
+      previousStickySelection === undefined ||
+      !sameYrsSelection(previousStickySelection, stickySelection);
     if (
       selection.anchor === selection.head &&
       shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)

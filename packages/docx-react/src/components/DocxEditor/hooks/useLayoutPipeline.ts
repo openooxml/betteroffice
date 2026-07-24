@@ -190,9 +190,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('local');
 
   const captureViewportPosition = useCallback(
-    (position: number, paraId: string) => {
+    (position: number) => {
       const loc = displayPositionToYrsLocRef.current?.(position);
-      if (!session || !loc || loc.paraId !== paraId) return null;
+      // Round-trip guard: a projection that cannot map the loc back to the same
+      // display position would resolve the anchor into another story on restore.
+      if (!session || !loc || yrsLocToDisplayPositionRef.current?.(loc) !== position) return null;
       try {
         return session.encodeStickyPosition(loc);
       } catch {
@@ -202,9 +204,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     [session]
   );
   const resolveViewportPosition = useCallback(
-    (position: YrsStickyPosition, paraId: string) => {
+    (position: YrsStickyPosition) => {
       const loc = session?.resolveStickyPosition(position);
-      if (!loc || loc.paraId !== paraId) return null;
+      if (!loc) return null;
       return yrsLocToDisplayPositionRef.current?.(loc) ?? null;
     },
     [session]
