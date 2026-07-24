@@ -261,6 +261,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     inputOperationQueueRef.current?.enqueue(operation);
   }, []);
 
+  const advanceInteractionEpoch = useCallback((): void => {
+    inputOperationQueueRef.current?.advanceInteractionEpoch();
+  }, []);
+
   const suggestingAuthor = useCallback((): YrsAuthor | undefined => {
     return isSuggesting ? { name: author, date: new Date().toISOString() } : undefined;
   }, [author, isSuggesting]);
@@ -767,6 +771,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       byWord = false
     ): void => {
       const verticalDirection = direction === 'up' || direction === 'down' ? direction : null;
+      const interactionEpoch = verticalDirection
+        ? inputOperationQueueRef.current?.captureInteractionEpoch()
+        : undefined;
       enqueueInputOperation(async () => {
         if (!verticalDirection) verticalCaretGoalRef.current.reset();
         if (!session) return;
@@ -779,6 +786,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               ? { queries: currentQueries, frameEpoch: displayListFrameEpochRef.current }
               : null
           : null;
+        if (
+          verticalDirection &&
+          interactionEpoch !== undefined &&
+          !inputOperationQueueRef.current?.isInteractionEpochCurrent(interactionEpoch)
+        ) {
+          return;
+        }
         const current = ensureSelection();
         const activeStory = current?.head.story;
         const map = activeStory ? inputPositionMap(activeStory) : null;
@@ -1103,13 +1117,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       blur: () => textareaRef.current?.blur(),
       isFocused: () => document.activeElement === textareaRef.current,
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
-        verticalCaretGoalRef.current.reset();
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
-        if (session && anchorLoc && headLoc) setSelection(anchorLoc, headLoc);
+        if (session && anchorLoc && headLoc) {
+          advanceInteractionEpoch();
+          verticalCaretGoalRef.current.reset();
+          setSelection(anchorLoc, headLoc);
+        }
       },
       selectWordAtDisplay(position, targetStory = story) {
-        verticalCaretGoalRef.current.reset();
         if (!session) return;
         const loc = displayPositionToLoc(position, targetStory);
         if (!loc) return;
@@ -1119,11 +1135,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (!paragraph) return;
         const [start, end] = findWordBoundaries(paragraph.text, loc.offset);
         if (start < end) {
+          advanceInteractionEpoch();
+          verticalCaretGoalRef.current.reset();
           setSelection({ ...loc, offset: start }, { ...loc, offset: end });
         }
       },
       selectParagraphAtDisplay(position, targetStory = story) {
-        verticalCaretGoalRef.current.reset();
         if (!session) return;
         const loc = displayPositionToLoc(position, targetStory);
         if (!loc) return;
@@ -1131,6 +1148,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           .paragraphs(loc.story)
           .find((candidate) => candidate.paraId === loc.paraId);
         if (!paragraph) return;
+        advanceInteractionEpoch();
+        verticalCaretGoalRef.current.reset();
         setSelection({ ...loc, offset: 0 }, { ...loc, offset: paragraph.text.length });
       },
       displaySelection,
@@ -1146,11 +1165,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection() {
-        if (!readOnly && deleteSelected()) finishMutation();
+        if (!readOnly && deleteSelected()) {
+          advanceInteractionEpoch();
+          finishMutation();
+        }
       },
-      selectAll,
+      selectAll() {
+        advanceInteractionEpoch();
+        selectAll();
+      },
     }),
     [
+      advanceInteractionEpoch,
       applyStoredFormatting,
       displayPositionToLoc,
       displaySelection,
