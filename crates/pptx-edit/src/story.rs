@@ -158,10 +158,15 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
-        check_text_range(&story, &txn, start, end)?;
+        check_text_bounds(&story, &txn, start, end)?;
         let text = text_in_range(&story, &txn, start, end);
-        if end > start {
-            story.format(&mut txn, start, end - start, attrs_from_patch(patch));
+        for (segment_start, segment_end) in paragraph_text_segments(&story, &txn, start, end) {
+            story.format(
+                &mut txn,
+                segment_start,
+                segment_end - segment_start,
+                attrs_from_patch(patch),
+            );
         }
         Ok(TextReceipt {
             story_id: story_id.to_owned(),
@@ -278,13 +283,7 @@ fn final_pilcrow_index<T: ReadTxn>(story: &TextRef, txn: &T) -> EditResult<u32> 
 }
 
 fn check_text_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> EditResult<()> {
-    let length = story.len(txn);
-    if start > end || end > length {
-        return Err(EditError::OutOfBounds {
-            index: end.max(start),
-            length,
-        });
-    }
+    check_text_bounds(story, txn, start, end)?;
     let mut offset = 0;
     for diff in story.diff(txn, YChange::identity) {
         let item_length = out_len(&diff.insert);
@@ -294,6 +293,41 @@ fn check_text_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) 
         offset += item_length;
     }
     Ok(())
+}
+
+fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> EditResult<()> {
+    let length = story.len(txn);
+    if start > end || end > length {
+        return Err(EditError::OutOfBounds {
+            index: end.max(start),
+            length,
+        });
+    }
+    Ok(())
+}
+
+fn paragraph_text_segments<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    start: u32,
+    end: u32,
+) -> Vec<(u32, u32)> {
+    let mut segments = Vec::new();
+    let mut paragraph_start = 0;
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let item_length = out_len(&diff.insert);
+        if matches!(diff.insert, Out::YMap(_)) {
+            let segment_start = start.max(paragraph_start);
+            let segment_end = end.min(offset);
+            if segment_start < segment_end {
+                segments.push((segment_start, segment_end));
+            }
+            paragraph_start = offset + item_length;
+        }
+        offset += item_length;
+    }
+    segments
 }
 
 fn text_in_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> String {
