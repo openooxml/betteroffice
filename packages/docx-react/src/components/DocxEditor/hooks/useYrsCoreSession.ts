@@ -31,8 +31,9 @@ export interface YrsCoreSession {
 }
 
 interface YrsCoreSessionCallbacks {
-  onHostDocument?: (host: YrsDocxHost) => void;
-  onError?: (error: Error) => void;
+  isCurrentLoad?: (generation: number) => boolean;
+  onHostDocument?: (host: YrsDocxHost, generation: number) => void;
+  onError?: (error: Error, generation: number) => void;
 }
 
 function mergeHeaderFooterMaps(
@@ -107,6 +108,7 @@ export function useYrsCoreSession(
   document: Document | null,
   seedDocument: Document | null,
   seedBytes: Uint8Array | null,
+  seedGeneration: number,
   collaboration?: DocxEditorCollaborationOptions,
   callbacks?: YrsCoreSessionCallbacks
 ): YrsCoreSession {
@@ -126,9 +128,9 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
 
   useEffect(() => {
+    setSession(null);
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
-    setSession(null);
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
@@ -136,7 +138,10 @@ export function useYrsCoreSession(
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
-        if (cancelled) {
+        if (
+          cancelled ||
+          callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false
+        ) {
           next.destroy();
           return;
         }
@@ -150,13 +155,17 @@ export function useYrsCoreSession(
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
-        if (host) callbacksRef.current?.onHostDocument?.(host);
+        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false
+        ) {
           callbacksRef.current?.onError?.(
-            error instanceof Error ? error : new Error(String(error))
+            error instanceof Error ? error : new Error(String(error)),
+            seedGeneration
           );
         }
       });
@@ -169,7 +178,14 @@ export function useYrsCoreSession(
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
     };
-  }, [enabled, seedDocument, seedBytes, collaborationClientId, collaborationInitialUpdate]);
+  }, [
+    enabled,
+    seedDocument,
+    seedBytes,
+    seedGeneration,
+    collaborationClientId,
+    collaborationInitialUpdate,
+  ]);
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;

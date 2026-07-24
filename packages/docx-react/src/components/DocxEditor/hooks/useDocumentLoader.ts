@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost } from '@betteroffice/docx/yrs';
@@ -16,6 +16,7 @@ import type { FontOption } from '@betteroffice/docx/utils/fontOptions';
 import type { UseHistoryReturn } from '../../../hooks/useHistory';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
+import { DocumentLoadGeneration } from './documentLoadGeneration';
 
 /**
  * Document lifecycle: load buffer / pre-parsed doc, react to
@@ -71,18 +72,16 @@ export function useDocumentLoader({
     initialDocument ?? null
   );
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
-  // Monotonically increasing generation counter for overlapping loads.
-  const loadGenerationRef = useRef(0);
-  const pendingLoadRef = useRef<(() => void) | null>(null);
+  const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
+  const [loadGeneration] = useState(() => new DocumentLoadGeneration());
 
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
-      loadGenerationRef.current += 1;
-      pendingLoadRef.current?.();
-      pendingLoadRef.current = null;
+      const generation = loadGeneration.begin();
       resetForNewDocument();
       setYrsSeedDocument(doc);
       setYrsSeedBytes(seedBytes?.slice() ?? null);
+      setYrsSeedGeneration(generation);
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
       loadDocumentFonts(doc).catch((err) => {
@@ -96,36 +95,36 @@ export function useDocumentLoader({
         })
       );
     },
-    [resetForNewDocument, history, setLoadingState, setDocumentFonts]
+    [loadGeneration, resetForNewDocument, history, setLoadingState, setDocumentFonts]
   );
 
   const loadBuffer = useCallback(
     async (buffer: DocxInput) => {
-      const generation = ++loadGenerationRef.current;
-      pendingLoadRef.current?.();
+      const generation = loadGeneration.begin();
       resetForNewDocument();
       setLoadingState({ isLoading: true, parseError: null });
+      setYrsSeedDocument(null);
+      setYrsSeedBytes(null);
+      setYrsSeedGeneration(generation);
       try {
         const source = buffer instanceof ArrayBuffer ? buffer : await toArrayBuffer(buffer);
-        if (loadGenerationRef.current !== generation) return;
-        setYrsSeedDocument(null);
+        if (!loadGeneration.isCurrent(generation)) return;
         setYrsSeedBytes(new Uint8Array(source));
         history.reset(null);
-        await new Promise<void>((resolve) => {
-          pendingLoadRef.current = resolve;
-        });
+        await loadGeneration.waitForCompletion(generation);
       } catch (error) {
-        if (loadGenerationRef.current !== generation) return;
+        if (!loadGeneration.complete(generation)) return;
         const message = error instanceof Error ? error.message : 'Failed to parse document';
         setLoadingState({ isLoading: false, parseError: message });
         onError?.(error instanceof Error ? error : new Error(message));
       }
     },
-    [resetForNewDocument, history, onError, setLoadingState]
+    [loadGeneration, resetForNewDocument, history, onError, setLoadingState]
   );
 
   const acceptHostDocument = useCallback(
-    (host: YrsDocxHost) => {
+    (host: YrsDocxHost, generation: number) => {
+      if (!loadGeneration.complete(generation)) return;
       const doc = host.document;
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
@@ -151,21 +150,24 @@ export function useDocumentLoader({
         .catch((error) => {
           console.warn('Failed to load document fonts:', error);
         });
-      pendingLoadRef.current?.();
-      pendingLoadRef.current = null;
     },
-    [history, setDocumentFonts, setLoadingState]
+    [loadGeneration, history, setDocumentFonts, setLoadingState]
   );
 
   const failHostDocument = useCallback(
-    (error: Error) => {
+    (error: Error, generation: number) => {
+      if (!loadGeneration.complete(generation)) return;
+      setYrsSeedDocument(null);
       setYrsSeedBytes(null);
       setLoadingState({ isLoading: false, parseError: error.message });
       onError?.(error);
-      pendingLoadRef.current?.();
-      pendingLoadRef.current = null;
     },
-    [onError, setLoadingState]
+    [loadGeneration, onError, setLoadingState]
+  );
+
+  const isCurrentLoad = useCallback(
+    (generation: number) => loadGeneration.isCurrent(generation),
+    [loadGeneration]
   );
 
   // React to documentBuffer / document prop changes.
@@ -215,10 +217,9 @@ export function useDocumentLoader({
 
   useEffect(
     () => () => {
-      pendingLoadRef.current?.();
-      pendingLoadRef.current = null;
+      loadGeneration.invalidate();
     },
-    []
+    [loadGeneration]
   );
 
   return {
@@ -226,6 +227,8 @@ export function useDocumentLoader({
     loadBuffer,
     yrsSeedDocument,
     yrsSeedBytes,
+    yrsSeedGeneration,
+    isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
   };
