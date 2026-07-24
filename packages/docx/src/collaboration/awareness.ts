@@ -18,6 +18,9 @@ const PRESENCE_COLORS = [
 ] as const;
 const PRESENCE_COLOR_PATTERN = /^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/;
 
+export const MAX_AWARENESS_STRING_LENGTH = 1024;
+export const MAX_AWARENESS_CURSOR_BYTES = 1024;
+
 export function resolvePresenceColor(clientId: number, color: unknown): string {
   if (typeof color === 'string' && PRESENCE_COLOR_PATTERN.test(color)) return color;
   const paletteIndex =

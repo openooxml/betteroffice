@@ -12,6 +12,8 @@ import {
 import {
   awarenessPeers,
   expireAwarenessRecords,
+  MAX_AWARENESS_CURSOR_BYTES,
+  MAX_AWARENESS_STRING_LENGTH,
   reduceAwarenessEntries,
   reduceTypingInference,
   resolvePresenceColor,
@@ -91,7 +93,7 @@ function resolveUser(
     throw new TypeError('user.name must be a non-empty string');
   }
   return {
-    name: user.name.trim(),
+    name: user.name.trim().slice(0, MAX_AWARENESS_STRING_LENGTH),
     color: resolvePresenceColor(clientId, user.color),
   };
 }
@@ -111,6 +113,14 @@ function ownedCursor(cursor: CollaborationCursor | null): CollaborationCursor | 
     anchor: cursor.anchor.slice(),
     head: cursor.head.slice(),
   };
+}
+
+function encodableCursor(cursor: CollaborationCursor): boolean {
+  return (
+    cursor.story.length <= MAX_AWARENESS_STRING_LENGTH &&
+    cursor.anchor.byteLength <= MAX_AWARENESS_CURSOR_BYTES &&
+    cursor.head.byteLength <= MAX_AWARENESS_CURSOR_BYTES
+  );
 }
 
 function typingInference(value: unknown): CollaborationTextInsertion | null {
@@ -160,6 +170,7 @@ export class CollaborationProvider {
   private queuedBytes = 0;
   private isFlushing = false;
   private localClock = 0;
+  private reportedClockExhaustion = false;
   private localCursor: CollaborationCursor | null = null;
   private lastAwarenessSentAt = Number.NEGATIVE_INFINITY;
   private cursorBroadcastTimer: Timer | null = null;
@@ -217,7 +228,16 @@ export class CollaborationProvider {
 
   setCursor(cursor: CollaborationCursor | null, broadcast = true): void {
     if (this.isDestroyed || !this.localUser) return;
-    this.localCursor = ownedCursor(cursor);
+    const owned = ownedCursor(cursor);
+    this.localCursor = !owned || encodableCursor(owned) ? owned : null;
+    if (owned && !this.localCursor) {
+      this.report(
+        new CollaborationError(
+          'protocol',
+          `Presence cursor exceeds ${MAX_AWARENESS_STRING_LENGTH} story characters or ${MAX_AWARENESS_CURSOR_BYTES} position bytes; cursor dropped`
+        )
+      );
+    }
     if (!broadcast) {
       this.clearCursorBroadcastTimer();
       return;
@@ -468,17 +488,24 @@ export class CollaborationProvider {
 
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
-      if (this.localUser && this.isCurrent(token) && this.isOpen) {
-        this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
-        this.broadcastLocalAwareness();
-        this.startPresence();
-      }
     } catch (cause) {
       this.failConnection(
         token,
         normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
       );
+      return;
     }
+    if (!this.localUser || !this.isCurrent(token) || !this.isOpen) return;
+
+    try {
+      this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
+    } catch (cause) {
+      this.report(normalizeError('protocol', 'Failed to encode awareness query', cause));
+    }
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    this.broadcastLocalAwareness();
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    this.startPresence();
   }
 
   private handleMessage(token: number, data: Uint8Array): void {
@@ -507,11 +534,9 @@ export class CollaborationProvider {
               try {
                 this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
               } catch (cause) {
-                this.failConnection(
-                  token,
+                this.report(
                   normalizeError('protocol', 'Failed to query awareness after sync', cause)
                 );
-                return;
               }
             }
           }
@@ -547,11 +572,7 @@ export class CollaborationProvider {
             if (this.localUser) this.broadcastLocalAwareness();
             else this.sendFrame(encodeAwarenessMessage([], this.maxFrameBytes));
           } catch (cause) {
-            this.failConnection(
-              token,
-              normalizeError('protocol', 'Failed to encode awareness response', cause)
-            );
-            return;
+            this.report(normalizeError('protocol', 'Failed to encode awareness response', cause));
           }
           break;
       }
@@ -631,25 +652,51 @@ export class CollaborationProvider {
     return this.localClock;
   }
 
+  private encodeLocalAwareness(
+    user: CollaborationResolvedUser,
+    clock: number,
+    cursor: CollaborationCursor | null
+  ): Uint8Array {
+    return encodeAwarenessMessage(
+      [{ clientId: this.replica.clientId, clock, state: { user, cursor } }],
+      this.maxFrameBytes
+    );
+  }
+
   private broadcastLocalAwareness(): void {
     if (!this.localUser || !this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     this.clearCursorBroadcastTimer();
+    if (this.localClock >= Number.MAX_SAFE_INTEGER) {
+      if (!this.reportedClockExhaustion) {
+        this.reportedClockExhaustion = true;
+        this.report(
+          new CollaborationError('protocol', 'Awareness clock exceeds Number.MAX_SAFE_INTEGER')
+        );
+      }
+      return;
+    }
+
+    const user = this.localUser;
     const clock = this.nextAwarenessClock();
-    this.sendFrame(
-      encodeAwarenessMessage(
-        [
-          {
-            clientId: this.replica.clientId,
-            clock,
-            state: {
-              user: this.localUser,
-              cursor: this.localCursor,
-            },
-          },
-        ],
-        this.maxFrameBytes
-      )
-    );
+    let frame: Uint8Array;
+    try {
+      frame = this.encodeLocalAwareness(user, clock, this.localCursor);
+    } catch (cause) {
+      const dropped = this.localCursor;
+      this.localCursor = null;
+      if (!dropped) {
+        this.report(normalizeError('protocol', 'Failed to encode local awareness', cause));
+        return;
+      }
+      try {
+        frame = this.encodeLocalAwareness(user, clock, null);
+      } catch (retryCause) {
+        this.report(normalizeError('protocol', 'Failed to encode local awareness', retryCause));
+        return;
+      }
+      this.report(normalizeError('protocol', 'Dropped an unencodable presence cursor', cause));
+    }
+    this.sendFrame(frame);
     this.lastAwarenessSentAt = nowMs();
   }
 
@@ -657,28 +704,14 @@ export class CollaborationProvider {
     if (!this.localUser || !this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     const remaining = CURSOR_BROADCAST_INTERVAL_MS - (nowMs() - this.lastAwarenessSentAt);
     if (remaining <= 0) {
-      try {
-        this.broadcastLocalAwareness();
-      } catch (cause) {
-        this.failConnection(
-          this.epoch,
-          normalizeError('protocol', 'Failed to encode cursor awareness', cause)
-        );
-      }
+      this.broadcastLocalAwareness();
       return;
     }
     if (this.cursorBroadcastTimer) return;
     this.cursorBroadcastTimer = setTimeout(() => {
       this.cursorBroadcastTimer = null;
       if (!this.isOpen || this.isDestroyed || !this.wantsConnection) return;
-      try {
-        this.broadcastLocalAwareness();
-      } catch (cause) {
-        this.failConnection(
-          this.epoch,
-          normalizeError('protocol', 'Failed to encode cursor awareness', cause)
-        );
-      }
+      this.broadcastLocalAwareness();
     }, remaining);
     unrefTimer(this.cursorBroadcastTimer);
   }
@@ -700,14 +733,7 @@ export class CollaborationProvider {
       return;
     }
     this.heartbeatTimer = setInterval(() => {
-      try {
-        this.broadcastLocalAwareness();
-      } catch (cause) {
-        this.failConnection(
-          this.epoch,
-          normalizeError('protocol', 'Failed to encode awareness heartbeat', cause)
-        );
-      }
+      this.broadcastLocalAwareness();
     }, HEARTBEAT_INTERVAL_MS);
     this.expiryTimer = setInterval(() => {
       const reduction = expireAwarenessRecords(

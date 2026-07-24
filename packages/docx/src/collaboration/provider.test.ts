@@ -451,6 +451,149 @@ describe('CollaborationProvider awareness', () => {
     expect(transport.sent).toHaveLength(initialFrames + 1);
     provider.destroy();
   });
+
+  it('truncates an overlength user name and keeps document sync alive', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, {
+      user: { name: 'n'.repeat(2000) },
+    });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.connect();
+    transport.emit({ type: 'open' });
+
+    const announced = decodeMessages(transport.sent[2])[0];
+    if (announced.type !== 'awareness') throw new Error('expected awareness');
+    expect(decodeAwarenessUpdate(announced.update)[0].state?.user.name).toHaveLength(1024);
+
+    transport.sent = [];
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+    replica.emit(Uint8Array.of(5), 'local');
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4)]);
+    expect(errors).toEqual([]);
+    provider.destroy();
+  });
+
+  it('drops an overlength cursor identifier without touching the connection', async () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, {
+      user: { name: 'Calm Otter' },
+    });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.connect();
+    transport.emit({ type: 'open' });
+    transport.sent = [];
+
+    provider.setCursor({
+      story: 'body',
+      anchor: Uint8Array.of(1),
+      head: Uint8Array.of(1),
+    });
+    provider.setCursor({
+      story: 's'.repeat(2000),
+      anchor: Uint8Array.of(2),
+      head: Uint8Array.of(2),
+    });
+    await Bun.sleep(100);
+
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('cursor dropped');
+    expect(transport.sent).toHaveLength(1);
+    const movement = decodeMessages(transport.sent[0])[0];
+    if (movement.type !== 'awareness') throw new Error('expected awareness');
+    expect(decodeAwarenessUpdate(movement.update)[0].state).toMatchObject({
+      user: { name: 'Calm Otter' },
+      cursor: null,
+    });
+
+    transport.sent = [];
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+    replica.emit(Uint8Array.of(5), 'local');
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4)]);
+    provider.destroy();
+  });
+
+  it('publishes presence without the cursor when the cursor cannot be encoded', () => {
+    const user = { name: 'Calm Otter', color: '#B3261E' };
+    const cursor = {
+      story: 'body',
+      anchor: Uint8Array.of(1),
+      head: Uint8Array.of(1),
+    };
+    const withCursor = encodeAwarenessMessage([
+      { clientId: 1, clock: 1, state: { user, cursor } },
+    ]).byteLength;
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, {
+      user: { name: user.name },
+      maxFrameBytes: withCursor - 1,
+    });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.setCursor(cursor);
+    provider.connect();
+    transport.emit({ type: 'open' });
+
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Dropped an unencodable presence cursor');
+    const announced = decodeMessages(transport.sent[2])[0];
+    if (announced.type !== 'awareness') throw new Error('expected awareness');
+    expect(decodeAwarenessUpdate(announced.update)[0].state).toMatchObject({
+      user,
+      cursor: null,
+    });
+
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+    replica.emit(Uint8Array.of(5), 'local');
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4)]);
+    provider.destroy();
+  });
+
+  it('stops presence once the awareness clock is exhausted and keeps syncing', () => {
+    const replica = new FakeReplica();
+    const transport = new FakeTransport();
+    const provider = new CollaborationProvider(replica, transport, {
+      user: { name: 'Calm Otter' },
+    });
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    provider.connect();
+    transport.emit({ type: 'open' });
+    (provider as unknown as { localClock: number }).localClock = Number.MAX_SAFE_INTEGER;
+    transport.sent = [];
+
+    transport.emit({ type: 'message', data: encodeQueryAwareness() });
+    transport.emit({ type: 'message', data: encodeQueryAwareness() });
+
+    expect(errors.map((error) => error.code)).toEqual(['protocol']);
+    expect(errors[0].message).toContain('Awareness clock');
+    expect(transport.sent).toEqual([]);
+
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
+    replica.emit(Uint8Array.of(5), 'local');
+
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4)]);
+    provider.destroy();
+  });
 });
 
 describe('CollaborationProvider transport flow control', () => {
