@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  PRESENCE_CLOCK_RETENTION_MS,
   PRESENCE_EXPIRY_MS,
   PresencePeers,
   presenceColorForClientId,
@@ -28,6 +29,7 @@ describe('PresencePeers', () => {
     const peers = new PresencePeers(1);
     expect(peers.apply([entry(2, 3, { slideId: 's1', shapeId: 'a' })], 100)).toBe(true);
     expect(peers.apply([entry(2, 2, { slideId: 's1', shapeId: 'b' })], 200)).toBe(false);
+    expect(peers.peers[0].state.clock).toBe(3);
     expect(peers.apply([entry(2, 4, { slideId: 's1', shapeId: 'a' })], 300)).toBe(true);
     const state = entry(2, 4, { slideId: 's1', shapeId: 'a' }).state;
     if (!state) throw new Error('Expected presence state');
@@ -60,6 +62,41 @@ describe('PresencePeers', () => {
     expect(peers.expire(1_000 + PRESENCE_EXPIRY_MS - 1)).toBe(false);
     expect(peers.expire(1_000 + PRESENCE_EXPIRY_MS)).toBe(true);
     expect(peers.peers.map((peer) => peer.state.clientId)).toEqual([3]);
+  });
+
+  it('reclaims expired clocks after the replay grace period', () => {
+    const peers = new PresencePeers(1);
+    peers.apply([entry(2, 5)], 100);
+
+    expect(peers.expire(100 + PRESENCE_EXPIRY_MS)).toBe(true);
+    expect(peers.peers).toEqual([]);
+    expect(peers.trackedIdCount).toBe(1);
+    expect(peers.nextExpiryAt).toBe(100 + PRESENCE_CLOCK_RETENTION_MS);
+    expect(peers.apply([entry(2, 4)], 100 + PRESENCE_EXPIRY_MS)).toBe(false);
+    expect(peers.expire(100 + PRESENCE_CLOCK_RETENTION_MS - 1)).toBe(false);
+    expect(peers.trackedIdCount).toBe(1);
+    expect(peers.expire(100 + PRESENCE_CLOCK_RETENTION_MS)).toBe(false);
+    expect(peers.trackedIdCount).toBe(0);
+    expect(peers.nextExpiryAt).toBeUndefined();
+    expect(peers.apply([entry(2, 1)], 101 + PRESENCE_CLOCK_RETENTION_MS)).toBe(true);
+    expect(peers.peers[0].state.clock).toBe(1);
+  });
+
+  it('caps tracked ids by evicting the least recently seen first', () => {
+    const peers = new PresencePeers(1, { maxTrackedIds: 3 });
+    peers.apply([entry(2, 1)], 100);
+    peers.apply([entry(3, 1)], 200);
+    peers.apply([entry(4, 1)], 300);
+    peers.apply([entry(2, 2)], 400);
+    peers.apply([entry(5, 1)], 500);
+
+    expect(peers.trackedIdCount).toBe(3);
+    expect(peers.peers.map((peer) => peer.state.clientId)).toEqual([2, 4, 5]);
+    for (let clientId = 6; clientId < 100; clientId += 1) {
+      peers.apply([entry(clientId, 1)], 500 + clientId);
+    }
+    expect(peers.trackedIdCount).toBe(3);
+    expect(peers.peers.map((peer) => peer.state.clientId)).toEqual([97, 98, 99]);
   });
 
   it('derives one of eight deterministic colors', () => {

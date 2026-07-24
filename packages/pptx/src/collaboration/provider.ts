@@ -12,7 +12,6 @@ import {
 import {
   MAX_AWARENESS_STRING_LENGTH,
   PRESENCE_CURSOR_INTERVAL_MS,
-  PRESENCE_EXPIRY_MS,
   PRESENCE_HEARTBEAT_MS,
   PresencePeers,
   presenceUser,
@@ -504,10 +503,8 @@ export class CollaborationProvider {
         case 'awareness': {
           try {
             const entries = decodeAwarenessUpdate(message.update, this.maxMessagesPerFrame);
-            if (this.remotePresence.apply(entries, Date.now())) {
-              this.emitPresence();
-              this.schedulePresenceExpiry();
-            }
+            if (this.remotePresence.apply(entries, Date.now())) this.emitPresence();
+            this.schedulePresenceExpiry();
           } catch (cause) {
             this.report(normalizeError('protocol', 'Invalid awareness update', cause));
           }
@@ -664,9 +661,8 @@ export class CollaborationProvider {
     if (this.expiryTimer) clearTimeout(this.expiryTimer);
     this.expiryTimer = null;
     if (!this.isOpen || this.isDestroyed) return;
-    const peers = this.remotePresence.peers;
-    if (peers.length === 0) return;
-    const expiresAt = Math.min(...peers.map((peer) => peer.lastSeen + PRESENCE_EXPIRY_MS));
+    const expiresAt = this.remotePresence.nextExpiryAt;
+    if (expiresAt === undefined) return;
     this.expiryTimer = setTimeout(() => {
       this.expiryTimer = null;
       if (this.remotePresence.expire(Date.now())) this.emitPresence();

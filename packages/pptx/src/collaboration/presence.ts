@@ -8,8 +8,11 @@ import type {
 export const PRESENCE_CURSOR_INTERVAL_MS = 80;
 export const PRESENCE_HEARTBEAT_MS = 20_000;
 export const PRESENCE_EXPIRY_MS = 45_000;
+export const PRESENCE_CLOCK_RETENTION_MS = 5 * 60_000;
 export const PRESENCE_LABEL_DURATION_MS = 3_000;
 export const MAX_AWARENESS_STRING_LENGTH = 1024;
+/** Full stores evict the least recently accepted client id first. */
+export const MAX_TRACKED_PRESENCE_IDS = 4096;
 
 export const PRESENCE_COLORS = [
   '#B3261E',
@@ -28,6 +31,15 @@ export interface AwarenessUpdateEntry {
   clientId: number;
   clock: number;
   state: PptxPresenceState | null;
+}
+
+export interface PresencePeersOptions {
+  maxTrackedIds?: number;
+}
+
+interface PresenceClock {
+  clock: number;
+  updatedAt: number;
 }
 
 export function presenceColorForClientId(clientId: number): string {
@@ -68,9 +80,18 @@ export function samePresenceCursor(
 
 export class PresencePeers {
   private readonly states = new Map<number, PptxPresencePeer>();
-  private readonly clocks = new Map<number, number>();
+  private readonly clocks = new Map<number, PresenceClock>();
+  private readonly maxTrackedIds: number;
 
-  constructor(private readonly localClientId: number) {}
+  constructor(
+    private readonly localClientId: number,
+    options: PresencePeersOptions = {}
+  ) {
+    this.maxTrackedIds = options.maxTrackedIds ?? MAX_TRACKED_PRESENCE_IDS;
+    if (!Number.isSafeInteger(this.maxTrackedIds) || this.maxTrackedIds < 1) {
+      throw new RangeError('Presence tracked id limit must be a positive integer');
+    }
+  }
 
   get peers(): readonly PptxPresencePeer[] {
     return [...this.states.values()]
@@ -78,13 +99,34 @@ export class PresencePeers {
       .map(copyPeer);
   }
 
+  get trackedIdCount(): number {
+    return this.clocks.size;
+  }
+
+  get nextExpiryAt(): number | undefined {
+    let next: number | undefined;
+    for (const peer of this.states.values()) {
+      const expiresAt = peer.lastSeen + PRESENCE_EXPIRY_MS;
+      next = next === undefined ? expiresAt : Math.min(next, expiresAt);
+    }
+    for (const record of this.clocks.values()) {
+      const expiresAt = record.updatedAt + PRESENCE_CLOCK_RETENTION_MS;
+      next = next === undefined ? expiresAt : Math.min(next, expiresAt);
+    }
+    return next;
+  }
+
   apply(entries: readonly AwarenessUpdateEntry[], now: number): boolean {
-    let changed = false;
+    let changed = this.expire(now);
     for (const entry of entries) {
       if (entry.clientId === this.localClientId) continue;
-      const currentClock = this.clocks.get(entry.clientId) ?? -1;
-      if (entry.clock <= currentClock) continue;
-      this.clocks.set(entry.clientId, entry.clock);
+      const currentClock = this.clocks.get(entry.clientId);
+      if (currentClock && entry.clock <= currentClock.clock) continue;
+      if (!currentClock && this.clocks.size >= this.maxTrackedIds) {
+        changed = this.evictOldest() || changed;
+      }
+      this.clocks.delete(entry.clientId);
+      this.clocks.set(entry.clientId, { clock: entry.clock, updatedAt: now });
 
       if (!entry.state) {
         changed = this.states.delete(entry.clientId) || changed;
@@ -113,6 +155,11 @@ export class PresencePeers {
       this.states.delete(clientId);
       changed = true;
     }
+    for (const [clientId, record] of this.clocks) {
+      if (now - record.updatedAt < PRESENCE_CLOCK_RETENTION_MS) continue;
+      this.clocks.delete(clientId);
+      changed = this.states.delete(clientId) || changed;
+    }
     return changed;
   }
 
@@ -121,6 +168,13 @@ export class PresencePeers {
     this.states.clear();
     this.clocks.clear();
     return changed;
+  }
+
+  private evictOldest(): boolean {
+    const oldest = this.clocks.keys().next();
+    if (oldest.done) return false;
+    this.clocks.delete(oldest.value);
+    return this.states.delete(oldest.value);
   }
 }
 

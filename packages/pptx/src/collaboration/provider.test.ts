@@ -8,6 +8,7 @@ import {
   encodeSyncStep2,
   encodeUpdate,
 } from './protocol';
+import { PRESENCE_CLOCK_RETENTION_MS } from './presence';
 import { CollaborationProvider } from './provider';
 import type {
   CollaborationError,
@@ -32,8 +33,16 @@ function sentMessageTypes(transport: FakeTransport): string[] {
   return transport.sent.flatMap((frame) => decodeMessages(frame).map((message) => message.type));
 }
 
+function lastAwarenessFrame(transport: FakeTransport): Uint8Array {
+  for (let index = transport.sent.length - 1; index >= 0; index -= 1) {
+    if (decodeMessages(transport.sent[index]).some((message) => message.type === 'awareness')) {
+      return transport.sent[index];
+    }
+  }
+  throw new Error('Expected awareness frame');
+}
+
 class FakeReplica implements CollaborationReplica {
-  readonly clientId = 1;
   stateVector = Uint8Array.of(7);
   stateUpdate = Uint8Array.of(8);
   applied: Uint8Array[] = [];
@@ -45,6 +54,8 @@ class FakeReplica implements CollaborationReplica {
   private readonly listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   >();
+
+  constructor(readonly clientId = 1) {}
 
   encodeStateVector(): Uint8Array {
     return this.stateVector;
@@ -374,6 +385,63 @@ describe('CollaborationProvider sync', () => {
 
     expect(changes).toEqual([[], [2], []]);
     expect(provider.peers).toEqual([]);
+  });
+
+  it('accepts a recreated provider with the same client id after clock retention expires', () => {
+    const originalDateNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+    const receiverReplica = new FakeReplica();
+    const receiverTransport = new FakeTransport();
+    const receiver = new CollaborationProvider(receiverReplica, receiverTransport);
+    const senderReplica = new FakeReplica(2);
+    const firstSenderTransport = new FakeTransport();
+    const firstSender = new CollaborationProvider(senderReplica, firstSenderTransport);
+    let secondSender: CollaborationProvider | undefined;
+
+    try {
+      receiver.connect();
+      receiverTransport.emit({ type: 'open' });
+      firstSender.connect();
+      firstSenderTransport.emit({ type: 'open' });
+      firstSenderTransport.emit({ type: 'message', data: encodeQueryAwareness() });
+      firstSenderTransport.emit({ type: 'message', data: encodeQueryAwareness() });
+      receiverTransport.emit({
+        type: 'message',
+        data: lastAwarenessFrame(firstSenderTransport),
+      });
+      expect(receiver.peers[0].state).toMatchObject({ clientId: 2, clock: 3 });
+
+      firstSender.destroy();
+      now += PRESENCE_CLOCK_RETENTION_MS;
+      const retained = (
+        receiver as unknown as {
+          remotePresence: {
+            expire(now: number): boolean;
+            trackedIdCount: number;
+          };
+        }
+      ).remotePresence;
+      expect(retained.expire(now)).toBe(true);
+      expect(retained.trackedIdCount).toBe(0);
+      expect(receiver.peers).toEqual([]);
+
+      const secondSenderTransport = new FakeTransport();
+      secondSender = new CollaborationProvider(senderReplica, secondSenderTransport);
+      secondSender.connect();
+      secondSenderTransport.emit({ type: 'open' });
+      receiverTransport.emit({
+        type: 'message',
+        data: lastAwarenessFrame(secondSenderTransport),
+      });
+
+      expect(receiver.peers[0].state).toMatchObject({ clientId: 2, clock: 1 });
+    } finally {
+      secondSender?.destroy();
+      firstSender.destroy();
+      receiver.destroy();
+      Date.now = originalDateNow;
+    }
   });
 
   it('coalesces cursor changes and sends the latest shape', async () => {
