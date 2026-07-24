@@ -1801,7 +1801,7 @@ fn paragraph_attrs(
             );
         }
     }
-    if array(field(Some(paragraph), "propertyChanges")).len() > 0 {
+    if !array(field(Some(paragraph), "propertyChanges")).is_empty() {
         attrs.insert(
             "pPrChange".to_owned(),
             field(Some(paragraph), "propertyChanges").unwrap().clone(),
