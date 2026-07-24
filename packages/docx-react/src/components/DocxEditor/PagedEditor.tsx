@@ -85,6 +85,7 @@ import {
   pluginOverlaysStyles,
 } from './internals/styles';
 import { viewportMinHeightPx } from './internals/scrollUtils';
+import type { LayoutUpdateOrigin } from './internals/viewportAnchoring';
 import {
   createCanvasHostProjector,
   createRenderedDomContext,
@@ -543,6 +544,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]
     );
+    const displayPositionToViewportLoc = useCallback(
+      (position: number): YrsLoc | null => {
+        const target = getYrsPositionProjectionRef.current('body')?.targetAt(position);
+        return target
+          ? yrsCore.displayPositionToLoc(target.displayPosition, target.story)
+          : yrsCore.displayPositionToLoc(position, 'body');
+      },
+      [yrsCore.displayPositionToLoc]
+    );
+    const yrsLocToViewportDisplayPosition = useCallback(
+      (loc: YrsLoc): number | null =>
+        getYrsPositionProjectionRef.current('body')?.positionForLoc(loc) ??
+        (loc.story === 'body' ? yrsLocToDisplayPosition(loc) : null),
+      [yrsLocToDisplayPosition]
+    );
     // Store callbacks in refs to avoid infinite re-render loops
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
@@ -614,7 +630,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]
     );
-    const { layout, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
+    const {
+      layout,
+      layoutUpdateOrigin,
+      runLayoutPipeline,
+      scheduleLayout,
+      cancelPendingScrollRestore,
+    } = useLayoutPipeline({
       document,
       session: yrsCore.session,
       renderEnv: yrsRenderEnv,
@@ -627,6 +649,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       pagesContainerRef,
       viewportLayoutRef,
       getSelectionHead: getYrsSelectionHead,
+      displayPositionToYrsLoc: displayPositionToViewportLoc,
+      yrsLocToDisplayPosition: yrsLocToViewportDisplayPosition,
       syncCoordinator,
       getScrollContainer,
       onTotalPagesChange,
@@ -634,6 +658,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
+    const handleLocalCaretInterrupt = useCallback(() => {
+      cancelPendingScrollRestore();
+      onCaretInterrupt?.();
+    }, [cancelPendingScrollRestore, onCaretInterrupt]);
 
     // Selection overlay — caret, range rects, image overlay info, plus the
     // ResizeObserver + post-layout recompute that keep geometry fresh.
@@ -690,12 +718,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       []
     );
-    const refreshYrsLayout = useCallback((): void => {
-      yrsProjectionVersionRef.current += 1;
-      syncCoordinator.incrementStateSeq();
-      syncCoordinator.requestRender();
-      scheduleLayout();
-    }, [scheduleLayout, syncCoordinator]);
+    const refreshYrsLayout = useCallback(
+      (origin: LayoutUpdateOrigin): void => {
+        yrsProjectionVersionRef.current += 1;
+        syncCoordinator.incrementStateSeq();
+        syncCoordinator.requestRender();
+        scheduleLayout(origin);
+      },
+      [scheduleLayout, syncCoordinator]
+    );
 
     /**
      * Publish sticky yrs selection geometry and refresh the yrs-backed layout.
@@ -705,7 +736,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         selection: YrsDisplaySelection,
         docChanged: boolean,
         residentLayoutReady = false,
-        residentCaretReady = false
+        residentCaretReady = false,
+        updateOrigin: LayoutUpdateOrigin = 'local'
       ): void => {
         const session = yrsCore.session;
         if (session) {
@@ -775,7 +807,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // later from a projection rebuild.
         if (!residentCaretReady) updateSelectionOverlay();
         if (docChanged && !residentLayoutReady) {
-          refreshYrsLayout();
+          refreshYrsLayout(updateOrigin);
         }
         if (docChanged) {
           // Compatibility callbacks stay off the synchronous input path.
@@ -816,13 +848,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [collaboration?.presence, yrsCore.session]);
 
     const syncYrsInputState = useCallback(
-      (docChanged: boolean): boolean => {
+      (docChanged: boolean, origin: LayoutUpdateOrigin = 'local'): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
           yrsCore.publishDirectInput();
         }
-        handleYrsStateChange(displaySelection, docChanged);
+        handleYrsStateChange(displaySelection, docChanged, false, false, origin);
         return true;
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
@@ -832,7 +864,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       const session = yrsCore.session;
       if (!session) return;
       return session.onUpdate((_update, origin) => {
-        if (origin === 'remote') syncYrsInputState(true);
+        if (origin === 'remote') syncYrsInputState(true, origin);
       });
     }, [syncYrsInputState, yrsCore.session]);
 
@@ -1210,6 +1242,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getScrollContainer,
       displayListQueries,
       canvasHostRef,
+      onNavigationIntent: cancelPendingScrollRestore,
       requestCanvasParagraphFlash,
     });
 
@@ -1381,17 +1414,19 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
         // Cmd/Ctrl+Home - scroll to top and move cursor to start
         if (e.key === 'Home' && (e.metaKey || e.ctrlKey)) {
+          cancelPendingScrollRestore();
           const sc = getScrollContainer();
           if (sc) sc.scrollTop = 0;
         }
 
         // Cmd/Ctrl+End - scroll to bottom and move cursor to end
         if (e.key === 'End' && (e.metaKey || e.ctrlKey)) {
+          cancelPendingScrollRestore();
           const sc = getScrollContainer();
           if (sc) sc.scrollTop = sc.scrollHeight;
         }
       },
-      [readOnly, getScrollContainer, focusBodyInput]
+      [cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
     );
 
     /**
@@ -1632,6 +1667,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           displayListFrameEpoch={displayListFrameEpoch}
           residentCaret={residentCaret}
           residentCaretAuthoritative={residentCaretAuthoritative}
+          layoutUpdateOrigin={layoutUpdateOrigin}
           canvasHostRef={canvasHostRef ?? pagesContainerRef}
           onStateChange={handleYrsStateChange}
           onDirectInput={publishYrsDirectInput}
@@ -1640,7 +1676,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           onFocusChange={setIsFocused}
           onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
           onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
-          onCaretInterrupt={onCaretInterrupt}
+          onCaretInterrupt={handleLocalCaretInterrupt}
         />
 
         {/* Non-rendering orchestration host. Visible pages are canvas-only;

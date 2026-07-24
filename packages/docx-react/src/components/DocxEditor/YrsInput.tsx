@@ -48,6 +48,10 @@ import {
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
+import {
+  shouldScrollCaretIntoView,
+  type LayoutUpdateOrigin,
+} from './internals/viewportAnchoring';
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -101,6 +105,7 @@ export interface YrsInputProps {
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
   residentCaretAuthoritative?: boolean;
+  layoutUpdateOrigin?: LayoutUpdateOrigin;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   /** Called for selection-only changes and direct document mutations. */
   onStateChange(
@@ -211,6 +216,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     displayListFrameEpoch = null,
     residentCaret = null,
     residentCaretAuthoritative = false,
+    layoutUpdateOrigin = 'local',
     canvasHostRef,
     onStateChange,
     onDirectInput,
@@ -240,6 +246,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
   const resolveDisplayListQueriesRef = useRef(resolveDisplayListQueries);
+  const lastCaretScrollSelectionEpochRef = useRef<number | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -1211,7 +1218,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         ? current
         : { left: nextLeft, top: nextTop, height: nextHeight }
     );
-    if (selection.anchor === selection.head) {
+    const selectionChanged = lastCaretScrollSelectionEpochRef.current !== selectionEpoch;
+    lastCaretScrollSelectionEpochRef.current = selectionEpoch;
+    if (
+      selection.anchor === selection.head &&
+      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
+    ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const viewport = scroller.getBoundingClientRect();
       const margin = 24;
@@ -1228,6 +1240,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     displayListQueries,
     displaySelection,
     enabled,
+    layoutUpdateOrigin,
     onStateChange,
     residentCaret,
     residentCaretAuthoritative,

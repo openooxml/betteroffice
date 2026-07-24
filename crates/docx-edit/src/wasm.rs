@@ -1788,6 +1788,35 @@ impl EditSession {
         Ok(())
     }
 
+    /// Encodes one paragraph location as a sticky position.
+    pub fn encode_sticky_position(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let txn = self.engine.doc().yrs_doc().transact();
+        let text = story_ref(&txn, story).map_err(js_err)?;
+        let position = text
+            .sticky_index(&txn, index, Assoc::After)
+            .ok_or_else(|| js_err("position could not be made sticky"))?;
+        Ok(encode_sticky(&position))
+    }
+
+    /// Resolves one encoded sticky position to a paragraph location.
+    pub fn resolve_sticky_position(&self, story: &str, position: &[u8]) -> Result<String, JsValue> {
+        let (index, _) = resolve_sticky_selection(self.engine.doc(), story, position, position)
+            .map_err(js_err)?;
+        let (para_id, offset) = index_loc(self.engine.doc(), story, index)?;
+        Ok(json!({
+            "story": story,
+            "paraId": para_id,
+            "offset": offset,
+        })
+        .to_string())
+    }
+
     /// Resolves this peer's current sticky selection as two public Locs, or
     /// `null` before the host establishes an initial selection.
     pub fn selection(&self) -> Result<String, JsValue> {
