@@ -1,5 +1,13 @@
 # @betteroffice/demo
 
+## 0.0.7
+
+### Patch Changes
+
+- Updated dependencies [5212690]
+  - @betteroffice/pptx@0.0.3
+  - @betteroffice/pptx-react@0.0.3
+
 ## 0.0.6
 
 ### Patch Changes
