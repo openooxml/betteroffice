@@ -22,6 +22,7 @@ yanked = "warn"
 ignore = [
   { id = "RUSTSEC-2026-0192", reason = "unmaintained ttf-parser, transitive via rustybuzz; migration tracked to fontations" },
   { id = "RUSTSEC-2026-0206", reason = "rustybuzz declared unmaintained; migration to harfrust tracked with the fontations move" },
+  { id = "RUSTSEC-2026-0215", reason = "unmaintained smallstr, transitive via yrs" },
 ]
 
 [bans]

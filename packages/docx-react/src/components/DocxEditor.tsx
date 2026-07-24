@@ -828,6 +828,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     loadBuffer,
     yrsSeedDocument,
     yrsSeedBytes,
+    yrsSeedGeneration,
+    isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
   } = useDocumentLoader({
@@ -853,8 +855,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     history.state,
     yrsSeedDocument,
     yrsSeedBytes,
+    yrsSeedGeneration,
     collaboration,
     {
+      isCurrentLoad,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
     }
