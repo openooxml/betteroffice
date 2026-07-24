@@ -12,146 +12,32 @@ import type {
   ShapeOutline,
   ShapeTextBody as ShapeTextBodyBase,
   ShapeType,
-} from '@betteroffice/drawingml';
+} from '../drawingml';
+import type {
+  DrawingScene,
+  ShapeEffect,
+  ShapeFillPaint,
+  ShapeStrokePaint,
+  ShapeTextBodyProperties,
+} from '../../layout/drawing';
 import type { ImageSize, ImagePosition, ImageWrap, ImageTransform } from './image';
 import type { Paragraph } from './paragraph';
 import type { BlockContent } from './section';
-import type { Image } from './image';
-import type { Chart } from './chart';
-import type { ColorValue, ThemeColorSlot } from '../colors';
 
-export type { ShapeFill, ShapeOutline, ShapeType } from '@betteroffice/drawingml';
+export type { ShapeFill, ShapeOutline, ShapeType } from '../drawingml';
+export type {
+  DrawingScene,
+  DrawingSceneNode,
+  ShapeEffect,
+  ShapeFillPaint,
+  ShapeStrokePaint,
+  ShapeTextBodyProperties,
+} from '../../layout/drawing';
 
 /**
  * Text body inside a shape (content typed as docx paragraphs)
  */
 export type ShapeTextBody = ShapeTextBodyBase<Paragraph>;
-
-/** Detailed DrawingML paint server retained alongside the legacy shared fill. */
-export interface ShapeFillPaint {
-  kind?: 'none' | 'solid' | 'gradient' | 'pattern' | 'picture' | 'theme';
-  color?: ColorValue;
-  themeColor?: ThemeColorSlot;
-  gradientType?: 'linear' | 'path' | 'radial' | 'rectangular';
-  angle?: number;
-  stops?: Array<{ position?: number; color?: ColorValue }>;
-  pathShape?: 'circle' | 'rect' | 'shape';
-  focusRect?: { left?: number; top?: number; right?: number; bottom?: number };
-  rotateWithShape?: boolean;
-  patternPreset?: string;
-  foregroundColor?: ColorValue;
-  backgroundColor?: ColorValue;
-  picture?: Image;
-  themeRefIndex?: number;
-  /** Picture-fill source crop fractions (`a:srcRect`, 0..1; negative = outset). */
-  srcRect?: { left?: number; top?: number; right?: number; bottom?: number };
-  /** Picture-fill mode: `a:stretch` (default) or `a:tile`. */
-  fillMode?: 'stretch' | 'tile';
-  /** Picture-fill tile parameters (`a:tile`). Offsets px, scales fractions. */
-  tile?: {
-    offsetX?: number;
-    offsetY?: number;
-    scaleX?: number;
-    scaleY?: number;
-    alignment?: string;
-    flip?: 'none' | 'x' | 'y' | 'xy';
-  };
-  /** Picture-fill stretch target rect fractions (`a:stretch/a:fillRect`, 0..1). */
-  stretchRect?: { left?: number; top?: number; right?: number; bottom?: number };
-  /** Picture-fill alpha 0..1 (`a:alphaModFix` on the blip). */
-  pictureOpacity?: number;
-}
-
-/** Detailed DrawingML line contract, including arrows and compound/custom dash. */
-export interface ShapeStrokePaint {
-  fill?: ShapeFillPaint;
-  width?: number;
-  dash?: string;
-  customDash?: number[];
-  compound?: 'single' | 'double' | 'thickThin' | 'thinThick' | 'triple';
-  alignment?: 'center' | 'inset';
-  cap?: 'flat' | 'round' | 'square';
-  join?: 'bevel' | 'miter' | 'round';
-  miterLimit?: number;
-  headEnd?: { type?: string; width?: string; length?: string };
-  tailEnd?: { type?: string; width?: string; length?: string };
-  themeRefIndex?: number;
-}
-
-/** Common 2-D shape effect. Missing parameters mean the OOXML default. */
-export interface ShapeEffect {
-  kind?: 'shadow' | 'glow' | 'reflection' | 'softEdge' | 'blur' | 'unknown';
-  color?: ColorValue;
-  opacity?: number;
-  blurRadius?: number;
-  distance?: number;
-  direction?: number;
-  size?: number;
-  rawName?: string;
-}
-
-/** Full `a:bodyPr` projection used by text-body/autofit layout. */
-export interface ShapeTextBodyProperties {
-  vertical?:
-    | 'horizontal'
-    | 'vertical'
-    | 'vertical270'
-    | 'wordArtVertical'
-    | 'eastAsianVertical'
-    | 'mongolianVertical';
-  rotation?: number;
-  upright?: boolean;
-  anchor?: 'top' | 'middle' | 'bottom' | 'distributed' | 'justified';
-  anchorCenter?: boolean;
-  columns?: number;
-  columnSpacing?: number;
-  wrap?: 'square' | 'none';
-  horizontalOverflow?: 'clip' | 'overflow';
-  verticalOverflow?: 'clip' | 'ellipsis' | 'overflow';
-  margins?: { top?: number; bottom?: number; left?: number; right?: number };
-  autoFit?: 'none' | 'normal' | 'shape';
-  fontScale?: number;
-  lineSpacingReduction?: number;
-  fromWordArt?: boolean;
-  presetTextWarp?: string;
-}
-
-/** Heterogeneous DrawingML group/canvas scene node. */
-export interface DrawingSceneNode {
-  kind?: 'shape' | 'group' | 'canvas' | 'picture' | 'chart' | 'graphicFrame' | 'contentPart';
-  id?: string;
-  name?: string;
-  shape?: Shape;
-  image?: Image;
-  chart?: Chart;
-  children?: DrawingSceneNode[];
-  transform?: {
-    offsetX?: number;
-    offsetY?: number;
-    width?: number;
-    height?: number;
-    childOffsetX?: number;
-    childOffsetY?: number;
-    childWidth?: number;
-    childHeight?: number;
-    rotation?: number;
-    flipH?: boolean;
-    flipV?: boolean;
-  };
-  fill?: ShapeFillPaint;
-  effects?: ShapeEffect[];
-  relationshipId?: string;
-}
-
-/** Versioned general DrawingML scene. Undefined version reads as legacy v0. */
-export interface DrawingScene {
-  version?: number;
-  root?: DrawingSceneNode;
-  title?: string;
-  description?: string;
-  decorative?: boolean;
-  hidden?: boolean;
-}
 
 /**
  * Shape/drawing object (wps:wsp)

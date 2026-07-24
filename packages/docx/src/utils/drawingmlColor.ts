@@ -11,55 +11,12 @@
  * - The wire value is a hex byte (00-FF) meaning "how much color to keep"
  */
 
-import type { Theme, ThemeColorScheme } from './theme';
-
-/**
- * Theme color slots from a theme's clrScheme (plus the WordprocessingML
- * alias slots background1/text1/background2/text2).
- *
- * @public
- */
-export type ThemeColorSlot =
-  | 'dk1'
-  | 'lt1'
-  | 'dk2'
-  | 'lt2'
-  | 'accent1'
-  | 'accent2'
-  | 'accent3'
-  | 'accent4'
-  | 'accent5'
-  | 'accent6'
-  | 'hlink'
-  | 'folHlink'
-  | 'background1'
-  | 'text1'
-  | 'background2'
-  | 'text2';
-
-/**
- * ECMA-376 color reference — either a direct RGB hex, a theme slot
- * reference (with optional tint/shade), or `auto` for context-dependent
- * defaults (usually black for text on light backgrounds). When both
- * `rgb` and `themeColor` are set, the theme wins on Word import and the
- * `rgb` acts as a fallback for renderers without theme support.
- *
- * See ECMA-376 §17.18.39 (`ST_ThemeColor`).
- *
- * @public
- */
-export interface ColorValue {
-  /** RGB hex value without # (e.g., "FF0000") */
-  rgb?: string;
-  /** Theme color slot reference */
-  themeColor?: ThemeColorSlot;
-  /** Tint modifier (0-255 as hex string, e.g., "80") - makes color lighter */
-  themeTint?: string;
-  /** Shade modifier (0-255 as hex string) - makes color darker */
-  themeShade?: string;
-  /** Auto color - context-dependent (usually black for text) */
-  auto?: boolean;
-}
+import type {
+  ColorValue,
+  Theme,
+  ThemeColorScheme,
+  ThemeColorSlot,
+} from '../types/drawingml';
 
 /**
  * Default theme colors (Office 2016 default theme).

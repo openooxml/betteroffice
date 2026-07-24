@@ -13,7 +13,7 @@
  * - w:color/@w:themeShade - Shade modifier (0-255, hex)
  */
 
-import { hexToRgb, resolveColor, resolveThemeColorSlot } from '@betteroffice/drawingml';
+import { hexToRgb, resolveColor, resolveThemeColorSlot } from './drawingmlColor';
 import type { ColorValue, Theme, ThemeColorSlot } from '../types/document';
 
 export {
@@ -25,8 +25,8 @@ export {
   lightenColor,
   resolveColor,
   resolveColorToHex,
-} from '@betteroffice/drawingml';
-export type { ThemeMatrixCell } from '@betteroffice/drawingml';
+} from './drawingmlColor';
+export type { ThemeMatrixCell } from './drawingmlColor';
 
 /**
  * Highlight color mapping to hex values
