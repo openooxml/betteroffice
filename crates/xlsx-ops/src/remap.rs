@@ -84,6 +84,71 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
     Ok(restores)
 }
 
+pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
+    let Some(target) = structural_target(op) else {
+        return Vec::new();
+    };
+    let names: HashMap<String, SheetId> = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
+        .collect();
+    let mut restores = Vec::new();
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        let owner = SheetId(index as u32);
+        let matches =
+            |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, target, &names);
+        let mut hyperlinks = sheet.hyperlinks.clone();
+        let mut changed_sheet = false;
+        for hyperlink in &mut hyperlinks {
+            if hyperlink.external_target.is_some() {
+                continue;
+            }
+            let Some(location) = &hyperlink.location else {
+                continue;
+            };
+            let prefixed = location.starts_with('#');
+            let source = location.strip_prefix('#').unwrap_or(location);
+            let Ok(expr) = parse_formula(source) else {
+                continue;
+            };
+            let mut changed = false;
+            let rewritten = transform(&expr, op, &matches, &mut changed).to_formula();
+            if changed {
+                hyperlink.location = Some(if prefixed && !rewritten.starts_with('#') {
+                    format!("#{rewritten}")
+                } else {
+                    rewritten
+                });
+                changed_sheet = true;
+            }
+        }
+        if changed_sheet {
+            restores.push(Op::SetHyperlinks {
+                sheet: owner,
+                hyperlinks: sheet.hyperlinks.clone(),
+            });
+            edits.push((owner, hyperlinks));
+        }
+    }
+    for (sheet, hyperlinks) in edits {
+        wb.sheet_mut(sheet)
+            .expect("sheet exists during hyperlink remap")
+            .hyperlinks = hyperlinks;
+    }
+    restores
+}
+
+pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
+    match remap_span(range, op) {
+        Remapped::Unchanged => Some(range),
+        Remapped::Moved(range) => Some(range),
+        Remapped::Deleted => None,
+    }
+}
+
 pub(crate) fn rename_sheet_references(
     wb: &mut Workbook,
     old_name: &str,
@@ -121,7 +186,7 @@ pub(crate) fn rename_sheet_references(
     Ok(restores)
 }
 
-fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
+pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
     if old_name == new_name {
         return source.to_string();
     }

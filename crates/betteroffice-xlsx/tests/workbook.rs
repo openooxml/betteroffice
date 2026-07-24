@@ -2,10 +2,10 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DefinedName,
-    DrawCmd, Error, FreezePane, GridGeometry, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind, NumberFormatMutation, Op,
-    ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch, UpdateOrigin, Viewport,
-    Workbook, WorkbookModel,
+    DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
+    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind,
+    NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -214,6 +214,70 @@ fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
     assert_eq!(
         reopened.sheet(SheetId(0)).unwrap().freeze_pane,
         workbook.sheet(SheetId(0)).unwrap().freeze_pane
+    );
+}
+
+#[test]
+fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("B2"),
+        Cell {
+            value: CellValue::Text {
+                value: "Website".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::parse_a1("B2:C2").unwrap(),
+        external_target: Some("https://example.com".into()),
+        location: None,
+        tooltip: Some("Open site".into()),
+        display: None,
+    });
+    sheet.hyperlinks.push(Hyperlink {
+        range: CellRange::parse_a1("D4").unwrap(),
+        external_target: None,
+        location: Some("Data!A1".into()),
+        tooltip: None,
+        display: Some("Jump".into()),
+    });
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+
+    let workbook = Workbook::from_model(model).unwrap();
+    let display = workbook
+        .display_list(&Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 120.0,
+        })
+        .unwrap();
+    assert_eq!(display.hyperlinks.len(), 2);
+    assert_eq!(
+        display.hyperlinks[0].external_target.as_deref(),
+        Some("https://example.com")
+    );
+    assert!(display.commands.iter().any(|command| matches!(
+        command,
+        DrawCmd::Text {
+            text,
+            color,
+            underline: true,
+            ..
+        } if text == "Website" && color == "#0563c1"
+    )));
+    let (x, y) = workbook
+        .cell_scroll_position(SheetId(0), cell("D4"))
+        .unwrap();
+    assert!(x > 0.0 && y > 0.0);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.sheet(SheetId(0)).unwrap().hyperlinks,
+        workbook.sheet(SheetId(0)).unwrap().hyperlinks
     );
 }
 

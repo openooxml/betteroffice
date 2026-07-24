@@ -270,6 +270,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = cellPositionJson)]
+    pub fn cell_position_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .cell_position_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// a rectangular block of cells for clipboard copy.
     #[wasm_bindgen(js_name = rangeCellsJson)]
     pub fn range_cells_json(&self, args: &str) -> Result<String, JsValue> {

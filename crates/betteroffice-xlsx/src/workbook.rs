@@ -6,7 +6,7 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, Fill, HAlign,
-    MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
+    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -35,6 +35,8 @@ use crate::{RenderOptions, RenderedPng};
 const MAX_RANGE_CELLS: u64 = 100_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
+const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
+const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
 /// Largest browser-safe collaboration client identifier.
@@ -461,6 +463,19 @@ impl Workbook {
             initial_scroll_x,
             initial_scroll_y,
         })
+    }
+
+    pub fn cell_scroll_position(&self, sheet: SheetId, cell: CellRef) -> Result<(f32, f32)> {
+        validate_cell_ref(cell)?;
+        let sheet = self.sheet(sheet)?;
+        let geometry = GridGeometry::new(sheet);
+        let (frozen_rows, frozen_cols) = sheet
+            .freeze_pane
+            .map_or((0, 0), |pane| (pane.rows, pane.cols));
+        Ok((
+            (geometry.col_x(cell.col) - geometry.col_x(frozen_cols)).max(0.0),
+            (geometry.row_y(cell.row) - geometry.row_y(frozen_rows)).max(0.0),
+        ))
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
@@ -1705,6 +1720,7 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
                 sheet.name
             )));
         }
+        validate_hyperlinks(&sheet.hyperlinks)?;
         validate_sheet_name(&sheet.name)?;
         if !names.insert(sheet.name.to_lowercase()) {
             return Err(Error::InvalidOperation(format!(
@@ -1841,6 +1857,10 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 ));
             }
         }
+        Op::SetHyperlinks { sheet, hyperlinks } => {
+            require_sheet(model, *sheet)?;
+            validate_hyperlinks(hyperlinks)?;
+        }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
             validate_range(*range)?;
@@ -1896,7 +1916,11 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .merges
                 .iter()
                 .any(|range| range.end.row >= at && range.end.row >= cutoff);
-            if loses_cells || loses_heights || loses_merges {
+            let loses_hyperlinks = sheet
+                .hyperlinks
+                .iter()
+                .any(|link| link.range.end.row >= at && link.range.end.row >= cutoff);
+            if loses_cells || loses_heights || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "row insertion would discard content at the sheet boundary".to_string(),
                 ));
@@ -1918,7 +1942,11 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .merges
                 .iter()
                 .any(|range| range.end.col >= at && range.end.col >= cutoff);
-            if loses_cells || loses_widths || loses_merges {
+            let loses_hyperlinks = sheet
+                .hyperlinks
+                .iter()
+                .any(|link| link.range.end.col >= at && link.range.end.col >= cutoff);
+            if loses_cells || loses_widths || loses_merges || loses_hyperlinks {
                 return Err(Error::InvalidOperation(
                     "column insertion would discard content at the sheet boundary".to_string(),
                 ));
@@ -1963,6 +1991,46 @@ fn validate_range(range: CellRange) -> Result<()> {
         return Err(Error::InvalidOperation(
             "range start must be above and left of range end".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {
+    if hyperlinks.len() > MAX_HYPERLINKS_PER_SHEET {
+        return Err(Error::InvalidOperation(
+            "sheet contains too many hyperlinks".to_string(),
+        ));
+    }
+    for hyperlink in hyperlinks {
+        validate_range(hyperlink.range)?;
+        if hyperlink
+            .external_target
+            .as_deref()
+            .is_none_or(|value| value.is_empty())
+            && hyperlink
+                .location
+                .as_deref()
+                .is_none_or(|value| value.is_empty())
+        {
+            return Err(Error::InvalidOperation(
+                "hyperlink must have a destination".to_string(),
+            ));
+        }
+        for value in [
+            &hyperlink.external_target,
+            &hyperlink.location,
+            &hyperlink.tooltip,
+            &hyperlink.display,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > MAX_HYPERLINK_FIELD_BYTES {
+                return Err(Error::InvalidOperation(
+                    "hyperlink field exceeds its length limit".to_string(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2279,6 +2347,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
+            | Op::SetHyperlinks { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }

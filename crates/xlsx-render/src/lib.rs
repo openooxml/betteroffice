@@ -15,7 +15,7 @@ use xlsx_model::value::CellValue;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetId, VAlign, Workbook};
 
-pub use display_list::{Align, DisplayList, DrawCmd, GridMeta, Rect, scaled};
+pub use display_list::{Align, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, Rect, scaled};
 pub use geometry::GridGeometry;
 pub use region::{viewport_for_range, viewport_for_used_range};
 
@@ -33,6 +33,7 @@ const GRIDLINE_COLOR: &str = "#d4d4d4";
 const TEXT_COLOR: &str = "#000000";
 const BORDER_COLOR: &str = "#000000";
 const PANE_DIVIDER_COLOR: &str = "#8a8a8a";
+const HYPERLINK_COLOR: &str = "#0563c1";
 const GRIDLINE_WIDTH: f32 = 1.0;
 const PANE_DIVIDER_WIDTH: f32 = 2.0;
 const FONT_SIZE_PT: f32 = 11.0;
@@ -190,6 +191,12 @@ impl AxisLayout {
             .is_ok()
     }
 
+    fn intersects(&self, start: u32, end: u32) -> bool {
+        self.tracks
+            .iter()
+            .any(|track| (start..=end).contains(&track.index))
+    }
+
     fn span(&self, start: u32, end: u32, edge: impl Fn(u32) -> f32) -> Option<AxisSpan> {
         let first = self
             .tracks
@@ -249,11 +256,13 @@ pub fn build_display_list_with_ghosts(
             height: viewport.height,
             commands,
             grid: GridMeta::default(),
+            hyperlinks: Vec::new(),
         };
     };
 
     let styles = &wb.styles;
     let theme = &styles.theme;
+    let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
     let geom = GridGeometry::new(sheet_ref);
     let (frozen_rows, frozen_cols) = sheet_ref
         .freeze_pane
@@ -283,6 +292,23 @@ pub fn build_display_list_with_ghosts(
         row_offsets: rows.offsets(),
         col_offsets: cols.offsets(),
     };
+    let hyperlinks = sheet_ref
+        .hyperlinks
+        .iter()
+        .filter(|link| {
+            rows.intersects(link.range.start.row, link.range.end.row)
+                && cols.intersects(link.range.start.col, link.range.end.col)
+        })
+        .map(|link| HyperlinkRegion {
+            top: link.range.start.row,
+            left: link.range.start.col,
+            bottom: link.range.end.row,
+            right: link.range.end.col,
+            external_target: link.external_target.clone(),
+            location: link.location.clone(),
+            tooltip: link.tooltip.clone(),
+        })
+        .collect();
     let anchors = visible_anchors(sheet_ref, &rows, &cols);
     let changed_ghost_cells: std::collections::HashSet<(u32, u32)> = ghosts
         .iter()
@@ -362,8 +388,20 @@ pub fn build_display_list_with_ghosts(
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
-        let Some((text, color)) = cell_display_text(styles, wb.date_system, cell) else {
+        let hyperlink = sheet_ref.hyperlink_at(at);
+        let Some((text, color)) = cell_display_text(styles, wb.date_system, cell).or_else(|| {
+            hyperlink
+                .filter(|link| link.range.start == at)
+                .and_then(|link| link.display.clone())
+                .filter(|display| !display.is_empty())
+                .map(|display| (display, hyperlink_color.to_string()))
+        }) else {
             continue;
+        };
+        let color = if hyperlink.is_some() {
+            hyperlink_color.to_string()
+        } else {
+            color
         };
 
         let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
@@ -397,11 +435,41 @@ pub fn build_display_list_with_ghosts(
             align,
             bold: font.is_some_and(|f| f.bold),
             italic: font.is_some_and(|f| f.italic),
-            underline: font.is_some_and(|f| f.underline),
+            underline: hyperlink.is_some() || font.is_some_and(|f| f.underline),
             strike: font.is_some_and(|f| f.strike),
             highlight: None,
             dashed_underline: false,
             font_family: font.and_then(|f| f.name.clone()),
+            ghost: false,
+        });
+    }
+
+    for link in &sheet_ref.hyperlinks {
+        let at = link.range.start;
+        if sheet_ref.cell(at).is_some() || !rows.contains(at.row) || !cols.contains(at.col) {
+            continue;
+        }
+        let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
+            continue;
+        };
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+            continue;
+        };
+        commands.push(DrawCmd::Text {
+            x: cell_box.x + TEXT_PAD_PX,
+            y: baseline_y(cell_box.y, cell_box.h, FONT_SIZE_PT, None),
+            text: text.clone(),
+            font_size: FONT_SIZE_PT,
+            color: hyperlink_color.to_string(),
+            clip: cell_box.clip,
+            align: Align::Left,
+            bold: false,
+            italic: false,
+            underline: true,
+            strike: false,
+            highlight: None,
+            dashed_underline: false,
+            font_family: None,
             ghost: false,
         });
     }
@@ -458,6 +526,7 @@ pub fn build_display_list_with_ghosts(
         height: viewport.height,
         commands,
         grid,
+        hyperlinks,
     }
 }
 
@@ -863,6 +932,7 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsx_model::Hyperlink;
     use xlsx_model::workbook::{Cell, FreezePane, Sheet};
 
     fn text_cell(s: &str) -> Cell {
@@ -927,6 +997,58 @@ mod tests {
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert_eq!(long_text.x, dc * 2.0);
         assert_eq!(long_text.w, dc);
+    }
+
+    #[test]
+    fn renders_hyperlink_indication_and_hit_regions() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 0), text_cell("Website"));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A1:B1").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: Some("Open site".into()),
+            display: None,
+        });
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C3").unwrap(),
+            external_target: None,
+            location: Some("Sheet1!A1".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+
+        let dl = build_display_list(
+            &wb,
+            SheetId(0),
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 120.0,
+            },
+        );
+
+        assert_eq!(dl.hyperlinks.len(), 2);
+        assert_eq!(dl.hyperlinks[0].right, 1);
+        assert_eq!(dl.hyperlinks[0].tooltip.as_deref(), Some("Open site"));
+        let text = dl
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                DrawCmd::Text {
+                    text,
+                    color,
+                    underline,
+                    ..
+                } => Some((text.as_str(), color.as_str(), *underline)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(text.contains(&("Website", HYPERLINK_COLOR, true)));
+        assert!(text.contains(&("Jump", HYPERLINK_COLOR, true)));
     }
 
     #[test]

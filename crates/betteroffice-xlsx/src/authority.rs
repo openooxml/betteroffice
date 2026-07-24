@@ -5,7 +5,8 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue,
-    FreezePane, MAX_COLS, MAX_ROWS, Sheet, SheetId, Stylesheet, Workbook as WorkbookModel,
+    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, Sheet, SheetId, Stylesheet,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -13,11 +14,12 @@ use yrs::block::{
     BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
 };
 use yrs::encoding::read::{Error as DecodeError, Read};
+use yrs::encoding::write::Write;
 use yrs::sync::time::Clock;
 use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
-use yrs::updates::encoder::Encode;
+use yrs::updates::encoder::{Encoder, EncoderV1};
 use yrs::{
     Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Origin, Out, ReadTxn,
     StateVector, Transact, TransactionMut, Update, WriteTxn,
@@ -27,12 +29,13 @@ const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CONTENTS: &str = "contents";
 const COL_WIDTHS: &str = "colWidths";
 const FREEZE_PANE: &str = "freezePane";
+const HYPERLINKS: &str = "hyperlinks";
 const MERGES: &str = "merges";
 const NAME: &str = "name";
 const ROW_HEIGHTS: &str = "rowHeights";
@@ -45,6 +48,8 @@ const MAX_SAFE_CLOCK: u32 = i32::MAX as u32;
 const MAX_UPDATE_BLOCKS: usize = 1_000_000;
 const MAX_UPDATE_VALUES: usize = 1_000_000;
 const MAX_UPDATE_DELETE_RANGES: usize = 1_000_000;
+const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
+const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
 const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
@@ -115,6 +120,7 @@ pub(crate) struct WorkbookStructure {
     sheet_keys: Vec<String>,
     sheet_names: Vec<String>,
     freeze_panes: Vec<Option<FreezePane>>,
+    hyperlinks: Vec<Vec<Hyperlink>>,
     merges: Vec<Vec<CellRange>>,
     shared_types: BTreeMap<String, SheetSharedTypes>,
 }
@@ -274,7 +280,19 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
-        self.doc.transact().state_vector().encode_v1()
+        let state_vector = self.doc.transact().state_vector();
+        let mut entries = state_vector
+            .iter()
+            .map(|(client, clock)| (client.get(), *clock))
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        let mut encoder = EncoderV1::new();
+        encoder.write_var(entries.len());
+        for (client, clock) in entries {
+            encoder.write_var(client);
+            encoder.write_var(clock);
+        }
+        encoder.to_vec()
     }
 
     pub(crate) fn encode_state_as_update_v1(&self) -> Vec<u8> {
@@ -579,6 +597,7 @@ impl WorkbookAuthority {
                         COL_WIDTHS,
                         CONTENTS,
                         FREEZE_PANE,
+                        HYPERLINKS,
                         MERGES,
                         NAME,
                         ROW_HEIGHTS,
@@ -610,6 +629,7 @@ impl WorkbookAuthority {
                         COL_WIDTHS,
                         CONTENTS,
                         FREEZE_PANE,
+                        HYPERLINKS,
                         MERGES,
                         NAME,
                         ROW_HEIGHTS,
@@ -630,6 +650,11 @@ impl WorkbookAuthority {
                 .map(|sheet| sheet.name.clone())
                 .collect(),
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
+            hyperlinks: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.hyperlinks.clone())
+                .collect(),
             merges: model
                 .sheets
                 .iter()
@@ -946,6 +971,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
             | Op::SetFreezePane { .. }
+            | Op::SetHyperlinks { .. }
             | Op::MergeCells { .. }
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
@@ -1710,6 +1736,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
             | Op::SetFreezePane { .. }
+            | Op::SetHyperlinks { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
     )
@@ -1798,6 +1825,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetColWidth { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
+        | Op::SetHyperlinks { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
         | Op::PatchRangeStyle { sheet, .. }
@@ -1891,6 +1919,9 @@ fn sync_sheet(
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     sheet_map.try_update(txn, FREEZE_PANE, freeze_pane_to_any(sheet.freeze_pane));
+    let hyperlinks = serde_json::to_string(&sheet.hyperlinks)
+        .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
+    sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     sheet_map.try_update(txn, MERGES, merges_to_any(&sheet.merges));
     sheet_map.try_update(txn, NAME, sheet.name.as_str());
     let row_heights: MapRef = sheet_map.get_or_init(txn, ROW_HEIGHTS);
@@ -2152,6 +2183,18 @@ fn materialize_sheet<T: ReadTxn>(
     sheet.freeze_pane = match sheet_map.get(txn, FREEZE_PANE) {
         Some(Out::Any(value)) => freeze_pane_from_any(&value)?,
         _ => return Err("sheet is missing freeze pane".to_string()),
+    };
+    sheet.hyperlinks = match sheet_map.get(txn, HYPERLINKS) {
+        Some(value) => {
+            let json = value
+                .cast::<String>()
+                .map_err(|_| "sheet hyperlinks are not a string".to_string())?;
+            let hyperlinks: Vec<Hyperlink> = serde_json::from_str(&json)
+                .map_err(|error| format!("sheet hyperlinks are invalid: {error}"))?;
+            validate_hyperlinks(&hyperlinks)?;
+            hyperlinks
+        }
+        None => return Err("sheet is missing hyperlinks".to_string()),
     };
     sheet.merges = match sheet_map.get(txn, MERGES) {
         Some(Out::Any(value)) => merges_from_any(&value)?,
@@ -2469,6 +2512,47 @@ fn freeze_pane_from_any(value: &Any) -> Result<Option<FreezePane>, String> {
     Ok(Some(pane))
 }
 
+fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<(), String> {
+    if hyperlinks.len() > MAX_HYPERLINKS_PER_SHEET {
+        return Err("sheet has too many hyperlinks".to_string());
+    }
+    for hyperlink in hyperlinks {
+        let range = hyperlink.range;
+        if range.start.row > range.end.row
+            || range.start.col > range.end.col
+            || range.end.row >= MAX_ROWS
+            || range.end.col >= MAX_COLS
+        {
+            return Err("sheet hyperlink range is out of bounds".to_string());
+        }
+        if hyperlink
+            .external_target
+            .as_deref()
+            .is_none_or(|value| value.is_empty())
+            && hyperlink
+                .location
+                .as_deref()
+                .is_none_or(|value| value.is_empty())
+        {
+            return Err("sheet hyperlink has no destination".to_string());
+        }
+        for value in [
+            &hyperlink.external_target,
+            &hyperlink.location,
+            &hyperlink.tooltip,
+            &hyperlink.display,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > MAX_HYPERLINK_FIELD_BYTES {
+                return Err("sheet hyperlink field exceeds its length limit".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn merges_from_any(value: &Any) -> Result<Vec<CellRange>, String> {
     let Any::Array(merges) = value else {
         return Err("sheet merges are not an array".to_string());
@@ -2524,7 +2608,7 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
 
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     let mut hasher = Sha256::new();
-    hasher.update(b"betteroffice-xlsx-yrs-v4");
+    hasher.update(b"betteroffice-xlsx-yrs-v5");
     let base = serde_json::to_vec(&(
         model.date_system,
         &model.defined_names,
@@ -2580,6 +2664,9 @@ fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
             }
             None => hasher.update([0]),
         }
+        let hyperlinks = serde_json::to_vec(&sheet.hyperlinks)
+            .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
+        hash_bytes(&mut hasher, &hyperlinks);
     }
     let digest = hasher.finalize();
     let fingerprint = format!("{digest:x}");
@@ -2660,6 +2747,13 @@ mod tests {
             .merges
             .push(CellRange::new(CellRef::new(3, 0), CellRef::new(4, 2)));
         first.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(3, 2)));
+        first.hyperlinks.push(Hyperlink {
+            range: CellRange::new(CellRef::new(1, 0), CellRef::new(1, 0)),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: Some("Open".into()),
+            display: Some("Example".into()),
+        });
         let mut model = WorkbookModel {
             date_system: DateSystem::V1904,
             shared_strings: vec!["hello".into()],

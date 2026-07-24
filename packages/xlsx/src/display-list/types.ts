@@ -116,6 +116,16 @@ export interface GridMeta {
   colOffsets: number[];
 }
 
+export interface HyperlinkRegion {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+  externalTarget?: string;
+  location?: string;
+  tooltip?: string;
+}
+
 /**
  * A full frame to paint: logical size plus the ordered command stream. `grid`
  * is optional so a synthetic or pre-grid-metadata frame still type-checks; the
@@ -126,4 +136,5 @@ export interface DisplayList {
   height: number;
   commands: DrawCmd[];
   grid?: GridMeta;
+  hyperlinks?: HyperlinkRegion[];
 }

@@ -9,7 +9,10 @@ use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workboo
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
-use crate::remap::{remap_formulas, rename_sheet_references};
+use crate::remap::{
+    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_formula_sheet,
+    rename_sheet_references,
+};
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
 /// order, restores the prior workbook state.
@@ -98,6 +101,14 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 pane: old,
             }]))
         }
+        Op::SetHyperlinks { sheet, hyperlinks } => {
+            let sheet_ref = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut sheet_ref.hyperlinks, hyperlinks.clone());
+            Ok(InvertedOp(vec![Op::SetHyperlinks {
+                sheet: *sheet,
+                hyperlinks: old,
+            }]))
+        }
         Op::MergeCells { sheet, range } => {
             let s = sheet_mut(wb, *sheet)?;
             let replaced = s
@@ -184,12 +195,15 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 .name
                 .clone();
             let formulas = rename_sheet_references(wb, &old, name)?;
+            let hyperlinks = rename_hyperlink_locations(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
-            Ok(InvertedOp(vec![Op::RestoreSheet {
+            let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
                 name: old,
                 formulas,
-            }]))
+            }];
+            inverse.extend(hyperlinks);
+            Ok(InvertedOp(inverse))
         }
         Op::RestoreSheet {
             sheet,
@@ -358,10 +372,13 @@ fn insert_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
+    let old_hyperlinks = s.hyperlinks.clone();
     let dropped = shift_cells(s, op);
     shift_row_heights_up(s, at, count);
     remap_merges_keep(s, op);
+    remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteRows { sheet, at, count }];
     for (r, c) in dropped {
@@ -371,7 +388,12 @@ fn insert_rows(
             cell: CellState::from(&c),
         });
     }
+    inv.push(Op::SetHyperlinks {
+        sheet,
+        hyperlinks: old_hyperlinks,
+    });
     inv.extend(restores);
+    inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
 
@@ -383,10 +405,13 @@ fn delete_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
+    let old_hyperlinks = s.hyperlinks.clone();
     let deleted = shift_cells(s, op);
     let dropped_heights = shift_row_heights_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
+    remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertRows { sheet, at, count }];
     for (r, c) in deleted {
@@ -406,7 +431,12 @@ fn delete_rows(
     for range in dropped_merges {
         inv.push(Op::MergeCells { sheet, range });
     }
+    inv.push(Op::SetHyperlinks {
+        sheet,
+        hyperlinks: old_hyperlinks,
+    });
     inv.extend(restores);
+    inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
 
@@ -418,10 +448,13 @@ fn insert_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
+    let old_hyperlinks = s.hyperlinks.clone();
     let dropped = shift_cells(s, op);
     shift_col_widths_up(s, at, count);
     remap_merges_keep(s, op);
+    remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
     for (r, c) in dropped {
@@ -431,7 +464,12 @@ fn insert_cols(
             cell: CellState::from(&c),
         });
     }
+    inv.push(Op::SetHyperlinks {
+        sheet,
+        hyperlinks: old_hyperlinks,
+    });
     inv.extend(restores);
+    inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
 
@@ -443,10 +481,13 @@ fn delete_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
+    let old_hyperlinks = s.hyperlinks.clone();
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
+    remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
     for (r, c) in deleted {
@@ -466,7 +507,12 @@ fn delete_cols(
     for range in dropped_merges {
         inv.push(Op::MergeCells { sheet, range });
     }
+    inv.push(Op::SetHyperlinks {
+        sheet,
+        hyperlinks: old_hyperlinks,
+    });
     inv.extend(restores);
+    inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
 
@@ -584,6 +630,46 @@ fn remap_merges_drop(s: &mut Sheet, op: &Op) -> Vec<CellRange> {
     dropped
 }
 
+fn remap_hyperlinks(sheet: &mut Sheet, op: &Op) {
+    sheet.hyperlinks = sheet
+        .hyperlinks
+        .drain(..)
+        .filter_map(|mut hyperlink| {
+            hyperlink.range = remap_hyperlink_range(hyperlink.range, op)?;
+            Some(hyperlink)
+        })
+        .collect();
+}
+
+fn rename_hyperlink_locations(wb: &mut Workbook, old_name: &str, new_name: &str) -> Vec<Op> {
+    let mut restores = Vec::new();
+    for (index, sheet) in wb.sheets.iter_mut().enumerate() {
+        let mut changed = false;
+        let mut hyperlinks = sheet.hyperlinks.clone();
+        for hyperlink in &mut hyperlinks {
+            if hyperlink.external_target.is_some() {
+                continue;
+            }
+            let Some(location) = &hyperlink.location else {
+                continue;
+            };
+            let rewritten = rename_formula_sheet(location, old_name, new_name);
+            if rewritten != *location {
+                hyperlink.location = Some(rewritten);
+                changed = true;
+            }
+        }
+        if changed {
+            let old = std::mem::replace(&mut sheet.hyperlinks, hyperlinks);
+            restores.push(Op::SetHyperlinks {
+                sheet: SheetId(index as u32),
+                hyperlinks: old,
+            });
+        }
+    }
+    restores
+}
+
 fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> {
     if index >= wb.sheets.len() {
         return Err(OpError::SheetIndexOutOfRange(index));
@@ -627,6 +713,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             pane: Some(pane),
         });
     }
+    if !removed.hyperlinks.is_empty() {
+        inv.push(Op::SetHyperlinks {
+            sheet,
+            hyperlinks: removed.hyperlinks,
+        });
+    }
     Ok(InvertedOp(inv))
 }
 
@@ -637,7 +729,7 @@ fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{CellProvider, CellValue, FreezePane};
+    use xlsx_model::{CellProvider, CellValue, FreezePane, Hyperlink};
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()
@@ -756,6 +848,13 @@ mod tests {
             },
         );
         s.merges.push(CellRange::parse_a1("A6:B6").unwrap());
+        s.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A6:B6").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: None,
+        });
         s.row_heights.insert(5, 30.0);
         let before = wb.clone();
 
@@ -781,6 +880,7 @@ mod tests {
             CellValue::Number { value: 6.0 }
         );
         assert_eq!(after.merges, orig.merges);
+        assert_eq!(after.hyperlinks, orig.hyperlinks);
         assert_eq!(after.row_heights, orig.row_heights);
     }
 
@@ -794,6 +894,16 @@ mod tests {
                 ..Default::default()
             },
         );
+        wb.sheet_mut(SheetId(0))
+            .unwrap()
+            .hyperlinks
+            .push(Hyperlink {
+                range: CellRange::parse_a1("A3:B3").unwrap(),
+                external_target: None,
+                location: Some("Sheet1!A1".into()),
+                tooltip: None,
+                display: None,
+            });
         let before = wb.sheets[0].used_range();
 
         let op = Op::InsertRows {
@@ -806,6 +916,7 @@ mod tests {
             wb.value(SheetId(0), r("A5")),
             CellValue::Text { value: "x".into() }
         );
+        assert_eq!(wb.sheets[0].hyperlinks[0].range.to_a1(), "A5:B5");
 
         for iop in &inv.0 {
             apply(&mut wb, iop).unwrap();
@@ -815,6 +926,83 @@ mod tests {
             wb.value(SheetId(0), r("A3")),
             CellValue::Text { value: "x".into() }
         );
+        assert_eq!(wb.sheets[0].hyperlinks[0].range.to_a1(), "A3:B3");
+    }
+
+    #[test]
+    fn structural_edits_and_renames_rewrite_hyperlink_destinations() {
+        let mut wb = wb_one_sheet();
+        wb.sheets[0].hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A1").unwrap(),
+            external_target: None,
+            location: Some("Target!A3".into()),
+            tooltip: None,
+            display: Some("Jump".into()),
+        });
+        wb.sheets.push(Sheet::new("Target"));
+        wb.sheets[1].hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A1:A4").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: None,
+        });
+        let before = wb.clone();
+
+        let inverse = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(1),
+                at: 1,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].location.as_deref(),
+            Some("Target!A5")
+        );
+        assert_eq!(wb.sheets[1].hyperlinks[0].range.to_a1(), "A1:A6");
+        for operation in &inverse.0 {
+            apply(&mut wb, operation).unwrap();
+        }
+        assert_eq!(wb, before);
+
+        let inverse = apply(
+            &mut wb,
+            &Op::DeleteRows {
+                sheet: SheetId(1),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[1].hyperlinks[0].range.to_a1(), "A1:A3");
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].location.as_deref(),
+            Some("Target!A2")
+        );
+        for operation in &inverse.0 {
+            apply(&mut wb, operation).unwrap();
+        }
+        assert_eq!(wb, before);
+
+        let inverse = apply(
+            &mut wb,
+            &Op::RenameSheet {
+                sheet: SheetId(1),
+                name: "New Target".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].location.as_deref(),
+            Some("'New Target'!A3")
+        );
+        for operation in &inverse.0 {
+            apply(&mut wb, operation).unwrap();
+        }
+        assert_eq!(wb, before);
     }
 
     #[test]

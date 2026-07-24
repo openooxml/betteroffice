@@ -35,6 +35,15 @@ pub struct DefinedName {
     pub hidden: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hyperlink {
+    pub range: CellRange,
+    pub external_target: Option<String>,
+    pub location: Option<String>,
+    pub tooltip: Option<String>,
+    pub display: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Cell {
     pub value: CellValue,
@@ -49,6 +58,7 @@ pub struct Sheet {
     pub name: String,
     cells: BTreeMap<(RowId, ColId), Cell>,
     pub freeze_pane: Option<FreezePane>,
+    pub hyperlinks: Vec<Hyperlink>,
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
@@ -95,15 +105,30 @@ impl Sheet {
         })
     }
 
+    pub fn hyperlink_at(&self, at: CellRef) -> Option<&Hyperlink> {
+        self.hyperlinks.iter().find(|link| link.range.contains(at))
+    }
+
     pub fn used_range(&self) -> Option<CellRange> {
-        let mut it = self.cells.keys();
-        let &(r0, c0) = it.next()?;
-        let (mut min_r, mut max_r, mut min_c, mut max_c) = (r0, r0, c0, c0);
-        for &(r, c) in it {
+        let mut bounds = self
+            .cells
+            .keys()
+            .map(|&(row, col)| CellRange::new(CellRef::new(row, col), CellRef::new(row, col)))
+            .chain(self.hyperlinks.iter().map(|link| link.range));
+        let first = bounds.next()?;
+        let (mut min_r, mut max_r, mut min_c, mut max_c) = (
+            first.start.row,
+            first.end.row,
+            first.start.col,
+            first.end.col,
+        );
+        for range in bounds {
+            let r = range.start.row;
+            let c = range.start.col;
             min_r = min_r.min(r);
-            max_r = max_r.max(r);
+            max_r = max_r.max(range.end.row);
             min_c = min_c.min(c);
-            max_c = max_c.max(c);
+            max_c = max_c.max(range.end.col);
         }
         Some(CellRange::new(
             CellRef::new(min_r, min_c),
@@ -305,5 +330,30 @@ mod tests {
         let mut reversed = 1..2;
         std::mem::swap(&mut reversed.start, &mut reversed.end);
         assert_eq!(sheet.iter_cells_in_rect(0..3, reversed).count(), 0);
+    }
+
+    #[test]
+    fn hyperlinks_are_addressable_and_extend_the_used_range() {
+        let mut sheet = Sheet::new("Data");
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("C4:D5").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: Some("Example".into()),
+        });
+
+        assert_eq!(sheet.used_range().unwrap().to_a1(), "C4:D5");
+        assert_eq!(
+            sheet
+                .hyperlink_at(CellRef::parse_a1("D5").unwrap())
+                .and_then(|link| link.display.as_deref()),
+            Some("Example")
+        );
+        assert!(
+            sheet
+                .hyperlink_at(CellRef::parse_a1("A1").unwrap())
+                .is_none()
+        );
     }
 }
