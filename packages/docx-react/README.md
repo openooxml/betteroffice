@@ -6,8 +6,7 @@ drop-in `<DocxEditor>` component with the toolbar, ruler, selection, keyboard,
 comments, and tracked-changes UI wired up. Rendering and layout run in the
 core's Rust/WebAssembly engine; pages are painted onto canvas.
 
-<!-- TODO(author): screenshot/GIF — editor with tracked changes / collab cursors -->
-<img src="https://betteroffice.dev/readme/docx-editor.png" alt="DocxEditor with tracked changes and comments" width="720" />
+<!-- TODO(author): add a screenshot/GIF here once hosted; an <img> with an unresolvable src renders broken on npm -->
 
 > **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
 > components, collaboration — are settling and unlikely to change shape. Smaller
@@ -78,7 +77,7 @@ revisions).
 - Localized UI via the `i18n` prop
   ([`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n))
 - Real-time collaboration with people or agents; the document is a CRDT
-- Live collaborator cursors are landing in the next release.
+- Live collaborator cursors and selections, shown in each peer's color
 
 Bundled metric-compatible fonts ship in-repo, and the `measurementFontProvider`
 prop accepts a custom provider for Word-accurate metrics.
@@ -101,7 +100,9 @@ import { CollaborationProvider } from '@betteroffice/docx/collaboration';
     initialUpdate: sharedSeed, // identical bytes for every peer
     onReplica: (replica) => {
       if (!replica) return;
-      const provider = new CollaborationProvider(replica, transport);
+      const provider = new CollaborationProvider(replica, transport, {
+        user: { name: "Ada" }, // shown on this peer's remote caret
+      });
       provider.connect();
     },
   }}

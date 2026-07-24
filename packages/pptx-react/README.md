@@ -6,8 +6,7 @@ slide canvas, slide strip, formatting toolbar, and keyboard editing surface.
 Parsing, layout, and text shaping run in the core's Rust/WebAssembly engine;
 slides are painted onto canvas.
 
-<!-- TODO(author): screenshot/GIF — editor with slide strip / collab cursors -->
-<img src="https://betteroffice.dev/readme/pptx-editor.png" alt="PptxEditor with slide strip and formatting toolbar" width="720" />
+<!-- TODO(author): add a screenshot/GIF here once hosted; an <img> with an unresolvable src renders broken on npm -->
 
 > **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
 > components, collaboration — are settling and unlikely to change shape. Smaller
@@ -60,7 +59,7 @@ edits), `onChange` (deck snapshots), `onError`.
 - Localized UI via the `i18n` prop
   ([`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n))
 - Real-time collaboration with people or agents; the deck is a CRDT
-- Live collaborator cursors are landing in the next release.
+- Live collaborator shape selections and presence chips, shown in each peer's color
 
 ## Collaboration
 
@@ -79,7 +78,9 @@ import { CollaborationProvider } from '@betteroffice/pptx';
     initialUpdate: sharedSeed,
     onReplica: (replica) => {
       if (!replica) return;
-      const provider = new CollaborationProvider(replica, transport);
+      const provider = new CollaborationProvider(replica, transport, {
+        user: { name: "Ada" }, // shown on this peer's presence chip
+      });
       provider.connect();
     },
   }}

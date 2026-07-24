@@ -6,8 +6,7 @@ drop-in `<XlsxEditor>` component with the toolbar, selection, keyboard, and
 clipboard wired up. Formula calculation and rendering run in the core's
 Rust/WebAssembly engine; the grid is painted onto canvas.
 
-<!-- TODO(author): screenshot/GIF — editor with agent proposal ghosts / collab cursors -->
-<img src="https://betteroffice.dev/readme/xlsx-editor.png" alt="XlsxEditor with the editing toolbar and a pending agent proposal" width="720" />
+<!-- TODO(author): add a screenshot/GIF here once hosted; an <img> with an unresolvable src renders broken on npm -->
 
 > **Early (`0.0.x`).** The core surfaces — opening/saving documents, the editor
 > components, collaboration — are settling and unlikely to change shape. Smaller
@@ -74,7 +73,7 @@ edits), `collaboration`, `i18n`, and `className`.
 - Localized UI via the `i18n` prop
   ([`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n))
 - Real-time collaboration with people or agents; the workbook is a CRDT
-- Live collaborator cursors are landing in the next release.
+- Live collaborator selections and presence chips, shown in each peer's color
 
 ## AI agents
 
@@ -111,7 +110,9 @@ import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
   file={file}
   collaboration={{ clientId }}
   onReady={({ handle }) => {
-    const provider = new CollaborationProvider(handle, transport);
+    const provider = new CollaborationProvider(handle, transport, {
+      user: { name: "Ada" }, // shown on this peer's selection flag
+    });
     provider.connect();
     return () => provider.destroy();
   }}

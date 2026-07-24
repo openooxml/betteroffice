@@ -50,7 +50,9 @@ Connect the editor's Yrs replica to any reliable binary transport:
 ```ts
 import { CollaborationProvider } from '@betteroffice/docx/collaboration';
 
-const provider = new CollaborationProvider(replica, createTransport());
+const provider = new CollaborationProvider(replica, createTransport(), {
+  user: { name: "Ada" }, // identity for this peer's remote caret
+});
 provider.connect();
 ```
 

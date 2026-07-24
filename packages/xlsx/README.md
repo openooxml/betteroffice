@@ -86,7 +86,9 @@ import {
 await initWasm();
 const workbook = openWorkbook(bytes, { collaborative: true });
 const transport: CollaborationTransport = createTransport();
-const provider = new CollaborationProvider(workbook, transport);
+const provider = new CollaborationProvider(workbook, transport, {
+  user: { name: "Ada" }, // identity for this peer's selection flag
+});
 provider.connect();
 
 function dispose() {

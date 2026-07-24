@@ -59,7 +59,9 @@ and bounds frames and pending backpressure bytes.
 ```ts
 import { CollaborationProvider } from '@betteroffice/pptx';
 
-const provider = new CollaborationProvider(deck, transport);
+const provider = new CollaborationProvider(deck, transport, {
+  user: { name: "Ada" }, // identity for this peer's presence chip
+});
 deck.onUpdate((_update, origin) => {
   if (origin === 'remote') repaint();
 });
