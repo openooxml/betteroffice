@@ -213,6 +213,9 @@
         "@betteroffice/pptx-i18n": "workspace:*",
       },
       "devDependencies": {
+        "@happy-dom/global-registrator": "^20.8.3",
+        "@testing-library/react": "^16.0.0",
+        "@types/bun": "^1.3.14",
         "@types/react": "^19.2.17",
         "@types/react-dom": "^19.2.3",
         "react": "^19.2.7",
@@ -251,6 +254,9 @@
         "@betteroffice/xlsx-i18n": "workspace:*",
       },
       "devDependencies": {
+        "@happy-dom/global-registrator": "^20.8.3",
+        "@testing-library/react": "^16.0.0",
+        "@types/bun": "^1.3.14",
         "@types/react": "^19.2.17",
         "@types/react-dom": "^19.2.3",
         "react": "^19.2.7",

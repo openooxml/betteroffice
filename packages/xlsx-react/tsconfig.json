@@ -18,6 +18,7 @@
     "noFallthroughCasesInSwitch": true,
     "declaration": true,
     "declarationMap": true,
+    "types": ["bun"],
     "paths": {
       "@/*": ["./src/*"],
       "@betteroffice/xlsx": ["../xlsx/src/index.ts"],
