@@ -89,6 +89,15 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 height: old,
             }]))
         }
+        Op::SetFreezePane { sheet, pane } => {
+            let sheet_ref = sheet_mut(wb, *sheet)?;
+            let old = sheet_ref.freeze_pane;
+            sheet_ref.freeze_pane = *pane;
+            Ok(InvertedOp(vec![Op::SetFreezePane {
+                sheet: *sheet,
+                pane: old,
+            }]))
+        }
         Op::MergeCells { sheet, range } => {
             let s = sheet_mut(wb, *sheet)?;
             let replaced = s
@@ -612,6 +621,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             height: Some(h),
         });
     }
+    if let Some(pane) = removed.freeze_pane {
+        inv.push(Op::SetFreezePane {
+            sheet,
+            pane: Some(pane),
+        });
+    }
     Ok(InvertedOp(inv))
 }
 
@@ -622,7 +637,7 @@ fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{CellProvider, CellValue};
+    use xlsx_model::{CellProvider, CellValue, FreezePane};
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()
@@ -832,6 +847,7 @@ mod tests {
         );
         s.merges.push(CellRange::parse_a1("A1:B1").unwrap());
         s.col_widths.insert(0, 12.0);
+        s.freeze_pane = Some(FreezePane::new(1, 1, r("C4")));
         let before = wb.sheets[1].clone();
 
         let inv = apply(&mut wb, &Op::RemoveSheet { index: 1 }).unwrap();
@@ -846,6 +862,7 @@ mod tests {
         );
         assert_eq!(wb.sheets[1].merges, before.merges);
         assert_eq!(wb.sheets[1].col_widths, before.col_widths);
+        assert_eq!(wb.sheets[1].freeze_pane, before.freeze_pane);
     }
 
     #[test]

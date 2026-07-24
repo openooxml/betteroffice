@@ -12,8 +12,8 @@ import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collabo
 import type { DisplayList } from '../display-list/types';
 
 /**
- * A scrolled window into a sheet, in content pixels from the sheet origin — the
- * argument the renderer needs to build a frame. Mirrors the Rust `Viewport`.
+ * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
+ * non-frozen body. Mirrors the Rust `Viewport`.
  */
 export interface Viewport {
   x: number;
@@ -31,6 +31,10 @@ export interface SheetInfo {
   activeSheet: number;
   contentWidth: number;
   contentHeight: number;
+  frozenRows: number;
+  frozenCols: number;
+  initialScrollX: number;
+  initialScrollY: number;
 }
 
 /**

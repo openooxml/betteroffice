@@ -87,6 +87,10 @@ fn is_false(b: &bool) -> bool {
 pub struct GridMeta {
     pub start_row: u32,
     pub start_col: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_indices: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col_indices: Option<Vec<u32>>,
     pub row_offsets: Vec<f32>,
     pub col_offsets: Vec<f32>,
 }
@@ -180,6 +184,8 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         grid: GridMeta {
             start_row: dl.grid.start_row,
             start_col: dl.grid.start_col,
+            row_indices: dl.grid.row_indices,
+            col_indices: dl.grid.col_indices,
             row_offsets: dl
                 .grid
                 .row_offsets
@@ -247,6 +253,8 @@ mod tests {
             grid: GridMeta {
                 start_row: 1,
                 start_col: 2,
+                row_indices: None,
+                col_indices: None,
                 row_offsets: vec![0.0, 20.0],
                 col_offsets: vec![0.0, 64.0],
             },

@@ -10,6 +10,23 @@ use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreezePane {
+    pub rows: RowId,
+    pub cols: ColId,
+    pub top_left: CellRef,
+}
+
+impl FreezePane {
+    pub fn new(rows: RowId, cols: ColId, top_left: CellRef) -> Self {
+        Self {
+            rows,
+            cols,
+            top_left,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinedName {
     pub name: String,
@@ -31,6 +48,7 @@ pub struct Cell {
 pub struct Sheet {
     pub name: String,
     cells: BTreeMap<(RowId, ColId), Cell>,
+    pub freeze_pane: Option<FreezePane>,
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,

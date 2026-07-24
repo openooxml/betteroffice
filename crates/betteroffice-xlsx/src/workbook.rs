@@ -419,12 +419,32 @@ impl Workbook {
     pub fn sheet_info(&self) -> Result<SheetInfo> {
         let sheet = self.sheet(self.active_sheet)?;
         let geometry = GridGeometry::new(sheet);
-        let (content_width, content_height) = match sheet.used_range() {
-            Some(range) => (
-                geometry.col_x(range.end.col.saturating_add(2).min(MAX_COLS)),
-                geometry.row_y(range.end.row.saturating_add(2).min(MAX_ROWS)),
-            ),
-            None => (geometry.col_x(26), geometry.row_y(50)),
+        let used_range = sheet.used_range();
+        let mut content_col = used_range
+            .map_or(26, |range| range.end.col.saturating_add(2))
+            .min(MAX_COLS);
+        let mut content_row = used_range
+            .map_or(50, |range| range.end.row.saturating_add(2))
+            .min(MAX_ROWS);
+        let (frozen_rows, frozen_cols, initial_scroll_x, initial_scroll_y) = match sheet.freeze_pane
+        {
+            Some(pane) => {
+                content_col = content_col
+                    .max(pane.cols.saturating_add(1))
+                    .max(pane.top_left.col.saturating_add(2))
+                    .min(MAX_COLS);
+                content_row = content_row
+                    .max(pane.rows.saturating_add(1))
+                    .max(pane.top_left.row.saturating_add(2))
+                    .min(MAX_ROWS);
+                (
+                    pane.rows,
+                    pane.cols,
+                    (geometry.col_x(pane.top_left.col) - geometry.col_x(pane.cols)).max(0.0),
+                    (geometry.row_y(pane.top_left.row) - geometry.row_y(pane.rows)).max(0.0),
+                )
+            }
+            None => (0, 0, 0.0, 0.0),
         };
         Ok(SheetInfo {
             sheet_names: self
@@ -434,8 +454,12 @@ impl Workbook {
                 .map(|sheet| sheet.name.clone())
                 .collect(),
             active_sheet: self.active_sheet,
-            content_width,
-            content_height,
+            content_width: geometry.col_x(content_col),
+            content_height: geometry.row_y(content_row),
+            frozen_rows,
+            frozen_cols,
+            initial_scroll_x,
+            initial_scroll_y,
         })
     }
 
@@ -1670,6 +1694,17 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
     }
     let mut names = HashSet::with_capacity(model.sheets.len());
     for sheet in &model.sheets {
+        if let Some(pane) = sheet.freeze_pane
+            && (pane.rows > MAX_ROWS
+                || pane.cols > MAX_COLS
+                || pane.top_left.row >= MAX_ROWS
+                || pane.top_left.col >= MAX_COLS)
+        {
+            return Err(Error::InvalidOperation(format!(
+                "sheet {} has an invalid freeze pane",
+                sheet.name
+            )));
+        }
         validate_sheet_name(&sheet.name)?;
         if !names.insert(sheet.name.to_lowercase()) {
             return Err(Error::InvalidOperation(format!(
@@ -1791,6 +1826,19 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 return Err(Error::InvalidOperation(format!(
                     "row height must be between 0 and {MAX_ROW_HEIGHT}"
                 )));
+            }
+        }
+        Op::SetFreezePane { sheet, pane } => {
+            require_sheet(model, *sheet)?;
+            if pane.is_some_and(|pane| {
+                pane.rows > MAX_ROWS
+                    || pane.cols > MAX_COLS
+                    || pane.top_left.row >= MAX_ROWS
+                    || pane.top_left.col >= MAX_COLS
+            }) {
+                return Err(Error::InvalidOperation(
+                    "freeze pane is out of range".to_string(),
+                ));
             }
         }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
@@ -2175,8 +2223,12 @@ fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<()> {
         return Err(Error::InvalidViewport);
     }
     let (rows, columns) = geometry.viewport_range(viewport);
-    let row_count = u64::from(rows.end - rows.start);
-    let column_count = u64::from(columns.end - columns.start);
+    let (frozen_rows, frozen_cols) = sheet
+        .freeze_pane
+        .map_or((0, 0), |pane| (pane.rows, pane.cols));
+    let row_count = u64::from(rows.end - rows.start).saturating_add(u64::from(frozen_rows));
+    let column_count =
+        u64::from(columns.end - columns.start).saturating_add(u64::from(frozen_cols));
     let cells = row_count.saturating_mul(column_count);
     if cells > MAX_DISPLAY_CELLS {
         return Err(Error::DisplayTooLarge {

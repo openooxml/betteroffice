@@ -287,6 +287,7 @@ fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
         w.create_element("worksheet")
             .with_attribute(("xmlns", NS_MAIN))
             .write_inner_content(|w| {
+                write_sheet_views(w, sheet)?;
                 write_cols(w, sheet)?;
                 w.create_element("sheetData").write_inner_content(|w| {
                     for &row in &rows {
@@ -299,6 +300,44 @@ fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
             })?;
         Ok(())
     })
+}
+
+fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
+    let Some(pane) = sheet.freeze_pane else {
+        return Ok(());
+    };
+    w.create_element("sheetViews").write_inner_content(|w| {
+        w.create_element("sheetView")
+            .with_attribute(("workbookViewId", "0"))
+            .write_inner_content(|w| {
+                let mut element = BytesStart::new("pane");
+                let x_split = pane.cols.to_string();
+                let y_split = pane.rows.to_string();
+                if pane.cols > 0 {
+                    element.push_attribute(("xSplit", x_split.as_str()));
+                }
+                if pane.rows > 0 {
+                    element.push_attribute(("ySplit", y_split.as_str()));
+                }
+                let top_left = CellRef::new(pane.top_left.row, pane.top_left.col).to_a1();
+                element.push_attribute(("topLeftCell", top_left.as_str()));
+                element.push_attribute(("activePane", active_pane(pane.rows, pane.cols)));
+                element.push_attribute(("state", "frozen"));
+                w.write_event(Event::Empty(element))?;
+                Ok(())
+            })?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn active_pane(rows: u32, cols: u32) -> &'static str {
+    match (rows > 0, cols > 0) {
+        (true, true) => "bottomRight",
+        (true, false) => "bottomLeft",
+        (false, true) => "topRight",
+        (false, false) => "topLeft",
+    }
 }
 
 fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {

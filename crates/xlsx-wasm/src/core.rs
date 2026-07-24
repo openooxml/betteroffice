@@ -19,6 +19,10 @@ struct SheetInfo {
     active_sheet: u32,
     content_width: f32,
     content_height: f32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+    initial_scroll_x: f32,
+    initial_scroll_y: f32,
 }
 
 #[derive(Deserialize)]
@@ -569,6 +573,10 @@ impl Session {
                 active_sheet: info.active_sheet.0,
                 content_width: info.content_width,
                 content_height: info.content_height,
+                frozen_rows: info.frozen_rows,
+                frozen_cols: info.frozen_cols,
+                initial_scroll_x: info.initial_scroll_x,
+                initial_scroll_y: info.initial_scroll_y,
             })
             .map_err(|error| error.to_string())
     }
@@ -708,6 +716,10 @@ mod tests {
         let info = session.sheet_info_json().unwrap();
         assert!(info.contains(r#""sheetNames":["Data","Empty"]"#));
         assert!(info.contains(r#""activeSheet":0"#));
+        assert!(info.contains(r#""frozenRows":0"#));
+        assert!(info.contains(r#""frozenCols":0"#));
+        assert!(info.contains(r#""initialScrollX":0.0"#));
+        assert!(info.contains(r#""initialScrollY":0.0"#));
         assert_eq!(
             session.calculation_status_json().unwrap(),
             r#"{"limitedCells":[]}"#

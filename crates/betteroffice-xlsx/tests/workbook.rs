@@ -2,7 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DefinedName,
-    DrawCmd, Error, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    DrawCmd, Error, FreezePane, GridGeometry, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind, NumberFormatMutation, Op,
     ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch, UpdateOrigin, Viewport,
     Workbook, WorkbookModel,
@@ -161,6 +161,59 @@ fn defined_names_survive_the_facade_and_drive_incremental_recalculation() {
     assert_eq!(
         reopened.model().defined_names,
         workbook.model().defined_names
+    );
+}
+
+#[test]
+fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
+    let mut sheet = Sheet::new("Data");
+    sheet.freeze_pane = Some(FreezePane::new(1, 1, cell("D5")));
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Text {
+                value: "pinned".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("D5"),
+        Cell {
+            value: CellValue::Text {
+                value: "body".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    let geometry = GridGeometry::new(&sheet);
+    let expected_x = geometry.col_x(3) - geometry.col_x(1);
+    let expected_y = geometry.row_y(4) - geometry.row_y(1);
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+
+    let workbook = Workbook::from_model(model).unwrap();
+    let info = workbook.sheet_info().unwrap();
+    assert_eq!((info.frozen_rows, info.frozen_cols), (1, 1));
+    assert_eq!(
+        (info.initial_scroll_x, info.initial_scroll_y),
+        (expected_x, expected_y)
+    );
+    let display = workbook
+        .display_list(&Viewport {
+            x: info.initial_scroll_x,
+            y: info.initial_scroll_y,
+            width: 300.0,
+            height: 120.0,
+        })
+        .unwrap();
+    assert_eq!(display.grid.col_indices.as_deref().unwrap()[..2], [0, 3]);
+    assert_eq!(display.grid.row_indices.as_deref().unwrap()[..2], [0, 4]);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.sheet(SheetId(0)).unwrap().freeze_pane,
+        workbook.sheet(SheetId(0)).unwrap().freeze_pane
     );
 }
 

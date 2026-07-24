@@ -357,6 +357,7 @@ function XlsxEditorContent({
   const editorInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
   const suppressBlurRef = useRef(false);
+  const pendingSheetViewRef = useRef(false);
   // latest onReady, read (not depended on) by the open effect so a changing
   // callback identity never reopens the workbook.
   const onReadyRef = useRef(onReady);
@@ -444,6 +445,7 @@ function XlsxEditorContent({
     setBorderColorChoice(undefined);
     setCapturedFormat(null);
     paintSourceRef.current = null;
+    pendingSheetViewRef.current = false;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -489,6 +491,7 @@ function XlsxEditorContent({
               setError(e instanceof Error ? e.message : String(e));
             }
           });
+          pendingSheetViewRef.current = true;
           setSheetInfo(handle.sheetInfo());
           setSelection(selectionAt({ row: 0, col: 0 }));
           setCollaborationReplica(handle);
@@ -530,6 +533,15 @@ function XlsxEditorContent({
     collaborationInitialUpdate,
     refreshProposals,
   ]);
+
+  useEffect(() => {
+    if (!sheetInfo || !pendingSheetViewRef.current) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    pendingSheetViewRef.current = false;
+    scroll.scrollLeft = sheetInfo.initialScrollX * zoom;
+    scroll.scrollTop = sheetInfo.initialScrollY * zoom;
+  }, [sheetInfo, zoom]);
 
   useEffect(() => {
     if (!collaborationOnReplica || !collaborationReplica) return;
@@ -1270,11 +1282,7 @@ function XlsxEditorContent({
     if (!handle) return;
     try {
       handle.setActiveSheet(index);
-      const scroll = scrollRef.current;
-      if (scroll) {
-        scroll.scrollLeft = 0;
-        scroll.scrollTop = 0;
-      }
+      pendingSheetViewRef.current = true;
       setSelection(selectionAt({ row: 0, col: 0 }));
       setEditing(null);
       setFormulaDraft(null);

@@ -110,6 +110,8 @@ export type DrawCmd = FillRectCmd | LineCmd | TextCmd;
 export interface GridMeta {
   startRow: number;
   startCol: number;
+  rowIndices?: number[];
+  colIndices?: number[];
   rowOffsets: number[];
   colOffsets: number[];
 }

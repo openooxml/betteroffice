@@ -88,3 +88,31 @@ describe('non-uniform tracks', () => {
     expect(cellAtPoint(g, 150, 45)).toEqual({ row: 1, col: 2 });
   });
 });
+
+describe('frozen pane address maps', () => {
+  const g: GridMeta = {
+    startRow: 0,
+    startCol: 0,
+    rowIndices: [0, 4, 5],
+    colIndices: [0, 3, 4],
+    colOffsets: [0, 80, 160, 240],
+    rowOffsets: [0, 20, 40, 60],
+  };
+
+  it('maps pinned and scrolled tracks to their absolute addresses', () => {
+    expect(cellAtPoint(g, 10, 10)).toEqual({ row: 0, col: 0 });
+    expect(cellAtPoint(g, 90, 25)).toEqual({ row: 4, col: 3 });
+    expect(cellRect(g, 5, 4)).toEqual({ x: 160, y: 40, w: 80, h: 20 });
+    expect(cellRect(g, 2, 2)).toBeNull();
+  });
+
+  it('unions only visible tracks from a range crossing the pane gap', () => {
+    expect(rangeRect(g, { top: 0, left: 0, bottom: 4, right: 3 })).toEqual({
+      x: 0,
+      y: 0,
+      w: 160,
+      h: 40,
+    });
+    expect(rangeRect(g, { top: 1, left: 1, bottom: 3, right: 2 })).toBeNull();
+  });
+});

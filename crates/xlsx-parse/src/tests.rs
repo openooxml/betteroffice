@@ -3,7 +3,7 @@
 
 use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
 use xlsx_model::{
-    Cell, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, SheetId, Workbook,
+    Cell, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane, SheetId, Workbook,
 };
 
 use crate::{ParseError, parse_workbook, serialize_workbook};
@@ -134,6 +134,26 @@ fn honors_1904_date_system() {
 }
 
 #[test]
+fn parses_and_round_trips_frozen_sheet_views() {
+    let body = r#"
+        <sheetViews>
+            <sheetView workbookViewId="0">
+                <pane xSplit="2" ySplit="3" topLeftCell="E8" activePane="bottomRight" state="frozen"/>
+            </sheetView>
+        </sheetViews>
+        <sheetData/>
+    "#;
+    let parsed = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(
+        parsed.sheets[0].freeze_pane,
+        Some(FreezePane::new(3, 2, CellRef::parse_a1("E8").unwrap()))
+    );
+
+    let reparsed = parse_workbook(&serialize_workbook(&parsed).unwrap()).unwrap();
+    assert_eq!(reparsed.sheets[0].freeze_pane, parsed.sheets[0].freeze_pane);
+}
+
+#[test]
 fn parses_and_round_trips_scoped_defined_names() {
     let mut parts = package("<sheetData/>", &[], false);
     let workbook = br#"
@@ -260,6 +280,7 @@ type Snapshot = (
         Vec<String>,
         Vec<(u32, f64)>,
         Vec<(u32, f64)>,
+        Option<FreezePane>,
     )>,
     DateSystem,
     Vec<String>,
@@ -278,7 +299,14 @@ fn snapshot(wb: &Workbook) -> Snapshot {
             let merges = s.merges.iter().map(|m| m.to_a1()).collect();
             let widths = s.col_widths.iter().map(|(&k, &v)| (k, v)).collect();
             let heights = s.row_heights.iter().map(|(&k, &v)| (k, v)).collect();
-            (s.name.clone(), cells, merges, widths, heights)
+            (
+                s.name.clone(),
+                cells,
+                merges,
+                widths,
+                heights,
+                s.freeze_pane,
+            )
         })
         .collect();
     (

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, MAX_COLS,
-    MAX_ROWS, Sheet, SheetId, Stylesheet, Workbook as WorkbookModel,
+    Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue,
+    FreezePane, MAX_COLS, MAX_ROWS, Sheet, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -27,11 +27,12 @@ const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CONTENTS: &str = "contents";
 const COL_WIDTHS: &str = "colWidths";
+const FREEZE_PANE: &str = "freezePane";
 const MERGES: &str = "merges";
 const NAME: &str = "name";
 const ROW_HEIGHTS: &str = "rowHeights";
@@ -113,6 +114,7 @@ pub(crate) struct WorkbookStructure {
     generation: i64,
     sheet_keys: Vec<String>,
     sheet_names: Vec<String>,
+    freeze_panes: Vec<Option<FreezePane>>,
     merges: Vec<Vec<CellRange>>,
     shared_types: BTreeMap<String, SheetSharedTypes>,
 }
@@ -573,7 +575,15 @@ impl WorkbookAuthority {
                 require_map_keys(
                     &sheet_map,
                     &txn,
-                    &[COL_WIDTHS, CONTENTS, MERGES, NAME, ROW_HEIGHTS, STYLES],
+                    &[
+                        COL_WIDTHS,
+                        CONTENTS,
+                        FREEZE_PANE,
+                        MERGES,
+                        NAME,
+                        ROW_HEIGHTS,
+                        STYLES,
+                    ],
                     &format!("sheet {key}"),
                 )?;
             }
@@ -596,7 +606,15 @@ impl WorkbookAuthority {
                 require_map_keys(
                     &sheet_map,
                     &txn,
-                    &[COL_WIDTHS, CONTENTS, MERGES, NAME, ROW_HEIGHTS, STYLES],
+                    &[
+                        COL_WIDTHS,
+                        CONTENTS,
+                        FREEZE_PANE,
+                        MERGES,
+                        NAME,
+                        ROW_HEIGHTS,
+                        STYLES,
+                    ],
                     &format!("inactive sheet {key}"),
                 )?;
                 materialize_sheet(&sheet_map, &txn, &style_indices)?;
@@ -611,6 +629,7 @@ impl WorkbookAuthority {
                 .iter()
                 .map(|sheet| sheet.name.clone())
                 .collect(),
+            freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
             merges: model
                 .sheets
                 .iter()
@@ -926,6 +945,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
+            | Op::SetFreezePane { .. }
             | Op::MergeCells { .. }
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
@@ -1689,6 +1709,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteRows { .. }
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
+            | Op::SetFreezePane { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
     )
@@ -1776,6 +1797,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::DeleteCols { sheet, .. }
         | Op::SetColWidth { sheet, .. }
         | Op::SetRowHeight { sheet, .. }
+        | Op::SetFreezePane { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
         | Op::PatchRangeStyle { sheet, .. }
@@ -1868,6 +1890,7 @@ fn sync_sheet(
 ) -> Result<(), String> {
     let col_widths: MapRef = sheet_map.get_or_init(txn, COL_WIDTHS);
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
+    sheet_map.try_update(txn, FREEZE_PANE, freeze_pane_to_any(sheet.freeze_pane));
     sheet_map.try_update(txn, MERGES, merges_to_any(&sheet.merges));
     sheet_map.try_update(txn, NAME, sheet.name.as_str());
     let row_heights: MapRef = sheet_map.get_or_init(txn, ROW_HEIGHTS);
@@ -2126,6 +2149,10 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
+    sheet.freeze_pane = match sheet_map.get(txn, FREEZE_PANE) {
+        Some(Out::Any(value)) => freeze_pane_from_any(&value)?,
+        _ => return Err("sheet is missing freeze pane".to_string()),
+    };
     sheet.merges = match sheet_map.get(txn, MERGES) {
         Some(Out::Any(value)) => merges_from_any(&value)?,
         _ => return Err("sheet is missing merges".to_string()),
@@ -2397,6 +2424,51 @@ fn merges_to_any(merges: &[CellRange]) -> Any {
     ))
 }
 
+fn freeze_pane_to_any(pane: Option<FreezePane>) -> Any {
+    match pane {
+        None => Any::Null,
+        Some(pane) => any_array(vec![
+            Any::from(pane.rows),
+            Any::from(pane.cols),
+            Any::from(pane.top_left.row),
+            Any::from(pane.top_left.col),
+            Any::Bool(pane.top_left.abs_row),
+            Any::Bool(pane.top_left.abs_col),
+        ]),
+    }
+}
+
+fn freeze_pane_from_any(value: &Any) -> Result<Option<FreezePane>, String> {
+    let Any::Array(values) = value else {
+        return if matches!(value, Any::Null) {
+            Ok(None)
+        } else {
+            Err("sheet freeze pane is not an array".to_string())
+        };
+    };
+    if values.len() != 6 {
+        return Err("sheet freeze pane must contain six values".to_string());
+    }
+    let pane = FreezePane::new(
+        any_u32(&values[0], "frozen row count")?,
+        any_u32(&values[1], "frozen column count")?,
+        CellRef {
+            row: any_u32(&values[2], "freeze pane top row")?,
+            col: any_u32(&values[3], "freeze pane left column")?,
+            abs_row: any_bool(&values[4], "freeze pane absolute row")?,
+            abs_col: any_bool(&values[5], "freeze pane absolute column")?,
+        },
+    );
+    if pane.rows > MAX_ROWS
+        || pane.cols > MAX_COLS
+        || pane.top_left.row >= MAX_ROWS
+        || pane.top_left.col >= MAX_COLS
+    {
+        return Err("sheet freeze pane is out of bounds".to_string());
+    }
+    Ok(Some(pane))
+}
+
 fn merges_from_any(value: &Any) -> Result<Vec<CellRange>, String> {
     let Any::Array(merges) = value else {
         return Err("sheet merges are not an array".to_string());
@@ -2452,7 +2524,7 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
 
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     let mut hasher = Sha256::new();
-    hasher.update(b"betteroffice-xlsx-yrs-v3");
+    hasher.update(b"betteroffice-xlsx-yrs-v4");
     let base = serde_json::to_vec(&(
         model.date_system,
         &model.defined_names,
@@ -2498,6 +2570,15 @@ fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
         for (&row, &height) in &sheet.row_heights {
             hash_u32(&mut hasher, row);
             hash_u64(&mut hasher, height.to_bits());
+        }
+        match sheet.freeze_pane {
+            Some(pane) => {
+                hasher.update([1]);
+                hash_u32(&mut hasher, pane.rows);
+                hash_u32(&mut hasher, pane.cols);
+                hash_cell_ref(&mut hasher, pane.top_left);
+            }
+            None => hasher.update([0]),
         }
     }
     let digest = hasher.finalize();
@@ -2578,6 +2659,7 @@ mod tests {
         first
             .merges
             .push(CellRange::new(CellRef::new(3, 0), CellRef::new(4, 2)));
+        first.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(3, 2)));
         let mut model = WorkbookModel {
             date_system: DateSystem::V1904,
             shared_strings: vec!["hello".into()],

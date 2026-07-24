@@ -48,6 +48,10 @@ pub struct SheetInfo {
     pub active_sheet: SheetId,
     pub content_width: f32,
     pub content_height: f32,
+    pub frozen_rows: u32,
+    pub frozen_cols: u32,
+    pub initial_scroll_x: f32,
+    pub initial_scroll_y: f32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

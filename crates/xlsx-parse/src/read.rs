@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, Sheet, SheetId,
-    Workbook,
+    Cell, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane, Sheet,
+    SheetId, Workbook,
 };
 
 use crate::styles::parse_stylesheet;
@@ -300,6 +300,11 @@ fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, 
                         sheet.merges.push(range);
                     }
                 }
+                b"pane" => {
+                    if sheet.freeze_pane.is_none() {
+                        sheet.freeze_pane = parse_freeze_pane(&e)?;
+                    }
+                }
                 b"col" => parse_col(&e, &mut sheet)?,
                 _ => {}
             },
@@ -322,6 +327,36 @@ fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, 
     }
     normalize_merges(&mut sheet.merges);
     Ok(sheet)
+}
+
+fn parse_freeze_pane(
+    element: &quick_xml::events::BytesStart,
+) -> Result<Option<FreezePane>, ParseError> {
+    let state = attr(element, b"state")?;
+    if !matches!(state.as_deref(), Some("frozen" | "frozenSplit")) {
+        return Ok(None);
+    }
+    let rows = frozen_count(attr(element, b"ySplit")?, MAX_ROWS);
+    let cols = frozen_count(attr(element, b"xSplit")?, MAX_COLS);
+    if rows == 0 && cols == 0 {
+        return Ok(None);
+    }
+    let fallback = CellRef::new(
+        rows.min(MAX_ROWS.saturating_sub(1)),
+        cols.min(MAX_COLS.saturating_sub(1)),
+    );
+    let top_left = attr(element, b"topLeftCell")?
+        .and_then(|value| CellRef::parse_a1(&value).ok())
+        .unwrap_or(fallback);
+    Ok(Some(FreezePane::new(rows, cols, top_left)))
+}
+
+fn frozen_count(value: Option<String>, limit: u32) -> u32 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+        .map(|value| value.min(f64::from(limit)) as u32)
+        .unwrap_or(0)
 }
 
 fn normalize_merges(merges: &mut Vec<CellRange>) {

@@ -34,12 +34,32 @@ export function cellAtPoint(grid: GridMeta | undefined, x: number, y: number): C
   const col = trackIndexAt(grid.colOffsets, x);
   const row = trackIndexAt(grid.rowOffsets, y);
   if (col < 0 || row < 0) return null;
-  return { row: grid.startRow + row, col: grid.startCol + col };
+  return {
+    row: grid.rowIndices?.[row] ?? grid.startRow + row,
+    col: grid.colIndices?.[col] ?? grid.startCol + col,
+  };
 }
 
 // local track index for an absolute row/col, or -1 when it is off the visible
 // window described by grid.
-function localIndex(start: number, offsets: number[], absolute: number): number {
+function localIndex(
+  start: number,
+  indices: number[] | undefined,
+  offsets: number[],
+  absolute: number
+): number {
+  if (indices) {
+    let left = 0;
+    let right = indices.length - 1;
+    while (left <= right) {
+      const midpoint = (left + right) >> 1;
+      const candidate = indices[midpoint];
+      if (candidate === absolute) return midpoint;
+      if (candidate < absolute) left = midpoint + 1;
+      else right = midpoint - 1;
+    }
+    return -1;
+  }
   const local = absolute - start;
   return local >= 0 && local < offsets.length - 1 ? local : -1;
 }
@@ -50,8 +70,8 @@ function localIndex(start: number, offsets: number[], absolute: number): number 
  */
 export function cellRect(grid: GridMeta | undefined, row: number, col: number): Rect | null {
   if (!grid) return null;
-  const lc = localIndex(grid.startCol, grid.colOffsets, col);
-  const lr = localIndex(grid.startRow, grid.rowOffsets, row);
+  const lc = localIndex(grid.startCol, grid.colIndices, grid.colOffsets, col);
+  const lr = localIndex(grid.startRow, grid.rowIndices, grid.rowOffsets, row);
   if (lc < 0 || lr < 0) return null;
   return {
     x: grid.colOffsets[lc],
@@ -61,9 +81,27 @@ export function cellRect(grid: GridMeta | undefined, row: number, col: number): 
   };
 }
 
-// clamp an inclusive [value..] index into the visible track window [0, tracks).
-function clampLocal(start: number, tracks: number, absolute: number): number {
-  return Math.max(0, Math.min(tracks - 1, absolute - start));
+function trackAddress(start: number, indices: number[] | undefined, local: number): number {
+  return indices?.[local] ?? start + local;
+}
+
+function intersectingTracks(
+  start: number,
+  indices: number[] | undefined,
+  tracks: number,
+  first: number,
+  last: number
+): [number, number] | null {
+  let leading = -1;
+  let trailing = -1;
+  for (let local = 0; local < tracks; local++) {
+    const address = trackAddress(start, indices, local);
+    if (address < first) continue;
+    if (address > last) break;
+    if (leading < 0) leading = local;
+    trailing = local;
+  }
+  return leading < 0 ? null : [leading, trailing];
 }
 
 /**
@@ -77,16 +115,23 @@ export function rangeRect(grid: GridMeta | undefined, range: CellRange): Rect | 
   const rows = grid.rowOffsets.length - 1;
   if (cols <= 0 || rows <= 0) return null;
 
-  const lastCol = grid.startCol + cols - 1;
-  const lastRow = grid.startRow + rows - 1;
-  // reject ranges that do not intersect the visible window on either axis.
-  if (range.right < grid.startCol || range.left > lastCol) return null;
-  if (range.bottom < grid.startRow || range.top > lastRow) return null;
-
-  const l = clampLocal(grid.startCol, cols, range.left);
-  const r = clampLocal(grid.startCol, cols, range.right);
-  const t = clampLocal(grid.startRow, rows, range.top);
-  const b = clampLocal(grid.startRow, rows, range.bottom);
+  const visibleCols = intersectingTracks(
+    grid.startCol,
+    grid.colIndices,
+    cols,
+    range.left,
+    range.right
+  );
+  const visibleRows = intersectingTracks(
+    grid.startRow,
+    grid.rowIndices,
+    rows,
+    range.top,
+    range.bottom
+  );
+  if (!visibleCols || !visibleRows) return null;
+  const [l, r] = visibleCols;
+  const [t, b] = visibleRows;
   return {
     x: grid.colOffsets[l],
     y: grid.rowOffsets[t],
