@@ -278,7 +278,8 @@ export function encodeQueryAwareness(
 
 export function decodeAwarenessUpdate(
   update: Uint8Array,
-  maxStates = DEFAULT_MAX_AWARENESS_STATES
+  maxStates = DEFAULT_MAX_AWARENESS_STATES,
+  reportDiscard?: (error: ProtocolError) => void
 ): AwarenessUpdate[] {
   if (!(update instanceof Uint8Array)) {
     throw new ProtocolError('Awareness update must be a Uint8Array');
@@ -289,27 +290,58 @@ export function decodeAwarenessUpdate(
   const decoder = new Decoder(update);
   const count = decoder.readVarUint();
   if (count > maxStates) {
-    throw new ProtocolError(`Awareness update exceeds ${maxStates} states`);
+    const error = new ProtocolError(`Awareness update exceeds ${maxStates} states`);
+    if (!reportDiscard) throw error;
+    reportDiscard(error);
   }
   const updates: AwarenessUpdate[] = [];
-  for (let index = 0; index < count; index++) {
-    const clientId = decoder.readVarUint();
-    const clock = decoder.readVarUint();
-    if (clientId <= 0) {
-      throw new ProtocolError('Awareness clientId must be a positive safe integer');
-    }
-    let parsed: unknown;
+  const decodedCount = Math.min(count, maxStates);
+  for (let index = 0; index < decodedCount; index++) {
+    let clientId: number;
+    let clock: number;
+    let encodedState: string;
     try {
-      parsed = JSON.parse(decoder.readVarString());
+      clientId = decoder.readVarUint();
+      clock = decoder.readVarUint();
+      encodedState = decoder.readVarString();
     } catch (cause) {
-      if (cause instanceof ProtocolError) throw cause;
-      throw new ProtocolError(
-        `Invalid awareness JSON${cause instanceof Error ? `: ${cause.message}` : ''}`
+      if (!reportDiscard) throw cause;
+      reportDiscard(
+        new ProtocolError(
+          `Awareness entry ${index + 1} could not be decoded: ${
+            cause instanceof Error ? cause.message : 'Unknown error'
+          }`
+        )
+      );
+      return updates;
+    }
+
+    try {
+      if (clientId <= 0) {
+        throw new ProtocolError('Awareness clientId must be a positive safe integer');
+      }
+      const parsed: unknown = JSON.parse(encodedState);
+      updates.push({ clientId, clock, state: awarenessPayload(parsed, clientId) });
+    } catch (cause) {
+      const error =
+        cause instanceof ProtocolError
+          ? cause
+          : new ProtocolError(
+              `Invalid awareness JSON${cause instanceof Error ? `: ${cause.message}` : ''}`
+            );
+      if (!reportDiscard) throw error;
+      reportDiscard(
+        new ProtocolError(
+          `Awareness entry ${index + 1} discarded: ${error.message}`
+        )
       );
     }
-    updates.push({ clientId, clock, state: awarenessPayload(parsed, clientId) });
   }
-  if (!decoder.done) throw new ProtocolError('Trailing awareness update data');
+  if (count <= maxStates && !decoder.done) {
+    const error = new ProtocolError('Trailing awareness update data');
+    if (!reportDiscard) throw error;
+    reportDiscard(error);
+  }
   return updates;
 }
 

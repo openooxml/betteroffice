@@ -15,6 +15,7 @@ export const XLSX_MAX_ROWS = 1_048_576;
 export const XLSX_MAX_COLUMNS = 16_384;
 export const MAX_AWARENESS_NAME_LENGTH = 128;
 export const MAX_AWARENESS_SHEET_LENGTH = 256;
+export const MAX_TRACKED_AWARENESS_PEERS = 1024;
 
 export const AWARENESS_COLORS = [
   '#0B57D0',
@@ -35,6 +36,11 @@ export interface AwarenessPeerEntry {
 }
 
 export type AwarenessPeerStore = Map<number, AwarenessPeerEntry>;
+
+export interface ApplyAwarenessUpdateOptions {
+  maxPeers?: number;
+  onPeersDiscarded?: (count: number) => void;
+}
 
 export interface ResolvedAwarenessCursor {
   sheetIndex: number;
@@ -110,15 +116,25 @@ export function applyAwarenessUpdates(
   store: AwarenessPeerStore,
   updates: readonly AwarenessUpdate[],
   localClientId: number,
-  now: number
+  now: number,
+  options: ApplyAwarenessUpdateOptions = {}
 ): boolean {
+  const maxPeers = options.maxPeers ?? MAX_TRACKED_AWARENESS_PEERS;
+  if (!Number.isSafeInteger(maxPeers) || maxPeers < 1) {
+    throw new RangeError('Awareness peer limit must be a positive integer');
+  }
   let changed = false;
+  let discarded = 0;
   for (const update of updates) {
     if (update.clientId === localClientId) continue;
     const current = store.get(update.clientId);
     if (current && update.clock < current.clock) continue;
     if (current && update.clock === current.clock) {
       current.lastSeen = now;
+      continue;
+    }
+    if (!current && store.size >= maxPeers) {
+      discarded += 1;
       continue;
     }
 
@@ -134,6 +150,7 @@ export function applyAwarenessUpdates(
       cursorMovedAt: cursorMoved ? now : (current?.cursorMovedAt ?? 0),
     });
   }
+  if (discarded > 0) options.onPeersDiscarded?.(discarded);
   return changed;
 }
 

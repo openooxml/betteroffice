@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  DEFAULT_MAX_AWARENESS_STATES,
   decodeAwarenessUpdate,
   decodeMessages,
   encodeAwarenessUpdate,
@@ -7,7 +8,9 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  encodeVarUint,
 } from './protocol';
+import { MAX_TRACKED_AWARENESS_PEERS } from './awareness';
 import { CollaborationProvider } from './provider';
 import type {
   CollaborationError,
@@ -26,6 +29,35 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     offset += part.byteLength;
   }
   return output;
+}
+
+function encodeRawAwarenessFrame(
+  updates: readonly { clientId: number; clock: number; state: unknown }[]
+): Uint8Array {
+  const parts = [encodeVarUint(updates.length)];
+  const encoder = new TextEncoder();
+  for (const update of updates) {
+    const state = encoder.encode(JSON.stringify(update.state));
+    parts.push(
+      encodeVarUint(update.clientId),
+      encodeVarUint(update.clock),
+      encodeVarUint(state.byteLength),
+      state
+    );
+  }
+  const payload = concat(...parts);
+  return concat(Uint8Array.of(1), encodeVarUint(payload.byteLength), payload);
+}
+
+function remoteAwarenessState(name: string, sheet = 'sheet:0') {
+  return {
+    user: { name, color: '#0B57D0' },
+    cursor: {
+      sheet,
+      anchor: { row: 1, col: 2 },
+      head: { row: 1, col: 2 },
+    },
+  };
 }
 
 function messageTypes(frames: readonly Uint8Array[]): string[] {
@@ -341,6 +373,182 @@ describe('CollaborationProvider sync', () => {
     expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
     expect(errors.map((error) => error.code)).toEqual(['protocol']);
     expect(errors[0].message).toContain('Invalid awareness update');
+    provider.destroy();
+  });
+
+  it('discards an overlength peer name while valid siblings and document updates keep flowing', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of()) });
+    replica.applied = [];
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeRawAwarenessFrame([
+          {
+            clientId: 22,
+            clock: 1,
+            state: remoteAwarenessState('n'.repeat(129)),
+          },
+          {
+            clientId: 23,
+            clock: 1,
+            state: remoteAwarenessState('Valid Peer'),
+          },
+        ]),
+        encodeUpdate(Uint8Array.of(4))
+      ),
+    });
+    transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(5)) });
+
+    expect(provider.peers.map((peer) => peer.clientId)).toEqual([23]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('Awareness entry 1 discarded');
+    expect(errors[0].message).toContain('user name');
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
+    provider.destroy();
+  });
+
+  it('discards an overlength peer sheet while valid siblings and document updates keep flowing', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of()) });
+    replica.applied = [];
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeRawAwarenessFrame([
+          {
+            clientId: 22,
+            clock: 1,
+            state: remoteAwarenessState('Invalid Sheet', 's'.repeat(257)),
+          },
+          {
+            clientId: 23,
+            clock: 1,
+            state: remoteAwarenessState('Valid Peer'),
+          },
+        ]),
+        encodeUpdate(Uint8Array.of(4))
+      ),
+    });
+    transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(5)) });
+
+    expect(provider.peers.map((peer) => peer.clientId)).toEqual([23]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('Awareness entry 1 discarded');
+    expect(errors[0].message).toContain('sheet identifier');
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
+    provider.destroy();
+  });
+
+  it('caps awareness entries independently of frame bytes and keeps document updates flowing', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of()) });
+    replica.applied = [];
+    const updates = Array.from(
+      { length: DEFAULT_MAX_AWARENESS_STATES + 1 },
+      (_, index) => ({
+        clientId: index + 2,
+        clock: 1,
+        state: remoteAwarenessState(`Peer ${index + 1}`),
+      })
+    );
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeRawAwarenessFrame(updates),
+        encodeUpdate(Uint8Array.of(4))
+      ),
+    });
+    transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(5)) });
+
+    expect(provider.peers).toHaveLength(DEFAULT_MAX_AWARENESS_STATES);
+    expect(
+      provider.peers.some(
+        (peer) => peer.clientId === DEFAULT_MAX_AWARENESS_STATES + 2
+      )
+    ).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain(
+      `Awareness update exceeds ${DEFAULT_MAX_AWARENESS_STATES} states`
+    );
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
+    provider.destroy();
+  });
+
+  it('caps tracked peer ids while existing peers and document updates keep flowing', () => {
+    const { provider, replica, transport } = open();
+    const errors: CollaborationError[] = [];
+    provider.onError((error) => errors.push(error));
+    transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of()) });
+    replica.applied = [];
+    const initialPeers = Array.from(
+      { length: MAX_TRACKED_AWARENESS_PEERS },
+      (_, index) => ({
+        clientId: index + 2,
+        clock: 1,
+        state: remoteAwarenessState(`Peer ${index + 1}`),
+      })
+    );
+    transport.emit({
+      type: 'message',
+      data: encodeRawAwarenessFrame(initialPeers),
+    });
+
+    transport.emit({
+      type: 'message',
+      data: concat(
+        encodeRawAwarenessFrame([
+          {
+            clientId: MAX_TRACKED_AWARENESS_PEERS + 2,
+            clock: 1,
+            state: remoteAwarenessState('Overflow Peer'),
+          },
+          {
+            clientId: 2,
+            clock: 2,
+            state: remoteAwarenessState('Updated Peer'),
+          },
+        ]),
+        encodeUpdate(Uint8Array.of(4))
+      ),
+    });
+    transport.emit({ type: 'message', data: encodeUpdate(Uint8Array.of(5)) });
+
+    expect(provider.peers).toHaveLength(MAX_TRACKED_AWARENESS_PEERS);
+    expect(
+      provider.peers.some(
+        (peer) => peer.clientId === MAX_TRACKED_AWARENESS_PEERS + 2
+      )
+    ).toBe(false);
+    expect(provider.peers.find((peer) => peer.clientId === 2)?.user.name).toBe(
+      'Updated Peer'
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain(
+      `tracked peer limit of ${MAX_TRACKED_AWARENESS_PEERS}`
+    );
+    expect(provider.status).toBe('connected');
+    expect(provider.synced).toBe(true);
+    expect(transport.disconnectCount).toBe(0);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
     provider.destroy();
   });
 

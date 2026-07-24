@@ -1,6 +1,7 @@
 import {
   decodeAwarenessUpdate,
   decodeMessages,
+  DEFAULT_MAX_AWARENESS_STATES,
   DEFAULT_MAX_FRAME_BYTES,
   DEFAULT_MAX_MESSAGES_PER_FRAME,
   encodeAwarenessUpdate,
@@ -8,6 +9,7 @@ import {
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  type ProtocolError,
 } from './protocol';
 import {
   applyAwarenessUpdates,
@@ -17,6 +19,7 @@ import {
   awarenessPeers,
   expireAwarenessPeers,
   MAX_AWARENESS_SHEET_LENGTH,
+  MAX_TRACKED_AWARENESS_PEERS,
   normalizeCollaborationUser,
   type AwarenessPeerStore,
 } from './awareness';
@@ -544,12 +547,37 @@ export class CollaborationProvider {
           break;
         case 'awareness':
           try {
+            const decodeErrors: ProtocolError[] = [];
+            let discardedPeers = 0;
             const changed = applyAwarenessUpdates(
               this.awarenessStore,
-              decodeAwarenessUpdate(message.update),
+              decodeAwarenessUpdate(
+                message.update,
+                DEFAULT_MAX_AWARENESS_STATES,
+                (cause) => decodeErrors.push(cause)
+              ),
               this.replica.clientId,
-              Date.now()
+              Date.now(),
+              {
+                onPeersDiscarded: (count) => {
+                  discardedPeers = count;
+                },
+              }
             );
+            for (const cause of decodeErrors) {
+              this.report(normalizeError('protocol', 'Invalid awareness update', cause));
+            }
+            if (discardedPeers > 0) {
+              this.report(
+                new CollaborationError(
+                  'protocol',
+                  `${discardedPeers} awareness ${
+                    discardedPeers === 1 ? 'entry was' : 'entries were'
+                  } discarded because the tracked peer limit of ${MAX_TRACKED_AWARENESS_PEERS} was reached`
+                )
+              );
+            }
+            if (!this.isCurrent(token) || !this.isOpen) return;
             if (changed) this.emitAwareness();
           } catch (cause) {
             this.report(normalizeError('protocol', 'Invalid awareness update', cause));
