@@ -6,6 +6,7 @@
     "build:deck": "bun ../../scripts/create-demo-deck.ts",
     "build:wasm": "bun ../../scripts/build-xlsx-wasm.ts && bun ../../scripts/build-docx-wasm.ts && bun ../../scripts/build-pptx-wasm.ts",
     "build:seeds": "bun scripts/build-collaboration-seeds.ts",
+    "check:seeds": "bun scripts/check-collaboration-seeds.ts",
     "predev": "bun run build:deck && bun run build:wasm && bun run build:seeds",
     "dev": "next dev",
     "prebuild": "bun run build:deck && bun run build:wasm && bun run build:seeds",
