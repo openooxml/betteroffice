@@ -2,6 +2,7 @@
 //! coercion follows excel; errors propagate leftmost-first.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
@@ -12,6 +13,11 @@ pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
 const MAX_DEFINED_NAME_DEPTH: usize = 100;
+
+#[cfg(test)]
+thread_local! {
+    static DEFINED_NAME_EXPANSIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 pub(crate) struct EvaluationBudget {
     remaining: Cell<u64>,
@@ -44,7 +50,8 @@ pub struct EvalContext<'a> {
     remaining_cell_visits: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
-    defined_name_stack: Rc<RefCell<Vec<(SheetId, String)>>>,
+    defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
+    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, CellValue>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
 }
 
@@ -58,6 +65,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
+            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
         }
     }
@@ -71,6 +79,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
+            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
         }
     }
@@ -88,6 +97,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
+            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: Some(budget),
         }
     }
@@ -101,6 +111,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
+            defined_name_values: Rc::clone(&self.defined_name_values),
             shared_budget: self.shared_budget.clone(),
         }
     }
@@ -144,6 +155,20 @@ impl<'a> EvalContext<'a> {
         self.exhausted.set(true);
         self.unhandled_budget_errors
             .set(self.unhandled_budget_errors.get().saturating_add(1));
+    }
+
+    /// evaluate a bound definition with the name held on the re-entry stack.
+    fn inside_defined_name<T>(
+        &self,
+        binding: &DefinedNameBinding,
+        evaluate_definition: impl FnOnce(&Expr, &EvalContext<'_>) -> T,
+    ) -> T {
+        self.defined_name_stack
+            .borrow_mut()
+            .push(binding.key.clone());
+        let value = evaluate_definition(&binding.expression, &self.for_sheet(binding.sheet));
+        self.defined_name_stack.borrow_mut().pop();
+        value
     }
 }
 
@@ -196,44 +221,84 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
-    match with_defined_name(scope, name, ctx, evaluate) {
-        Ok(value) => value,
-        Err(error) => err(error),
-    }
+/// a defined name identified by the sheet its lookup resolved against.
+type DefinedNameKey = (SheetId, String);
+
+/// a defined name resolved to its parsed definition plus the sheet that
+/// definition's unqualified refs bind to.
+struct DefinedNameBinding {
+    key: DefinedNameKey,
+    expression: Expr,
+    sheet: SheetId,
 }
 
-fn with_defined_name<T>(
+/// a name's value is stable for the life of a context, so each one is expanded
+/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n.
+fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
+    let key = match defined_name_key(scope, name, ctx) {
+        Ok(key) => key,
+        Err(error) => return err(error),
+    };
+    if let Some(cached) = ctx.defined_name_values.borrow().get(&key) {
+        return cached.clone();
+    }
+    let binding = match bind_defined_name(key, name, ctx) {
+        Ok(binding) => binding,
+        Err(error) => return err(error),
+    };
+    let value = ctx.inside_defined_name(&binding, evaluate);
+    ctx.defined_name_values
+        .borrow_mut()
+        .insert(binding.key, value.clone());
+    value
+}
+
+fn defined_name_key(
     scope: &Option<String>,
     name: &str,
     ctx: &EvalContext<'_>,
-    evaluate_definition: impl FnOnce(&Expr, &EvalContext<'_>) -> T,
-) -> Result<T, ErrorValue> {
+) -> Result<DefinedNameKey, ErrorValue> {
     let lookup_sheet = match scope {
         Some(scope) => ctx.provider.sheet_id(scope).ok_or(ErrorValue::Ref)?,
         None => ctx.sheet,
     };
-    let key = (lookup_sheet, name.to_lowercase());
+    Ok((lookup_sheet, name.to_lowercase()))
+}
+
+/// look up and parse a name's definition, refusing re-entry and over-deep
+/// chains. every expansion is charged to the work budget so a name graph that
+/// defeats the memo degrades to `#NUM!` instead of running unbounded.
+fn bind_defined_name(
+    key: DefinedNameKey,
+    name: &str,
+    ctx: &EvalContext<'_>,
+) -> Result<DefinedNameBinding, ErrorValue> {
     {
         let stack = ctx.defined_name_stack.borrow();
         if stack.len() >= MAX_DEFINED_NAME_DEPTH || stack.contains(&key) {
             return Err(ErrorValue::Name);
         }
     }
+    if !ctx.consume_cells(1) {
+        return Err(ErrorValue::Num);
+    }
     let defined = ctx
         .provider
-        .defined_name(lookup_sheet, name)
+        .defined_name(key.0, name)
         .ok_or(ErrorValue::Name)?;
     let formula = defined
         .formula
         .strip_prefix('=')
         .unwrap_or(&defined.formula);
     let expression = crate::parse_formula(formula).map_err(|_| ErrorValue::Name)?;
-    let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
-    ctx.defined_name_stack.borrow_mut().push(key);
-    let value = evaluate_definition(&expression, &ctx.for_sheet(definition_sheet));
-    ctx.defined_name_stack.borrow_mut().pop();
-    Ok(value)
+    let sheet = defined.local_sheet.unwrap_or(key.0);
+    #[cfg(test)]
+    DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
+    Ok(DefinedNameBinding {
+        key,
+        expression,
+        sheet,
+    })
 }
 
 /// resolve a possibly sheet-qualified cell reference to its stored value.
@@ -510,7 +575,11 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             rows: (range.end.row - range.start.row + 1) as usize,
             cols: (range.end.col - range.start.col + 1) as usize,
         }),
-        Expr::Name { scope, name } => with_defined_name(scope, name, ctx, as_area).ok().flatten(),
+        Expr::Name { scope, name } => {
+            let key = defined_name_key(scope, name, ctx).ok()?;
+            let binding = bind_defined_name(key, name, ctx).ok()?;
+            ctx.inside_defined_name(&binding, as_area)
+        }
         _ => None,
     }
 }
@@ -535,6 +604,15 @@ mod tests {
         Cell {
             value: CellValue::Number { value },
             ..Cell::default()
+        }
+    }
+
+    fn defined_name(name: &str, formula: &str) -> DefinedName {
+        DefinedName {
+            name: name.into(),
+            formula: formula.into(),
+            local_sheet: None,
+            hidden: false,
         }
     }
 
@@ -598,6 +676,81 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn mutually_recursive_names_return_name_error() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        workbook
+            .defined_names
+            .extend([defined_name("Ping", "Pong"), defined_name("Pong", "Ping")]);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for formula in ["Ping", "Pong"] {
+            assert_eq!(
+                evaluate(&parse_formula(formula).unwrap(), &context),
+                CellValue::Error {
+                    value: ErrorValue::Name
+                }
+            );
+        }
+    }
+
+    /// `Chain_0=Chain_1+Chain_1`, `Chain_1=Chain_2+Chain_2`, ... doubles the
+    /// work per level, so re-expanding a name would cost 2^n.
+    #[test]
+    fn repeated_defined_name_expansion_stays_linear() {
+        const DEPTH: usize = 60;
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for index in 0..DEPTH {
+            let next = index + 1;
+            workbook.defined_names.push(defined_name(
+                &format!("Chain_{index}"),
+                &format!("Chain_{next}+Chain_{next}"),
+            ));
+        }
+        workbook
+            .defined_names
+            .push(defined_name(&format!("Chain_{DEPTH}"), "1"));
+
+        DEFINED_NAME_EXPANSIONS.with(|count| count.set(0));
+        let value = evaluate(
+            &parse_formula("Chain_0").unwrap(),
+            &EvalContext::new(&workbook, SheetId(0)),
+        );
+        let expansions = DEFINED_NAME_EXPANSIONS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            value,
+            CellValue::Number {
+                value: 2f64.powi(DEPTH as i32)
+            }
+        );
+        assert_eq!(expansions, DEPTH + 1);
+    }
+
+    #[test]
+    fn defined_name_expansion_charges_the_work_budget() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for index in 0..4 {
+            workbook.defined_names.push(defined_name(
+                &format!("Step_{index}"),
+                &format!("Step_{}", index + 1),
+            ));
+        }
+        workbook.defined_names.push(defined_name("Step_4", "1"));
+
+        let context =
+            EvalContext::with_budget(&workbook, SheetId(0), Rc::new(EvaluationBudget::new(2)));
+        assert_eq!(
+            evaluate(&parse_formula("Step_0").unwrap(), &context),
+            CellValue::Error {
+                value: ErrorValue::Num
+            }
+        );
+        assert!(context.exhausted());
     }
 
     #[test]

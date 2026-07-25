@@ -366,6 +366,35 @@ mod tests {
         assert_eq!(result.changed, vec![(SheetId(0), a1("A1"))]);
     }
 
+    /// recalc runs on open, so a `Chain_0=Chain_1+Chain_1` ladder in an
+    /// untrusted workbook must not cost 2^n expansions.
+    #[test]
+    fn doubling_defined_name_chain_recalculates_without_blowing_up() {
+        const DEPTH: usize = 60;
+        let (mut wb, sheet) = one_sheet();
+        for index in 0..DEPTH {
+            let next = index + 1;
+            wb.defined_names.push(DefinedName {
+                name: format!("Chain_{index}"),
+                formula: format!("Chain_{next}+Chain_{next}"),
+                local_sheet: None,
+                hidden: false,
+            });
+        }
+        wb.defined_names.push(DefinedName {
+            name: format!("Chain_{DEPTH}"),
+            formula: "1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        put_formula(&mut wb, sheet, "A1", "Chain_0");
+
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+
+        assert_eq!(value(&wb, sheet, "A1"), num(2f64.powi(DEPTH as i32)));
+        assert!(result.limited_cells.is_empty());
+    }
+
     #[test]
     fn unknown_defined_name_replaces_stale_cache_with_name_error() {
         let (mut wb, sheet) = one_sheet();
