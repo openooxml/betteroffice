@@ -1,6 +1,97 @@
 import { describe, expect, test } from 'bun:test';
 import type { Document } from '@betteroffice/docx/types/document';
-import { mergeDocxHostMetadata } from './useYrsCoreSession';
+import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
+import { mergeDocxHostMetadata, seedYrsSession } from './useYrsCoreSession';
+
+function fakeSeedSession(): {
+  session: Pick<YrsSession, 'openDocx' | 'loadState'>;
+  host: YrsDocxHost;
+  opened: { bytes: Uint8Array; seedStories: boolean }[];
+  loaded: Uint8Array[];
+} {
+  const host = { name: 'host' } as unknown as YrsDocxHost;
+  const opened: { bytes: Uint8Array; seedStories: boolean }[] = [];
+  const loaded: Uint8Array[] = [];
+  return {
+    session: {
+      openDocx: (bytes, seedStories) => {
+        opened.push({ bytes, seedStories });
+        return host;
+      },
+      loadState: (update) => {
+        loaded.push(update);
+      },
+    },
+    host,
+    opened,
+    loaded,
+  };
+}
+
+describe('seedYrsSession', () => {
+  test('hydrates a pre-parsed document host from the shared initial update', () => {
+    const { session, loaded } = fakeSeedSession();
+    const initialUpdate = Uint8Array.of(7, 8, 9);
+    const seeded: Document[] = [];
+
+    const host = seedYrsSession(session, (document) => seeded.push(document), {
+      bytes: null,
+      document: { name: 'parsed' } as unknown as Document,
+      initialUpdate,
+    });
+
+    expect(seeded).toEqual([]);
+    expect(loaded).toEqual([initialUpdate]);
+    expect(host).toBeNull();
+  });
+
+  test('seeds from the pre-parsed document when no shared state exists', () => {
+    const { session, loaded } = fakeSeedSession();
+    const document = { name: 'parsed' } as unknown as Document;
+    const seeded: Document[] = [];
+
+    const host = seedYrsSession(session, (next) => seeded.push(next), {
+      bytes: null,
+      document,
+      initialUpdate: undefined,
+    });
+
+    expect(seeded).toEqual([document]);
+    expect(loaded).toEqual([]);
+    expect(host).toBeNull();
+  });
+
+  test('opens bytes for metadata without seeding stories when shared state exists', () => {
+    const { session, host: expectedHost, opened, loaded } = fakeSeedSession();
+    const bytes = Uint8Array.of(1, 2);
+    const initialUpdate = Uint8Array.of(3, 4);
+
+    const host = seedYrsSession(session, () => expect.unreachable(), {
+      bytes,
+      document: null,
+      initialUpdate,
+    });
+
+    expect(opened).toEqual([{ bytes, seedStories: false }]);
+    expect(loaded).toEqual([initialUpdate]);
+    expect(host).toBe(expectedHost);
+  });
+
+  test('seeds stories from bytes when no shared state exists', () => {
+    const { session, host: expectedHost, opened, loaded } = fakeSeedSession();
+    const bytes = Uint8Array.of(1, 2);
+
+    const host = seedYrsSession(session, () => expect.unreachable(), {
+      bytes,
+      document: null,
+      initialUpdate: undefined,
+    });
+
+    expect(opened).toEqual([{ bytes, seedStories: true }]);
+    expect(loaded).toEqual([]);
+    expect(host).toBe(expectedHost);
+  });
+});
 
 describe('mergeDocxHostMetadata', () => {
   test('preserves recursive content while applying live host metadata', () => {

@@ -103,6 +103,35 @@ export function mergeDocxHostMetadata(full: Document, host: Document): Document 
   };
 }
 
+export interface YrsSeedSources {
+  bytes: Uint8Array | null;
+  document: Document | null;
+  initialUpdate?: Uint8Array;
+}
+
+/**
+ * Hydrates a fresh session. Shared collaboration state wins over both seed
+ * shapes so a client joining a room never seeds an independent replica.
+ */
+export function seedYrsSession(
+  session: Pick<YrsSession, 'openDocx' | 'loadState'>,
+  seedDocumentIntoYrs: (document: Document) => void,
+  seed: YrsSeedSources
+): YrsDocxHost | null {
+  const { bytes, document, initialUpdate } = seed;
+  if (bytes) {
+    const host = session.openDocx(bytes, !initialUpdate);
+    if (initialUpdate) session.loadState(initialUpdate.slice());
+    return host;
+  }
+  if (initialUpdate) {
+    session.loadState(initialUpdate.slice());
+    return null;
+  }
+  if (document) seedDocumentIntoYrs(document);
+  return null;
+}
+
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -145,13 +174,11 @@ export function useYrsCoreSession(
           next.destroy();
           return;
         }
-        let host: YrsDocxHost | null = null;
-        if (seedBytes) {
-          host = next.openDocx(seedBytes, !collaborationInitialUpdate);
-          if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
-        } else if (seedDocument) {
-          yrs.documentToYrs(next, seedDocument);
-        }
+        const host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+          bytes: seedBytes,
+          document: seedDocument,
+          initialUpdate: collaborationInitialUpdate,
+        });
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
