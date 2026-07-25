@@ -15,8 +15,12 @@
  */
 
 import type { EditSession } from './wasm/index';
+import type { Document } from '../types/document';
+import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
+  CollaborationCursor,
   CollaborationReplica,
+  CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 
@@ -36,6 +40,13 @@ export {
 export { documentToYrs } from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 
+export interface YrsDocxHost {
+  document: Document;
+  referencedFonts: string[];
+  embeddedFonts: Map<string, ArrayBuffer>;
+  fontTableRelationshipsXml?: string;
+}
+
 /** Durable authorship metadata for one suggested (tracked-change) operation. */
 export interface YrsAuthor {
   name: string;
@@ -48,6 +59,12 @@ export interface YrsLoc {
   story: string;
   paraId: string;
   offset: number;
+}
+
+/** One binary Yrs position that transforms with collaborative edits. */
+export interface YrsStickyPosition {
+  story: string;
+  encoded: Uint8Array;
 }
 
 /** A paragraph-addressed position without the story (used inside {@link YrsStoryRange}). */
@@ -659,6 +676,11 @@ export interface YrsSession extends CollaborationReplica {
   residentWorkerProbe(): { layoutRevision: number } | null;
   /** Resident display-list hit/range queries; results are small JSON records. */
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
+  displayVerticalMoveJson(
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
@@ -673,6 +695,12 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
+  /** Parses a DOCX, seeds its stories, and returns thin host metadata. */
+  seedFromDocx(bytes: Uint8Array): YrsDocxHost;
+  /** Parses a DOCX and optionally seeds its stories. */
+  openDocx(bytes: Uint8Array, seedStories: boolean): YrsDocxHost;
+  /** Materializes the retained canonical package for compatibility APIs. */
+  materializeDocx(): Document | null;
   /**
    * Seeds stories from parsed content (S1 scaffold; the real
    * `load(ParsedDocument)` lands with the ops track). Returns paraIds per
@@ -686,7 +714,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Full state, or only the state missing from a peer vector. */
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Applies a remote/incremental yrs v1 update. */
-  applyUpdate(update: Uint8Array): void;
+  applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array, story: string): void;
   /**
@@ -699,10 +727,18 @@ export interface YrsSession extends CollaborationReplica {
 
   // -- local input state --
 
+  /** Encode one location as a binary Yrs sticky position. */
+  encodeStickyPosition(loc: YrsLoc): YrsStickyPosition;
+  /** Resolve a binary Yrs sticky position against this replica. */
+  resolveStickyPosition(position: YrsStickyPosition): YrsLoc | null;
   /** Store this peer's awareness selection as sticky positions. */
   setSelection(anchor: YrsLoc, head?: YrsLoc): void;
   /** Resolve this peer's current sticky selection, or null before initialization. */
   selection(): YrsSelection | null;
+  /** Encode the current selection as binary Yrs sticky indices. */
+  encodeSelection(): CollaborationCursor | null;
+  /** Resolve a peer's binary Yrs sticky indices against this replica. */
+  resolveSelection(cursor: CollaborationCursor): YrsSelection | null;
   /** Store this peer's rectangular table selection outside the document. */
   setCellSelection(range: YrsTableRange): void;
   /** Resolve the current sticky cell selection, or null before initialization. */
@@ -923,6 +959,40 @@ function wireRanges(ranges: readonly YrsStoryRange[]): string {
   );
 }
 
+function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteOffset === 0 &&
+    bytes.byteLength === bytes.buffer.byteLength
+  ) {
+    return bytes.buffer;
+  }
+  return bytes.slice().buffer as ArrayBuffer;
+}
+
+function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
+  const value: unknown = JSON.parse(json);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new TypeError('DOCX host metadata must be an object');
+  }
+  const wire = value as Record<string, unknown>;
+  if (
+    !Array.isArray(wire.referencedFonts) ||
+    !wire.referencedFonts.every((name) => typeof name === 'string')
+  ) {
+    throw new TypeError('DOCX host referencedFonts must be a string array');
+  }
+  const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
+  return {
+    document: result.document,
+    referencedFonts: wire.referencedFonts,
+    embeddedFonts: result.embeddedFonts,
+    ...(result.fontTableRelationshipsXml === undefined
+      ? {}
+      : { fontTableRelationshipsXml: result.fontTableRelationshipsXml }),
+  };
+}
+
 function wrapSession(session: EditSession, clientId: number): YrsSession {
   const listeners = new Map<
     number,
@@ -950,6 +1020,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let residentLayoutRevision = 0;
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
+  let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -1053,6 +1124,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     pendingUpdates.length = 0;
     session.clear_update_observer();
     observing = false;
+  };
+
+  const openDocx = (bytes: Uint8Array, seedStories: boolean): YrsDocxHost => {
+    const source = bytes.slice();
+    const json = mutate(() => session.open_docx(source, seedStories));
+    const host = decodeDocxHost(json, source);
+    docxSource = source;
+    return host;
   };
 
   return {
@@ -1164,12 +1243,22 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     displayHitTestRegionsJson: (pageIndex, x, y) =>
       session.display_hit_test_regions_json(pageIndex, x, y),
+    displayVerticalMoveJson: (position, direction, goalX) =>
+      session.display_vertical_move_json(position, direction, goalX),
     displayRangeRectsJson: (from, to) => session.display_range_rects_json(from, to),
     displayRangeRectsRegionJson: (region, rId, from, to) =>
       session.display_range_rects_region_json(region, rId, from, to),
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
 
     loadState: (update) => mutate(() => session.load(update)),
+    seedFromDocx: (bytes) => openDocx(bytes, true),
+    openDocx,
+    materializeDocx: () => {
+      const source = docxSource;
+      const json = session.materialize_docx();
+      if (!source || json === undefined) return null;
+      return decodeS9Envelope(json, docxSourceBuffer(source)).document;
+    },
     loadStories: (stories) =>
       mutate(
         () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>
@@ -1180,7 +1269,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
-    applyUpdate: (update) => mutate(() => session.apply_update(update)),
+    applyUpdate: (update) =>
+      mutate(
+        () =>
+          JSON.parse(
+            session.apply_update_with_inference(update)
+          ) as CollaborationTextInsertion | null
+      ),
     applyLocalUpdate: (update, story) => {
       ensureUndo(story);
       mutate(() => session.apply_local_update(update));
@@ -1200,6 +1295,19 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       };
     },
 
+    encodeStickyPosition: (loc) => ({
+      story: loc.story,
+      encoded: session.encode_sticky_position(loc.story, loc.paraId, loc.offset),
+    }),
+    resolveStickyPosition: (position) => {
+      try {
+        return JSON.parse(
+          session.resolve_sticky_position(position.story, position.encoded)
+        ) as YrsLoc;
+      } catch {
+        return null;
+      }
+    },
     setSelection: (anchor, head = anchor) => {
       if (anchor.story !== head.story) throw new Error('yrs selection must stay inside one story');
       session.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
@@ -1212,6 +1320,29 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
       cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
+    },
+    encodeSelection: () => {
+      const encoded = JSON.parse(session.encoded_selection()) as {
+        story: string;
+        anchor: number[];
+        head: number[];
+      } | null;
+      return encoded
+        ? {
+            story: encoded.story,
+            anchor: Uint8Array.from(encoded.anchor),
+            head: Uint8Array.from(encoded.head),
+          }
+        : null;
+    },
+    resolveSelection: (cursor) => {
+      try {
+        return JSON.parse(
+          session.resolve_encoded_selection(cursor.story, cursor.anchor, cursor.head)
+        ) as YrsSelection;
+      } catch {
+        return null;
+      }
     },
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,

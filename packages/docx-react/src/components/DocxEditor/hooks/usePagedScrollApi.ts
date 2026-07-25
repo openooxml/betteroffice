@@ -21,6 +21,7 @@ export interface UsePagedScrollApiOptions {
   getScrollContainer: () => HTMLDivElement | null;
   displayListQueries?: DisplayListQueries | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
+  onNavigationIntent?: () => void;
   requestCanvasParagraphFlash?: (req: {
     from: number;
     to: number;
@@ -43,6 +44,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     getScrollContainer,
     displayListQueries = null,
     canvasHostRef,
+    onNavigationIntent,
     requestCanvasParagraphFlash,
   } = opts;
   const scrollAbortRef = useRef<AbortController | null>(null);
@@ -79,12 +81,13 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
       if (!Number.isInteger(pmPos) || pmPos < 0 || !displayListQueries) return;
+      onNavigationIntent?.();
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
       const rect = displayListQueries.anchorRect(pmPos);
       if (rect) scrollRectIntoView(rect, !forParaIdScroll);
     },
-    [displayListQueries, scrollRectIntoView]
+    [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
   const scrollToPageImpl = useCallback(
@@ -97,10 +100,11 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       ) {
         return;
       }
+      onNavigationIntent?.();
       const bounds = displayListQueries.pageBounds(pageNumber - 1);
       if (bounds) scrollRectIntoView(bounds, true);
     },
-    [displayListQueries, scrollRectIntoView]
+    [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
 
   const scrollToParaIdImpl = useCallback(

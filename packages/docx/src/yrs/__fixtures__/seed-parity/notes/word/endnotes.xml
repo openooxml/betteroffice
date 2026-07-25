@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:id="-1" w:type="separator">
+    <w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p>
+  </w:endnote>
+  <w:endnote w:id="0" w:type="continuationSeparator">
+    <w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p>
+  </w:endnote>
+  <w:endnote w:id="2">
+    <w:p>
+      <w:pPr><w:pStyle w:val="EndnoteText"/></w:pPr>
+      <w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteRef/></w:r>
+      <w:r><w:t xml:space="preserve"> Endnote body with </w:t></w:r>
+      <w:r><w:rPr><w:i/></w:rPr><w:t>italic</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> text.</w:t></w:r>
+    </w:p>
+  </w:endnote>
+</w:endnotes>

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+  <w:body>
+    <w:p>
+      <w:r><w:t xml:space="preserve">Inline text box: </w:t></w:r>
+      <w:r>
+        <w:drawing>
+          <wp:inline distT="0" distB="0" distL="0" distR="0">
+            <wp:extent cx="1828800" cy="914400"/>
+            <wp:docPr id="20" name="Text Box 20"/>
+            <a:graphic>
+              <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                <wps:wsp>
+                  <wps:cNvPr id="20" name="Text Box 20"/>
+                  <wps:spPr>
+                    <a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+                    <a:prstGeom prst="roundRect"><a:avLst/></a:prstGeom>
+                    <a:solidFill><a:srgbClr val="EEF3FF"/></a:solidFill>
+                    <a:ln w="12700"><a:solidFill><a:srgbClr val="2F5496"/></a:solidFill></a:ln>
+                  </wps:spPr>
+                  <wps:txbx>
+                    <w:txbxContent>
+                      <w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Text box paragraph one</w:t></w:r></w:p>
+                      <w:p><w:r><w:t>Text box paragraph two</w:t></w:r></w:p>
+                      <w:tbl>
+                        <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+                        <w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid>
+                        <w:tr><w:tc><w:p><w:r><w:t>cell in text box</w:t></w:r></w:p></w:tc></w:tr>
+                      </w:tbl>
+                    </w:txbxContent>
+                  </wps:txbx>
+                  <wps:bodyPr rot="0" lIns="91440" tIns="45720" rIns="91440" bIns="45720" anchor="ctr"><a:normAutofit/></wps:bodyPr>
+                </wps:wsp>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:drawing>
+          <wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="4" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
+            <wp:simplePos x="0" y="0"/>
+            <wp:positionH relativeFrom="margin"><wp:posOffset>0</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="paragraph"><wp:posOffset>114300</wp:posOffset></wp:positionV>
+            <wp:extent cx="1371600" cy="685800"/>
+            <wp:wrapNone/>
+            <wp:docPr id="21" name="Floating shape"/>
+            <a:graphic>
+              <a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                <wps:wsp>
+                  <wps:cNvPr id="21" name="Floating shape"/>
+                  <wps:spPr>
+                    <a:xfrm rot="2700000"><a:off x="0" y="0"/><a:ext cx="1371600" cy="685800"/></a:xfrm>
+                    <a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+                    <a:solidFill><a:srgbClr val="FFF2CC"/></a:solidFill>
+                  </wps:spPr>
+                  <wps:txbx><w:txbxContent><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Rotated ellipse label</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                  <wps:bodyPr vert="vert270" anchor="ctr"/>
+                </wps:wsp>
+              </a:graphicData>
+            </a:graphic>
+          </wp:anchor>
+        </w:drawing>
+      </w:r>
+      <w:r><w:t>Body text alongside the floating shape.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r>
+        <w:pict>
+          <v:shape id="VmlTextBox1" type="#_x0000_t202" style="position:absolute;width:144pt;height:36pt;margin-left:0" fillcolor="#f2f2f2" strokecolor="#7f7f7f">
+            <v:textbox>
+              <w:txbxContent>
+                <w:p><w:r><w:t>Legacy VML text box content</w:t></w:r></w:p>
+              </w:txbxContent>
+            </v:textbox>
+          </v:shape>
+        </w:pict>
+      </w:r>
+      <w:r><w:t>Body text after the VML text box.</w:t></w:r>
+    </w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

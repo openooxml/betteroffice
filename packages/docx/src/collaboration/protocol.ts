@@ -1,3 +1,12 @@
+import {
+  MAX_AWARENESS_CURSOR_BYTES,
+  MAX_AWARENESS_ENTRIES_PER_UPDATE,
+  MAX_AWARENESS_STRING_LENGTH,
+  MAX_AWARENESS_TRACKED_PEERS,
+  resolvePresenceColor,
+  type AwarenessUpdateEntry,
+} from './awareness';
+
 export const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
 
@@ -26,6 +35,14 @@ export class ProtocolError extends Error {
     super(message);
     this.name = 'ProtocolError';
   }
+}
+
+class AwarenessLimitError extends ProtocolError {}
+
+export interface DecodeAwarenessUpdateOptions {
+  trackedClientIds?: Iterable<number>;
+  localClientId?: number;
+  onDiscard?(error: ProtocolError): void;
 }
 
 class Decoder {
@@ -81,6 +98,15 @@ class Decoder {
     return value;
   }
 
+  skipVarUint8Array(): void {
+    const length = this.readVarUint();
+    const remaining = this.bytes.byteLength - this.offset;
+    if (length > remaining) {
+      throw new ProtocolError('Truncated varUint8Array');
+    }
+    this.offset += length;
+  }
+
   readVarString(): string {
     const bytes = this.readVarUint8Array();
     try {
@@ -126,6 +152,14 @@ function encodeFrame(parts: readonly Uint8Array[], maxFrameBytes: number): Uint8
   return frame;
 }
 
+function encodeVarString(value: string): Uint8Array {
+  const bytes = new TextEncoder().encode(value);
+  return encodeFrame(
+    [encodeVarUint(bytes.byteLength), bytes],
+    Number.MAX_SAFE_INTEGER
+  );
+}
+
 function encodeSyncMessage(
   subtype: number,
   payload: Uint8Array,
@@ -166,15 +200,180 @@ export function encodeUpdate(
 export function encodeEmptyAwarenessUpdate(
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
 ): Uint8Array {
-  const emptyUpdate = Uint8Array.of(0);
+  return encodeAwarenessMessage([], maxFrameBytes);
+}
+
+function encodedAwarenessState(entry: AwarenessUpdateEntry): string {
+  if (entry.state === null) return 'null';
+  return JSON.stringify({
+    user: entry.state.user,
+    cursor: entry.state.cursor
+      ? {
+          story: entry.state.cursor.story,
+          anchor: [...entry.state.cursor.anchor],
+          head: [...entry.state.cursor.head],
+        }
+      : null,
+  });
+}
+
+export function encodeAwarenessUpdate(entries: readonly AwarenessUpdateEntry[]): Uint8Array {
+  const parts = [encodeVarUint(entries.length)];
+  for (const entry of entries) {
+    parts.push(
+      encodeVarUint(entry.clientId),
+      encodeVarUint(entry.clock),
+      encodeVarString(encodedAwarenessState(entry))
+    );
+  }
+  return encodeFrame(parts, Number.MAX_SAFE_INTEGER);
+}
+
+export function encodeAwarenessMessage(
+  entries: readonly AwarenessUpdateEntry[],
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  const update = encodeAwarenessUpdate(entries);
   return encodeFrame(
     [
       encodeVarUint(TOP_LEVEL_AWARENESS),
-      encodeVarUint(emptyUpdate.byteLength),
-      emptyUpdate,
+      encodeVarUint(update.byteLength),
+      update,
     ],
     maxFrameBytes
   );
+}
+
+export function encodeQueryAwareness(
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  return encodeFrame([encodeVarUint(TOP_LEVEL_QUERY_AWARENESS)], maxFrameBytes);
+}
+
+function decodeByteArray(value: unknown, label: string): Uint8Array {
+  if (!Array.isArray(value)) {
+    throw new ProtocolError(`${label} must be a byte array`);
+  }
+  if (value.length > MAX_AWARENESS_CURSOR_BYTES) {
+    throw new AwarenessLimitError(`${label} exceeds ${MAX_AWARENESS_CURSOR_BYTES} bytes`);
+  }
+  if (value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
+    throw new ProtocolError(`${label} must be a byte array`);
+  }
+  return Uint8Array.from(value as number[]);
+}
+
+function decodeAwarenessState(value: string, clientId: number): AwarenessUpdateEntry['state'] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new ProtocolError('Invalid awareness JSON');
+  }
+  if (parsed === null) return null;
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new ProtocolError('Awareness state must be an object or null');
+  }
+  const state = parsed as Record<string, unknown>;
+  const userValue = state.user;
+  if (typeof userValue !== 'object' || userValue === null || Array.isArray(userValue)) {
+    throw new ProtocolError('Awareness user must be an object');
+  }
+  const userRecord = userValue as Record<string, unknown>;
+  if (typeof userRecord.name !== 'string') {
+    throw new ProtocolError('Awareness user requires a string name');
+  }
+  if (userRecord.name.length > MAX_AWARENESS_STRING_LENGTH) {
+    throw new AwarenessLimitError(
+      `Awareness user name exceeds ${MAX_AWARENESS_STRING_LENGTH} characters`
+    );
+  }
+  const decodedUser = {
+    name: userRecord.name,
+    color: resolvePresenceColor(clientId, userRecord.color),
+  };
+  const cursor = state.cursor;
+  if (cursor === null || cursor === undefined) {
+    return {
+      user: decodedUser,
+      cursor: null,
+    };
+  }
+  if (typeof cursor !== 'object' || Array.isArray(cursor)) {
+    throw new ProtocolError('Awareness cursor must be an object or null');
+  }
+  const cursorRecord = cursor as Record<string, unknown>;
+  if (typeof cursorRecord.story !== 'string') {
+    throw new ProtocolError('Awareness cursor requires a string story');
+  }
+  if (cursorRecord.story.length > MAX_AWARENESS_STRING_LENGTH) {
+    throw new AwarenessLimitError(
+      `Awareness cursor story exceeds ${MAX_AWARENESS_STRING_LENGTH} characters`
+    );
+  }
+  return {
+    user: decodedUser,
+    cursor: {
+      story: cursorRecord.story,
+      anchor: decodeByteArray(cursorRecord.anchor, 'Awareness cursor anchor'),
+      head: decodeByteArray(cursorRecord.head, 'Awareness cursor head'),
+    },
+  };
+}
+
+export function decodeAwarenessUpdate(
+  update: Uint8Array,
+  options: DecodeAwarenessUpdateOptions = {}
+): AwarenessUpdateEntry[] {
+  const decoder = new Decoder(update);
+  const count = decoder.readVarUint();
+  if (count > update.byteLength) {
+    throw new ProtocolError('Invalid awareness entry count');
+  }
+  const trackedClientIds = new Set(options.trackedClientIds);
+  if (options.localClientId !== undefined) trackedClientIds.delete(options.localClientId);
+  const reported = new Set<string>();
+  const reportDiscard = (error: ProtocolError): void => {
+    if (reported.has(error.message)) return;
+    reported.add(error.message);
+    options.onDiscard?.(error);
+  };
+  if (count > MAX_AWARENESS_ENTRIES_PER_UPDATE) {
+    reportDiscard(
+      new AwarenessLimitError(
+        `Awareness update exceeds ${MAX_AWARENESS_ENTRIES_PER_UPDATE} entries`
+      )
+    );
+  }
+  const entries: AwarenessUpdateEntry[] = [];
+  const decodedCount = Math.min(count, MAX_AWARENESS_ENTRIES_PER_UPDATE);
+  for (let index = 0; index < decodedCount; index += 1) {
+    const clientId = decoder.readVarUint();
+    const clock = decoder.readVarUint();
+    const isTracked = clientId === options.localClientId || trackedClientIds.has(clientId);
+    if (!isTracked && trackedClientIds.size >= MAX_AWARENESS_TRACKED_PEERS) {
+      decoder.skipVarUint8Array();
+      reportDiscard(
+        new AwarenessLimitError(`Awareness peer limit of ${MAX_AWARENESS_TRACKED_PEERS} reached`)
+      );
+      continue;
+    }
+    const encodedState = decoder.readVarString();
+    let state: AwarenessUpdateEntry['state'];
+    try {
+      state = decodeAwarenessState(encodedState, clientId);
+    } catch (error) {
+      if (!(error instanceof AwarenessLimitError)) throw error;
+      reportDiscard(error);
+      continue;
+    }
+    entries.push({ clientId, clock, state });
+    if (clientId !== options.localClientId) trackedClientIds.add(clientId);
+  }
+  if (count <= MAX_AWARENESS_ENTRIES_PER_UPDATE && !decoder.done) {
+    throw new ProtocolError('Trailing awareness data');
+  }
+  return entries;
 }
 
 export function decodeMessages(

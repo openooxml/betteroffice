@@ -123,9 +123,7 @@ export interface StyleDefinitions {
 // THEME
 // ============================================================================
 
-// Theme types are format-agnostic DrawingML concepts shared with pptx/xlsx;
-// they live in @betteroffice/drawingml and are re-exported here.
-export type { Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme } from '@betteroffice/drawingml';
+export type { Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme } from './drawingml';
 
 // ============================================================================
 // FONT TABLE

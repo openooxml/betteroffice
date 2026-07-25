@@ -19,6 +19,63 @@ function createClientId(): number {
   return value || 1;
 }
 
+const IDENTITY_KEY = "betteroffice:collaboration-user";
+const ADJECTIVES = [
+  "Bright",
+  "Calm",
+  "Clever",
+  "Kind",
+  "Merry",
+  "Nimble",
+  "Quiet",
+  "Swift",
+] as const;
+const ANIMALS = [
+  "Badger",
+  "Falcon",
+  "Fox",
+  "Koala",
+  "Otter",
+  "Panda",
+  "Robin",
+  "Tiger",
+] as const;
+
+export interface DemoCollaborationUser {
+  name: string;
+}
+
+function generatedIdentity(): DemoCollaborationUser {
+  const values = crypto.getRandomValues(new Uint32Array(2));
+  return {
+    name: `${ADJECTIVES[values[0] % ADJECTIVES.length]} ${
+      ANIMALS[values[1] % ANIMALS.length]
+    }`,
+  };
+}
+
+export function useDemoIdentity(): DemoCollaborationUser | null {
+  const [user, setUser] = useState<DemoCollaborationUser | null>(null);
+  useEffect(() => {
+    let identity: DemoCollaborationUser | null = null;
+    try {
+      const stored = sessionStorage.getItem(IDENTITY_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as Partial<DemoCollaborationUser>;
+        if (typeof parsed.name === "string" && parsed.name.trim()) {
+          identity = { name: parsed.name.trim() };
+        }
+      }
+    } catch {}
+    identity ??= generatedIdentity();
+    try {
+      sessionStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+    } catch {}
+    setUser(identity);
+  }, []);
+  return user;
+}
+
 export function useDemoRoom(): string | null {
   const pathname = usePathname();
   const router = useRouter();

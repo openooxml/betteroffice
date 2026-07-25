@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:r><w:t xml:space="preserve">Kept text </w:t></w:r>
+      <w:ins w:id="101" w:author="Ada Lovelace" w:date="2026-01-02T03:04:05Z">
+        <w:r><w:t xml:space="preserve">inserted words </w:t></w:r>
+        <w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">bold insert </w:t></w:r>
+      </w:ins>
+      <w:del w:id="102" w:author="Grace Hopper" w:date="2026-01-03T04:05:06Z">
+        <w:r><w:delText xml:space="preserve">deleted words </w:delText></w:r>
+      </w:del>
+      <w:r><w:t>tail.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:jc w:val="center"/>
+        <w:pPrChange w:id="103" w:author="Ada Lovelace" w:date="2026-01-04T05:06:07Z">
+          <w:pPr><w:jc w:val="left"/></w:pPr>
+        </w:pPrChange>
+      </w:pPr>
+      <w:r>
+        <w:rPr>
+          <w:b/>
+          <w:rPrChange w:id="104" w:author="Grace Hopper" w:date="2026-01-05T06:07:08Z">
+            <w:rPr><w:i/></w:rPr>
+          </w:rPrChange>
+        </w:rPr>
+        <w:t>Run whose formatting changed.</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:rPr><w:ins w:id="107" w:author="Ada Lovelace" w:date="2026-01-07T08:09:10Z"/></w:rPr>
+      </w:pPr>
+      <w:r><w:t>Paragraph whose mark is an insertion.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr>
+        <w:rPr><w:del w:id="108" w:author="Grace Hopper" w:date="2026-01-08T09:10:11Z"/></w:rPr>
+      </w:pPr>
+      <w:r><w:t>Paragraph whose mark is a deletion.</w:t></w:r>
+    </w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>
