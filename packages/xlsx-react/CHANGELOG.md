@@ -1,5 +1,17 @@
 # @betteroffice/xlsx-react
 
+## 0.0.8
+
+### Patch Changes
+
+- 4e04087: Formulas referencing defined names now resolve correctly, frozen panes render, and hyperlinks survive the round trip. The collaboration schema advances to version 5 and upgrades version 3 and 4 snapshots when read, so a client on this release cannot share a collaboration room with an older one: upgrade every peer together.
+- 0d3baa1: Collaborative presence: remote collaborators' cell and range selections render as colored outlines with name flags, plus toolbar avatar chips; worksheets expose stable collaborative ids so presence survives sheet renames.
+- Updated dependencies [4e04087]
+- Updated dependencies [47c37b0]
+- Updated dependencies [0d3baa1]
+  - @betteroffice/xlsx@0.0.8
+  - @betteroffice/xlsx-i18n@0.0.8
+
 ## 0.0.7
 
 ### Patch Changes

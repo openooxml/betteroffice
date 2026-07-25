@@ -1,5 +1,13 @@
 # @betteroffice/xlsx
 
+## 0.0.8
+
+### Patch Changes
+
+- 4e04087: Formulas referencing defined names now resolve correctly, frozen panes render, and hyperlinks survive the round trip. The collaboration schema advances to version 5 and upgrades version 3 and 4 snapshots when read, so a client on this release cannot share a collaboration room with an older one: upgrade every peer together.
+- 47c37b0: The default collaboration frame limit drops from 64 MiB to 16 MiB to match what the relay accepts and retains, and an oversized frame now raises a protocol error before it is sent instead of closing the socket. Hosts running their own relay can restore the previous ceiling with the `maxFrameBytes` option.
+- 0d3baa1: Collaborative presence: remote collaborators' cell and range selections render as colored outlines with name flags, plus toolbar avatar chips; worksheets expose stable collaborative ids so presence survives sheet renames.
+
 ## 0.0.7
 
 ### Patch Changes
