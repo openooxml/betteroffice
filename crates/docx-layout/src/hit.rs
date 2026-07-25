@@ -24,13 +24,15 @@
 
 use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive, TableCellRef};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use serde_json::Number;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 #[cfg(test)]
 thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// vertical slack when matching a pointer to a span's band, mirrors the ±4px
@@ -332,6 +334,8 @@ where
 }
 
 fn same_line_owner(left: &TextHit<'_>, right: &TextHit<'_>) -> bool {
+    #[cfg(test)]
+    LINE_OWNER_COMPARE_COUNT.with(|count| count.set(count.get() + 1));
     match (&left.attrs.table, &right.attrs.table) {
         (Some(left), Some(right)) if left.table_id != right.table_id => return false,
         (Some(_), None) | (None, Some(_)) => return false,
@@ -414,13 +418,64 @@ impl VisualLine<'_> {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum LineOwner<'a> {
+    Para(&'a str),
+    BlockKey(&'a str),
+    BlockId(&'a Number),
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct LineKey<'a> {
+    column_index: usize,
+    table_id: Option<&'a str>,
+    cell: Option<(u64, u64, Option<&'a str>)>,
+    line_index: u64,
+    owner: LineOwner<'a>,
+}
+
+/// Hashable line identity, mirroring [`same_line_owner`]. `None` when grouping
+/// falls back to baseline proximity or doc adjacency, which only a scan settles.
+fn line_key(attrs: &DocAttrs, column_index: usize) -> Option<LineKey<'_>> {
+    let owner = if let Some(para_id) = attrs.para_id.as_deref() {
+        LineOwner::Para(para_id)
+    } else if let Some(block_key) = attrs.block_key.as_deref() {
+        LineOwner::BlockKey(block_key)
+    } else {
+        LineOwner::BlockId(attrs.block_id.as_ref()?)
+    };
+    Some(LineKey {
+        column_index,
+        table_id: attrs.table.as_ref().map(|table| table.table_id.as_str()),
+        cell: attrs
+            .cell
+            .as_ref()
+            .map(|cell| (cell.row, cell.col, cell.cell_id.as_deref())),
+        line_index: attrs.line_index?,
+        owner,
+    })
+}
+
+fn line_accepts_hit(line: &VisualLine<'_>, column_index: usize, hit: &TextHit<'_>) -> bool {
+    line.column_index == column_index
+        && line.hits.first().is_some_and(|previous| {
+            same_line_owner(previous, hit)
+                && (previous.attrs.line_index.is_some()
+                    || (previous.baseline - hit.baseline).abs() <= LINE_CENTER_EPSILON)
+        })
+}
+
 fn visual_lines(dl: &DisplayList, page_range: Range<usize>) -> Vec<VisualLine<'_>> {
     let mut lines: Vec<VisualLine<'_>> = Vec::new();
     for page_index in page_range {
         let Some(page) = dl.pages.get(page_index) else {
             continue;
         };
-        let page_lines_start = lines.len();
+        // Keyed lines resolve by identity; only hits without one (no block
+        // identity, or no line index) scan, and they can only ever match
+        // another unkeyed line.
+        let mut keyed_lines: HashMap<LineKey<'_>, usize> = HashMap::new();
+        let mut unkeyed_lines: Vec<usize> = Vec::new();
         for hit in text_hits(&page.primitives) {
             let center_x = hit.x + hit.width / 2.0;
             let column_index = page
@@ -432,21 +487,23 @@ fn visual_lines(dl: &DisplayList, page_range: Range<usize>) -> Vec<VisualLine<'_
                     center_x >= x && center_x <= x + width
                 })
                 .unwrap_or(0);
-            let matching_line = lines[page_lines_start..]
-                .iter()
-                .position(|line| {
-                    line.column_index == column_index
-                        && line.hits.first().is_some_and(|previous| {
-                            same_line_owner(previous, &hit)
-                                && (previous.attrs.line_index.is_some()
-                                    || (previous.baseline - hit.baseline).abs()
-                                        <= LINE_CENTER_EPSILON)
-                        })
-                })
-                .map(|index| page_lines_start + index);
+            let key = line_key(hit.attrs, column_index);
+            let matching_line = match &key {
+                Some(key) => keyed_lines.get(key).copied(),
+                None => unkeyed_lines
+                    .iter()
+                    .copied()
+                    .find(|index| line_accepts_hit(&lines[*index], column_index, &hit)),
+            };
             if let Some(index) = matching_line {
                 lines[index].hits.push(hit);
             } else {
+                match key {
+                    Some(key) => {
+                        keyed_lines.insert(key, lines.len());
+                    }
+                    None => unkeyed_lines.push(lines.len()),
+                }
                 lines.push(VisualLine {
                     page_index,
                     column_index,
@@ -1064,5 +1121,66 @@ mod tests {
 
         assert_eq!(movement.position, 2511);
         assert_eq!(hit_builds, 4);
+    }
+
+    /// Dense pages (fine-print tables, per-character formatting) must not cost
+    /// a scan of every line built so far per primitive.
+    #[test]
+    fn visual_line_grouping_stays_linear_in_page_density() {
+        const PRIMITIVES_PER_LINE: usize = 4;
+        const PRIMITIVES_PER_PAGE: usize = 2_000;
+        let lines_per_page = PRIMITIVES_PER_PAGE / PRIMITIVES_PER_LINE;
+        let mut position = 1_i64;
+        let mut caret = 0_i64;
+        let pages: Vec<serde_json::Value> = (0..3)
+            .map(|page_index| {
+                let primitives: Vec<serde_json::Value> = (0..lines_per_page)
+                    .flat_map(|line| {
+                        (0..PRIMITIVES_PER_LINE)
+                            .map(|column| {
+                                let doc_start = position;
+                                position += 2;
+                                if page_index == 1 && line == 0 && column == 0 {
+                                    caret = doc_start;
+                                }
+                                serde_json::json!({
+                                    "kind": "text",
+                                    "text": "xx",
+                                    "x": 80.0 + column as f64 * 20.0,
+                                    "baselineY": 80.0 + line as f64 * 12.0,
+                                    "width": 20,
+                                    "font": "400 16px Calibri",
+                                    "color": "#000000",
+                                    "docStart": doc_start,
+                                    "docEnd": doc_start + 1,
+                                    "blockId": line,
+                                    "lineIndex": 0,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                serde_json::json!({
+                    "pageIndex": page_index,
+                    "width": 500,
+                    "height": 500,
+                    "columnBounds": [{"x": 60, "y": 60, "width": 400, "height": 400}],
+                    "primitives": primitives,
+                })
+            })
+            .collect();
+        let display_list: DisplayList =
+            serde_json::from_value(serde_json::json!({ "pages": pages })).unwrap();
+
+        LINE_OWNER_COMPARE_COUNT.with(|count| count.set(0));
+        let movement = vertical_move(&display_list, caret, VerticalDirection::Down, None).unwrap();
+        let compares = LINE_OWNER_COMPARE_COUNT.with(std::cell::Cell::get);
+
+        assert_eq!(movement.position, caret + PRIMITIVES_PER_LINE as i64 * 2);
+        assert!(
+            compares <= PRIMITIVES_PER_PAGE,
+            "grouping compared line owners {compares} times for {PRIMITIVES_PER_PAGE} \
+             primitives per page"
+        );
     }
 }
