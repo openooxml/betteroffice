@@ -108,12 +108,13 @@ pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
             };
             let prefixed = location.starts_with('#');
             let source = location.strip_prefix('#').unwrap_or(location);
-            let Ok(expr) = parse_formula(source) else {
+            let Some((expr, suffix)) = split_location_reference(source) else {
                 continue;
             };
             let mut changed = false;
             let rewritten = transform(&expr, op, &matches, &mut changed).to_formula();
             if changed {
+                let rewritten = format!("{rewritten}{suffix}");
                 hyperlink.location = Some(if prefixed && !rewritten.starts_with('#') {
                     format!("#{rewritten}")
                 } else {
@@ -181,6 +182,16 @@ pub(crate) fn rename_sheet_references(
         }
     }
     Ok(restores)
+}
+
+/// Splits a hyperlink location into its reference and any trailing `#` fragment.
+fn split_location_reference(source: &str) -> Option<(Expr, &str)> {
+    if let Ok(expr) = parse_formula(source) {
+        return Some((expr, ""));
+    }
+    let (reference, _) = source.rsplit_once('#')?;
+    let expr = parse_formula(reference).ok()?;
+    Some((expr, &source[reference.len()..]))
 }
 
 /// rename the sheet inside an internal hyperlink location. locations are
@@ -559,7 +570,7 @@ fn clip_interval(a: u32, b: u32, at: u32, count: u32) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{Cell, CellProvider, Sheet};
+    use xlsx_model::{Cell, CellProvider, Hyperlink, Sheet};
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()
@@ -772,6 +783,41 @@ mod tests {
             "Renamed!A1"
         );
         assert_eq!(rename_formula_sheet("S!A1", "S", "R4C"), "'R4C'!A1");
+    }
+
+    #[test]
+    fn structural_remap_preserves_a_trailing_location_fragment() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.sheets.push(Sheet::new("Target"));
+        let link = |location: &str| Hyperlink {
+            range: CellRange::parse_a1("A1").unwrap(),
+            external_target: None,
+            location: Some(location.into()),
+            tooltip: None,
+            display: None,
+        };
+        wb.sheets[0]
+            .hyperlinks
+            .extend([link("#Target!A3#2"), link("Target!A3!B4")]);
+
+        remap_hyperlink_locations(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(1),
+                at: 1,
+                count: 2,
+            },
+        );
+
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].location.as_deref(),
+            Some("#Target!A5#2")
+        );
+        assert_eq!(
+            wb.sheets[0].hyperlinks[1].location.as_deref(),
+            Some("Target!A3!B4")
+        );
     }
 
     #[test]
