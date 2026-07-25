@@ -12,7 +12,7 @@ use crate::parser::{BinaryOp, Expr, UnaryOp};
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
-const MAX_DEFINED_NAME_DEPTH: usize = 100;
+const MAX_DEFINED_NAME_DEPTH: usize = 256;
 
 #[cfg(test)]
 thread_local! {
@@ -265,9 +265,7 @@ fn defined_name_key(
     Ok((lookup_sheet, name.to_lowercase()))
 }
 
-/// look up and parse a name's definition, refusing re-entry and over-deep
-/// chains. every expansion is charged to the work budget so a name graph that
-/// defeats the memo degrades to `#NUM!` instead of running unbounded.
+/// Parses a name's definition, refusing re-entry, and charges the work budget.
 fn bind_defined_name(
     key: DefinedNameKey,
     name: &str,
@@ -275,8 +273,11 @@ fn bind_defined_name(
 ) -> Result<DefinedNameBinding, ErrorValue> {
     {
         let stack = ctx.defined_name_stack.borrow();
-        if stack.len() >= MAX_DEFINED_NAME_DEPTH || stack.contains(&key) {
+        if stack.contains(&key) {
             return Err(ErrorValue::Name);
+        }
+        if stack.len() >= MAX_DEFINED_NAME_DEPTH {
+            return Err(ErrorValue::Num);
         }
     }
     if !ctx.consume_cells(1) {
@@ -728,6 +729,56 @@ mod tests {
             }
         );
         assert_eq!(expansions, DEPTH + 1);
+    }
+
+    #[test]
+    fn deep_acyclic_name_chains_resolve_to_the_terminal_value() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for index in 0..MAX_DEFINED_NAME_DEPTH - 1 {
+            let next = index + 1;
+            workbook.defined_names.push(defined_name(
+                &format!("Link_{index}"),
+                &format!("Link_{next}"),
+            ));
+        }
+        workbook.defined_names.push(defined_name(
+            &format!("Link_{}", MAX_DEFINED_NAME_DEPTH - 1),
+            "7",
+        ));
+
+        assert_eq!(
+            evaluate(
+                &parse_formula("Link_0").unwrap(),
+                &EvalContext::new(&workbook, SheetId(0)),
+            ),
+            CellValue::Number { value: 7.0 }
+        );
+    }
+
+    #[test]
+    fn name_chains_past_the_depth_limit_report_a_number_error() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        for index in 0..MAX_DEFINED_NAME_DEPTH + 4 {
+            let next = index + 1;
+            workbook.defined_names.push(defined_name(
+                &format!("Link_{index}"),
+                &format!("Link_{next}"),
+            ));
+        }
+        workbook.defined_names.push(defined_name(
+            &format!("Link_{}", MAX_DEFINED_NAME_DEPTH + 4),
+            "7",
+        ));
+
+        assert_eq!(
+            evaluate(
+                &parse_formula("Link_0").unwrap(),
+                &EvalContext::new(&workbook, SheetId(0)),
+            ),
+            err(ErrorValue::Num)
+        );
     }
 
     #[test]
