@@ -61,9 +61,13 @@ impl PreservedPackage {
                 .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
             let bytes =
                 find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
+            let relationship_type = relationship
+                .and_then(|relationship| relationship.attribute("Type"))
+                .map(str::to_owned);
             sheets.push(PreservedSheet {
                 path,
                 relationship_id: entry.relationship_id,
+                relationship_type,
                 sheet_id: entry.sheet_id.unwrap_or((index + 1) as u32),
                 attributes: entry.attributes,
                 template: XmlTemplate::capture(bytes)?,
@@ -120,15 +124,33 @@ impl PreservedPackage {
     pub fn source_sheet_count(&self) -> usize {
         self.sheets.len()
     }
+
+    /// False for chartsheets, dialogsheets and any other non-worksheet sheet.
+    #[doc(hidden)]
+    pub fn source_sheet_is_worksheet(&self, index: usize) -> bool {
+        self.sheets
+            .get(index)
+            .is_none_or(PreservedSheet::is_worksheet)
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreservedSheet {
     pub(crate) path: String,
     pub(crate) relationship_id: Option<String>,
+    pub(crate) relationship_type: Option<String>,
     pub(crate) sheet_id: u32,
     pub(crate) attributes: Vec<XmlAttribute>,
     pub(crate) template: XmlTemplate,
+}
+
+impl PreservedSheet {
+    pub(crate) fn is_worksheet(&self) -> bool {
+        self.relationship_type
+            .as_deref()
+            .and_then(|relationship_type| relationship_type.rsplit('/').next())
+            .is_none_or(|kind| kind == "worksheet")
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -40,9 +40,12 @@ pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseErro
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     for (idx, entry) in meta.sheets.iter().enumerate() {
-        let path = worksheet_path(&rels, entry.rid.as_deref(), idx).ok_or_else(|| {
-            ParseError::Malformed(format!("no target for sheet {:?}", entry.name))
-        })?;
+        let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
+        if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
+            sheets.push(Sheet::new(&entry.name));
+            continue;
+        }
+        let path = worksheet_path(relationship, idx);
         let bytes = find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
         let sheet_rels = find_part(parts, &relationship_part_path(&path))
             .map(parse_rels)
@@ -179,6 +182,15 @@ struct Relationship {
     external: bool,
 }
 
+impl Relationship {
+    fn is_worksheet(&self) -> bool {
+        self.kind
+            .as_deref()
+            .and_then(|kind| kind.rsplit('/').next())
+            .is_none_or(|kind| kind == "worksheet")
+    }
+}
+
 /// map relationship id -> relationship metadata from a `.rels` part.
 fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError> {
     let mut reader = reader(data);
@@ -212,17 +224,11 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError>
 
 /// pick the worksheet part path: the relationship target, else the
 /// conventional positional name.
-fn worksheet_path(
-    rels: &BTreeMap<String, Relationship>,
-    rid: Option<&str>,
-    idx: usize,
-) -> Option<String> {
-    if let Some(relationship) = rid.and_then(|r| rels.get(r))
-        && !relationship.external
-    {
-        return Some(resolve_part_path("xl", &relationship.target));
-    }
-    Some(format!("xl/worksheets/sheet{}.xml", idx + 1))
+fn worksheet_path(relationship: Option<&Relationship>, idx: usize) -> String {
+    relationship
+        .filter(|relationship| !relationship.external)
+        .map(|relationship| resolve_part_path("xl", &relationship.target))
+        .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", idx + 1))
 }
 
 fn relationship_part_path(path: &str) -> String {

@@ -171,7 +171,10 @@ pub fn serialize_workbook_with_package_and_origins(
 
     for (sheet, plan) in wb.sheets.iter().zip(&sheets) {
         let bytes = match plan.origin.and_then(|origin| package.sheets.get(origin)) {
-            Some(source) => worksheet_xml_with_template(sheet, wb, &source.template)?,
+            Some(source) if source.is_worksheet() => {
+                worksheet_xml_with_template(sheet, wb, &source.template)?
+            }
+            Some(_) => continue,
             None => worksheet_xml(sheet, wb)?,
         };
         parts.set(plan.path.clone(), bytes);
@@ -281,14 +284,10 @@ fn plan_sheets(
                         .find(|relationship| relationship.id() == Some(id))
                 });
                 let relationship = match source_relationship {
-                    Some(relationship) => {
-                        let mut relationship = relationship.clone();
-                        relationship.set_attribute("Type", "Type", REL_WORKSHEET.to_owned());
-                        relationship
-                    }
+                    Some(relationship) => relationship.clone(),
                     None => new_relationship(
                         next_relationship_id(used_relationship_ids),
-                        REL_WORKSHEET,
+                        source.relationship_type.as_deref().unwrap_or(REL_WORKSHEET),
                         relative_to_xl(&source.path),
                     ),
                 };
@@ -622,12 +621,18 @@ fn merged_content_types(
         normalized_part_name("xl/workbook.xml"),
         source_content_type(package, "xl/workbook.xml").unwrap_or(CT_WORKBOOK),
     );
+    let fallback_worksheet_content_type = package
+        .sheets
+        .iter()
+        .find(|sheet| sheet.is_worksheet())
+        .and_then(|sheet| source_content_type(package, &sheet.path))
+        .unwrap_or(CT_WORKSHEET);
     for sheet in sheets {
         let content_type = sheet
             .origin
             .and_then(|origin| package.sheets.get(origin))
             .and_then(|source| source_content_type(package, &source.path))
-            .unwrap_or(CT_WORKSHEET);
+            .unwrap_or(fallback_worksheet_content_type);
         desired.insert(normalized_part_name(&sheet.path), content_type);
     }
     if let Some(part) = shared_strings {

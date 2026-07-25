@@ -169,8 +169,51 @@ fn preservation_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&preservation_fixture_parts()).unwrap()
 }
 
+fn non_worksheet_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Chart"));
+    model.sheets.push(Sheet::new("Dialog"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    rename_test_part(
+        &mut parts,
+        "xl/worksheets/sheet2.xml",
+        "xl/chartsheets/sheet1.xml",
+    );
+    rename_test_part(
+        &mut parts,
+        "xl/worksheets/sheet3.xml",
+        "xl/dialogsheets/sheet1.xml",
+    );
+    set_test_part(
+        &mut parts,
+        "xl/chartsheets/sheet1.xml",
+        br#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/dialogsheets/sheet1.xml",
+        br#"<dialogsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></dialogsheet>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/_rels/workbook.xml.rels",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet" Target="dialogsheets/sheet1.xml"/></Relationships>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/chartsheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"/><Override PartName="/xl/dialogsheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.dialogsheet+xml"/></Types>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
     parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
+}
+
+fn rename_test_part(parts: &mut [(String, Vec<u8>)], from: &str, to: &str) {
+    parts.iter_mut().find(|(name, _)| name == from).unwrap().0 = to.to_owned();
 }
 
 fn test_part_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
@@ -3024,4 +3067,53 @@ fn collaborative_materialization_retains_source_package() {
     ] {
         assert_eq!(after[path], before[path], "changed {path}");
     }
+}
+
+#[test]
+fn non_worksheet_sheets_stay_typed_and_byte_identical() {
+    let original = non_worksheet_fixture();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    assert_eq!(workbook.sheet_count(), 3);
+    assert!(workbook.model().sheets[1].used_range().is_none());
+    assert!(matches!(
+        workbook.edit_cell(
+            SheetId(1),
+            cell("A1"),
+            "blocked",
+            CalculationOptions::default()
+        ),
+        Err(Error::InvalidOperation(_))
+    ));
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after = package_map(&saved);
+    assert_eq!(
+        after["xl/chartsheets/sheet1.xml"],
+        before["xl/chartsheets/sheet1.xml"]
+    );
+    assert_eq!(
+        after["xl/dialogsheets/sheet1.xml"],
+        before["xl/dialogsheets/sheet1.xml"]
+    );
+    let relationships = String::from_utf8(after["xl/_rels/workbook.xml.rels"].clone()).unwrap();
+    assert!(relationships.contains("/chartsheet\""));
+    assert!(relationships.contains("/dialogsheet\""));
+    assert_eq!(relationships.matches("/worksheet\"").count(), 1);
+    let content_types = String::from_utf8(after["[Content_Types].xml"].clone()).unwrap();
+    assert!(content_types.contains("spreadsheetml.chartsheet+xml"));
+    assert!(content_types.contains("spreadsheetml.dialogsheet+xml"));
+    assert!(
+        !String::from_utf8(after["xl/chartsheets/sheet1.xml"].clone())
+            .unwrap()
+            .contains("sheetData")
+    );
+    Workbook::open(&saved).unwrap();
 }

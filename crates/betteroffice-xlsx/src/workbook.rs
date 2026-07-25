@@ -763,7 +763,7 @@ impl Workbook {
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
-        self.sheet(sheet)?;
+        self.ensure_worksheet_sheet(sheet)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
@@ -827,6 +827,9 @@ impl Workbook {
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
         for op in &ops {
+            if let Some(sheet) = worksheet_edit_target(op) {
+                self.ensure_worksheet_sheet(sheet)?;
+            }
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
             xlsx_ops::apply(&mut preview, op)?;
@@ -1272,13 +1275,13 @@ impl Workbook {
     }
 
     fn validate_target(&self, sheet: SheetId, cell: CellRef) -> Result<()> {
-        self.sheet(sheet)?;
+        self.ensure_worksheet_sheet(sheet)?;
         self.validate_cell(cell)
     }
 
     fn validate_bounded_range(&self, sheet: SheetId, range: CellRange) -> Result<(u64, u64)> {
         validate_range(range)?;
-        self.sheet(sheet)?;
+        self.ensure_worksheet_sheet(sheet)?;
         let rows = u64::from(range.end.row - range.start.row + 1);
         let columns = u64::from(range.end.col - range.start.col + 1);
         if rows * columns > MAX_RANGE_CELLS {
@@ -1310,6 +1313,23 @@ impl Workbook {
 
     fn validate_cell(&self, cell: CellRef) -> Result<()> {
         validate_cell_ref(cell)
+    }
+
+    /// Rejects edits aimed at a preserved chartsheet or dialogsheet.
+    fn ensure_worksheet_sheet(&self, sheet: SheetId) -> Result<()> {
+        self.sheet(sheet)?;
+        let origin = self.sheet_origins.get(sheet.0 as usize).copied().flatten();
+        if origin.is_some_and(|origin| {
+            self.source_package
+                .as_ref()
+                .is_some_and(|package| !package.source_sheet_is_worksheet(origin))
+        }) {
+            return Err(Error::InvalidOperation(format!(
+                "sheet {} is not an editable worksheet",
+                sheet.0
+            )));
+        }
+        Ok(())
     }
 
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
@@ -1884,6 +1904,29 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
+    match op {
+        Op::SetCell { sheet, .. }
+        | Op::InsertRows { sheet, .. }
+        | Op::DeleteRows { sheet, .. }
+        | Op::InsertCols { sheet, .. }
+        | Op::DeleteCols { sheet, .. }
+        | Op::SetColWidth { sheet, .. }
+        | Op::SetRowHeight { sheet, .. }
+        | Op::SetFreezePane { sheet, .. }
+        | Op::SetHyperlinks { sheet, .. }
+        | Op::MergeCells { sheet, .. }
+        | Op::UnmergeCells { sheet, .. }
+        | Op::PatchRangeStyle { sheet, .. }
+        | Op::SetRangeNumberFormat { sheet, .. }
+        | Op::ApplyRangeFormat { sheet, .. } => Some(*sheet),
+        Op::AddSheet { .. }
+        | Op::RemoveSheet { .. }
+        | Op::RenameSheet { .. }
+        | Op::RestoreSheet { .. } => None,
+    }
 }
 
 fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
