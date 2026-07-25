@@ -41,11 +41,11 @@ export interface CollabRoomState<
   Provider extends CollaborationProvider = CollaborationProvider,
 > {
   clientId: number | null;
-  provider: Provider | null;
   status: CollaborationStatus;
   synced: boolean;
   peerCount: number | null;
   error: string | null;
+  provider: Provider | null;
   onReplica(replica: CollaborationReplica | null): void;
 }
 
@@ -72,6 +72,7 @@ export function useCollabRoom<Provider extends CollaborationProvider>(
     const provider = providerRef.current;
     const transport = transportRef.current;
     providerRef.current = null;
+    setProvider(null);
     transportRef.current = null;
     setProvider(null);
     void provider?.destroy();
@@ -115,5 +116,5 @@ export function useCollabRoom<Provider extends CollaborationProvider>(
     [createProvider, relayOrigin, roomId, teardown],
   );
 
-  return { clientId, provider, status, synced, peerCount, error, onReplica };
+  return { clientId, status, synced, peerCount, error, provider, onReplica };
 }

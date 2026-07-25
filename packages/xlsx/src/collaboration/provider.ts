@@ -1,14 +1,34 @@
 import {
+  decodeAwarenessUpdate,
   decodeMessages,
+  DEFAULT_MAX_AWARENESS_STATES,
   DEFAULT_MAX_FRAME_BYTES,
   DEFAULT_MAX_MESSAGES_PER_FRAME,
-  encodeEmptyAwarenessUpdate,
+  encodeAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
+  type ProtocolError,
 } from './protocol';
 import {
+  applyAwarenessUpdates,
+  AWARENESS_BROADCAST_INTERVAL_MS,
+  AWARENESS_HEARTBEAT_INTERVAL_MS,
+  AWARENESS_PEER_TIMEOUT_MS,
+  awarenessPeers,
+  expireAwarenessPeers,
+  MAX_AWARENESS_SHEET_LENGTH,
+  MAX_TRACKED_AWARENESS_PEERS,
+  normalizeCollaborationUser,
+  type AwarenessPeerStore,
+} from './awareness';
+import {
   CollaborationError,
+  type AwarenessCursor,
+  type AwarenessListener,
+  type AwarenessPeer,
+  type CollaborationUser,
   type CollaborationErrorCode,
   type CollaborationErrorListener,
   type CollaborationProviderOptions,
@@ -21,6 +41,7 @@ import {
 } from './types';
 
 const DEFAULT_MAX_PENDING_BYTES = DEFAULT_MAX_FRAME_BYTES;
+const AWARENESS_EXPIRY_INTERVAL_MS = 1000;
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -51,6 +72,31 @@ function requireBytes(value: unknown, operation: string): Uint8Array {
   return value.slice();
 }
 
+function unrefTimer(timer: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>): void {
+  const handle = timer as unknown as { unref?: () => void };
+  handle.unref?.();
+}
+
+function encodableCell(cell: AwarenessCursor['anchor'] | undefined): boolean {
+  return (
+    !!cell &&
+    Number.isSafeInteger(cell.row) &&
+    cell.row >= 0 &&
+    Number.isSafeInteger(cell.col) &&
+    cell.col >= 0
+  );
+}
+
+function encodableCursor(cursor: AwarenessCursor): boolean {
+  return (
+    typeof cursor.sheet === 'string' &&
+    cursor.sheet.length > 0 &&
+    cursor.sheet.length <= MAX_AWARENESS_SHEET_LENGTH &&
+    encodableCell(cursor.anchor) &&
+    encodableCell(cursor.head)
+  );
+}
+
 export class CollaborationProvider {
   private readonly replica: CollaborationReplica;
   private readonly transport: CollaborationTransport;
@@ -59,6 +105,9 @@ export class CollaborationProvider {
   private readonly maxPendingBytes: number;
   private readonly statusListeners = new Map<number, CollaborationStatusListener>();
   private readonly errorListeners = new Map<number, CollaborationErrorListener>();
+  private readonly awarenessListeners = new Map<number, AwarenessListener>();
+  private readonly awarenessStore: AwarenessPeerStore = new Map();
+  private readonly awarenessUser: CollaborationUser;
   private readonly pendingFrames: Uint8Array[] = [];
   private unsubscribeReplica: () => void;
   private unsubscribeTransport: () => void = () => {};
@@ -75,6 +124,14 @@ export class CollaborationProvider {
   private isFlushing = false;
   private transportCleanup: Promise<void> | undefined;
   private statusRevision = 0;
+  private awarenessClock = 0;
+  private reportedClockExhaustion = false;
+  private awarenessCursor: AwarenessCursor | null = null;
+  private lastAwarenessSentAt = Number.NEGATIVE_INFINITY;
+  private awarenessBroadcastTimer: ReturnType<typeof setTimeout> | undefined;
+  private awarenessHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  private awarenessExpiryTimer: ReturnType<typeof setInterval> | undefined;
+  private hasPublishedAwarenessForOpen = false;
 
   constructor(
     replica: CollaborationReplica,
@@ -98,6 +155,7 @@ export class CollaborationProvider {
       options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES,
       true
     );
+    this.awarenessUser = normalizeCollaborationUser(options.user, replica.clientId);
 
     try {
       this.unsubscribeReplica = replica.onUpdate((update, origin) => {
@@ -118,6 +176,10 @@ export class CollaborationProvider {
 
   get pendingBytes(): number {
     return this.queuedBytes;
+  }
+
+  get peers(): readonly AwarenessPeer[] {
+    return awarenessPeers(this.awarenessStore);
   }
 
   connect(): void {
@@ -193,12 +255,16 @@ export class CollaborationProvider {
       this.connectionStatus !== 'disconnected';
     if (!active) return;
 
+    this.clearPending();
+    this.publishAwareness(null, 'best-effort');
+    this.stopAwarenessTimers();
+    this.clearAwarenessPeers();
+    this.hasPublishedAwarenessForOpen = false;
     this.wantsConnection = false;
     this.isOpen = false;
     this.epoch += 1;
     this.connectAttempt += 1;
     const unsubscribe = this.takeTransportSubscription();
-    this.clearPending();
     const cleanupErrors = this.cleanupTransport(unsubscribe, true);
     this.setStatus('disconnected', false);
     for (const error of cleanupErrors) this.report(error);
@@ -213,13 +279,17 @@ export class CollaborationProvider {
       this.hasTransportSubscription ||
       this.connectionStatus === 'connecting' ||
       this.connectionStatus === 'connected';
+    this.clearPending();
+    this.publishAwareness(null, 'best-effort');
+    this.stopAwarenessTimers();
+    this.clearAwarenessPeers();
+    this.hasPublishedAwarenessForOpen = false;
     this.isDestroyed = true;
     this.wantsConnection = false;
     this.isOpen = false;
     this.epoch += 1;
     this.connectAttempt += 1;
     const unsubscribe = this.takeTransportSubscription();
-    this.clearPending();
     const cleanupErrors = this.cleanupTransport(unsubscribe, active);
     this.setStatus('destroyed', false);
     for (const error of cleanupErrors) this.report(error);
@@ -231,6 +301,7 @@ export class CollaborationProvider {
     this.unsubscribeReplica = () => {};
     this.statusListeners.clear();
     this.errorListeners.clear();
+    this.awarenessListeners.clear();
   }
 
   onStatus(listener: CollaborationStatusListener): () => void {
@@ -249,6 +320,52 @@ export class CollaborationProvider {
     return () => this.errorListeners.delete(id);
   }
 
+  onAwareness(listener: AwarenessListener): () => void {
+    if (this.isDestroyed) return () => {};
+    if (typeof listener !== 'function') throw new TypeError('awareness listener must be a function');
+    const id = this.nextListenerId++;
+    this.awarenessListeners.set(id, listener);
+    try {
+      listener(this.peers);
+    } catch {}
+    return () => this.awarenessListeners.delete(id);
+  }
+
+  setCursor(cursor: AwarenessCursor | null): void {
+    if (this.isDestroyed) return;
+    const encodable = cursor ? encodableCursor(cursor) : false;
+    this.awarenessCursor =
+      cursor && encodable
+        ? {
+            sheet: cursor.sheet,
+            anchor: { ...cursor.anchor },
+            head: { ...cursor.head },
+          }
+        : null;
+    if (cursor && !encodable) {
+      this.report(
+        new CollaborationError(
+          'protocol',
+          `Awareness cursor needs a sheet identifier of 1 to ${MAX_AWARENESS_SHEET_LENGTH} characters and non-negative cell coordinates; cursor dropped`
+        )
+      );
+    }
+    if (!this.isOpen || !this.wantsConnection) return;
+
+    const remaining =
+      AWARENESS_BROADCAST_INTERVAL_MS - (Date.now() - this.lastAwarenessSentAt);
+    if (remaining <= 0) {
+      this.publishAwareness();
+      return;
+    }
+    if (this.awarenessBroadcastTimer) return;
+    this.awarenessBroadcastTimer = setTimeout(() => {
+      this.awarenessBroadcastTimer = undefined;
+      this.publishAwareness();
+    }, remaining);
+    unrefTimer(this.awarenessBroadcastTimer);
+  }
+
   private isCurrent(token: number): boolean {
     return !this.isDestroyed && this.wantsConnection && token === this.epoch;
   }
@@ -256,6 +373,9 @@ export class CollaborationProvider {
   private failConnection(token: number, error: CollaborationError): void {
     if (!this.isCurrent(token)) return;
 
+    this.stopAwarenessTimers();
+    this.clearAwarenessPeers();
+    this.hasPublishedAwarenessForOpen = false;
     this.wantsConnection = false;
     this.isOpen = false;
     this.epoch += 1;
@@ -328,6 +448,9 @@ export class CollaborationProvider {
         if (this.isOpen) this.handleMessage(token, event.data);
         break;
       case 'close':
+        this.stopAwarenessTimers();
+        this.clearAwarenessPeers();
+        this.hasPublishedAwarenessForOpen = false;
         this.isOpen = false;
         this.connectAttempt += 1;
         this.clearPending();
@@ -353,6 +476,7 @@ export class CollaborationProvider {
   private handleOpen(token: number): void {
     if (this.isOpen) return;
     this.isOpen = true;
+    this.hasPublishedAwarenessForOpen = false;
     this.clearPending();
     this.setStatus('connected', false);
     if (!this.isCurrent(token) || !this.isOpen) return;
@@ -371,8 +495,23 @@ export class CollaborationProvider {
     try {
       this.sendFrame(encodeSyncStep1(stateVector, this.maxFrameBytes));
     } catch (cause) {
-      this.failConnection(token, normalizeError('protocol', 'Failed to encode SyncStep1', cause));
+      this.failConnection(
+        token,
+        normalizeError('protocol', 'Failed to encode collaboration handshake', cause)
+      );
+      return;
     }
+    if (!this.isCurrent(token) || !this.isOpen) return;
+
+    try {
+      this.sendFrame(encodeQueryAwareness(this.maxFrameBytes));
+    } catch (cause) {
+      this.report(normalizeError('protocol', 'Failed to encode awareness query', cause));
+    }
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    if (!this.hasPublishedAwarenessForOpen) this.publishAwareness();
+    if (!this.isCurrent(token) || !this.isOpen) return;
+    this.startAwarenessTimers();
   }
 
   private handleMessage(token: number, data: Uint8Array): void {
@@ -407,6 +546,42 @@ export class CollaborationProvider {
           this.applyRemoteUpdate(token, message.update);
           break;
         case 'awareness':
+          try {
+            const decodeErrors: ProtocolError[] = [];
+            let discardedPeers = 0;
+            const changed = applyAwarenessUpdates(
+              this.awarenessStore,
+              decodeAwarenessUpdate(
+                message.update,
+                DEFAULT_MAX_AWARENESS_STATES,
+                (cause) => decodeErrors.push(cause)
+              ),
+              this.replica.clientId,
+              Date.now(),
+              {
+                onPeersDiscarded: (count) => {
+                  discardedPeers = count;
+                },
+              }
+            );
+            for (const cause of decodeErrors) {
+              this.report(normalizeError('protocol', 'Invalid awareness update', cause));
+            }
+            if (discardedPeers > 0) {
+              this.report(
+                new CollaborationError(
+                  'protocol',
+                  `${discardedPeers} awareness ${
+                    discardedPeers === 1 ? 'entry was' : 'entries were'
+                  } discarded because the tracked peer limit of ${MAX_TRACKED_AWARENESS_PEERS} was reached`
+                )
+              );
+            }
+            if (!this.isCurrent(token) || !this.isOpen) return;
+            if (changed) this.emitAwareness();
+          } catch (cause) {
+            this.report(normalizeError('protocol', 'Invalid awareness update', cause));
+          }
           break;
         case 'auth':
           this.failConnection(
@@ -418,15 +593,7 @@ export class CollaborationProvider {
           );
           return;
         case 'query-awareness':
-          try {
-            this.sendFrame(encodeEmptyAwarenessUpdate(this.maxFrameBytes));
-          } catch (cause) {
-            this.failConnection(
-              token,
-              normalizeError('protocol', 'Failed to encode awareness response', cause)
-            );
-            return;
-          }
+          this.publishAwareness();
           break;
       }
     }
@@ -486,6 +653,97 @@ export class CollaborationProvider {
     }
   }
 
+  private publishAwareness(
+    state: 'current' | null = 'current',
+    delivery: 'queued' | 'best-effort' = 'queued'
+  ): void {
+    if (!this.isOpen || this.isDestroyed || !this.wantsConnection) return;
+    if (this.awarenessBroadcastTimer) {
+      clearTimeout(this.awarenessBroadcastTimer);
+      this.awarenessBroadcastTimer = undefined;
+    }
+    if (this.awarenessClock >= Number.MAX_SAFE_INTEGER) {
+      if (delivery === 'queued' && !this.reportedClockExhaustion) {
+        this.reportedClockExhaustion = true;
+        this.report(new CollaborationError('protocol', 'Awareness clock exhausted'));
+      }
+      return;
+    }
+    this.awarenessClock += 1;
+    try {
+      this.hasPublishedAwarenessForOpen = true;
+      const frame = encodeAwarenessUpdate(
+        [
+          {
+            clientId: this.replica.clientId,
+            clock: this.awarenessClock,
+            state:
+              state === null
+                ? null
+                : {
+                    user: this.awarenessUser,
+                    cursor: this.awarenessCursor,
+                  },
+          },
+        ],
+        this.maxFrameBytes
+      );
+      if (delivery === 'best-effort') this.sendBestEffort(frame);
+      else this.sendFrame(frame);
+      this.lastAwarenessSentAt = Date.now();
+    } catch (cause) {
+      if (delivery === 'queued') {
+        this.report(normalizeError('protocol', 'Failed to encode awareness update', cause));
+      }
+    }
+  }
+
+  private startAwarenessTimers(): void {
+    this.stopAwarenessTimers();
+    this.awarenessHeartbeatTimer = setInterval(() => {
+      this.publishAwareness();
+    }, AWARENESS_HEARTBEAT_INTERVAL_MS);
+    this.awarenessExpiryTimer = setInterval(() => {
+      if (
+        expireAwarenessPeers(
+          this.awarenessStore,
+          Date.now(),
+          AWARENESS_PEER_TIMEOUT_MS
+        )
+      ) {
+        this.emitAwareness();
+      }
+    }, AWARENESS_EXPIRY_INTERVAL_MS);
+    unrefTimer(this.awarenessHeartbeatTimer);
+    unrefTimer(this.awarenessExpiryTimer);
+  }
+
+  private stopAwarenessTimers(): void {
+    if (this.awarenessBroadcastTimer) clearTimeout(this.awarenessBroadcastTimer);
+    if (this.awarenessHeartbeatTimer) clearInterval(this.awarenessHeartbeatTimer);
+    if (this.awarenessExpiryTimer) clearInterval(this.awarenessExpiryTimer);
+    this.awarenessBroadcastTimer = undefined;
+    this.awarenessHeartbeatTimer = undefined;
+    this.awarenessExpiryTimer = undefined;
+  }
+
+  private clearAwarenessPeers(): void {
+    if (this.awarenessStore.size === 0) return;
+    const hadPeers = this.peers.length > 0;
+    this.awarenessStore.clear();
+    if (hadPeers) this.emitAwareness();
+  }
+
+  private emitAwareness(): void {
+    const peers = this.peers;
+    for (const [id, listener] of [...this.awarenessListeners]) {
+      if (this.awarenessListeners.get(id) !== listener) continue;
+      try {
+        listener(peers);
+      } catch {}
+    }
+  }
+
   private sendFrame(frame: Uint8Array): void {
     if (!this.isOpen || this.isDestroyed || !this.wantsConnection) return;
     const token = this.epoch;
@@ -510,6 +768,12 @@ export class CollaborationProvider {
       return;
     }
     if (!accepted && this.isCurrent(token) && this.isOpen) this.queueFrame(token, frame);
+  }
+
+  private sendBestEffort(frame: Uint8Array): void {
+    try {
+      this.transport.send(frame.slice());
+    } catch {}
   }
 
   private queueFrame(token: number, frame: Uint8Array): void {

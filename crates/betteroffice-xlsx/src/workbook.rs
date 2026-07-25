@@ -419,6 +419,12 @@ impl Workbook {
     pub fn sheet_info(&self) -> Result<SheetInfo> {
         let sheet = self.sheet(self.active_sheet)?;
         let geometry = GridGeometry::new(sheet);
+        let sheet_ids = match &self.mode {
+            WorkbookMode::Collaborative { structure } => structure.sheet_keys.clone(),
+            WorkbookMode::Standalone => (0..self.model.sheets.len())
+                .map(|index| format!("sheet:{index}"))
+                .collect(),
+        };
         let (content_width, content_height) = match sheet.used_range() {
             Some(range) => (
                 geometry.col_x(range.end.col.saturating_add(2).min(MAX_COLS)),
@@ -427,6 +433,7 @@ impl Workbook {
             None => (geometry.col_x(26), geometry.row_y(50)),
         };
         Ok(SheetInfo {
+            sheet_ids,
             sheet_names: self
                 .model
                 .sheets
