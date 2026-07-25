@@ -2408,6 +2408,15 @@ export function hit_test_regions_json(display_list, page_index, x, y) {
 }
 
 /**
+ * wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+ * unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+ * module init for every wasm core that links this crate (layout and edit).
+ */
+export function install_panic_hook() {
+    wasm.install_panic_hook();
+}
+
+/**
  * wasm wrapper over [`layout_to_json`].
  * @param {string} input
  * @returns {string}
@@ -3164,6 +3173,9 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1, arg2, arg3);
             return ret;
         }, arguments); },
+        __wbg_error_73f4720a6c53102a: function(arg0, arg1) {
+            console.error(getStringFromWasm0(arg0, arg1));
+        },
         __wbg_getRandomValues_3f44b700395062e5: function() { return handleError(function (arg0, arg1) {
             globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
         }, arguments); },

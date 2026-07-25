@@ -9,6 +9,7 @@ import {
   decodeFrameDelta,
   demoDisplayList,
   encodeDisplayListFrameExtras,
+  isDisplayListQuerySourceDead,
   type DisplayList,
   type DisplayListQueries,
   type GlyphOutlineProvider,
@@ -759,15 +760,22 @@ function residentCaretForSelection(
   return validated ? { ...validated, selection: computedFor } : null;
 }
 
+/**
+ * The editing wasm's own query surface, unless a panic already poisoned that
+ * instance — then queries route through the layout module instead of dying on
+ * the leaked borrow guard.
+ */
 function residentDisplayListQueryEngine(
   engine: RustDisplayListEngine | null | undefined
 ): ResidentDisplayListQueryEngine | undefined {
-  return engine?.displayHitTestRegionsJson &&
+  const resident =
+    engine?.displayHitTestRegionsJson &&
     engine.displayVerticalMoveJson &&
     engine.displayRangeRectsJson &&
     engine.displayRangeRectsRegionJson
-    ? (engine as ResidentDisplayListQueryEngine)
-    : undefined;
+      ? (engine as ResidentDisplayListQueryEngine)
+      : undefined;
+  return isDisplayListQuerySourceDead(resident) ? undefined : resident;
 }
 
 function isWorkerHostEngine(

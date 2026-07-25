@@ -135,6 +135,15 @@ export function hit_test_regions_json(display_list, page_index, x, y) {
 }
 
 /**
+ * wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+ * unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+ * module init for every wasm core that links this crate (layout and edit).
+ */
+export function install_panic_hook() {
+    wasm.install_panic_hook();
+}
+
+/**
  * wasm wrapper over [`layout_to_json`].
  * @param {string} input
  * @returns {string}
@@ -463,6 +472,9 @@ export function vertical_move_json(display_list, position, direction, goal_x) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_error_73f4720a6c53102a: function(arg0, arg1) {
+            console.error(getStringFromWasm0(arg0, arg1));
+        },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);

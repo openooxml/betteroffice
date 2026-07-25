@@ -81,6 +81,27 @@ pub mod table_row_break;
 
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(message: &str);
+}
+
+/// wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+/// unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+/// module init for every wasm core that links this crate (layout and edit).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            console_error(&format!("[docx-wasm] panic: {info}"));
+        }));
+    });
+}
+
 /// Why the engine refused an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {

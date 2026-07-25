@@ -519,6 +519,13 @@ export function hit_test_regions_by_handle(handle: number, page_index: number, x
 export function hit_test_regions_json(display_list: string, page_index: number, x: number, y: number): string;
 
 /**
+ * wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+ * unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+ * module init for every wasm core that links this crate (layout and edit).
+ */
+export function install_panic_hook(): void;
+
+/**
  * wasm wrapper over [`layout_to_json`].
  */
 export function layout_document_json(input: string): string;
@@ -823,6 +830,7 @@ export interface InitOutput {
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
     readonly clear_measure_fonts: () => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
