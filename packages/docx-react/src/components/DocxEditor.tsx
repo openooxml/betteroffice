@@ -74,6 +74,7 @@ import { DocxEditorShell } from './DocxEditor/DocxEditorShell';
 import {
   commitLegacyDocumentChange,
   commitYrsDocumentChange,
+  LEGACY_PROJECTION_DELAY_MS,
 } from './DocxEditor/documentChangeCommit';
 import type { FontOption } from './ui/FontPicker';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './DocumentOutline';
@@ -730,6 +731,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // can observe edits without competing for the single React prop.
   const contentChangeSubscribersRef = useRef(new Set<(doc: Document) => void>());
   const selectionChangeSubscribersRef = useRef(new Set<(s: SelectionState | null) => void>());
+  const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // History hook for undo/redo - start with null document
   const history = useDocumentHistory<Document | null>(initialDocument || null, {
@@ -935,15 +937,40 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
   }, [cleanOrphanedComments, refreshHeadings, showOutlineRef]);
 
+  const scheduleLegacyProjection = useCallback((project: () => void) => {
+    if (legacyProjectionTimerRef.current !== null) {
+      clearTimeout(legacyProjectionTimerRef.current);
+    }
+    legacyProjectionTimerRef.current = setTimeout(() => {
+      legacyProjectionTimerRef.current = null;
+      project();
+    }, LEGACY_PROJECTION_DELAY_MS);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (legacyProjectionTimerRef.current !== null) {
+        clearTimeout(legacyProjectionTimerRef.current);
+        legacyProjectionTimerRef.current = null;
+      }
+    },
+    []
+  );
+
   const handleDocumentChange = useCallback(
     (newDocument: Document) => {
-      commitLegacyDocumentChange(newDocument, yrsCore.documentFromYrs, {
-        push: pushDocument,
-        notify:
-          onChange || contentChangeSubscribersRef.current.size > 0
-            ? notifyDocumentChange
-            : undefined,
-      });
+      commitLegacyDocumentChange(
+        newDocument,
+        yrsCore.documentFromYrs,
+        {
+          push: pushDocument,
+          notify:
+            onChange || contentChangeSubscribersRef.current.size > 0
+              ? notifyDocumentChange
+              : undefined,
+        },
+        scheduleLegacyProjection
+      );
       handleContentHousekeeping();
     },
     [
@@ -951,6 +978,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       notifyDocumentChange,
       onChange,
       pushDocument,
+      scheduleLegacyProjection,
       yrsCore.documentFromYrs,
     ]
   );
