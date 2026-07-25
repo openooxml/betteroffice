@@ -13,7 +13,8 @@
     "esbuild": "0.28.1",
     "fast-uri": "3.1.4",
     "postcss": "8.5.23",
-    "sharp": "^0.35.0"
+    "sharp": "^0.35.0",
+    "brace-expansion": "5.0.8"
   },
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",

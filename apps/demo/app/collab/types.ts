@@ -43,8 +43,8 @@ export interface CollaborationProvider {
 }
 
 export type CollaborationProviderFactory<
-  TProvider extends CollaborationProvider = CollaborationProvider,
+  Provider extends CollaborationProvider = CollaborationProvider,
 > = (
   replica: CollaborationReplica,
   transport: CollaborationTransport,
-) => TProvider;
+) => Provider;

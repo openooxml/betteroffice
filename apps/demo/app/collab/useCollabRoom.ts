@@ -95,30 +95,30 @@ export function useDemoRoom(): string | null {
 }
 
 export interface CollabRoomState<
-  TProvider extends CollaborationProvider = CollaborationProvider,
+  Provider extends CollaborationProvider = CollaborationProvider,
 > {
   clientId: number | null;
-  provider: TProvider | null;
   status: CollaborationStatus;
   synced: boolean;
   peerCount: number | null;
   error: string | null;
+  provider: Provider | null;
   onReplica(replica: CollaborationReplica | null): void;
 }
 
-export function useCollabRoom<TProvider extends CollaborationProvider>(
+export function useCollabRoom<Provider extends CollaborationProvider>(
   relayOrigin: string,
   roomId: string | null,
-  createProvider: CollaborationProviderFactory<TProvider>,
-): CollabRoomState<TProvider> {
+  createProvider: CollaborationProviderFactory<Provider>,
+): CollabRoomState<Provider> {
   const [clientId, setClientId] = useState<number | null>(null);
   const [status, setStatus] =
     useState<CollaborationStatus>("disconnected");
   const [synced, setSynced] = useState(false);
   const [peerCount, setPeerCount] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [provider, setProvider] = useState<TProvider | null>(null);
-  const providerRef = useRef<TProvider | null>(null);
+  const [provider, setProvider] = useState<Provider | null>(null);
+  const providerRef = useRef<Provider | null>(null);
   const transportRef = useRef<RoomTransport | null>(null);
   const cleanupRef = useRef<Array<() => void>>([]);
 
@@ -172,5 +172,5 @@ export function useCollabRoom<TProvider extends CollaborationProvider>(
     [createProvider, relayOrigin, roomId, teardown],
   );
 
-  return { clientId, provider, status, synced, peerCount, error, onReplica };
+  return { clientId, status, synced, peerCount, error, provider, onReplica };
 }

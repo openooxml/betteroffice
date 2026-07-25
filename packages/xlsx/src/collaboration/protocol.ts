@@ -1,5 +1,13 @@
+import type { AwarenessPayload, AwarenessUpdate } from './types';
+import {
+  MAX_AWARENESS_NAME_LENGTH,
+  MAX_AWARENESS_SHEET_LENGTH,
+  normalizeAwarenessColor,
+} from './awareness';
+
 export const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024 + 16;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
+export const DEFAULT_MAX_AWARENESS_STATES = 1024;
 
 const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
@@ -126,6 +134,64 @@ function encodeFrame(parts: readonly Uint8Array[], maxFrameBytes: number): Uint8
   return frame;
 }
 
+function encodeVarString(value: string): Uint8Array[] {
+  const bytes = new TextEncoder().encode(value);
+  return [encodeVarUint(bytes.byteLength), bytes];
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function awarenessCell(value: unknown): { row: number; col: number } {
+  if (!isObject(value)) throw new ProtocolError('Awareness cell must be an object');
+  const { row, col } = value;
+  if (
+    !Number.isSafeInteger(row) ||
+    !Number.isSafeInteger(col) ||
+    (row as number) < 0 ||
+    (col as number) < 0
+  ) {
+    throw new ProtocolError('Awareness cell coordinates must be non-negative safe integers');
+  }
+  return { row: row as number, col: col as number };
+}
+
+function awarenessPayload(value: unknown, clientId: number): AwarenessPayload | null {
+  if (value === null) return null;
+  if (!isObject(value) || !isObject(value.user)) {
+    throw new ProtocolError('Awareness state must contain a user');
+  }
+  const { name, color } = value.user;
+  if (typeof name !== 'string' || name.length === 0 || name.length > MAX_AWARENESS_NAME_LENGTH) {
+    throw new ProtocolError(
+      `Awareness user name must contain 1 to ${MAX_AWARENESS_NAME_LENGTH} characters`
+    );
+  }
+  const normalizedColor = normalizeAwarenessColor(color, clientId);
+
+  const cursor = value.cursor;
+  if (cursor === null || cursor === undefined) {
+    return { user: { name, color: normalizedColor }, cursor: null };
+  }
+  if (!isObject(cursor) || typeof cursor.sheet !== 'string') {
+    throw new ProtocolError('Awareness cursor must contain a sheet identifier');
+  }
+  if (cursor.sheet.length === 0 || cursor.sheet.length > MAX_AWARENESS_SHEET_LENGTH) {
+    throw new ProtocolError(
+      `Awareness sheet identifier must contain 1 to ${MAX_AWARENESS_SHEET_LENGTH} characters`
+    );
+  }
+  return {
+    user: { name, color: normalizedColor },
+    cursor: {
+      sheet: cursor.sheet,
+      anchor: awarenessCell(cursor.anchor),
+      head: awarenessCell(cursor.head),
+    },
+  };
+}
+
 function encodeSyncMessage(
   subtype: number,
   payload: Uint8Array,
@@ -166,15 +232,117 @@ export function encodeUpdate(
 export function encodeEmptyAwarenessUpdate(
   maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
 ): Uint8Array {
-  const emptyUpdate = Uint8Array.of(0);
+  return encodeAwarenessUpdate([], maxFrameBytes);
+}
+
+export function encodeAwarenessUpdate(
+  updates: readonly AwarenessUpdate[],
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  if (updates.length > DEFAULT_MAX_AWARENESS_STATES) {
+    throw new ProtocolError(
+      `Awareness update exceeds ${DEFAULT_MAX_AWARENESS_STATES} states`
+    );
+  }
+  const payloadParts: Uint8Array[] = [encodeVarUint(updates.length)];
+  for (const update of updates) {
+    if (!Number.isSafeInteger(update.clientId) || update.clientId <= 0) {
+      throw new ProtocolError('Awareness clientId must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(update.clock) || update.clock < 0) {
+      throw new ProtocolError('Awareness clock must be a non-negative safe integer');
+    }
+    const state = awarenessPayload(update.state, update.clientId);
+    payloadParts.push(
+      encodeVarUint(update.clientId),
+      encodeVarUint(update.clock),
+      ...encodeVarString(JSON.stringify(state))
+    );
+  }
+  const payload = encodeFrame(payloadParts, maxFrameBytes);
   return encodeFrame(
     [
       encodeVarUint(TOP_LEVEL_AWARENESS),
-      encodeVarUint(emptyUpdate.byteLength),
-      emptyUpdate,
+      encodeVarUint(payload.byteLength),
+      payload,
     ],
     maxFrameBytes
   );
+}
+
+export function encodeQueryAwareness(
+  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES
+): Uint8Array {
+  return encodeFrame([encodeVarUint(TOP_LEVEL_QUERY_AWARENESS)], maxFrameBytes);
+}
+
+export function decodeAwarenessUpdate(
+  update: Uint8Array,
+  maxStates = DEFAULT_MAX_AWARENESS_STATES,
+  reportDiscard?: (error: ProtocolError) => void
+): AwarenessUpdate[] {
+  if (!(update instanceof Uint8Array)) {
+    throw new ProtocolError('Awareness update must be a Uint8Array');
+  }
+  if (!Number.isSafeInteger(maxStates) || maxStates < 1) {
+    throw new ProtocolError('Awareness state limit must be a positive integer');
+  }
+  const decoder = new Decoder(update);
+  const count = decoder.readVarUint();
+  if (count > maxStates) {
+    const error = new ProtocolError(`Awareness update exceeds ${maxStates} states`);
+    if (!reportDiscard) throw error;
+    reportDiscard(error);
+  }
+  const updates: AwarenessUpdate[] = [];
+  const decodedCount = Math.min(count, maxStates);
+  for (let index = 0; index < decodedCount; index++) {
+    let clientId: number;
+    let clock: number;
+    let encodedState: string;
+    try {
+      clientId = decoder.readVarUint();
+      clock = decoder.readVarUint();
+      encodedState = decoder.readVarString();
+    } catch (cause) {
+      if (!reportDiscard) throw cause;
+      reportDiscard(
+        new ProtocolError(
+          `Awareness entry ${index + 1} could not be decoded: ${
+            cause instanceof Error ? cause.message : 'Unknown error'
+          }`
+        )
+      );
+      return updates;
+    }
+
+    try {
+      if (clientId <= 0) {
+        throw new ProtocolError('Awareness clientId must be a positive safe integer');
+      }
+      const parsed: unknown = JSON.parse(encodedState);
+      updates.push({ clientId, clock, state: awarenessPayload(parsed, clientId) });
+    } catch (cause) {
+      const error =
+        cause instanceof ProtocolError
+          ? cause
+          : new ProtocolError(
+              `Invalid awareness JSON${cause instanceof Error ? `: ${cause.message}` : ''}`
+            );
+      if (!reportDiscard) throw error;
+      reportDiscard(
+        new ProtocolError(
+          `Awareness entry ${index + 1} discarded: ${error.message}`
+        )
+      );
+    }
+  }
+  if (count <= maxStates && !decoder.done) {
+    const error = new ProtocolError('Trailing awareness update data');
+    if (!reportDiscard) throw error;
+    reportDiscard(error);
+  }
+  return updates;
 }
 
 export function decodeMessages(
