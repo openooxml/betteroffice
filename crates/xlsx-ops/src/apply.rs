@@ -10,7 +10,7 @@ use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workboo
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_formula_sheet,
+    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_hyperlink_location,
     rename_sheet_references,
 };
 
@@ -650,7 +650,7 @@ fn rename_hyperlink_locations(wb: &mut Workbook, old_name: &str, new_name: &str)
             let Some(location) = &hyperlink.location else {
                 continue;
             };
-            let rewritten = rename_formula_sheet(location, old_name, new_name);
+            let rewritten = rename_hyperlink_location(location, old_name, new_name);
             if rewritten != *location {
                 hyperlink.location = Some(rewritten);
                 changed = true;
@@ -1004,6 +1004,69 @@ mod tests {
             wb.sheets[0].hyperlinks[0].external_target.as_deref(),
             Some("https://example.com/report")
         );
+        for operation in &inverse.0 {
+            apply(&mut wb, operation).unwrap();
+        }
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn rename_rewrites_hash_prefixed_hyperlink_locations() {
+        let mut wb = wb_one_sheet();
+        let link = |range: &str, location: &str| Hyperlink {
+            range: CellRange::parse_a1(range).unwrap(),
+            external_target: None,
+            location: Some(location.into()),
+            tooltip: None,
+            display: None,
+        };
+        wb.sheets[0].hyperlinks.extend([
+            link("A1", "#Target!A1"),
+            link("A2", "Target!A2"),
+            link("A3", "#'Target'!A3"),
+            link("A4", "#MyRange"),
+            link("A5", "#Other!A1"),
+        ]);
+        wb.sheets[0].hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("A6").unwrap(),
+            external_target: Some("https://example.com/report".into()),
+            location: Some("#Target!A6".into()),
+            tooltip: None,
+            display: None,
+        });
+        wb.sheets.push(Sheet::new("Target"));
+        let before = wb.clone();
+
+        let inverse = apply(
+            &mut wb,
+            &Op::RenameSheet {
+                sheet: SheetId(1),
+                name: "My Sheet".into(),
+            },
+        )
+        .unwrap();
+
+        let locations: Vec<Option<&str>> = wb.sheets[0]
+            .hyperlinks
+            .iter()
+            .map(|hyperlink| hyperlink.location.as_deref())
+            .collect();
+        assert_eq!(
+            locations,
+            vec![
+                Some("#'My Sheet'!A1"),
+                Some("'My Sheet'!A2"),
+                Some("#'My Sheet'!A3"),
+                Some("#MyRange"),
+                Some("#Other!A1"),
+                Some("#'My Sheet'!A6"),
+            ]
+        );
+        assert_eq!(
+            wb.sheets[0].hyperlinks[5].external_target.as_deref(),
+            Some("https://example.com/report")
+        );
+
         for operation in &inverse.0 {
             apply(&mut wb, operation).unwrap();
         }

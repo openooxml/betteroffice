@@ -317,6 +317,66 @@ fn combined_hyperlink_location_remaps_and_round_trips() {
 }
 
 #[test]
+fn renaming_a_sheet_rewrites_hash_prefixed_hyperlink_locations() {
+    let mut source = Sheet::new("Source");
+    let link = |range: &str, location: &str| Hyperlink {
+        range: CellRange::parse_a1(range).unwrap(),
+        external_target: None,
+        location: Some(location.into()),
+        tooltip: None,
+        display: None,
+    };
+    source.hyperlinks.extend([
+        link("A1", "#Target!A1"),
+        link("A2", "Target!A2"),
+        link("A3", "#'Target'!A3"),
+        link("A4", "#MyRange"),
+    ]);
+    source.hyperlinks.push(Hyperlink {
+        range: CellRange::parse_a1("A5").unwrap(),
+        external_target: Some("https://example.com/report".into()),
+        location: Some("#Target!A5".into()),
+        tooltip: None,
+        display: Some("Open report".into()),
+    });
+    let mut model = WorkbookModel::default();
+    model.sheets.push(source);
+    model.sheets.push(Sheet::new("Target"));
+    let mut workbook = Workbook::from_model(model).unwrap();
+
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(1),
+                name: "My Sheet".into(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let hyperlinks = &reopened.sheet(SheetId(0)).unwrap().hyperlinks;
+    let locations: Vec<Option<&str>> = hyperlinks
+        .iter()
+        .map(|hyperlink| hyperlink.location.as_deref())
+        .collect();
+    assert_eq!(
+        locations,
+        vec![
+            Some("#'My Sheet'!A1"),
+            Some("'My Sheet'!A2"),
+            Some("#'My Sheet'!A3"),
+            Some("#MyRange"),
+            Some("#'My Sheet'!A5"),
+        ]
+    );
+    assert_eq!(
+        hyperlinks[4].external_target.as_deref(),
+        Some("https://example.com/report")
+    );
+}
+
+#[test]
 fn edits_recalculate_render_and_round_trip() {
     let mut workbook =
         Workbook::open_recalculated(&sample_xlsx(), CalculationOptions::default()).unwrap();

@@ -183,6 +183,16 @@ pub(crate) fn rename_sheet_references(
     Ok(restores)
 }
 
+/// rename the sheet inside an internal hyperlink location. locations are
+/// commonly written `#Sheet!A1`; the leading `#` is not part of the reference
+/// and must not reach the formula rewriter, but its presence is preserved.
+pub(crate) fn rename_hyperlink_location(location: &str, old_name: &str, new_name: &str) -> String {
+    match location.strip_prefix('#') {
+        Some(reference) => format!("#{}", rename_formula_sheet(reference, old_name, new_name)),
+        None => rename_formula_sheet(location, old_name, new_name),
+    }
+}
+
 pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
     if old_name == new_name {
         return source.to_string();
@@ -762,6 +772,48 @@ mod tests {
             "Renamed!A1"
         );
         assert_eq!(rename_formula_sheet("S!A1", "S", "R4C"), "'R4C'!A1");
+    }
+
+    #[test]
+    fn rename_hyperlink_location_preserves_the_leading_hash() {
+        assert_eq!(
+            rename_hyperlink_location("#Target!A1", "Target", "Renamed"),
+            "#Renamed!A1"
+        );
+        assert_eq!(
+            rename_hyperlink_location("Target!A1", "Target", "Renamed"),
+            "Renamed!A1"
+        );
+        assert_eq!(
+            rename_hyperlink_location("#Target!A1", "Target", "New Target"),
+            "#'New Target'!A1"
+        );
+    }
+
+    #[test]
+    fn rename_hyperlink_location_handles_quoted_and_bare_targets() {
+        assert_eq!(
+            rename_hyperlink_location("#'My Sheet'!A1", "My Sheet", "Renamed"),
+            "#Renamed!A1"
+        );
+        assert_eq!(
+            rename_hyperlink_location("'My Sheet'!A1:B2", "My Sheet", "Renamed"),
+            "Renamed!A1:B2"
+        );
+        assert_eq!(
+            rename_hyperlink_location("#'It''s Data'!A1", "It's Data", "Renamed"),
+            "#Renamed!A1"
+        );
+        for location in ["#MyRange", "MyRange", "#Target", "#A1"] {
+            assert_eq!(
+                rename_hyperlink_location(location, "Target", "Renamed"),
+                location
+            );
+        }
+        assert_eq!(
+            rename_hyperlink_location("#Target!A1#2", "Target", "Renamed"),
+            "#Renamed!A1#2"
+        );
     }
 
     #[test]
