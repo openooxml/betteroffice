@@ -105,10 +105,37 @@ pub fn serialize_workbook_with_package_and_origins(
     package: &PreservedPackage,
     origins: &[Option<usize>],
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    let edited = wb != &package.original_workbook
+        || origins.len() != package.sheets.len()
+        || origins
+            .iter()
+            .enumerate()
+            .any(|(index, origin)| *origin != Some(index));
+    serialize_workbook_with_package_and_origins_after_edits(wb, package, origins, edited)
+}
+
+/// `edited` false means the caller guarantees an untouched model, which is
+/// returned as the source bytes; true drops the now-stale calculation chain.
+#[doc(hidden)]
+pub fn serialize_workbook_with_package_and_origins_after_edits(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    edited: bool,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if origins.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
         ));
+    }
+    if !edited
+        && origins.len() == package.sheets.len()
+        && origins
+            .iter()
+            .enumerate()
+            .all(|(index, origin)| *origin == Some(index))
+    {
+        return Ok(package.parts.clone());
     }
 
     let have_sst = !wb.shared_strings.is_empty();
@@ -181,6 +208,12 @@ pub fn serialize_workbook_with_package_and_origins(
             parts.remove(&relationship_part_path(&source.path));
         }
     }
+    if edited {
+        for calc_chain in &package.calc_chains {
+            parts.remove(&calc_chain.path);
+            parts.remove(&relationship_part_path(&calc_chain.path));
+        }
+    }
 
     for (sheet, plan) in wb.sheets.iter().zip(&sheets) {
         let bytes = match plan.origin.and_then(|origin| package.sheets.get(origin)) {
@@ -193,7 +226,7 @@ pub fn serialize_workbook_with_package_and_origins(
         parts.set(plan.path.clone(), bytes);
     }
 
-    let workbook = workbook_xml_with_template(wb, package, &sheets)?;
+    let workbook = workbook_xml_with_template(wb, package, &sheets, edited)?;
     parts.set("xl/workbook.xml".to_owned(), workbook);
     parts.set(
         "xl/_rels/workbook.xml.rels".to_owned(),
@@ -203,6 +236,7 @@ pub fn serialize_workbook_with_package_and_origins(
             shared_strings.as_ref(),
             styles.as_ref(),
             theme.as_ref(),
+            edited,
         )?,
     );
     parts.set(
@@ -217,6 +251,7 @@ pub fn serialize_workbook_with_package_and_origins(
             shared_strings.as_ref(),
             styles.as_ref(),
             theme.as_ref(),
+            edited,
         )?,
     );
 
@@ -238,7 +273,8 @@ pub fn serialize_workbook_with_package_and_origins(
 
     match (package.theme.as_ref(), theme.as_ref()) {
         (Some(source), Some(planned))
-            if source.path == planned.path && wb.styles.theme == package.original_theme => {}
+            if source.path == planned.path
+                && wb.styles.theme == package.original_workbook.styles.theme => {}
         (source, Some(planned)) => {
             if let Some(source) = source
                 && source.path != planned.path
@@ -598,6 +634,7 @@ fn merged_workbook_relationships(
     shared_strings: Option<&PlannedPart>,
     styles: Option<&PlannedPart>,
     theme: Option<&PlannedPart>,
+    edited: bool,
 ) -> Result<Vec<u8>, ParseError> {
     let planned = sheets
         .iter()
@@ -629,6 +666,9 @@ fn merged_workbook_relationships(
     let mut emitted = HashSet::new();
     let mut merged = Vec::new();
     for source in &package.workbook_relationships {
+        if edited && source.has_type("calcChain") {
+            continue;
+        }
         let id = source.id();
         if let Some(planned) = id.and_then(|id| planned_by_id.get(id))
             && emitted.insert(id.unwrap().to_owned())
@@ -677,6 +717,7 @@ fn merged_content_types(
     shared_strings: Option<&PlannedPart>,
     styles: Option<&PlannedPart>,
     theme: Option<&PlannedPart>,
+    edited: bool,
 ) -> Result<Vec<u8>, ParseError> {
     let mut desired = BTreeMap::new();
     let strict = package.workbook_template.root_namespace() == Some(NS_STRICT_MAIN);
@@ -754,6 +795,11 @@ fn merged_content_types(
     let mut entries = Vec::new();
     let mut emitted_parts = HashSet::new();
     let mut default_extensions = HashSet::new();
+    let calc_chain_paths = package
+        .calc_chains
+        .iter()
+        .map(|part| normalized_part_name(&part.path))
+        .collect::<HashSet<_>>();
     for entry in &package.content_types {
         if entry.element == "Default" {
             if let Some(extension) = entry.attribute("Extension") {
@@ -767,6 +813,9 @@ fn merged_content_types(
             continue;
         };
         let normalized = normalized_part_name(part_name);
+        if edited && calc_chain_paths.contains(&normalized) {
+            continue;
+        }
         if source_owned.contains(&normalized) {
             if desired.contains_key(&normalized) && emitted_parts.insert(normalized) {
                 entries.push(entry.clone());
@@ -999,6 +1048,7 @@ fn workbook_xml_with_template(
     wb: &Workbook,
     package: &PreservedPackage,
     sheets: &[PlannedSheet],
+    edited: bool,
 ) -> Result<Vec<u8>, ParseError> {
     let workbook_pr =
         if package.workbook_pr_attributes.is_some() || wb.date_system == DateSystem::V1904 {
@@ -1056,8 +1106,29 @@ fn workbook_xml_with_template(
         writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
+    let calc_pr = if edited {
+        let mut attributes = package.calc_pr_attributes.clone().unwrap_or_default();
+        set_attribute(
+            &mut attributes,
+            "fullCalcOnLoad",
+            "fullCalcOnLoad",
+            "1".to_owned(),
+        );
+        Some(fragment(|writer| {
+            write_empty_element(writer, "calcPr", &attributes)
+        })?)
+    } else {
+        package
+            .workbook_template
+            .child("calcPr")
+            .map(|child| child.bytes.clone())
+    };
     package.workbook_template.render(
-        vec![("workbookPr", workbook_pr), ("sheets", sheets_fragment)],
+        vec![
+            ("workbookPr", workbook_pr),
+            ("sheets", sheets_fragment),
+            ("calcPr", calc_pr),
+        ],
         workbook_child_rank,
     )
 }

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
-use xlsx_model::{Theme, Workbook};
+use xlsx_model::Workbook;
 
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
 use crate::{MAX_DEPTH, ParseError};
@@ -18,12 +18,14 @@ pub struct PreservedPackage {
     pub(crate) workbook_template: XmlTemplate,
     pub(crate) workbook_pr_attributes: Option<Vec<XmlAttribute>>,
     pub(crate) workbook_sheets_attributes: Vec<XmlAttribute>,
+    pub(crate) calc_pr_attributes: Option<Vec<XmlAttribute>>,
     pub(crate) sheets: Vec<PreservedSheet>,
     pub(crate) shared_strings: Option<PartReference>,
     pub(crate) styles: Option<PartReference>,
     pub(crate) theme: Option<PartReference>,
+    pub(crate) calc_chains: Vec<PartReference>,
     pub(crate) stylesheet_template: Option<XmlTemplate>,
-    pub(crate) original_theme: Theme,
+    pub(crate) original_workbook: Workbook,
 }
 
 impl PreservedPackage {
@@ -43,6 +45,10 @@ impl PreservedPackage {
             .map(|child| attributes_from_fragment(&child.bytes))
             .transpose()?
             .unwrap_or_default();
+        let calc_pr_attributes = workbook_template
+            .child("calcPr")
+            .map(|child| attributes_from_fragment(&child.bytes))
+            .transpose()?;
 
         let workbook_relationships = find_part(parts, "xl/_rels/workbook.xml.rels")
             .map(parse_relationships)
@@ -92,6 +98,22 @@ impl PreservedPackage {
             "theme",
             "xl/theme/theme1.xml",
         );
+        let mut calc_chains = workbook_relationships
+            .iter()
+            .filter(|relationship| relationship.has_type("calcChain"))
+            .filter_map(|relationship| {
+                relationship.target().map(|target| PartReference {
+                    path: resolve_part_path("xl", target),
+                    relationship_id: relationship.id().map(str::to_owned),
+                })
+            })
+            .collect::<Vec<_>>();
+        if calc_chains.is_empty() && find_part(parts, "xl/calcChain.xml").is_some() {
+            calc_chains.push(PartReference {
+                path: "xl/calcChain.xml".to_owned(),
+                relationship_id: None,
+            });
+        }
         let stylesheet_template = styles
             .as_ref()
             .and_then(|part| find_part(parts, &part.path))
@@ -112,12 +134,14 @@ impl PreservedPackage {
             workbook_template,
             workbook_pr_attributes,
             workbook_sheets_attributes,
+            calc_pr_attributes,
             sheets,
             shared_strings,
             styles,
             theme,
+            calc_chains,
             stylesheet_template,
-            original_theme: workbook.styles.theme.clone(),
+            original_workbook: workbook.clone(),
         })
     }
 

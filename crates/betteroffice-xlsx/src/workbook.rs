@@ -93,6 +93,7 @@ pub struct Workbook {
     source_package: Option<xlsx_parse::PreservedPackage>,
     sheet_origins: Vec<Option<usize>>,
     removed_sheet_origins: Vec<RemovedSheetOrigin>,
+    edited_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
@@ -202,6 +203,7 @@ impl Workbook {
             source_package,
             sheet_origins,
             removed_sheet_origins: Vec::new(),
+            edited_since_open: false,
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
             graph,
@@ -368,6 +370,7 @@ impl Workbook {
         self.undo.clear();
         self.authority.clear_history();
         self.proposals.clear();
+        self.edited_since_open = true;
         self.emit_update(UpdateEvent {
             update,
             origin: UpdateOrigin::Remote,
@@ -415,10 +418,11 @@ impl Workbook {
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model(&self.model)?;
         let parts = match &self.source_package {
-            Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins(
+            Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins_after_edits(
                 &self.model,
                 package,
                 &self.sheet_origins,
+                self.edited_since_open,
             )?,
             None => xlsx_parse::serialize_workbook(&self.model)?,
         };
@@ -976,6 +980,7 @@ impl Workbook {
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
         self.model = history.model;
+        self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
@@ -1361,6 +1366,7 @@ impl Workbook {
             }
         }
         self.apply_sheet_origin_ops(before_sheet_names, ops);
+        self.edited_since_open = true;
         Ok(())
     }
 
@@ -1393,6 +1399,7 @@ impl Workbook {
             }
         }
         self.apply_sheet_origin_ops(before_sheet_names, ops);
+        self.edited_since_open = true;
         Ok(())
     }
 
@@ -1429,6 +1436,7 @@ impl Workbook {
     }
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
+        self.edited_since_open = true;
         let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
         self.graph = Some(graph);
         let result = calculation_result(&result);

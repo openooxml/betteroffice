@@ -12,6 +12,7 @@ pub use read::parse_workbook;
 pub use write::{
     serialize_workbook, serialize_workbook_with_package,
     serialize_workbook_with_package_and_origins,
+    serialize_workbook_with_package_and_origins_after_edits,
 };
 
 use xlsx_model::Workbook;

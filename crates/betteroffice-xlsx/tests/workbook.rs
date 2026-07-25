@@ -2964,9 +2964,17 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
         .collect::<Vec<_>>();
     let after = package_map(&saved);
 
-    assert_eq!(after_order, before_order);
+    assert_eq!(
+        after_order,
+        before_order
+            .into_iter()
+            .filter(|path| path != "xl/calcChain.xml")
+            .collect::<Vec<_>>()
+    );
     for path in before.keys() {
-        assert!(after.contains_key(path), "missing {path}");
+        if path != "xl/calcChain.xml" {
+            assert!(after.contains_key(path), "missing {path}");
+        }
     }
     let owned = [
         "[Content_Types].xml",
@@ -2979,13 +2987,15 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
         "xl/worksheets/sheet1.xml",
     ];
     for (path, bytes) in &before {
-        if !owned.contains(&path.as_str()) {
+        if path != "xl/calcChain.xml" && !owned.contains(&path.as_str()) {
             assert_eq!(&after[path], bytes, "changed {path}");
         }
     }
 
     let workbook_xml = String::from_utf8(after["xl/workbook.xml"].clone()).unwrap();
     assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
+    assert!(!after.contains_key("xl/calcChain.xml"));
+    assert!(workbook_xml.contains(r#"fullCalcOnLoad="1""#));
     let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
     let fragments = [
         "<sheetViews>",
@@ -3010,7 +3020,6 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
         "/xl/drawings/drawing1.xml",
         "/xl/tables/table1.xml",
         "/xl/comments1.xml",
-        "/xl/calcChain.xml",
         "/xl/externalLinks/externalLink1.xml",
         "/docProps/core.xml",
     ] {
@@ -3019,8 +3028,9 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
             "missing content type for {part}"
         );
     }
+    assert!(!content_types.contains("/xl/calcChain.xml"));
     let workbook_rels = String::from_utf8(after["xl/_rels/workbook.xml.rels"].clone()).unwrap();
-    assert!(workbook_rels.contains(r#"Id="rId9""#));
+    assert!(!workbook_rels.contains(r#"Id="rId9""#));
     assert!(workbook_rels.contains(r#"Id="rId12""#));
     let styles = String::from_utf8(after["xl/styles.xml"].clone()).unwrap();
     assert!(styles.contains("<dxfs"));
@@ -3100,13 +3110,13 @@ fn collaborative_materialization_retains_source_package() {
         "xl/tables/table1.xml",
         "xl/comments1.xml",
         "xl/drawings/vmlDrawing1.vml",
-        "xl/calcChain.xml",
         "xl/externalLinks/externalLink1.xml",
         "docProps/core.xml",
         "customXml/item1.xml",
     ] {
         assert_eq!(after[path], before[path], "changed {path}");
     }
+    assert!(!after.contains_key("xl/calcChain.xml"));
 }
 
 #[test]
@@ -3180,6 +3190,7 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     assert!(workbook_xml.contains("<s:sheets>"));
     assert!(workbook_xml.contains("rel:id="));
     assert!(!workbook_xml.contains("r:id="));
+    assert!(workbook_xml.contains("<s:calcPr"));
     assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
     assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
@@ -3202,4 +3213,14 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     let content_types = String::from_utf8(parts["[Content_Types].xml"].clone()).unwrap();
     assert!(content_types.contains(r#"PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.ms-excel.worksheet+xml""#));
     assert_eq!(Workbook::open(&saved).unwrap().sheet_count(), 2);
+}
+
+#[test]
+fn no_edit_round_trip_keeps_calculation_chain_and_source_parts() {
+    let original = preservation_fixture();
+    let before = ooxml_opc::unzip_parts(&original).unwrap();
+    let saved = Workbook::open(&original).unwrap().save().unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(after, before);
+    assert!(package_map(&saved).contains_key("xl/calcChain.xml"));
 }
