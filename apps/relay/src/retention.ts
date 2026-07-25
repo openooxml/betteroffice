@@ -171,68 +171,90 @@ function bytesEqual(first: Uint8Array, second: Uint8Array): boolean {
   return first.every((byte, index) => byte === second[index]);
 }
 
+export interface RetainedEntry {
+  seq: number;
+  bytes: Uint8Array;
+}
+
+/** The storage writes that bring the persisted log back in line with memory. */
+export interface LogMutation {
+  puts: readonly RetainedEntry[];
+  deletes: readonly number[];
+}
+
 export class RetainedUpdateLog {
-  private updates: Uint8Array[] = [];
+  private updates: RetainedEntry[] = [];
   private retainedBytes = 0;
+  private nextSeq = 0;
 
   constructor(
     private readonly maxCount: number,
     private readonly maxBytes: number,
   ) {}
 
-  restore(updates: readonly Uint8Array[]): boolean {
-    this.updates = [];
-    this.retainedBytes = 0;
-    let changed = false;
-    for (const update of updates) {
+  restore(stored: readonly RetainedEntry[]): LogMutation | null {
+    this.clear();
+    const puts: RetainedEntry[] = [];
+    const deletes: number[] = [];
+    for (const entry of [...stored].sort((first, second) => first.seq - second.seq)) {
+      this.nextSeq = Math.max(this.nextSeq, entry.seq + 1);
       const retained =
-        update.byteLength <= this.maxBytes
-          ? retainDocumentMessages(update)
+        entry.bytes.byteLength <= this.maxBytes
+          ? retainDocumentMessages(entry.bytes)
           : null;
       if (!retained || retained.byteLength > this.maxBytes) {
-        changed = true;
+        deletes.push(entry.seq);
         continue;
       }
-      this.updates.push(retained);
+      if (!bytesEqual(retained, entry.bytes)) {
+        puts.push({ seq: entry.seq, bytes: retained });
+      }
+      this.updates.push({ seq: entry.seq, bytes: retained });
       this.retainedBytes += retained.byteLength;
-      changed = this.trim() || !bytesEqual(retained, update) || changed;
+      deletes.push(...this.trim());
     }
-    return changed;
+
+    const evicted = new Set(deletes);
+    const rewrites = puts.filter((entry) => !evicted.has(entry.seq));
+    if (rewrites.length === 0 && deletes.length === 0) return null;
+    return { puts: rewrites, deletes };
   }
 
-  retain(update: Uint8Array): boolean {
-    if (update.byteLength > this.maxBytes) return false;
+  retain(update: Uint8Array): LogMutation | null {
+    if (update.byteLength > this.maxBytes) return null;
     const retained = retainDocumentMessages(update);
-    if (!retained || retained.byteLength > this.maxBytes) return false;
-    this.updates.push(retained);
+    if (!retained || retained.byteLength > this.maxBytes) return null;
+    const entry: RetainedEntry = { seq: this.nextSeq++, bytes: retained };
+    this.updates.push(entry);
     this.retainedBytes += retained.byteLength;
-    this.trim();
-    return true;
+    return { puts: [entry], deletes: this.trim() };
   }
 
   replay(send: (update: Uint8Array) => void): void {
-    for (const update of this.updates) send(update.slice());
+    for (const entry of this.updates) send(entry.bytes.slice());
   }
 
   snapshot(): Uint8Array[] {
-    return this.updates.map((update) => update.slice());
+    return this.updates.map((entry) => entry.bytes.slice());
   }
 
   clear(): void {
     this.updates = [];
     this.retainedBytes = 0;
+    this.nextSeq = 0;
   }
 
-  private trim(): boolean {
-    let changed = false;
+  private trim(): number[] {
+    const evicted: number[] = [];
     while (
       this.updates.length > this.maxCount ||
       this.retainedBytes > this.maxBytes
     ) {
       const removed = this.updates.shift();
-      if (removed) this.retainedBytes -= removed.byteLength;
-      changed = true;
+      if (!removed) break;
+      this.retainedBytes -= removed.bytes.byteLength;
+      evicted.push(removed.seq);
     }
-    return changed;
+    return evicted;
   }
 }

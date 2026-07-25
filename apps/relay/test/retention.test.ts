@@ -63,7 +63,7 @@ describe("RetainedUpdateLog", () => {
     const mixed = frame(document, awarenessFrame(Uint8Array.of(12)));
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(mixed)).toBe(true);
+    expect(log.retain(mixed)).not.toBeNull();
     const [retained] = log.snapshot();
     expect(retained).toEqual(document);
     expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
@@ -79,7 +79,7 @@ describe("RetainedUpdateLog", () => {
   test("does not retain awareness-only frames", () => {
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(awarenessFrame(Uint8Array.of(13)))).toBe(false);
+    expect(log.retain(awarenessFrame(Uint8Array.of(13)))).toBeNull();
     expect(log.snapshot()).toEqual([]);
   });
 
@@ -87,7 +87,7 @@ describe("RetainedUpdateLog", () => {
     const document = syncFrame(1, new Uint8Array(130).fill(14));
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(document)).toBe(true);
+    expect(log.retain(document)).not.toBeNull();
     const [retained] = log.snapshot();
     expect(retained).toEqual(document);
     expect(retained).not.toBe(document);
@@ -99,7 +99,7 @@ describe("RetainedUpdateLog", () => {
     const mixed = frame(encodeVarUint(3), document);
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(mixed)).toBe(true);
+    expect(log.retain(mixed)).not.toBeNull();
     const [retained] = log.snapshot();
     expect(retained).toEqual(document);
     expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
@@ -109,10 +109,10 @@ describe("RetainedUpdateLog", () => {
     const query = syncFrame(0, Uint8Array.of(15));
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(query)).toBe(false);
-    expect(log.retain(frame(query, awarenessFrame(Uint8Array.of(16))))).toBe(
-      false,
-    );
+    expect(log.retain(query)).toBeNull();
+    expect(
+      log.retain(frame(query, awarenessFrame(Uint8Array.of(16)))),
+    ).toBeNull();
     expect(log.snapshot()).toEqual([]);
   });
 
@@ -121,7 +121,7 @@ describe("RetainedUpdateLog", () => {
     const mixed = frame(syncFrame(0, Uint8Array.of(16)), update);
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(mixed)).toBe(true);
+    expect(log.retain(mixed)).not.toBeNull();
     expect(log.snapshot()).toEqual([update]);
   });
 
@@ -136,7 +136,7 @@ describe("RetainedUpdateLog", () => {
     const expected = frame(first, second);
     const log = new RetainedUpdateLog(512, 1024);
 
-    expect(log.retain(mixed)).toBe(true);
+    expect(log.retain(mixed)).not.toBeNull();
     const [retained] = log.snapshot();
     expect(retained).toEqual(expected);
     expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
@@ -152,11 +152,11 @@ describe("RetainedUpdateLog", () => {
     const log = new RetainedUpdateLog(512, 1024);
 
     for (const malformed of frames) {
-      let retained = true;
+      let retained: unknown = "unset";
       expect(() => {
         retained = log.retain(malformed);
       }).not.toThrow();
-      expect(retained).toBe(false);
+      expect(retained).toBeNull();
     }
     expect(log.snapshot()).toEqual([]);
   });
@@ -168,7 +168,7 @@ describe("RetainedUpdateLog", () => {
       authFrame(Uint8Array.of(105)),
     );
 
-    expect(log.retain(mixed)).toBe(false);
+    expect(log.retain(mixed)).toBeNull();
     expect(log.snapshot()).toEqual([]);
   });
 
@@ -179,9 +179,72 @@ describe("RetainedUpdateLog", () => {
     const log = new RetainedUpdateLog(512, 1024);
 
     expect(
-      log.restore([awareness, Uint8Array.of(0x80), mixed]),
-    ).toBe(true);
+      log.restore([
+        { seq: 0, bytes: awareness },
+        { seq: 1, bytes: Uint8Array.of(0x80) },
+        { seq: 2, bytes: mixed },
+      ]),
+    ).toEqual({ puts: [{ seq: 2, bytes: document }], deletes: [0, 1] });
     expect(log.snapshot()).toEqual([document]);
+  });
+
+  test("reports nothing to write when the stored log is canonical", () => {
+    const log = new RetainedUpdateLog(512, 1024);
+    const stored = [
+      { seq: 4, bytes: syncFrame(1, Uint8Array.of(25)) },
+      { seq: 9, bytes: syncFrame(2, Uint8Array.of(26)) },
+    ];
+
+    expect(log.restore(stored)).toBeNull();
+    expect(log.snapshot()).toEqual(stored.map((entry) => entry.bytes));
+  });
+
+  test("restores in sequence order and appends above the highest seq", () => {
+    const first = syncFrame(2, Uint8Array.of(27));
+    const second = syncFrame(2, Uint8Array.of(28));
+    const third = syncFrame(2, Uint8Array.of(29));
+    const log = new RetainedUpdateLog(512, 1024);
+
+    log.restore([
+      { seq: 9, bytes: second },
+      { seq: 2, bytes: first },
+    ]);
+    expect(log.snapshot()).toEqual([first, second]);
+    expect(log.retain(third)).toEqual({
+      puts: [{ seq: 10, bytes: third }],
+      deletes: [],
+    });
+    expect(log.snapshot()).toEqual([first, second, third]);
+  });
+
+  test("reports the appended entry and the seqs it evicted", () => {
+    const first = syncFrame(2, Uint8Array.of(30));
+    const second = syncFrame(2, Uint8Array.of(31));
+    const third = syncFrame(2, Uint8Array.of(32));
+    const log = new RetainedUpdateLog(2, 1024);
+
+    expect(log.retain(first)).toEqual({
+      puts: [{ seq: 0, bytes: first }],
+      deletes: [],
+    });
+    expect(log.retain(second)?.deletes).toEqual([]);
+    expect(log.retain(third)).toEqual({
+      puts: [{ seq: 2, bytes: third }],
+      deletes: [0],
+    });
+    expect(log.snapshot()).toEqual([second, third]);
+  });
+
+  test("replays nothing after clear and restarts sequence numbers", () => {
+    const document = syncFrame(2, Uint8Array.of(33));
+    const log = new RetainedUpdateLog(512, 1024);
+    log.retain(document);
+
+    log.clear();
+    const replayed: Uint8Array[] = [];
+    log.replay((update) => replayed.push(update));
+    expect(replayed).toEqual([]);
+    expect(log.retain(document)?.puts).toEqual([{ seq: 0, bytes: document }]);
   });
 });
 

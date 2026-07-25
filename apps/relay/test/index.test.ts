@@ -40,25 +40,51 @@ const UPGRADE = new Request("https://relay.test/room/a", {
   headers: { Upgrade: "websocket" },
 });
 
-function createRoom() {
+function updateKey(seq: number): string {
+  return `update:${String(seq).padStart(16, "0")}`;
+}
+
+function createRoom(seed: Iterable<[string, unknown]> = []) {
   const sender = createSocket();
   const peer = createSocket();
   const sockets: FakeSocket[] = [sender, peer];
-  const storageWrites: Array<{
-    key: string;
-    value: Uint8Array[];
-  }> = [];
+  const rows = new Map<string, unknown>(seed);
+  const putKeys: string[][] = [];
+  const deletedKeys: string[][] = [];
   const pending: Promise<unknown>[] = [];
   const alarms: number[] = [];
   const deleteAll = mock(async () => {
-    storageWrites.length = 0;
+    rows.clear();
   });
   let initialization = Promise.resolve();
   const state = {
     storage: {
-      get: async () => [],
-      put: async (key: string, value: Uint8Array[]) => {
-        storageWrites.push({ key, value });
+      get: async (key: string) => rows.get(key),
+      list: async ({ prefix }: { prefix: string }) =>
+        new Map(
+          [...rows]
+            .filter(([key]) => key.startsWith(prefix))
+            .sort(([first], [second]) => (first < second ? -1 : 1)),
+        ),
+      put: async (
+        keyOrBatch: string | Record<string, Uint8Array>,
+        value?: Uint8Array,
+      ) => {
+        if (typeof keyOrBatch === "string") {
+          rows.set(keyOrBatch, value);
+          putKeys.push([keyOrBatch]);
+          return;
+        }
+        for (const [key, bytes] of Object.entries(keyOrBatch)) {
+          rows.set(key, bytes);
+        }
+        putKeys.push(Object.keys(keyOrBatch));
+      },
+      delete: async (keys: string | readonly string[]) => {
+        const batch = typeof keys === "string" ? [keys] : [...keys];
+        for (const key of batch) rows.delete(key);
+        deletedKeys.push(batch);
+        return batch.length;
       },
       getAlarm: async () => null,
       setAlarm: async (time: number) => {
@@ -81,13 +107,15 @@ function createRoom() {
   return {
     alarms,
     deleteAll,
+    deletedKeys,
     initialization,
     peer,
     pending,
+    putKeys,
     room,
+    rows,
     sender,
     sockets,
-    storageWrites,
   };
 }
 
@@ -113,9 +141,8 @@ describe("CollaborationRoom.webSocketMessage", () => {
     expect(harness.peer.send).toHaveBeenCalledTimes(1);
     expect(harness.peer.send.mock.calls[0][0]).toEqual(mixed);
     expect(harness.sender.send).not.toHaveBeenCalled();
-    expect(harness.storageWrites).toEqual([
-      { key: "updates", value: [document] },
-    ]);
+    expect(harness.putKeys).toEqual([[updateKey(0)]]);
+    expect(harness.rows.get(updateKey(0))).toEqual(document);
   });
 
   test("closes only the sender on a malformed frame and broadcasts nothing", async () => {
@@ -136,7 +163,7 @@ describe("CollaborationRoom.webSocketMessage", () => {
     expect(harness.peer.send).not.toHaveBeenCalled();
     expect(harness.peer.close).not.toHaveBeenCalled();
     expect(harness.pending).toEqual([]);
-    expect(harness.storageWrites).toEqual([]);
+    expect(harness.rows.size).toBe(0);
   });
 
   test("closes only the sender on a client-origin auth denial", async () => {
@@ -153,7 +180,7 @@ describe("CollaborationRoom.webSocketMessage", () => {
     expect(harness.sender.close.mock.calls[0][0]).toBe(1008);
     expect(harness.peer.send).not.toHaveBeenCalled();
     expect(harness.peer.close).not.toHaveBeenCalled();
-    expect(harness.storageWrites).toEqual([]);
+    expect(harness.rows.size).toBe(0);
   });
 
   test("broadcasts awareness-only frames without retaining them", async () => {
@@ -169,7 +196,7 @@ describe("CollaborationRoom.webSocketMessage", () => {
     expect(harness.sender.close).not.toHaveBeenCalled();
     expect(harness.peer.send).toHaveBeenCalledTimes(1);
     expect(harness.peer.send.mock.calls[0][0]).toEqual(awareness);
-    expect(harness.storageWrites).toEqual([]);
+    expect(harness.rows.size).toBe(0);
   });
 
   test("broadcasts sync-step-1 so live peers answer it, without retaining it", async () => {
@@ -185,7 +212,7 @@ describe("CollaborationRoom.webSocketMessage", () => {
     expect(harness.sender.close).not.toHaveBeenCalled();
     expect(harness.peer.send).toHaveBeenCalledTimes(1);
     expect(harness.peer.send.mock.calls[0][0]).toEqual(query);
-    expect(harness.storageWrites).toEqual([]);
+    expect(harness.rows.size).toBe(0);
   });
 });
 
@@ -240,13 +267,13 @@ describe("CollaborationRoom expiry", () => {
     await harness.initialization;
     send(harness);
     await Promise.all(harness.pending);
-    expect(harness.storageWrites).toHaveLength(1);
+    expect(harness.rows.size).toBe(1);
 
     harness.sockets.length = 0;
     await harness.room.alarm();
 
     expect(harness.deleteAll).toHaveBeenCalledTimes(1);
-    expect(harness.storageWrites).toEqual([]);
+    expect(harness.rows.size).toBe(0);
 
     const joiner = await join(harness);
     expect(joiner.send).toHaveBeenCalledTimes(1);
@@ -266,7 +293,101 @@ describe("CollaborationRoom expiry", () => {
     await harness.room.alarm();
 
     expect(harness.deleteAll).not.toHaveBeenCalled();
-    expect(harness.storageWrites).toHaveLength(1);
+    expect(harness.rows.size).toBe(1);
     expect(harness.alarms).toEqual([START_MS + DAY_MS, START_MS + 2 * DAY_MS]);
+  });
+});
+
+describe("CollaborationRoom persistence", () => {
+  function documentAt(payload: number): Uint8Array {
+    return Uint8Array.of(0, 2, 1, payload);
+  }
+
+  function send(
+    harness: ReturnType<typeof createRoom>,
+    document: Uint8Array,
+  ): void {
+    harness.room.webSocketMessage(
+      harness.sender as never,
+      document.buffer as ArrayBuffer,
+    );
+  }
+
+  function replayed(socket: FakeSocket, count: number): unknown[] {
+    return socket.send.mock.calls.slice(0, count).map(([value]) => value);
+  }
+
+  test("writes one key per retained frame and rewrites nothing", async () => {
+    const harness = createRoom();
+    await harness.initialization;
+
+    for (const payload of [1, 2, 3]) send(harness, documentAt(payload));
+    await Promise.all(harness.pending);
+
+    expect(harness.putKeys).toEqual([
+      [updateKey(0)],
+      [updateKey(1)],
+      [updateKey(2)],
+    ]);
+    expect(harness.deletedKeys).toEqual([]);
+    expect(harness.rows.size).toBe(3);
+  });
+
+  test("evicts only the oldest key once the entry cap is reached", async () => {
+    const harness = createRoom();
+    await harness.initialization;
+
+    for (let index = 0; index <= 512; index += 1) {
+      send(harness, documentAt(index & 0xff));
+    }
+    await Promise.all(harness.pending);
+
+    expect(harness.rows.size).toBe(512);
+    expect(harness.deletedKeys).toEqual([[updateKey(0)]]);
+    expect(harness.rows.has(updateKey(512))).toBe(true);
+  });
+
+  test("rehydrates in sequence order and appends above the highest seq", async () => {
+    const first = documentAt(4);
+    const second = documentAt(5);
+    const harness = createRoom([
+      [updateKey(9), second],
+      [updateKey(2), first],
+    ]);
+    await harness.initialization;
+
+    expect(harness.putKeys).toEqual([]);
+    expect(harness.deletedKeys).toEqual([]);
+    expect(replayed(await join(harness), 2)).toEqual([first, second]);
+
+    send(harness, documentAt(6));
+    await Promise.all(harness.pending);
+    expect(harness.putKeys).toEqual([[updateKey(10)]]);
+  });
+
+  test("repairs a non-canonical entry and drops unreadable ones", async () => {
+    const document = documentAt(7);
+    const survivor = documentAt(9);
+    const harness = createRoom([
+      [updateKey(0), frame(document, Uint8Array.of(1, 1, 8))],
+      [updateKey(1), Uint8Array.of(0x80)],
+      ["update:nope", document],
+      [updateKey(2), survivor],
+    ]);
+    await harness.initialization;
+
+    expect(harness.deletedKeys).toEqual([["update:nope"], [updateKey(1)]]);
+    expect(harness.putKeys).toEqual([[updateKey(0)]]);
+    expect(harness.rows.get(updateKey(0))).toEqual(document);
+    expect(replayed(await join(harness), 2)).toEqual([document, survivor]);
+  });
+
+  test("discards the legacy single-blob log on rehydrate", async () => {
+    const harness = createRoom([["updates", [documentAt(10)]]]);
+    await harness.initialization;
+
+    expect(harness.deletedKeys).toEqual([["updates"]]);
+    expect(harness.rows.size).toBe(0);
+    expect((await join(harness)).send).toHaveBeenCalledTimes(1);
   });
 });

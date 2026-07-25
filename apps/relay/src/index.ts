@@ -1,17 +1,36 @@
 import { DurableObject } from "cloudflare:workers";
 import { MAX_COLLABORATION_FRAME_BYTES } from "../../../shared/collaboration-limits";
-import { classifyFrame, RetainedUpdateLog } from "./retention";
+import {
+  classifyFrame,
+  RetainedUpdateLog,
+  type LogMutation,
+  type RetainedEntry,
+} from "./retention";
 
 interface Env {
   ROOMS: DurableObjectNamespace<CollaborationRoom>;
 }
 
 const MAX_RETAINED_COUNT = 512;
-const LOG_KEY = "updates";
+const UPDATE_PREFIX = "update:";
+const SEQ_DIGITS = 16;
+const LEGACY_LOG_KEY = "updates";
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
 const TTL_REFRESH_SLACK_MS = 60 * 60 * 1000;
 
 type PeerMessage = { type: "peers"; count: number };
+
+/** Zero-padded so storage's lexicographic key order is replay order. */
+function updateKey(seq: number): string {
+  return UPDATE_PREFIX + String(seq).padStart(SEQ_DIGITS, "0");
+}
+
+function parseSeq(key: string): number | null {
+  const digits = key.slice(UPDATE_PREFIX.length);
+  if (digits.length !== SEQ_DIGITS || !/^\d+$/.test(digits)) return null;
+  const seq = Number(digits);
+  return Number.isSafeInteger(seq) ? seq : null;
+}
 
 function isWebSocketRequest(request: Request): boolean {
   return request.headers.get("Upgrade")?.toLowerCase() === "websocket";
@@ -36,10 +55,26 @@ export class CollaborationRoom extends DurableObject<Env> {
     super(state, env);
     state.blockConcurrencyWhile(async () => {
       this.expiresAt = await state.storage.getAlarm();
-      const stored = (await state.storage.get<Uint8Array[]>(LOG_KEY)) ?? [];
-      if (this.updates.restore(stored)) {
-        await state.storage.put(LOG_KEY, this.updates.snapshot());
+      const stored = await state.storage.list<Uint8Array>({
+        prefix: UPDATE_PREFIX,
+      });
+      const entries: RetainedEntry[] = [];
+      const unusable: string[] = [];
+      for (const [key, bytes] of stored) {
+        const seq = parseSeq(key);
+        if (seq === null || !(bytes instanceof Uint8Array)) {
+          unusable.push(key);
+          continue;
+        }
+        entries.push({ seq, bytes });
       }
+      if ((await state.storage.get(LEGACY_LOG_KEY)) !== undefined) {
+        unusable.push(LEGACY_LOG_KEY);
+      }
+
+      const repair = this.updates.restore(entries);
+      if (unusable.length > 0) await state.storage.delete(unusable);
+      if (repair) await this.writeMutation(repair);
     });
   }
 
@@ -84,7 +119,10 @@ export class CollaborationRoom extends DurableObject<Env> {
     }
 
     this.refreshExpiry();
-    if (kind === "document" && this.updates.retain(bytes)) this.persistUpdates();
+    if (kind === "document") {
+      const mutation = this.updates.retain(bytes);
+      if (mutation) this.persistUpdates(mutation);
+    }
     for (const peer of this.ctx.getWebSockets()) {
       if (peer !== socket) peer.send(bytes.slice());
     }
@@ -133,10 +171,23 @@ export class CollaborationRoom extends DurableObject<Env> {
     this.ctx.waitUntil(this.persist);
   }
 
-  private persistUpdates(): void {
-    const snapshot = this.updates.snapshot();
-    this.persist = this.persist.then(() => this.ctx.storage.put(LOG_KEY, snapshot));
+  private persistUpdates(mutation: LogMutation): void {
+    this.persist = this.persist.then(() => this.writeMutation(mutation));
     this.ctx.waitUntil(this.persist);
+  }
+
+  private async writeMutation(mutation: LogMutation): Promise<void> {
+    if (mutation.puts.length === 1) {
+      const [entry] = mutation.puts;
+      await this.ctx.storage.put(updateKey(entry.seq), entry.bytes);
+    } else if (mutation.puts.length > 1) {
+      const batch: Record<string, Uint8Array> = {};
+      for (const entry of mutation.puts) batch[updateKey(entry.seq)] = entry.bytes;
+      await this.ctx.storage.put(batch);
+    }
+    if (mutation.deletes.length > 0) {
+      await this.ctx.storage.delete(mutation.deletes.map(updateKey));
+    }
   }
 
   private broadcastPeerCount(): void {
