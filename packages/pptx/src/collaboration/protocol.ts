@@ -1,3 +1,4 @@
+import { MAX_COLLABORATION_FRAME_BYTES } from '../../../../shared/collaboration-limits';
 import {
   MAX_AWARENESS_STRING_LENGTH,
   sanitizePresenceColor,
@@ -5,7 +6,7 @@ import {
 } from './presence';
 import type { PptxPresenceCursor, PptxPresenceState } from './types';
 
-export const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_MAX_FRAME_BYTES = MAX_COLLABORATION_FRAME_BYTES;
 export const DEFAULT_MAX_MESSAGES_PER_FRAME = 4096;
 
 const TOP_LEVEL_SYNC = 0;

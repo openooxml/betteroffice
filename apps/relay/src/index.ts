@@ -1,11 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
+import { MAX_COLLABORATION_FRAME_BYTES } from "../../../shared/collaboration-limits";
 import { classifyFrame, RetainedUpdateLog } from "./retention";
 
 interface Env {
   ROOMS: DurableObjectNamespace<CollaborationRoom>;
 }
 
-const MAX_RETAINED_BYTES = 16 * 1024 * 1024;
 const MAX_RETAINED_COUNT = 512;
 const LOG_KEY = "updates";
 
@@ -25,7 +25,7 @@ function copyBytes(message: ArrayBuffer | ArrayBufferView): Uint8Array {
 export class CollaborationRoom extends DurableObject<Env> {
   private updates = new RetainedUpdateLog(
     MAX_RETAINED_COUNT,
-    MAX_RETAINED_BYTES,
+    MAX_COLLABORATION_FRAME_BYTES,
   );
   private persist = Promise.resolve();
 
@@ -63,8 +63,8 @@ export class CollaborationRoom extends DurableObject<Env> {
     }
 
     const bytes = copyBytes(message);
-    if (bytes.byteLength > MAX_RETAINED_BYTES) {
-      socket.close(1009, "Frame too large");
+    if (bytes.byteLength > MAX_COLLABORATION_FRAME_BYTES) {
+      socket.close(1009, `Frame exceeds ${MAX_COLLABORATION_FRAME_BYTES} bytes`);
       return;
     }
 
