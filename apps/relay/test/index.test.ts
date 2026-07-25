@@ -142,4 +142,20 @@ describe("CollaborationRoom.webSocketMessage", () => {
     expect(harness.peer.send.mock.calls[0][0]).toEqual(awareness);
     expect(harness.storageWrites).toEqual([]);
   });
+
+  test("broadcasts sync-step-1 so live peers answer it, without retaining it", async () => {
+    const query = Uint8Array.of(0, 0, 1, 15);
+    const harness = createRoom();
+    await harness.initialization;
+
+    harness.room.webSocketMessage(
+      harness.sender as never,
+      query.buffer as ArrayBuffer,
+    );
+
+    expect(harness.sender.close).not.toHaveBeenCalled();
+    expect(harness.peer.send).toHaveBeenCalledTimes(1);
+    expect(harness.peer.send.mock.calls[0][0]).toEqual(query);
+    expect(harness.storageWrites).toEqual([]);
+  });
 });

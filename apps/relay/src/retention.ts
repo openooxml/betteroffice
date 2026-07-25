@@ -2,6 +2,8 @@ const TOP_LEVEL_SYNC = 0;
 const TOP_LEVEL_AWARENESS = 1;
 const TOP_LEVEL_AUTH = 2;
 const TOP_LEVEL_QUERY_AWARENESS = 3;
+/** A state-vector query: valid to relay, never worth replaying to joiners. */
+const SYNC_STEP_1 = 0;
 const MAX_SYNC_SUBTYPE = 2;
 const AUTH_PERMISSION_DENIED = 0;
 const MAX_MESSAGES_PER_FRAME = 4096;
@@ -110,7 +112,7 @@ function decodeFrame(frame: Uint8Array): DecodedFrame | null {
       ) {
         return null;
       }
-      documents.push({ subtype, payload });
+      if (subtype !== SYNC_STEP_1) documents.push({ subtype, payload });
     } else if (type === TOP_LEVEL_AWARENESS) {
       if (decoder.readVarUint8Array() === null) return null;
     } else if (type === TOP_LEVEL_AUTH) {

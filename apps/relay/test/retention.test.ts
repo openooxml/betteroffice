@@ -53,10 +53,7 @@ function authFrame(reason: Uint8Array): Uint8Array {
 
 function documentMessages(protocolFrame: Uint8Array) {
   return decodeMessages(protocolFrame).filter(
-    ({ type }) =>
-      type === "sync-step-1" ||
-      type === "sync-step-2" ||
-      type === "update",
+    ({ type }) => type === "sync-step-2" || type === "update",
   );
 }
 
@@ -98,7 +95,7 @@ describe("RetainedUpdateLog", () => {
   });
 
   test("retains sync from a mixed query-awareness frame", () => {
-    const document = syncFrame(0, Uint8Array.of(15));
+    const document = syncFrame(1, Uint8Array.of(15));
     const mixed = frame(encodeVarUint(3), document);
     const log = new RetainedUpdateLog(512, 1024);
 
@@ -108,8 +105,28 @@ describe("RetainedUpdateLog", () => {
     expect(decodeMessages(retained)).toEqual(documentMessages(mixed));
   });
 
+  test("does not retain sync-step-1 state-vector queries", () => {
+    const query = syncFrame(0, Uint8Array.of(15));
+    const log = new RetainedUpdateLog(512, 1024);
+
+    expect(log.retain(query)).toBe(false);
+    expect(log.retain(frame(query, awarenessFrame(Uint8Array.of(16))))).toBe(
+      false,
+    );
+    expect(log.snapshot()).toEqual([]);
+  });
+
+  test("drops sync-step-1 from a frame that also carries an update", () => {
+    const update = syncFrame(2, Uint8Array.of(17));
+    const mixed = frame(syncFrame(0, Uint8Array.of(16)), update);
+    const log = new RetainedUpdateLog(512, 1024);
+
+    expect(log.retain(mixed)).toBe(true);
+    expect(log.snapshot()).toEqual([update]);
+  });
+
   test("retains multiple sync messages in their original order", () => {
-    const first = syncFrame(0, Uint8Array.of(16));
+    const first = syncFrame(1, Uint8Array.of(16));
     const second = syncFrame(2, Uint8Array.of(17, 18));
     const mixed = frame(
       first,
@@ -156,7 +173,7 @@ describe("RetainedUpdateLog", () => {
   });
 
   test("normalizes mixed stored frames and removes invalid entries", () => {
-    const document = syncFrame(0, Uint8Array.of(22));
+    const document = syncFrame(1, Uint8Array.of(22));
     const awareness = awarenessFrame(Uint8Array.of(23));
     const mixed = frame(document, awareness);
     const log = new RetainedUpdateLog(512, 1024);
@@ -180,6 +197,7 @@ describe("classifyFrame", () => {
   test("reports valid but unretained frames as transient", () => {
     expect(classifyFrame(awarenessFrame(Uint8Array.of(2)))).toBe("transient");
     expect(classifyFrame(encodeVarUint(3))).toBe("transient");
+    expect(classifyFrame(syncFrame(0, Uint8Array.of(3)))).toBe("transient");
   });
 
   test("reports auth-bearing frames as auth even alongside sync", () => {
