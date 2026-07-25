@@ -6,13 +6,17 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "Safe DOCX XML parsing, typed relationship models, and the versioned Rust/TypeScript equivalence contract."
+description = "Safe DOCX XML parsing, typed relationship models, and the versioned canonical document contract."
 keywords = ["docx", "word", "ooxml", "wordprocessingml"]
 categories = ["parser-implementations", "encoding"]
 
 [lib]
 name = "docx_parse"
 crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["wasm"]
+wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 base64 = "0.22"
@@ -25,4 +29,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-wasm-bindgen = "0.2"
+wasm-bindgen = { version = "0.2", optional = true }

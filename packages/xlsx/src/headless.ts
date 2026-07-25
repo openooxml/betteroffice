@@ -14,6 +14,7 @@ export type {
   DrawCmd,
   DisplayList,
   GridMeta,
+  HyperlinkRegion,
 } from './display-list/types';
 
 export type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './viewport/index';
@@ -49,6 +50,13 @@ export {
 } from './selection/index';
 
 export { cellAtPoint, cellRect, rangeRect } from './hittest/index';
+
+export type { HyperlinkDestination } from './hyperlinks/index';
+export {
+  hyperlinkAtCell,
+  parseHyperlinkLocation,
+  safeExternalHyperlink,
+} from './hyperlinks/index';
 
 export type { CellInput } from './clipboard/index';
 export { toTsv, fromTsv } from './clipboard/index';

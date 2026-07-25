@@ -49,6 +49,7 @@ import { useControllableBoolean } from './DocxEditor/hooks/useControllableBoolea
 import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
+import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
 import { useContextMenus } from './DocxEditor/hooks/useContextMenus';
 import { useCommentManagement } from './DocxEditor/hooks/useCommentManagement';
 import { useCommentLifecycle } from './DocxEditor/hooks/useCommentLifecycle';
@@ -70,6 +71,11 @@ import type { RustFontChainsProvider } from './DocxEditor/hooks/useRustMeasureme
 import { useResetEditorState } from './DocxEditor/hooks/useResetEditorState';
 import type { YrsToolbarSelection } from './DocxEditor/yrsToolbar';
 import { DocxEditorShell } from './DocxEditor/DocxEditorShell';
+import {
+  commitLegacyDocumentChange,
+  commitYrsDocumentChange,
+  LEGACY_PROJECTION_DELAY_MS,
+} from './DocxEditor/documentChangeCommit';
 import type { FontOption } from './ui/FontPicker';
 import { OUTLINE_BUTTON_RESERVED_SPACE, OUTLINE_RESERVED_SPACE } from './DocumentOutline';
 import { RULER_WIDTH } from './ui/VerticalRuler';
@@ -725,6 +731,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // can observe edits without competing for the single React prop.
   const contentChangeSubscribersRef = useRef(new Set<(doc: Document) => void>());
   const selectionChangeSubscribersRef = useRef(new Set<(s: SelectionState | null) => void>());
+  const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // History hook for undo/redo - start with null document
   const history = useDocumentHistory<Document | null>(initialDocument || null, {
@@ -822,7 +829,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     cleanOrphanedCommentsTimerRef,
   });
 
-  const { loadParsedDocument, loadBuffer, yrsSeedDocument } = useDocumentLoader({
+  const {
+    loadParsedDocument,
+    loadBuffer,
+    yrsSeedDocument,
+    yrsSeedBytes,
+    yrsSeedGeneration,
+    isCurrentLoad,
+    acceptHostDocument,
+    failHostDocument,
+  } = useDocumentLoader({
     documentBuffer,
     initialDocument,
     externalContent: false,
@@ -839,6 +855,20 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     commentIdAllocator: commentIdAllocatorRef.current,
     setDocumentFonts,
   });
+
+  const yrsCore = useYrsCoreSession(
+    true,
+    history.state,
+    yrsSeedDocument,
+    yrsSeedBytes,
+    yrsSeedGeneration,
+    collaboration,
+    {
+      isCurrentLoad,
+      onHostDocument: acceptHostDocument,
+      onError: failHostDocument,
+    }
+  );
 
   const {
     imageInputRef,
@@ -885,29 +915,89 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [history]
   );
 
-  // Handle document change
-  const handleDocumentChange = useCallback(
-    (newDocument: Document) => {
-      pushDocument(newDocument);
-      onChange?.(newDocument);
-      // Fan out to bridge subscribers (errors in one don't break the others).
-      for (const cb of contentChangeSubscribersRef.current) {
+  const notifyDocumentChange = useCallback(
+    (document: Document) => {
+      onChange?.(document);
+      for (const callback of contentChangeSubscribersRef.current) {
         try {
-          cb(newDocument);
-        } catch (e) {
-          console.error('contentChange subscriber threw:', e);
+          callback(document);
+        } catch (error) {
+          console.error('contentChange subscriber threw:', error);
         }
       }
-      // Update outline headings if sidebar is open
-      if (showOutlineRef.current) refreshHeadings();
-      // Clean up orphaned comments (debounced — avoid yanking comments mid-edit)
-      if (cleanOrphanedCommentsTimerRef.current) {
-        clearTimeout(cleanOrphanedCommentsTimerRef.current);
-      }
-      cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
     },
-    [onChange, pushDocument, cleanOrphanedComments, refreshHeadings, showOutlineRef]
+    [onChange]
   );
+
+  const handleContentHousekeeping = useCallback(() => {
+    if (showOutlineRef.current) refreshHeadings();
+    if (cleanOrphanedCommentsTimerRef.current) {
+      clearTimeout(cleanOrphanedCommentsTimerRef.current);
+    }
+    cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
+  }, [cleanOrphanedComments, refreshHeadings, showOutlineRef]);
+
+  const scheduleLegacyProjection = useCallback((project: () => void) => {
+    if (legacyProjectionTimerRef.current !== null) {
+      clearTimeout(legacyProjectionTimerRef.current);
+    }
+    legacyProjectionTimerRef.current = setTimeout(() => {
+      legacyProjectionTimerRef.current = null;
+      project();
+    }, LEGACY_PROJECTION_DELAY_MS);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (legacyProjectionTimerRef.current !== null) {
+        clearTimeout(legacyProjectionTimerRef.current);
+        legacyProjectionTimerRef.current = null;
+      }
+    },
+    []
+  );
+
+  const handleDocumentChange = useCallback(
+    (newDocument: Document) => {
+      commitLegacyDocumentChange(
+        newDocument,
+        yrsCore.documentFromYrs,
+        {
+          push: pushDocument,
+          notify:
+            onChange || contentChangeSubscribersRef.current.size > 0
+              ? notifyDocumentChange
+              : undefined,
+        },
+        scheduleLegacyProjection
+      );
+      handleContentHousekeeping();
+    },
+    [
+      handleContentHousekeeping,
+      notifyDocumentChange,
+      onChange,
+      pushDocument,
+      scheduleLegacyProjection,
+      yrsCore.documentFromYrs,
+    ]
+  );
+
+  const handleYrsContentChange = useCallback(() => {
+    if (onChange || contentChangeSubscribersRef.current.size > 0) {
+      commitYrsDocumentChange(yrsCore.documentFromYrs, {
+        push: pushDocument,
+        notify: notifyDocumentChange,
+      });
+    }
+    handleContentHousekeeping();
+  }, [
+    handleContentHousekeeping,
+    notifyDocumentChange,
+    onChange,
+    pushDocument,
+    yrsCore.documentFromYrs,
+  ]);
 
   // Recompute the floating "add comment" button position from the current Yrs
   // selection + page/container geometry. Called from handleSelectionChange and
@@ -1211,6 +1301,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   useDocxEditorRefApi({
     ref,
     document: history.state,
+    documentFromYrs: yrsCore.documentFromYrs,
     historyStateRef,
     pagedEditorRef,
     handleSave,
@@ -1763,7 +1854,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             interactive={!readOnly}
           >
             <DocxEditorPagedArea
-              yrsSeedDocument={yrsSeedDocument}
+              yrsCore={yrsCore}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}
@@ -1789,7 +1880,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               author={author}
               measurementFontProvider={measurementFontProvider}
               rustFontChainsProviderRef={rustFontChainsProviderRef}
-              onDocumentChange={handleDocumentChange}
+              onYrsContentChange={handleYrsContentChange}
               onYrsHistoryChange={handleYrsHistoryChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
@@ -1825,6 +1916,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               applyResidentInput={canvasRenderer.applyInput}
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
+              resolveDisplayListQueries={canvasRenderer.resolveQueries}
               canvasDisplayList={canvasRenderer.displayList}
               displayListFrameEpoch={canvasRenderer.frame?.frameEpoch ?? null}
               residentCaret={canvasRenderer.caret}

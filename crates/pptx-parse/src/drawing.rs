@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use ooxml_drawingml::{ColorValue, GradientFill, GradientStop, LineEnd, ShapeFill, ShapeOutline};
 
 use crate::PptxError;
@@ -6,6 +8,30 @@ use crate::relationships::Relationship;
 use crate::xml::{ParseBudget, XmlElement};
 
 const MAX_SAFE_EMU: i64 = 1_000_000_000_000_000;
+const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
+const ADJUSTMENT_SCALE: f64 = 100_000.0;
+
+#[derive(Clone, Copy)]
+struct GuideValue {
+    value: f64,
+    extent_power: f64,
+}
+
+impl GuideValue {
+    fn scalar(value: f64) -> Self {
+        Self {
+            value,
+            extent_power: 0.0,
+        }
+    }
+
+    fn extent(value: f64) -> Self {
+        Self {
+            value,
+            extent_power: 1.0,
+        }
+    }
+}
 
 pub(crate) struct CommonSlideData {
     pub name: Option<String>,
@@ -116,12 +142,11 @@ fn parse_shape(
 ) -> Result<Shape, PptxError> {
     budget.charge_shape(part)?;
     let properties = element.child("spPr");
+    let transform = properties.and_then(|value| value.child("xfrm"));
     Ok(Shape {
-        base: parse_base(
-            element.child("nvSpPr"),
-            properties.and_then(|value| value.child("xfrm")),
-        ),
+        base: parse_base(element.child("nvSpPr"), transform),
         geometry: parse_geometry(properties),
+        adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
         text: element
@@ -318,6 +343,212 @@ fn parse_geometry(properties: Option<&XmlElement>) -> String {
                 .map(|_| "custom".to_owned())
         })
         .unwrap_or_else(|| "rect".to_owned())
+}
+
+fn parse_shape_extent(transform: Option<&XmlElement>) -> Option<(f64, f64)> {
+    let extent = transform?.child("ext")?;
+    let width = numeric_attribute(Some(extent), "cx")?;
+    let height = numeric_attribute(Some(extent), "cy")?;
+    (width > 0 && height > 0).then_some((width as f64, height as f64))
+}
+
+fn parse_adjust_values(
+    properties: Option<&XmlElement>,
+    extent: Option<(f64, f64)>,
+) -> BTreeMap<String, f64> {
+    let Some(adjustment_list) = properties
+        .and_then(|value| value.child("prstGeom"))
+        .and_then(|value| value.child("avLst"))
+    else {
+        return BTreeMap::new();
+    };
+    let mut values = extent.map(standard_guide_values).unwrap_or_default();
+    let mut adjustments = BTreeMap::new();
+    for guide in adjustment_list
+        .child_elements()
+        .filter(|value| value.local_name() == "gd")
+    {
+        let (Some(name), Some(formula)) = (guide.attribute("name"), guide.attribute("fmla")) else {
+            continue;
+        };
+        let Some(value) = evaluate_guide_formula(formula, &values) else {
+            continue;
+        };
+        values.insert(name.to_owned(), value);
+        let denominator = if value.extent_power == 0.0 {
+            ADJUSTMENT_SCALE
+        } else {
+            let Some((width, height)) = extent else {
+                continue;
+            };
+            width.min(height).powf(value.extent_power)
+        };
+        let adjustment = value.value / denominator;
+        if adjustment.is_finite() {
+            adjustments.insert(name.to_owned(), adjustment);
+        }
+    }
+    adjustments
+}
+
+fn standard_guide_values((width, height): (f64, f64)) -> BTreeMap<String, GuideValue> {
+    let short = width.min(height);
+    let long = width.max(height);
+    let mut values = BTreeMap::from([
+        ("w".to_owned(), GuideValue::extent(width)),
+        ("h".to_owned(), GuideValue::extent(height)),
+        ("ss".to_owned(), GuideValue::extent(short)),
+        ("ls".to_owned(), GuideValue::extent(long)),
+        ("hc".to_owned(), GuideValue::extent(width / 2.0)),
+        ("vc".to_owned(), GuideValue::extent(height / 2.0)),
+        ("l".to_owned(), GuideValue::extent(0.0)),
+        ("t".to_owned(), GuideValue::extent(0.0)),
+        ("r".to_owned(), GuideValue::extent(width)),
+        ("b".to_owned(), GuideValue::extent(height)),
+    ]);
+    for divisor in [2, 3, 4, 5, 6, 8, 10, 12, 32] {
+        values.insert(
+            format!("wd{divisor}"),
+            GuideValue::extent(width / divisor as f64),
+        );
+    }
+    for divisor in [2, 3, 4, 5, 6, 8] {
+        values.insert(
+            format!("hd{divisor}"),
+            GuideValue::extent(height / divisor as f64),
+        );
+    }
+    for divisor in [2, 4, 6, 8, 16, 32] {
+        values.insert(
+            format!("ssd{divisor}"),
+            GuideValue::extent(short / divisor as f64),
+        );
+    }
+    let circle = 360.0 * ANGLE_UNITS_PER_DEGREE;
+    for (name, numerator, denominator) in [
+        ("cd2", 1.0, 2.0),
+        ("cd4", 1.0, 4.0),
+        ("cd8", 1.0, 8.0),
+        ("3cd4", 3.0, 4.0),
+        ("3cd8", 3.0, 8.0),
+        ("5cd8", 5.0, 8.0),
+        ("7cd8", 7.0, 8.0),
+    ] {
+        values.insert(
+            name.to_owned(),
+            GuideValue::scalar(circle * numerator / denominator),
+        );
+    }
+    values
+}
+
+fn evaluate_guide_formula(
+    formula: &str,
+    values: &BTreeMap<String, GuideValue>,
+) -> Option<GuideValue> {
+    let mut tokens = formula.split_whitespace();
+    let operator = tokens.next()?;
+    let operands = tokens
+        .map(|token| guide_operand(token, values))
+        .collect::<Option<Vec<_>>>()?;
+    let result = match (operator, operands.as_slice()) {
+        ("val", [x]) => *x,
+        ("*/", [x, y, z]) if z.value != 0.0 => GuideValue {
+            value: x.value * y.value / z.value,
+            extent_power: x.extent_power + y.extent_power - z.extent_power,
+        },
+        ("+-", [x, y, z]) => GuideValue {
+            value: x.value + y.value - z.value,
+            extent_power: additive_extent_power(&[*x, *y, *z]),
+        },
+        ("+/", [x, y, z]) if z.value != 0.0 => GuideValue {
+            value: (x.value + y.value) / z.value,
+            extent_power: additive_extent_power(&[*x, *y]) - z.extent_power,
+        },
+        ("?:", [x, y, z]) => {
+            if x.value > 0.0 {
+                *y
+            } else {
+                *z
+            }
+        }
+        ("abs", [x]) => GuideValue {
+            value: x.value.abs(),
+            ..*x
+        },
+        ("at2", [x, y]) => {
+            GuideValue::scalar(y.value.atan2(x.value).to_degrees() * ANGLE_UNITS_PER_DEGREE)
+        }
+        ("cat2", [x, y, z]) => GuideValue {
+            value: x.value * z.value.atan2(y.value).cos(),
+            ..*x
+        },
+        ("cos", [x, y]) => GuideValue {
+            value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().cos(),
+            ..*x
+        },
+        ("max", [x, y]) => {
+            if x.value >= y.value {
+                *x
+            } else {
+                *y
+            }
+        }
+        ("min", [x, y]) => {
+            if x.value <= y.value {
+                *x
+            } else {
+                *y
+            }
+        }
+        ("mod", [x, y, z]) => GuideValue {
+            value: x.value.hypot(y.value).hypot(z.value),
+            extent_power: additive_extent_power(&[*x, *y, *z]),
+        },
+        ("pin", [x, y, z]) => {
+            if y.value < x.value {
+                *x
+            } else if y.value > z.value {
+                *z
+            } else {
+                *y
+            }
+        }
+        ("sat2", [x, y, z]) => GuideValue {
+            value: x.value * z.value.atan2(y.value).sin(),
+            ..*x
+        },
+        ("sin", [x, y]) => GuideValue {
+            value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().sin(),
+            ..*x
+        },
+        ("sqrt", [x]) if x.value >= 0.0 => GuideValue {
+            value: x.value.sqrt(),
+            extent_power: x.extent_power / 2.0,
+        },
+        ("tan", [x, y]) => GuideValue {
+            value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().tan(),
+            ..*x
+        },
+        _ => return None,
+    };
+    result.value.is_finite().then_some(result)
+}
+
+fn additive_extent_power(values: &[GuideValue]) -> f64 {
+    values
+        .iter()
+        .find_map(|value| (value.extent_power != 0.0).then_some(value.extent_power))
+        .unwrap_or_default()
+}
+
+fn guide_operand(token: &str, values: &BTreeMap<String, GuideValue>) -> Option<GuideValue> {
+    token
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(GuideValue::scalar)
+        .or_else(|| values.get(token).copied())
 }
 
 fn parse_background(element: &XmlElement) -> Option<ShapeFill> {
@@ -712,7 +943,7 @@ mod tests {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
-            br#"<p:sld><p:cSld name="Test"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="roundRect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr><p:txBody><a:bodyPr anchor="ctr"><a:normAutofit fontScale="85000" lnSpcReduction="12000"/></a:bodyPr><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            br#"<p:sld><p:cSld name="Test"><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 20000"/></a:avLst></a:prstGeom><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr><p:txBody><a:bodyPr anchor="ctr"><a:normAutofit fontScale="85000" lnSpcReduction="12000"/></a:bodyPr><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="2400" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:latin typeface="Aptos"/></a:rPr><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
             "ppt/slides/slide1.xml",
             &mut budget,
         )
@@ -722,6 +953,7 @@ mod tests {
             panic!("expected shape");
         };
         assert_eq!(shape.geometry, "roundRect");
+        assert_eq!(shape.adjust_values.get("adj"), Some(&0.2));
         assert_eq!(shape.base.transform.width, 3);
         assert_eq!(
             shape.text.as_ref().unwrap().autofit,
@@ -740,5 +972,187 @@ mod tests {
                 .font_size_pt,
             Some(24.0)
         );
+    }
+
+    #[test]
+    fn evaluates_literal_arithmetic_and_reference_adjustment_formulas() {
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="val 20000"/>
+               <a:gd name="adj1" fmla="*/ 30000 2 3"/>
+               <a:gd name="adj2" fmla="+- adj1 15000 5000"/>
+               <a:gd name="adj3" fmla="+/ adj2 10000 2"/>"#,
+        );
+        let adjustments = parse_adjust_values(Some(&properties), None);
+
+        assert_eq!(adjustments.get("adj"), Some(&0.2));
+        assert_eq!(adjustments.get("adj1"), Some(&0.2));
+        assert_eq!(adjustments.get("adj2"), Some(&0.3));
+        assert_eq!(adjustments.get("adj3"), Some(&0.2));
+    }
+
+    #[test]
+    fn seeds_standard_geometry_guides_from_extent() {
+        let values = standard_guide_values((4_000_000.0, 1_000_000.0));
+
+        for (name, expected) in [
+            ("w", 4_000_000.0),
+            ("h", 1_000_000.0),
+            ("ss", 1_000_000.0),
+            ("ls", 4_000_000.0),
+            ("hc", 2_000_000.0),
+            ("vc", 500_000.0),
+            ("l", 0.0),
+            ("t", 0.0),
+            ("r", 4_000_000.0),
+            ("b", 1_000_000.0),
+        ] {
+            assert_guide_value(&values, name, expected, 1.0);
+        }
+        for divisor in [2, 3, 4, 5, 6, 8, 10, 12, 32] {
+            assert_guide_value(
+                &values,
+                &format!("wd{divisor}"),
+                4_000_000.0 / divisor as f64,
+                1.0,
+            );
+        }
+        for divisor in [2, 3, 4, 5, 6, 8] {
+            assert_guide_value(
+                &values,
+                &format!("hd{divisor}"),
+                1_000_000.0 / divisor as f64,
+                1.0,
+            );
+        }
+        for divisor in [2, 4, 6, 8, 16, 32] {
+            assert_guide_value(
+                &values,
+                &format!("ssd{divisor}"),
+                1_000_000.0 / divisor as f64,
+                1.0,
+            );
+        }
+        for (name, expected) in [
+            ("cd2", 10_800_000.0),
+            ("cd4", 5_400_000.0),
+            ("cd8", 2_700_000.0),
+            ("3cd4", 16_200_000.0),
+            ("3cd8", 8_100_000.0),
+            ("5cd8", 13_500_000.0),
+            ("7cd8", 18_900_000.0),
+        ] {
+            assert_guide_value(&values, name, expected, 0.0);
+        }
+    }
+
+    #[test]
+    fn evaluates_standard_and_mixed_guide_formulas() {
+        let properties = adjustment_properties(
+            r#"<a:gd name="fromW" fmla="*/ w 1 16"/>
+               <a:gd name="fromH" fmla="*/ h 1 4"/>
+               <a:gd name="fromSs" fmla="*/ ss 1 4"/>
+               <a:gd name="fromLs" fmla="*/ ls 1 16"/>
+               <a:gd name="fromHc" fmla="*/ hc 1 8"/>
+               <a:gd name="fromVc" fmla="*/ vc 1 2"/>
+               <a:gd name="fromL" fmla="+- l 250000 0"/>
+               <a:gd name="fromT" fmla="+- t 250000 0"/>
+               <a:gd name="fromR" fmla="*/ r 1 16"/>
+               <a:gd name="fromB" fmla="*/ b 1 4"/>
+               <a:gd name="fromWd2" fmla="*/ wd2 1 8"/>
+               <a:gd name="fromHd2" fmla="*/ hd2 1 2"/>
+               <a:gd name="fromSsd4" fmla="val ssd4"/>
+               <a:gd name="fromAngle" fmla="*/ cd4 1 54"/>
+               <a:gd name="mixed" fmla="+- w 10000 h"/>
+               <a:gd name="cancelled" fmla="*/ w 10000 w"/>"#,
+        );
+        let adjustments = parse_adjust_values(Some(&properties), Some((4_000_000.0, 1_000_000.0)));
+
+        for name in [
+            "fromW", "fromH", "fromSs", "fromLs", "fromHc", "fromVc", "fromL", "fromT", "fromR",
+            "fromB", "fromWd2", "fromHd2", "fromSsd4",
+        ] {
+            assert_eq!(adjustments.get(name), Some(&0.25));
+        }
+        assert_eq!(adjustments.get("fromAngle"), Some(&1.0));
+        assert_eq!(adjustments.get("mixed"), Some(&3.01));
+        assert_eq!(adjustments.get("cancelled"), Some(&0.1));
+    }
+
+    #[test]
+    fn extent_relative_adjustment_matches_equivalent_literal() {
+        let extent = Some((4_000_000.0, 1_000_000.0));
+        let relative = adjustment_properties(r#"<a:gd name="adj" fmla="*/ ss 25000 100000"/>"#);
+        let literal = adjustment_properties(r#"<a:gd name="adj" fmla="val 25000"/>"#);
+
+        assert_eq!(
+            parse_adjust_values(Some(&relative), extent),
+            parse_adjust_values(Some(&literal), extent)
+        );
+        assert_eq!(
+            parse_adjust_values(Some(&relative), extent).get("adj"),
+            Some(&0.25)
+        );
+    }
+
+    #[test]
+    fn leaves_extent_guides_absent_without_an_extent() {
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="*/ ss 25000 100000"/>
+               <a:gd name="adj1" fmla="val 20000"/>"#,
+        );
+        let adjustments = parse_adjust_values(Some(&properties), None);
+
+        assert!(!adjustments.contains_key("adj"));
+        assert_eq!(adjustments.get("adj1"), Some(&0.2));
+    }
+
+    #[test]
+    fn selection_operators_keep_the_chosen_operand_units() {
+        let extent = Some((4_000_000.0, 1_000_000.0));
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="?: 1 50000 w"/>
+               <a:gd name="adj1" fmla="max 25000 ssd4"/>
+               <a:gd name="adj2" fmla="pin 10000 ss 30000"/>"#,
+        );
+        let adjustments = parse_adjust_values(Some(&properties), extent);
+
+        assert_eq!(adjustments.get("adj"), Some(&0.5));
+        assert_eq!(adjustments.get("adj1"), Some(&0.25));
+        assert_eq!(adjustments.get("adj2"), Some(&0.3));
+    }
+
+    #[test]
+    fn leaves_unresolvable_adjustments_absent_for_preset_fallbacks() {
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="*/ missing 2 3"/>
+               <a:gd name="adj1" fmla="unknown 20000"/>"#,
+        );
+
+        assert!(parse_adjust_values(Some(&properties), None).is_empty());
+    }
+
+    fn adjustment_properties(guides: &str) -> XmlElement {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        parse_xml(
+            format!(
+                r#"<p:spPr><a:prstGeom prst="roundRect"><a:avLst>{guides}</a:avLst></a:prstGeom></p:spPr>"#
+            )
+            .as_bytes(),
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap()
+    }
+
+    fn assert_guide_value(
+        values: &BTreeMap<String, GuideValue>,
+        name: &str,
+        expected: f64,
+        expected_power: f64,
+    ) {
+        let actual = values.get(name).unwrap();
+        assert_eq!(actual.value, expected);
+        assert_eq!(actual.extent_power, expected_power);
     }
 }

@@ -214,6 +214,7 @@ mod tests {
                 },
             ],
             grid: xlsx_render::GridMeta::default(),
+            hyperlinks: Vec::new(),
         };
 
         let png = render_png(&dl).unwrap();
@@ -237,6 +238,7 @@ mod tests {
                 color: "red".into(),
             }],
             grid: xlsx_render::GridMeta::default(),
+            hyperlinks: Vec::new(),
         };
         assert!(render_png(&dl).is_err());
     }

@@ -72,7 +72,7 @@ export function EditableCombobox({
 
   const commit = useCallback(() => {
     if (!disabled && onCommit && draft.trim()) onCommit(draft.trim());
-    else setDraft(value);
+    setDraft(value);
   }, [disabled, onCommit, draft, value]);
 
   return (

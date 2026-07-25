@@ -91,6 +91,18 @@ type HitTestRegionsByHandleExport = (
   x: number,
   y: number
 ) => string;
+type VerticalMoveJsonExport = (
+  displayList: string,
+  position: number,
+  direction: string,
+  goalX: number
+) => string;
+type VerticalMoveByHandleExport = (
+  handle: number,
+  position: number,
+  direction: string,
+  goalX: number
+) => string;
 type RangeRectsByHandleExport = (handle: number, from: number, to: number) => string;
 type RangeRectsRegionJsonExport = (
   displayList: string,
@@ -188,6 +200,33 @@ export function hitTestRegionsByHandle(
   if (!query)
     throw new Error('hit_test_regions_by_handle is not available in the embedded layout wasm yet');
   return query(handle, pageIndex, x, y);
+}
+
+/** Resolve the closest caret position on the adjacent visual line. */
+export function verticalMoveJson(
+  displayList: string,
+  position: number,
+  direction: 'up' | 'down',
+  goalX: number
+): string {
+  state.ensure();
+  const query = glueExport<VerticalMoveJsonExport>('vertical_move_json');
+  if (!query) throw new Error('vertical_move_json is not available in the embedded layout wasm');
+  return query(displayList, position, direction, goalX);
+}
+
+/** Resolve the closest caret position on the adjacent visual line by handle. */
+export function verticalMoveByHandle(
+  handle: number,
+  position: number,
+  direction: 'up' | 'down',
+  goalX: number
+): string {
+  state.ensure();
+  const query = glueExport<VerticalMoveByHandleExport>('vertical_move_by_handle');
+  if (!query)
+    throw new Error('vertical_move_by_handle is not available in the embedded layout wasm');
+  return query(handle, position, direction, goalX);
 }
 
 /**

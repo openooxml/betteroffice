@@ -2,7 +2,10 @@
 //! matches local element names, so fixtures omit namespace declarations.
 
 use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
-use xlsx_model::{Cell, CellRef, CellValue, DateSystem, ErrorValue, Workbook};
+use xlsx_model::{
+    Cell, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, SheetId,
+    Workbook,
+};
 
 use crate::{ParseError, parse_workbook, serialize_workbook};
 
@@ -132,6 +135,123 @@ fn honors_1904_date_system() {
 }
 
 #[test]
+fn parses_and_round_trips_frozen_sheet_views() {
+    let body = r#"
+        <sheetViews>
+            <sheetView workbookViewId="0">
+                <pane xSplit="2" ySplit="3" topLeftCell="E8" activePane="bottomRight" state="frozen"/>
+            </sheetView>
+        </sheetViews>
+        <sheetData/>
+    "#;
+    let parsed = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(
+        parsed.sheets[0].freeze_pane,
+        Some(FreezePane::new(3, 2, CellRef::parse_a1("E8").unwrap()))
+    );
+
+    let reparsed = parse_workbook(&serialize_workbook(&parsed).unwrap()).unwrap();
+    assert_eq!(reparsed.sheets[0].freeze_pane, parsed.sheets[0].freeze_pane);
+}
+
+#[test]
+fn parses_and_round_trips_scoped_defined_names() {
+    let mut parts = package("<sheetData/>", &[], false);
+    let workbook = br#"
+        <workbook>
+            <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+            <definedNames>
+                <definedName name="TaxRate">0.19</definedName>
+                <definedName name="Input" localSheetId="0" hidden="1">Sheet1!$B$2</definedName>
+            </definedNames>
+        </workbook>
+    "#;
+    parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/workbook.xml")
+        .unwrap()
+        .1 = workbook.to_vec();
+
+    let parsed = parse_workbook(&parts).unwrap();
+    assert_eq!(
+        parsed.defined_names,
+        vec![
+            DefinedName {
+                name: "TaxRate".into(),
+                formula: "0.19".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "Input".into(),
+                formula: "Sheet1!$B$2".into(),
+                local_sheet: Some(SheetId(0)),
+                hidden: true,
+            },
+        ]
+    );
+
+    let reparsed = parse_workbook(&serialize_workbook(&parsed).unwrap()).unwrap();
+    assert_eq!(reparsed.defined_names, parsed.defined_names);
+}
+
+#[test]
+fn parses_and_round_trips_external_and_internal_hyperlinks() {
+    let body = r#"
+        <sheetData>
+            <row r="1"><c r="A1" t="inlineStr"><is><t>Website</t></is></c></row>
+        </sheetData>
+        <hyperlinks>
+            <hyperlink ref="A1:B1" r:id="rId7" tooltip="Open site" display="Website"/>
+            <hyperlink ref="C3" location="'Other Sheet'!$D$4" display="Jump"/>
+        </hyperlinks>
+    "#;
+    let mut parts = package(body, &[], false);
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".into(),
+        br#"
+            <Relationships>
+                <Relationship Id="rId7"
+                    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+                    Target="https://example.com/report?q=1&amp;lang=en"
+                    TargetMode="External"/>
+            </Relationships>
+        "#
+        .to_vec(),
+    ));
+
+    let parsed = parse_workbook(&parts).unwrap();
+    assert_eq!(
+        parsed.sheets[0].hyperlinks,
+        vec![
+            Hyperlink {
+                range: xlsx_model::CellRange::parse_a1("A1:B1").unwrap(),
+                external_target: Some("https://example.com/report?q=1&lang=en".into()),
+                location: None,
+                tooltip: Some("Open site".into()),
+                display: Some("Website".into()),
+            },
+            Hyperlink {
+                range: xlsx_model::CellRange::parse_a1("C3").unwrap(),
+                external_target: None,
+                location: Some("'Other Sheet'!$D$4".into()),
+                tooltip: None,
+                display: Some("Jump".into()),
+            },
+        ]
+    );
+
+    let serialized = serialize_workbook(&parsed).unwrap();
+    assert!(
+        serialized
+            .iter()
+            .any(|(name, _)| name == "xl/worksheets/_rels/sheet1.xml.rels")
+    );
+    let reparsed = parse_workbook(&serialized).unwrap();
+    assert_eq!(reparsed.sheets[0].hyperlinks, parsed.sheets[0].hyperlinks);
+}
+
+#[test]
 fn skips_unknown_elements() {
     let body = r#"
         <extLst><ext uri="whatever"><custom><deep/></custom></ext></extLst>
@@ -217,9 +337,12 @@ type Snapshot = (
         Vec<String>,
         Vec<(u32, f64)>,
         Vec<(u32, f64)>,
+        Option<FreezePane>,
+        Vec<Hyperlink>,
     )>,
     DateSystem,
     Vec<String>,
+    Vec<DefinedName>,
 );
 
 fn snapshot(wb: &Workbook) -> Snapshot {
@@ -234,10 +357,23 @@ fn snapshot(wb: &Workbook) -> Snapshot {
             let merges = s.merges.iter().map(|m| m.to_a1()).collect();
             let widths = s.col_widths.iter().map(|(&k, &v)| (k, v)).collect();
             let heights = s.row_heights.iter().map(|(&k, &v)| (k, v)).collect();
-            (s.name.clone(), cells, merges, widths, heights)
+            (
+                s.name.clone(),
+                cells,
+                merges,
+                widths,
+                heights,
+                s.freeze_pane,
+                s.hyperlinks.clone(),
+            )
         })
         .collect();
-    (sheets, wb.date_system, wb.shared_strings.clone())
+    (
+        sheets,
+        wb.date_system,
+        wb.shared_strings.clone(),
+        wb.defined_names.clone(),
+    )
 }
 
 #[test]

@@ -29,6 +29,9 @@ use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
 
+use crate::presence::{
+    apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
+};
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, DocUndoManager, EditCtx, EditingDoc,
     EngineSession, FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta,
@@ -813,6 +816,7 @@ fn seed_paragraph(value: &Value) -> (String, String, String) {
 #[wasm_bindgen]
 pub struct EditSession {
     engine: EngineSession,
+    docx_source: RefCell<Option<Vec<u8>>>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
     undo: RefCell<Option<DocUndoManager>>,
@@ -827,7 +831,117 @@ struct UpdateEventObserver {
     _subscription: Subscription,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocxHostWire {
+    envelope: docx_parse::S9WireEnvelope,
+    referenced_fonts: Vec<String>,
+}
+
+fn thin_header_footer(
+    entries: &Option<Vec<(String, docx_parse::HeaderFooter)>>,
+) -> Option<Vec<(String, docx_parse::HeaderFooter)>> {
+    entries.as_ref().map(|entries| {
+        entries
+            .iter()
+            .map(|(relationship_id, part)| {
+                (
+                    relationship_id.clone(),
+                    docx_parse::HeaderFooter {
+                        story_type: part.story_type.clone(),
+                        hdr_ftr_type: part.hdr_ftr_type.clone(),
+                        content: Vec::new(),
+                        watermark: part.watermark.clone(),
+                    },
+                )
+            })
+            .collect()
+    })
+}
+
+fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::Note>> {
+    notes.as_ref().map(|notes| {
+        notes
+            .iter()
+            .map(|note| docx_parse::Note {
+                story_type: note.story_type.clone(),
+                id: note.id,
+                note_type: note.note_type.clone(),
+                content: Vec::new(),
+                verbatim_xml: None,
+            })
+            .collect()
+    })
+}
+
+fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9WireEnvelope {
+    let package = &envelope.document.package;
+    let sections = package.document.sections.as_ref().map(|sections| {
+        sections
+            .iter()
+            .map(|section| docx_parse::S9SectionWire {
+                id: section.id.clone(),
+                properties: section.properties.clone(),
+                content_start: 0,
+                content_end: 0,
+            })
+            .collect()
+    });
+    docx_parse::S9WireEnvelope {
+        wire_version: envelope.wire_version,
+        document: docx_parse::S9DocumentWire {
+            package: docx_parse::S9PackageWire {
+                document: docx_parse::S9DocumentBodyWire {
+                    content: Vec::new(),
+                    sections,
+                    final_section_properties: package.document.final_section_properties.clone(),
+                    comments: package.document.comments.clone(),
+                },
+                styles: package.styles.clone(),
+                theme: package.theme.clone(),
+                numbering: docx_parse::NumberingDefinitions::default(),
+                settings: package.settings.clone(),
+                font_table: package.font_table.clone(),
+                header_entries: thin_header_footer(&package.header_entries),
+                footer_entries: thin_header_footer(&package.footer_entries),
+                footnotes: thin_notes(&package.footnotes),
+                endnotes: thin_notes(&package.endnotes),
+                footnote_separators: None,
+                endnote_separators: None,
+                relationship_entries: package.relationship_entries.clone(),
+                media_entries: Vec::new(),
+                chart_entries: Vec::new(),
+            },
+            template_variables: None,
+            warnings: envelope.document.warnings.clone(),
+        },
+        embedded_font_parts: envelope.embedded_font_parts.clone(),
+        font_table_relationships_xml: envelope.font_table_relationships_xml.clone(),
+        canonical_base64: None,
+        canonical_sha256: None,
+    }
+}
+
 impl EditSession {
+    fn open_docx_inner(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
+        let envelope = crate::seed::parse_docx_for_edit(bytes).map_err(js_err)?;
+        let host_envelope = thin_docx_envelope(&envelope);
+        let referenced_fonts = if seed_stories {
+            crate::seed::seed_parsed_docx(self.engine.doc(), envelope).map_err(js_err)?
+        } else {
+            let fonts = crate::seed::referenced_fonts(&envelope).map_err(js_err)?;
+            drop(envelope);
+            fonts
+        };
+        let host = DocxHostWire {
+            envelope: host_envelope,
+            referenced_fonts,
+        };
+        let json = serde_json::to_string(&host).map_err(js_err)?;
+        self.docx_source.replace(Some(bytes.to_vec()));
+        Ok(json)
+    }
+
     fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32, u32), JsValue> {
         let selection = self.selection.borrow();
         let selection = selection
@@ -944,6 +1058,7 @@ impl EditSession {
         }
         Ok(Self {
             engine: EngineSession::new(client_id as u64),
+            docx_source: RefCell::new(None),
             update_observer: None,
             update_event_observer: None,
             undo: RefCell::new(None),
@@ -1299,6 +1414,17 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    pub fn display_vertical_move_json(
+        &self,
+        position: f64,
+        direction: &str,
+        goal_x: f64,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .display_vertical_move_json(position as i64, direction, goal_x)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Body range geometry without a display-list JSON round trip.
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
         self.engine
@@ -1330,6 +1456,27 @@ impl EditSession {
     /// `load` — typically another replica's `encode_state()` output).
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
+    }
+
+    /// Parses a DOCX, seeds its stories, and returns thin host metadata.
+    pub fn seed_from_docx(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        self.open_docx_inner(bytes, true)
+    }
+
+    /// Parses a DOCX and optionally seeds its editable stories.
+    pub fn open_docx(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
+        self.open_docx_inner(bytes, seed_stories)
+    }
+
+    /// Materializes the retained canonical package for compatibility APIs.
+    pub fn materialize_docx(&self) -> Result<Option<String>, JsValue> {
+        let source = self.docx_source.borrow();
+        let Some(source) = source.as_ref() else {
+            return Ok(None);
+        };
+        let envelope = crate::seed::parse_docx_for_edit(source).map_err(js_err)?;
+        let json = serde_json::to_string(&envelope).map_err(js_err)?;
+        Ok(Some(json))
     }
 
     /// Seeds stories from JSON (the json form of `load`):
@@ -1439,6 +1586,20 @@ impl EditSession {
     /// Applies a remote/incremental yrs v1 update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
+    }
+
+    pub fn apply_update_with_inference(&self, update: &[u8]) -> Result<String, JsValue> {
+        let inference =
+            apply_update_with_typing_inference(self.engine.doc(), update).map_err(js_err)?;
+        serde_json::to_string(&inference.map(|inference| {
+            json!({
+                "clientId": inference.client_id,
+                "story": inference.story,
+                "paraId": inference.para_id,
+                "endOffset": inference.end_offset,
+            })
+        }))
+        .map_err(js_err)
     }
 
     /// Applies an update produced by this document's dedicated local worker.
@@ -1627,6 +1788,35 @@ impl EditSession {
         Ok(())
     }
 
+    /// Encodes one paragraph location as a sticky position.
+    pub fn encode_sticky_position(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        let index = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let txn = self.engine.doc().yrs_doc().transact();
+        let text = story_ref(&txn, story).map_err(js_err)?;
+        let position = text
+            .sticky_index(&txn, index, Assoc::After)
+            .ok_or_else(|| js_err("position could not be made sticky"))?;
+        Ok(encode_sticky(&position))
+    }
+
+    /// Resolves one encoded sticky position to a paragraph location.
+    pub fn resolve_sticky_position(&self, story: &str, position: &[u8]) -> Result<String, JsValue> {
+        let (index, _) = resolve_sticky_selection(self.engine.doc(), story, position, position)
+            .map_err(js_err)?;
+        let (para_id, offset) = index_loc(self.engine.doc(), story, index)?;
+        Ok(json!({
+            "story": story,
+            "paraId": para_id,
+            "offset": offset,
+        })
+        .to_string())
+    }
+
     /// Resolves this peer's current sticky selection as two public Locs, or
     /// `null` before the host establishes an initial selection.
     pub fn selection(&self) -> Result<String, JsValue> {
@@ -1657,6 +1847,44 @@ impl EditSession {
             },
             "head": {
                 "story": selection.story,
+                "paraId": head_para,
+                "offset": head_offset,
+            }
+        })
+        .to_string())
+    }
+
+    pub fn encoded_selection(&self) -> Result<String, JsValue> {
+        let selection = self.selection.borrow();
+        let Some(selection) = selection.as_ref() else {
+            return Ok("null".to_owned());
+        };
+        Ok(json!({
+            "story": selection.story,
+            "anchor": encode_sticky(&selection.anchor),
+            "head": encode_sticky(&selection.head),
+        })
+        .to_string())
+    }
+
+    pub fn resolve_encoded_selection(
+        &self,
+        story: &str,
+        anchor: &[u8],
+        head: &[u8],
+    ) -> Result<String, JsValue> {
+        let (anchor_index, head_index) =
+            resolve_sticky_selection(self.engine.doc(), story, anchor, head).map_err(js_err)?;
+        let (anchor_para, anchor_offset) = index_loc(self.engine.doc(), story, anchor_index)?;
+        let (head_para, head_offset) = index_loc(self.engine.doc(), story, head_index)?;
+        Ok(json!({
+            "anchor": {
+                "story": story,
+                "paraId": anchor_para,
+                "offset": anchor_offset,
+            },
+            "head": {
+                "story": story,
                 "paraId": head_para,
                 "offset": head_offset,
             }

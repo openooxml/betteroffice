@@ -100,4 +100,24 @@ describe('buildA11yGrid', () => {
     expect(g.columnHeaders[0].text).toBe('AA');
     expect(g.rows[0].cells[0].address).toBe('AA1');
   });
+
+  it('uses explicit frozen-pane track addresses', () => {
+    const dl: DisplayList = {
+      width: 160,
+      height: 40,
+      commands: [],
+      grid: {
+        startRow: 0,
+        startCol: 0,
+        rowIndices: [0, 8],
+        colIndices: [0, 5],
+        colOffsets: [0, 80, 160],
+        rowOffsets: [0, 20, 40],
+      },
+    };
+    const g = buildA11yGrid(dl, null, 'S', strings);
+    expect(g.columnHeaders.map((header) => header.text)).toEqual(['A', 'F']);
+    expect(g.rows.map((row) => row.row)).toEqual([0, 8]);
+    expect(g.rows[1].cells.map((cell) => cell.address)).toEqual(['A9', 'F9']);
+  });
 });

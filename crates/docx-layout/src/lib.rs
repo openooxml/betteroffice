@@ -31,18 +31,14 @@
 
 //! The pure layout-core (pagination) in Rust, compiled to WASM.
 //!
-//! A twin of the TypeScript `layoutCore` behind the same contract:
-//! `(MeasuredBlock[], LayoutOptions) -> Layout`, marshaled as JSON. It ports
-//! INCREMENTALLY — this spine paginates paragraph flow (spacing collapse,
-//! page/column splits, PM ranges, resolved lines), explicit page/column
-//! breaks, multi-column options, inline/anchored images, text boxes, and
-//! per-page footnote reservations. Features still owned by the TypeScript
-//! engine sit behind the stubs in [`hooks`]; engaging one returns
-//! `Unsupported`, so the JS seam falls back. Coverage grows one hook at a
-//! time, each checkpointed against the golden corpus
-//! (`crates/docx-layout/tests/goldens.rs` natively,
-//! `packages/core/src/layout/pagination/__golden__/rustParity.test.ts` via
-//! wasm).
+//! Contract: `(MeasuredBlock[], LayoutOptions) -> Layout`, marshaled as
+//! JSON. Paginates paragraph flow (spacing collapse, page/column splits,
+//! PM ranges, resolved lines), explicit page/column breaks, multi-column
+//! options, inline/anchored images, text boxes, and per-page footnote
+//! reservations. Inputs that engage an uncovered feature hit the stubs in
+//! [`hooks`] and return `Unsupported` so the host seam can degrade
+//! gracefully. Coverage is checkpointed against the golden corpus
+//! (`crates/docx-layout/tests/goldens.rs`).
 //!
 //! Module map (TS source → Rust module):
 //! - `pagination/types.ts` → [`types`]
@@ -85,13 +81,34 @@ pub mod table_row_break;
 
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(message: &str);
+}
+
+/// wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+/// unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+/// module init for every wasm core that links this crate (layout and edit).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(start)]
+pub fn install_panic_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            console_error(&format!("[docx-wasm] panic: {info}"));
+        }));
+    });
+}
+
 /// Why the engine refused an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutError {
-    /// The input engages a feature this port doesn't cover yet — the caller
-    /// must fall back to the reference (TypeScript) engine.
+    /// The input engages a feature the engine doesn't cover yet — the
+    /// caller must degrade gracefully.
     Unsupported(String),
-    /// The input violates the layout contract (the TS engine would throw).
+    /// The input violates the layout contract.
     Invalid(String),
 }
 
@@ -352,6 +369,17 @@ pub fn hit_test_json(
     hit::hit_test_json(display_list, page_index as usize, x, y).map_err(|e| JsValue::from_str(&e))
 }
 
+#[wasm_bindgen]
+pub fn vertical_move_json(
+    display_list: &str,
+    position: f64,
+    direction: &str,
+    goal_x: f64,
+) -> Result<String, JsValue> {
+    hit::vertical_move_json(display_list, position as i64, direction, goal_x)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 /// wasm wrapper over [`hit::range_rects_json`]: display-list JSON + PM range
 /// in, JSON array of page-local rects out.
 #[wasm_bindgen]
@@ -436,6 +464,17 @@ pub fn hit_test_regions_by_handle(
     y: f64,
 ) -> Result<String, JsValue> {
     session::hit_test_regions_by_handle(handle, page_index as usize, x, y)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen]
+pub fn vertical_move_by_handle(
+    handle: u32,
+    position: f64,
+    direction: &str,
+    goal_x: f64,
+) -> Result<String, JsValue> {
+    session::vertical_move_by_handle(handle, position as i64, direction, goal_x)
         .map_err(|e| JsValue::from_str(&e))
 }
 

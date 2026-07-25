@@ -26,6 +26,8 @@ wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 # 0.27.3 is the newest crates.io release. The repository's minimumReleaseAge is a Bun/npm
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true
+docx-parse.workspace = true
+ryu-js = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 yrs = "0.27.3"

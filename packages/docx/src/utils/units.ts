@@ -13,16 +13,22 @@
  * @public
  */
 
-import { EMUS_PER_INCH, PIXELS_PER_INCH } from '@betteroffice/drawingml/units';
+const EMUS_PER_INCH = 914400;
+const POINTS_PER_INCH = 72;
+export const PIXELS_PER_INCH = 96;
 
-// EMU/point/pixel converters are format-agnostic DrawingML units and live in
-// @betteroffice/drawingml/units; re-exported here for backwards compatibility.
-export {
-  emuToPixels,
-  pixelsToEmu,
-  pointsToPixels,
-  PIXELS_PER_INCH,
-} from '@betteroffice/drawingml/units';
+export function emuToPixels(emu: number | undefined | null): number {
+  if (emu == null || isNaN(emu)) return 0;
+  return Math.round((emu * PIXELS_PER_INCH) / EMUS_PER_INCH);
+}
+
+export function pixelsToEmu(px: number): number {
+  return Math.round((px / PIXELS_PER_INCH) * EMUS_PER_INCH);
+}
+
+export function pointsToPixels(points: number): number {
+  return (points / POINTS_PER_INCH) * PIXELS_PER_INCH;
+}
 
 // ============================================================================
 // CONSTANTS

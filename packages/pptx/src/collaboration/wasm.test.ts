@@ -65,6 +65,15 @@ describe('PPTX collaboration replica', () => {
       text: 'RIGHT',
       style: { italic: true, fontSizePt: 18 },
     });
+    const shape = right.addShape(slideId, {
+      name: 'Remote shape',
+      geometry: 'roundRect',
+      rect: { x: 4_000_000, y: 4_500_000, width: 2_000_000, height: 900_000 },
+      fill: '#D9EAF7',
+    });
+    right.setShapeFill(slideId, shape.shapeId, '#34A853');
+    right.setShapeStroke(slideId, shape.shapeId, { color: '#202124', widthPt: 2 });
+    right.setShapeAdjust(slideId, shape.shapeId, { adj: 0.25 });
     hub.resume();
 
     expect([...left.encodeStateVector()]).toEqual([...right.encodeStateVector()]);
@@ -78,6 +87,9 @@ describe('PPTX collaboration replica', () => {
     expect(left.snapshot().slides.find((slide) => slide.id === slideId)?.shapes.some(
       (shape) => shape.name === 'Remote note'
     )).toBe(true);
+    expect(left.snapshot().slides.find((slide) => slide.id === slideId)?.shapes.find(
+      (candidate) => candidate.id === shape.shapeId
+    )?.adjustValues).toEqual({ adj: 0.25 });
     expect(leftOrigins).toContain('local');
     expect(leftOrigins).toContain('remote');
     expect(rightOrigins).toContain('local');

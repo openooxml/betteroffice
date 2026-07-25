@@ -60,6 +60,10 @@ pub enum TokKind {
     ErrLit(ErrorValue),
     /// a bare word that is not a bool/ref — a function name or defined name.
     Ident(String),
+    Name {
+        scope: Option<String>,
+        name: String,
+    },
     Ref {
         sheet: Option<String>,
         cell: CellRef,
@@ -149,7 +153,9 @@ impl Lexer<'_> {
                         _ => TokKind::Gt,
                     }
                 }
-                c if c.is_ascii_alphabetic() || c == '$' => self.lex_word_or_ref()?,
+                c if c.is_alphabetic() || matches!(c, '$' | '_' | '\\') => {
+                    self.lex_word_or_ref()?
+                }
                 other => {
                     return Err(ParseError::new(
                         start,
@@ -194,11 +200,11 @@ impl Lexer<'_> {
         }
     }
 
-    /// read a maximal `[A-Za-z0-9_.$]` run (ref parts, sheet names, func names).
+    /// read a maximal name/reference run.
     fn read_word(&mut self) -> String {
         let start = self.pos;
         while let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$' {
+            if c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '\\') {
                 self.bump();
             } else {
                 break;
@@ -343,12 +349,19 @@ impl Lexer<'_> {
         start: usize,
     ) -> Result<TokKind, ParseError> {
         let word = self.read_word();
-        if self.peek() == Some(':') {
+        if word.is_empty() {
+            return Err(ParseError::new(start, "expected reference or defined name"));
+        }
+        if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
             return self.finish_range(sheet, &word, start);
         }
-        let cell = CellRef::parse_a1(&word)
-            .map_err(|e| ParseError::new(start, format!("invalid reference {word:?}: {e}")))?;
-        Ok(TokKind::Ref { sheet, cell })
+        match CellRef::parse_a1(&word) {
+            Ok(cell) => Ok(TokKind::Ref { sheet, cell }),
+            Err(_) => Ok(TokKind::Name {
+                scope: sheet,
+                name: word,
+            }),
+        }
     }
 
     /// consume `:end` and build a range from an already-read start segment.
@@ -484,6 +497,19 @@ mod tests {
     fn function_name_wins_over_ref_shape() {
         assert_eq!(kinds("LOG10(")[0], TokKind::Ident("LOG10".into()));
         assert_eq!(kinds("SUM(")[0], TokKind::Ident("SUM".into()));
+    }
+
+    #[test]
+    fn lexes_defined_names_and_scopes() {
+        assert_eq!(kinds("Tax_Rate"), vec![TokKind::Ident("Tax_Rate".into())]);
+        assert_eq!(kinds("\\Legacy"), vec![TokKind::Ident("\\Legacy".into())]);
+        assert_eq!(
+            kinds("'Input Sheet'!LocalRate"),
+            vec![TokKind::Name {
+                scope: Some("Input Sheet".into()),
+                name: "LocalRate".into(),
+            }]
+        );
     }
 
     #[test]

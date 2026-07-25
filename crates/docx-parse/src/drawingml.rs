@@ -243,7 +243,10 @@ pub fn parse_shape_type(sp_pr: Option<&XmlElement>) -> String {
         .to_owned()
 }
 
-pub fn parse_preset_geometry_path(sp_pr: Option<&XmlElement>) -> Option<Vec<GeometryPathCommand>> {
+pub fn parse_preset_geometry_path(
+    sp_pr: Option<&XmlElement>,
+    aspect_ratio: f64,
+) -> Option<Vec<GeometryPathCommand>> {
     let preset = sp_pr?.child_by_full_name("a:prstGeom")?;
     let shape_type = preset.attribute(None, "prst")?;
     let mut values = standard_guide_values(100_000.0, 100_000.0);
@@ -258,7 +261,7 @@ pub fn parse_preset_geometry_path(sp_pr: Option<&XmlElement>) -> Option<Vec<Geom
             }
         }
     }
-    preset_geometry_to_path(shape_type, &adjustments)
+    preset_geometry_to_path(shape_type, &adjustments, aspect_ratio)
 }
 
 pub fn parse_custom_geometry_path(
@@ -733,7 +736,9 @@ mod tests {
         let properties =
             root("<wps:spPr><a:prstGeom prst=\"roundRect\"><a:avLst/></a:prstGeom></wps:spPr>");
         assert_eq!(
-            parse_preset_geometry_path(Some(&properties)).unwrap().len(),
+            parse_preset_geometry_path(Some(&properties), 1.0)
+                .unwrap()
+                .len(),
             10
         );
         let geometry = root(

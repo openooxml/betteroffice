@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use xlsx_model::{CellRange, CellRef, ColId, RowId, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
 use crate::deps::references;
 use crate::parser::{Expr, parse_formula};
@@ -37,6 +37,8 @@ const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 pub struct DepGraph {
     /// sheet name -> id, snapshot at build time.
     names: HashMap<String, SheetId>,
+    defined_names: Vec<DefinedName>,
+    defined_name_indices: HashMap<(Option<SheetId>, String), usize>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
     deps: HashMap<NodeKey, Vec<(SheetId, CellRange)>>,
     /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
@@ -55,8 +57,17 @@ impl DepGraph {
             .enumerate()
             .map(|(i, s)| (s.name.to_lowercase(), SheetId(i as u32)))
             .collect();
+        let defined_names = wb.defined_names.clone();
+        let mut defined_name_indices = HashMap::with_capacity(defined_names.len());
+        for (index, defined) in defined_names.iter().enumerate() {
+            defined_name_indices
+                .entry((defined.local_sheet, defined.name.to_ascii_lowercase()))
+                .or_insert(index);
+        }
         let mut g = DepGraph {
             names,
+            defined_names,
+            defined_name_indices,
             deps: HashMap::new(),
             by_sheet: HashMap::new(),
             volatile: HashSet::new(),
@@ -132,7 +143,7 @@ impl DepGraph {
         for (sid, range) in &edges {
             self.by_sheet.entry(*sid).or_default().push((*range, key));
         }
-        if is_volatile(&expr) {
+        if self.is_volatile(key.sheet, &expr) {
             self.volatile.insert(key);
         }
         self.deps.insert(key, edges);
@@ -155,6 +166,18 @@ impl DepGraph {
     fn resolve_edges(&self, owner: SheetId, expr: &Expr) -> Vec<(SheetId, CellRange)> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        self.add_references(owner, expr, &mut out, &mut seen);
+        self.add_defined_name_references(owner, expr, &mut out, &mut seen);
+        out
+    }
+
+    fn add_references(
+        &self,
+        owner: SheetId,
+        expr: &Expr,
+        out: &mut Vec<(SheetId, CellRange)>,
+        seen: &mut HashSet<(SheetId, u32, u32, u32, u32)>,
+    ) {
         for (sheet, range) in references(expr) {
             let sid = match sheet {
                 None => owner,
@@ -174,21 +197,144 @@ impl DepGraph {
                 out.push((sid, range));
             }
         }
-        out
+    }
+
+    fn add_defined_name_references(
+        &self,
+        owner: SheetId,
+        expr: &Expr,
+        out: &mut Vec<(SheetId, CellRange)>,
+        seen: &mut HashSet<(SheetId, u32, u32, u32, u32)>,
+    ) {
+        let mut pending = Vec::new();
+        push_defined_name_uses(owner, expr, &mut pending);
+        let mut expanded = HashSet::new();
+        while let Some((owner, scope, name)) = pending.pop() {
+            let Some((lookup_sheet, defined)) = self.resolve_defined_name(owner, &scope, &name)
+            else {
+                continue;
+            };
+            let key = (lookup_sheet, name.to_ascii_lowercase());
+            if !expanded.insert(key) {
+                continue;
+            }
+            let Ok(expression) = parse_formula(
+                defined
+                    .formula
+                    .strip_prefix('=')
+                    .unwrap_or(&defined.formula),
+            ) else {
+                continue;
+            };
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            self.add_references(definition_sheet, &expression, out, seen);
+            push_defined_name_uses(definition_sheet, &expression, &mut pending);
+        }
+    }
+
+    fn resolve_defined_name<'a>(
+        &'a self,
+        owner: SheetId,
+        scope: &Option<String>,
+        name: &str,
+    ) -> Option<(SheetId, &'a DefinedName)> {
+        let lookup_sheet = match scope {
+            Some(scope) => *self.names.get(&scope.to_lowercase())?,
+            None => owner,
+        };
+        let normalized = name.to_ascii_lowercase();
+        let index = self
+            .defined_name_indices
+            .get(&(Some(lookup_sheet), normalized.clone()))
+            .or_else(|| self.defined_name_indices.get(&(None, normalized)))?;
+        Some((lookup_sheet, &self.defined_names[*index]))
+    }
+
+    fn is_volatile(&self, owner: SheetId, expr: &Expr) -> bool {
+        let mut pending = Vec::new();
+        if push_volatile_name_uses(owner, expr, &mut pending) {
+            return true;
+        }
+        let mut expanded = HashSet::new();
+        while let Some((owner, scope, name)) = pending.pop() {
+            let Some((lookup_sheet, defined)) = self.resolve_defined_name(owner, &scope, &name)
+            else {
+                continue;
+            };
+            let key = (lookup_sheet, name.to_ascii_lowercase());
+            if !expanded.insert(key) {
+                continue;
+            }
+            let Ok(expression) = parse_formula(
+                defined
+                    .formula
+                    .strip_prefix('=')
+                    .unwrap_or(&defined.formula),
+            ) else {
+                continue;
+            };
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            if push_volatile_name_uses(definition_sheet, &expression, &mut pending) {
+                return true;
+            }
+        }
+        false
     }
 }
 
-/// true if any function in the tree is volatile (case-insensitive name match).
-fn is_volatile(expr: &Expr) -> bool {
-    match expr {
-        Expr::FuncCall { name, args } => {
-            let upper = name.to_ascii_uppercase();
-            VOLATILE_FNS.contains(&upper.as_str()) || args.iter().any(is_volatile)
+type DefinedNameUse = (SheetId, Option<String>, String);
+
+fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<DefinedNameUse>) {
+    let mut expressions = vec![expr];
+    let mut uses = Vec::new();
+    while let Some(expression) = expressions.pop() {
+        match expression {
+            Expr::Name { scope, name } => uses.push((owner, scope.clone(), name.clone())),
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
+            Expr::Binary { lhs, rhs, .. } => {
+                expressions.push(rhs);
+                expressions.push(lhs);
+            }
+            Expr::FuncCall { args, .. } => expressions.extend(args.iter().rev()),
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Ref { .. }
+            | Expr::Range { .. } => {}
         }
-        Expr::Unary { expr, .. } | Expr::Percent(expr) => is_volatile(expr),
-        Expr::Binary { lhs, rhs, .. } => is_volatile(lhs) || is_volatile(rhs),
-        _ => false,
     }
+    pending.extend(uses.into_iter().rev());
+}
+
+fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<DefinedNameUse>) -> bool {
+    let mut expressions = vec![expr];
+    let mut uses = Vec::new();
+    while let Some(expression) = expressions.pop() {
+        match expression {
+            Expr::FuncCall { name, args } => {
+                let upper = name.to_ascii_uppercase();
+                if VOLATILE_FNS.contains(&upper.as_str()) {
+                    return true;
+                }
+                expressions.extend(args.iter().rev());
+            }
+            Expr::Name { scope, name } => uses.push((owner, scope.clone(), name.clone())),
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
+            Expr::Binary { lhs, rhs, .. } => {
+                expressions.push(rhs);
+                expressions.push(lhs);
+            }
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Ref { .. }
+            | Expr::Range { .. } => {}
+        }
+    }
+    pending.extend(uses.into_iter().rev());
+    false
 }
 
 #[cfg(test)]
@@ -329,5 +475,89 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn defined_name_edges_and_volatility_are_expanded() {
+        let mut wb = wb2();
+        wb.defined_names.extend([
+            DefinedName {
+                name: "Inputs".into(),
+                formula: "Data!A1:A3".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "Clock".into(),
+                formula: "NOW()".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+        ]);
+        let sheet = wb.sheet_mut(SheetId(0)).unwrap();
+        sheet.set_cell(a1("B1"), formula_cell("SUM(Inputs)"));
+        sheet.set_cell(a1("B2"), formula_cell("Clock"));
+
+        let graph = DepGraph::build(&wb);
+        assert_eq!(deps_a1(&graph, "Data", "A2", &wb), vec!["Sheet1!B1"]);
+        assert_eq!(
+            graph.volatile_cells().collect::<Vec<_>>(),
+            vec![(SheetId(0), a1("B2"))]
+        );
+    }
+
+    #[test]
+    fn deep_defined_name_chain_is_expanded_iteratively() {
+        const NAME_COUNT: usize = 100_000;
+
+        let mut wb = wb2();
+        wb.defined_names.reserve(NAME_COUNT);
+        for index in 0..NAME_COUNT {
+            wb.defined_names.push(DefinedName {
+                name: format!("Chain_{index}"),
+                formula: if index + 1 == NAME_COUNT {
+                    "Data!A1".into()
+                } else {
+                    format!("Chain_{}", index + 1)
+                },
+                local_sheet: None,
+                hidden: false,
+            });
+        }
+        wb.sheet_mut(SheetId(0))
+            .unwrap()
+            .set_cell(a1("B1"), formula_cell("Chain_0"));
+
+        let graph = DepGraph::build(&wb);
+
+        assert_eq!(deps_a1(&graph, "Data", "A1", &wb), vec!["Sheet1!B1"]);
+        assert!(graph.volatile_cells().next().is_none());
+    }
+
+    #[test]
+    fn defined_name_cycles_terminate() {
+        let mut wb = wb2();
+        wb.defined_names.extend([
+            DefinedName {
+                name: "First".into(),
+                formula: "Second".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+            DefinedName {
+                name: "Second".into(),
+                formula: "First".into(),
+                local_sheet: None,
+                hidden: false,
+            },
+        ]);
+        wb.sheet_mut(SheetId(0))
+            .unwrap()
+            .set_cell(a1("B1"), formula_cell("First"));
+
+        let graph = DepGraph::build(&wb);
+
+        assert!(graph.deps[&NodeKey::new(SheetId(0), a1("B1"))].is_empty());
+        assert!(graph.volatile_cells().next().is_none());
     }
 }

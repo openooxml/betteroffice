@@ -87,8 +87,27 @@ fn is_false(b: &bool) -> bool {
 pub struct GridMeta {
     pub start_row: u32,
     pub start_col: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_indices: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col_indices: Option<Vec<u32>>,
     pub row_offsets: Vec<f32>,
     pub col_offsets: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HyperlinkRegion {
+    pub top: u32,
+    pub left: u32,
+    pub bottom: u32,
+    pub right: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tooltip: Option<String>,
 }
 
 /// a full frame for one viewport, sized in pixels; commands are emitted in a
@@ -99,6 +118,8 @@ pub struct DisplayList {
     pub height: f32,
     pub commands: Vec<DrawCmd>,
     pub grid: GridMeta,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hyperlinks: Vec<HyperlinkRegion>,
 }
 
 /// scale every coordinate, size, stroke width, and font size by `factor`,
@@ -180,6 +201,8 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         grid: GridMeta {
             start_row: dl.grid.start_row,
             start_col: dl.grid.start_col,
+            row_indices: dl.grid.row_indices,
+            col_indices: dl.grid.col_indices,
             row_offsets: dl
                 .grid
                 .row_offsets
@@ -193,6 +216,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 .map(|v| v * factor)
                 .collect(),
         },
+        hyperlinks: dl.hyperlinks,
     }
 }
 
@@ -247,9 +271,12 @@ mod tests {
             grid: GridMeta {
                 start_row: 1,
                 start_col: 2,
+                row_indices: None,
+                col_indices: None,
                 row_offsets: vec![0.0, 20.0],
                 col_offsets: vec![0.0, 64.0],
             },
+            hyperlinks: Vec::new(),
         }
     }
 

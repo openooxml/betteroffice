@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/pptx",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "PowerPoint-faithful PPTX editor and viewer core — full OOXML fidelity, real-time human + AI agent collaboration. Framework-free (Rust/Wasm).",
   "keywords": [
     "pptx",

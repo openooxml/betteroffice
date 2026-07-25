@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:id="-1" w:type="separator">
+    <w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p>
+  </w:footnote>
+  <w:footnote w:id="0" w:type="continuationSeparator">
+    <w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p>
+  </w:footnote>
+  <w:footnote w:id="2">
+    <w:p>
+      <w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>
+      <w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>
+      <w:r><w:t xml:space="preserve"> First footnote, with </w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>bold</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> text.</w:t></w:r>
+    </w:p>
+  </w:footnote>
+  <w:footnote w:id="3">
+    <w:p>
+      <w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>
+      <w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>
+      <w:r><w:t xml:space="preserve"> Second footnote paragraph one.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>
+      <w:r><w:t>Second footnote paragraph two.</w:t></w:r>
+    </w:p>
+  </w:footnote>
+</w:footnotes>

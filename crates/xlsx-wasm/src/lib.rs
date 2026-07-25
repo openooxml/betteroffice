@@ -199,7 +199,7 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
-    /// serialized `SheetInfo`: sheet names, active index, content extent.
+    /// serialized `SheetInfo`: stable IDs, names, active index, content extent.
     #[wasm_bindgen(js_name = sheetInfoJson)]
     pub fn sheet_info_json(&self) -> Result<String, JsValue> {
         self.session
@@ -267,6 +267,13 @@ impl XlsxDocument {
     pub fn cell_json(&self, args: &str) -> Result<String, JsValue> {
         self.session
             .cell_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = cellPositionJson)]
+    pub fn cell_position_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .cell_position_json(args)
             .map_err(|e| JsValue::from_str(&e))
     }
 

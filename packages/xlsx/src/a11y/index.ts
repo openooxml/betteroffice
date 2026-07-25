@@ -53,6 +53,10 @@ function isSelected(range: CellRange | null, row: number, col: number): boolean 
   return row >= range.top && row <= range.bottom && col >= range.left && col <= range.right;
 }
 
+function trackAddress(start: number, indices: number[] | undefined, local: number): number {
+  return indices?.[local] ?? start + local;
+}
+
 function buildCell(
   grid: GridMeta,
   lr: number,
@@ -61,8 +65,8 @@ function buildCell(
   selected: boolean,
   t: A11yStrings
 ): A11yCell {
-  const row = grid.startRow + lr;
-  const col = grid.startCol + lc;
+  const row = trackAddress(grid.startRow, grid.rowIndices, lr);
+  const col = trackAddress(grid.startCol, grid.colIndices, lc);
   const address = cellAddress(row, col);
   const empty = text.length === 0;
   const template = empty
@@ -104,19 +108,20 @@ export function buildA11yGrid(
 
   const columnHeaders: A11yColumnHeader[] = [];
   for (let lc = 0; lc < cols; lc++) {
-    const col = grid.startCol + lc;
+    const col = trackAddress(grid.startCol, grid.colIndices, lc);
     const letter = columnLetter(col);
     columnHeaders.push({ col, text: letter, label: fill(t.columnHeaderLabel, { column: letter }) });
   }
 
   const outRows: A11yRow[] = [];
   for (let lr = 0; lr < rows; lr++) {
-    const row = grid.startRow + lr;
+    const row = trackAddress(grid.startRow, grid.rowIndices, lr);
     const cells: A11yCell[] = [];
     for (let lc = 0; lc < cols; lc++) {
       const origin = key(grid.colOffsets[lc], grid.rowOffsets[lr]);
       const text = textAt.get(origin) ?? '';
-      cells.push(buildCell(grid, lr, lc, text, isSelected(range, row, grid.startCol + lc), t));
+      const col = trackAddress(grid.startCol, grid.colIndices, lc);
+      cells.push(buildCell(grid, lr, lc, text, isSelected(range, row, col), t));
     }
     outRows.push({ row, header: fill(t.rowHeaderLabel, { row: row + 1 }), cells });
   }

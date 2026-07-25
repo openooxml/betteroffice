@@ -31,8 +31,7 @@
 //!
 //! S0 freezes the cross-language canonical contract in [`canonical`]. S1 adds
 //! bounded XML and relationship parsing on top of `ooxml-opc`'s existing
-//! ZIP/OPC trust boundary. The production TypeScript parser remains the live
-//! default while the two implementations run under the differential harness.
+//! ZIP/OPC trust boundary.
 
 pub mod block;
 pub mod borders;
@@ -74,6 +73,7 @@ pub mod vml;
 pub mod wrap;
 pub mod xml;
 
+#[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
 pub use block::{BlockContent, BlockSdt, StoryParser};
@@ -205,6 +205,7 @@ pub use xml::{
 };
 
 /// Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_relationships(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_relationship_parts(data).map_err(js_error)?;
@@ -212,6 +213,7 @@ pub fn parse_docx_relationships(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Focused wasm leaf used by hostile-input and facade tests.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_relationships_xml(xml: &[u8], part_path: &str) -> Result<String, JsValue> {
     let limits = ParseLimits::default();
@@ -222,6 +224,7 @@ pub fn parse_relationships_xml(xml: &[u8], part_path: &str) -> Result<String, Js
 }
 
 /// Legacy staged Rust S2 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s2(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s2_wire(data).map_err(js_error)?;
@@ -229,6 +232,7 @@ pub fn parse_docx_s2(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S3 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s3(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s3_wire(data).map_err(js_error)?;
@@ -236,6 +240,7 @@ pub fn parse_docx_s3(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S4 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s4(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s4_wire(data).map_err(js_error)?;
@@ -243,6 +248,7 @@ pub fn parse_docx_s4(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S5 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s5(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s5_wire(data).map_err(js_error)?;
@@ -250,6 +256,7 @@ pub fn parse_docx_s5(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S6 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s6(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s6_wire(data).map_err(js_error)?;
@@ -257,6 +264,7 @@ pub fn parse_docx_s6(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S7 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s7(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s7_wire(data).map_err(js_error)?;
@@ -264,6 +272,7 @@ pub fn parse_docx_s7(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S8 entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s8(data: &[u8]) -> Result<String, JsValue> {
     let envelope = parse_docx_s8_wire(data).map_err(js_error)?;
@@ -271,6 +280,7 @@ pub fn parse_docx_s8(data: &[u8]) -> Result<String, JsValue> {
 }
 
 /// S9 production read facade: one safe package pass to the full Document wire.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s9(data: &[u8], options_json: &str) -> Result<String, JsValue> {
     let options = if options_json.is_empty() {
@@ -283,6 +293,7 @@ pub fn parse_docx_s9(data: &[u8], options_json: &str) -> Result<String, JsValue>
 }
 
 /// Legacy staged Rust S10 serializer entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s10(request_json: &str) -> Result<String, JsValue> {
     let request =
@@ -292,6 +303,7 @@ pub fn serialize_docx_s10(request_json: &str) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S11 serializer entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s11(request_json: &str) -> Result<String, JsValue> {
     let request =
@@ -301,6 +313,7 @@ pub fn serialize_docx_s11(request_json: &str) -> Result<String, JsValue> {
 }
 
 /// Legacy staged Rust S12 serializer entry retained for ABI compatibility.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
     let request =
@@ -310,6 +323,7 @@ pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
 }
 
 /// S13 production-capable package writer: typed model + original package -> DOCX.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {
     let request =
@@ -317,6 +331,7 @@ pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<V
     write_docx_s13(request, original_docx).map_err(js_error)
 }
 
+#[cfg(feature = "wasm")]
 fn js_error(error: impl ToString) -> JsValue {
     JsValue::from_str(&error.to_string())
 }

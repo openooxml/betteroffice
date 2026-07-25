@@ -9,6 +9,7 @@ export const xlsxdocument_applyUpdateJson: (a: number, b: number, c: number) => 
 export const xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_clearUpdateObservation: (a: number) => void;
 export const xlsxdocument_clientId: (a: number) => number;
 export const xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];

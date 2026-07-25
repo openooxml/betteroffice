@@ -25,6 +25,7 @@ export class XlsxDocument {
      * the editable representation of one cell.
      */
     cellJson(args: string): string;
+    cellPositionJson(args: string): string;
     /**
      * Stop observation and discard queued events.
      */
@@ -140,6 +141,7 @@ export interface InitOutput {
     readonly xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];

@@ -5,13 +5,16 @@ use std::collections::BTreeMap;
 
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, CellValue, DateSystem, ErrorValue, Sheet, Workbook};
+use xlsx_model::{
+    Cell, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane,
+    Hyperlink, Sheet, SheetId, Workbook,
+};
 
 use crate::styles::parse_stylesheet;
 use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
 };
-use crate::{MAX_CELLS, MAX_SHARED_STRINGS, ParseError};
+use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, ParseError};
 
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
@@ -41,12 +44,22 @@ pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseErro
             ParseError::Malformed(format!("no target for sheet {:?}", entry.name))
         })?;
         let bytes = find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
-        sheets.push(parse_worksheet(&entry.name, bytes, &shared_strings)?);
+        let sheet_rels = find_part(parts, &relationship_part_path(&path))
+            .map(parse_rels)
+            .transpose()?
+            .unwrap_or_default();
+        sheets.push(parse_worksheet(
+            &entry.name,
+            bytes,
+            &shared_strings,
+            &sheet_rels,
+        )?);
     }
 
     Ok(Workbook {
         sheets,
         date_system: meta.date_system,
+        defined_names: meta.defined_names,
         shared_strings,
         styles,
     })
@@ -101,6 +114,7 @@ struct SheetEntry {
 struct WorkbookMeta {
     date_system: DateSystem,
     sheets: Vec<SheetEntry>,
+    defined_names: Vec<DefinedName>,
 }
 
 /// read sheet order/names, the r:id linking each to a worksheet part, and the
@@ -111,6 +125,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
     let mut sheets = Vec::new();
+    let mut defined_names = Vec::new();
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -127,6 +142,23 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     let rid = attr(&e, b"id")?;
                     sheets.push(SheetEntry { name, rid });
                 }
+                b"definedName" => {
+                    if defined_names.len() >= MAX_DEFINED_NAMES {
+                        return Err(ParseError::TooManyDefinedNames);
+                    }
+                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    let local_sheet = attr(&e, b"localSheetId")?
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .map(SheetId);
+                    let hidden = attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value));
+                    let formula = collect_text(&mut reader, &mut buf, &mut depth)?;
+                    defined_names.push(DefinedName {
+                        name,
+                        formula,
+                        local_sheet,
+                        hidden,
+                    });
+                }
                 _ => {}
             },
             Event::Eof => break,
@@ -136,11 +168,19 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     Ok(WorkbookMeta {
         date_system,
         sheets,
+        defined_names,
     })
 }
 
-/// map relationship id -> target from a `.rels` part.
-fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, String>, ParseError> {
+#[derive(Clone)]
+struct Relationship {
+    target: String,
+    kind: Option<String>,
+    external: bool,
+}
+
+/// map relationship id -> relationship metadata from a `.rels` part.
+fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -150,7 +190,17 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, String>, ParseError> {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if local_name(&e) == b"Relationship" => {
                 if let (Some(id), Some(target)) = (attr(&e, b"Id")?, attr(&e, b"Target")?) {
-                    map.insert(id, target);
+                    let kind = attr(&e, b"Type")?;
+                    let external = attr(&e, b"TargetMode")?
+                        .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                    map.insert(
+                        id,
+                        Relationship {
+                            target,
+                            kind,
+                            external,
+                        },
+                    );
                 }
             }
             Event::Eof => break,
@@ -163,14 +213,23 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, String>, ParseError> {
 /// pick the worksheet part path: the relationship target, else the
 /// conventional positional name.
 fn worksheet_path(
-    rels: &BTreeMap<String, String>,
+    rels: &BTreeMap<String, Relationship>,
     rid: Option<&str>,
     idx: usize,
 ) -> Option<String> {
-    if let Some(target) = rid.and_then(|r| rels.get(r)) {
-        return Some(resolve_part_path("xl", target));
+    if let Some(relationship) = rid.and_then(|r| rels.get(r))
+        && !relationship.external
+    {
+        return Some(resolve_part_path("xl", &relationship.target));
     }
     Some(format!("xl/worksheets/sheet{}.xml", idx + 1))
+}
+
+fn relationship_part_path(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((directory, file)) => format!("{directory}/_rels/{file}.rels"),
+        None => format!("_rels/{path}.rels"),
+    }
 }
 
 /// parse the shared string table, flattening rich runs to plain text.
@@ -208,7 +267,12 @@ struct CellBuild {
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
 /// merges, and column/row sizing. `shared` resolves `t="s"` indices.
-fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, ParseError> {
+fn parse_worksheet(
+    name: &str,
+    data: &[u8],
+    shared: &[String],
+    relationships: &BTreeMap<String, Relationship>,
+) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -217,6 +281,7 @@ fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, 
     let mut col_cursor: u32 = 0;
     let mut cur: Option<CellBuild> = None;
     let mut cell_count: u64 = 0;
+    let mut hyperlink_count: usize = 0;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -276,6 +341,20 @@ fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, 
                         sheet.merges.push(range);
                     }
                 }
+                b"pane" => {
+                    if sheet.freeze_pane.is_none() {
+                        sheet.freeze_pane = parse_freeze_pane(&e)?;
+                    }
+                }
+                b"hyperlink" => {
+                    hyperlink_count += 1;
+                    if hyperlink_count > MAX_HYPERLINKS {
+                        return Err(ParseError::TooManyHyperlinks);
+                    }
+                    if let Some(link) = parse_hyperlink(&e, relationships)? {
+                        sheet.hyperlinks.push(link);
+                    }
+                }
                 b"col" => parse_col(&e, &mut sheet)?,
                 _ => {}
             },
@@ -298,6 +377,69 @@ fn parse_worksheet(name: &str, data: &[u8], shared: &[String]) -> Result<Sheet, 
     }
     normalize_merges(&mut sheet.merges);
     Ok(sheet)
+}
+
+fn parse_hyperlink(
+    element: &quick_xml::events::BytesStart,
+    relationships: &BTreeMap<String, Relationship>,
+) -> Result<Option<Hyperlink>, ParseError> {
+    let Some(reference) = attr(element, b"ref")? else {
+        return Ok(None);
+    };
+    let range = CellRange::parse_a1(&reference)
+        .map_err(|_| ParseError::Malformed(format!("bad hyperlink ref {reference:?}")))?;
+    let external_target = attr(element, b"id")?
+        .and_then(|id| relationships.get(&id))
+        .filter(|relationship| {
+            relationship.external
+                && relationship
+                    .kind
+                    .as_deref()
+                    .is_some_and(|kind| kind.ends_with("/hyperlink"))
+        })
+        .map(|relationship| relationship.target.clone())
+        .filter(|target| !target.is_empty());
+    let location = attr(element, b"location")?.filter(|location| !location.is_empty());
+    if external_target.is_none() && location.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Hyperlink {
+        range,
+        external_target,
+        location,
+        tooltip: attr(element, b"tooltip")?,
+        display: attr(element, b"display")?,
+    }))
+}
+
+fn parse_freeze_pane(
+    element: &quick_xml::events::BytesStart,
+) -> Result<Option<FreezePane>, ParseError> {
+    let state = attr(element, b"state")?;
+    if !matches!(state.as_deref(), Some("frozen" | "frozenSplit")) {
+        return Ok(None);
+    }
+    let rows = frozen_count(attr(element, b"ySplit")?, MAX_ROWS);
+    let cols = frozen_count(attr(element, b"xSplit")?, MAX_COLS);
+    if rows == 0 && cols == 0 {
+        return Ok(None);
+    }
+    let fallback = CellRef::new(
+        rows.min(MAX_ROWS.saturating_sub(1)),
+        cols.min(MAX_COLS.saturating_sub(1)),
+    );
+    let top_left = attr(element, b"topLeftCell")?
+        .and_then(|value| CellRef::parse_a1(&value).ok())
+        .unwrap_or(fallback);
+    Ok(Some(FreezePane::new(rows, cols, top_left)))
+}
+
+fn frozen_count(value: Option<String>, limit: u32) -> u32 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+        .map(|value| value.min(f64::from(limit)) as u32)
+        .unwrap_or(0)
 }
 
 fn normalize_merges(merges: &mut Vec<CellRange>) {

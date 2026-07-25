@@ -12,8 +12,8 @@ import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collabo
 import type { DisplayList } from '../display-list/types';
 
 /**
- * A scrolled window into a sheet, in content pixels from the sheet origin — the
- * argument the renderer needs to build a frame. Mirrors the Rust `Viewport`.
+ * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
+ * non-frozen body. Mirrors the Rust `Viewport`.
  */
 export interface Viewport {
   x: number;
@@ -23,14 +23,24 @@ export interface Viewport {
 }
 
 /**
- * Chrome-facing sheet metadata: tab names, active index, and the scrollable
- * content extent of the active sheet. Mirrors the Rust `SheetInfo`.
+ * Chrome-facing sheet metadata: stable IDs, tab names, active index, and the
+ * scrollable content extent of the active sheet. Mirrors the Rust `SheetInfo`.
  */
 export interface SheetInfo {
+  sheetIds: string[];
   sheetNames: string[];
   activeSheet: number;
   contentWidth: number;
   contentHeight: number;
+  frozenRows: number;
+  frozenCols: number;
+  initialScrollX: number;
+  initialScrollY: number;
+}
+
+export interface CellPosition {
+  x: number;
+  y: number;
 }
 
 /**
@@ -286,6 +296,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   redo(): EditResult;
   /** the editable view of one cell (formula bar / in-cell editor prefill). */
   cell(sheet: number, row: number, col: number): CellEdit;
+  cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -579,6 +590,9 @@ export function openWorkbook(
     },
     cell(sheet: number, row: number, col: number): CellEdit {
       return parseJson(() => doc.cellJson(JSON.stringify({ sheet, row, col })));
+    },
+    cellPosition(sheet: number, row: number, col: number): CellPosition {
+      return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
     rangeCells(sheet: number, range: string): CellEdit[][] {
       const parsed = parseJson<{ cells: CellEdit[][] }>(() =>

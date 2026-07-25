@@ -3,11 +3,42 @@ use std::collections::HashMap;
 use crate::GeometryPathCommand;
 
 const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
-const ROUND_RECT_RADIUS: f64 = 0.166_666_666_666_666_66;
+const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
+
+pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
+    let values = match shape_type {
+        "roundRect" => vec![("adj", ROUND_RECT_ADJUSTMENT)],
+        "triangle" | "isosTriangle" => vec![("adj", 0.5)],
+        "parallelogram" => vec![("adj", 0.25)],
+        "trapezoid" => vec![("adj", 0.2)],
+        "hexagon" => vec![("adj", 0.25)],
+        "octagon" => vec![("adj", 0.292_89)],
+        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" => {
+            vec![("adj1", 0.5), ("adj2", 0.5)]
+        }
+        "chevron" => vec![("adj", 0.35)],
+        value
+            if value
+                .strip_prefix("star")
+                .and_then(|points| points.parse::<usize>().ok())
+                .is_some_and(|points| {
+                    matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32)
+                }) =>
+        {
+            vec![("adj", 0.45)]
+        }
+        _ => Vec::new(),
+    };
+    values
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect()
+}
 
 pub fn preset_geometry_to_path(
     shape_type: &str,
     adjustments: &HashMap<String, f64>,
+    aspect_ratio: f64,
 ) -> Option<Vec<GeometryPathCommand>> {
     use GeometryPathCommand as C;
     let result = match shape_type {
@@ -19,39 +50,9 @@ pub fn preset_geometry_to_path(
             C::Close,
         ],
         "roundRect" => {
-            let r = ROUND_RECT_RADIUS;
-            vec![
-                C::Move { x: r, y: 0.0 },
-                C::Line { x: 1.0 - r, y: 0.0 },
-                C::Quad {
-                    cpx: 1.0,
-                    cpy: 0.0,
-                    x: 1.0,
-                    y: r,
-                },
-                C::Line { x: 1.0, y: 1.0 - r },
-                C::Quad {
-                    cpx: 1.0,
-                    cpy: 1.0,
-                    x: 1.0 - r,
-                    y: 1.0,
-                },
-                C::Line { x: r, y: 1.0 },
-                C::Quad {
-                    cpx: 0.0,
-                    cpy: 1.0,
-                    x: 0.0,
-                    y: 1.0 - r,
-                },
-                C::Line { x: 0.0, y: r },
-                C::Quad {
-                    cpx: 0.0,
-                    cpy: 0.0,
-                    x: r,
-                    y: 0.0,
-                },
-                C::Close,
-            ]
+            let adjustment =
+                clamp_fraction(adjustments.get("adj").copied(), ROUND_RECT_ADJUSTMENT).min(0.5);
+            rounded_rect(aspect_ratio, adjustment)
         }
         "ellipse" => vec![
             C::Move { x: 1.0, y: 0.5 },
@@ -92,7 +93,10 @@ pub fn preset_geometry_to_path(
         "line" | "straightConnector1" => {
             vec![C::Move { x: 0.0, y: 0.0 }, C::Line { x: 1.0, y: 1.0 }]
         }
-        "triangle" | "isosTriangle" => polygon(&[(0.5, 0.0), (1.0, 1.0), (0.0, 1.0)]),
+        "triangle" | "isosTriangle" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.5);
+            polygon(&[(adjustment, 0.0), (1.0, 1.0), (0.0, 1.0)])
+        }
         "rtTriangle" => polygon(&[(0.0, 0.0), (1.0, 1.0), (0.0, 1.0)]),
         "diamond" | "flowChartDecision" => {
             polygon(&[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)])
@@ -106,9 +110,31 @@ pub fn preset_geometry_to_path(
             polygon(&[(i, 0.0), (1.0 - i, 0.0), (1.0, 1.0), (0.0, 1.0)])
         }
         "pentagon" | "flowChartOffpageConnector" => regular_polygon(5),
-        "hexagon" => regular_polygon(6),
+        "hexagon" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.25).min(0.5);
+            polygon(&[
+                (adjustment, 0.0),
+                (1.0 - adjustment, 0.0),
+                (1.0, 0.5),
+                (1.0 - adjustment, 1.0),
+                (adjustment, 1.0),
+                (0.0, 0.5),
+            ])
+        }
         "heptagon" => regular_polygon(7),
-        "octagon" => regular_polygon(8),
+        "octagon" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.292_89).min(0.5);
+            polygon(&[
+                (adjustment, 0.0),
+                (1.0 - adjustment, 0.0),
+                (1.0, adjustment),
+                (1.0, 1.0 - adjustment),
+                (1.0 - adjustment, 1.0),
+                (adjustment, 1.0),
+                (0.0, 1.0 - adjustment),
+                (0.0, adjustment),
+            ])
+        }
         "decagon" => regular_polygon(10),
         "dodecagon" => regular_polygon(12),
         value if value.starts_with("star") => {
@@ -116,7 +142,7 @@ pub fn preset_geometry_to_path(
             if !matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32) {
                 return None;
             }
-            star(points)
+            star(points, adjustments.get("adj").copied())
         }
         "bentConnector2" => bent_connector(2, adjustments.get("adj1").copied()),
         "bentConnector3" => bent_connector(3, adjustments.get("adj1").copied()),
@@ -126,10 +152,26 @@ pub fn preset_geometry_to_path(
         "curvedConnector3" => curved_connector(3),
         "curvedConnector4" => curved_connector(4),
         "curvedConnector5" => curved_connector(5),
-        "rightArrow" => arrow("right", adjustments.get("adj2").copied()),
-        "leftArrow" => arrow("left", adjustments.get("adj2").copied()),
-        "upArrow" => arrow("up", adjustments.get("adj2").copied()),
-        "downArrow" => arrow("down", adjustments.get("adj2").copied()),
+        "rightArrow" => arrow(
+            "right",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
+        "leftArrow" => arrow(
+            "left",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
+        "upArrow" => arrow(
+            "up",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
+        "downArrow" => arrow(
+            "down",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
         "leftRightArrow" => polygon(&[
             (0.0, 0.5),
             (0.25, 0.0),
@@ -154,14 +196,17 @@ pub fn preset_geometry_to_path(
             (0.25, 0.25),
             (0.0, 0.25),
         ]),
-        "chevron" => polygon(&[
-            (0.0, 0.0),
-            (0.65, 0.0),
-            (1.0, 0.5),
-            (0.65, 1.0),
-            (0.0, 1.0),
-            (0.35, 0.5),
-        ]),
+        "chevron" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.35).min(0.5);
+            polygon(&[
+                (0.0, 0.0),
+                (1.0 - adjustment, 0.0),
+                (1.0, 0.5),
+                (1.0 - adjustment, 1.0),
+                (0.0, 1.0),
+                (adjustment, 0.5),
+            ])
+        }
         "homePlate" => polygon(&[(0.0, 0.0), (0.75, 0.0), (1.0, 0.5), (0.75, 1.0), (0.0, 1.0)]),
         "flowChartProcess"
         | "flowChartAlternateProcess"
@@ -173,15 +218,67 @@ pub fn preset_geometry_to_path(
         | "flowChartMagneticDisk"
         | "flowChartMagneticDrum"
         | "flowChartDisplay"
-        | "textBox" => preset_geometry_to_path("rect", adjustments)?,
-        "flowChartConnector" => preset_geometry_to_path("ellipse", adjustments)?,
+        | "textBox" => preset_geometry_to_path("rect", adjustments, aspect_ratio)?,
+        "flowChartConnector" => preset_geometry_to_path("ellipse", adjustments, aspect_ratio)?,
         "flowChartInputOutput" | "flowChartManualInput" => {
-            preset_geometry_to_path("parallelogram", adjustments)?
+            preset_geometry_to_path("parallelogram", adjustments, aspect_ratio)?
         }
-        "flowChartTerminator" => preset_geometry_to_path("roundRect", adjustments)?,
+        "flowChartTerminator" => rounded_rect(aspect_ratio, 0.5),
         _ => return None,
     };
     Some(result)
+}
+
+fn rounded_rect(aspect_ratio: f64, adjustment: f64) -> Vec<GeometryPathCommand> {
+    use GeometryPathCommand as C;
+    let aspect_ratio = if aspect_ratio.is_finite() && aspect_ratio > 0.0 {
+        aspect_ratio
+    } else {
+        1.0
+    };
+    let (rx, ry) = if aspect_ratio >= 1.0 {
+        (adjustment / aspect_ratio, adjustment)
+    } else {
+        (adjustment, adjustment * aspect_ratio)
+    };
+    vec![
+        C::Move { x: rx, y: 0.0 },
+        C::Line {
+            x: 1.0 - rx,
+            y: 0.0,
+        },
+        C::Quad {
+            cpx: 1.0,
+            cpy: 0.0,
+            x: 1.0,
+            y: ry,
+        },
+        C::Line {
+            x: 1.0,
+            y: 1.0 - ry,
+        },
+        C::Quad {
+            cpx: 1.0,
+            cpy: 1.0,
+            x: 1.0 - rx,
+            y: 1.0,
+        },
+        C::Line { x: rx, y: 1.0 },
+        C::Quad {
+            cpx: 0.0,
+            cpy: 1.0,
+            x: 0.0,
+            y: 1.0 - ry,
+        },
+        C::Line { x: 0.0, y: ry },
+        C::Quad {
+            cpx: 0.0,
+            cpy: 0.0,
+            x: rx,
+            y: 0.0,
+        },
+        C::Close,
+    ]
 }
 
 fn polygon(points: &[(f64, f64)]) -> Vec<GeometryPathCommand> {
@@ -214,13 +311,14 @@ fn regular_polygon(sides: usize) -> Vec<GeometryPathCommand> {
     )
 }
 
-fn star(points: usize) -> Vec<GeometryPathCommand> {
+fn star(points: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let inner_radius = clamp_fraction(adjustment, 0.45) * 0.5;
     polygon(
         &(0..points * 2)
             .map(|i| {
                 let a =
                     -std::f64::consts::PI / 2.0 + i as f64 * std::f64::consts::PI / points as f64;
-                let r = if i % 2 == 0 { 0.5 } else { 0.225 };
+                let r = if i % 2 == 0 { 0.5 } else { inner_radius };
                 (0.5 + a.cos() * r, 0.5 + a.sin() * r)
             })
             .collect::<Vec<_>>(),
@@ -235,16 +333,22 @@ fn clamp_fraction(value: Option<f64>, fallback: f64) -> f64 {
         .clamp(0.0, 1.0)
 }
 
-fn arrow(direction: &str, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
-    let h = clamp_fraction(adjustment, 0.5);
+fn arrow(
+    direction: &str,
+    shaft_adjustment: Option<f64>,
+    head_adjustment: Option<f64>,
+) -> Vec<GeometryPathCommand> {
+    let shaft = clamp_fraction(shaft_adjustment, 0.5);
+    let edge = (1.0 - shaft) / 2.0;
+    let head = clamp_fraction(head_adjustment, 0.5);
     polygon(&[
-        (0.0, 0.25),
-        (1.0 - h, 0.25),
-        (1.0 - h, 0.0),
+        (0.0, edge),
+        (1.0 - head, edge),
+        (1.0 - head, 0.0),
         (1.0, 0.5),
-        (1.0 - h, 1.0),
-        (1.0 - h, 0.75),
-        (0.0, 0.75),
+        (1.0 - head, 1.0),
+        (1.0 - head, 1.0 - edge),
+        (0.0, 1.0 - edge),
     ])
     .into_iter()
     .map(|command| match command {
@@ -331,12 +435,129 @@ fn curved_connector(segments: usize) -> Vec<GeometryPathCommand> {
 mod tests {
     use super::*;
 
+    fn corner_radii(path: &[GeometryPathCommand]) -> (f64, f64) {
+        let GeometryPathCommand::Move { x: rx, .. } = path[0] else {
+            panic!("round rectangle must begin with a move");
+        };
+        let GeometryPathCommand::Quad { y: ry, .. } = path[2] else {
+            panic!("round rectangle must curve its first corner");
+        };
+        (rx, ry)
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
+    }
+
+    fn assert_path_close(
+        actual: &[GeometryPathCommand],
+        expected: &[GeometryPathCommand],
+        tolerance: f64,
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            match (actual, expected) {
+                (
+                    GeometryPathCommand::Move { x, y },
+                    GeometryPathCommand::Move {
+                        x: expected_x,
+                        y: expected_y,
+                    },
+                )
+                | (
+                    GeometryPathCommand::Line { x, y },
+                    GeometryPathCommand::Line {
+                        x: expected_x,
+                        y: expected_y,
+                    },
+                ) => {
+                    assert!((x - expected_x).abs() < tolerance);
+                    assert!((y - expected_y).abs() < tolerance);
+                }
+                (
+                    GeometryPathCommand::Quad { cpx, cpy, x, y },
+                    GeometryPathCommand::Quad {
+                        cpx: expected_cpx,
+                        cpy: expected_cpy,
+                        x: expected_x,
+                        y: expected_y,
+                    },
+                ) => {
+                    assert!((cpx - expected_cpx).abs() < tolerance);
+                    assert!((cpy - expected_cpy).abs() < tolerance);
+                    assert!((x - expected_x).abs() < tolerance);
+                    assert!((y - expected_y).abs() < tolerance);
+                }
+                (GeometryPathCommand::Close, GeometryPathCommand::Close) => {}
+                _ => panic!("path command variants differ"),
+            }
+        }
+    }
+
     #[test]
     fn compiles_common_presets_and_rejects_unknown_shapes() {
         let adjustments = HashMap::new();
-        assert!(preset_geometry_to_path("rect", &adjustments).is_some());
-        assert!(preset_geometry_to_path("ellipse", &adjustments).is_some());
-        assert!(preset_geometry_to_path("rightArrow", &adjustments).is_some());
-        assert!(preset_geometry_to_path("unknown", &adjustments).is_none());
+        assert!(preset_geometry_to_path("rect", &adjustments, 1.0).is_some());
+        assert!(preset_geometry_to_path("ellipse", &adjustments, 1.0).is_some());
+        assert!(preset_geometry_to_path("rightArrow", &adjustments, 1.0).is_some());
+        assert!(preset_geometry_to_path("unknown", &adjustments, 1.0).is_none());
+    }
+
+    #[test]
+    fn exposes_defaults_for_adjustable_presets() {
+        assert_eq!(
+            preset_geometry_default_adjustments("parallelogram").get("adj"),
+            Some(&0.25)
+        );
+        assert_eq!(
+            preset_geometry_default_adjustments("rightArrow").get("adj1"),
+            Some(&0.5)
+        );
+        assert!(preset_geometry_default_adjustments("rect").is_empty());
+    }
+
+    #[test]
+    fn non_square_round_rect_has_equal_absolute_corner_radii() {
+        let path = preset_geometry_to_path("roundRect", &HashMap::new(), 4.0).unwrap();
+        let (rx, ry) = corner_radii(&path);
+        assert_close(rx * 400.0, ry * 100.0);
+    }
+
+    #[test]
+    fn round_rect_honors_adjustment_override() {
+        let path =
+            preset_geometry_to_path("roundRect", &HashMap::from([("adj".to_owned(), 0.2)]), 4.0)
+                .unwrap();
+        let (rx, ry) = corner_radii(&path);
+        assert_close(rx, 0.05);
+        assert_close(ry, 0.2);
+    }
+
+    #[test]
+    fn round_rect_clamps_adjustment() {
+        let sharp =
+            preset_geometry_to_path("roundRect", &HashMap::from([("adj".to_owned(), -0.1)]), 1.0)
+                .unwrap();
+        assert_eq!(corner_radii(&sharp), (0.0, 0.0));
+
+        let pill =
+            preset_geometry_to_path("roundRect", &HashMap::from([("adj".to_owned(), 0.75)]), 1.0)
+                .unwrap();
+        assert_eq!(corner_radii(&pill), (0.5, 0.5));
+    }
+
+    #[test]
+    fn square_round_rect_matches_previous_output() {
+        let path = preset_geometry_to_path("roundRect", &HashMap::new(), 1.0).unwrap();
+        let previous = rounded_rect(1.0, 1.0 / 6.0);
+        assert_path_close(&path, &previous, 0.000_01);
+    }
+
+    #[test]
+    fn flow_chart_terminator_has_circular_ends() {
+        let path = preset_geometry_to_path("flowChartTerminator", &HashMap::new(), 4.0).unwrap();
+        let (rx, ry) = corner_radii(&path);
+        assert_close(rx * 400.0, 50.0);
+        assert_close(ry * 100.0, 50.0);
     }
 }

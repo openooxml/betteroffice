@@ -39,11 +39,19 @@ describe('wasm loader', () => {
     const handle = openWorkbook(sampleBytes());
     try {
       const info = handle.sheetInfo();
+      expect(info.sheetIds).toEqual(['sheet:0', 'sheet:1', 'sheet:2']);
       expect(info.sheetNames).toEqual(['Budget', 'Summary', 'Styled']);
       expect(info.activeSheet).toBe(0);
       expect(info.contentWidth).toBeGreaterThan(0);
       expect(info.contentHeight).toBeGreaterThan(0);
+      expect(info.frozenRows).toBe(0);
+      expect(info.frozenCols).toBe(0);
+      expect(info.initialScrollX).toBe(0);
+      expect(info.initialScrollY).toBe(0);
       expect(handle.calculationStatus()).toEqual({ limitedCells: [] });
+      const position = handle.cellPosition(0, 7, 2);
+      expect(position.x).toBeGreaterThan(0);
+      expect(position.y).toBeGreaterThan(0);
     } finally {
       handle.dispose();
     }

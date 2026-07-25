@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LayoutBlock } from '@betteroffice/docx/layout/pagination';
-import type { Document } from '@betteroffice/docx/types/document';
 import type {
+  Document,
+  Endnote,
+  Footnote,
+  HeaderFooter,
+  Section,
+} from '@betteroffice/docx/types/document';
+import type {
+  YrsDocxHost,
   YrsInputPositionMap,
   YrsLoc,
   YrsRenderEnv,
@@ -19,15 +26,137 @@ export interface YrsCoreSession {
   inputPositionMap(storyId?: string): YrsInputPositionMap | null;
   displayPositionToLoc(position: number, storyId?: string): YrsLoc | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
-  documentFromYrs(): Document | null;
+  documentFromYrs(baseDocument?: Document | null): Document | null;
   publishDirectInput(): void;
+}
+
+interface YrsCoreSessionCallbacks {
+  isCurrentLoad?: (generation: number) => boolean;
+  onHostDocument?: (host: YrsDocxHost, generation: number) => void;
+  onError?: (error: Error, generation: number) => void;
+}
+
+function mergeHeaderFooterMaps(
+  full: Map<string, HeaderFooter> | undefined,
+  host: Map<string, HeaderFooter> | undefined
+): Map<string, HeaderFooter> | undefined {
+  if (host === undefined) return undefined;
+  return new Map(
+    [...host].map(([relationshipId, metadata]) => {
+      const existing = full?.get(relationshipId);
+      return [relationshipId, existing ? { ...metadata, content: existing.content } : metadata];
+    })
+  );
+}
+
+function mergeNotes<T extends Footnote | Endnote>(
+  full: T[] | undefined,
+  host: T[] | undefined
+): T[] | undefined {
+  if (host === undefined) return undefined;
+  return host.map((metadata) => {
+    const existing = full?.find((note) => note.id === metadata.id);
+    return existing ? { ...existing, ...metadata, content: existing.content } : metadata;
+  });
+}
+
+function mergeSections(
+  full: Section[] | undefined,
+  host: Section[] | undefined
+): Section[] | undefined {
+  if (host === undefined) return undefined;
+  return host.map((metadata, index) => {
+    const existing =
+      full?.find((section) => section.id !== undefined && section.id === metadata.id) ??
+      full?.[index];
+    return existing ? { ...metadata, content: existing.content } : metadata;
+  });
+}
+
+export function mergeDocxHostMetadata(full: Document, host: Document): Document {
+  const fullPackage = full.package;
+  const hostPackage = host.package;
+  return {
+    ...full,
+    contractVersion: host.contractVersion ?? full.contractVersion,
+    originalBuffer: full.originalBuffer ?? host.originalBuffer,
+    warnings: host.warnings,
+    package: {
+      ...fullPackage,
+      contractVersion: hostPackage.contractVersion ?? fullPackage.contractVersion,
+      styles: hostPackage.styles,
+      theme: hostPackage.theme,
+      settings: hostPackage.settings,
+      fontTable: hostPackage.fontTable,
+      relationships: hostPackage.relationships,
+      headers: mergeHeaderFooterMaps(fullPackage.headers, hostPackage.headers),
+      footers: mergeHeaderFooterMaps(fullPackage.footers, hostPackage.footers),
+      footnotes: mergeNotes(fullPackage.footnotes, hostPackage.footnotes),
+      endnotes: mergeNotes(fullPackage.endnotes, hostPackage.endnotes),
+      document: {
+        ...fullPackage.document,
+        sections: mergeSections(fullPackage.document.sections, hostPackage.document.sections),
+        finalSectionProperties: hostPackage.document.finalSectionProperties,
+        comments: hostPackage.document.comments,
+      },
+    },
+  };
+}
+
+export interface YrsSeedSources {
+  bytes: Uint8Array | null;
+  document: Document | null;
+  initialUpdate?: Uint8Array;
+}
+
+/**
+ * Hydrates a fresh session. Shared collaboration state wins over both seed
+ * shapes so a client joining a room never seeds an independent replica.
+ */
+export function seedYrsSession(
+  session: Pick<YrsSession, 'openDocx' | 'loadState'>,
+  seedDocumentIntoYrs: (document: Document) => void,
+  seed: YrsSeedSources
+): YrsDocxHost | null {
+  const { bytes, document, initialUpdate } = seed;
+  if (bytes) {
+    const host = session.openDocx(bytes, !initialUpdate);
+    if (initialUpdate) session.loadState(initialUpdate.slice());
+    return host;
+  }
+  if (initialUpdate) {
+    session.loadState(initialUpdate.slice());
+    return null;
+  }
+  if (document) seedDocumentIntoYrs(document);
+  return null;
+}
+
+/**
+ * Materializes the save-projection base once. `materializeDocx` re-parses the
+ * retained source and ships the full envelope (every media entry, twice, as
+ * JSON), so no interactive event should be the first to pay for it.
+ */
+export function warmCompatibilityBase(
+  session: Pick<YrsSession, 'materializeDocx'>,
+  compatibilityBase: { current: Document | null }
+): void {
+  if (compatibilityBase.current) return;
+  try {
+    compatibilityBase.current = session.materializeDocx();
+  } catch (error) {
+    console.error('[yrs] failed to warm the save projection base', error);
+  }
 }
 
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
   seedDocument: Document | null,
-  collaboration?: DocxEditorCollaborationOptions
+  seedBytes: Uint8Array | null,
+  seedGeneration: number,
+  collaboration?: DocxEditorCollaborationOptions,
+  callbacks?: YrsCoreSessionCallbacks
 ): YrsCoreSession {
   const collaborationClientId = collaboration?.clientId;
   const collaborationInitialUpdate = collaboration?.initialUpdate;
@@ -35,6 +164,9 @@ export function useYrsCoreSession(
   const facadeRef = useRef<YrsFacadeModule | null>(null);
   const documentRef = useRef(document);
   documentRef.current = document;
+  const callbacksRef = useRef(callbacks);
+  callbacksRef.current = callbacks;
+  const compatibilityBaseRef = useRef<Document | null>(null);
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new Set<string>());
   const enabledRef = useRef(enabled);
@@ -42,27 +174,44 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
 
   useEffect(() => {
-    if (!enabled || !seedDocument) return;
-    let cancelled = false;
     setSession(null);
+    if (!enabled || (!seedDocument && !seedBytes)) return;
+    let cancelled = false;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
+    compatibilityBaseRef.current = null;
 
     void import('@betteroffice/docx/yrs')
       .then(async (yrs) => {
         const next = await yrs.createYrsSession({ clientId: collaborationClientId });
-        if (cancelled) {
+        if (
+          cancelled ||
+          callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false
+        ) {
           next.destroy();
           return;
         }
-        if (collaborationInitialUpdate) next.loadState(collaborationInitialUpdate.slice());
-        else yrs.documentToYrs(next, seedDocument);
+        const host = seedYrsSession(next, (document) => yrs.documentToYrs(next, document), {
+          bytes: seedBytes,
+          document: seedDocument,
+          initialUpdate: collaborationInitialUpdate,
+        });
         sessionRef.current = next;
         facadeRef.current = yrs;
         setSession(next);
+        if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
       })
       .catch((error) => {
         console.error('[yrs] failed to start the editing session', error);
+        if (
+          !cancelled &&
+          callbacksRef.current?.isCurrentLoad?.(seedGeneration) !== false
+        ) {
+          callbacksRef.current?.onError?.(
+            error instanceof Error ? error : new Error(String(error)),
+            seedGeneration
+          );
+        }
       });
 
     return () => {
@@ -73,7 +222,29 @@ export function useYrsCoreSession(
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
     };
-  }, [enabled, seedDocument, collaborationClientId, collaborationInitialUpdate]);
+  }, [
+    enabled,
+    seedDocument,
+    seedBytes,
+    seedGeneration,
+    collaborationClientId,
+    collaborationInitialUpdate,
+  ]);
+
+  // Off the interaction path: the first host onChange, ruler drag or save would
+  // otherwise re-parse the source document mid-keystroke.
+  useEffect(() => {
+    if (!enabled || !session || !seedBytes) return;
+    const warm = (): void => {
+      if (sessionRef.current === session) warmCompatibilityBase(session, compatibilityBaseRef);
+    };
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(warm);
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(warm, 200);
+    return () => clearTimeout(id);
+  }, [enabled, seedBytes, session]);
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;
@@ -128,12 +299,17 @@ export function useYrsCoreSession(
     [inputPositionMap]
   );
 
-  const documentFromYrs = useCallback((): Document | null => {
+  const documentFromYrs = useCallback((baseDocument?: Document | null): Document | null => {
     const live = sessionRef.current;
     const facade = facadeRef.current;
-    const base = documentRef.current;
+    const host = baseDocument === undefined ? documentRef.current : baseDocument;
+    let base = host;
     if (!enabledRef.current || !live || !facade || !base) return null;
     try {
+      const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
+      if (compatibilityBase) {
+        base = mergeDocxHostMetadata(compatibilityBase, base);
+      }
       const dirtyStories = projectionStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
@@ -141,6 +317,7 @@ export function useYrsCoreSession(
         dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
       );
       dirtyStories.clear();
+      if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {
       console.error('[yrs] failed to project the document for save', error);

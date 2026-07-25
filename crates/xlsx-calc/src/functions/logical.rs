@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{EvalContext, boolean, cmp_values, err, evaluate, range_values, to_bool};
+use crate::eval::{EvalContext, as_area, boolean, cmp_values, err, evaluate, to_bool};
 use crate::parser::Expr;
 
 /// IF(condition, then, [else]); omitted else yields FALSE.
@@ -131,12 +131,12 @@ fn fold_bools(
     let mut acc = init;
     let mut seen = false;
     for arg in args {
-        let values = match arg {
-            Expr::Range { sheet, range } => match range_values(sheet, range, ctx) {
+        let values = match as_area(arg, ctx) {
+            Some(area) => match area.values(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            _ => vec![evaluate(arg, ctx)],
+            None => vec![evaluate(arg, ctx)],
         };
         for v in values {
             match v {

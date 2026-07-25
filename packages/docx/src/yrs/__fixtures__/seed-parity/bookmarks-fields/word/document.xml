@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:bookmarkStart w:id="1" w:name="intro"/>
+      <w:r><w:t>Bookmarked sentence.</w:t></w:r>
+      <w:bookmarkEnd w:id="1"/>
+    </w:p>
+    <w:p>
+      <w:r><w:t xml:space="preserve">Page </w:t></w:r>
+      <w:fldSimple w:instr=" PAGE ">
+        <w:r><w:rPr><w:noProof/></w:rPr><w:t>1</w:t></w:r>
+      </w:fldSimple>
+      <w:r><w:t xml:space="preserve"> of </w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:rPr><w:noProof/></w:rPr><w:t>2</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      <w:r><w:t>.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:bookmarkStart w:id="2" w:name="crossSpan"/>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> REF intro \h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>Bookmarked sentence.</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Field spanning the paragraph break ends here.</w:t></w:r>
+      <w:bookmarkEnd w:id="2"/>
+    </w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

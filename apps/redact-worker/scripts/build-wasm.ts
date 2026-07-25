@@ -27,7 +27,19 @@ if (version.stdout.trim() !== `wasm-pack ${WASM_PACK_VERSION}`) {
 await rm(output, { recursive: true, force: true });
 const build = spawnSync(
   "wasm-pack",
-  ["build", crate, "--release", "--target", "web", "--out-dir", output, "--locked"],
+  [
+    "build",
+    crate,
+    "--release",
+    "--target",
+    "web",
+    "--out-dir",
+    output,
+    "--",
+    "--locked",
+    "--features",
+    "wasm",
+  ],
   { stdio: "inherit" },
 );
 if (build.status !== 0) process.exit(build.status ?? 1);

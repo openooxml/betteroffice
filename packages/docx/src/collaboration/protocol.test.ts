@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  MAX_AWARENESS_CURSOR_BYTES,
+  MAX_AWARENESS_ENTRIES_PER_UPDATE,
+  MAX_AWARENESS_STRING_LENGTH,
+  MAX_AWARENESS_TRACKED_PEERS,
+} from './awareness';
+import {
+  decodeAwarenessUpdate,
   decodeMessages,
+  encodeAwarenessMessage,
+  encodeAwarenessUpdate,
   encodeEmptyAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
@@ -25,6 +35,29 @@ describe('collaboration protocol encoding', () => {
     expect([...encodeSyncStep2(Uint8Array.of(3, 4))]).toEqual([0, 1, 2, 3, 4]);
     expect([...encodeUpdate(Uint8Array.of(5, 6))]).toEqual([0, 2, 2, 5, 6]);
     expect([...encodeEmptyAwarenessUpdate()]).toEqual([1, 1, 0]);
+    expect([...encodeQueryAwareness()]).toEqual([3]);
+  });
+
+  it('round-trips sticky cursor awareness and leave states', () => {
+    const states = [
+      {
+        clientId: 17,
+        clock: 4,
+        state: {
+          user: { name: 'Calm Otter', color: '#0B57D0' },
+          cursor: {
+            story: 'body',
+            anchor: Uint8Array.of(1, 2, 3),
+            head: Uint8Array.of(4, 5),
+          },
+        },
+      },
+      { clientId: 18, clock: 9, state: null },
+    ];
+    const [message] = decodeMessages(encodeAwarenessMessage(states));
+    expect(message.type).toBe('awareness');
+    if (message.type !== 'awareness') return;
+    expect(decodeAwarenessUpdate(message.update)).toEqual(states);
   });
 
   it('uses standard multibyte varUint lengths', () => {
@@ -85,6 +118,132 @@ describe('collaboration protocol decoding', () => {
       Uint8Array.of(2, 0, 1),
     ];
     for (const frame of frames) expect(() => decodeMessages(frame)).toThrow(ProtocolError);
+  });
+
+  it('rejects malformed awareness payloads', () => {
+    expect(() => decodeAwarenessUpdate(Uint8Array.of())).toThrow('Truncated varUint');
+    expect(() => decodeAwarenessUpdate(Uint8Array.of(1, 1, 1, 1, 123))).toThrow(
+      'Invalid awareness JSON'
+    );
+    expect(() =>
+      decodeAwarenessUpdate(
+        encodeAwarenessUpdate([
+          {
+            clientId: 1,
+            clock: 1,
+            state: {
+              user: { name: 'A', color: '#000000' },
+              cursor: null,
+            },
+          },
+        ]).slice(0, -1)
+      )
+    ).toThrow(ProtocolError);
+  });
+
+  it('falls back to the client palette for unsafe awareness colors', () => {
+    const update = encodeAwarenessUpdate([
+      {
+        clientId: 12,
+        clock: 1,
+        state: {
+          user: { name: 'Bright Fox', color: 'url("https://attacker/pixel")' },
+          cursor: null,
+        },
+      },
+    ]);
+
+    expect(decodeAwarenessUpdate(update)[0]?.state?.user.color).toBe('#A142F4');
+  });
+
+  it('discards over-limit states while keeping valid awareness entries', () => {
+    const valid = {
+      clientId: 12,
+      clock: 1,
+      state: {
+        user: { name: 'Bright Fox', color: '#137333' },
+        cursor: null,
+      },
+    };
+    const discarded: ProtocolError[] = [];
+    const update = encodeAwarenessUpdate([
+      {
+        clientId: 10,
+        clock: 1,
+        state: {
+          user: {
+            name: 'n'.repeat(MAX_AWARENESS_STRING_LENGTH + 1),
+            color: '#000000',
+          },
+          cursor: null,
+        },
+      },
+      valid,
+      {
+        clientId: 14,
+        clock: 1,
+        state: {
+          user: { name: 'Large Cursor', color: '#000000' },
+          cursor: {
+            story: 'body',
+            anchor: new Uint8Array(MAX_AWARENESS_CURSOR_BYTES + 1),
+            head: Uint8Array.of(1),
+          },
+        },
+      },
+    ]);
+
+    expect(
+      decodeAwarenessUpdate(update, {
+        onDiscard: (error) => discarded.push(error),
+      })
+    ).toEqual([valid]);
+    expect(discarded.map((error) => error.message)).toEqual([
+      `Awareness user name exceeds ${MAX_AWARENESS_STRING_LENGTH} characters`,
+      `Awareness cursor anchor exceeds ${MAX_AWARENESS_CURSOR_BYTES} bytes`,
+    ]);
+  });
+
+  it('caps entries per update and total tracked peers', () => {
+    const flood = Array.from({ length: MAX_AWARENESS_ENTRIES_PER_UPDATE + 2 }, (_, index) => ({
+      clientId: index + 10,
+      clock: 1,
+      state: null,
+    }));
+    const frameDiscards: ProtocolError[] = [];
+    const decoded = decodeAwarenessUpdate(encodeAwarenessUpdate(flood), {
+      onDiscard: (error) => frameDiscards.push(error),
+    });
+
+    expect(decoded).toHaveLength(MAX_AWARENESS_ENTRIES_PER_UPDATE);
+    expect(frameDiscards.map((error) => error.message)).toEqual([
+      `Awareness update exceeds ${MAX_AWARENESS_ENTRIES_PER_UPDATE} entries`,
+    ]);
+
+    const tracked = new Set(
+      Array.from({ length: MAX_AWARENESS_TRACKED_PEERS }, (_, index) => index + 10)
+    );
+    const peerDiscards: ProtocolError[] = [];
+    const existing = flood[0];
+    expect(
+      decodeAwarenessUpdate(
+        encodeAwarenessUpdate([
+          existing,
+          {
+            clientId: MAX_AWARENESS_TRACKED_PEERS + 100,
+            clock: 1,
+            state: null,
+          },
+        ]),
+        {
+          trackedClientIds: tracked,
+          onDiscard: (error) => peerDiscards.push(error),
+        }
+      )
+    ).toEqual([existing]);
+    expect(peerDiscards.map((error) => error.message)).toEqual([
+      `Awareness peer limit of ${MAX_AWARENESS_TRACKED_PEERS} reached`,
+    ]);
   });
 
   it('rejects overflowing and non-canonical varUints', () => {

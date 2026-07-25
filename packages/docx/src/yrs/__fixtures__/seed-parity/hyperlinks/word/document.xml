@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:r><w:t xml:space="preserve">See </w:t></w:r>
+      <w:hyperlink r:id="rId4" w:tooltip="External docs" w:history="1">
+        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>the external docs</w:t></w:r>
+      </w:hyperlink>
+      <w:r><w:t xml:space="preserve"> and </w:t></w:r>
+      <w:hyperlink w:anchor="target" w:history="1">
+        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>the internal anchor</w:t></w:r>
+      </w:hyperlink>
+      <w:r><w:t>.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:hyperlink r:id="rId5" w:docLocation="section2">
+        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/><w:b/></w:rPr><w:t xml:space="preserve">Multi run </w:t></w:r>
+        <w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>hyperlink</w:t></w:r>
+      </w:hyperlink>
+    </w:p>
+    <w:p>
+      <w:bookmarkStart w:id="9" w:name="target"/>
+      <w:r><w:t>Anchor destination.</w:t></w:r>
+      <w:bookmarkEnd w:id="9"/>
+    </w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

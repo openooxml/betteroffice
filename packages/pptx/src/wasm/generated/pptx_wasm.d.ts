@@ -5,6 +5,7 @@ export class PptxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
@@ -28,6 +29,9 @@ export class PptxDocument {
     redoJson(): string;
     removeShapeJson(args: string): string;
     resizeShapeJson(args: string): string;
+    setShapeAdjustJson(args: string): string;
+    setShapeFillJson(args: string): string;
+    setShapeStrokeJson(args: string): string;
     snapshotJson(): string;
     startUpdateObservation(): void;
     storyJson(args: string): string;
@@ -76,6 +80,7 @@ export interface InitOutput {
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
+    readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_canRedo: (a: number) => number;
@@ -100,6 +105,9 @@ export interface InitOutput {
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];

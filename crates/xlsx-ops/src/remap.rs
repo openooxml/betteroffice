@@ -84,6 +84,69 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
     Ok(restores)
 }
 
+pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
+    let Some(target) = structural_target(op) else {
+        return Vec::new();
+    };
+    let names: HashMap<String, SheetId> = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
+        .collect();
+    let mut restores = Vec::new();
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        let owner = SheetId(index as u32);
+        let matches =
+            |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, target, &names);
+        let mut hyperlinks = sheet.hyperlinks.clone();
+        let mut changed_sheet = false;
+        for hyperlink in &mut hyperlinks {
+            let Some(location) = &hyperlink.location else {
+                continue;
+            };
+            let prefixed = location.starts_with('#');
+            let source = location.strip_prefix('#').unwrap_or(location);
+            let Some((expr, suffix)) = split_location_reference(source) else {
+                continue;
+            };
+            let mut changed = false;
+            let rewritten = transform(&expr, op, &matches, &mut changed).to_formula();
+            if changed {
+                let rewritten = format!("{rewritten}{suffix}");
+                hyperlink.location = Some(if prefixed && !rewritten.starts_with('#') {
+                    format!("#{rewritten}")
+                } else {
+                    rewritten
+                });
+                changed_sheet = true;
+            }
+        }
+        if changed_sheet {
+            restores.push(Op::SetHyperlinks {
+                sheet: owner,
+                hyperlinks: sheet.hyperlinks.clone(),
+            });
+            edits.push((owner, hyperlinks));
+        }
+    }
+    for (sheet, hyperlinks) in edits {
+        wb.sheet_mut(sheet)
+            .expect("sheet exists during hyperlink remap")
+            .hyperlinks = hyperlinks;
+    }
+    restores
+}
+
+pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
+    match remap_span(range, op) {
+        Remapped::Unchanged => Some(range),
+        Remapped::Moved(range) => Some(range),
+        Remapped::Deleted => None,
+    }
+}
+
 pub(crate) fn rename_sheet_references(
     wb: &mut Workbook,
     old_name: &str,
@@ -121,7 +184,27 @@ pub(crate) fn rename_sheet_references(
     Ok(restores)
 }
 
-fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
+/// Splits a hyperlink location into its reference and any trailing `#` fragment.
+fn split_location_reference(source: &str) -> Option<(Expr, &str)> {
+    if let Ok(expr) = parse_formula(source) {
+        return Some((expr, ""));
+    }
+    let (reference, _) = source.rsplit_once('#')?;
+    let expr = parse_formula(reference).ok()?;
+    Some((expr, &source[reference.len()..]))
+}
+
+/// rename the sheet inside an internal hyperlink location. locations are
+/// commonly written `#Sheet!A1`; the leading `#` is not part of the reference
+/// and must not reach the formula rewriter, but its presence is preserved.
+pub(crate) fn rename_hyperlink_location(location: &str, old_name: &str, new_name: &str) -> String {
+    match location.strip_prefix('#') {
+        Some(reference) => format!("#{}", rename_formula_sheet(reference, old_name, new_name)),
+        None => rename_formula_sheet(location, old_name, new_name),
+    }
+}
+
+pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
     if old_name == new_name {
         return source.to_string();
     }
@@ -487,7 +570,7 @@ fn clip_interval(a: u32, b: u32, at: u32, count: u32) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsx_model::{Cell, CellProvider, Sheet};
+    use xlsx_model::{Cell, CellProvider, Hyperlink, Sheet};
 
     fn r(a1: &str) -> CellRef {
         CellRef::parse_a1(a1).unwrap()
@@ -700,6 +783,83 @@ mod tests {
             "Renamed!A1"
         );
         assert_eq!(rename_formula_sheet("S!A1", "S", "R4C"), "'R4C'!A1");
+    }
+
+    #[test]
+    fn structural_remap_preserves_a_trailing_location_fragment() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Data"));
+        wb.sheets.push(Sheet::new("Target"));
+        let link = |location: &str| Hyperlink {
+            range: CellRange::parse_a1("A1").unwrap(),
+            external_target: None,
+            location: Some(location.into()),
+            tooltip: None,
+            display: None,
+        };
+        wb.sheets[0]
+            .hyperlinks
+            .extend([link("#Target!A3#2"), link("Target!A3!B4")]);
+
+        remap_hyperlink_locations(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(1),
+                at: 1,
+                count: 2,
+            },
+        );
+
+        assert_eq!(
+            wb.sheets[0].hyperlinks[0].location.as_deref(),
+            Some("#Target!A5#2")
+        );
+        assert_eq!(
+            wb.sheets[0].hyperlinks[1].location.as_deref(),
+            Some("Target!A3!B4")
+        );
+    }
+
+    #[test]
+    fn rename_hyperlink_location_preserves_the_leading_hash() {
+        assert_eq!(
+            rename_hyperlink_location("#Target!A1", "Target", "Renamed"),
+            "#Renamed!A1"
+        );
+        assert_eq!(
+            rename_hyperlink_location("Target!A1", "Target", "Renamed"),
+            "Renamed!A1"
+        );
+        assert_eq!(
+            rename_hyperlink_location("#Target!A1", "Target", "New Target"),
+            "#'New Target'!A1"
+        );
+    }
+
+    #[test]
+    fn rename_hyperlink_location_handles_quoted_and_bare_targets() {
+        assert_eq!(
+            rename_hyperlink_location("#'My Sheet'!A1", "My Sheet", "Renamed"),
+            "#Renamed!A1"
+        );
+        assert_eq!(
+            rename_hyperlink_location("'My Sheet'!A1:B2", "My Sheet", "Renamed"),
+            "Renamed!A1:B2"
+        );
+        assert_eq!(
+            rename_hyperlink_location("#'It''s Data'!A1", "It's Data", "Renamed"),
+            "#Renamed!A1"
+        );
+        for location in ["#MyRange", "MyRange", "#Target", "#A1"] {
+            assert_eq!(
+                rename_hyperlink_location(location, "Target", "Renamed"),
+                location
+            );
+        }
+        assert_eq!(
+            rename_hyperlink_location("#Target!A1#2", "Target", "Renamed"),
+            "#Renamed!A1#2"
+        );
     }
 
     #[test]
