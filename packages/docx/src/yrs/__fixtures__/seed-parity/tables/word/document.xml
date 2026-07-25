@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r><w:t>Table below.</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tblPr>
+        <w:tblStyle w:val="TableGrid"/>
+        <w:tblW w:w="0" w:type="auto"/>
+        <w:tblBorders>
+          <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+          <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+          <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+          <w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+          <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+          <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+        </w:tblBorders>
+        <w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>
+      </w:tblPr>
+      <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
+      <w:tr>
+        <w:trPr><w:tblHeader/><w:trHeight w:val="400" w:hRule="atLeast"/></w:trPr>
+        <w:tc>
+          <w:tcPr><w:gridSpan w:val="2"/><w:shd w:val="clear" w:color="auto" w:fill="DDEEFF"/></w:tcPr>
+          <w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Header spanning two columns</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:vMerge w:val="restart"/><w:vAlign w:val="center"/></w:tcPr>
+          <w:p><w:r><w:t>Vertically merged start</w:t></w:r></w:p>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:t>Row two, cell one</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>
+          <w:tbl>
+            <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+            <w:tblGrid><w:gridCol w:w="1400"/><w:gridCol w:w="1400"/></w:tblGrid>
+            <w:tr>
+              <w:tc><w:p><w:r><w:t>nested A</w:t></w:r></w:p></w:tc>
+              <w:tc><w:p><w:r><w:t>nested B</w:t></w:r></w:p></w:tc>
+            </w:tr>
+            <w:tr>
+              <w:tc><w:p><w:r><w:t>nested C</w:t></w:r></w:p></w:tc>
+              <w:tc><w:p><w:r><w:t>nested D</w:t></w:r></w:p></w:tc>
+            </w:tr>
+          </w:tbl>
+          <w:p><w:r><w:t>after nested table</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc>
+          <w:tcPr><w:vMerge/></w:tcPr>
+          <w:p/>
+        </w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc>
+          <w:tcPr><w:textDirection w:val="btLr"/></w:tcPr>
+          <w:p><w:r><w:t>rotated text</w:t></w:r></w:p>
+        </w:tc>
+        <w:tc><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>plain</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p><w:r><w:t>Table above.</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

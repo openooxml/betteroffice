@@ -23,10 +23,11 @@ export interface Viewport {
 }
 
 /**
- * Chrome-facing sheet metadata: tab names, active index, and the scrollable
- * content extent of the active sheet. Mirrors the Rust `SheetInfo`.
+ * Chrome-facing sheet metadata: stable IDs, tab names, active index, and the
+ * scrollable content extent of the active sheet. Mirrors the Rust `SheetInfo`.
  */
 export interface SheetInfo {
+  sheetIds: string[];
   sheetNames: string[];
   activeSheet: number;
   contentWidth: number;

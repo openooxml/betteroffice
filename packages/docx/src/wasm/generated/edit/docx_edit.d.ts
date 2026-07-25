@@ -80,6 +80,7 @@ export class EditSession {
      * Applies a remote/incremental yrs v1 update.
      */
     apply_update(update: Uint8Array): void;
+    apply_update_with_inference(update: Uint8Array): string;
     /**
      * Binary FrameDelta v1 display output. The returned `Vec<u8>` is exposed
      * by wasm-bindgen as a transferable-friendly `Uint8Array`.
@@ -157,6 +158,7 @@ export class EditSession {
      * Region-scoped range geometry without a display-list JSON round trip.
      */
     display_range_rects_region_json(region: string, r_id: string, from: number, to: number): string;
+    display_vertical_move_json(position: number, direction: string, goal_x: number): string;
     drain_update_event(): Uint8Array;
     encode_diff(remote_state_vector: Uint8Array): Uint8Array;
     /**
@@ -164,6 +166,11 @@ export class EditSession {
      */
     encode_state(): Uint8Array;
     encode_state_vector(): Uint8Array;
+    /**
+     * Encodes one paragraph location as a sticky position.
+     */
+    encode_sticky_position(story: string, para_id: string, offset: number): Uint8Array;
+    encoded_selection(): string;
     /**
      * Applies a set-valued, tri-state inline formatting delta over
      * `[start, end)` in one transaction. Omitted fields are kept and `null`
@@ -238,6 +245,10 @@ export class EditSession {
      */
     locate_paragraph(story: string, para_id: string): string;
     /**
+     * Materializes the retained canonical package for compatibility APIs.
+     */
+    materialize_docx(): string | undefined;
+    /**
      * Paragraph-measure compatibility export on the resident engine module.
      */
     measure_paragraph_json(input: string): string;
@@ -256,6 +267,10 @@ export class EditSession {
      * the host allocates it (yjs-style random 32-bit ids are fine).
      */
     constructor(client_id: number);
+    /**
+     * Parses a DOCX and optionally seeds its editable stories.
+     */
+    open_docx(bytes: Uint8Array, seed_stories: boolean): string;
     /**
      * Resolve one glyph outline from the session's resident font store.
      */
@@ -304,6 +319,15 @@ export class EditSession {
      * `[{"story","start","end"}]`. Errors when an anchor no longer resolves.
      */
     resolve_comment(comment_id: string): string;
+    resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string;
+    /**
+     * Resolves one encoded sticky position to a paragraph location.
+     */
+    resolve_sticky_position(story: string, position: Uint8Array): string;
+    /**
+     * Parses a DOCX, seeds its stories, and returns thin host metadata.
+     */
+    seed_from_docx(bytes: Uint8Array): string;
     /**
      * Resolves this peer's current sticky selection as two public Locs, or
      * `null` before the host establishes an initial selection.
@@ -495,6 +519,13 @@ export function hit_test_regions_by_handle(handle: number, page_index: number, x
 export function hit_test_regions_json(display_list: string, page_index: number, x: number, y: number): string;
 
 /**
+ * wasm panics abort, so a trap reaches JS as a bare `RuntimeError:
+ * unreachable executed`. Log the panic first so it stays diagnosable. Runs on
+ * module init for every wasm core that links this crate (layout and edit).
+ */
+export function install_panic_hook(): void;
+
+/**
  * wasm wrapper over [`layout_to_json`].
  */
 export function layout_document_json(input: string): string;
@@ -525,6 +556,56 @@ export function open_display_list(display_list: string): number;
  * flipping y at draw time. `cmds` is empty for a blank glyph (space).
  */
 export function outline_glyph_json(font_id: number, glyph_id: number): string;
+
+/**
+ * Wasm control-plane entry: safe ZIP -> bounded XML -> typed relationships.
+ */
+export function parse_docx_relationships(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S2 entry retained for ABI compatibility.
+ */
+export function parse_docx_s2(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S3 entry retained for ABI compatibility.
+ */
+export function parse_docx_s3(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S4 entry retained for ABI compatibility.
+ */
+export function parse_docx_s4(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S5 entry retained for ABI compatibility.
+ */
+export function parse_docx_s5(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S6 entry retained for ABI compatibility.
+ */
+export function parse_docx_s6(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S7 entry retained for ABI compatibility.
+ */
+export function parse_docx_s7(data: Uint8Array): string;
+
+/**
+ * Legacy staged Rust S8 entry retained for ABI compatibility.
+ */
+export function parse_docx_s8(data: Uint8Array): string;
+
+/**
+ * S9 production read facade: one safe package pass to the full Document wire.
+ */
+export function parse_docx_s9(data: Uint8Array, options_json: string): string;
+
+/**
+ * Focused wasm leaf used by hostile-input and facade tests.
+ */
+export function parse_relationships_xml(xml: Uint8Array, part_path: string): string;
 
 /**
  * wasm wrapper over [`session::range_rects_by_handle`]: range rects against a
@@ -565,12 +646,48 @@ export function range_rects_region_json(display_list: string, region: string, r_
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
+ * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
+ */
+export function rezip_docx(entries: any): Uint8Array;
+
+export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
+
+/**
+ * Legacy staged Rust S10 serializer entry retained for ABI compatibility.
+ */
+export function serialize_docx_s10(request_json: string): string;
+
+/**
+ * Legacy staged Rust S11 serializer entry retained for ABI compatibility.
+ */
+export function serialize_docx_s11(request_json: string): string;
+
+/**
+ * Legacy staged Rust S12 serializer entry retained for ABI compatibility.
+ */
+export function serialize_docx_s12(request_json: string): string;
+
+/**
+ * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
+ */
+export function unzip_docx(data: Uint8Array): any;
+
+/**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
  * update to a stored display list so an incremental rebuild re-parses only
  * its changed pages. `Err` closes the handle first, so the caller's fallback
  * (a fresh [`open_display_list`]) can never race a half-updated list.
  */
 export function update_display_list(handle: number, update: string): void;
+
+export function vertical_move_by_handle(handle: number, position: number, direction: string, goal_x: number): string;
+
+export function vertical_move_json(display_list: string, position: number, direction: string, goal_x: number): string;
+
+/**
+ * S13 production-capable package writer: typed model + original package -> DOCX.
+ */
+export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -588,6 +705,7 @@ export interface InitOutput {
     readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
@@ -608,10 +726,13 @@ export interface InitOutput {
     readonly editsession_display_hit_test_regions_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_display_range_rects_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_display_range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];
+    readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
@@ -627,10 +748,12 @@ export interface InitOutput {
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
+    readonly editsession_open_docx: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
@@ -641,6 +764,9 @@ export interface InitOutput {
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_set_cell_borders: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -671,6 +797,23 @@ export interface InitOutput {
     readonly editsession_undo_depth: (a: number) => number;
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
+    readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s4: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s5: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s6: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s7: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s8: (a: number, b: number) => [number, number, number, number];
+    readonly parse_docx_s9: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly parse_relationships_xml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
+    readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
+    readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
+    readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly rezip_docx: (a: any) => [number, number, number, number];
+    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -685,13 +828,16 @@ export interface InitOutput {
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
+    readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
     readonly clear_measure_fonts: () => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_drop_slice: (a: number, b: number) => void;

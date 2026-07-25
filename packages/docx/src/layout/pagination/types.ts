@@ -6,7 +6,12 @@
  * @public
  */
 
-import type { PresetGeometryPathCommand } from '@betteroffice/drawingml';
+import type { PresetGeometryPathCommand } from '../../types/drawingml';
+import type {
+  DrawingScene,
+  ShapeEffect,
+  ShapeTextBodyProperties,
+} from '../drawing';
 import type { Chart } from '../../types/document';
 import { isWrapNone, wrapsAroundText } from '../../docx/wrapTypes';
 import { emuToPixels } from '../../utils/units';
@@ -783,11 +788,11 @@ export type ShapeBlock = {
   /** Child shapes positioned relative to this shape's top-left corner. */
   children?: ShapeBlock[];
   /** General heterogeneous scene. Undefined = legacy shape-only children. */
-  scene?: import('../../types/content/shape').DrawingScene;
+  scene?: DrawingScene;
   /** Ordered 2-D effects. Undefined = none. */
-  effects?: import('../../types/content/shape').ShapeEffect[];
+  effects?: ShapeEffect[];
   /** Full text-body/autofit settings. */
-  textBodyProperties?: import('../../types/content/shape').ShapeTextBodyProperties;
+  textBodyProperties?: ShapeTextBodyProperties;
   /** Anchor/wrap metadata. Undefined = in-flow. */
   position?: ImageRunPosition;
   wrapType?: string;

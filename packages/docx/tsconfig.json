@@ -19,9 +19,7 @@
     "declarationMap": true,
     "types": ["bun", "node"],
     "paths": {
-      "@/*": ["./src/*"],
-      "@betteroffice/drawingml": ["../drawingml/src/index.ts"],
-      "@betteroffice/drawingml/units": ["../drawingml/src/units.ts"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"],

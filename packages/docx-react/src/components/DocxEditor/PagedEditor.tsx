@@ -26,6 +26,7 @@ import {
   type YrsStoredFormatting,
 } from './YrsInput';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
+import { RemotePresenceOverlay } from './overlays/RemotePresenceOverlay';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
 import { CanvasImageSelectionOverlay } from './overlays/CanvasImageSelectionOverlay';
 import { CanvasTableResizeOverlay } from './overlays/CanvasTableResizeOverlay';
@@ -84,14 +85,16 @@ import {
   pluginOverlaysStyles,
 } from './internals/styles';
 import { viewportMinHeightPx } from './internals/scrollUtils';
+import type { LayoutUpdateOrigin } from './internals/viewportAnchoring';
 import {
   createCanvasHostProjector,
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
-import { useYrsCoreSession } from './hooks/useYrsCoreSession';
+import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { useSelectionOverlay } from './hooks/useSelectionOverlay';
 import { useImageInteractions } from './hooks/useImageInteractions';
 import { usePagedScrollApi } from './hooks/usePagedScrollApi';
@@ -164,8 +167,8 @@ function yrsDeltaForTextFormatting(formatting: TextFormatting | undefined): YrsI
 export interface PagedEditorProps {
   /** The document to edit. */
   document: Document | null;
-  /** Source document used only when seeding a replacement yrs session. */
-  yrsSeedDocument?: Document | null;
+  /** The parent-owned authoritative editing session. */
+  yrsCore: YrsCoreSession;
   /** Collaboration identity and replica lifecycle callback. */
   collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
@@ -190,8 +193,8 @@ export interface PagedEditorProps {
   pageGap?: number;
   /** Zoom level (1 = 100%). */
   zoom?: number;
-  /** Callback when document changes. */
-  onDocumentChange?: (document: Document) => void;
+  /** Callback when Yrs content changes. */
+  onYrsContentChange?: () => void;
   /** Callback when the native Yrs undo/redo availability changes. */
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   /** Callback when selection changes. */
@@ -302,6 +305,7 @@ export interface PagedEditorProps {
    * through Rust queries over the display list.
    */
   displayListQueries?: DisplayListQueries | null;
+  resolveDisplayListQueries?: ResolveDisplayListQueries;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -418,7 +422,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
   function PagedEditor(props, ref) {
     const {
       document,
-      yrsSeedDocument = document,
+      yrsCore,
       collaboration,
       styles,
       theme: _theme,
@@ -429,7 +433,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly = false,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
-      onDocumentChange,
+      onYrsContentChange,
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
@@ -466,6 +470,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       measurementFontProvider,
       rustFontChainsProviderRef,
       displayListQueries = null,
+      resolveDisplayListQueries,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -503,7 +508,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const viewportLayoutRef = useRef<HTMLDivElement>(null);
     const yrsInputRef = useRef<YrsInputRef>(null);
 
-    const yrsCore = useYrsCoreSession(true, document, yrsSeedDocument, collaboration);
     const yrsRenderEnv = useMemo<YrsRenderEnv>(() => {
       const themeColors: Record<string, string> = {};
       for (const [name, value] of Object.entries(_theme?.colorScheme ?? {})) {
@@ -533,24 +537,41 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (!map) return null;
         const local = yrsLocToLocalDisplayPosition(map, loc);
         const rootStory = loc.story.startsWith('hf:') ? activeYrsRootStory : 'body';
-        if (loc.story === rootStory) return local;
-        return getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ?? null;
+        return (
+          getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
+          (loc.story === rootStory ? local : null)
+        );
       },
       [activeYrsRootStory, yrsCore.inputPositionMap]
+    );
+    const displayPositionToViewportLoc = useCallback(
+      (position: number): YrsLoc | null => {
+        const target = getYrsPositionProjectionRef.current('body')?.targetAt(position);
+        return target
+          ? yrsCore.displayPositionToLoc(target.displayPosition, target.story)
+          : yrsCore.displayPositionToLoc(position, 'body');
+      },
+      [yrsCore.displayPositionToLoc]
+    );
+    const yrsLocToViewportDisplayPosition = useCallback(
+      (loc: YrsLoc): number | null =>
+        getYrsPositionProjectionRef.current('body')?.positionForLoc(loc) ??
+        (loc.story === 'body' ? yrsLocToDisplayPosition(loc) : null),
+      [yrsLocToDisplayPosition]
     );
     // Store callbacks in refs to avoid infinite re-render loops
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
     const onYrsHfSelectionChangeRef = useRef(onYrsHfSelectionChange);
-    const onDocumentChangeRef = useRef(onDocumentChange);
+    const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
     const onReadyRef = useRef(onReady);
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
     onYrsHfSelectionChangeRef.current = onYrsHfSelectionChange;
-    onDocumentChangeRef.current = onDocumentChange;
+    onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
     onReadyRef.current = onReady;
 
@@ -609,7 +630,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]
     );
-    const { layout, runLayoutPipeline, scheduleLayout } = useLayoutPipeline({
+    const {
+      layout,
+      layoutUpdateOrigin,
+      runLayoutPipeline,
+      scheduleLayout,
+      cancelPendingScrollRestore,
+    } = useLayoutPipeline({
       document,
       session: yrsCore.session,
       renderEnv: yrsRenderEnv,
@@ -622,6 +649,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       pagesContainerRef,
       viewportLayoutRef,
       getSelectionHead: getYrsSelectionHead,
+      displayPositionToYrsLoc: displayPositionToViewportLoc,
+      yrsLocToDisplayPosition: yrsLocToViewportDisplayPosition,
       syncCoordinator,
       getScrollContainer,
       onTotalPagesChange,
@@ -629,6 +658,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onAnchorPositionsChange,
     });
     runLayoutPipelineRef.current = yrsCore.session ? runLayoutPipeline : null;
+    const handleLocalCaretInterrupt = useCallback(() => {
+      cancelPendingScrollRestore();
+      onCaretInterrupt?.();
+    }, [cancelPendingScrollRestore, onCaretInterrupt]);
 
     // Selection overlay — caret, range rects, image overlay info, plus the
     // ResizeObserver + post-layout recompute that keep geometry fresh.
@@ -668,6 +701,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const yrsProjectionVersionRef = useRef(0);
     const lastYrsToolbarSelectionKeyRef = useRef<string | null>(null);
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
+    const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const publishYrsDirectInput = useCallback((): void => {
       yrsCore.publishDirectInput();
@@ -684,12 +718,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       },
       []
     );
-    const refreshYrsLayout = useCallback((): void => {
-      yrsProjectionVersionRef.current += 1;
-      syncCoordinator.incrementStateSeq();
-      syncCoordinator.requestRender();
-      scheduleLayout();
-    }, [scheduleLayout, syncCoordinator]);
+    const refreshYrsLayout = useCallback(
+      (origin: LayoutUpdateOrigin): void => {
+        yrsProjectionVersionRef.current += 1;
+        syncCoordinator.incrementStateSeq();
+        syncCoordinator.requestRender();
+        scheduleLayout(origin);
+      },
+      [scheduleLayout, syncCoordinator]
+    );
 
     /**
      * Publish sticky yrs selection geometry and refresh the yrs-backed layout.
@@ -699,11 +736,29 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         selection: YrsDisplaySelection,
         docChanged: boolean,
         residentLayoutReady = false,
-        residentCaretReady = false
+        residentCaretReady = false,
+        updateOrigin: LayoutUpdateOrigin = 'local'
       ): void => {
         const session = yrsCore.session;
         if (session) {
           onYrsHistoryChangeRef.current?.(session.canUndo(), session.canRedo());
+        }
+        const presence = collaboration?.presence;
+        const stickySelection = session?.selection() ?? null;
+        const presenceSelectionKey = stickySelection
+          ? JSON.stringify([stickySelection.anchor, stickySelection.head])
+          : null;
+        if (
+          presence &&
+          session &&
+          lastPublishedPresenceSelectionKeyRef.current !== presenceSelectionKey
+        ) {
+          lastPublishedPresenceSelectionKeyRef.current = presenceSelectionKey;
+          try {
+            presence.setCursor(session.encodeSelection(), !docChanged);
+          } catch {
+            presence.setCursor(null, !docChanged);
+          }
         }
         const liveStory = session?.selection()?.head.story ?? activeYrsRootStory;
         const inputMap = yrsCore.inputPositionMap(liveStory);
@@ -752,42 +807,54 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         // later from a projection rebuild.
         if (!residentCaretReady) updateSelectionOverlay();
         if (docChanged && !residentLayoutReady) {
-          refreshYrsLayout();
+          refreshYrsLayout(updateOrigin);
         }
         if (docChanged) {
-          // Projecting the complete document is intentionally kept off the
-          // synchronous input path. Besides being unnecessary for canvas
-          // rendering, doing it once per key starves the browser event loop on
-          // larger documents. Coalesce host onChange notifications instead.
+          // Compatibility callbacks stay off the synchronous input path.
           if (documentChangeTimerRef.current !== null) {
             clearTimeout(documentChangeTimerRef.current);
           }
           documentChangeTimerRef.current = setTimeout(() => {
             documentChangeTimerRef.current = null;
-            const projected = yrsCore.documentFromYrs();
-            if (projected) onDocumentChangeRef.current?.(projected);
+            onYrsContentChangeRef.current?.();
           }, 100);
         }
       },
       [
         activeYrsRootStory,
+        collaboration?.presence,
         hfEditRId,
         refreshYrsLayout,
         updateSelectionOverlay,
-        yrsCore.documentFromYrs,
         yrsCore.inputPositionMap,
         yrsCore.session,
       ]
     );
 
+    useEffect(() => {
+      const presence = collaboration?.presence;
+      const session = yrsCore.session;
+      lastPublishedPresenceSelectionKeyRef.current = null;
+      if (!presence || !session) return;
+      const selection = session.selection();
+      lastPublishedPresenceSelectionKeyRef.current = selection
+        ? JSON.stringify([selection.anchor, selection.head])
+        : null;
+      try {
+        presence.setCursor(session.encodeSelection());
+      } catch {
+        presence.setCursor(null);
+      }
+    }, [collaboration?.presence, yrsCore.session]);
+
     const syncYrsInputState = useCallback(
-      (docChanged: boolean): boolean => {
+      (docChanged: boolean, origin: LayoutUpdateOrigin = 'local'): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
           yrsCore.publishDirectInput();
         }
-        handleYrsStateChange(displaySelection, docChanged);
+        handleYrsStateChange(displaySelection, docChanged, false, false, origin);
         return true;
       },
       [handleYrsStateChange, yrsCore.publishDirectInput, yrsCore.session]
@@ -797,7 +864,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       const session = yrsCore.session;
       if (!session) return;
       return session.onUpdate((_update, origin) => {
-        if (origin === 'remote') syncYrsInputState(true);
+        if (origin === 'remote') syncYrsInputState(true, origin);
       });
     }, [syncYrsInputState, yrsCore.session]);
 
@@ -1175,6 +1242,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getScrollContainer,
       displayListQueries,
       canvasHostRef,
+      onNavigationIntent: cancelPendingScrollRestore,
       requestCanvasParagraphFlash,
     });
 
@@ -1211,6 +1279,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [yrsCore.session]
     );
     getYrsPositionProjectionRef.current = getYrsPositionProjection;
+    const resolveYrsDisplayTarget = useCallback(
+      (position: number) => {
+        const target = getYrsPositionProjection(activeYrsRootStory)?.targetAt(position);
+        return target
+          ? { story: target.story, displayPosition: target.displayPosition }
+          : null;
+      },
+      [activeYrsRootStory, getYrsPositionProjection]
+    );
 
     // Pointer routing — every mouse path on the visible pages: cursor
     // placement, drag-to-select (with cell-selection promotion), table
@@ -1337,17 +1414,19 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
         // Cmd/Ctrl+Home - scroll to top and move cursor to start
         if (e.key === 'Home' && (e.metaKey || e.ctrlKey)) {
+          cancelPendingScrollRestore();
           const sc = getScrollContainer();
           if (sc) sc.scrollTop = 0;
         }
 
         // Cmd/Ctrl+End - scroll to bottom and move cursor to end
         if (e.key === 'End' && (e.metaKey || e.ctrlKey)) {
+          cancelPendingScrollRestore();
           const sc = getScrollContainer();
           if (sc) sc.scrollTop = sc.scrollHeight;
         }
       },
-      [readOnly, getScrollContainer, focusBodyInput]
+      [cancelPendingScrollRestore, readOnly, getScrollContainer, focusBodyInput]
     );
 
     /**
@@ -1578,12 +1657,17 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           author={author}
           inputPositionMap={yrsInputPositionMap}
           displayPositionToLoc={yrsDisplayPositionToLoc}
+          resolveDisplayTarget={resolveYrsDisplayTarget}
           locToDisplayPosition={yrsLocToDisplayPosition}
           nextParagraphStyleId={(styleId) => yrsStyleResolver?.getNextStyleId(styleId) ?? null}
           displayListQueries={activeYrsRootStory === 'body' ? displayListQueries : null}
+          resolveDisplayListQueries={
+            activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
+          }
           displayListFrameEpoch={displayListFrameEpoch}
           residentCaret={residentCaret}
           residentCaretAuthoritative={residentCaretAuthoritative}
+          layoutUpdateOrigin={layoutUpdateOrigin}
           canvasHostRef={canvasHostRef ?? pagesContainerRef}
           onStateChange={handleYrsStateChange}
           onDirectInput={publishYrsDirectInput}
@@ -1592,7 +1676,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           onFocusChange={setIsFocused}
           onCaretInput={activeYrsRootStory === 'body' ? onCaretInput : undefined}
           onCaretInputDispatched={activeYrsRootStory === 'body' ? onCaretInputDispatched : undefined}
-          onCaretInterrupt={onCaretInterrupt}
+          onCaretInterrupt={handleLocalCaretInterrupt}
         />
 
         {/* Non-rendering orchestration host. Visible pages are canvas-only;
@@ -1621,6 +1705,25 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 displayList={canvasDisplayList}
                 displayListQueries={displayListQueries}
                 directProjection={residentCaretAuthoritative}
+                sidebarOpen={commentsSidebarOpen}
+                zoom={zoom}
+              />
+            )}
+
+          {canvasOverlayTarget &&
+            canvasDisplayList &&
+            displayListQueries &&
+            collaboration?.presence &&
+            yrsCore.session && (
+              <RemotePresenceOverlay
+                presence={collaboration.presence}
+                session={yrsCore.session}
+                locToDisplayPosition={yrsLocToDisplayPosition}
+                overlayTarget={canvasOverlayTarget}
+                canvasHostRef={interactionPageHostRef}
+                displayListQueries={displayListQueries}
+                displayListIdentity={canvasDisplayList}
+                displayListFrameEpoch={displayListFrameEpoch}
                 sidebarOpen={commentsSidebarOpen}
                 zoom={zoom}
               />

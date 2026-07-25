@@ -15,6 +15,7 @@ pub struct Session {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SheetInfo {
+    sheet_ids: Vec<String>,
     sheet_names: Vec<String>,
     active_sheet: u32,
     content_width: f32,
@@ -565,6 +566,7 @@ impl Session {
         self.workbook
             .sheet_info()
             .map(|info| SheetInfo {
+                sheet_ids: info.sheet_ids,
                 sheet_names: info.sheet_names,
                 active_sheet: info.active_sheet.0,
                 content_width: info.content_width,
@@ -706,6 +708,7 @@ mod tests {
         assert!(display.contains("Hello"));
 
         let info = session.sheet_info_json().unwrap();
+        assert!(info.contains(r#""sheetIds":["sheet:0","sheet:1"]"#));
         assert!(info.contains(r#""sheetNames":["Data","Empty"]"#));
         assert!(info.contains(r#""activeSheet":0"#));
         assert_eq!(
@@ -1118,7 +1121,9 @@ mod tests {
         assert!(
             left.apply_update_json(&right_update, None)
                 .unwrap()
-                .contains(r#""sheetInfo":{"sheetNames":["Data","Empty"]"#)
+                .contains(
+                    r#""sheetInfo":{"sheetIds":["sheet:0","sheet:1"],"sheetNames":["Data","Empty"]"#
+                )
         );
         right.apply_update_json(&left_update, None).unwrap();
 

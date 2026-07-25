@@ -26,9 +26,7 @@
       "@betteroffice/docx/mcp": ["../docx/src/mcp/index.ts"],
       "@betteroffice/docx/plugin-api/*": ["../docx/src/plugin-api/*"],
       "@betteroffice/docx/*": ["../docx/src/*"],
-      "@betteroffice/docx-i18n": ["../docx-i18n/src/index.ts"],
-      "@betteroffice/drawingml": ["../drawingml/src/index.ts"],
-      "@betteroffice/drawingml/units": ["../drawingml/src/units.ts"]
+      "@betteroffice/docx-i18n": ["../docx-i18n/src/index.ts"]
     }
   },
   "include": ["src"],

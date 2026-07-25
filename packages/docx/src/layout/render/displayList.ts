@@ -5,6 +5,8 @@
 // space as Layout. v0 carries shaped-by-browser text runs (string + CSS font);
 // phase 2 (docx-text) adds glyph-run primitives without breaking consumers.
 
+import type { DrawingScene, ShapeTextBodyProperties } from '../drawing';
+
 export interface DisplayList {
   /** Contract version. Undefined reads as legacy version 0. */
   contractVersion?: number;
@@ -272,6 +274,8 @@ export interface DocAttrs {
   // fragment node). The mirror stamps them on the paragraph wrapper.
   fromLine?: number;
   toLine?: number;
+  /** Resolved line index within the owning paragraph. */
+  lineIndex?: number;
   /**
    * Table cell the primitive paints inside, when any. The a11y mirror builds
    * real ARIA table semantics (role table/row/cell, aria-row/colindex) from
@@ -678,9 +682,9 @@ export interface ShapePrimitive extends DocAttrs {
   /** Effect extents in page px. Undefined = zero. */
   effectExtent?: { top?: number; right?: number; bottom?: number; left?: number };
   /** Versioned heterogeneous DrawingML group/canvas scene. */
-  drawingScene?: import('../../types/content/shape').DrawingScene;
+  drawingScene?: DrawingScene;
   /** Full DrawingML `a:bodyPr` projection for shape text. */
-  textBodyProperties?: import('../../types/content/shape').ShapeTextBodyProperties;
+  textBodyProperties?: ShapeTextBodyProperties;
 }
 
 export interface DecorationPrimitive extends DocAttrs {

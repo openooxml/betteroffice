@@ -5,6 +5,7 @@ import {
   findShape,
   findTopLevelShape,
   frameBoundsForShape,
+  indexShapes,
   movedShapePosition,
   passedDragThreshold,
   slidePoint,
@@ -94,6 +95,11 @@ describe('pptx interactions', () => {
     expect(findShape(deck.slides[0].shapes, 'child')?.id).toBe('child');
     expect(findTopLevelShape(deck.slides[0], 'child')?.id).toBe('group');
     expect(findTopLevelShape(deck.slides[0], 'missing')).toBeNull();
+    expect([...indexShapes(deck.slides[0].shapes).keys()].sort()).toEqual([
+      'child',
+      'group',
+      'picture',
+    ]);
   });
 
   it('only moves shapes with a local transform', () => {

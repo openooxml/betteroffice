@@ -1,13 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { parseDocx } from "../../../packages/docx/src/docx/index.ts";
-import {
-  createYrsSession,
-  documentToYrs,
-} from "../../../packages/docx/src/yrs/index.ts";
+import { createYrsSession } from "../../../packages/docx/src/yrs/index.ts";
 import { preloadEditWasm } from "../../../packages/docx/src/wasm/edit.ts";
-import { preloadOpcWasm } from "../../../packages/docx/src/wasm/opc.ts";
-import { preloadParseWasm } from "../../../packages/docx/src/wasm/parse.ts";
 import {
   initWasm as initXlsxWasm,
   openWorkbook,
@@ -30,39 +24,20 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
 
 await mkdir(seeds, { recursive: true });
 
-await Promise.all([
-  preloadOpcWasm(
-    await readFile(
-      resolve(
-        root,
-        "packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm",
-      ),
+await preloadEditWasm(
+  await readFile(
+    resolve(
+      root,
+      "packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm",
     ),
   ),
-  preloadParseWasm(
-    await readFile(
-      resolve(
-        root,
-        "packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm",
-      ),
-    ),
-  ),
-  preloadEditWasm(
-    await readFile(
-      resolve(
-        root,
-        "packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm",
-      ),
-    ),
-  ),
-]);
+);
 
 const docxBytes = new Uint8Array(
   await readFile(resolve(demo, "public/betteroffice-demo.docx")),
 );
-const document = await parseDocx(docxBytes);
 const docxSession = await createYrsSession({ clientId: 1 });
-documentToYrs(docxSession, document);
+docxSession.seedFromDocx(docxBytes);
 const docxSeed = docxSession.encodeState();
 const docxStateVector = docxSession.encodeStateVector();
 docxSession.destroy();

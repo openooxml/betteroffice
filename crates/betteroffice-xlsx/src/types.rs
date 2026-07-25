@@ -44,6 +44,7 @@ pub struct CellEdit {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetInfo {
+    pub sheet_ids: Vec<String>,
     pub sheet_names: Vec<String>,
     pub active_sheet: SheetId,
     pub content_width: f32,
