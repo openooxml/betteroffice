@@ -7,9 +7,17 @@ const AUTH_PERMISSION_DENIED = 0;
 const MAX_MESSAGES_PER_FRAME = 4096;
 const MAX_VAR_UINT = Number.MAX_SAFE_INTEGER;
 
+/** `document` frames carry state worth retaining, `transient` ones do not. */
+export type FrameKind = "document" | "transient" | "auth" | "invalid";
+
 interface DocumentMessage {
   subtype: number;
   payload: Uint8Array;
+}
+
+interface DecodedFrame {
+  documents: DocumentMessage[];
+  hasAuth: boolean;
 }
 
 class FrameDecoder {
@@ -79,12 +87,11 @@ function encodeFrame(parts: readonly Uint8Array[]): Uint8Array {
   return frame;
 }
 
-function decodeDocumentMessages(
-  frame: Uint8Array,
-): DocumentMessage[] | null {
+function decodeFrame(frame: Uint8Array): DecodedFrame | null {
   if (frame.byteLength === 0) return null;
   const decoder = new FrameDecoder(frame);
   const documents: DocumentMessage[] = [];
+  let hasAuth = false;
   let messageCount = 0;
 
   while (!decoder.done) {
@@ -116,12 +123,20 @@ function decodeDocumentMessages(
       ) {
         return null;
       }
+      hasAuth = true;
     } else if (type !== TOP_LEVEL_QUERY_AWARENESS) {
       return null;
     }
   }
 
-  return documents;
+  return { documents, hasAuth };
+}
+
+export function classifyFrame(frame: Uint8Array): FrameKind {
+  const decoded = decodeFrame(frame);
+  if (!decoded) return "invalid";
+  if (decoded.hasAuth) return "auth";
+  return decoded.documents.length > 0 ? "document" : "transient";
 }
 
 function isValidUtf8(bytes: Uint8Array): boolean {
@@ -134,11 +149,11 @@ function isValidUtf8(bytes: Uint8Array): boolean {
 }
 
 function retainDocumentMessages(frame: Uint8Array): Uint8Array | null {
-  const documents = decodeDocumentMessages(frame);
-  if (!documents || documents.length === 0) return null;
+  const decoded = decodeFrame(frame);
+  if (!decoded || decoded.hasAuth || decoded.documents.length === 0) return null;
 
   const parts: Uint8Array[] = [];
-  for (const document of documents) {
+  for (const document of decoded.documents) {
     parts.push(
       encodeVarUint(TOP_LEVEL_SYNC),
       encodeVarUint(document.subtype),
@@ -152,11 +167,6 @@ function retainDocumentMessages(frame: Uint8Array): Uint8Array | null {
 function bytesEqual(first: Uint8Array, second: Uint8Array): boolean {
   if (first.byteLength !== second.byteLength) return false;
   return first.every((byte, index) => byte === second[index]);
-}
-
-export function isDocumentFrame(frame: Uint8Array): boolean {
-  const retained = retainDocumentMessages(frame);
-  return retained !== null && bytesEqual(retained, frame);
 }
 
 export class RetainedUpdateLog {

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { RetainedUpdateLog } from "./retention";
+import { classifyFrame, RetainedUpdateLog } from "./retention";
 
 interface Env {
   ROOMS: DurableObjectNamespace<CollaborationRoom>;
@@ -68,7 +68,17 @@ export class CollaborationRoom extends DurableObject<Env> {
       return;
     }
 
-    if (this.updates.retain(bytes)) this.persistUpdates();
+    const kind = classifyFrame(bytes);
+    if (kind === "invalid") {
+      socket.close(1002, "Malformed collaboration frame");
+      return;
+    }
+    if (kind === "auth") {
+      socket.close(1008, "Auth messages are server-only");
+      return;
+    }
+
+    if (kind === "document" && this.updates.retain(bytes)) this.persistUpdates();
     for (const peer of this.ctx.getWebSockets()) {
       if (peer !== socket) peer.send(bytes.slice());
     }

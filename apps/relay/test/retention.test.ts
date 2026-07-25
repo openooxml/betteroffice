@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { decodeMessages } from "../../../packages/docx/src/collaboration/protocol";
-import { RetainedUpdateLog, isDocumentFrame } from "../src/retention";
+import { RetainedUpdateLog, classifyFrame } from "../src/retention";
 
 function encodeVarUint(value: number): Uint8Array {
   const bytes: number[] = [];
@@ -39,6 +39,15 @@ function awarenessFrame(payload: Uint8Array): Uint8Array {
     encodeVarUint(1),
     encodeVarUint(payload.byteLength),
     payload,
+  );
+}
+
+function authFrame(reason: Uint8Array): Uint8Array {
+  return frame(
+    encodeVarUint(2),
+    encodeVarUint(0),
+    encodeVarUint(reason.byteLength),
+    reason,
   );
 }
 
@@ -135,6 +144,17 @@ describe("RetainedUpdateLog", () => {
     expect(log.snapshot()).toEqual([]);
   });
 
+  test("does not retain frames carrying an auth message", () => {
+    const log = new RetainedUpdateLog(512, 1024);
+    const mixed = frame(
+      syncFrame(2, Uint8Array.of(24)),
+      authFrame(Uint8Array.of(105)),
+    );
+
+    expect(log.retain(mixed)).toBe(false);
+    expect(log.snapshot()).toEqual([]);
+  });
+
   test("normalizes mixed stored frames and removes invalid entries", () => {
     const document = syncFrame(0, Uint8Array.of(22));
     const awareness = awarenessFrame(Uint8Array.of(23));
@@ -148,18 +168,35 @@ describe("RetainedUpdateLog", () => {
   });
 });
 
-describe("isDocumentFrame", () => {
-  test("accepts only complete, canonical sync messages", () => {
+describe("classifyFrame", () => {
+  test("reports frames carrying document state as document", () => {
     const document = syncFrame(2, Uint8Array.of(1));
-    expect(isDocumentFrame(document)).toBe(true);
+    expect(classifyFrame(document)).toBe("document");
     expect(
-      isDocumentFrame(frame(document, awarenessFrame(Uint8Array.of(2)))),
-    ).toBe(false);
-    expect(isDocumentFrame(new Uint8Array())).toBe(false);
-    expect(isDocumentFrame(Uint8Array.of(0))).toBe(false);
-    expect(isDocumentFrame(Uint8Array.of(0x80))).toBe(false);
-    expect(isDocumentFrame(Uint8Array.of(0x80, 0))).toBe(false);
-    expect(isDocumentFrame(Uint8Array.of(0, 3, 0))).toBe(false);
-    expect(isDocumentFrame(encodeVarUint(128))).toBe(false);
+      classifyFrame(frame(document, awarenessFrame(Uint8Array.of(2)))),
+    ).toBe("document");
+  });
+
+  test("reports valid but unretained frames as transient", () => {
+    expect(classifyFrame(awarenessFrame(Uint8Array.of(2)))).toBe("transient");
+    expect(classifyFrame(encodeVarUint(3))).toBe("transient");
+  });
+
+  test("reports auth-bearing frames as auth even alongside sync", () => {
+    const denial = authFrame(Uint8Array.of(104, 105));
+    expect(classifyFrame(denial)).toBe("auth");
+    expect(classifyFrame(frame(syncFrame(2, Uint8Array.of(1)), denial))).toBe(
+      "auth",
+    );
+  });
+
+  test("reports truncated or unknown frames as invalid", () => {
+    expect(classifyFrame(new Uint8Array())).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0))).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0x80))).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0x80, 0))).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0, 3, 0))).toBe("invalid");
+    expect(classifyFrame(encodeVarUint(128))).toBe("invalid");
+    expect(classifyFrame(authFrame(Uint8Array.of(0xff)))).toBe("invalid");
   });
 });

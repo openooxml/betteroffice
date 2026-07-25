@@ -89,7 +89,7 @@ describe("CollaborationRoom.webSocketMessage", () => {
     ]);
   });
 
-  test("broadcasts malformed bytes without throwing or persisting", async () => {
+  test("closes only the sender on a malformed frame and broadcasts nothing", async () => {
     const document = Uint8Array.of(0, 2, 1, 13);
     const malformed = frame(document, Uint8Array.of(1, 2, 14));
     const harness = createRoom();
@@ -102,10 +102,44 @@ describe("CollaborationRoom.webSocketMessage", () => {
       ),
     ).not.toThrow();
 
-    expect(harness.peer.send).toHaveBeenCalledTimes(1);
-    expect(harness.peer.send.mock.calls[0][0]).toEqual(malformed);
-    expect(harness.sender.send).not.toHaveBeenCalled();
+    expect(harness.sender.close).toHaveBeenCalledTimes(1);
+    expect(harness.sender.close.mock.calls[0][0]).toBe(1002);
+    expect(harness.peer.send).not.toHaveBeenCalled();
+    expect(harness.peer.close).not.toHaveBeenCalled();
     expect(harness.pending).toEqual([]);
+    expect(harness.storageWrites).toEqual([]);
+  });
+
+  test("closes only the sender on a client-origin auth denial", async () => {
+    const auth = Uint8Array.of(2, 0, 2, 104, 105);
+    const harness = createRoom();
+    await harness.initialization;
+
+    harness.room.webSocketMessage(
+      harness.sender as never,
+      auth.buffer as ArrayBuffer,
+    );
+
+    expect(harness.sender.close).toHaveBeenCalledTimes(1);
+    expect(harness.sender.close.mock.calls[0][0]).toBe(1008);
+    expect(harness.peer.send).not.toHaveBeenCalled();
+    expect(harness.peer.close).not.toHaveBeenCalled();
+    expect(harness.storageWrites).toEqual([]);
+  });
+
+  test("broadcasts awareness-only frames without retaining them", async () => {
+    const awareness = Uint8Array.of(1, 1, 12);
+    const harness = createRoom();
+    await harness.initialization;
+
+    harness.room.webSocketMessage(
+      harness.sender as never,
+      awareness.buffer as ArrayBuffer,
+    );
+
+    expect(harness.sender.close).not.toHaveBeenCalled();
+    expect(harness.peer.send).toHaveBeenCalledTimes(1);
+    expect(harness.peer.send.mock.calls[0][0]).toEqual(awareness);
     expect(harness.storageWrites).toEqual([]);
   });
 });
