@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook};
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_hyperlink_location,
-    rename_sheet_references,
+    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_defined_names,
+    rename_hyperlink_location, rename_sheet_references,
 };
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
@@ -185,6 +185,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         Op::AddSheet { index, name } => {
             let idx = (*index).min(wb.sheets.len());
             wb.sheets.insert(idx, Sheet::new(name.clone()));
+            shift_defined_name_scopes(wb, idx);
             Ok(InvertedOp(vec![Op::RemoveSheet { index: idx }]))
         }
         Op::RemoveSheet { index } => remove_sheet(wb, *index),
@@ -196,6 +197,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 .clone();
             let formulas = rename_sheet_references(wb, &old, name)?;
             let hyperlinks = rename_hyperlink_locations(wb, &old, name);
+            let defined_names = rename_defined_names(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
@@ -203,6 +205,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 formulas,
             }];
             inverse.extend(hyperlinks);
+            inverse.extend(defined_names);
             Ok(InvertedOp(inverse))
         }
         Op::RestoreSheet {
@@ -226,14 +229,23 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                     .unwrap_or_default();
                 old_formulas.push((*formula_sheet, *cell, state));
             }
+            let defined_names = rename_defined_names(wb, &old_name, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             for (formula_sheet, cell, state) in formulas {
                 sheet_mut(wb, *formula_sheet)?.set_cell(*cell, state.clone().into());
             }
-            Ok(InvertedOp(vec![Op::RestoreSheet {
+            let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
                 name: old_name,
                 formulas: old_formulas,
+            }];
+            inverse.extend(defined_names);
+            Ok(InvertedOp(inverse))
+        }
+        Op::SetDefinedNames { defined_names } => {
+            let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());
+            Ok(InvertedOp(vec![Op::SetDefinedNames {
+                defined_names: previous,
             }]))
         }
         Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
@@ -672,6 +684,7 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         return Err(OpError::SheetIndexOutOfRange(index));
     }
     let removed = wb.sheets.remove(index);
+    let previous_defined_names = drop_defined_name_scopes(wb, index);
     let sheet = SheetId(index as u32);
     let mut inv = vec![Op::AddSheet {
         index,
@@ -716,7 +729,37 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             hyperlinks: removed.hyperlinks,
         });
     }
+    if let Some(defined_names) = previous_defined_names {
+        inv.push(Op::SetDefinedNames { defined_names });
+    }
     Ok(InvertedOp(inv))
+}
+
+/// Widens sheet scopes at or after an inserted sheet.
+fn shift_defined_name_scopes(wb: &mut Workbook, index: usize) {
+    for defined in &mut wb.defined_names {
+        if let Some(sheet) = defined.local_sheet
+            && sheet.0 as usize >= index
+        {
+            defined.local_sheet = Some(SheetId(sheet.0 + 1));
+        }
+    }
+}
+
+/// Drops names scoped to a removed sheet and narrows the scopes above it,
+/// returning the prior list when it changed.
+fn drop_defined_name_scopes(wb: &mut Workbook, index: usize) -> Option<Vec<DefinedName>> {
+    let previous = wb.defined_names.clone();
+    wb.defined_names
+        .retain(|defined| defined.local_sheet.map(|sheet| sheet.0 as usize) != Some(index));
+    for defined in &mut wb.defined_names {
+        if let Some(sheet) = defined.local_sheet
+            && sheet.0 as usize > index
+        {
+            defined.local_sheet = Some(SheetId(sheet.0 - 1));
+        }
+    }
+    (previous != wb.defined_names).then_some(previous)
 }
 
 fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {

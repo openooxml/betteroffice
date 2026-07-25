@@ -1933,7 +1933,8 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         Op::AddSheet { .. }
         | Op::RemoveSheet { .. }
         | Op::RenameSheet { .. }
-        | Op::RestoreSheet { .. } => None,
+        | Op::RestoreSheet { .. }
+        | Op::SetDefinedNames { .. } => None,
     }
 }
 
@@ -2038,7 +2039,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RenameSheet { sheet, .. } => {
             require_sheet(model, *sheet)?;
         }
-        Op::RestoreSheet { .. } => {
+        Op::RestoreSheet { .. } | Op::SetDefinedNames { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));

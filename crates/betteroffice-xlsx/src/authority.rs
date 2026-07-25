@@ -301,6 +301,7 @@ impl WorkbookAuthority {
                 ))
             })?;
         }
+        self.base.defined_names = model.defined_names.clone();
         self.sync_model(&model, ops, origin)
             .map_err(AuthorityError::InvalidState)?;
         let update = self.doc.transact().encode_diff_v1(&state_vector);
@@ -1077,6 +1078,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
+            | Op::SetDefinedNames { .. }
     )
 }
 
@@ -1876,6 +1878,7 @@ fn targeted_sheet_keys(
                 tokens.remove(*index);
                 targets.push(None);
             }
+            Op::SetDefinedNames { .. } => targets.push(None),
             op => {
                 let sheet = op_sheet(op)
                     .ok_or_else(|| "operation has no sheet target".to_string())?
@@ -1932,7 +1935,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::ApplyRangeFormat { sheet, .. }
         | Op::RenameSheet { sheet, .. }
         | Op::RestoreSheet { sheet, .. } => Some(*sheet),
-        Op::AddSheet { .. } | Op::RemoveSheet { .. } => None,
+        Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::SetDefinedNames { .. } => None,
     }
 }
 

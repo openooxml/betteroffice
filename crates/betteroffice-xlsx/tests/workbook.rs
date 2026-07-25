@@ -248,6 +248,20 @@ fn strict_prefixed_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+fn defined_names_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Middle"));
+    model.sheets.push(Sheet::new("Tail"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Middle" sheetId="2" r:id="rId2"/><sheet name="Tail" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="GlobalData">Data!$A$1</definedName><definedName name="AmbiguousData">Data</definedName><definedName name="GlobalMiddle">Middle!$A$1</definedName><definedName name="LocalData" localSheetId="0">Data!$A$1</definedName><definedName name="LocalMiddle" localSheetId="1">Middle!$A$1</definedName><definedName name="LocalTail" localSheetId="2">Tail!$A$1</definedName><definedName name="Unrelated">42</definedName></definedNames></workbook>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
     parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
 }
@@ -3223,4 +3237,104 @@ fn no_edit_round_trip_keeps_calculation_chain_and_source_parts() {
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
     assert_eq!(after, before);
     assert!(package_map(&saved).contains_key("xl/calcChain.xml"));
+}
+
+#[test]
+fn defined_names_follow_renames_and_drop_ambiguous_references() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Renamed Sheet".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = package_map(&workbook.save().unwrap());
+    let workbook_xml = String::from_utf8(saved["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains("&apos;Renamed Sheet&apos;!$A$1"));
+    assert!(!workbook_xml.contains(r#"name="AmbiguousData""#));
+    assert!(workbook_xml.contains(r#"name="Unrelated">42</definedName>"#));
+}
+
+#[test]
+fn scoped_defined_names_remap_indices_and_drop_deleted_scopes() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 0,
+                name: "Fresh".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let workbook_xml = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
+    assert!(!workbook_xml.contains(r#"name="LocalMiddle""#));
+    assert!(workbook_xml.contains(r#"name="LocalData" localSheetId="1""#));
+    assert!(workbook_xml.contains(r#"name="LocalTail" localSheetId="2""#));
+    Workbook::open(&saved).unwrap();
+}
+
+#[test]
+fn undo_restores_defined_names_dropped_by_a_sheet_removal() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook.model().defined_names.clone();
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        !workbook
+            .model()
+            .defined_names
+            .iter()
+            .any(|defined| defined.name == "LocalMiddle")
+    );
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
+/// v1 leaves preserved sheet fragments at their original geometry after an
+/// axis edit; the file must still open, even though the ranges have drifted.
+#[test]
+fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
+    let original = preservation_fixture();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after = package_map(&saved);
+    let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(worksheet.contains(r#"<autoFilter ref="A1:B2""#));
+    assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
+    assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
+    assert_eq!(
+        after["xl/drawings/drawing1.xml"],
+        before["xl/drawings/drawing1.xml"]
+    );
+    Workbook::open(&saved).unwrap();
 }

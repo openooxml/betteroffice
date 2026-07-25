@@ -13,7 +13,7 @@ use xlsx_model::{Cell, CellRef, CellValue, DateSystem, Sheet, Workbook};
 use crate::ParseError;
 use crate::package::{
     ContentTypeEntry, PartReference, PreservedPackage, Relationship, XmlAttribute, XmlTemplate,
-    relationship_part_path, remove_attribute, set_attribute,
+    attributes_from_fragment, relationship_part_path, remove_attribute, set_attribute,
 };
 use crate::xml::xml_err;
 
@@ -1123,14 +1123,89 @@ fn workbook_xml_with_template(
             .child("calcPr")
             .map(|child| child.bytes.clone())
     };
-    package.workbook_template.render(
-        vec![
-            ("workbookPr", workbook_pr),
-            ("sheets", sheets_fragment),
-            ("calcPr", calc_pr),
-        ],
-        workbook_child_rank,
-    )
+    let mut replacements = vec![
+        ("workbookPr", workbook_pr),
+        ("sheets", sheets_fragment),
+        ("calcPr", calc_pr),
+    ];
+    if let Some(child) = package.workbook_template.child("definedNames") {
+        replacements.push((
+            "definedNames",
+            render_defined_names(&child.bytes, wb, package)?,
+        ));
+    }
+    package
+        .workbook_template
+        .render(replacements, workbook_child_rank)
+}
+
+/// Patches retained `definedName` elements from the model, which the sheet ops
+/// have already rescoped, rewritten or dropped. Source entries the model no
+/// longer carries are dropped; every other byte of the element survives.
+fn render_defined_names(
+    fragment: &[u8],
+    wb: &Workbook,
+    package: &PreservedPackage,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    if wb.defined_names == package.original_workbook.defined_names {
+        return Ok(Some(fragment.to_vec()));
+    }
+    let template = XmlTemplate::capture(fragment)?;
+    let sources = template.children_named("definedName").collect::<Vec<_>>();
+    if sources.len() != package.original_workbook.defined_names.len() {
+        return Ok(Some(fragment.to_vec()));
+    }
+    let mut current = wb.defined_names.iter().peekable();
+    let mut replacements = Vec::new();
+    for (source, original) in sources.iter().zip(&package.original_workbook.defined_names) {
+        let Some(defined) = current
+            .peek()
+            .filter(|defined| defined.name == original.name)
+        else {
+            continue;
+        };
+        let defined = *defined;
+        current.next();
+        if defined == original {
+            replacements.push(source.bytes.clone());
+            continue;
+        }
+        replacements.push(template.qualify_fragment(&patch_defined_name(&source.bytes, defined)?)?);
+    }
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(template.render_repeated(
+        "definedName",
+        &replacements,
+        &[],
+    )?))
+}
+
+fn patch_defined_name(
+    source: &[u8],
+    defined: &xlsx_model::DefinedName,
+) -> Result<Vec<u8>, ParseError> {
+    let mut attributes = attributes_from_fragment(source)?;
+    match defined.local_sheet {
+        Some(sheet) => set_attribute(
+            &mut attributes,
+            "localSheetId",
+            "localSheetId",
+            sheet.0.to_string(),
+        ),
+        None => remove_attribute(&mut attributes, "localSheetId"),
+    }
+    fragment(|writer| {
+        let mut element = BytesStart::new("definedName");
+        for attribute in &attributes {
+            element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        }
+        writer.write_event(Event::Start(element))?;
+        writer.write_event(Event::Text(BytesText::new(&defined.formula)))?;
+        writer.write_event(Event::End(BytesEnd::new("definedName")))?;
+        Ok(())
+    })
 }
 
 fn workbook_child_rank(name: &str) -> usize {
@@ -1260,6 +1335,8 @@ fn worksheet_xml_with_namespace(
     })
 }
 
+/// Preserved fragments (filters, validations, anchors, hyperlink ranges) keep
+/// their source geometry: valid XML, but stale after a row or column edit.
 fn worksheet_xml_with_template(
     sheet: &Sheet,
     wb: &Workbook,

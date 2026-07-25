@@ -250,6 +250,7 @@ pub(crate) struct XmlTemplate {
     pub(crate) children: Vec<XmlChild>,
     trailing: Vec<u8>,
     suffix: Vec<u8>,
+    root_name: String,
     root_prefix: Option<String>,
     root_namespace: Option<String>,
     namespaces: Vec<(Option<String>, String)>,
@@ -273,6 +274,7 @@ impl XmlTemplate {
         let mut depth = 0_usize;
         let mut root_start = None;
         let mut root_end = None;
+        let mut root_name = None;
         let mut root_prefix = None;
         let mut root_namespace = None;
         let mut namespaces = Vec::new();
@@ -290,6 +292,7 @@ impl XmlTemplate {
                         root_start = Some(after);
                         let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
                         root_prefix = name.rsplit_once(':').map(|(prefix, _)| prefix.to_owned());
+                        root_name = Some(name);
                         root_namespace = namespace.clone();
                         namespaces = namespace_bindings(&element)?;
                     } else if depth == 1 {
@@ -354,6 +357,8 @@ impl XmlTemplate {
             children,
             trailing: data[cursor..root_end].to_vec(),
             suffix: data[root_end..].to_vec(),
+            root_name: root_name
+                .ok_or_else(|| ParseError::Malformed("xml part has no root name".into()))?,
             root_prefix,
             root_namespace,
             namespaces,
@@ -436,6 +441,55 @@ impl XmlTemplate {
         Ok(output)
     }
 
+    /// Replaces every child with `local_name` by the supplied fragments, in
+    /// order, keeping surrounding children untouched.
+    pub(crate) fn render_repeated(
+        &self,
+        local_name: &str,
+        replacements: &[Vec<u8>],
+        root_attributes: &[(&str, String)],
+    ) -> Result<Vec<u8>, ParseError> {
+        let mut output = self.prefix_with_attributes(root_attributes)?;
+        let last_repeated = self
+            .children
+            .iter()
+            .rposition(|child| self.is_root_child_named(child, local_name));
+        let mut replacement_index = 0;
+        let mut emitted_without_source = false;
+
+        for (index, child) in self.children.iter().enumerate() {
+            output.extend_from_slice(&child.before);
+            if last_repeated.is_none() && !emitted_without_source {
+                for replacement in replacements {
+                    output.extend_from_slice(replacement);
+                }
+                replacement_index = replacements.len();
+                emitted_without_source = true;
+            }
+            if self.is_root_child_named(child, local_name) {
+                if let Some(replacement) = replacements.get(replacement_index) {
+                    output.extend_from_slice(replacement);
+                }
+                replacement_index += 1;
+            } else {
+                output.extend_from_slice(&child.bytes);
+            }
+            if Some(index) == last_repeated {
+                for replacement in &replacements[replacement_index.min(replacements.len())..] {
+                    output.extend_from_slice(replacement);
+                }
+                replacement_index = replacements.len();
+            }
+        }
+
+        output.extend_from_slice(&self.trailing);
+        for replacement in &replacements[replacement_index.min(replacements.len())..] {
+            output.extend_from_slice(replacement);
+        }
+        output.extend_from_slice(&self.suffix);
+        Ok(output)
+    }
+
     /// Rewrites unqualified fragment element names into the root's prefix.
     pub(crate) fn qualify_fragment(&self, fragment: &[u8]) -> Result<Vec<u8>, ParseError> {
         let Some(prefix) = &self.root_prefix else {
@@ -500,6 +554,50 @@ impl XmlTemplate {
         self.children
             .iter()
             .find(|child| self.is_root_child_named(child, local_name))
+    }
+
+    pub(crate) fn children_named<'a>(
+        &'a self,
+        local_name: &'a str,
+    ) -> impl Iterator<Item = &'a XmlChild> {
+        self.children
+            .iter()
+            .filter(move |child| self.is_root_child_named(child, local_name))
+    }
+
+    fn prefix_with_attributes(&self, changes: &[(&str, String)]) -> Result<Vec<u8>, ParseError> {
+        if changes.is_empty() {
+            return Ok(self.prefix.clone());
+        }
+        let mut reader = Reader::from_reader(self.prefix.as_slice());
+        loop {
+            let before = reader.buffer_position() as usize;
+            match reader.read_event().map_err(xml_err)? {
+                Event::Start(element) => {
+                    let after = reader.buffer_position() as usize;
+                    let mut attributes = attributes(&element)?;
+                    for (name, value) in changes {
+                        set_attribute(&mut attributes, name, name, value.clone());
+                    }
+                    let mut root = BytesStart::new(self.root_name.as_str());
+                    for attribute in &attributes {
+                        root.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+                    }
+                    let mut writer = Writer::new(Vec::new());
+                    writer.write_event(Event::Start(root)).map_err(xml_err)?;
+                    let mut output = self.prefix[..before].to_vec();
+                    output.extend_from_slice(&writer.into_inner());
+                    output.extend_from_slice(&self.prefix[after..]);
+                    return Ok(output);
+                }
+                Event::Eof => {
+                    return Err(ParseError::Malformed(
+                        "xml template root start is missing".to_owned(),
+                    ));
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn is_root_child_named(&self, child: &XmlChild, local_name: &str) -> bool {
@@ -719,7 +817,7 @@ fn attributes(element: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, ParseError>
         .collect()
 }
 
-fn attributes_from_fragment(fragment: &[u8]) -> Result<Vec<XmlAttribute>, ParseError> {
+pub(crate) fn attributes_from_fragment(fragment: &[u8]) -> Result<Vec<XmlAttribute>, ParseError> {
     let mut reader = Reader::from_reader(fragment);
     loop {
         match reader.read_event().map_err(xml_err)? {

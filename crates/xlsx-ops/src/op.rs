@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColId, FreezePane, Hyperlink, RowId, SheetId,
+    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, FreezePane, Hyperlink, RowId, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -132,6 +132,11 @@ pub enum Op {
     RenameSheet {
         sheet: SheetId,
         name: String,
+    },
+    /// Absolute replacement emitted as the inverse of structural sheet ops.
+    #[doc(hidden)]
+    SetDefinedNames {
+        defined_names: Vec<DefinedName>,
     },
     #[doc(hidden)]
     RestoreSheet {

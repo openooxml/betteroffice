@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
-use xlsx_model::{CellRange, CellRef, ErrorValue, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, DefinedName, ErrorValue, SheetId, Workbook};
 
 use crate::apply::OpError;
 use crate::apply::remap_ref;
@@ -279,6 +279,92 @@ pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str)
     }
     output.push_str(&source[copied_until..]);
     output
+}
+
+/// Rewrites defined names through a sheet rename, dropping any whose formula
+/// mentions the old name without a `!` because the intent cannot be resolved.
+/// Returns the inverse op when the list changed.
+pub(crate) fn rename_defined_names(
+    wb: &mut Workbook,
+    old_name: &str,
+    new_name: &str,
+) -> Option<Op> {
+    if old_name == new_name || wb.defined_names.is_empty() {
+        return None;
+    }
+    let previous = wb.defined_names.clone();
+    let mut rewritten: Vec<DefinedName> = Vec::with_capacity(previous.len());
+    for defined in &previous {
+        if mentions_sheet_ambiguously(&defined.formula, old_name) {
+            continue;
+        }
+        let mut defined = defined.clone();
+        defined.formula = rename_formula_sheet(&defined.formula, old_name, new_name);
+        rewritten.push(defined);
+    }
+    if rewritten == previous {
+        return None;
+    }
+    wb.defined_names = rewritten;
+    Some(Op::SetDefinedNames {
+        defined_names: previous,
+    })
+}
+
+/// True when the old sheet name appears as a bare token that is neither a
+/// sheet reference nor safely unrelated.
+fn mentions_sheet_ambiguously(source: &str, old_name: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut bracket_depth = 0_u32;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = skip_string(source, index);
+            continue;
+        }
+        if bytes[index] == b'[' {
+            bracket_depth = bracket_depth.saturating_add(1);
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b']' {
+            bracket_depth = bracket_depth.saturating_sub(1);
+            index += 1;
+            continue;
+        }
+        if bracket_depth != 0 {
+            index += next_char_len(source, index);
+            continue;
+        }
+        let Some(first) = parse_sheet_token(source, index) else {
+            index += next_char_len(source, index);
+            continue;
+        };
+        if bytes.get(first.end) == Some(&b'!') {
+            index = first.end + 1;
+            continue;
+        }
+        if bytes.get(first.end) == Some(&b':')
+            && let Some(second) = parse_sheet_token(source, first.end + 1)
+            && bytes.get(second.end) == Some(&b'!')
+        {
+            index = second.end + 1;
+            continue;
+        }
+        if sheet_names_equal(&first.name, old_name) {
+            return true;
+        }
+        index = first.end;
+    }
+    false
+}
+
+fn next_char_len(source: &str, index: usize) -> usize {
+    source[index..]
+        .chars()
+        .next()
+        .map(char::len_utf8)
+        .unwrap_or(1)
 }
 
 struct ParsedSheetToken {
