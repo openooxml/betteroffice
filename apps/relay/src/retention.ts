@@ -218,6 +218,11 @@ export class RetainedUpdateLog {
     return this.updates.map((update) => update.slice());
   }
 
+  clear(): void {
+    this.updates = [];
+    this.retainedBytes = 0;
+  }
+
   private trim(): boolean {
     let changed = false;
     while (
