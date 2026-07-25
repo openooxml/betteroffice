@@ -225,6 +225,9 @@ pub struct DocAttrs {
     pub from_line: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_line: Option<u64>,
+    /// Resolved line index within the owning paragraph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_index: Option<u64>,
     /// table cell the primitive paints inside (0-based grid coordinates)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cell: Option<TableCellRef>,
@@ -4045,9 +4048,7 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     }
 }
 
-/// Exact body content/column boxes for interaction queries. This mirrors
-/// `calculateColumnGeometry` in the transitional TypeScript paginator so the
-/// metadata is identical whether the supplied Layout came from TS or Rust.
+/// Exact body content/column boxes for interaction queries.
 fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     let content_width = (page.size.w - page.margins.left - page.margins.right).max(0.0);
     let content_height = (page.size.h - page.margins.top - page.margins.bottom).max(0.0);
@@ -5282,6 +5283,7 @@ pub(crate) fn emit_paragraph_fragment(
 
         let is_first_line = idx == 0 && !carried_from_prev;
         let is_last_line = idx + 1 == total_lines;
+        let line_stamp_from = prims.len();
 
         last_line = emit_line(
             prims,
@@ -5306,6 +5308,11 @@ pub(crate) fn emit_paragraph_fragment(
             &block_ref,
             ctx,
         );
+        for primitive in &mut prims[line_stamp_from..] {
+            if let Some(attrs) = doc_attrs_mut(primitive) {
+                attrs.line_index = Some(idx as u64);
+            }
+        }
 
         line_top += line.line_height;
     }

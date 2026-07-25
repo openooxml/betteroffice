@@ -1,9 +1,9 @@
 //! Document-story table models and incumbent-compatible property leaves.
 //!
 //! The similarly named helpers in `formatting` intentionally parse table
-//! properties inside style definitions. The live TypeScript parser has a
-//! separate document-table path with different malformed/default handling;
-//! S7 mirrors that path here.
+//! properties inside style definitions. Document tables take a
+//! separate path with different malformed/default handling; S7 covers it
+//! here.
 
 use serde::{Deserialize, Serialize};
 

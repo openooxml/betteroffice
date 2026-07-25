@@ -48,6 +48,11 @@ import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from 
 /** Query surface implemented by the editing wasm over its resident list. */
 export interface ResidentDisplayListQueryEngine {
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
+  displayVerticalMoveJson(
+    position: number,
+    direction: 'up' | 'down',
+    goalX: number
+  ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
@@ -70,6 +75,11 @@ export interface DisplayListRegionHit {
   region: DisplayListHitRegion;
   rId?: string;
   pos: number | null;
+}
+
+export interface DisplayListVerticalMove {
+  position: number;
+  goalX: number;
 }
 
 /** one highlight rectangle of a PM range, page-local px */
@@ -150,6 +160,11 @@ export interface DisplayListQueries {
   ): DisplayListImageGeometry | null;
   /** region-aware point → doc position (page-local coordinates) */
   hitTestRegions(pageIndex: number, x: number, y: number): DisplayListRegionHit | null;
+  verticalMove(
+    position: number,
+    direction: 'up' | 'down',
+    goalX?: number
+  ): DisplayListVerticalMove | null;
   /** body PM range → highlight rects */
   rangeRects(from: number, to: number): DisplayListRect[];
   /**
@@ -253,6 +268,39 @@ interface FacadeDeltaSeed {
 
 const facadeDeltaSeeds = new WeakMap<DisplayListQueries, FacadeDeltaSeed>();
 
+type DisplayListQuerySource = RustDisplayListQueryEngine | ResidentDisplayListQueryEngine;
+
+/**
+ * Engines whose wasm instance trapped. A trap aborts without running
+ * destructors, so a `RefCell` guard held across the query leaks and every
+ * later call into that instance fails — the instance must be rebuilt, and
+ * until then nothing may query it.
+ */
+const deadSources = new WeakSet<DisplayListQuerySource>();
+const sourceFailureListeners = new Set<(error: Error) => void>();
+
+/** True once a query trapped in this engine's wasm instance. */
+export function isDisplayListQuerySourceDead(
+  engine: DisplayListQuerySource | null | undefined
+): boolean {
+  return engine !== null && engine !== undefined && deadSources.has(engine);
+}
+
+/** Subscribe to wasm traps so the host can rebuild the dead session. */
+export function onDisplayListQuerySourceFailure(listener: (error: Error) => void): () => void {
+  sourceFailureListeners.add(listener);
+  return () => {
+    sourceFailureListeners.delete(listener);
+  };
+}
+
+/** A trap (panic) rather than a returned `Err`, which arrives as a string. */
+function isWasmTrap(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (typeof WebAssembly !== 'undefined' && error instanceof WebAssembly.RuntimeError) return true;
+  return error.name === 'RuntimeError';
+}
+
 /**
  * Page-delta between two display lists, exploiting the retained-frame
  * invariant that unchanged pages keep object identity across builds. A page
@@ -326,6 +374,8 @@ export function createDisplayListQueries(
   let handleAttempted = false;
   let superseded = false;
   let disposed = false;
+  // lets dispose() cancel the finalizer below so a handle is never double-closed
+  const finalizerToken = {};
 
   // The adoption donor: `previous` when it holds the handle, otherwise the
   // donor `previous` itself recorded — pre-collapsed to one hop so a typing
@@ -341,7 +391,44 @@ export function createDisplayListQueries(
     }
   }
 
+  const source = (): DisplayListQuerySource | null => resident ?? eng;
+
+  const isDead = (): boolean => {
+    const current = source();
+    return current !== null && deadSources.has(current);
+  };
+
+  /**
+   * A trap poisons the whole wasm instance, so record it, stop querying, and
+   * tell the host to rebuild. The leaked handle is abandoned rather than
+   * closed — closing would re-enter the dead instance.
+   */
+  const killSource = (label: string, error: unknown): void => {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    sourceError = failure;
+    handle = null;
+    handleFinalizers?.unregister(finalizerToken);
+    const current = source();
+    if (!current || deadSources.has(current)) return;
+    deadSources.add(current);
+    console.error(
+      `[CanvasRenderer] ${label} trapped in wasm; the session is unusable and must be rebuilt`,
+      failure
+    );
+    for (const listener of sourceFailureListeners) {
+      try {
+        listener(failure);
+      } catch (listenerError) {
+        console.error('[CanvasRenderer] display-list source failure listener threw', listenerError);
+      }
+    }
+  };
+
   const closeHandle = (): void => {
+    if (handle !== null && isDead()) {
+      handle = null;
+      return;
+    }
     if (handle !== null) {
       try {
         eng?.closeDisplayList?.(handle);
@@ -385,7 +472,7 @@ export function createDisplayListQueries(
   // acquire at most one handle, on the first query that wants it (or via
   // prime()); a failure leaves `handle` null so queries take the JSON-arg path
   const openHandle = (): void => {
-    if (disposed || superseded || handleAttempted || handle !== null || !eng) return;
+    if (disposed || superseded || handleAttempted || handle !== null || !eng || isDead()) return;
     if (!eng.hasDisplayListSession?.() || !eng.openDisplayList) return;
     handleAttempted = true;
     if (adoptHandle()) return;
@@ -393,6 +480,10 @@ export function createDisplayListQueries(
       handle = eng.openDisplayList(getJson());
     } catch (error) {
       handle = null;
+      if (isWasmTrap(error)) {
+        killSource('display-list session open', error);
+        return;
+      }
       console.warn(
         '[CanvasRenderer] display-list session open failed; using JSON-arg queries',
         error
@@ -425,12 +516,16 @@ export function createDisplayListQueries(
     byJson: () => string,
     label: string
   ): string | null => {
-    if (!eng) return null;
+    if (!eng || isDead()) return null;
     if (handle === null) openHandle();
     if (handle !== null && byHandle) {
       try {
         return byHandle(handle);
       } catch (error) {
+        if (isWasmTrap(error)) {
+          killSource(label, error);
+          return null;
+        }
         console.warn(`[CanvasRenderer] ${label} session query failed; falling back`, error);
         closeHandle();
       }
@@ -438,6 +533,10 @@ export function createDisplayListQueries(
     try {
       return byJson();
     } catch (error) {
+      if (isWasmTrap(error)) {
+        killSource(label, error);
+        return null;
+      }
       sourceError = error instanceof Error ? error : new Error(String(error));
       console.warn(`[CanvasRenderer] ${label} query failed`, error);
       return null;
@@ -456,9 +555,14 @@ export function createDisplayListQueries(
   };
 
   const residentQuery = (query: () => string, label: string): string | null => {
+    if (isDead()) return null;
     try {
       return query();
     } catch (error) {
+      if (isWasmTrap(error)) {
+        killSource(`resident ${label}`, error);
+        return null;
+      }
       sourceError = error instanceof Error ? error : new Error(String(error));
       console.warn(`[CanvasRenderer] resident ${label} query failed`, error);
       return null;
@@ -499,6 +603,32 @@ export function createDisplayListQueries(
       'range_rects'
     );
     return parseQuery(raw, [], 'range_rects');
+  };
+
+  const verticalMove = (
+    position: number,
+    direction: 'up' | 'down',
+    goalX?: number
+  ): DisplayListVerticalMove | null => {
+    const resolvedGoalX = goalX ?? Number.NaN;
+    if (resident) {
+      return parseQuery(
+        residentQuery(
+          () => resident.displayVerticalMoveJson(position, direction, resolvedGoalX),
+          'vertical_move'
+        ),
+        null,
+        'vertical_move'
+      );
+    }
+    if (!eng?.verticalMoveJson) return null;
+    const raw = runQuery(
+      eng.verticalMoveByHandle &&
+        ((h: number) => eng!.verticalMoveByHandle!(h, position, direction, resolvedGoalX)),
+      () => eng!.verticalMoveJson!(getJson(), position, direction, resolvedGoalX),
+      'vertical_move'
+    );
+    return parseQuery(raw, null, 'vertical_move');
   };
 
   const hfRangeRects = (
@@ -829,8 +959,6 @@ export function createDisplayListQueries(
   ): DisplayListImageGeometry | null =>
     imageGeometry(findImagePrimitiveByDocPos(list, pos, region, rId));
 
-  // lets dispose() cancel the finalizer below so a handle is never double-closed
-  const finalizerToken = {};
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
@@ -862,6 +990,7 @@ export function createDisplayListQueries(
     imageAtPoint,
     imageByPos,
     hitTestRegions,
+    verticalMove,
     rangeRects,
     hfRangeRects,
     hfCaretRects,
@@ -907,6 +1036,8 @@ function isResidentQueryEngine(
 ): engine is ResidentDisplayListQueryEngine {
   return (
     typeof (engine as ResidentDisplayListQueryEngine | undefined)?.displayHitTestRegionsJson ===
+      'function' &&
+    typeof (engine as ResidentDisplayListQueryEngine | undefined)?.displayVerticalMoveJson ===
       'function' &&
     typeof (engine as ResidentDisplayListQueryEngine | undefined)?.displayRangeRectsJson ===
       'function' &&

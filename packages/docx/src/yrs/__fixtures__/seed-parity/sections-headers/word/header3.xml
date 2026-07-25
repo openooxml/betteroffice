@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:tbl>
+    <w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>
+    <w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>
+    <w:tr>
+      <w:tc><w:p><w:r><w:t>Section two header, left</w:t></w:r></w:p></w:tc>
+      <w:tc><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>right</w:t></w:r></w:p></w:tc>
+    </w:tr>
+  </w:tbl>
+</w:hdr>

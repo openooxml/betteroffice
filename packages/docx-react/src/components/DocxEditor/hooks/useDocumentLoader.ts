@@ -1,17 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
-import { parseDocx } from '@betteroffice/docx/docx';
+import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 import {
+  loadEmbeddedFonts,
   loadDocumentFonts,
+  loadFontsWithMapping,
   getRenderableDocumentFonts,
   getEmbeddedFontFamilies,
+  selectRenderableFonts,
+  toArrayBuffer,
   type DocxInput,
 } from '@betteroffice/docx/utils';
 import type { FontOption } from '@betteroffice/docx/utils/fontOptions';
 import type { UseHistoryReturn } from '../../../hooks/useHistory';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
+import { DocumentLoadGeneration } from './documentLoadGeneration';
 
 /**
  * Document lifecycle: load buffer / pre-parsed doc, react to
@@ -66,15 +71,17 @@ export function useDocumentLoader({
   const [yrsSeedDocument, setYrsSeedDocument] = useState<Document | null>(
     initialDocument ?? null
   );
-  // Monotonically increasing generation counter so a late `parseDocx`
-  // result doesn't overwrite a newer load that started while we were
-  // parsing.
-  const loadGenerationRef = useRef(0);
+  const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
+  const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
+  const [loadGeneration] = useState(() => new DocumentLoadGeneration());
 
   const loadParsedDocument = useCallback(
-    (doc: Document) => {
+    (doc: Document, seedBytes?: Uint8Array) => {
+      const generation = loadGeneration.begin();
       resetForNewDocument();
       setYrsSeedDocument(doc);
+      setYrsSeedBytes(seedBytes?.slice() ?? null);
+      setYrsSeedGeneration(generation);
       history.reset(doc);
       setLoadingState({ isLoading: false, parseError: null });
       loadDocumentFonts(doc).catch((err) => {
@@ -88,26 +95,79 @@ export function useDocumentLoader({
         })
       );
     },
-    [resetForNewDocument, history, setLoadingState, setDocumentFonts]
+    [loadGeneration, resetForNewDocument, history, setLoadingState, setDocumentFonts]
   );
 
   const loadBuffer = useCallback(
     async (buffer: DocxInput) => {
-      const generation = ++loadGenerationRef.current;
+      const generation = loadGeneration.begin();
       resetForNewDocument();
       setLoadingState({ isLoading: true, parseError: null });
+      setYrsSeedDocument(null);
+      setYrsSeedBytes(null);
+      setYrsSeedGeneration(generation);
       try {
-        const doc = await parseDocx(buffer);
-        if (loadGenerationRef.current !== generation) return;
-        loadParsedDocument(doc);
+        const source = buffer instanceof ArrayBuffer ? buffer : await toArrayBuffer(buffer);
+        if (!loadGeneration.isCurrent(generation)) return;
+        setYrsSeedBytes(new Uint8Array(source));
+        history.reset(null);
+        await loadGeneration.waitForCompletion(generation);
       } catch (error) {
-        if (loadGenerationRef.current !== generation) return;
+        if (!loadGeneration.complete(generation)) return;
         const message = error instanceof Error ? error.message : 'Failed to parse document';
         setLoadingState({ isLoading: false, parseError: message });
         onError?.(error instanceof Error ? error : new Error(message));
       }
     },
-    [resetForNewDocument, loadParsedDocument, onError, setLoadingState]
+    [loadGeneration, resetForNewDocument, history, onError, setLoadingState]
+  );
+
+  const acceptHostDocument = useCallback(
+    (host: YrsDocxHost, generation: number) => {
+      if (!loadGeneration.complete(generation)) return;
+      const doc = host.document;
+      history.reset(doc);
+      setLoadingState({ isLoading: false, parseError: null });
+      const embeddedFamilies = getEmbeddedFontFamilies(doc.package.fontTable);
+      const documentFonts = [
+        ...getRenderableDocumentFonts(doc, { embeddedFamilies }),
+        ...selectRenderableFonts(host.referencedFonts, { embeddedFamilies }),
+      ];
+      setDocumentFonts(
+        [...new Map(documentFonts.map((font) => [font.name.toLowerCase(), font])).values()]
+      );
+      void loadEmbeddedFonts(
+        doc.package.fontTable,
+        host.embeddedFonts,
+        host.fontTableRelationshipsXml
+      )
+        .catch((error) => {
+          console.warn('Failed to load embedded document fonts:', error);
+        })
+        .then(() =>
+          Promise.all([loadFontsWithMapping(host.referencedFonts), loadDocumentFonts(doc)])
+        )
+        .catch((error) => {
+          console.warn('Failed to load document fonts:', error);
+        });
+    },
+    [loadGeneration, history, setDocumentFonts, setLoadingState]
+  );
+
+  const failHostDocument = useCallback(
+    (error: Error, generation: number) => {
+      if (!loadGeneration.complete(generation)) return;
+      setYrsSeedDocument(null);
+      setYrsSeedBytes(null);
+      setLoadingState({ isLoading: false, parseError: error.message });
+      onError?.(error);
+    },
+    [loadGeneration, onError, setLoadingState]
+  );
+
+  const isCurrentLoad = useCallback(
+    (generation: number) => loadGeneration.isCurrent(generation),
+    [loadGeneration]
   );
 
   // React to documentBuffer / document prop changes.
@@ -155,9 +215,21 @@ export function useDocumentLoader({
     commentIdAllocator,
   ]);
 
+  useEffect(
+    () => () => {
+      loadGeneration.invalidate();
+    },
+    [loadGeneration]
+  );
+
   return {
     loadParsedDocument,
     loadBuffer,
     yrsSeedDocument,
+    yrsSeedBytes,
+    yrsSeedGeneration,
+    isCurrentLoad,
+    acceptHostDocument,
+    failHostDocument,
   };
 }

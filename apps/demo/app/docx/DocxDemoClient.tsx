@@ -16,6 +16,7 @@ import {
   CollaborationControls,
   COLLAB_RELAY_ORIGIN,
   useCollabRoom,
+  useDemoIdentity,
   useDemoRoom,
   type CollaborationReplica,
   type CollaborationTransport,
@@ -33,10 +34,13 @@ export function DocxDemoClient() {
   const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
   const [seed, setSeed] = useState<Uint8Array | null>(null);
   const room = useDemoRoom();
+  const user = useDemoIdentity();
   const createProvider = useCallback(
     (replica: CollaborationReplica, transport: CollaborationTransport) =>
-      new CollaborationProvider(replica, transport),
-    [],
+      new CollaborationProvider(replica, transport, {
+        user: user ?? undefined,
+      }),
+    [user],
   );
   const collab = useCollabRoom(
     COLLAB_RELAY_ORIGIN,
@@ -95,14 +99,16 @@ export function DocxDemoClient() {
 
   const collaboration = useMemo(
     () =>
-      room && seed && collab.clientId
+      room && seed && collab.clientId && user
         ? {
             clientId: collab.clientId,
             initialUpdate: seed,
+            user,
             onReplica: collab.onReplica,
+            presence: collab.provider ?? undefined,
           }
         : undefined,
-    [collab.clientId, collab.onReplica, room, seed],
+    [collab.clientId, collab.onReplica, collab.provider, room, seed, user],
   );
 
   return (

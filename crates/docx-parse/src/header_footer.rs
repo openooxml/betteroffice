@@ -40,9 +40,9 @@ pub fn parse_header_footer(
     } else {
         Vec::new()
     };
-    // The TypeScript owner extracts VML watermarks only from headers. Footer
-    // VML remains ordinary story content (where supported) and never becomes
-    // the dedicated package watermark field.
+    // VML watermarks are extracted only from headers. Footer VML remains
+    // ordinary story content (where supported) and never becomes the
+    // dedicated package watermark field.
     let watermark = is_header
         .then(|| extract_watermark(Some(root), parser.relationships, Some(parser.media)))
         .flatten();

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:pPr><w:bidi/><w:jc w:val="right"/></w:pPr>
+      <w:r><w:rPr><w:rtl/><w:rFonts w:cs="Arial"/><w:lang w:bidi="he-IL"/></w:rPr><w:t>שלום עולם</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> latin inside RTL </w:t></w:r>
+      <w:r><w:rPr><w:rtl/><w:lang w:bidi="ar-SA"/></w:rPr><w:t>مرحبا بالعالم</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:rPr><w:rFonts w:eastAsia="MS Mincho" w:hint="eastAsia"/><w:lang w:eastAsia="ja-JP"/></w:rPr><w:t>日本語のテキスト</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> mixed with latin </w:t></w:r>
+      <w:r><w:rPr><w:rFonts w:eastAsia="SimSun"/><w:lang w:eastAsia="zh-CN"/></w:rPr><w:t>简体中文</w:t></w:r>
+      <w:r><w:rPr><w:rFonts w:eastAsia="Batang"/><w:lang w:eastAsia="ko-KR"/></w:rPr><w:t>한국어</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Astral plane and combining marks: </w:t></w:r>
+      <w:r><w:t>🙂👍🏽 é ﬁ</w:t></w:r>
+      <w:r><w:t xml:space="preserve"> soft hyphen</w:t></w:r>
+      <w:r><w:softHyphen/></w:r>
+      <w:r><w:t>ated and non</w:t></w:r>
+      <w:r><w:noBreakHyphen/></w:r>
+      <w:r><w:t>breaking.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:tab/><w:t>tabbed</w:t><w:tab/><w:t>columns</w:t></w:r>
+      <w:r><w:br/><w:t>after line break</w:t></w:r>
+      <w:r><w:br w:type="page"/><w:t>after page break</w:t></w:r>
+      <w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>
+    </w:p>
+    <w:sectPr>
+      <w:bidi/>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

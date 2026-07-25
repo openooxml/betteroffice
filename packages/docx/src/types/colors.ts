@@ -6,9 +6,9 @@
  * formats; the WordprocessingML border/shading types stay here.
  */
 
-import type { ColorValue } from '@betteroffice/drawingml';
+import type { ColorValue } from './drawingml';
 
-export type { ColorValue, ThemeColorSlot } from '@betteroffice/drawingml';
+export type { ColorValue, ThemeColorSlot } from './drawingml';
 
 /**
  * One side of a border — style, color, width, spacing. Used by paragraph

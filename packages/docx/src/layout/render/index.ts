@@ -106,6 +106,8 @@ export {
 
 export {
   createDisplayListQueries,
+  isDisplayListQuerySourceDead,
+  onDisplayListQuerySourceFailure,
   type DisplayListHitRegion,
   type DisplayListImageGeometry,
   type DisplayListParagraphGeometry,
@@ -113,6 +115,7 @@ export {
   type DisplayListQuerySourceState,
   type DisplayListRect,
   type DisplayListRegionHit,
+  type DisplayListVerticalMove,
   type DisplayListVisualLine,
   type ResidentDisplayListQueryEngine,
 } from './displayListQueries';

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { RetainedUpdateLog } from "./retention";
 
 interface Env {
   ROOMS: DurableObjectNamespace<CollaborationRoom>;
@@ -22,18 +23,19 @@ function copyBytes(message: ArrayBuffer | ArrayBufferView): Uint8Array {
 }
 
 export class CollaborationRoom extends DurableObject<Env> {
-  private updates: Uint8Array[] = [];
-  private retainedBytes = 0;
+  private updates = new RetainedUpdateLog(
+    MAX_RETAINED_COUNT,
+    MAX_RETAINED_BYTES,
+  );
   private persist = Promise.resolve();
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
     state.blockConcurrencyWhile(async () => {
-      this.updates = (await state.storage.get<Uint8Array[]>(LOG_KEY)) ?? [];
-      this.retainedBytes = this.updates.reduce(
-        (total, update) => total + update.byteLength,
-        0,
-      );
+      const stored = (await state.storage.get<Uint8Array[]>(LOG_KEY)) ?? [];
+      if (this.updates.restore(stored)) {
+        await state.storage.put(LOG_KEY, this.updates.snapshot());
+      }
     });
   }
 
@@ -46,7 +48,7 @@ export class CollaborationRoom extends DurableObject<Env> {
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
-    for (const update of this.updates) server.send(update.slice());
+    this.updates.replay((update) => server.send(update));
     this.broadcastPeerCount();
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -66,7 +68,7 @@ export class CollaborationRoom extends DurableObject<Env> {
       return;
     }
 
-    this.retain(bytes);
+    if (this.updates.retain(bytes)) this.persistUpdates();
     for (const peer of this.ctx.getWebSockets()) {
       if (peer !== socket) peer.send(bytes.slice());
     }
@@ -87,17 +89,8 @@ export class CollaborationRoom extends DurableObject<Env> {
     this.broadcastPeerCount();
   }
 
-  private retain(update: Uint8Array): void {
-    this.updates.push(update.slice());
-    this.retainedBytes += update.byteLength;
-    while (
-      this.updates.length > MAX_RETAINED_COUNT ||
-      this.retainedBytes > MAX_RETAINED_BYTES
-    ) {
-      const removed = this.updates.shift();
-      if (removed) this.retainedBytes -= removed.byteLength;
-    }
-    const snapshot = this.updates.map((entry) => entry.slice());
+  private persistUpdates(): void {
+    const snapshot = this.updates.snapshot();
     this.persist = this.persist.then(() => this.ctx.storage.put(LOG_KEY, snapshot));
     this.ctx.waitUntil(this.persist);
   }

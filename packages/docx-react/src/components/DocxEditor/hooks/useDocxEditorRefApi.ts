@@ -131,6 +131,7 @@ function formattingDelta(marks: Parameters<DocxEditorRef['applyFormatting']>[0][
 export function useDocxEditorRefApi({
   ref,
   document,
+  documentFromYrs,
   historyStateRef,
   pagedEditorRef,
   handleSave,
@@ -150,6 +151,7 @@ export function useDocxEditorRefApi({
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
+  documentFromYrs: () => Document | null;
   historyStateRef: React.RefObject<Document | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   handleSave: () => Promise<ArrayBuffer | null>;
@@ -172,7 +174,7 @@ export function useDocxEditorRefApi({
   useImperativeHandle(
     ref,
     () => ({
-      getDocument: () => pagedEditorRef.current?.getDocument() ?? document,
+      getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
       save: handleSave,
       setZoom,
@@ -393,6 +395,7 @@ export function useDocxEditorRefApi({
     }),
     [
       document,
+      documentFromYrs,
       zoom,
       scrollPageInfo,
       scrollPageInfo,

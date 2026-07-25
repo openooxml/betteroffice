@@ -38,13 +38,23 @@ if (version.stdout.trim() !== `wasm-pack ${WASM_PACK_VERSION}`) {
 // cargoArgs = extra flags after `--` (docx-edit keeps its wasm-bindgen boundary
 // behind the `wasm` cargo feature so native builds never pull that stack).
 const MODULES: WasmModuleBuild[] = [
-  { crate: 'ooxml-opc', name: 'ooxml_opc', dir: 'opc', cargoArgs: [] },
+  {
+    crate: 'ooxml-opc',
+    name: 'ooxml_opc',
+    dir: 'opc',
+    cargoArgs: ['--locked', '--features', 'wasm'],
+  },
   { crate: 'docx-layout', name: 'docx_layout', dir: 'layout', cargoArgs: [] },
   // --locked must ride with the cargo pass-through here: wasm-pack forwards its
   // own trailing args verbatim once a `--` section exists, and cargo rejects a
   // stray `--` marker.
   { crate: 'docx-edit', name: 'docx_edit', dir: 'edit', cargoArgs: ['--locked', '--features', 'wasm'] },
-  { crate: 'docx-parse', name: 'docx_parse', dir: 'parse', cargoArgs: [] },
+  {
+    crate: 'docx-parse',
+    name: 'docx_parse',
+    dir: 'parse',
+    cargoArgs: ['--locked', '--features', 'wasm'],
+  },
 ];
 
 for (const { crate, name, dir, cargoArgs } of MODULES) {
