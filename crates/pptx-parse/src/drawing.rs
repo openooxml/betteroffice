@@ -466,10 +466,10 @@ fn evaluate_guide_formula(
             extent_power: additive_extent_power(&[*x, *y]) - z.extent_power,
         },
         ("?:", [x, y, z]) => {
-            let branch = if x.value > 0.0 { *y } else { *z };
-            GuideValue {
-                value: branch.value,
-                extent_power: additive_extent_power(&[*y, *z]),
+            if x.value > 0.0 {
+                *y
+            } else {
+                *z
             }
         }
         ("abs", [x]) => GuideValue {
@@ -487,22 +487,33 @@ fn evaluate_guide_formula(
             value: x.value * (y.value / ANGLE_UNITS_PER_DEGREE).to_radians().cos(),
             ..*x
         },
-        ("max", [x, y]) => GuideValue {
-            value: x.value.max(y.value),
-            extent_power: additive_extent_power(&[*x, *y]),
-        },
-        ("min", [x, y]) => GuideValue {
-            value: x.value.min(y.value),
-            extent_power: additive_extent_power(&[*x, *y]),
-        },
+        ("max", [x, y]) => {
+            if x.value >= y.value {
+                *x
+            } else {
+                *y
+            }
+        }
+        ("min", [x, y]) => {
+            if x.value <= y.value {
+                *x
+            } else {
+                *y
+            }
+        }
         ("mod", [x, y, z]) => GuideValue {
             value: x.value.hypot(y.value).hypot(z.value),
             extent_power: additive_extent_power(&[*x, *y, *z]),
         },
-        ("pin", [x, y, z]) => GuideValue {
-            value: y.value.max(x.value).min(z.value),
-            extent_power: additive_extent_power(&[*x, *y, *z]),
-        },
+        ("pin", [x, y, z]) => {
+            if y.value < x.value {
+                *x
+            } else if y.value > z.value {
+                *z
+            } else {
+                *y
+            }
+        }
         ("sat2", [x, y, z]) => GuideValue {
             value: x.value * z.value.atan2(y.value).sin(),
             ..*x
@@ -1093,6 +1104,21 @@ mod tests {
 
         assert!(!adjustments.contains_key("adj"));
         assert_eq!(adjustments.get("adj1"), Some(&0.2));
+    }
+
+    #[test]
+    fn selection_operators_keep_the_chosen_operand_units() {
+        let extent = Some((4_000_000.0, 1_000_000.0));
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="?: 1 50000 w"/>
+               <a:gd name="adj1" fmla="max 25000 ssd4"/>
+               <a:gd name="adj2" fmla="pin 10000 ss 30000"/>"#,
+        );
+        let adjustments = parse_adjust_values(Some(&properties), extent);
+
+        assert_eq!(adjustments.get("adj"), Some(&0.5));
+        assert_eq!(adjustments.get("adj1"), Some(&0.25));
+        assert_eq!(adjustments.get("adj2"), Some(&0.3));
     }
 
     #[test]
