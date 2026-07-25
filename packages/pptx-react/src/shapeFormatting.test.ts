@@ -9,7 +9,9 @@ describe('shapeFormattingFromShape', () => {
       geometry: 'roundRect',
       adjustValues: { adj: 0.25 },
       fill: { type: 'solid', color: { rgb: '3367D6' } },
+      resolvedFillColor: '#3367D6',
       outline: { width: 38_100, color: { rgb: 'EA4335' } },
+      resolvedOutlineColor: '#EA4335',
     });
 
     expect(formatting).toEqual({
@@ -19,6 +21,19 @@ describe('shapeFormattingFromShape', () => {
       strokeWidthPt: 3,
       adjustments: { adj: 0.25 },
     });
+  });
+
+  it('uses presentation-resolved colors while retaining raw theme references', () => {
+    const formatting = shapeFormattingFromShape({
+      ...shape,
+      fill: { type: 'solid', color: { themeColor: 'accent1' } },
+      resolvedFillColor: '#123456',
+      outline: { color: { themeColor: 'accent2' } },
+      resolvedOutlineColor: '#ABCDEF',
+    });
+
+    expect(formatting.fillColor).toBe('#123456');
+    expect(formatting.strokeColor).toBe('#ABCDEF');
   });
 
   it('recognizes explicit no-fill and no-line styling', () => {
@@ -50,7 +65,9 @@ const shape: ShapeSnapshot = {
   adjustValues: {},
   placeholder: null,
   fill: null,
+  resolvedFillColor: null,
   outline: null,
+  resolvedOutlineColor: null,
   mediaPartPath: null,
   graphic: null,
   textStories: [],

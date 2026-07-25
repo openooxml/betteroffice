@@ -50,6 +50,7 @@
     "borderWidthValue": null,
     "noBorder": null,
     "cornerRadius": null,
+    "shapeAdjustment": "आकृति समायोजन",
     "shapes": {
       "rect": null,
       "roundRect": null,

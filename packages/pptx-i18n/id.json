@@ -50,6 +50,7 @@
     "borderWidthValue": null,
     "noBorder": null,
     "cornerRadius": null,
+    "shapeAdjustment": "Penyesuaian bentuk",
     "shapes": {
       "rect": null,
       "roundRect": null,

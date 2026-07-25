@@ -50,6 +50,7 @@
     "borderWidthValue": null,
     "noBorder": null,
     "cornerRadius": null,
+    "shapeAdjustment": "Ajustement de forme",
     "shapes": {
       "rect": null,
       "roundRect": null,

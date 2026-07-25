@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use ooxml_drawingml::{
-    ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_to_path, resolve_color_value_to_hex,
+    ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
+    preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
 use pptx_parse::{PptxPackage, ShapeNode, Slide};
 use serde::de::DeserializeOwned;
@@ -23,7 +24,8 @@ const SCHEMA_VERSION: f64 = 1.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
-const DEFAULT_ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
+const MAX_ADJUSTMENTS: usize = 32;
+const MAX_ADJUSTMENT_INDEX: usize = 32;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
     let package_json =
@@ -119,12 +121,11 @@ fn seed_shape(
         ShapeNode::Shape(shape) => {
             shape_map.insert(txn, "kind", "shape");
             shape_map.insert(txn, "geometry", shape.geometry.as_str());
-            insert_json(
-                &shape_map,
-                txn,
-                "adjustValuesJson",
-                Some(&shape.adjust_values),
-            )?;
+            let mut adjust_values = preset_geometry_default_adjustments(&shape.geometry)
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            adjust_values.extend(shape.adjust_values.clone());
+            insert_json(&shape_map, txn, "adjustValuesJson", Some(&adjust_values))?;
             insert_json(&shape_map, txn, "fillJson", shape.fill.as_ref())?;
             insert_json(&shape_map, txn, "outlineJson", shape.outline.as_ref())?;
             if let Some(body) = &shape.text {
@@ -178,12 +179,21 @@ fn seed_shape(
 }
 
 fn slide_theme<'a>(package: &'a PptxPackage, slide: &Slide) -> Option<&'a Theme> {
-    let layout = slide.layout_part_path.as_deref().and_then(|path| {
-        package
-            .layouts
-            .iter()
-            .find(|layout| layout.part_path == path)
-    });
+    theme_for_layout(package, slide.layout_part_path.as_deref())
+}
+
+fn theme_for_layout<'a>(
+    package: &'a PptxPackage,
+    layout_part_path: Option<&str>,
+) -> Option<&'a Theme> {
+    let layout = layout_part_path
+        .and_then(|path| {
+            package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        })
+        .or_else(|| package.layouts.first());
     let master = layout
         .and_then(|layout| layout.master_part_path.as_deref())
         .and_then(|path| {
@@ -201,7 +211,8 @@ fn slide_theme<'a>(package: &'a PptxPackage, slide: &Slide) -> Option<&'a Theme>
                         .any(|path| path == &layout.part_path)
                 })
             })
-        });
+        })
+        .or_else(|| package.masters.first());
     master
         .and_then(|master| master.theme_part_path.as_deref())
         .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
@@ -225,7 +236,7 @@ fn insert_json<T: serde::Serialize>(
 
 impl DeckSession {
     pub fn snapshot(&self) -> EditResult<DeckSnapshot> {
-        snapshot_doc(&self.doc)
+        snapshot_doc(&self.doc, &self.package)
     }
 
     pub fn insert_slide(
@@ -376,11 +387,9 @@ impl DeckSession {
             )));
         }
         let fill = shape_fill(draft.fill.as_deref())?;
-        let adjust_values = if draft.geometry == "roundRect" {
-            BTreeMap::from([("adj".to_owned(), DEFAULT_ROUND_RECT_ADJUSTMENT)])
-        } else {
-            BTreeMap::new()
-        };
+        let adjust_values = preset_geometry_default_adjustments(&draft.geometry)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         let shape_id = self.next_id("shape");
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
@@ -490,6 +499,7 @@ impl DeckSession {
         shape_id: &str,
         adjustments: &BTreeMap<String, f64>,
     ) -> EditResult<ShapeAdjustReceipt> {
+        validate_adjustments(adjustments)?;
         let mut txn = self.transact_for(context);
         require_shape_membership(&txn, slide_id, shape_id)?;
         let shape = shape_ref(&txn, shape_id)?;
@@ -498,11 +508,6 @@ impl DeckSession {
         let before = optional_json(&shape, &txn, "adjustValuesJson")?.unwrap_or_else(BTreeMap::new);
         let mut after = BTreeMap::new();
         for (name, value) in adjustments {
-            if name.is_empty() || name.len() > 128 || !value.is_finite() {
-                return Err(EditError::InvalidGeometry(format!(
-                    "invalid adjustment {name:?}"
-                )));
-            }
             let maximum = if geometry == "roundRect" && name == "adj" {
                 0.5
             } else {
@@ -597,7 +602,8 @@ impl DeckSession {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
-    let snapshot = snapshot_doc(doc)?;
+    let package = package_from_doc(doc)?;
+    let snapshot = snapshot_doc(doc, &package)?;
     if snapshot.width_emu <= 0 || snapshot.height_emu <= 0 {
         return Err(EditError::InvalidState(
             "slide dimensions must be positive".to_owned(),
@@ -613,7 +619,6 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     if map_string(&meta, &txn, "fingerprint").is_none() {
         return Err(EditError::InvalidState("missing fingerprint".to_owned()));
     }
-    package_from_meta(&meta, &txn)?;
     let stories = required_map(&txn, STORIES)?;
     for (story_id, value) in stories.iter(&txn) {
         let story = value
@@ -637,7 +642,7 @@ fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPacka
     serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
 }
 
-fn snapshot_doc(doc: &Doc) -> EditResult<DeckSnapshot> {
+fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     let order = required_order(&txn)?;
@@ -654,6 +659,9 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DeckSnapshot> {
             .get(&txn, &slide_id)
             .and_then(|value| value.cast::<MapRef>().ok())
             .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
+        let source_part_path = map_string(&slide, &txn, "sourcePartPath");
+        let layout_part_path = map_string(&slide, &txn, "layoutPartPath");
+        let theme = theme_for_layout(package, layout_part_path.as_deref());
         let shape_order = slide_shape_order(&slide, &txn)?;
         let mut seen_shapes = HashSet::new();
         let mut shape_snapshots = Vec::new();
@@ -665,13 +673,14 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DeckSnapshot> {
                     &txn,
                     &shape_id,
                     &mut HashSet::new(),
+                    theme,
                 )?);
             }
         }
         slide_snapshots.push(SlideSnapshot {
             id: slide_id,
-            source_part_path: map_string(&slide, &txn, "sourcePartPath"),
-            layout_part_path: map_string(&slide, &txn, "layoutPartPath"),
+            source_part_path,
+            layout_part_path,
             name: map_string(&slide, &txn, "name"),
             shapes: shape_snapshots,
         });
@@ -689,6 +698,7 @@ fn snapshot_shape<T: ReadTxn>(
     txn: &T,
     shape_id: &str,
     visiting: &mut HashSet<String>,
+    theme: Option<&Theme>,
 ) -> EditResult<ShapeSnapshot> {
     if visiting.len() >= MAX_SHAPE_DEPTH {
         return Err(EditError::InvalidState(format!(
@@ -714,9 +724,20 @@ fn snapshot_shape<T: ReadTxn>(
     }
     let mut children = Vec::new();
     for child_id in map_string_array(&shape, txn, "children")? {
-        children.push(snapshot_shape(shapes, stories, txn, &child_id, visiting)?);
+        children.push(snapshot_shape(
+            shapes, stories, txn, &child_id, visiting, theme,
+        )?);
     }
     visiting.remove(shape_id);
+    let fill: Option<ShapeFill> = optional_json(&shape, txn, "fillJson")?;
+    let outline: Option<ShapeOutline> = optional_json(&shape, txn, "outlineJson")?;
+    let resolved_fill_color = fill
+        .as_ref()
+        .filter(|fill| fill.fill_type != "none")
+        .and_then(|fill| resolve_color_value_to_hex_with_theme(fill.color.as_ref(), theme));
+    let resolved_outline_color = outline
+        .as_ref()
+        .and_then(|outline| resolve_color_value_to_hex_with_theme(outline.color.as_ref(), theme));
     Ok(ShapeSnapshot {
         id: shape_id.to_owned(),
         source_id: required_u32(&shape, txn, "sourceId")?,
@@ -732,8 +753,10 @@ fn snapshot_shape<T: ReadTxn>(
         geometry: required_string(&shape, txn, "geometry")?,
         adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
         placeholder: optional_json(&shape, txn, "placeholderJson")?,
-        fill: optional_json(&shape, txn, "fillJson")?,
-        outline: optional_json(&shape, txn, "outlineJson")?,
+        fill,
+        resolved_fill_color,
+        outline,
+        resolved_outline_color,
         media_part_path: map_string(&shape, txn, "mediaPartPath"),
         graphic: optional_json(&shape, txn, "graphicJson")?,
         text_stories: text_snapshots,
@@ -940,6 +963,41 @@ fn validate_coordinate(value: i64) -> EditResult<()> {
         )));
     }
     Ok(())
+}
+
+fn validate_adjustments(adjustments: &BTreeMap<String, f64>) -> EditResult<()> {
+    if adjustments.len() > MAX_ADJUSTMENTS {
+        return Err(EditError::InvalidAdjustment(format!(
+            "at most {MAX_ADJUSTMENTS} values are allowed"
+        )));
+    }
+    for (name, value) in adjustments {
+        if !valid_adjustment_name(name) {
+            return Err(EditError::InvalidAdjustment(format!(
+                "unrecognized guide name {name:?}"
+            )));
+        }
+        if !value.is_finite() {
+            return Err(EditError::InvalidAdjustment(format!(
+                "guide {name:?} must be finite"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_adjustment_name(name: &str) -> bool {
+    if name == "adj" {
+        return true;
+    }
+    let Some(index) = name.strip_prefix("adj") else {
+        return false;
+    };
+    index
+        .parse::<usize>()
+        .ok()
+        .filter(|value| value.to_string() == index)
+        .is_some_and(|value| (1..=MAX_ADJUSTMENT_INDEX).contains(&value))
 }
 
 fn shape_fill(color: Option<&str>) -> EditResult<ShapeFill> {

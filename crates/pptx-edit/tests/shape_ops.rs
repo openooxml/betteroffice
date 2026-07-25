@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
-use pptx_edit::{DeckSession, EditCtx, PresetShapeDraft, ShapeRect, ShapeStroke};
+use ooxml_drawingml::{ColorValue, ShapeFill, ShapeOutline};
+use pptx_edit::{
+    DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, ShapeSnapshot, ShapeStroke,
+};
+use pptx_parse::ShapeNode;
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
@@ -111,6 +115,165 @@ fn add_shape_rejects_unknown_geometry_and_invalid_colors() {
             .add_shape(&context, &slide_id, &invalid_color)
             .is_err()
     );
+}
+
+#[test]
+fn adjustable_presets_expose_engine_defaults() {
+    let session = DeckSession::open(FIXTURE, 704).unwrap();
+    let context = EditCtx::local("test");
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let receipt = session
+        .add_shape(
+            &context,
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Parallelogram".to_owned(),
+                geometry: "parallelogram".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let shape = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == receipt.shape_id)
+        .unwrap();
+
+    assert_eq!(shape.adjust_values.get("adj"), Some(&0.25));
+}
+
+#[test]
+fn set_shape_adjust_rejects_unknown_names_and_oversized_maps() {
+    let session = DeckSession::open(FIXTURE, 705).unwrap();
+    let context = EditCtx::local("test");
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let receipt = session
+        .add_shape(
+            &context,
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Parallelogram".to_owned(),
+                geometry: "parallelogram".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let before = session.snapshot().unwrap();
+
+    let invalid_name = session
+        .set_shape_adjust(
+            &context,
+            &slide_id,
+            &receipt.shape_id,
+            &BTreeMap::from([("width".to_owned(), 0.5)]),
+        )
+        .unwrap_err();
+    assert!(matches!(invalid_name, EditError::InvalidAdjustment(_)));
+
+    let out_of_range_name = session
+        .set_shape_adjust(
+            &context,
+            &slide_id,
+            &receipt.shape_id,
+            &BTreeMap::from([("adj33".to_owned(), 0.5)]),
+        )
+        .unwrap_err();
+    assert!(matches!(out_of_range_name, EditError::InvalidAdjustment(_)));
+
+    let mut oversized = BTreeMap::from([("adj".to_owned(), 0.5)]);
+    for index in 1..=32 {
+        oversized.insert(format!("adj{index}"), 0.5);
+    }
+    let too_many = session
+        .set_shape_adjust(&context, &slide_id, &receipt.shape_id, &oversized)
+        .unwrap_err();
+    assert!(matches!(too_many, EditError::InvalidAdjustment(_)));
+
+    let non_finite = session
+        .set_shape_adjust(
+            &context,
+            &slide_id,
+            &receipt.shape_id,
+            &BTreeMap::from([("adj".to_owned(), f64::NAN)]),
+        )
+        .unwrap_err();
+    assert!(matches!(non_finite, EditError::InvalidAdjustment(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn snapshot_resolves_shape_colors_with_the_presentation_theme() {
+    let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+    package.themes[0].theme.color_scheme.accent1 = "123456".to_owned();
+    package.themes[0].theme.color_scheme.accent2 = "ABCDEF".to_owned();
+    let shape = package
+        .slides
+        .iter_mut()
+        .flat_map(|slide| &mut slide.shapes)
+        .find_map(|node| match node {
+            ShapeNode::Shape(shape) => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    let source_id = shape.base.id;
+    shape.fill = Some(ShapeFill {
+        fill_type: "solid".to_owned(),
+        color: Some(ColorValue {
+            theme_color: Some("accent1".to_owned()),
+            ..ColorValue::default()
+        }),
+        gradient: None,
+    });
+    shape.outline = Some(ShapeOutline {
+        color: Some(ColorValue {
+            theme_color: Some("accent2".to_owned()),
+            ..ColorValue::default()
+        }),
+        ..ShapeOutline::default()
+    });
+
+    let session = DeckSession::from_package(package, 706).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let shape = snapshot
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .find_map(|shape| find_shape(shape, source_id))
+        .unwrap();
+
+    assert_eq!(
+        shape
+            .fill
+            .as_ref()
+            .and_then(|fill| fill.color.as_ref())
+            .and_then(|color| color.theme_color.as_deref()),
+        Some("accent1")
+    );
+    assert_eq!(shape.resolved_fill_color.as_deref(), Some("#123456"));
+    assert_eq!(shape.resolved_outline_color.as_deref(), Some("#ABCDEF"));
+}
+
+fn find_shape(shape: &ShapeSnapshot, source_id: u32) -> Option<&ShapeSnapshot> {
+    if shape.source_id == source_id {
+        return Some(shape);
+    }
+    shape
+        .children
+        .iter()
+        .find_map(|child| find_shape(child, source_id))
 }
 
 fn assert_history_round_trip(session: &DeckSession, before: pptx_edit::DeckSnapshot) {

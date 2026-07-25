@@ -5,6 +5,36 @@ use crate::GeometryPathCommand;
 const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
 
+pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
+    let values = match shape_type {
+        "roundRect" => vec![("adj", ROUND_RECT_ADJUSTMENT)],
+        "triangle" | "isosTriangle" => vec![("adj", 0.5)],
+        "parallelogram" => vec![("adj", 0.25)],
+        "trapezoid" => vec![("adj", 0.2)],
+        "hexagon" => vec![("adj", 0.25)],
+        "octagon" => vec![("adj", 0.292_89)],
+        "rightArrow" | "leftArrow" | "upArrow" | "downArrow" => {
+            vec![("adj1", 0.5), ("adj2", 0.5)]
+        }
+        "chevron" => vec![("adj", 0.35)],
+        value
+            if value
+                .strip_prefix("star")
+                .and_then(|points| points.parse::<usize>().ok())
+                .is_some_and(|points| {
+                    matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32)
+                }) =>
+        {
+            vec![("adj", 0.45)]
+        }
+        _ => Vec::new(),
+    };
+    values
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value))
+        .collect()
+}
+
 pub fn preset_geometry_to_path(
     shape_type: &str,
     adjustments: &HashMap<String, f64>,
@@ -63,7 +93,10 @@ pub fn preset_geometry_to_path(
         "line" | "straightConnector1" => {
             vec![C::Move { x: 0.0, y: 0.0 }, C::Line { x: 1.0, y: 1.0 }]
         }
-        "triangle" | "isosTriangle" => polygon(&[(0.5, 0.0), (1.0, 1.0), (0.0, 1.0)]),
+        "triangle" | "isosTriangle" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.5);
+            polygon(&[(adjustment, 0.0), (1.0, 1.0), (0.0, 1.0)])
+        }
         "rtTriangle" => polygon(&[(0.0, 0.0), (1.0, 1.0), (0.0, 1.0)]),
         "diamond" | "flowChartDecision" => {
             polygon(&[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)])
@@ -77,9 +110,31 @@ pub fn preset_geometry_to_path(
             polygon(&[(i, 0.0), (1.0 - i, 0.0), (1.0, 1.0), (0.0, 1.0)])
         }
         "pentagon" | "flowChartOffpageConnector" => regular_polygon(5),
-        "hexagon" => regular_polygon(6),
+        "hexagon" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.25).min(0.5);
+            polygon(&[
+                (adjustment, 0.0),
+                (1.0 - adjustment, 0.0),
+                (1.0, 0.5),
+                (1.0 - adjustment, 1.0),
+                (adjustment, 1.0),
+                (0.0, 0.5),
+            ])
+        }
         "heptagon" => regular_polygon(7),
-        "octagon" => regular_polygon(8),
+        "octagon" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.292_89).min(0.5);
+            polygon(&[
+                (adjustment, 0.0),
+                (1.0 - adjustment, 0.0),
+                (1.0, adjustment),
+                (1.0, 1.0 - adjustment),
+                (1.0 - adjustment, 1.0),
+                (adjustment, 1.0),
+                (0.0, 1.0 - adjustment),
+                (0.0, adjustment),
+            ])
+        }
         "decagon" => regular_polygon(10),
         "dodecagon" => regular_polygon(12),
         value if value.starts_with("star") => {
@@ -87,7 +142,7 @@ pub fn preset_geometry_to_path(
             if !matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32) {
                 return None;
             }
-            star(points)
+            star(points, adjustments.get("adj").copied())
         }
         "bentConnector2" => bent_connector(2, adjustments.get("adj1").copied()),
         "bentConnector3" => bent_connector(3, adjustments.get("adj1").copied()),
@@ -97,10 +152,26 @@ pub fn preset_geometry_to_path(
         "curvedConnector3" => curved_connector(3),
         "curvedConnector4" => curved_connector(4),
         "curvedConnector5" => curved_connector(5),
-        "rightArrow" => arrow("right", adjustments.get("adj2").copied()),
-        "leftArrow" => arrow("left", adjustments.get("adj2").copied()),
-        "upArrow" => arrow("up", adjustments.get("adj2").copied()),
-        "downArrow" => arrow("down", adjustments.get("adj2").copied()),
+        "rightArrow" => arrow(
+            "right",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
+        "leftArrow" => arrow(
+            "left",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
+        "upArrow" => arrow(
+            "up",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
+        "downArrow" => arrow(
+            "down",
+            adjustments.get("adj1").copied(),
+            adjustments.get("adj2").copied(),
+        ),
         "leftRightArrow" => polygon(&[
             (0.0, 0.5),
             (0.25, 0.0),
@@ -125,14 +196,17 @@ pub fn preset_geometry_to_path(
             (0.25, 0.25),
             (0.0, 0.25),
         ]),
-        "chevron" => polygon(&[
-            (0.0, 0.0),
-            (0.65, 0.0),
-            (1.0, 0.5),
-            (0.65, 1.0),
-            (0.0, 1.0),
-            (0.35, 0.5),
-        ]),
+        "chevron" => {
+            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.35).min(0.5);
+            polygon(&[
+                (0.0, 0.0),
+                (1.0 - adjustment, 0.0),
+                (1.0, 0.5),
+                (1.0 - adjustment, 1.0),
+                (0.0, 1.0),
+                (adjustment, 0.5),
+            ])
+        }
         "homePlate" => polygon(&[(0.0, 0.0), (0.75, 0.0), (1.0, 0.5), (0.75, 1.0), (0.0, 1.0)]),
         "flowChartProcess"
         | "flowChartAlternateProcess"
@@ -237,13 +311,14 @@ fn regular_polygon(sides: usize) -> Vec<GeometryPathCommand> {
     )
 }
 
-fn star(points: usize) -> Vec<GeometryPathCommand> {
+fn star(points: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let inner_radius = clamp_fraction(adjustment, 0.45) * 0.5;
     polygon(
         &(0..points * 2)
             .map(|i| {
                 let a =
                     -std::f64::consts::PI / 2.0 + i as f64 * std::f64::consts::PI / points as f64;
-                let r = if i % 2 == 0 { 0.5 } else { 0.225 };
+                let r = if i % 2 == 0 { 0.5 } else { inner_radius };
                 (0.5 + a.cos() * r, 0.5 + a.sin() * r)
             })
             .collect::<Vec<_>>(),
@@ -258,16 +333,22 @@ fn clamp_fraction(value: Option<f64>, fallback: f64) -> f64 {
         .clamp(0.0, 1.0)
 }
 
-fn arrow(direction: &str, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
-    let h = clamp_fraction(adjustment, 0.5);
+fn arrow(
+    direction: &str,
+    shaft_adjustment: Option<f64>,
+    head_adjustment: Option<f64>,
+) -> Vec<GeometryPathCommand> {
+    let shaft = clamp_fraction(shaft_adjustment, 0.5);
+    let edge = (1.0 - shaft) / 2.0;
+    let head = clamp_fraction(head_adjustment, 0.5);
     polygon(&[
-        (0.0, 0.25),
-        (1.0 - h, 0.25),
-        (1.0 - h, 0.0),
+        (0.0, edge),
+        (1.0 - head, edge),
+        (1.0 - head, 0.0),
         (1.0, 0.5),
-        (1.0 - h, 1.0),
-        (1.0 - h, 0.75),
-        (0.0, 0.75),
+        (1.0 - head, 1.0),
+        (1.0 - head, 1.0 - edge),
+        (0.0, 1.0 - edge),
     ])
     .into_iter()
     .map(|command| match command {
@@ -420,6 +501,19 @@ mod tests {
         assert!(preset_geometry_to_path("ellipse", &adjustments, 1.0).is_some());
         assert!(preset_geometry_to_path("rightArrow", &adjustments, 1.0).is_some());
         assert!(preset_geometry_to_path("unknown", &adjustments, 1.0).is_none());
+    }
+
+    #[test]
+    fn exposes_defaults_for_adjustable_presets() {
+        assert_eq!(
+            preset_geometry_default_adjustments("parallelogram").get("adj"),
+            Some(&0.25)
+        );
+        assert_eq!(
+            preset_geometry_default_adjustments("rightArrow").get("adj1"),
+            Some(&0.5)
+        );
+        assert!(preset_geometry_default_adjustments("rect").is_empty());
     }
 
     #[test]

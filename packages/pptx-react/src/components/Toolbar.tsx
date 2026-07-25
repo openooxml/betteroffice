@@ -120,6 +120,7 @@ const DEFAULT_FONT_FAMILIES = [
 const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72] as const;
 const BORDER_WIDTHS = [1, 2, 3, 4, 8] as const;
 const CORNER_RADIUS_OPTIONS = [0, 10, 17, 25, 33, 50] as const;
+const SHAPE_ADJUSTMENT_OPTIONS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] as const;
 
 function stripUndefined<T extends object>(value: T): Partial<T> {
   const result: Partial<T> = {};
@@ -137,6 +138,16 @@ function useToolbarProps(props: ToolbarProps): ToolbarProps {
 function nextFontSize(value: number, sizes: readonly number[], direction: -1 | 1): number {
   if (direction > 0) return sizes.find((size) => size > value) ?? value + 1;
   return [...sizes].reverse().find((size) => size < value) ?? Math.max(1, value - 1);
+}
+
+function primaryAdjustment(
+  adjustments: Record<string, number> | undefined
+): [string, number] | null {
+  if (!adjustments) return null;
+  if (adjustments.adj !== undefined) return ['adj', adjustments.adj];
+  if (adjustments.adj1 !== undefined) return ['adj1', adjustments.adj1];
+  const name = Object.keys(adjustments).sort()[0];
+  return name ? [name, adjustments[name]] : null;
 }
 
 export function Toolbar(explicitProps: ToolbarProps) {
@@ -175,6 +186,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const fontSize = currentFormatting.fontSize ?? 24;
   const fitLabel = t('toolbar.fit');
   const zoomValue = zoom === 'fit' ? fitLabel : `${Math.round(zoom * 100)}%`;
+  const shapeAdjustment = primaryAdjustment(currentShapeFormatting.adjustments);
+  const roundRectAdjustment =
+    currentShapeFormatting.geometry === 'roundRect' && shapeAdjustment?.[0] === 'adj';
 
   useEffect(() => {
     const root = rootRef.current;
@@ -527,7 +541,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     },
     {
       key: 'shape-formatting',
-      width: currentShapeFormatting.geometry === 'roundRect' ? 244 : 172,
+      width: shapeAdjustment ? 244 : 172,
       node: (
         <>
           <ToolbarSeparator />
@@ -590,30 +604,36 @@ export function Toolbar(explicitProps: ToolbarProps) {
                 </>
               )}
             </ToolbarDropdown>
-            {currentShapeFormatting.geometry === 'roundRect' ? (
+            {shapeAdjustment ? (
               <EditableCombobox
-                value={`${Math.round(
-                  (currentShapeFormatting.adjustments?.adj ?? 0.166_67) * 100
-                )}%`}
-                options={CORNER_RADIUS_OPTIONS.map((value) => ({
+                value={`${Math.round(shapeAdjustment[1] * 100)}%`}
+                options={(roundRectAdjustment
+                  ? CORNER_RADIUS_OPTIONS
+                  : SHAPE_ADJUSTMENT_OPTIONS
+                ).map((value) => ({
                   value: String(value),
                   label: `${value}%`,
                 }))}
-                label={t('toolbar.cornerRadius')}
+                label={t(roundRectAdjustment ? 'toolbar.cornerRadius' : 'toolbar.shapeAdjustment')}
                 disabled={!shapeFormattingEnabled}
                 onCommit={(value) => {
                   const percent = Number.parseFloat(value.replace('%', ''));
                   if (Number.isFinite(percent)) {
+                    const maximum = roundRectAdjustment ? 50 : 100;
                     applyShape({
                       type: 'adjust',
-                      name: 'adj',
-                      value: Math.max(0, Math.min(50, percent)) / 100,
+                      name: shapeAdjustment[0],
+                      value: Math.max(0, Math.min(maximum, percent)) / 100,
                     });
                   }
                 }}
                 width={68}
                 inputStyle={{ textAlign: 'center' }}
-                testId="pptx-shape-corner-radius"
+                testId={
+                  roundRectAdjustment
+                    ? 'pptx-shape-corner-radius'
+                    : 'pptx-shape-adjustment'
+                }
               />
             ) : null}
           </ToolbarGroup>

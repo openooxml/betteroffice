@@ -50,6 +50,7 @@
     "borderWidthValue": "{width} pt",
     "noBorder": "No border",
     "cornerRadius": "Corner radius",
+    "shapeAdjustment": "Shape adjustment",
     "shapes": {
       "rect": "Rectangle",
       "roundRect": "Rounded rectangle",

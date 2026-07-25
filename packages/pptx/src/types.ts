@@ -76,7 +76,9 @@ export interface ShapeSnapshot {
   adjustValues: Record<string, number>;
   placeholder: unknown | null;
   fill: ShapeFill | null;
+  resolvedFillColor: string | null;
   outline: ShapeOutline | null;
+  resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
   graphic: unknown | null;
   textStories: StorySnapshot[];

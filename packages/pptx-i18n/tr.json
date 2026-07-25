@@ -50,6 +50,7 @@
     "borderWidthValue": null,
     "noBorder": null,
     "cornerRadius": null,
+    "shapeAdjustment": "Şekil ayarı",
     "shapes": {
       "rect": null,
       "roundRect": null,

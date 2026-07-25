@@ -112,7 +112,9 @@ pub struct ShapeSnapshot {
     pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,
     pub fill: Option<ShapeFill>,
+    pub resolved_fill_color: Option<String>,
     pub outline: Option<ShapeOutline>,
+    pub resolved_outline_color: Option<String>,
     pub media_part_path: Option<String>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
@@ -276,6 +278,8 @@ pub enum EditError {
     ParagraphBoundary { start: u32, end: u32 },
     #[error("invalid shape geometry: {0}")]
     InvalidGeometry(String),
+    #[error("invalid shape adjustment: {0}")]
+    InvalidAdjustment(String),
     #[error("update observer failed: {0}")]
     Observer(String),
     #[error("JSON boundary error: {0}")]

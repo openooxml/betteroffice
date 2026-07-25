@@ -8,6 +8,7 @@ use crate::relationships::Relationship;
 use crate::xml::{ParseBudget, XmlElement};
 
 const MAX_SAFE_EMU: i64 = 1_000_000_000_000_000;
+const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
 
 pub(crate) struct CommonSlideData {
     pub name: Option<String>,
@@ -324,19 +325,71 @@ fn parse_geometry(properties: Option<&XmlElement>) -> String {
 }
 
 fn parse_adjust_values(properties: Option<&XmlElement>) -> BTreeMap<String, f64> {
-    properties
+    let Some(adjustment_list) = properties
         .and_then(|value| value.child("prstGeom"))
         .and_then(|value| value.child("avLst"))
-        .into_iter()
-        .flat_map(XmlElement::child_elements)
+    else {
+        return BTreeMap::new();
+    };
+    let mut raw_values = BTreeMap::new();
+    let mut adjustments = BTreeMap::new();
+    for guide in adjustment_list
+        .child_elements()
         .filter(|value| value.local_name() == "gd")
-        .filter_map(|value| {
-            let name = value.attribute("name")?;
-            let formula = value.attribute("fmla")?;
-            let raw = formula.strip_prefix("val ")?.parse::<f64>().ok()?;
-            raw.is_finite().then(|| (name.to_owned(), raw / 100_000.0))
-        })
-        .collect()
+    {
+        let (Some(name), Some(formula)) = (guide.attribute("name"), guide.attribute("fmla")) else {
+            continue;
+        };
+        let Some(raw) = evaluate_guide_formula(formula, &raw_values) else {
+            continue;
+        };
+        raw_values.insert(name.to_owned(), raw);
+        adjustments.insert(name.to_owned(), raw / 100_000.0);
+    }
+    adjustments
+}
+
+fn evaluate_guide_formula(formula: &str, values: &BTreeMap<String, f64>) -> Option<f64> {
+    let mut tokens = formula.split_whitespace();
+    let operator = tokens.next()?;
+    let operands = tokens
+        .map(|token| guide_operand(token, values))
+        .collect::<Option<Vec<_>>>()?;
+    let result = match (operator, operands.as_slice()) {
+        ("val", [x]) => *x,
+        ("*/", [x, y, z]) if *z != 0.0 => x * y / z,
+        ("+-", [x, y, z]) => x + y - z,
+        ("+/", [x, y, z]) if *z != 0.0 => (x + y) / z,
+        ("?:", [x, y, z]) => {
+            if *x > 0.0 {
+                *y
+            } else {
+                *z
+            }
+        }
+        ("abs", [x]) => x.abs(),
+        ("at2", [x, y]) => y.atan2(*x).to_degrees() * ANGLE_UNITS_PER_DEGREE,
+        ("cat2", [x, y, z]) => x * z.atan2(*y).cos(),
+        ("cos", [x, y]) => x * (y / ANGLE_UNITS_PER_DEGREE).to_radians().cos(),
+        ("max", [x, y]) => x.max(*y),
+        ("min", [x, y]) => x.min(*y),
+        ("mod", [x, y, z]) => x.hypot(*y).hypot(*z),
+        ("pin", [x, y, z]) => y.max(*x).min(*z),
+        ("sat2", [x, y, z]) => x * z.atan2(*y).sin(),
+        ("sin", [x, y]) => x * (y / ANGLE_UNITS_PER_DEGREE).to_radians().sin(),
+        ("sqrt", [x]) if *x >= 0.0 => x.sqrt(),
+        ("tan", [x, y]) => x * (y / ANGLE_UNITS_PER_DEGREE).to_radians().tan(),
+        _ => return None,
+    };
+    result.is_finite().then_some(result)
+}
+
+fn guide_operand(token: &str, values: &BTreeMap<String, f64>) -> Option<f64> {
+    token
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .or_else(|| values.get(token).copied())
 }
 
 fn parse_background(element: &XmlElement) -> Option<ShapeFill> {
@@ -760,5 +813,45 @@ mod tests {
                 .font_size_pt,
             Some(24.0)
         );
+    }
+
+    #[test]
+    fn evaluates_literal_arithmetic_and_reference_adjustment_formulas() {
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="val 20000"/>
+               <a:gd name="adj1" fmla="*/ 30000 2 3"/>
+               <a:gd name="adj2" fmla="+- adj1 15000 5000"/>
+               <a:gd name="adj3" fmla="+/ adj2 10000 2"/>"#,
+        );
+        let adjustments = parse_adjust_values(Some(&properties));
+
+        assert_eq!(adjustments.get("adj"), Some(&0.2));
+        assert_eq!(adjustments.get("adj1"), Some(&0.2));
+        assert_eq!(adjustments.get("adj2"), Some(&0.3));
+        assert_eq!(adjustments.get("adj3"), Some(&0.2));
+    }
+
+    #[test]
+    fn leaves_unresolvable_adjustments_absent_for_preset_fallbacks() {
+        let properties = adjustment_properties(
+            r#"<a:gd name="adj" fmla="*/ missing 2 3"/>
+               <a:gd name="adj1" fmla="unknown 20000"/>"#,
+        );
+
+        assert!(parse_adjust_values(Some(&properties)).is_empty());
+    }
+
+    fn adjustment_properties(guides: &str) -> XmlElement {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        parse_xml(
+            format!(
+                r#"<p:spPr><a:prstGeom prst="roundRect"><a:avLst>{guides}</a:avLst></a:prstGeom></p:spPr>"#
+            )
+            .as_bytes(),
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap()
     }
 }
