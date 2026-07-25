@@ -132,6 +132,23 @@ export function seedYrsSession(
   return null;
 }
 
+/**
+ * Materializes the save-projection base once. `materializeDocx` re-parses the
+ * retained source and ships the full envelope (every media entry, twice, as
+ * JSON), so no interactive event should be the first to pay for it.
+ */
+export function warmCompatibilityBase(
+  session: Pick<YrsSession, 'materializeDocx'>,
+  compatibilityBase: { current: Document | null }
+): void {
+  if (compatibilityBase.current) return;
+  try {
+    compatibilityBase.current = session.materializeDocx();
+  } catch (error) {
+    console.error('[yrs] failed to warm the save projection base', error);
+  }
+}
+
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -213,6 +230,21 @@ export function useYrsCoreSession(
     collaborationClientId,
     collaborationInitialUpdate,
   ]);
+
+  // Off the interaction path: the first host onChange, ruler drag or save would
+  // otherwise re-parse the source document mid-keystroke.
+  useEffect(() => {
+    if (!enabled || !session || !seedBytes) return;
+    const warm = (): void => {
+      if (sessionRef.current === session) warmCompatibilityBase(session, compatibilityBaseRef);
+    };
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(warm);
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(warm, 200);
+    return () => clearTimeout(id);
+  }, [enabled, seedBytes, session]);
 
   useEffect(() => {
     const onReplica = collaboration?.onReplica;

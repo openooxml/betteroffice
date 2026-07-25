@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
-import { mergeDocxHostMetadata, seedYrsSession } from './useYrsCoreSession';
+import {
+  mergeDocxHostMetadata,
+  seedYrsSession,
+  warmCompatibilityBase,
+} from './useYrsCoreSession';
 
 function fakeSeedSession(): {
   session: Pick<YrsSession, 'openDocx' | 'loadState'>;
@@ -195,5 +199,34 @@ describe('mergeDocxHostMetadata', () => {
     expect(merged.package.relationships).toBe(relationships);
     expect(merged.package.media).toBe(media);
     expect(merged.originalBuffer).toBe(savedBuffer);
+  });
+});
+
+describe('warmCompatibilityBase', () => {
+  test('materializes the projection base once', () => {
+    let materializations = 0;
+    const materialized = { name: 'materialized' } as unknown as Document;
+    const session = {
+      materializeDocx: () => {
+        materializations += 1;
+        return materialized;
+      },
+    };
+    const compatibilityBase: { current: Document | null } = { current: null };
+
+    warmCompatibilityBase(session, compatibilityBase);
+    warmCompatibilityBase(session, compatibilityBase);
+
+    expect(compatibilityBase.current).toBe(materialized);
+    expect(materializations).toBe(1);
+  });
+
+  test('leaves an already-projected base untouched', () => {
+    const projected = { name: 'projected' } as unknown as Document;
+    const compatibilityBase: { current: Document | null } = { current: projected };
+
+    warmCompatibilityBase({ materializeDocx: () => expect.unreachable() }, compatibilityBase);
+
+    expect(compatibilityBase.current).toBe(projected);
   });
 });
