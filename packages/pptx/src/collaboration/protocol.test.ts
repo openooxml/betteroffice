@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'bun:test';
 import {
+  decodeAwarenessUpdate,
   decodeMessages,
+  encodeAwarenessUpdate,
   encodeEmptyAwarenessUpdate,
+  encodeQueryAwareness,
   encodeSyncStep1,
   encodeSyncStep2,
   encodeUpdate,
   encodeVarUint,
   ProtocolError,
 } from './protocol';
+import { presenceColorForClientId } from './presence';
 
 function concat(...parts: Uint8Array[]): Uint8Array {
   const output = new Uint8Array(parts.reduce((length, part) => length + part.byteLength, 0));
@@ -19,12 +23,44 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return output;
 }
 
+function rawAwarenessUpdate(clientId: number, clock: number, state: unknown): Uint8Array {
+  const encodedState = new TextEncoder().encode(JSON.stringify(state));
+  return concat(
+    encodeVarUint(1),
+    encodeVarUint(clientId),
+    encodeVarUint(clock),
+    encodeVarUint(encodedState.byteLength),
+    encodedState
+  );
+}
+
 describe('collaboration protocol encoding', () => {
   it('matches sync-v1 golden frames', () => {
     expect([...encodeSyncStep1(Uint8Array.of(1, 2))]).toEqual([0, 0, 2, 1, 2]);
     expect([...encodeSyncStep2(Uint8Array.of(3, 4))]).toEqual([0, 1, 2, 3, 4]);
     expect([...encodeUpdate(Uint8Array.of(5, 6))]).toEqual([0, 2, 2, 5, 6]);
     expect([...encodeEmptyAwarenessUpdate()]).toEqual([1, 1, 0]);
+    expect([...encodeQueryAwareness()]).toEqual([3]);
+  });
+
+  it('round-trips presence and leave awareness entries', () => {
+    const state = {
+      clientId: 42,
+      clock: 7,
+      user: { name: 'Brisk Otter', color: '#3949AB' },
+      cursor: { slideId: 'slide-1', shapeId: 'shape-2' },
+    };
+    const frame = encodeAwarenessUpdate([
+      { clientId: 42, clock: 7, state },
+      { clientId: 9, clock: 11, state: null },
+    ]);
+    const [message] = decodeMessages(frame);
+    expect(message.type).toBe('awareness');
+    if (message.type !== 'awareness') throw new Error('Expected awareness');
+    expect(decodeAwarenessUpdate(message.update)).toEqual([
+      { clientId: 42, clock: 7, state },
+      { clientId: 9, clock: 11, state: null },
+    ]);
   });
 
   it('uses standard multibyte varUint lengths', () => {
@@ -101,6 +137,39 @@ describe('collaboration protocol decoding', () => {
       'Unknown sync message type 3'
     );
     expect(() => decodeMessages(Uint8Array.of(2, 1))).toThrow('Unknown auth message type 1');
+  });
+
+  it('rejects malformed or inconsistent awareness states', () => {
+    const invalidJson = Uint8Array.of(1, 1, 1, 1, 1, 123);
+    expect(() => decodeAwarenessUpdate(invalidJson)).toThrow('Invalid awareness JSON');
+    expect(() =>
+      encodeAwarenessUpdate([
+        {
+          clientId: 1,
+          clock: 2,
+          state: {
+            clientId: 1,
+            clock: 3,
+            user: { name: 'Peer', color: '#3949AB' },
+            cursor: null,
+          },
+        },
+      ])
+    ).toThrow('Awareness state identity does not match its entry');
+  });
+
+  it('replaces unsafe peer colors with the deterministic palette color', () => {
+    const clientId = 42;
+    const [entry] = decodeAwarenessUpdate(
+      rawAwarenessUpdate(clientId, 7, {
+        clientId,
+        clock: 7,
+        user: { name: 'Peer', color: 'url(https://attacker.invalid/pixel)' },
+        cursor: null,
+      })
+    );
+
+    expect(entry.state?.user.color).toBe(presenceColorForClientId(clientId));
   });
 
   it('enforces the physical frame limit', () => {

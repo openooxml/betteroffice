@@ -145,7 +145,7 @@ impl WorkbookBase {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkbookStructure {
     generation: i64,
-    sheet_keys: Vec<String>,
+    pub(crate) sheet_keys: Vec<String>,
     sheet_names: Vec<String>,
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,

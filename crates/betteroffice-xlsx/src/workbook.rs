@@ -421,6 +421,12 @@ impl Workbook {
     pub fn sheet_info(&self) -> Result<SheetInfo> {
         let sheet = self.sheet(self.active_sheet)?;
         let geometry = GridGeometry::new(sheet);
+        let sheet_ids = match &self.mode {
+            WorkbookMode::Collaborative { structure } => structure.sheet_keys.clone(),
+            WorkbookMode::Standalone => (0..self.model.sheets.len())
+                .map(|index| format!("sheet:{index}"))
+                .collect(),
+        };
         let used_range = sheet.used_range();
         let mut content_col = used_range
             .map_or(26, |range| range.end.col.saturating_add(2))
@@ -449,6 +455,7 @@ impl Workbook {
             None => (0, 0, 0.0, 0.0),
         };
         Ok(SheetInfo {
+            sheet_ids,
             sheet_names: self
                 .model
                 .sheets

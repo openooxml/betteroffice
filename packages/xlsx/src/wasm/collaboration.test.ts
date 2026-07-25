@@ -43,6 +43,7 @@ describe('wasm collaboration', () => {
     const standalone = openWorkbook(sampleBytes());
     try {
       expect(explicit.clientId).toBe(Number.MAX_SAFE_INTEGER);
+      expect(explicit.sheetInfo().sheetIds).toEqual(['sheet:0', 'sheet:1', 'sheet:2']);
       expect(generated.clientId).toBeGreaterThan(0);
       expect(generated.clientId).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
       expect(requireReplica(explicit)).toBe(explicit);

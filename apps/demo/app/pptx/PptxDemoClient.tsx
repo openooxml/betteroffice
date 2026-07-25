@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CollaborationProvider,
+  type CollaborationUser,
   type PptxFontFace,
 } from "@betteroffice/pptx";
 import {
@@ -32,6 +33,28 @@ const SHOWCASE = {
   name: "betteroffice-demo.pptx",
 };
 
+const PRESENCE_USER_KEY = "betteroffice:pptx:presence-user";
+const PRESENCE_ADJECTIVES = [
+  "Brisk",
+  "Calm",
+  "Clever",
+  "Kind",
+  "Lively",
+  "Merry",
+  "Sunny",
+  "Swift",
+] as const;
+const PRESENCE_ANIMALS = [
+  "Badger",
+  "Dolphin",
+  "Falcon",
+  "Fox",
+  "Otter",
+  "Panda",
+  "Robin",
+  "Turtle",
+] as const;
+
 type DemoAssets = {
   file: Uint8Array;
   fonts: PptxFontFace[];
@@ -40,14 +63,19 @@ type DemoAssets = {
 
 export function PptxDemoClient() {
   const [assets, setAssets] = useState<DemoAssets | null>(null);
+  const [user, setUser] = useState<CollaborationUser | null>(null);
   const [error, setError] = useState<string | null>(null);
   const room = useDemoRoom();
   const createProvider = useCallback(
     (replica: CollaborationReplica, transport: CollaborationTransport) =>
-      new CollaborationProvider(replica, transport),
-    [],
+      new CollaborationProvider(replica, transport, {
+        user: user ?? undefined,
+      }),
+    [user],
   );
   const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
+
+  useEffect(() => setUser(loadPresenceUser()), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,14 +100,15 @@ export function PptxDemoClient() {
 
   const collaboration = useMemo(
     () =>
-      room && assets && collab.clientId
+      room && assets && collab.clientId && user
         ? {
             clientId: collab.clientId,
             initialUpdate: assets.seed,
             onReplica: collab.onReplica,
+            presence: collab.provider ?? undefined,
           }
         : undefined,
-    [assets, collab.clientId, collab.onReplica, room],
+    [assets, collab.clientId, collab.onReplica, collab.provider, room, user],
   );
 
   return (
@@ -153,6 +182,25 @@ export function PptxDemoClient() {
       </main>
     </div>
   );
+}
+
+function loadPresenceUser(): CollaborationUser {
+  try {
+    const stored = sessionStorage.getItem(PRESENCE_USER_KEY)?.trim();
+    if (stored) return { name: stored };
+    const name = generatePresenceName();
+    sessionStorage.setItem(PRESENCE_USER_KEY, name);
+    return { name };
+  } catch {
+    return { name: generatePresenceName() };
+  }
+}
+
+function generatePresenceName(): string {
+  const values = crypto.getRandomValues(new Uint32Array(2));
+  const adjective = PRESENCE_ADJECTIVES[values[0] % PRESENCE_ADJECTIVES.length];
+  const animal = PRESENCE_ANIMALS[values[1] % PRESENCE_ANIMALS.length];
+  return `${adjective} ${animal}`;
 }
 
 async function loadPresentation(): Promise<Uint8Array> {

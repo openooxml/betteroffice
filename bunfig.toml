@@ -1,4 +1,4 @@
 [install]
 minimumReleaseAge = 604800
 # Per-advisory exemptions; remove each after its pinned version clears the release-age window.
-minimumReleaseAgeExcludes = ["fast-uri", "next", "postcss"]
+minimumReleaseAgeExcludes = ["fast-uri", "next", "postcss", "brace-expansion"]
