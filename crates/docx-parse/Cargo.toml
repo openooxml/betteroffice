@@ -22,7 +22,7 @@ wasm = ["dep:wasm-bindgen"]
 base64 = "0.22"
 ooxml-opc.workspace = true
 indexmap = { version = "2", features = ["serde"] }
-ooxml-drawingml.workspace = true
+ooxml-drawingml = { workspace = true, features = ["chart"] }
 quick-xml = { version = "0.41", features = ["encoding"] }
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }

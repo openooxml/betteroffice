@@ -23,7 +23,7 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ['-O3']
 
 [dependencies]
-ooxml-drawingml.workspace = true
+ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-text.workspace = true
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }

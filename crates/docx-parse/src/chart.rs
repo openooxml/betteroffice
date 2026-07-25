@@ -13,7 +13,7 @@ use crate::relationships::{
 };
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
-pub use ooxml_drawingml::{
+pub use ooxml_drawingml::chart::{
     ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint, ChartSeries,
 };
 
