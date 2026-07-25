@@ -208,6 +208,46 @@ fn non_worksheet_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+fn strict_prefixed_fixture() -> Vec<u8> {
+    let strict_main = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+    let strict_rel = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.ms-excel.worksheet+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{strict_rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/workbook.xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><s:workbook xmlns:s="{strict_main}" xmlns:rel="{strict_rel}"><s:sheets><s:sheet name="Data" sheetId="1" rel:id="rId1"/></s:sheets><s:definedNames><s:definedName name="StrictName">Data!$A$1</s:definedName></s:definedNames></s:workbook>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{strict_rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><s:worksheet xmlns:s="{strict_main}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:fixture-extension" mc:Ignorable="x"><x:sheetData marker="keep"/><mc:AlternateContent><mc:Choice Requires="s"><s:sheetPr/></mc:Choice><mc:Fallback><s:sheetPr/></mc:Fallback></mc:AlternateContent><s:sheetData><s:row r="1"><s:c r="A1"><s:v>1</s:v></s:c></s:row></s:sheetData></s:worksheet>"#
+            )
+            .into_bytes(),
+        ),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
     parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
 }
@@ -3116,4 +3156,50 @@ fn non_worksheet_sheets_stay_typed_and_byte_identical() {
             .contains("sheetData")
     );
     Workbook::open(&saved).unwrap();
+}
+
+#[test]
+fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
+    let original = strict_prefixed_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
+        .unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Added".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let workbook_xml = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains("<s:sheets>"));
+    assert!(workbook_xml.contains("rel:id="));
+    assert!(!workbook_xml.contains("r:id="));
+    assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
+    let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
+    assert!(
+        worksheet.find("<mc:AlternateContent").unwrap() < worksheet.find("<s:sheetData").unwrap()
+    );
+    assert!(worksheet.contains("<s:row"));
+    assert!(worksheet.contains("<s:c"));
+    assert!(!worksheet.contains("<sheetData"));
+    let relationships = String::from_utf8(parts["xl/_rels/workbook.xml.rels"].clone()).unwrap();
+    assert_eq!(
+        relationships
+            .matches("http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet")
+            .count(),
+        2
+    );
+    assert!(!relationships.contains("schemas.openxmlformats.org/officeDocument"));
+    let added = String::from_utf8(parts["xl/worksheets/sheet2.xml"].clone()).unwrap();
+    assert!(added.contains("xmlns=\"http://purl.oclc.org/ooxml/spreadsheetml/main\""));
+    let content_types = String::from_utf8(parts["[Content_Types].xml"].clone()).unwrap();
+    assert!(content_types.contains(r#"PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.ms-excel.worksheet+xml""#));
+    assert_eq!(Workbook::open(&saved).unwrap().sheet_count(), 2);
 }

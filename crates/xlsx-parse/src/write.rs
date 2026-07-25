@@ -18,20 +18,24 @@ use crate::package::{
 use crate::xml::xml_err;
 
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const NS_PKG_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const CT_WORKSHEET: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml";
+const CT_STRICT_WORKSHEET: &str = "application/vnd.ms-excel.worksheet+xml";
 const CT_WORKBOOK: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml";
 const CT_SST: &str =
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
+const CT_STRICT_SST: &str = "application/vnd.ms-excel.sharedStrings+xml";
 const REL_WORKSHEET: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet";
 const REL_SST: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
 const CT_STYLES: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml";
+const CT_STRICT_STYLES: &str = "application/vnd.ms-excel.styles+xml";
 const CT_THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 const REL_STYLES: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles";
@@ -109,6 +113,14 @@ pub fn serialize_workbook_with_package_and_origins(
 
     let have_sst = !wb.shared_strings.is_empty();
     let have_styles = !wb.styles.is_empty();
+    let main_namespace = package
+        .workbook_template
+        .root_namespace()
+        .unwrap_or(NS_MAIN);
+    let worksheet_relationship_type = relationship_type(package, "worksheet", REL_WORKSHEET);
+    let shared_strings_relationship_type = relationship_type(package, "sharedStrings", REL_SST);
+    let styles_relationship_type = relationship_type(package, "styles", REL_STYLES);
+    let theme_relationship_type = relationship_type(package, "theme", REL_THEME);
     let mut used_relationship_ids = package
         .workbook_relationships
         .iter()
@@ -125,13 +137,14 @@ pub fn serialize_workbook_with_package_and_origins(
         origins,
         &mut used_relationship_ids,
         &mut used_paths,
+        &worksheet_relationship_type,
     );
     let shared_strings = have_sst.then(|| {
         plan_part(
             package.shared_strings.as_ref(),
             &package.workbook_relationships,
             "sharedStrings",
-            REL_SST,
+            &shared_strings_relationship_type,
             "xl/sharedStrings.xml",
             &mut used_relationship_ids,
         )
@@ -141,7 +154,7 @@ pub fn serialize_workbook_with_package_and_origins(
             package.styles.as_ref(),
             &package.workbook_relationships,
             "styles",
-            REL_STYLES,
+            &styles_relationship_type,
             "xl/styles.xml",
             &mut used_relationship_ids,
         )
@@ -151,7 +164,7 @@ pub fn serialize_workbook_with_package_and_origins(
             package.theme.as_ref(),
             &package.workbook_relationships,
             "theme",
-            REL_THEME,
+            &theme_relationship_type,
             "xl/theme/theme1.xml",
             &mut used_relationship_ids,
         )
@@ -175,7 +188,7 @@ pub fn serialize_workbook_with_package_and_origins(
                 worksheet_xml_with_template(sheet, wb, &source.template)?
             }
             Some(_) => continue,
-            None => worksheet_xml(sheet, wb)?,
+            None => worksheet_xml_with_namespace(sheet, wb, main_namespace)?,
         };
         parts.set(plan.path.clone(), bytes);
     }
@@ -211,7 +224,7 @@ pub fn serialize_workbook_with_package_and_origins(
         &mut parts,
         package.shared_strings.as_ref(),
         shared_strings.as_ref(),
-        || shared_strings_xml(wb),
+        || shared_strings_xml_with_namespace(wb, main_namespace),
     )?;
     replace_optional_part(
         &mut parts,
@@ -219,7 +232,7 @@ pub fn serialize_workbook_with_package_and_origins(
         styles.as_ref(),
         || match &package.stylesheet_template {
             Some(template) => styles_xml_with_template(&wb.styles, template),
-            None => styles_xml(&wb.styles),
+            None => styles_xml_with_namespace(&wb.styles, main_namespace),
         },
     )?;
 
@@ -261,6 +274,7 @@ fn plan_sheets(
     origins: &[Option<usize>],
     used_relationship_ids: &mut HashSet<String>,
     used_paths: &mut HashSet<String>,
+    worksheet_relationship_type: &str,
 ) -> Vec<PlannedSheet> {
     let mut claimed_origins = HashSet::new();
     let mut next_sheet_id = package
@@ -287,7 +301,10 @@ fn plan_sheets(
                     Some(relationship) => relationship.clone(),
                     None => new_relationship(
                         next_relationship_id(used_relationship_ids),
-                        source.relationship_type.as_deref().unwrap_or(REL_WORKSHEET),
+                        source
+                            .relationship_type
+                            .as_deref()
+                            .unwrap_or(worksheet_relationship_type),
                         relative_to_xl(&source.path),
                     ),
                 };
@@ -303,7 +320,7 @@ fn plan_sheets(
             let path = next_sheet_path(used_paths);
             let relationship = new_relationship(
                 next_relationship_id(used_relationship_ids),
-                REL_WORKSHEET,
+                worksheet_relationship_type,
                 relative_to_xl(&path),
             );
             let sheet_id = next_sheet_id;
@@ -342,11 +359,7 @@ fn plan_part(
                     .find(|relationship| relationship.has_type(type_suffix))
             });
         let relationship = match source_relationship {
-            Some(relationship) => {
-                let mut relationship = relationship.clone();
-                relationship.set_attribute("Type", "Type", relationship_type.to_owned());
-                relationship
-            }
+            Some(relationship) => relationship.clone(),
             None => new_relationship(
                 next_relationship_id(used_relationship_ids),
                 relationship_type,
@@ -367,6 +380,51 @@ fn plan_part(
             relative_to_xl(fallback_path),
         ),
     }
+}
+
+/// Picks the relationship type the source uses, keeping Strict URIs intact.
+fn relationship_type(package: &PreservedPackage, suffix: &str, fallback: &str) -> String {
+    relationship_type_from(&package.workbook_relationships, suffix, fallback)
+}
+
+fn relationship_type_from(relationships: &[Relationship], suffix: &str, fallback: &str) -> String {
+    if let Some(relationship_type) = relationships
+        .iter()
+        .find(|relationship| relationship.has_type(suffix))
+        .and_then(|relationship| relationship.attribute("Type"))
+    {
+        return relationship_type.to_owned();
+    }
+    relationships
+        .iter()
+        .filter_map(|relationship| relationship.attribute("Type"))
+        .find_map(|relationship_type| {
+            let (base, _) = relationship_type.rsplit_once('/')?;
+            base.ends_with("/officeDocument/relationships")
+                .then(|| format!("{base}/{suffix}"))
+        })
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn workbook_relationship_namespace(package: &PreservedPackage) -> (String, String) {
+    if let Some((prefix, namespace)) = package
+        .workbook_template
+        .namespace_binding("/officeDocument/relationships")
+    {
+        return (prefix.to_owned(), namespace.to_owned());
+    }
+    let namespace = package
+        .workbook_relationships
+        .iter()
+        .filter_map(|relationship| relationship.attribute("Type"))
+        .find_map(|relationship_type| {
+            let (namespace, _) = relationship_type.rsplit_once('/')?;
+            namespace
+                .ends_with("/officeDocument/relationships")
+                .then(|| namespace.to_owned())
+        })
+        .unwrap_or_else(|| NS_R.to_owned());
+    ("r".to_owned(), namespace)
 }
 
 fn new_relationship(id: String, relationship_type: &str, target: String) -> Relationship {
@@ -523,7 +581,11 @@ fn merged_root_relationships(package: &PreservedPackage) -> Result<Vec<u8>, Pars
             .collect::<HashSet<_>>();
         relationships.push(new_relationship(
             next_relationship_id(&mut used),
-            REL_OFFICE_DOCUMENT,
+            &relationship_type_from(
+                &package.root_relationships,
+                "officeDocument",
+                REL_OFFICE_DOCUMENT,
+            ),
             "xl/workbook.xml".to_owned(),
         ));
     }
@@ -617,6 +679,7 @@ fn merged_content_types(
     theme: Option<&PlannedPart>,
 ) -> Result<Vec<u8>, ParseError> {
     let mut desired = BTreeMap::new();
+    let strict = package.workbook_template.root_namespace() == Some(NS_STRICT_MAIN);
     desired.insert(
         normalized_part_name("xl/workbook.xml"),
         source_content_type(package, "xl/workbook.xml").unwrap_or(CT_WORKBOOK),
@@ -626,7 +689,11 @@ fn merged_content_types(
         .iter()
         .find(|sheet| sheet.is_worksheet())
         .and_then(|sheet| source_content_type(package, &sheet.path))
-        .unwrap_or(CT_WORKSHEET);
+        .unwrap_or(if strict {
+            CT_STRICT_WORKSHEET
+        } else {
+            CT_WORKSHEET
+        });
     for sheet in sheets {
         let content_type = sheet
             .origin
@@ -642,7 +709,7 @@ fn merged_content_types(
                 .shared_strings
                 .as_ref()
                 .and_then(|source| source_content_type(package, &source.path))
-                .unwrap_or(CT_SST),
+                .unwrap_or(if strict { CT_STRICT_SST } else { CT_SST }),
         );
     }
     if let Some(part) = styles {
@@ -652,7 +719,7 @@ fn merged_content_types(
                 .styles
                 .as_ref()
                 .and_then(|source| source_content_type(package, &source.path))
-                .unwrap_or(CT_STYLES),
+                .unwrap_or(if strict { CT_STRICT_STYLES } else { CT_STYLES }),
         );
     }
     if let Some(part) = theme {
@@ -947,35 +1014,52 @@ fn workbook_xml_with_template(
         } else {
             None
         };
-    let sheets = Some(fragment(|writer| {
-        writer
-            .create_element("sheets")
-            .write_inner_content(|writer| {
-                for (sheet, plan) in wb.sheets.iter().zip(sheets) {
-                    let mut attributes = plan.attributes.clone();
-                    set_attribute(&mut attributes, "name", "name", sheet.name.clone());
-                    set_attribute(
-                        &mut attributes,
-                        "sheetId",
-                        "sheetId",
-                        plan.sheet_id.to_string(),
-                    );
-                    set_attribute(
-                        &mut attributes,
-                        "id",
-                        "r:id",
-                        plan.relationship.id().unwrap_or_default().to_owned(),
-                    );
-                    write_empty_element(writer, "sheet", &attributes)?;
-                }
-                Ok(())
-            })?;
+    let (relationship_prefix, relationship_namespace) = workbook_relationship_namespace(package);
+    let mut sheets_attributes = package.workbook_sheets_attributes.clone();
+    if !package
+        .workbook_template
+        .declares_namespace(&relationship_prefix, &relationship_namespace)
+        && !sheets_attributes.iter().any(|attribute| {
+            attribute.name == format!("xmlns:{relationship_prefix}")
+                && attribute.value == relationship_namespace
+        })
+    {
+        sheets_attributes.push(XmlAttribute {
+            name: format!("xmlns:{relationship_prefix}"),
+            value: relationship_namespace,
+        });
+    }
+    let relationship_id_name = format!("{relationship_prefix}:id");
+    let sheets_fragment = Some(fragment(|writer| {
+        let mut element = BytesStart::new("sheets");
+        for attribute in &sheets_attributes {
+            element.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+        }
+        writer.write_event(Event::Start(element))?;
+        for (sheet, plan) in wb.sheets.iter().zip(sheets) {
+            let mut attributes = plan.attributes.clone();
+            set_attribute(&mut attributes, "name", "name", sheet.name.clone());
+            set_attribute(
+                &mut attributes,
+                "sheetId",
+                "sheetId",
+                plan.sheet_id.to_string(),
+            );
+            set_attribute(
+                &mut attributes,
+                "id",
+                &relationship_id_name,
+                plan.relationship.id().unwrap_or_default().to_owned(),
+            );
+            write_empty_element(writer, "sheet", &attributes)?;
+        }
+        writer.write_event(Event::End(BytesEnd::new("sheets")))?;
         Ok(())
     })?);
-    Ok(package.workbook_template.render(
-        vec![("workbookPr", workbook_pr), ("sheets", sheets)],
+    package.workbook_template.render(
+        vec![("workbookPr", workbook_pr), ("sheets", sheets_fragment)],
         workbook_child_rank,
-    ))
+    )
 }
 
 fn workbook_child_rank(name: &str) -> usize {
@@ -1049,10 +1133,17 @@ fn workbook_rels(wb: &Workbook, have_sst: bool, have_styles: bool) -> Result<Vec
 }
 
 fn shared_strings_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
+    shared_strings_xml_with_namespace(wb, NS_MAIN)
+}
+
+fn shared_strings_xml_with_namespace(
+    wb: &Workbook,
+    main_namespace: &str,
+) -> Result<Vec<u8>, ParseError> {
     let count = wb.shared_strings.len().to_string();
     doc(|w| {
         w.create_element("sst")
-            .with_attribute(("xmlns", NS_MAIN))
+            .with_attribute(("xmlns", main_namespace))
             .with_attribute(("count", count.as_str()))
             .with_attribute(("uniqueCount", count.as_str()))
             .write_inner_content(|w| {
@@ -1069,9 +1160,17 @@ fn shared_strings_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
 }
 
 fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
+    worksheet_xml_with_namespace(sheet, wb, NS_MAIN)
+}
+
+fn worksheet_xml_with_namespace(
+    sheet: &Sheet,
+    wb: &Workbook,
+    main_namespace: &str,
+) -> Result<Vec<u8>, ParseError> {
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
-        root.push_attribute(("xmlns", NS_MAIN));
+        root.push_attribute(("xmlns", main_namespace));
         if sheet
             .hyperlinks
             .iter()
@@ -1102,14 +1201,14 @@ fn worksheet_xml_with_template(
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
         .transpose()?;
-    Ok(template.render(
+    template.render(
         vec![
             ("cols", columns),
             ("sheetData", sheet_data),
             ("mergeCells", merges),
         ],
         worksheet_child_rank,
-    ))
+    )
 }
 
 fn worksheet_child_rank(name: &str) -> usize {
@@ -1413,9 +1512,13 @@ fn write_text_el(w: &mut Writer<Vec<u8>>, text: &str) -> io::Result<()> {
 /// serialize the style tables verbatim; callers building a stylesheet from
 /// scratch must include the sml convention entries for excel to accept it.
 fn styles_xml(ss: &Stylesheet) -> Result<Vec<u8>, ParseError> {
+    styles_xml_with_namespace(ss, NS_MAIN)
+}
+
+fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("styleSheet")
-            .with_attribute(("xmlns", NS_MAIN))
+            .with_attribute(("xmlns", main_namespace))
             .write_inner_content(|w| {
                 write_num_fmts(w, ss)?;
                 write_fonts(w, ss)?;
@@ -1447,7 +1550,7 @@ fn styles_xml_with_template(
     let cell_xfs = (!stylesheet.cell_xfs.is_empty())
         .then(|| fragment(|writer| write_cell_xfs(writer, stylesheet)))
         .transpose()?;
-    Ok(template.render(
+    template.render(
         vec![
             ("numFmts", num_fmts),
             ("fonts", fonts),
@@ -1456,7 +1559,7 @@ fn styles_xml_with_template(
             ("cellXfs", cell_xfs),
         ],
         stylesheet_child_rank,
-    ))
+    )
 }
 
 fn stylesheet_child_rank(name: &str) -> usize {

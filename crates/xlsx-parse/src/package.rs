@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
+use quick_xml::name::ResolveResult;
+use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::{Theme, Workbook};
 
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
@@ -16,6 +17,7 @@ pub struct PreservedPackage {
     pub(crate) workbook_relationships: Vec<Relationship>,
     pub(crate) workbook_template: XmlTemplate,
     pub(crate) workbook_pr_attributes: Option<Vec<XmlAttribute>>,
+    pub(crate) workbook_sheets_attributes: Vec<XmlAttribute>,
     pub(crate) sheets: Vec<PreservedSheet>,
     pub(crate) shared_strings: Option<PartReference>,
     pub(crate) styles: Option<PartReference>,
@@ -33,11 +35,14 @@ impl PreservedPackage {
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
         let workbook_template = XmlTemplate::capture(workbook_xml)?;
         let workbook_pr_attributes = workbook_template
-            .children
-            .iter()
-            .find(|child| child.local_name == "workbookPr")
+            .child("workbookPr")
             .map(|child| attributes_from_fragment(&child.bytes))
             .transpose()?;
+        let workbook_sheets_attributes = workbook_template
+            .child("sheets")
+            .map(|child| attributes_from_fragment(&child.bytes))
+            .transpose()?
+            .unwrap_or_default();
 
         let workbook_relationships = find_part(parts, "xl/_rels/workbook.xml.rels")
             .map(parse_relationships)
@@ -106,6 +111,7 @@ impl PreservedPackage {
             workbook_relationships,
             workbook_template,
             workbook_pr_attributes,
+            workbook_sheets_attributes,
             sheets,
             shared_strings,
             styles,
@@ -185,10 +191,6 @@ impl Relationship {
             .find(|attribute| attribute.local_name() == local_name)
             .map(|attribute| attribute.value.as_str())
     }
-
-    pub(crate) fn set_attribute(&mut self, local_name: &str, name: &str, value: String) {
-        set_attribute(&mut self.attributes, local_name, name, value);
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +226,9 @@ pub(crate) struct XmlTemplate {
     pub(crate) children: Vec<XmlChild>,
     trailing: Vec<u8>,
     suffix: Vec<u8>,
+    root_prefix: Option<String>,
+    root_namespace: Option<String>,
+    namespaces: Vec<(Option<String>, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -231,11 +236,12 @@ pub(crate) struct XmlChild {
     before: Vec<u8>,
     pub(crate) local_name: String,
     pub(crate) bytes: Vec<u8>,
+    namespace: Option<String>,
 }
 
 impl XmlTemplate {
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
-        let mut reader = Reader::from_reader(data);
+        let mut reader = NsReader::from_reader(data);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
         config.check_end_names = true;
@@ -243,22 +249,31 @@ impl XmlTemplate {
         let mut depth = 0_usize;
         let mut root_start = None;
         let mut root_end = None;
-        let mut active_child: Option<(usize, String)> = None;
+        let mut root_prefix = None;
+        let mut root_namespace = None;
+        let mut namespaces = Vec::new();
+        let mut active_child: Option<(usize, String, Option<String>)> = None;
         let mut spans = Vec::new();
 
         loop {
             let before = reader.buffer_position() as usize;
-            let event = reader.read_event().map_err(xml_err)?;
+            let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
+            let namespace = resolved_namespace(namespace);
             let after = reader.buffer_position() as usize;
             match event {
                 Event::Start(element) => {
                     if depth == 0 {
                         root_start = Some(after);
+                        let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                        root_prefix = name.rsplit_once(':').map(|(prefix, _)| prefix.to_owned());
+                        root_namespace = namespace.clone();
+                        namespaces = namespace_bindings(&element)?;
                     } else if depth == 1 {
                         active_child = Some((
                             before,
                             String::from_utf8_lossy(element.name().local_name().as_ref())
                                 .into_owned(),
+                            namespace,
                         ));
                     }
                     depth += 1;
@@ -271,6 +286,7 @@ impl XmlTemplate {
                         before,
                         after,
                         String::from_utf8_lossy(element.name().local_name().as_ref()).into_owned(),
+                        namespace,
                     ));
                 }
                 Event::End(_) if depth == 1 => {
@@ -280,9 +296,9 @@ impl XmlTemplate {
                 Event::End(_) => {
                     depth = depth.saturating_sub(1);
                     if depth == 1
-                        && let Some((start, name)) = active_child.take()
+                        && let Some((start, name, namespace)) = active_child.take()
                     {
-                        spans.push((start, after, name));
+                        spans.push((start, after, name, namespace));
                     }
                 }
                 Event::Eof => break,
@@ -296,7 +312,7 @@ impl XmlTemplate {
             root_end.ok_or_else(|| ParseError::Malformed("xml root is not closed".into()))?;
         let mut cursor = root_start;
         let mut children = Vec::with_capacity(spans.len());
-        for (start, end, local_name) in spans {
+        for (start, end, local_name, namespace) in spans {
             if start < cursor || end > root_end {
                 return Err(ParseError::Malformed("overlapping xml child spans".into()));
             }
@@ -304,6 +320,7 @@ impl XmlTemplate {
                 before: data[cursor..start].to_vec(),
                 local_name,
                 bytes: data[start..end].to_vec(),
+                namespace,
             });
             cursor = end;
         }
@@ -313,38 +330,68 @@ impl XmlTemplate {
             children,
             trailing: data[cursor..root_end].to_vec(),
             suffix: data[root_end..].to_vec(),
+            root_prefix,
+            root_namespace,
+            namespaces,
         })
     }
 
+    /// Replaces modeled children in place; children outside the root namespace
+    /// (`mc:AlternateContent` and friends) keep their position and are never
+    /// used as ordering anchors.
     pub(crate) fn render(
         &self,
         replacements: Vec<(&'static str, Option<Vec<u8>>)>,
         rank: fn(&str) -> usize,
-    ) -> Vec<u8> {
-        let replacements = replacements
+    ) -> Result<Vec<u8>, ParseError> {
+        let mut replacements = replacements
             .into_iter()
             .map(|(name, bytes)| (name.to_owned(), bytes))
             .collect::<BTreeMap<_, _>>();
+        for bytes in replacements.values_mut().flatten() {
+            *bytes = self.qualify_fragment(bytes)?;
+        }
+        let source_names = self
+            .children
+            .iter()
+            .filter(|child| self.is_root_child(child))
+            .map(|child| child.local_name.as_str())
+            .collect::<HashSet<_>>();
+        let last_ranked_child = self
+            .children
+            .iter()
+            .rposition(|child| self.is_root_child(child) && rank(&child.local_name) != usize::MAX);
         let mut emitted = HashSet::new();
         let mut output = Vec::new();
         output.extend_from_slice(&self.prefix);
 
-        for child in &self.children {
+        for (index, child) in self.children.iter().enumerate() {
             output.extend_from_slice(&child.before);
-            let child_rank = rank(&child.local_name);
-            let mut pending = replacements
-                .iter()
-                .filter(|(name, _)| !emitted.contains(name.as_str()) && rank(name) < child_rank)
-                .collect::<Vec<_>>();
-            pending.sort_by_key(|(name, _)| rank(name));
-            for (name, bytes) in pending {
-                emitted.insert(name.clone());
-                if let Some(bytes) = bytes {
-                    output.extend_from_slice(bytes);
+            let modeled = self.is_root_child(child);
+            let child_rank = if modeled {
+                rank(&child.local_name)
+            } else {
+                usize::MAX
+            };
+            if child_rank != usize::MAX {
+                let mut pending = replacements
+                    .iter()
+                    .filter(|(name, _)| {
+                        !source_names.contains(name.as_str())
+                            && !emitted.contains(name.as_str())
+                            && rank(name) < child_rank
+                    })
+                    .collect::<Vec<_>>();
+                pending.sort_by_key(|(name, _)| rank(name));
+                for (name, bytes) in pending {
+                    emitted.insert(name.clone());
+                    if let Some(bytes) = bytes {
+                        output.extend_from_slice(bytes);
+                    }
                 }
             }
 
-            if let Some(bytes) = replacements.get(&child.local_name) {
+            if modeled && let Some(bytes) = replacements.get(&child.local_name) {
                 if emitted.insert(child.local_name.clone())
                     && let Some(bytes) = bytes
                 {
@@ -353,22 +400,145 @@ impl XmlTemplate {
             } else {
                 output.extend_from_slice(&child.bytes);
             }
+
+            if Some(index) == last_ranked_child {
+                emit_pending(&replacements, &mut emitted, rank, &mut output);
+            }
         }
 
         output.extend_from_slice(&self.trailing);
-        let mut pending = replacements
-            .iter()
-            .filter(|(name, _)| !emitted.contains(name.as_str()))
-            .collect::<Vec<_>>();
-        pending.sort_by_key(|(name, _)| rank(name));
-        for (name, bytes) in pending {
-            emitted.insert(name.clone());
-            if let Some(bytes) = bytes {
-                output.extend_from_slice(bytes);
-            }
-        }
+        emit_pending(&replacements, &mut emitted, rank, &mut output);
         output.extend_from_slice(&self.suffix);
-        output
+        Ok(output)
+    }
+
+    /// Rewrites unqualified fragment element names into the root's prefix.
+    pub(crate) fn qualify_fragment(&self, fragment: &[u8]) -> Result<Vec<u8>, ParseError> {
+        let Some(prefix) = &self.root_prefix else {
+            return Ok(fragment.to_vec());
+        };
+        let mut reader = Reader::from_reader(fragment);
+        let mut writer = Writer::new(Vec::new());
+        loop {
+            let event = reader.read_event().map_err(xml_err)?;
+            let event = match event {
+                Event::Start(mut element) if !element.name().as_ref().contains(&b':') => {
+                    let name = format!(
+                        "{prefix}:{}",
+                        String::from_utf8_lossy(element.name().as_ref())
+                    );
+                    element.set_name(name.as_bytes());
+                    Event::Start(element.into_owned())
+                }
+                Event::Empty(mut element) if !element.name().as_ref().contains(&b':') => {
+                    let name = format!(
+                        "{prefix}:{}",
+                        String::from_utf8_lossy(element.name().as_ref())
+                    );
+                    element.set_name(name.as_bytes());
+                    Event::Empty(element.into_owned())
+                }
+                Event::End(element) if !element.name().as_ref().contains(&b':') => {
+                    let name = format!(
+                        "{prefix}:{}",
+                        String::from_utf8_lossy(element.name().as_ref())
+                    );
+                    Event::End(BytesEnd::new(name))
+                }
+                Event::Eof => break,
+                event => event.into_owned(),
+            };
+            writer.write_event(event).map_err(xml_err)?;
+        }
+        Ok(writer.into_inner())
+    }
+
+    pub(crate) fn root_namespace(&self) -> Option<&str> {
+        self.root_namespace.as_deref()
+    }
+
+    /// Finds the prefix the source bound to a namespace ending in `suffix`.
+    pub(crate) fn namespace_binding(&self, suffix: &str) -> Option<(&str, &str)> {
+        self.namespaces.iter().find_map(|(prefix, namespace)| {
+            (namespace.ends_with(suffix))
+                .then(|| prefix.as_deref().map(|prefix| (prefix, namespace.as_str())))
+                .flatten()
+        })
+    }
+
+    pub(crate) fn declares_namespace(&self, prefix: &str, namespace: &str) -> bool {
+        self.namespaces
+            .iter()
+            .any(|(candidate, value)| candidate.as_deref() == Some(prefix) && value == namespace)
+    }
+
+    pub(crate) fn child(&self, local_name: &str) -> Option<&XmlChild> {
+        self.children
+            .iter()
+            .find(|child| self.is_root_child_named(child, local_name))
+    }
+
+    pub(crate) fn is_root_child_named(&self, child: &XmlChild, local_name: &str) -> bool {
+        child.local_name == local_name && self.is_root_child(child)
+    }
+
+    fn is_root_child(&self, child: &XmlChild) -> bool {
+        child.namespace.as_deref() == self.root_namespace()
+    }
+}
+
+fn emit_pending(
+    replacements: &BTreeMap<String, Option<Vec<u8>>>,
+    emitted: &mut HashSet<String>,
+    rank: fn(&str) -> usize,
+    output: &mut Vec<u8>,
+) {
+    let mut pending = replacements
+        .iter()
+        .filter(|(name, _)| !emitted.contains(name.as_str()))
+        .collect::<Vec<_>>();
+    pending.sort_by_key(|(name, _)| rank(name));
+    for (name, bytes) in pending {
+        emitted.insert(name.clone());
+        if let Some(bytes) = bytes {
+            output.extend_from_slice(bytes);
+        }
+    }
+}
+
+fn namespace_bindings(
+    element: &BytesStart<'_>,
+) -> Result<Vec<(Option<String>, String)>, ParseError> {
+    element
+        .attributes()
+        .filter_map(|attribute| match attribute {
+            Ok(attribute) => {
+                let name = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+                let prefix = if name == "xmlns" {
+                    Some(None)
+                } else {
+                    name.strip_prefix("xmlns:")
+                        .map(|prefix| Some(prefix.to_owned()))
+                }?;
+                Some(
+                    attribute
+                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        .map(|value| (prefix, value.into_owned()))
+                        .map_err(xml_err),
+                )
+            }
+            Err(error) => Some(Err(xml_err(error))),
+        })
+        .collect()
+}
+
+fn resolved_namespace(namespace: ResolveResult<'_>) -> Option<String> {
+    match namespace {
+        ResolveResult::Unbound => None,
+        ResolveResult::Bound(namespace) => {
+            Some(String::from_utf8_lossy(namespace.as_ref()).into_owned())
+        }
+        ResolveResult::Unknown(prefix) => Some(format!("\0{}", String::from_utf8_lossy(&prefix))),
     }
 }
 
