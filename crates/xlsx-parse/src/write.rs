@@ -1,7 +1,7 @@
 //! `xlsx_model::Workbook` -> minimal valid xlsx parts. structural round-trip:
 //! whatever `read` captures comes back out.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 
 use quick_xml::Writer;
@@ -1340,15 +1340,19 @@ fn shared_strings_xml_with_template(
     template: &XmlTemplate,
 ) -> Result<Vec<u8>, ParseError> {
     let source_items = template.children_named("si").collect::<Vec<_>>();
+    let retained = retained_shared_string_items(
+        &package.original_workbook.shared_strings,
+        source_items.len(),
+        &wb.shared_strings,
+    );
     let mut items = Vec::with_capacity(wb.shared_strings.len());
-    for (index, value) in wb.shared_strings.iter().enumerate() {
-        if package.original_workbook.shared_strings.get(index) == Some(value)
-            && let Some(source) = source_items.get(index)
-        {
-            items.push(source.bytes.clone());
-        } else {
-            let item = fragment(|writer| write_shared_string_item(writer, value))?;
-            items.push(template.qualify_fragment(&item)?);
+    for (value, source) in wb.shared_strings.iter().zip(retained) {
+        match source.and_then(|source| source_items.get(source)) {
+            Some(source) => items.push(source.bytes.clone()),
+            None => {
+                let item = fragment(|writer| write_shared_string_item(writer, value))?;
+                items.push(template.qualify_fragment(&item)?);
+            }
         }
     }
     let count = wb.shared_strings.len().to_string();
@@ -1357,6 +1361,33 @@ fn shared_strings_xml_with_template(
         &items,
         &[("count", count.clone()), ("uniqueCount", count)],
     )
+}
+
+/// Pairs each output shared string with the source `<si>` whose markup it may
+/// reuse. Source items are claimed by plain value, in order and at most once,
+/// so inserts, deletions and reorders carry rich runs, `phoneticPr` and
+/// `extLst` along instead of stranding them on a stale index. A value with no
+/// unclaimed source item is regenerated as plain text.
+fn retained_shared_string_items(
+    original: &[String],
+    source_count: usize,
+    values: &[String],
+) -> Vec<Option<usize>> {
+    let mut unclaimed: HashMap<&str, VecDeque<usize>> = HashMap::new();
+    for (index, value) in original.iter().enumerate().take(source_count) {
+        unclaimed
+            .entry(value.as_str())
+            .or_default()
+            .push_back(index);
+    }
+    values
+        .iter()
+        .map(|value| {
+            unclaimed
+                .get_mut(value.as_str())
+                .and_then(VecDeque::pop_front)
+        })
+        .collect()
 }
 
 fn write_shared_string_item(writer: &mut Writer<Vec<u8>>, value: &str) -> io::Result<()> {

@@ -663,3 +663,83 @@ fn preserved_shared_strings_keep_rich_items_and_replace_only_changed_indices() {
     assert!(!changed_sst.contains("<si><t>plain</t></si>"));
     assert!(changed_sst.contains("<extLst>"));
 }
+
+/// The rich `<si>` is retained by its parsed value, so it must survive every
+/// way the serializer can move it to another index.
+#[test]
+fn preserved_shared_strings_follow_rich_items_through_index_moves() {
+    let rich_item = r#"<si><r><rPr><b/></rPr><t>Rich </t></r><r><rPr><i/></rPr><t>Text</t></r><phoneticPr fontId="2"/></si>"#;
+    let sst = format!(
+        r#"<sst count="3" uniqueCount="3"><si><t>first</t></si>{rich_item}<si><t>last</t></si></sst>"#
+    );
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.as_bytes().to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let moves: [(&str, Vec<&str>); 4] = [
+        ("insert", vec!["added", "first", "Rich Text", "last"]),
+        ("delete", vec!["first", "Rich Text"]),
+        ("reorder", vec!["last", "Rich Text", "first"]),
+        ("both", vec!["Rich Text", "added"]),
+    ];
+    for (label, strings) in moves {
+        let mut workbook = parsed.workbook.clone();
+        workbook.shared_strings = strings.iter().map(|s| (*s).to_owned()).collect();
+        let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+        let written = shared_strings_text(&saved);
+        assert!(written.contains(rich_item), "{label} lost the rich item");
+        assert_eq!(
+            written.matches("<si>").count(),
+            strings.len(),
+            "{label} wrote the wrong item count"
+        );
+    }
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.shared_strings[1] = "Rich Prose".to_owned();
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = shared_strings_text(&saved);
+    assert!(!written.contains("<r>"), "edited rich item must regenerate");
+    assert!(written.contains("<si><t xml:space=\"preserve\">Rich Prose</t></si>"));
+}
+
+/// Duplicate plain values claim the source items in order, so an item shifted
+/// past a same-valued sibling keeps its own markup.
+#[test]
+fn preserved_shared_strings_pair_duplicate_values_in_order() {
+    let rich_item = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="2">{rich_item}<si><t>Dup</t></si></sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.as_bytes().to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(
+        serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap(),
+        parts
+    );
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.shared_strings.insert(0, "added".to_owned());
+    let written =
+        shared_strings_text(&serialize_workbook_with_package(&workbook, &parsed.package).unwrap());
+    assert!(written.contains(&format!("{rich_item}<si><t>Dup</t></si>")));
+}
+
+fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
+    String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "xl/sharedStrings.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap()
+}
