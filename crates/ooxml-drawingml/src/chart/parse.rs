@@ -224,11 +224,15 @@ fn parse_number(raw: Option<&str>) -> Option<f64> {
     parsed.is_finite().then_some(parsed)
 }
 
-/// A schema `xsd:unsignedInt` index. Negative, fractional and out-of-range
-/// values are not indexes, so they never reach a host's `as usize`.
+/// A schema `xsd:unsignedInt` index: decimal digits in `u32` range. Signed,
+/// fractional, exponent and radix-prefixed forms are not indexes, so they never
+/// reach a host's `as usize`.
 fn parse_index(raw: Option<&str>) -> Option<f64> {
-    let value = parse_number(raw)?;
-    (value >= 0.0 && value.fract() == 0.0 && value <= f64::from(u32::MAX)).then_some(value)
+    let value = raw?.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u32>().ok().map(f64::from)
 }
 
 fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<String> {
@@ -303,10 +307,16 @@ fn parse_series<E: ChartXml>(
             let marker_size = parse_number(val_attr(marker.and_then(|value| child(value, "size"))));
             let points = children(series, "dPt")
                 .take(budget.point_cap(MAX_POINTS))
-                .map(|point| ChartPoint {
-                    index: parse_index(val_attr(child(point, "idx"))),
-                    explosion: parse_number(val_attr(child(point, "explosion"))),
-                    color: parse_series_color(point, index),
+                .filter_map(|point| {
+                    let point_index = match child(point, "idx") {
+                        Some(idx) => Some(parse_index(val_attr(Some(idx)))?),
+                        None => None,
+                    };
+                    Some(ChartPoint {
+                        index: point_index,
+                        explosion: parse_number(val_attr(child(point, "explosion"))),
+                        color: parse_series_color(point, index),
+                    })
                 })
                 .collect::<Vec<_>>();
             budget.spend_points(points.len());
@@ -477,6 +487,7 @@ fn nonempty_trimmed(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chart::{PlotChart, PlotOp, PlotRect, plot_chart};
 
     #[derive(Clone)]
     struct Node {
@@ -702,34 +713,96 @@ mod tests {
     fn out_of_schema_indexes_are_not_parsed_as_indexes() {
         assert_eq!(parse_index(Some("2")), Some(2.0));
         assert_eq!(parse_index(Some("0")), Some(0.0));
+        assert_eq!(parse_index(Some("007")), Some(7.0));
+        assert_eq!(parse_index(Some("4294967295")), Some(4_294_967_295.0));
+        assert_eq!(parse_index(Some("4294967296")), None);
         assert_eq!(parse_index(Some("-1")), None);
+        assert_eq!(parse_index(Some("+1")), None);
         assert_eq!(parse_index(Some("1.5")), None);
+        assert_eq!(parse_index(Some("2.0")), None);
+        assert_eq!(parse_index(Some("1e3")), None);
         assert_eq!(parse_index(Some("1e30")), None);
+        assert_eq!(parse_index(Some("0x2")), None);
         assert_eq!(parse_index(Some("nonsense")), None);
+    }
 
-        let space = Node::el(
+    /// A `c:dPt` carrying `idx`, if given, and a red fill.
+    fn red_point(index: Option<&str>) -> Node {
+        let mut children = index
+            .map(|index| vec![Node::val("c:idx", index)])
+            .unwrap_or_default();
+        children.push(Node::el(
+            "c:spPr",
+            vec![Node::el(
+                "c:solidFill",
+                vec![Node::val("a:srgbClr", "FF0000")],
+            )],
+        ));
+        Node::el("c:dPt", children)
+    }
+
+    /// A two-slice pie chart carrying `points`.
+    fn pie_with(points: Vec<Node>) -> Node {
+        let mut series = vec![Node::el(
+            "c:val",
+            vec![Node::el(
+                "c:numCache",
+                vec![
+                    Node::el("c:pt", vec![Node::text("c:v", "3")]),
+                    Node::el("c:pt", vec![Node::text("c:v", "1")]),
+                ],
+            )],
+        )];
+        series.extend(points);
+        Node::el(
             "c:chartSpace",
             vec![Node::el(
                 "c:chart",
                 vec![Node::el(
                     "c:plotArea",
-                    vec![Node::el(
-                        "c:pieChart",
-                        vec![Node::el(
-                            "c:ser",
-                            vec![
-                                Node::el("c:dPt", vec![Node::val("c:idx", "-1")]),
-                                Node::el("c:dPt", vec![Node::val("c:idx", "3")]),
-                            ],
-                        )],
-                    )],
+                    vec![Node::el("c:pieChart", vec![Node::el("c:ser", series)])],
                 )],
             )],
-        );
-        let parsed = parse_chart_space(&space).expect("chart space parses");
-        let points = parsed.plot_groups[0].series[0].points.as_ref().unwrap();
+        )
+    }
+
+    fn red_wedges(space: &ChartSpace) -> usize {
+        let rect = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 300.0,
+            h: 200.0,
+        };
+        plot_chart(&PlotChart::from(space), rect)
+            .iter()
+            .filter(|op| matches!(op, PlotOp::Path { fill, .. } if fill == "#FF0000"))
+            .count()
+    }
+
+    #[test]
+    fn an_invalid_point_index_is_dropped_instead_of_matching_every_slice() {
+        for index in ["-1", "1.5", "1e3", "0x2", "", "nonsense"] {
+            let space = parse_chart_space(&pie_with(vec![red_point(Some(index))]))
+                .expect("chart space parses");
+            assert!(space.plot_groups[0].series[0].points.is_none(), "{index}");
+            assert_eq!(red_wedges(&space), 0, "{index}");
+        }
+
+        let space = parse_chart_space(&pie_with(vec![red_point(Some("-1")), red_point(Some("1"))]))
+            .expect("chart space parses");
+        let points = space.plot_groups[0].series[0].points.as_ref().unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].index, Some(1.0));
+        assert_eq!(red_wedges(&space), 1);
+    }
+
+    #[test]
+    fn an_absent_point_index_stays_the_intentional_wildcard() {
+        let space =
+            parse_chart_space(&pie_with(vec![red_point(None)])).expect("chart space parses");
+        let points = space.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].index, None);
-        assert_eq!(points[1].index, Some(3.0));
+        assert_eq!(red_wedges(&space), 2);
     }
 
     #[test]
