@@ -685,6 +685,10 @@ pub(crate) fn parse_color_container(element: &XmlElement) -> Option<ColorValue> 
     };
     parsed.theme_tint = color.child("tint").and_then(color_modifier);
     parsed.theme_shade = color.child("shade").and_then(color_modifier);
+    parsed.luminance_modulation = color.child("lumMod").and_then(color_fraction);
+    parsed.luminance_offset = color.child("lumOff").and_then(color_fraction);
+    parsed.saturation_modulation = color.child("satMod").and_then(color_fraction);
+    parsed.alpha = color.child("alpha").and_then(color_fraction);
     Some(parsed)
 }
 
@@ -721,6 +725,17 @@ fn preset_color(value: &str) -> Option<&'static str> {
         "magenta" => Some("FF00FF"),
         _ => None,
     }
+}
+
+/// A `ST_Percentage` in thousandths of a percent, as a fraction.
+fn color_fraction(element: &XmlElement) -> Option<f64> {
+    let value = element.attribute("val")?.trim();
+    let value = value
+        .strip_suffix('%')
+        .map(|percent| percent.parse::<f64>().map(|value| value * 1_000.0))
+        .unwrap_or_else(|| value.parse::<f64>())
+        .ok()?;
+    (value.is_finite() && (0.0..=1_000_000.0).contains(&value)).then_some(value / 100_000.0)
 }
 
 fn color_modifier(element: &XmlElement) -> Option<String> {
