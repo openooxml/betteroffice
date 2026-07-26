@@ -7,6 +7,8 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Invertible op log: undo/redo, provenance-tagged proposals, address remapping, collab-ready serialization."
+keywords = ["xlsx", "spreadsheet", "undo", "collaboration", "ooxml"]
+categories = ["data-structures", "text-processing"]
 
 [lib]
 name = "xlsx_ops"

@@ -7,6 +7,8 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Workbook, worksheet, and cell model for SpreadsheetML: address types, values, styles. Framework- and IO-free."
+keywords = ["xlsx", "excel", "spreadsheet", "ooxml", "spreadsheetml"]
+categories = ["data-structures", "parser-implementations"]
 
 [lib]
 name = "xlsx_model"

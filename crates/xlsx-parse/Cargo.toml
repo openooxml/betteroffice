@@ -7,6 +7,8 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Streaming SpreadsheetML parser and serializer building the BetterOffice workbook model."
+keywords = ["xlsx", "excel", "ooxml", "spreadsheetml", "parser"]
+categories = ["parser-implementations", "encoding"]
 
 [lib]
 name = "xlsx_parse"

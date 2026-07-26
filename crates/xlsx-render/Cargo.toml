@@ -7,6 +7,8 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Grid layout and target-agnostic display list. Never imports canvas, DOM, or any raster backend."
+keywords = ["xlsx", "spreadsheet", "rendering", "layout", "ooxml"]
+categories = ["rendering", "graphics"]
 
 [lib]
 name = "xlsx_render"
