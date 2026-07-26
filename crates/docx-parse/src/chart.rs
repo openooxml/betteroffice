@@ -1,8 +1,8 @@
 //! DOCX packaging around the shared DrawingML chart part.
 
 use indexmap::IndexMap;
-use ooxml_drawingml::ColorValue;
 use ooxml_drawingml::chart::{ChartXml, parse_chart_space};
+use ooxml_drawingml::resolve_color_value_to_hex;
 use serde::{Deserialize, Serialize};
 
 use crate::drawingml::parse_color_element;
@@ -24,24 +24,24 @@ const MAX_DEEP_DEPTH: usize = 64;
 pub type ChartPartsMap = IndexMap<String, Chart>;
 
 impl ChartXml for XmlElement {
-    fn tag_name(&self) -> &str {
-        self.local_name()
+    fn local_name(&self) -> &str {
+        XmlElement::local_name(self)
     }
 
-    fn attr(&self, prefix: Option<&str>, name: &str) -> Option<&str> {
-        self.attribute(prefix, name)
+    fn attribute(&self, prefix: Option<&str>, name: &str) -> Option<&str> {
+        XmlElement::attribute(self, prefix, name)
     }
 
-    fn child_nodes(&self) -> impl Iterator<Item = &Self> {
-        self.child_elements()
+    fn child_elements(&self) -> impl Iterator<Item = &Self> {
+        XmlElement::child_elements(self)
     }
 
-    fn text(&self) -> String {
+    fn descendant_text(&self) -> String {
         self.text_content()
     }
 
-    fn fill_color(&self) -> Option<ColorValue> {
-        parse_color_element(Some(self))
+    fn solid_fill_hex(&self) -> Option<String> {
+        resolve_color_value_to_hex(parse_color_element(Some(self)).as_ref())
     }
 }
 

@@ -1,7 +1,5 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
-use crate::{ColorValue, resolve_color_value_to_hex};
-
 use super::model::{
     ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint, ChartSeries,
     ChartSpace,
@@ -51,22 +49,28 @@ impl Budget {
 }
 
 /// Read-only XML access [`parse_chart_space`] needs. Hosts implement it for
-/// their own element type so the chart parser stays format-agnostic.
+/// their own element type, or for an adapter carrying host context such as a
+/// theme, so the chart parser stays format-agnostic.
 pub trait ChartXml: Sized {
-    fn tag_name(&self) -> &str;
-    fn attr(&self, prefix: Option<&str>, name: &str) -> Option<&str>;
-    fn child_nodes(&self) -> impl Iterator<Item = &Self>;
-    fn text(&self) -> String;
-    /// Color of an `a:solidFill` element, resolved through the host's theme
-    /// and modifier handling.
-    fn fill_color(&self) -> Option<ColorValue>;
+    /// The local name, namespace prefix stripped: `ser` for a `<c:ser>`.
+    fn local_name(&self) -> &str;
+    /// The `prefix:name` attribute when `prefix` is given, falling back to the
+    /// unqualified `name`; `None` looks up `name` alone.
+    fn attribute(&self, prefix: Option<&str>, name: &str) -> Option<&str>;
+    /// Direct child elements in document order. Text nodes never appear.
+    fn child_elements(&self) -> impl Iterator<Item = &Self>;
+    /// Every descendant text and CDATA node, concatenated in document order.
+    fn descendant_text(&self) -> String;
+    /// `#RRGGBB` for an `a:solidFill` element, resolved through the host's own
+    /// theme and color modifiers.
+    fn solid_fill_hex(&self) -> Option<String>;
 }
 
 /// Parse a `c:chartSpace` root. `None` when it carries no recognized plot.
 pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
     let plot_area = first_deep(chart_space, "plotArea", 0)?;
     let chart_elements = plot_area
-        .child_nodes()
+        .child_elements()
         .filter(|child| plot_type_for(*child).is_some())
         .take(MAX_PLOT_GROUPS)
         .collect::<Vec<_>>();
@@ -106,8 +110,8 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
         })
         .collect::<Vec<_>>();
     let axis_list = plot_area
-        .child_nodes()
-        .filter(|child| matches!(child.tag_name(), "catAx" | "dateAx" | "valAx" | "serAx"))
+        .child_elements()
+        .filter(|child| matches!(child.local_name(), "catAx" | "dateAx" | "valAx" | "serAx"))
         .take(MAX_AXES)
         .map(parse_axis)
         .collect::<Vec<_>>();
@@ -124,23 +128,25 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
 }
 
 fn child<'a, E: ChartXml>(parent: &'a E, local: &str) -> Option<&'a E> {
-    parent.child_nodes().find(|node| node.tag_name() == local)
+    parent
+        .child_elements()
+        .find(|node| node.local_name() == local)
 }
 
 fn children<'a, E: ChartXml>(parent: &'a E, local: &'a str) -> impl Iterator<Item = &'a E> {
     parent
-        .child_nodes()
-        .filter(move |node| node.tag_name() == local)
+        .child_elements()
+        .filter(move |node| node.local_name() == local)
 }
 
 fn first_deep<'a, E: ChartXml>(root: &'a E, local: &str, depth: usize) -> Option<&'a E> {
     if depth > MAX_DEEP_DEPTH {
         return None;
     }
-    if root.tag_name() == local {
+    if root.local_name() == local {
         return Some(root);
     }
-    root.child_nodes()
+    root.child_elements()
         .find_map(|node| first_deep(node, local, depth + 1))
 }
 
@@ -148,10 +154,10 @@ fn all_deep<'a, E: ChartXml>(root: &'a E, local: &str, depth: usize, output: &mu
     if depth > MAX_DEEP_DEPTH || output.len() >= MAX_POINTS {
         return;
     }
-    if root.tag_name() == local {
+    if root.local_name() == local {
         output.push(root);
     }
-    for node in root.child_nodes() {
+    for node in root.child_elements() {
         all_deep(node, local, depth + 1, output);
         if output.len() >= MAX_POINTS {
             break;
@@ -162,8 +168,8 @@ fn all_deep<'a, E: ChartXml>(root: &'a E, local: &str, depth: usize, output: &mu
 fn val_attr<E: ChartXml>(element: Option<&E>) -> Option<&str> {
     let element = element?;
     element
-        .attr(None, "val")
-        .or_else(|| element.attr(Some("c"), "val"))
+        .attribute(None, "val")
+        .or_else(|| element.attribute(Some("c"), "val"))
 }
 
 fn text_from_rich_text<E: ChartXml>(parent: Option<&E>) -> Option<String> {
@@ -171,13 +177,18 @@ fn text_from_rich_text<E: ChartXml>(parent: Option<&E>) -> Option<String> {
     if let Some(rich) = first_deep(parent, "rich", 0) {
         let mut elements = Vec::new();
         all_deep(rich, "t", 0, &mut elements);
-        let text = elements.into_iter().map(E::text).collect::<String>();
+        let text = elements
+            .into_iter()
+            .map(E::descendant_text)
+            .collect::<String>();
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_owned());
         }
     }
-    let text = first_deep(parent, "v", 0).map(E::text).unwrap_or_default();
+    let text = first_deep(parent, "v", 0)
+        .map(E::descendant_text)
+        .unwrap_or_default();
     nonempty_trimmed(&text)
 }
 
@@ -227,7 +238,7 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
         .take(budget.point_cap(MAX_POINTS))
         .map(|point| {
             child(point, "v")
-                .map(E::text)
+                .map(E::descendant_text)
                 .unwrap_or_default()
                 .trim()
                 .to_owned()
@@ -247,7 +258,7 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
     let values = children(cache, "pt")
         .take(budget.point_cap(MAX_POINTS))
         .filter_map(|point| {
-            let text = child(point, "v")?.text();
+            let text = child(point, "v")?.descendant_text();
             parse_number(Some(text.trim()))
         })
         .collect::<Vec<_>>();
@@ -262,7 +273,7 @@ fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
 fn parse_series_color<E: ChartXml>(series: &E, index: usize) -> String {
     let parsed = child(series, "spPr")
         .and_then(|properties| first_deep(properties, "solidFill", 0))
-        .and_then(|fill| resolve_color_value_to_hex(fill.fill_color().as_ref()));
+        .and_then(E::solid_fill_hex);
     parsed.unwrap_or_else(|| DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned())
 }
 
@@ -317,7 +328,7 @@ fn parse_series<E: ChartXml>(
 }
 
 fn child_formula<E: ChartXml>(parent: Option<&E>) -> Option<String> {
-    let text = first_deep(parent?, "f", 0)?.text();
+    let text = first_deep(parent?, "f", 0)?.descendant_text();
     nonempty_trimmed(&text)
 }
 
@@ -345,7 +356,7 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         min: parse_number(val_attr(scaling.and_then(|value| child(value, "min")))),
         max: parse_number(val_attr(scaling.and_then(|value| child(value, "max")))),
         labels: None,
-        axis_type: match axis.tag_name() {
+        axis_type: match axis.local_name() {
             "catAx" => "category",
             "dateAx" => "date",
             "serAx" => "series",
@@ -370,7 +381,7 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         logarithmic_base: parse_number(val_attr(scaling.and_then(|value| child(value, "logBase")))),
         reversed: val_attr(scaling.and_then(|value| child(value, "orientation"))) == Some("maxMin"),
         number_format: child(axis, "numFmt")
-            .and_then(|value| value.attr(None, "formatCode"))
+            .and_then(|value| value.attribute(None, "formatCode"))
             .map(str::to_owned),
         major_tick_mark: val_attr(child(axis, "majorTickMark")).map(str::to_owned),
         minor_tick_mark: val_attr(child(axis, "minorTickMark")).map(str::to_owned),
@@ -394,7 +405,7 @@ fn parse_axes<E: ChartXml>(plot_area: &E, first_series: Option<&ChartSeries>) ->
 }
 
 fn plot_type_for<E: ChartXml>(chart: &E) -> Option<String> {
-    let local = chart.tag_name().replace("3DChart", "Chart");
+    let local = chart.local_name().replace("3DChart", "Chart");
     let value = match local.as_str() {
         "barChart" => {
             if val_attr(child(chart, "barDir")) == Some("bar") {
@@ -460,71 +471,86 @@ fn nonempty_trimmed(value: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
     struct Node {
-        name: &'static str,
-        attrs: Vec<(&'static str, &'static str)>,
-        text: &'static str,
+        name: String,
+        attrs: Vec<(String, String)>,
+        text: String,
         children: Vec<Node>,
     }
 
-    fn el(name: &'static str, children: Vec<Node>) -> Node {
-        Node {
-            name,
-            attrs: Vec::new(),
-            text: "",
-            children,
+    impl Node {
+        fn el(name: &str, children: Vec<Node>) -> Self {
+            Self {
+                name: name.to_owned(),
+                attrs: Vec::new(),
+                text: String::new(),
+                children,
+            }
         }
-    }
 
-    fn val(name: &'static str, value: &'static str) -> Node {
-        Node {
-            name,
-            attrs: vec![("val", value)],
-            text: "",
-            children: Vec::new(),
+        fn val(name: &str, value: &str) -> Self {
+            Self::el(name, Vec::new()).attr("val", value)
         }
-    }
 
-    fn text(name: &'static str, value: &'static str) -> Node {
-        Node {
-            name,
-            attrs: Vec::new(),
-            text: value,
-            children: Vec::new(),
+        fn text(name: &str, value: &str) -> Self {
+            Self {
+                name: name.to_owned(),
+                attrs: Vec::new(),
+                text: value.to_owned(),
+                children: Vec::new(),
+            }
+        }
+
+        fn attr(mut self, key: &str, value: &str) -> Self {
+            self.attrs.push((key.to_owned(), value.to_owned()));
+            self
         }
     }
 
     impl ChartXml for Node {
-        fn tag_name(&self) -> &str {
+        fn local_name(&self) -> &str {
             self.name
+                .split_once(':')
+                .map_or(self.name.as_str(), |(_, local)| local)
         }
 
-        fn attr(&self, prefix: Option<&str>, name: &str) -> Option<&str> {
-            (prefix.is_none())
-                .then(|| self.attrs.iter().find(|(key, _)| *key == name))
-                .flatten()
-                .map(|(_, value)| *value)
+        fn attribute(&self, prefix: Option<&str>, name: &str) -> Option<&str> {
+            prefix
+                .and_then(|prefix| {
+                    let qualified = format!("{prefix}:{name}");
+                    self.attrs.iter().find(|(key, _)| *key == qualified)
+                })
+                .or_else(|| self.attrs.iter().find(|(key, _)| key.as_str() == name))
+                .map(|(_, value)| value.as_str())
         }
 
-        fn child_nodes(&self) -> impl Iterator<Item = &Self> {
+        fn child_elements(&self) -> impl Iterator<Item = &Self> {
             self.children.iter()
         }
 
-        fn text(&self) -> String {
-            self.text.to_owned()
+        fn descendant_text(&self) -> String {
+            let mut text = self.text.clone();
+            for child in &self.children {
+                text.push_str(&child.descendant_text());
+            }
+            text
         }
 
-        fn fill_color(&self) -> Option<ColorValue> {
-            self.children.first().map(|child| ColorValue {
-                rgb: child.attr(None, "val").map(str::to_owned),
-                ..ColorValue::default()
-            })
+        fn solid_fill_hex(&self) -> Option<String> {
+            self.children
+                .first()
+                .and_then(|child| child.attribute(None, "val"))
+                .map(|rgb| format!("#{rgb}"))
         }
     }
 
-    #[test]
-    fn parses_series_axes_and_legend_from_a_generic_element_tree() {
-        let space = el(
+    /// The same chart, with every element name qualified by `ns`.
+    fn fixture(ns: &str) -> Node {
+        let el = |name: &str, children: Vec<Node>| Node::el(&format!("{ns}{name}"), children);
+        let val = |name: &str, value: &str| Node::val(&format!("{ns}{name}"), value);
+        let text = |name: &str, value: &str| Node::text(&format!("{ns}{name}"), value);
+        el(
             "chartSpace",
             vec![el(
                 "chart",
@@ -542,7 +568,13 @@ mod tests {
                                     el(
                                         "ser",
                                         vec![
-                                            el("tx", vec![text("v", "North")]),
+                                            el(
+                                                "tx",
+                                                vec![el(
+                                                    "v",
+                                                    vec![text("x", "Nor"), text("x", "th")],
+                                                )],
+                                            ),
                                             el(
                                                 "spPr",
                                                 vec![el(
@@ -581,9 +613,12 @@ mod tests {
                     ),
                 ],
             )],
-        );
+        )
+    }
 
-        let parsed = parse_chart_space(&space).expect("chart space parses");
+    #[test]
+    fn parses_series_axes_and_legend_from_a_generic_element_tree() {
+        let parsed = parse_chart_space(&fixture("")).expect("chart space parses");
         assert_eq!(parsed.chart_type, "bar");
         assert_eq!(parsed.title.as_deref(), Some("Sales"));
         assert_eq!(parsed.legend.unwrap().position.as_deref(), Some("left"));
@@ -599,13 +634,48 @@ mod tests {
     }
 
     #[test]
+    fn a_namespace_prefixed_document_parses_the_same_as_a_bare_one() {
+        let bare = parse_chart_space(&fixture("")).expect("bare parses");
+        let prefixed = parse_chart_space(&fixture("c:")).expect("prefixed parses");
+        assert_eq!(bare, prefixed);
+        assert_eq!(prefixed.series[0].name.as_deref(), Some("North"));
+    }
+
+    #[test]
+    fn a_qualified_val_attribute_resolves_through_the_prefix_fallback() {
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![
+                    Node::el(
+                        "c:legend",
+                        vec![Node::el("c:legendPos", Vec::new()).attr("c:val", "b")],
+                    ),
+                    Node::el("c:plotArea", vec![Node::el("c:pieChart", Vec::new())]),
+                ],
+            )],
+        );
+        let parsed = parse_chart_space(&space).expect("chart space parses");
+        assert_eq!(parsed.legend.unwrap().position.as_deref(), Some("bottom"));
+    }
+
+    #[test]
     fn chart_wide_budgets_cap_series_and_axis_ids() {
-        let mut bar = vec![val("barDir", "col")];
-        bar.extend((0..2_000).map(|_| el("ser", vec![el("tx", vec![text("v", "S")])])));
-        bar.extend((0..64).map(|_| val("axId", "1")));
-        let space = el(
-            "chartSpace",
-            vec![el("chart", vec![el("plotArea", vec![el("barChart", bar)])])],
+        let mut bar = vec![Node::val("c:barDir", "col")];
+        bar.extend((0..2_000).map(|_| {
+            Node::el(
+                "c:ser",
+                vec![Node::el("c:tx", vec![Node::text("c:v", "S")])],
+            )
+        }));
+        bar.extend((0..64).map(|_| Node::val("c:axId", "1")));
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el("c:plotArea", vec![Node::el("c:barChart", bar)])],
+            )],
         );
 
         let parsed = parse_chart_space(&space).expect("chart space parses");
@@ -633,11 +703,20 @@ mod tests {
 
     #[test]
     fn returns_none_without_a_recognized_plot() {
-        assert!(parse_chart_space(&el("chartSpace", vec![el("chart", vec![])])).is_none());
         assert!(
-            parse_chart_space(&el(
-                "chartSpace",
-                vec![el("chart", vec![el("plotArea", vec![])])]
+            parse_chart_space(&Node::el(
+                "c:chartSpace",
+                vec![Node::el("c:chart", Vec::new())]
+            ))
+            .is_none()
+        );
+        assert!(
+            parse_chart_space(&Node::el(
+                "c:chartSpace",
+                vec![Node::el(
+                    "c:chart",
+                    vec![Node::el("c:plotArea", Vec::new())]
+                )]
             ))
             .is_none()
         );
