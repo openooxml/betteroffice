@@ -1453,3 +1453,77 @@ fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
     )
     .unwrap()
 }
+
+/// A relationship prefix is source-controlled, so repeating it on every
+/// generated sheet and hyperlink amplifies it. Generated attributes use a
+/// fixed prefix and bind the source URI on the fragment instead.
+#[test]
+fn generated_relationship_attributes_never_repeat_a_source_prefix() {
+    let prefix = "p".repeat(4096);
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        format!(
+            r#"<workbook xmlns:{prefix}="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" {prefix}:id="rId1"/></sheets></workbook>"#
+        )
+        .into_bytes(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets.push(xlsx_model::Sheet::new("Added"));
+    workbook.sheets[1].hyperlinks.push(Hyperlink {
+        range: xlsx_model::CellRange::parse_a1("A1").unwrap(),
+        external_target: Some("https://example.invalid/".to_owned()),
+        location: None,
+        tooltip: None,
+        display: None,
+    });
+    let origins = vec![Some(0), None];
+    let saved =
+        crate::serialize_workbook_with_package_and_origins(&workbook, &parsed.package, &origins)
+            .unwrap();
+
+    let written = String::from_utf8(part_bytes(&saved, "xl/workbook.xml")).unwrap();
+    assert_eq!(written.matches(&prefix).count(), 2, "{written}");
+    assert!(written.contains(r#"r:id="rId2""#), "{written}");
+    assert!(
+        written.contains(
+            r#"<sheets xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
+        ),
+        "{written}"
+    );
+
+    let added = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet2.xml")).unwrap();
+    assert!(!added.contains(&prefix), "generated worksheet repeats it");
+    assert!(added.contains(r#"<hyperlink ref="A1" r:id="#), "{added}");
+    assert_eq!(parse_workbook(&saved).unwrap().sheets.len(), 2);
+}
+
+/// Every generated fragment carries the source relationship URI once, so an
+/// absurd one is refused before any of them is built.
+#[test]
+fn refuses_an_oversized_relationship_namespace() {
+    let namespace = format!(
+        "http://example.invalid/{}/officeDocument/relationships",
+        "x".repeat(2048)
+    );
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        format!(
+            r#"<workbook xmlns:r="{namespace}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+        )
+        .into_bytes(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+    let error = serialize_workbook_with_package(&workbook, &parsed.package).unwrap_err();
+
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("relationship namespace")),
+        "{error:?}"
+    );
+}

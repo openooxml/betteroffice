@@ -51,6 +51,18 @@ const REL_HYPERLINK: &str =
 const NS_DML: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_STRICT_DML: &str = "http://purl.oclc.org/ooxml/drawingml/main";
 
+/// Generated relationship attributes always use this prefix. A source prefix
+/// is caller-controlled and would be repeated on every generated sheet and
+/// hyperlink, turning a long one into amplified output.
+const GENERATED_REL_PREFIX: &str = "r";
+const REL_PREFIX_DECLARATION: &str = "xmlns:r";
+const REL_ID_ATTRIBUTE: &str = "r:id";
+
+/// Bound on the relationship URI a save copies out of the source. Real ones are
+/// under a hundred bytes; a larger one is rejected before any fragment that
+/// would repeat it is built.
+const MAX_RELATIONSHIP_NAMESPACE_BYTES: usize = 1024;
+
 /// A Strict package must not gain a Transitional DrawingML theme.
 fn drawingml_namespace(main_namespace: &str) -> &'static str {
     if main_namespace == NS_STRICT_MAIN {
@@ -90,7 +102,7 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
         let links = HyperlinkPlan::new(sheet, &[], REL_HYPERLINK);
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, "r", NS_R, &links)?,
+            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links)?,
         ));
         if !links.relationships.is_empty() {
             parts.push((
@@ -176,6 +188,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         .workbook_template
         .root_namespace()
         .unwrap_or(NS_MAIN);
+    let relationship_namespace = workbook_relationship_namespace(package)?;
     let worksheet_relationship_type = relationship_type(package, "worksheet", REL_WORKSHEET);
     let shared_strings_relationship_type = relationship_type(package, "sharedStrings", REL_SST);
     let styles_relationship_type = relationship_type(package, "styles", REL_STYLES);
@@ -249,7 +262,6 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
-    let (relationship_prefix, relationship_namespace) = workbook_relationship_namespace(package);
     let empty_provenance = SharedStringCells::new();
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
@@ -282,7 +294,6 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
                         sheet,
                         wb,
                         main_namespace,
-                        &relationship_prefix,
                         &relationship_namespace,
                         &links,
                     )?,
@@ -604,12 +615,15 @@ fn relationship_type_from(relationships: &[Relationship], suffix: &str, fallback
         .unwrap_or_else(|| fallback.to_owned())
 }
 
-fn workbook_relationship_namespace(package: &PreservedPackage) -> (String, String) {
-    if let Some((prefix, namespace)) = package
+/// The relationship URI the source uses, Strict or Transitional. Only the URI
+/// is taken from the source; the prefix bound to it is always
+/// [`GENERATED_REL_PREFIX`].
+fn workbook_relationship_namespace(package: &PreservedPackage) -> Result<String, ParseError> {
+    if let Some((_, namespace)) = package
         .workbook_template
         .namespace_binding("/officeDocument/relationships")
     {
-        return (prefix.to_owned(), namespace.to_owned());
+        return checked_relationship_namespace(namespace);
     }
     let namespace = package
         .workbook_relationships
@@ -619,10 +633,54 @@ fn workbook_relationship_namespace(package: &PreservedPackage) -> (String, Strin
             let (namespace, _) = relationship_type.rsplit_once('/')?;
             namespace
                 .ends_with("/officeDocument/relationships")
-                .then(|| namespace.to_owned())
+                .then_some(namespace)
         })
-        .unwrap_or_else(|| NS_R.to_owned());
-    ("r".to_owned(), namespace)
+        .unwrap_or(NS_R);
+    checked_relationship_namespace(namespace)
+}
+
+/// The URI a generated fragment binds `r:` to: the part's own declaration when
+/// it has one, so a Strict worksheet keeps its own, else the workbook's.
+fn fragment_relationship_namespace(
+    template: &XmlTemplate,
+    package: &PreservedPackage,
+) -> Result<String, ParseError> {
+    match template.namespace_binding("/officeDocument/relationships") {
+        Some((_, namespace)) => checked_relationship_namespace(namespace),
+        None => workbook_relationship_namespace(package),
+    }
+}
+
+fn checked_relationship_namespace(namespace: &str) -> Result<String, ParseError> {
+    if namespace.len() > MAX_RELATIONSHIP_NAMESPACE_BYTES {
+        return Err(ParseError::UnsupportedEdit(
+            "relationship namespace exceeds the generated-attribute cap".to_owned(),
+        ));
+    }
+    Ok(namespace.to_owned())
+}
+
+/// Declares [`GENERATED_REL_PREFIX`] on a generated element unless the part's
+/// root already binds it to the same URI, replacing any shadowing declaration
+/// the source put on that element.
+fn bind_relationship_prefix(
+    attributes: &mut Vec<XmlAttribute>,
+    template: &XmlTemplate,
+    namespace: &str,
+) {
+    if attributes
+        .iter()
+        .any(|attribute| attribute.name == REL_PREFIX_DECLARATION && attribute.value == namespace)
+    {
+        return;
+    }
+    attributes.retain(|attribute| attribute.name != REL_PREFIX_DECLARATION);
+    if !template.declares_namespace(GENERATED_REL_PREFIX, namespace) {
+        attributes.push(XmlAttribute {
+            name: REL_PREFIX_DECLARATION.to_owned(),
+            value: namespace.to_owned(),
+        });
+    }
 }
 
 fn new_relationship(id: String, relationship_type: &str, target: String) -> Relationship {
@@ -1341,22 +1399,13 @@ fn workbook_xml_with_template(
         } else {
             None
         };
-    let (relationship_prefix, relationship_namespace) = workbook_relationship_namespace(package);
+    let relationship_namespace = workbook_relationship_namespace(package)?;
     let mut sheets_attributes = package.workbook_sheets_attributes.clone();
-    if !package
-        .workbook_template
-        .declares_namespace(&relationship_prefix, &relationship_namespace)
-        && !sheets_attributes.iter().any(|attribute| {
-            attribute.name == format!("xmlns:{relationship_prefix}")
-                && attribute.value == relationship_namespace
-        })
-    {
-        sheets_attributes.push(XmlAttribute {
-            name: format!("xmlns:{relationship_prefix}"),
-            value: relationship_namespace,
-        });
-    }
-    let relationship_id_name = format!("{relationship_prefix}:id");
+    bind_relationship_prefix(
+        &mut sheets_attributes,
+        &package.workbook_template,
+        &relationship_namespace,
+    );
     let sheets_fragment = Some(fragment(|writer| {
         let mut element = BytesStart::new("sheets");
         for attribute in &sheets_attributes {
@@ -1375,7 +1424,7 @@ fn workbook_xml_with_template(
             set_attribute(
                 &mut attributes,
                 "id",
-                &relationship_id_name,
+                REL_ID_ATTRIBUTE,
                 plan.relationship.id().unwrap_or_default().to_owned(),
             );
             write_empty_element(writer, "sheet", &attributes)?;
@@ -1682,26 +1731,21 @@ fn worksheet_xml_with_namespace(
     sheet: &Sheet,
     wb: &Workbook,
     main_namespace: &str,
-    relationship_prefix: &str,
     relationship_namespace: &str,
     links: &HyperlinkPlan,
 ) -> Result<Vec<u8>, ParseError> {
-    let id_name = format!("{relationship_prefix}:id");
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
         root.push_attribute(("xmlns", main_namespace));
         if links.relationships.iter().any(Relationship::is_hyperlink) {
-            root.push_attribute((
-                format!("xmlns:{relationship_prefix}").as_str(),
-                relationship_namespace,
-            ));
+            root.push_attribute((REL_PREFIX_DECLARATION, relationship_namespace));
         }
         writer.write_event(Event::Start(root))?;
         write_sheet_views(writer, sheet)?;
         write_cols(writer, sheet)?;
         write_sheet_data(writer, sheet, wb, &SharedStringCells::new())?;
         write_merges(writer, sheet)?;
-        write_hyperlinks(writer, sheet, &links.ids, &id_name, &[])?;
+        write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
         writer.write_event(Event::End(BytesEnd::new("worksheet")))?;
         Ok(())
     })
@@ -1821,19 +1865,23 @@ fn patched_hyperlinks(
         return Ok(None);
     }
     let needs_binding = links.relationships.iter().any(Relationship::is_hyperlink);
-    let (prefix, namespace) = match template.namespace_binding("/officeDocument/relationships") {
-        Some((prefix, namespace)) => (prefix.to_owned(), namespace.to_owned()),
-        None => workbook_relationship_namespace(package),
-    };
-    let declared = template.declares_namespace(&prefix, &namespace);
+    let namespace = fragment_relationship_namespace(template, package)?;
+    let declared = template.declares_namespace(GENERATED_REL_PREFIX, &namespace);
     let root_attributes = if needs_binding && !declared {
-        vec![(format!("xmlns:{prefix}"), namespace)]
+        vec![(REL_PREFIX_DECLARATION.to_owned(), namespace)]
     } else {
         Vec::new()
     };
-    let id_name = format!("{prefix}:id");
-    fragment(|writer| write_hyperlinks(writer, sheet, &links.ids, &id_name, &root_attributes))
-        .map(Some)
+    fragment(|writer| {
+        write_hyperlinks(
+            writer,
+            sheet,
+            &links.ids,
+            REL_ID_ATTRIBUTE,
+            &root_attributes,
+        )
+    })
+    .map(Some)
 }
 
 fn worksheet_child_rank(name: &str) -> usize {

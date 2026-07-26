@@ -3296,9 +3296,10 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     let parts = package_map(&saved);
     let workbook_xml = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
     let strict_main = r#"xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main""#;
-    assert!(workbook_xml.contains(&format!("<sheets {strict_main}")));
-    assert!(workbook_xml.contains("rel:id="));
-    assert!(!workbook_xml.contains("r:id="));
+    let strict_rel = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    assert!(workbook_xml.contains(&format!(r#"<sheets xmlns:r="{strict_rel}" {strict_main}"#)));
+    assert!(workbook_xml.contains(r#"<sheet name="Data" sheetId="1" rel:id="rId1"/>"#));
+    assert!(workbook_xml.contains(r#"r:id="rId2""#));
     assert!(workbook_xml.contains("<calcPr"));
     assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
