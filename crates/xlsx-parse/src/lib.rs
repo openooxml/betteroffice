@@ -72,6 +72,9 @@ pub enum ParseError {
     TooManyHyperlinks,
     /// a style pool exceeded [`MAX_STYLE_ENTRIES`].
     TooManyStyles,
+    /// saving would have to rewrite source markup that cannot be patched
+    /// safely, so the edit is refused instead of corrupting the package.
+    UnsupportedEdit(String),
 }
 
 impl core::fmt::Display for ParseError {
@@ -86,6 +89,7 @@ impl core::fmt::Display for ParseError {
             ParseError::TooManyDefinedNames => write!(f, "defined name count exceeded cap"),
             ParseError::TooManyHyperlinks => write!(f, "worksheet hyperlink count exceeded cap"),
             ParseError::TooManyStyles => write!(f, "style pool count exceeded cap"),
+            ParseError::UnsupportedEdit(m) => write!(f, "unsupported edit: {m}"),
         }
     }
 }

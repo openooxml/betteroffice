@@ -824,6 +824,71 @@ fn keeps_worksheet_bytes_across_a_rename() {
     );
 }
 
+const MCE_NAMESPACES: &str = concat!(
+    r#" xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#,
+    r#" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#,
+    r#" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main""#,
+);
+
+fn mce_package(worksheet_body: &str) -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[2] = (
+        "xl/worksheets/sheet1.xml".to_owned(),
+        format!("<worksheet{MCE_NAMESPACES}>{worksheet_body}</worksheet>").into_bytes(),
+    );
+    parts
+}
+
+/// An `mc:AlternateContent` branch stands in for the element inside it, so a
+/// newly inserted sibling has to be ordered against that element's rank.
+#[test]
+fn orders_new_children_against_alternate_content_branches() {
+    let body = concat!(
+        r#"<sheetData/>"#,
+        r#"<mc:AlternateContent><mc:Choice Requires="x14">"#,
+        r#"<conditionalFormatting sqref="A1"><cfRule type="expression" priority="1"><formula>TRUE()</formula></cfRule></conditionalFormatting>"#,
+        r#"</mc:Choice></mc:AlternateContent>"#,
+        r#"<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>"#,
+    );
+    let parsed = parse_workbook_with_package(&mce_package(body)).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0]
+        .merges
+        .push(xlsx_model::CellRange::parse_a1("D1:E1").unwrap());
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    let merges = written.find("<mergeCells").unwrap();
+    let branch = written.find("<mc:AlternateContent").unwrap();
+    let margins = written.find("<pageMargins").unwrap();
+    assert!(
+        merges < branch && branch < margins,
+        "mergeCells must precede the conditionalFormatting branch: {written}"
+    );
+}
+
+/// Patching inside a compatibility branch is out of reach, so a save that
+/// would duplicate an owned singleton is refused instead.
+#[test]
+fn refuses_to_duplicate_a_singleton_hidden_in_a_branch() {
+    let body = concat!(
+        r#"<mc:AlternateContent><mc:Choice Requires="x14">"#,
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        r#"</mc:Choice></mc:AlternateContent>"#,
+    );
+    let parsed = parse_workbook_with_package(&mce_package(body)).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 9.0);
+    let error = serialize_workbook_with_package(&workbook, &parsed.package).unwrap_err();
+
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("sheetData")),
+        "{error:?}"
+    );
+}
+
 /// Freeze-pane edits used to vanish, because the retained-sheet renderer never
 /// replaced `sheetViews`.
 #[test]

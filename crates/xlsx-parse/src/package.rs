@@ -430,10 +430,30 @@ impl XmlTemplate {
             .filter(|child| self.is_root_child(child))
             .map(|child| child.local_name.as_str())
             .collect::<HashSet<_>>();
-        let last_ranked_child = self
-            .children
-            .iter()
-            .rposition(|child| self.is_root_child(child) && rank(&child.local_name) != usize::MAX);
+        let mut child_ranks = Vec::with_capacity(self.children.len());
+        for child in &self.children {
+            if self.is_root_child(child) {
+                child_ranks.push(rank(&child.local_name));
+                continue;
+            }
+            let covered = self.alternate_content_names(child)?;
+            if let Some(owned) = covered
+                .iter()
+                .find(|name| replacements.contains_key(name.as_str()))
+            {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "{owned} lives inside an mc:AlternateContent branch"
+                )));
+            }
+            child_ranks.push(
+                covered
+                    .iter()
+                    .map(|name| rank(name))
+                    .min()
+                    .unwrap_or(usize::MAX),
+            );
+        }
+        let last_ranked_child = child_ranks.iter().rposition(|rank| *rank != usize::MAX);
         let mut emitted = HashSet::new();
         let mut output = Vec::new();
         output.extend_from_slice(&self.prefix);
@@ -441,11 +461,7 @@ impl XmlTemplate {
         for (index, child) in self.children.iter().enumerate() {
             output.extend_from_slice(&child.before);
             let modeled = self.is_root_child(child);
-            let child_rank = if modeled {
-                rank(&child.local_name)
-            } else {
-                usize::MAX
-            };
+            let child_rank = child_ranks[index];
             if child_rank != usize::MAX {
                 let mut pending = replacements
                     .iter()
@@ -483,6 +499,64 @@ impl XmlTemplate {
         emit_pending(&replacements, &mut emitted, rank, &mut output);
         output.extend_from_slice(&self.suffix);
         Ok(output)
+    }
+
+    /// The root-namespace elements each `mc:Choice`/`mc:Fallback` branch stands
+    /// in for. They decide where the branch sits in child order and whether it
+    /// hides an element the caller wants to replace.
+    fn alternate_content_names(&self, child: &XmlChild) -> Result<Vec<String>, ParseError> {
+        if child.local_name != "AlternateContent" {
+            return Ok(Vec::new());
+        }
+        let mut writer = Writer::new(Vec::new());
+        let mut root = BytesStart::new("mcRoot");
+        for (prefix, namespace) in &self.namespaces {
+            let name = match prefix {
+                Some(prefix) => format!("xmlns:{prefix}"),
+                None => "xmlns".to_owned(),
+            };
+            root.push_attribute((name.as_str(), namespace.as_str()));
+        }
+        writer.write_event(Event::Start(root)).map_err(xml_err)?;
+        let mut document = writer.into_inner();
+        document.extend_from_slice(&child.bytes);
+        document.extend_from_slice(b"</mcRoot>");
+
+        let mut reader = NsReader::from_reader(document.as_slice());
+        reader.config_mut().expand_empty_elements = false;
+        let mut depth = 0_usize;
+        let mut names = Vec::new();
+        loop {
+            let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
+            let namespace = resolved_namespace(namespace);
+            let branch_content = depth == 3 && namespace.as_deref() == self.root_namespace();
+            match event {
+                Event::Start(element) => {
+                    if branch_content {
+                        names.push(
+                            String::from_utf8_lossy(element.name().local_name().as_ref())
+                                .into_owned(),
+                        );
+                    }
+                    depth += 1;
+                    if depth > MAX_DEPTH {
+                        return Err(ParseError::DepthExceeded);
+                    }
+                }
+                Event::Empty(element) => {
+                    if branch_content {
+                        names.push(
+                            String::from_utf8_lossy(element.name().local_name().as_ref())
+                                .into_owned(),
+                        );
+                    }
+                }
+                Event::End(_) => depth = depth.saturating_sub(1),
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        Ok(names)
     }
 
     /// Replaces every child with `local_name` by the supplied fragments, in
