@@ -13,6 +13,10 @@ categories = ["graphics", "rendering", "data-structures"]
 [lib]
 name = "ooxml_drawingml"
 
+[features]
+default = []
+chart = []
+
 [dependencies]
 indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

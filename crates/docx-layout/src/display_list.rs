@@ -29,6 +29,11 @@
 //! paragraph/table emitters. The payload is optional and additive — an
 //! envelope without it produces byte-identical output to before.
 
+use ooxml_drawingml::GeometryPathCommand;
+use ooxml_drawingml::chart::{
+    PlotAxisRange, PlotChart, PlotGroup, PlotLegend, PlotMarker, PlotOp, PlotPoint, PlotRect,
+    PlotSeries, PlotSink, chart_aria_label, plot_chart_into,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
@@ -7619,19 +7624,67 @@ fn scale_shape_y(n: &Number, frag: &ShapeFragmentIn) -> Number {
     px(frag.y + num_f64(n) * frag.height)
 }
 
-const CHART_FONT: &str = "400 10px Calibri, sans-serif";
-const CHART_TITLE_FONT: &str = "600 13px Calibri, sans-serif";
-const CHART_AXIS_COLOR: &str = "#666666";
-const CHART_GRID_COLOR: &str = "#D9D9D9";
-const CHART_TEXT_COLOR: &str = "#222222";
-const CHART_DEFAULT_COLORS: [&str; 8] = [
-    "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#264478", "#9E480E",
-];
+fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
+    PlotChart {
+        chart_type: &chart.chart_type,
+        title: chart.title.as_deref(),
+        legend: chart.legend.as_ref().map(|legend| PlotLegend {
+            position: legend.position.as_deref(),
+            visible: legend.visible,
+        }),
+        value_axis: chart
+            .axes
+            .as_ref()
+            .and_then(|axes| axes.value.as_ref())
+            .map(|axis| PlotAxisRange {
+                min: axis.min,
+                max: axis.max,
+            }),
+        series: chart.series.iter().map(plot_series_from).collect(),
+        plot_groups: chart
+            .plot_groups
+            .iter()
+            .map(|group| PlotGroup {
+                chart_type: group.chart_type.as_deref(),
+                grouping: group.grouping.as_deref(),
+                series: group.series.iter().map(plot_series_from).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
+    PlotSeries {
+        name: series.name.as_deref(),
+        categories: &series.categories,
+        values: &series.values,
+        color: series.color.as_deref(),
+        points: series
+            .points
+            .iter()
+            .map(|point| PlotPoint {
+                index: point.index,
+                value: point.value,
+                color: point.color.as_deref(),
+                marker: plot_marker_from(point.marker.as_ref()),
+                label: point.label.as_deref(),
+            })
+            .collect(),
+        grouping: series.grouping.as_deref(),
+        marker: plot_marker_from(series.marker.as_ref()),
+    }
+}
+
+fn plot_marker_from(marker: Option<&Value>) -> Option<PlotMarker> {
+    marker.map(|marker| PlotMarker {
+        size: marker.get("size").and_then(Value::as_f64),
+    })
+}
 
 fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block: &ChartBlockIn) {
     let stamp_from = prims.len();
     let block_ref = BlockRef::of(&frag.block_id);
-    let label = chart_aria_label(&block.chart);
+    let chart = plot_chart_from(&block.chart);
     let mut attrs = block_ref.attrs();
     attrs.doc_start = frag
         .doc_start
@@ -7645,7 +7698,9 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         .or(block.pm_end);
     attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
     attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-    attrs.chart = Some(ChartA11yAttrs { label });
+    attrs.chart = Some(ChartA11yAttrs {
+        label: chart_aria_label(&chart),
+    });
     attrs.aria_label = block.chart.title.clone();
     attrs.aria_description = block.chart.description.clone();
     attrs.decorative = block.chart.decorative.filter(|decorative| *decorative);
@@ -7660,716 +7715,143 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
     } else {
         block.height
     };
-    let x = frag.x;
-    let y = frag.y;
 
-    push_chart_rect(prims, x, y, width, height, "#FFFFFF", attrs.clone());
-
-    let title_h = if let Some(title) = block.chart.title.as_deref().filter(|s| !s.is_empty()) {
-        push_chart_text(
+    plot_chart_into(
+        &chart,
+        PlotRect {
+            x: frag.x,
+            y: frag.y,
+            w: width,
+            h: height,
+        },
+        &mut PrimitiveSink {
             prims,
-            title,
-            x + 8.0,
-            y + 18.0,
-            (width - 16.0).max(0.0),
-            CHART_TITLE_FONT,
-            attrs.clone(),
-        );
-        28.0
-    } else {
-        10.0
-    };
-
-    let legend_position = block
-        .chart
-        .legend
-        .as_ref()
-        .and_then(|l| l.position.as_deref())
-        .unwrap_or("right");
-    let legend_w = if chart_has_legend(&block.chart) {
-        104.0
-    } else {
-        8.0
-    };
-    let plot_x = if legend_position == "left" {
-        x + legend_w + 42.0
-    } else {
-        x + 42.0
-    };
-    let plot = ChartPlot {
-        x: plot_x,
-        y: y + title_h,
-        w: (width - 42.0 - legend_w - 10.0).max(24.0),
-        h: (height - title_h - 34.0).max(24.0),
-    };
-
-    if block.chart.plot_groups.is_empty() {
-        emit_chart_family(
-            prims,
-            &block.chart,
-            plot,
-            x,
-            y + title_h,
-            width,
-            height - title_h,
-            attrs.clone(),
-        );
-    } else {
-        for group in &block.chart.plot_groups {
-            let mut chart = block.chart.clone();
-            chart.chart_type = group
-                .chart_type
-                .clone()
-                .unwrap_or_else(|| block.chart.chart_type.clone());
-            chart.series = group.series.clone();
-            for series in &mut chart.series {
-                if series.grouping.is_none() {
-                    series.grouping = group.grouping.clone();
-                }
-            }
-            chart.plot_groups.clear();
-            emit_chart_family(
-                prims,
-                &chart,
-                plot,
-                x,
-                y + title_h,
-                width,
-                height - title_h,
-                attrs.clone(),
-            );
-        }
-    }
-
-    let legend_x = if legend_position == "left" {
-        x + 6.0
-    } else {
-        x + width - legend_w + 6.0
-    };
-    emit_chart_legend(
-        prims,
-        &block.chart,
-        legend_x,
-        y + title_h + 8.0,
-        legend_w - 12.0,
-        attrs.clone(),
+            attrs: &attrs,
+        },
     );
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_chart_family(
-    prims: &mut Vec<Primitive>,
-    chart: &ChartIn,
-    plot: ChartPlot,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    attrs: DocAttrs,
-) {
-    match chart.chart_type.as_str() {
-        "pie" | "doughnut" => emit_pie_chart(prims, chart, x, y, width, height, attrs),
-        "line" | "scatter" | "radar" => emit_line_chart(prims, chart, plot, attrs),
-        "bar" => emit_bar_chart(prims, chart, plot, attrs, true),
-        _ => emit_bar_chart(prims, chart, plot, attrs, false),
-    }
+/// Translates plot ops into display-list primitives as they are emitted.
+struct PrimitiveSink<'a> {
+    prims: &'a mut Vec<Primitive>,
+    attrs: &'a DocAttrs,
 }
 
-#[derive(Clone, Copy)]
-struct ChartPlot {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-}
-
-fn push_chart_rect(
-    prims: &mut Vec<Primitive>,
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
-    fill: &str,
-    attrs: DocAttrs,
-) {
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    prims.push(Primitive::Rect(RectPrimitive {
-        x: px(x),
-        y: px(y),
-        w: px(w),
-        h: px(h),
-        fill: fill.to_string(),
-        attrs,
-    }));
-}
-
-fn push_chart_text(
-    prims: &mut Vec<Primitive>,
-    text: &str,
-    x: f64,
-    baseline: f64,
-    width: f64,
-    font: &str,
-    attrs: DocAttrs,
-) {
-    if text.is_empty() || width <= 0.0 {
-        return;
-    }
-    prims.push(Primitive::Text(TextRunPrimitive {
-        text: text.chars().take(120).collect(),
-        x: px(x),
-        baseline_y: px(baseline),
-        width: px(width),
-        font: font.to_string(),
-        color: CHART_TEXT_COLOR.to_string(),
-        letter_spacing: None,
-        word_spacing: None,
-        rtl: None,
-        opacity: None,
-        rotation_deg: None,
-        horizontal_scale: None,
-        all_caps: false,
-        small_caps: false,
-        hidden: false,
-        text_shadow: None,
-        text_outline: false,
-        emphasis_mark: None,
-        text_effect: None,
-        attrs,
-    }));
-}
-
-fn push_chart_line(
-    prims: &mut Vec<Primitive>,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    color: &str,
-    width: f64,
-) {
-    prims.push(Primitive::Line(LinePrimitive {
-        x1: px(x1),
-        y1: px(y1),
-        x2: px(x2),
-        y2: px(y2),
-        stroke_width: px(width),
-        color: color.to_string(),
-        dash: None,
-        role: None,
-        ..LinePrimitive::contract_defaults()
-    }));
-}
-
-fn chart_has_legend(chart: &ChartIn) -> bool {
-    chart
-        .legend
-        .as_ref()
-        .and_then(|l| l.visible)
-        .unwrap_or(true)
-}
-
-fn series_color(series: Option<&ChartSeriesIn>, index: usize) -> String {
-    series
-        .and_then(|s| s.color.as_deref())
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            if s.starts_with('#') {
-                s.to_string()
-            } else {
-                format!("#{s}")
-            }
-        })
-        .unwrap_or_else(|| CHART_DEFAULT_COLORS[index % CHART_DEFAULT_COLORS.len()].to_string())
-}
-
-fn series_point(series: &ChartSeriesIn, index: usize) -> Option<&ChartPointIn> {
-    series
-        .points
-        .iter()
-        .find(|point| point.index.unwrap_or(index) == index)
-}
-
-fn series_value(series: &ChartSeriesIn, index: usize) -> f64 {
-    series_point(series, index)
-        .and_then(|point| point.value)
-        .or_else(|| series.values.get(index).copied())
-        .filter(|value| value.is_finite())
-        .unwrap_or(0.0)
-}
-
-fn series_point_color(series: &ChartSeriesIn, point_index: usize, series_index: usize) -> String {
-    series_point(series, point_index)
-        .and_then(|point| point.color.as_deref())
-        .map(|color| {
-            if color.starts_with('#') {
-                color.to_string()
-            } else {
-                format!("#{color}")
-            }
-        })
-        .unwrap_or_else(|| series_color(Some(series), series_index))
-}
-
-fn category_count(chart: &ChartIn) -> usize {
-    chart
-        .series
-        .iter()
-        .map(|s| s.categories.len().max(s.values.len()).max(s.points.len()))
-        .max()
-        .unwrap_or(0)
-}
-
-fn category_label(chart: &ChartIn, index: usize) -> String {
-    chart
-        .series
-        .iter()
-        .find_map(|s| s.categories.get(index).cloned())
-        .unwrap_or_else(|| (index + 1).to_string())
-}
-
-fn value_range(chart: &ChartIn) -> (f64, f64) {
-    let mut min = 0.0;
-    let mut max = 0.0;
-    for series in &chart.series {
-        for index in 0..series.values.len().max(series.points.len()) {
-            let value = series_value(series, index);
-            if value.is_finite() {
-                min = f64::min(min, value);
-                max = f64::max(max, value);
-            }
-        }
-    }
-    if let Some(axis) = chart.axes.as_ref().and_then(|a| a.value.as_ref()) {
-        if let Some(v) = axis.min.filter(|v| v.is_finite()) {
-            min = v;
-        }
-        if let Some(v) = axis.max.filter(|v| v.is_finite()) {
-            max = v;
-        }
-    }
-    if max <= min {
-        max = min + 1.0;
-    }
-    (min, max)
-}
-
-fn value_y(plot: ChartPlot, value: f64, min: f64, max: f64) -> f64 {
-    plot.y + (max - value) / (max - min) * plot.h
-}
-
-fn emit_chart_axes(prims: &mut Vec<Primitive>, chart: &ChartIn, plot: ChartPlot, attrs: DocAttrs) {
-    let (min, max) = value_range(chart);
-    for i in 0..=4 {
-        let t = i as f64 / 4.0;
-        let y = plot.y + t * plot.h;
-        push_chart_line(prims, plot.x, y, plot.x + plot.w, y, CHART_GRID_COLOR, 0.5);
-        let value = max - t * (max - min);
-        push_chart_text(
-            prims,
-            &format_chart_number(value),
-            plot.x - 38.0,
-            y + 3.0,
-            34.0,
-            CHART_FONT,
-            attrs.clone(),
-        );
-    }
-    push_chart_line(
-        prims,
-        plot.x,
-        plot.y,
-        plot.x,
-        plot.y + plot.h,
-        CHART_AXIS_COLOR,
-        1.0,
-    );
-    push_chart_line(
-        prims,
-        plot.x,
-        plot.y + plot.h,
-        plot.x + plot.w,
-        plot.y + plot.h,
-        CHART_AXIS_COLOR,
-        1.0,
-    );
-}
-
-fn emit_bar_chart(
-    prims: &mut Vec<Primitive>,
-    chart: &ChartIn,
-    plot: ChartPlot,
-    attrs: DocAttrs,
-    horizontal: bool,
-) {
-    let cat_count = category_count(chart);
-    if cat_count == 0 || chart.series.is_empty() {
-        return;
-    }
-    emit_chart_axes(prims, chart, plot, attrs.clone());
-    let (min, max) = value_range(chart);
-    let zero_y = value_y(plot, 0.0_f64.clamp(min, max), min, max);
-    let series_count = chart.series.len().max(1);
-    if horizontal {
-        let row_h = plot.h / cat_count as f64;
-        let bar_h = (row_h * 0.7 / series_count as f64).max(1.0);
-        for cat_idx in 0..cat_count {
-            let label = category_label(chart, cat_idx);
-            push_chart_text(
-                prims,
-                &label,
-                plot.x - 38.0,
-                plot.y + row_h * (cat_idx as f64 + 0.55),
-                36.0,
-                CHART_FONT,
-                attrs.clone(),
-            );
-            for (ser_idx, series) in chart.series.iter().enumerate() {
-                let v = series_value(series, cat_idx);
-                let ratio = ((v - min) / (max - min)).clamp(0.0, 1.0);
-                let bar_w = ratio * plot.w;
-                let y = plot.y + row_h * cat_idx as f64 + row_h * 0.15 + bar_h * ser_idx as f64;
-                push_chart_rect(
-                    prims,
-                    plot.x,
-                    y,
-                    bar_w,
-                    bar_h,
-                    &series_point_color(series, cat_idx, ser_idx),
-                    attrs.clone(),
-                );
-            }
-        }
-    } else {
-        let group_w = plot.w / cat_count as f64;
-        let bar_w = (group_w * 0.7 / series_count as f64).max(1.0);
-        for cat_idx in 0..cat_count {
-            let label = category_label(chart, cat_idx);
-            push_chart_text(
-                prims,
-                &label,
-                plot.x + group_w * cat_idx as f64 + 2.0,
-                plot.y + plot.h + 14.0,
-                group_w - 4.0,
-                CHART_FONT,
-                attrs.clone(),
-            );
-            for (ser_idx, series) in chart.series.iter().enumerate() {
-                let v = series_value(series, cat_idx);
-                let yv = value_y(plot, v.clamp(min, max), min, max);
-                let y0 = zero_y;
-                let x = plot.x + group_w * cat_idx as f64 + group_w * 0.15 + bar_w * ser_idx as f64;
-                push_chart_rect(
-                    prims,
-                    x,
-                    yv.min(y0),
-                    bar_w,
-                    (y0 - yv).abs().max(1.0),
-                    &series_point_color(series, cat_idx, ser_idx),
-                    attrs.clone(),
-                );
-            }
-        }
-    }
-}
-
-fn emit_line_chart(prims: &mut Vec<Primitive>, chart: &ChartIn, plot: ChartPlot, attrs: DocAttrs) {
-    let cat_count = category_count(chart);
-    if cat_count == 0 || chart.series.is_empty() {
-        return;
-    }
-    emit_chart_axes(prims, chart, plot, attrs.clone());
-    let (min, max) = value_range(chart);
-    let denom = (cat_count.saturating_sub(1)).max(1) as f64;
-    for i in 0..cat_count {
-        let label = category_label(chart, i);
-        let x = plot.x + plot.w * i as f64 / denom;
-        push_chart_text(
-            prims,
-            &label,
-            x - 16.0,
-            plot.y + plot.h + 14.0,
-            32.0,
-            CHART_FONT,
-            attrs.clone(),
-        );
-    }
-    for (ser_idx, series) in chart.series.iter().enumerate() {
-        let color = series_color(Some(series), ser_idx);
-        let mut prev: Option<(f64, f64)> = None;
-        for i in 0..cat_count {
-            let v = series_value(series, i);
-            let x = plot.x + plot.w * i as f64 / denom;
-            let y = value_y(plot, v.clamp(min, max), min, max);
-            if let Some((px0, py0)) = prev {
-                push_chart_line(prims, px0, py0, x, y, &color, 2.0);
-            }
-            let marker = series_point(series, i)
-                .and_then(|point| point.marker.as_ref())
-                .or(series.marker.as_ref());
-            let marker_size = marker
-                .and_then(|marker| marker.get("size"))
-                .and_then(Value::as_f64)
-                .unwrap_or(4.0)
-                .clamp(1.0, 24.0);
-            let point_color = series_point_color(series, i, ser_idx);
-            push_chart_rect(
-                prims,
-                x - marker_size / 2.0,
-                y - marker_size / 2.0,
-                marker_size,
-                marker_size,
-                &point_color,
-                attrs.clone(),
-            );
-            if let Some(label) = series_point(series, i).and_then(|point| point.label.as_deref()) {
-                push_chart_text(
-                    prims,
-                    label,
-                    x + marker_size,
-                    y - marker_size,
-                    48.0,
-                    CHART_FONT,
-                    attrs.clone(),
-                );
-            }
-            prev = Some((x, y));
-        }
-    }
-}
-
-fn emit_pie_chart(
-    prims: &mut Vec<Primitive>,
-    chart: &ChartIn,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    attrs: DocAttrs,
-) {
-    let Some(series) = chart.series.first() else {
-        return;
-    };
-    let values: Vec<(usize, f64)> = (0..series.values.len().max(series.points.len()))
-        .map(|index| (index, series_value(series, index)))
-        .filter(|(_, value)| *value > 0.0 && value.is_finite())
-        .collect();
-    let total: f64 = values.iter().map(|(_, value)| value).sum();
-    if total <= 0.0 {
-        return;
-    }
-    let r = (width.min(height) * 0.34).max(10.0);
-    let cx = x + width * 0.38;
-    let cy = y + height * 0.46;
-    let inner_r = if chart.chart_type == "doughnut" {
-        r * 0.48
-    } else {
-        0.0
-    };
-    let mut angle = -std::f64::consts::FRAC_PI_2;
-    for (idx, value) in &values {
-        let sweep = (*value / total) * std::f64::consts::TAU;
-        let path = pie_wedge_path(cx, cy, r, inner_r, angle, angle + sweep);
-        prims.push(Primitive::Shape(ShapePrimitive {
-            x: px(cx - r),
-            y: px(cy - r),
-            w: px(r * 2.0),
-            h: px(r * 2.0),
-            geometry_path: path,
-            fill: Some(series_point_color(series, *idx, *idx)),
-            stroke: Some(ShapeStrokePrimitive {
-                color: "#FFFFFF".to_string(),
-                width: px(1.0),
+impl PlotSink for PrimitiveSink<'_> {
+    fn push_op(&mut self, op: PlotOp) {
+        let (prims, attrs) = (&mut *self.prims, self.attrs);
+        match op {
+            PlotOp::Rect { x, y, w, h, fill } => prims.push(Primitive::Rect(RectPrimitive {
+                x: px(x),
+                y: px(y),
+                w: px(w),
+                h: px(h),
+                fill,
+                attrs: attrs.clone(),
+            })),
+            PlotOp::Text {
+                text,
+                x,
+                baseline_y,
+                width,
+                font,
+                color,
+            } => prims.push(Primitive::Text(TextRunPrimitive {
+                text,
+                x: px(x),
+                baseline_y: px(baseline_y),
+                width: px(width),
+                font: font.css(),
+                color,
+                letter_spacing: None,
+                word_spacing: None,
+                rtl: None,
+                opacity: None,
+                rotation_deg: None,
+                horizontal_scale: None,
+                all_caps: false,
+                small_caps: false,
+                hidden: false,
+                text_shadow: None,
+                text_outline: false,
+                emphasis_mark: None,
+                text_effect: None,
+                attrs: attrs.clone(),
+            })),
+            PlotOp::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                width,
+            } => prims.push(Primitive::Line(LinePrimitive {
+                x1: px(x1),
+                y1: px(y1),
+                x2: px(x2),
+                y2: px(y2),
+                stroke_width: px(width),
+                color,
                 dash: None,
-            }),
-            transform: None,
-            decorative: false,
-            attrs: attrs.clone(),
-        }));
-        angle += sweep;
-    }
-}
-
-fn pie_wedge_path(
-    cx: f64,
-    cy: f64,
-    r: f64,
-    inner_r: f64,
-    start: f64,
-    end: f64,
-) -> Vec<ShapePathCommand> {
-    let steps = (((end - start).abs() / std::f64::consts::TAU) * 48.0)
-        .ceil()
-        .max(2.0) as usize;
-    let mut path = Vec::new();
-    if inner_r > 0.0 {
-        path.push(ShapePathCommand::Move {
-            x: px(cx + r * start.cos()),
-            y: px(cy + r * start.sin()),
-        });
-    } else {
-        path.push(ShapePathCommand::Move {
-            x: px(cx),
-            y: px(cy),
-        });
-        path.push(ShapePathCommand::Line {
-            x: px(cx + r * start.cos()),
-            y: px(cy + r * start.sin()),
-        });
-    }
-    for i in 1..=steps {
-        let a = start + (end - start) * i as f64 / steps as f64;
-        path.push(ShapePathCommand::Line {
-            x: px(cx + r * a.cos()),
-            y: px(cy + r * a.sin()),
-        });
-    }
-    if inner_r > 0.0 {
-        path.push(ShapePathCommand::Line {
-            x: px(cx + inner_r * end.cos()),
-            y: px(cy + inner_r * end.sin()),
-        });
-        for i in (0..steps).rev() {
-            let a = start + (end - start) * i as f64 / steps as f64;
-            path.push(ShapePathCommand::Line {
-                x: px(cx + inner_r * a.cos()),
-                y: px(cy + inner_r * a.sin()),
-            });
+                role: None,
+                ..LinePrimitive::contract_defaults()
+            })),
+            PlotOp::Path {
+                x,
+                y,
+                w,
+                h,
+                commands,
+                fill,
+                stroke,
+            } => prims.push(Primitive::Shape(ShapePrimitive {
+                x: px(x),
+                y: px(y),
+                w: px(w),
+                h: px(h),
+                geometry_path: commands.into_iter().map(shape_path_command).collect(),
+                fill: Some(fill),
+                stroke: stroke.map(|stroke| ShapeStrokePrimitive {
+                    color: stroke.color,
+                    width: px(stroke.width),
+                    dash: None,
+                }),
+                transform: None,
+                decorative: false,
+                attrs: attrs.clone(),
+            })),
         }
     }
-    path.push(ShapePathCommand::Close);
-    path
 }
 
-fn emit_chart_legend(
-    prims: &mut Vec<Primitive>,
-    chart: &ChartIn,
-    x: f64,
-    y: f64,
-    width: f64,
-    attrs: DocAttrs,
-) {
-    if !chart_has_legend(chart) || width <= 0.0 {
-        return;
+fn shape_path_command(command: GeometryPathCommand) -> ShapePathCommand {
+    match command {
+        GeometryPathCommand::Move { x, y } => ShapePathCommand::Move { x: px(x), y: px(y) },
+        GeometryPathCommand::Line { x, y } => ShapePathCommand::Line { x: px(x), y: px(y) },
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => ShapePathCommand::Quad {
+            cpx: px(cpx),
+            cpy: px(cpy),
+            x: px(x),
+            y: px(y),
+        },
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => ShapePathCommand::Cubic {
+            cp1x: px(cp1x),
+            cp1y: px(cp1y),
+            cp2x: px(cp2x),
+            cp2y: px(cp2y),
+            x: px(x),
+            y: px(y),
+        },
+        GeometryPathCommand::Close => ShapePathCommand::Close,
     }
-    let series: Vec<&ChartSeriesIn> = if chart.series.is_empty() {
-        chart
-            .plot_groups
-            .iter()
-            .flat_map(|group| group.series.iter())
-            .collect()
-    } else {
-        chart.series.iter().collect()
-    };
-    let pie_legend = chart.chart_type == "pie"
-        || chart.chart_type == "doughnut"
-        || chart
-            .plot_groups
-            .iter()
-            .any(|group| matches!(group.chart_type.as_deref(), Some("pie") | Some("doughnut")));
-    let entries: Vec<(String, String)> = if pie_legend {
-        series
-            .as_slice()
-            .first()
-            .map(|s| {
-                let count = s.categories.len().max(s.values.len()).max(s.points.len());
-                (0..count)
-                    .map(|i| {
-                        (
-                            s.categories
-                                .get(i)
-                                .cloned()
-                                .unwrap_or_else(|| (i + 1).to_string()),
-                            series_point_color(s, i, i),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        series
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                (
-                    s.name
-                        .clone()
-                        .unwrap_or_else(|| format!("Series {}", i + 1)),
-                    series_color(Some(s), i),
-                )
-            })
-            .collect()
-    };
-    for (i, (label, color)) in entries.iter().take(8).enumerate() {
-        let yy = y + i as f64 * 15.0;
-        push_chart_rect(prims, x, yy, 8.0, 8.0, color, attrs.clone());
-        push_chart_text(
-            prims,
-            label,
-            x + 12.0,
-            yy + 8.0,
-            width - 12.0,
-            CHART_FONT,
-            attrs.clone(),
-        );
-    }
-}
-
-fn format_chart_number(v: f64) -> String {
-    if v.abs() >= 100.0 || v.fract().abs() < 0.01 {
-        format!("{v:.0}")
-    } else {
-        format!("{v:.1}")
-    }
-}
-
-fn chart_aria_label(chart: &ChartIn) -> String {
-    let kind = if chart.plot_groups.len() > 1 {
-        "combo chart"
-    } else {
-        match chart.chart_type.as_str() {
-            "bar" => "bar chart",
-            "line" => "line chart",
-            "pie" => "pie chart",
-            "doughnut" => "doughnut chart",
-            _ => "column chart",
-        }
-    };
-    let title = chart
-        .title
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Untitled chart");
-    let series_count = if chart.series.is_empty() {
-        chart
-            .plot_groups
-            .iter()
-            .map(|group| group.series.len())
-            .sum()
-    } else {
-        chart.series.len()
-    };
-    let category_count = if chart.series.is_empty() {
-        chart
-            .plot_groups
-            .iter()
-            .flat_map(|group| group.series.iter())
-            .map(|series| {
-                series
-                    .categories
-                    .len()
-                    .max(series.values.len())
-                    .max(series.points.len())
-            })
-            .max()
-            .unwrap_or(0)
-    } else {
-        category_count(chart)
-    };
-    format!("{title}, {kind}, {series_count} series, {category_count} categories")
 }
 
 /// paint one text-box fragment (port of renderTextBoxFragment): the container's
