@@ -3338,3 +3338,68 @@ fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
     );
     Workbook::open(&saved).unwrap();
 }
+
+#[test]
+fn remove_then_add_is_fresh_while_undo_restores_exact_sheet_identity() {
+    let original = preservation_fixture();
+    let mut replaced = Workbook::open(&original).unwrap();
+    replaced
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Keep".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    replaced
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 0 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    replaced
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 0,
+                name: "Data".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let replaced_parts = package_map(&replaced.save().unwrap());
+    assert!(!replaced_parts.contains_key("xl/worksheets/sheet1.xml"));
+    for (path, bytes) in &replaced_parts {
+        if path.starts_with("xl/worksheets/") && path.ends_with(".xml") {
+            assert!(
+                !String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .contains("<autoFilter")
+            );
+        }
+    }
+
+    let mut restored = Workbook::open(&original).unwrap();
+    restored
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Keep".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    restored
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 0 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    restored.undo(CalculationOptions::default()).unwrap();
+    let restored_parts = package_map(&restored.save().unwrap());
+    assert!(
+        String::from_utf8(restored_parts["xl/worksheets/sheet1.xml"].clone())
+            .unwrap()
+            .contains("<autoFilter")
+    );
+}

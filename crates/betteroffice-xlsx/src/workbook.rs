@@ -79,10 +79,13 @@ enum WorkbookMode {
     Collaborative { structure: WorkbookStructure },
 }
 
-struct RemovedSheetOrigin {
-    index: usize,
-    name: String,
-    origin: Option<usize>,
+/// Undo-issued identity token: the sheet origin vector on both sides of one
+/// committed transaction. Only replaying history restores a sheet's package
+/// identity; a fresh add never inherits one.
+#[derive(Clone)]
+struct SheetOriginHistory {
+    before: Vec<Option<usize>>,
+    after: Vec<Option<usize>>,
 }
 
 pub struct Workbook {
@@ -92,7 +95,8 @@ pub struct Workbook {
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
     sheet_origins: Vec<Option<usize>>,
-    removed_sheet_origins: Vec<RemovedSheetOrigin>,
+    sheet_origin_undo: Vec<SheetOriginHistory>,
+    sheet_origin_redo: Vec<SheetOriginHistory>,
     edited_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
@@ -202,7 +206,8 @@ impl Workbook {
             model,
             source_package,
             sheet_origins,
-            removed_sheet_origins: Vec::new(),
+            sheet_origin_undo: Vec::new(),
+            sheet_origin_redo: Vec::new(),
             edited_since_open: false,
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
@@ -368,6 +373,8 @@ impl Workbook {
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
         self.undo.clear();
+        self.sheet_origin_undo.clear();
+        self.sheet_origin_redo.clear();
         self.authority.clear_history();
         self.proposals.clear();
         self.edited_since_open = true;
@@ -900,7 +907,6 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
-        let before_sheet_names = self.sheet_names();
         let Some(ops) = self.undo.undo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
@@ -908,7 +914,12 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Undo)
             .map_err(authority_error)?;
-        self.apply_sheet_origin_ops(before_sheet_names, &ops);
+        if let Some(history) = self.sheet_origin_undo.pop() {
+            self.sheet_origins = history.before.clone();
+            self.sheet_origin_redo.push(history);
+        } else {
+            self.apply_sheet_origin_ops(&ops);
+        }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
@@ -934,7 +945,6 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
-        let before_sheet_names = self.sheet_names();
         let Some(ops) = self.undo.redo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
@@ -942,7 +952,12 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Redo)
             .map_err(authority_error)?;
-        self.apply_sheet_origin_ops(before_sheet_names, &ops);
+        if let Some(history) = self.sheet_origin_redo.pop() {
+            self.sheet_origins = history.after.clone();
+            self.sheet_origin_undo.push(history);
+        } else {
+            self.apply_sheet_origin_ops(&ops);
+        }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
@@ -1338,7 +1353,7 @@ impl Workbook {
     }
 
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
-        let before_sheet_names = self.sheet_names();
+        let origin_before = (!self.is_collaborative()).then(|| self.sheet_origins.clone());
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
@@ -1365,13 +1380,20 @@ impl Workbook {
                 });
             }
         }
-        self.apply_sheet_origin_ops(before_sheet_names, ops);
+        self.apply_sheet_origin_ops(ops);
+        if let Some(before) = origin_before {
+            self.sheet_origin_undo.push(SheetOriginHistory {
+                before,
+                after: self.sheet_origins.clone(),
+            });
+            self.sheet_origin_redo.clear();
+        }
         self.edited_since_open = true;
         Ok(())
     }
 
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
-        let before_sheet_names = self.sheet_names();
+        let origin_before = (!self.is_collaborative()).then(|| self.sheet_origins.clone());
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
@@ -1398,7 +1420,14 @@ impl Workbook {
                 });
             }
         }
-        self.apply_sheet_origin_ops(before_sheet_names, ops);
+        self.apply_sheet_origin_ops(ops);
+        if let Some(before) = origin_before {
+            self.sheet_origin_undo.push(SheetOriginHistory {
+                before,
+                after: self.sheet_origins.clone(),
+            });
+            self.sheet_origin_redo.clear();
+        }
         self.edited_since_open = true;
         Ok(())
     }
@@ -1488,46 +1517,15 @@ impl Workbook {
             .map(|sheet| sheet.name.clone())
     }
 
-    fn sheet_names(&self) -> Vec<String> {
-        self.model
-            .sheets
-            .iter()
-            .map(|sheet| sheet.name.clone())
-            .collect()
-    }
-
-    fn apply_sheet_origin_ops(&mut self, mut names: Vec<String>, ops: &[Op]) {
+    fn apply_sheet_origin_ops(&mut self, ops: &[Op]) {
         for op in ops {
             match op {
-                Op::AddSheet { index, name } => {
+                Op::AddSheet { index, .. } => {
                     let index = (*index).min(self.sheet_origins.len());
-                    let restored = self
-                        .removed_sheet_origins
-                        .iter()
-                        .rposition(|removed| {
-                            removed.index == index && removed.name.eq_ignore_ascii_case(name)
-                        })
-                        .and_then(|removed| self.removed_sheet_origins.remove(removed).origin);
-                    self.sheet_origins.insert(index, restored);
-                    names.insert(index, name.clone());
+                    self.sheet_origins.insert(index, None);
                 }
                 Op::RemoveSheet { index } if *index < self.sheet_origins.len() => {
-                    self.removed_sheet_origins.push(RemovedSheetOrigin {
-                        index: *index,
-                        name: names
-                            .get(*index)
-                            .cloned()
-                            .unwrap_or_else(|| format!("Sheet{}", index + 1)),
-                        origin: self.sheet_origins.remove(*index),
-                    });
-                    if *index < names.len() {
-                        names.remove(*index);
-                    }
-                }
-                Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } => {
-                    if let Some(current) = names.get_mut(sheet.0 as usize) {
-                        *current = name.clone();
-                    }
+                    self.sheet_origins.remove(*index);
                 }
                 _ => {}
             }
