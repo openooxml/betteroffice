@@ -1760,6 +1760,38 @@ fn refuses_a_moved_reference_whose_cache_cannot_be_regenerated() {
     );
 }
 
+/// A cache may legally carry an `extLst` beside its points, or a `formatCode`
+/// on a single point. Neither survives a rebuild, so the save is refused
+/// rather than quietly changing the labels a consumer reads back.
+#[test]
+fn refuses_to_rebuild_a_cache_holding_content_it_does_not_model() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    refs[2].formula = "Data!$B$2:$B$3".to_owned();
+    let source = String::from_utf8(CHART.to_vec()).unwrap();
+    for (label, cache) in [
+        (
+            "extension list",
+            r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:extLst><c:ext uri="{9F0C0C0A}"/></c:extLst></c:numCache>"#,
+        ),
+        (
+            "per-point format code",
+            r#"<c:numCache><c:pt idx="0" formatCode="0.00"><c:v>3</c:v></c:pt></c:numCache>"#,
+        ),
+    ] {
+        let part = source.replace(
+            r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache>"#,
+            cache,
+        );
+        let error = patch_refs(part.as_bytes(), &refs).unwrap_err();
+        assert!(
+            matches!(&error, ParseError::UnsupportedEdit(message)
+                if message.contains("does not model")),
+            "{label}: {error:?}"
+        );
+    }
+}
+
 /// The writer is the last line: a reference carrying a character xml 1.0
 /// cannot express is refused rather than written raw into a part Excel would
 /// then have to repair.

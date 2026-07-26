@@ -335,6 +335,9 @@ struct CacheSite {
     prefix: String,
     span: Option<Range<usize>>,
     format_code: Option<String>,
+    /// whether the cache carries content [`regenerated_cache`] does not
+    /// re-emit, which it would therefore delete.
+    unmodelled_content: bool,
 }
 
 /// One `c:f` found in a chart part: what it references and where its content
@@ -420,6 +423,28 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
         format_code: cache
             .child("formatCode")
             .map(|element| element.text_content()),
+        unmodelled_content: !cache_is_fully_modelled(cache),
+    })
+}
+
+/// Whether every byte of a cache's content is something the regenerator can
+/// write back. `extLst` and a per-point `formatCode` are legal cache content
+/// this crate does not model, so a cache carrying either is left alone rather
+/// than rebuilt without it.
+fn cache_is_fully_modelled(cache: &Element) -> bool {
+    cache.child_elements().all(|child| {
+        child.namespace() == Some(NS_CHART)
+            && match child.local_name() {
+                "formatCode" => child.attributes.is_empty(),
+                "ptCount" => child.attributes.iter().all(|value| value.name == "val"),
+                "pt" => {
+                    child.attributes.iter().all(|value| value.name == "idx")
+                        && child
+                            .child_elements()
+                            .all(|value| value.is(NS_CHART, "v") && value.attributes.is_empty())
+                }
+                _ => false,
+            }
     })
 }
 
@@ -496,7 +521,8 @@ pub(crate) fn patch_chart_refs(
     source.splice(&edits)
 }
 
-/// The content of a cache rebuilt from the post-edit workbook.
+/// The content of a cache rebuilt from the post-edit workbook. Refused when
+/// the authored cache holds anything the rebuild would not write back.
 fn regenerated_cache(
     cache: &CacheSite,
     formula: &str,
@@ -506,6 +532,11 @@ fn regenerated_cache(
     if cache.local == "multiLvlStrCache" {
         return Err(ParseError::UnsupportedEdit(
             "a multi-level category cache cannot be regenerated".into(),
+        ));
+    }
+    if cache.unmodelled_content {
+        return Err(ParseError::UnsupportedEdit(
+            "a chart cache carrying content this crate does not model cannot be regenerated".into(),
         ));
     }
     let numeric = cache.local == "numCache";
