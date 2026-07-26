@@ -651,7 +651,7 @@ fn parse_line_end(element: &XmlElement) -> LineEnd {
     }
 }
 
-fn parse_color_container(element: &XmlElement) -> Option<ColorValue> {
+pub(crate) fn parse_color_container(element: &XmlElement) -> Option<ColorValue> {
     let color = element.child_elements().find(|value| {
         matches!(
             value.local_name(),

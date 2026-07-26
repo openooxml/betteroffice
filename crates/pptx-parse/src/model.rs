@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::relationships::Relationship;
 
+pub use ooxml_drawingml::chart::{
+    ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint, ChartSeries,
+    ChartSpace,
+};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PptxPackage {
@@ -13,6 +18,7 @@ pub struct PptxPackage {
     pub layouts: Vec<SlideLayout>,
     pub masters: Vec<SlideMaster>,
     pub themes: Vec<ThemePart>,
+    pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
@@ -100,6 +106,14 @@ pub struct SlideMaster {
 pub struct ThemePart {
     pub part_path: String,
     pub theme: Theme,
+}
+
+/// A `ppt/charts/chartN.xml` part, already resolved against the deck theme.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartPart {
+    pub part_path: String,
+    pub chart: ChartSpace,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

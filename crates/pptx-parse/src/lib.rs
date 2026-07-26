@@ -1,5 +1,6 @@
 //! Bounded PresentationML parsing and byte-preserving package writes.
 
+mod chart;
 mod drawing;
 mod error;
 mod model;

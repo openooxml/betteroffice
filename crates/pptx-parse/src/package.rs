@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use ooxml_drawingml::Theme;
+
+use crate::chart::parse_chart_part;
 use crate::drawing::{common_slide_data, parse_text_styles};
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
@@ -143,6 +146,18 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
         });
     }
 
+    let charts = parse_chart_parts(
+        &parts,
+        &ChartSources {
+            slides: &slides,
+            layouts: &layouts,
+            masters: &masters,
+            themes: &themes,
+            relationships: &relationships,
+        },
+        &mut budget,
+    )?;
+
     let content_types = parse_content_types(&parts, &mut budget)?;
     let media = source_parts
         .iter()
@@ -163,6 +178,7 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
         layouts,
         masters,
         themes,
+        charts,
         media,
         relationships,
         parts,
@@ -261,6 +277,144 @@ fn parse_presentation(
         slides,
         master_part_paths,
     })
+}
+
+/// The parts a chart may be referenced from, plus the theme cascade that
+/// decides which colours it resolves against.
+struct ChartSources<'a> {
+    slides: &'a [Slide],
+    layouts: &'a [SlideLayout],
+    masters: &'a [SlideMaster],
+    themes: &'a [ThemePart],
+    relationships: &'a BTreeMap<String, Vec<Relationship>>,
+}
+
+impl ChartSources<'_> {
+    fn chart_target(&self, source_part: &str, relationship_id: &str) -> Option<String> {
+        self.relationships
+            .get(source_part)?
+            .iter()
+            .find(|relationship| relationship.id == relationship_id)
+            .filter(|relationship| relationship.has_type(relationship_types::CHART))
+            .and_then(|relationship| relationship.resolved_target.clone())
+    }
+
+    fn theme_for(&self, source_part: &str) -> Option<&Theme> {
+        if let Some(slide) = self
+            .slides
+            .iter()
+            .find(|slide| slide.part_path == source_part)
+        {
+            return self.theme_via_layout(slide.layout_part_path.as_deref());
+        }
+        if self
+            .layouts
+            .iter()
+            .any(|layout| layout.part_path == source_part)
+        {
+            return self.theme_via_layout(Some(source_part));
+        }
+        if self
+            .masters
+            .iter()
+            .any(|master| master.part_path == source_part)
+        {
+            return self.theme_via_master(Some(source_part));
+        }
+        self.themes.first().map(|part| &part.theme)
+    }
+
+    fn theme_via_layout(&self, layout_part_path: Option<&str>) -> Option<&Theme> {
+        let layout = layout_part_path
+            .and_then(|path| self.layouts.iter().find(|layout| layout.part_path == path))
+            .or_else(|| self.layouts.first());
+        let master_part_path = layout
+            .and_then(|layout| layout.master_part_path.as_deref())
+            .or_else(|| {
+                let layout = layout?;
+                self.masters
+                    .iter()
+                    .find(|master| {
+                        master
+                            .layout_part_paths
+                            .iter()
+                            .any(|path| path == &layout.part_path)
+                    })
+                    .map(|master| master.part_path.as_str())
+            });
+        self.theme_via_master(master_part_path)
+    }
+
+    fn theme_via_master(&self, master_part_path: Option<&str>) -> Option<&Theme> {
+        let master = master_part_path
+            .and_then(|path| self.masters.iter().find(|master| master.part_path == path))
+            .or_else(|| self.masters.first());
+        master
+            .and_then(|master| master.theme_part_path.as_deref())
+            .and_then(|path| self.themes.iter().find(|theme| theme.part_path == path))
+            .or_else(|| self.themes.first())
+            .map(|part| &part.theme)
+    }
+}
+
+fn parse_chart_parts(
+    parts: &HashMap<&str, &[u8]>,
+    sources: &ChartSources<'_>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Vec<ChartPart>, PptxError> {
+    let mut references = Vec::new();
+    for slide in sources.slides {
+        collect_chart_references(&slide.shapes, &slide.part_path, &mut references);
+    }
+    for layout in sources.layouts {
+        collect_chart_references(&layout.shapes, &layout.part_path, &mut references);
+    }
+    for master in sources.masters {
+        collect_chart_references(&master.shapes, &master.part_path, &mut references);
+    }
+    let default_theme = Theme::default();
+    let mut charts = Vec::new();
+    let mut loaded = HashSet::new();
+    for (source_part, relationship_id) in references {
+        let Some(part_path) = sources.chart_target(&source_part, &relationship_id) else {
+            continue;
+        };
+        if !loaded.insert(part_path.clone()) {
+            continue;
+        }
+        let Some(bytes) = parts.get(part_path.as_str()) else {
+            continue;
+        };
+        let root = parse_xml(bytes, &part_path, budget)?;
+        let theme = sources.theme_for(&source_part).unwrap_or(&default_theme);
+        if let Some(chart) = parse_chart_part(&root, theme) {
+            charts.push(ChartPart { part_path, chart });
+        }
+    }
+    Ok(charts)
+}
+
+/// `(referencing part, relationship id)` for every chart in `shapes`, groups
+/// included, in document order.
+fn collect_chart_references(
+    shapes: &[ShapeNode],
+    part_path: &str,
+    output: &mut Vec<(String, String)>,
+) {
+    for shape in shapes {
+        match shape {
+            ShapeNode::GraphicFrame(frame) => {
+                if let GraphicFrameData::Chart {
+                    relationship_id, ..
+                } = &frame.data
+                {
+                    output.push((part_path.to_owned(), relationship_id.clone()));
+                }
+            }
+            ShapeNode::Group(group) => collect_chart_references(&group.children, part_path, output),
+            ShapeNode::Shape(_) | ShapeNode::Picture(_) => {}
+        }
+    }
 }
 
 #[derive(Default)]
@@ -368,6 +522,7 @@ mod tests {
     use super::*;
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+    const CHART_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/chart-deck.pptx");
 
     #[test]
     fn parses_betteroffice_demo_deck_surface() {
@@ -414,6 +569,49 @@ mod tests {
         let before = ooxml_opc::unzip_parts(FIXTURE).unwrap();
         let after = ooxml_opc::unzip_parts(&written).unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn loads_every_referenced_chart_part_against_the_deck_theme() {
+        let package = parse_pptx(CHART_FIXTURE).unwrap();
+        assert_eq!(
+            package
+                .charts
+                .iter()
+                .map(|part| part.part_path.as_str())
+                .collect::<Vec<_>>(),
+            ["ppt/charts/chart1.xml", "ppt/charts/chart2.xml"]
+        );
+
+        let column = &package.charts[0].chart;
+        assert_eq!(column.chart_type, "column");
+        assert_eq!(column.title.as_deref(), Some("Revenue"));
+        assert_eq!(
+            column.legend.as_ref().unwrap().position.as_deref(),
+            Some("right")
+        );
+        assert_eq!(column.series[0].color, "#6254E7");
+        assert_eq!(column.series[1].color, "#1FA97A");
+        assert_eq!(column.series[0].values, [12.0, 19.0, 7.0]);
+        assert_eq!(column.plot_groups[0].gap_width, Some(150.0));
+        assert!(column.plot_groups[0].show_data_labels);
+        let axes = column.axis_list.as_ref().unwrap();
+        assert_eq!(axes[0].title.as_deref(), Some("Quarter"));
+        assert_eq!(axes[1].title.as_deref(), Some("Millions"));
+        assert_eq!(axes[1].max, Some(25.0));
+
+        // The grouped chart proves the reference walk descends into groups.
+        let pie = &package.charts[1].chart;
+        assert_eq!(pie.chart_type, "pie");
+        let points = pie.plot_groups[0].series[0].points.as_ref().unwrap();
+        assert_eq!(points[0].color, "#E7A954");
+        assert_eq!(points[1].color, "#112233");
+        assert_eq!(points[1].explosion, Some(10.0));
+    }
+
+    #[test]
+    fn a_deck_without_charts_loads_no_chart_parts() {
+        assert!(parse_pptx(FIXTURE).unwrap().charts.is_empty());
     }
 
     #[test]
