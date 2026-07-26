@@ -3268,8 +3268,16 @@ fn chart_references_and_anchor_follow_a_row_insert() {
         source
             .replace("Data!$A$2:$A$4", "Data!$A$4:$A$6")
             .replace("Data!$B$2:$B$4", "Data!$B$4:$B$6")
-            .replace("Data!$C$2:$C$4", "Data!$C$4:$C$6"),
-        "only the moved references may change"
+            .replace("Data!$C$2:$C$4", "Data!$C$4:$C$6")
+            .replace(
+                r#"<c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+                r#"<c:strCache><c:ptCount val="3"/></c:strCache></c:strRef></c:cat>"#,
+            )
+            .replace(
+                r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache>"#,
+                r#"<c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache>"#,
+            ),
+        "the moved references carry their caches, and nothing else changes"
     );
 
     let drawing = String::from_utf8(parts["xl/drawings/drawing1.xml"].clone()).unwrap();

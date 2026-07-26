@@ -402,7 +402,7 @@ fn patch_chart_parts(
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
 ) -> Result<(), ParseError> {
-    let mut chart_refs: BTreeMap<&str, &[ChartRef]> = BTreeMap::new();
+    let mut chart_refs: BTreeMap<&str, (&[ChartRef], &str)> = BTreeMap::new();
     let mut anchors: BTreeMap<&str, Vec<(usize, ChartAnchor)>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
         let source = origin
@@ -414,7 +414,10 @@ fn patch_chart_parts(
                 continue;
             };
             if original.refs != chart.refs {
-                chart_refs.insert(chart.part.as_str(), chart.refs.as_slice());
+                chart_refs.insert(
+                    chart.part.as_str(),
+                    (chart.refs.as_slice(), sheet.name.as_str()),
+                );
             }
             if original.anchor != chart.anchor {
                 anchors
@@ -424,13 +427,13 @@ fn patch_chart_parts(
             }
         }
     }
-    for (path, refs) in chart_refs {
+    for (path, (refs, owner)) in chart_refs {
         let Some(source) = package.part_bytes(path) else {
             continue;
         };
         parts.set(
             path.to_owned(),
-            crate::chart::patch_chart_refs(source, refs)?,
+            crate::chart::patch_chart_refs(source, refs, wb, owner)?,
         )?;
     }
     for (path, moved) in anchors {

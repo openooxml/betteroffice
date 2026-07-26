@@ -12,11 +12,11 @@ use ooxml_drawingml::{
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::styles::Theme;
 use xlsx_model::{
-    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, ChartAnchor, ChartRef, ChartRefKind,
-    SheetChart,
+    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, CellRef, CellValue, ChartAnchor, ChartRef,
+    ChartRefKind, ErrorValue, SheetChart,
 };
 
-use crate::tree::{Element, Part, parse_tree};
+use crate::tree::{Edit, Element, Part, Replacement, escape_text, parse_tree};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
@@ -326,12 +326,24 @@ fn attribute_number(element: &Element, name: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// The cache sitting beside a `c:f`: the points a consumer reads when it does
+/// not recalculate. A reference that moves must take its cache with it.
+struct CacheSite {
+    /// `numCache`, `strCache` or `multiLvlStrCache`.
+    local: String,
+    /// the authored prefix, so regenerated markup keeps the part's binding.
+    prefix: String,
+    span: Option<Range<usize>>,
+    format_code: Option<String>,
+}
+
 /// One `c:f` found in a chart part: what it references and where its content
 /// sits, so the same walk serves both the model and the writer.
 struct RefSite {
     kind: ChartRefKind,
     formula: String,
     span: Option<Range<usize>>,
+    cache: Option<CacheSite>,
 }
 
 fn chart_refs(root: &Element) -> Result<Vec<ChartRef>, ParseError> {
@@ -368,13 +380,47 @@ fn walk_refs(
             kind,
             formula: element.text_content().trim().to_owned(),
             span: element.splice_target(),
+            cache: None,
         });
         return Ok(());
     }
+    let before = out.len();
     for child in element.child_elements() {
         walk_refs(child, kind, depth + 1, out)?;
     }
+    if out.len() == before + 1
+        && element
+            .child(FORMULA_LOCAL)
+            .is_some_and(|child| child.is(NS_CHART, FORMULA_LOCAL))
+        && let Some(cache) = cache_site(element)
+    {
+        out[before].cache = Some(cache);
+    }
     Ok(())
+}
+
+const FORMULA_LOCAL: &str = "f";
+
+fn cache_site(reference: &Element) -> Option<CacheSite> {
+    let cache = reference.child_elements().find(|child| {
+        child.namespace() == Some(NS_CHART)
+            && matches!(
+                child.local_name(),
+                "numCache" | "strCache" | "multiLvlStrCache"
+            )
+    })?;
+    Some(CacheSite {
+        local: cache.local_name().to_owned(),
+        prefix: cache
+            .name
+            .rsplit_once(':')
+            .map(|(prefix, _)| format!("{prefix}:"))
+            .unwrap_or_default(),
+        span: cache.splice_target(),
+        format_code: cache
+            .child("formatCode")
+            .map(|element| element.text_content()),
+    })
 }
 
 fn slot_kind(local: &str) -> Option<ChartRefKind> {
@@ -389,10 +435,22 @@ fn slot_kind(local: &str) -> Option<ChartRefKind> {
     }
 }
 
-/// Write `refs` back into their `c:f` elements, leaving every other byte
-/// alone. Refuses when the part no longer holds the references the model was
-/// built from, rather than writing them into the wrong slots.
-pub(crate) fn patch_chart_refs(part: &[u8], refs: &[ChartRef]) -> Result<Vec<u8>, ParseError> {
+/// Upper bound on the points one regenerated cache may carry. Excel plots
+/// 32,000 per series; a reference longer than this is refused rather than
+/// turned into megabytes of markup.
+const MAX_CACHE_POINTS: u32 = 65_536;
+
+/// Write `refs` back into their `c:f` elements and regenerate the caches
+/// beside them from `workbook`, leaving every other byte alone. Refuses when
+/// the part no longer holds the references the model was built from, or when a
+/// moved reference's cache cannot be rebuilt, rather than leaving a reference
+/// pointing at one range while its cache still holds another's values.
+pub(crate) fn patch_chart_refs(
+    part: &[u8],
+    refs: &[ChartRef],
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let sites = ref_sites(&source.tree()?)?;
     if sites.len() != refs.len() {
@@ -402,7 +460,7 @@ pub(crate) fn patch_chart_refs(part: &[u8], refs: &[ChartRef]) -> Result<Vec<u8>
             refs.len()
         )));
     }
-    let mut edits = Vec::new();
+    let mut edits: Vec<Edit> = Vec::new();
     for (site, reference) in sites.iter().zip(refs) {
         if site.formula == reference.formula {
             continue;
@@ -412,12 +470,188 @@ pub(crate) fn patch_chart_refs(part: &[u8], refs: &[ChartRef]) -> Result<Vec<u8>
                 "a self-closing c:f cannot take a rewritten reference".into(),
             ));
         };
-        edits.push((span, reference.formula.clone()));
+        edits.push((span, Replacement::Text(reference.formula.clone())));
+        let Some(cache) = &site.cache else {
+            continue;
+        };
+        let Some(cache_span) = cache.span.clone() else {
+            return Err(ParseError::UnsupportedEdit(
+                "a self-closing chart cache cannot be regenerated".into(),
+            ));
+        };
+        edits.push((
+            cache_span,
+            Replacement::Markup(regenerated_cache(
+                cache,
+                &reference.formula,
+                workbook,
+                owner,
+            )?),
+        ));
     }
     if edits.is_empty() {
         return Ok(part.to_vec());
     }
+    edits.sort_by_key(|(span, _)| span.start);
     source.splice(&edits)
+}
+
+/// The content of a cache rebuilt from the post-edit workbook.
+fn regenerated_cache(
+    cache: &CacheSite,
+    formula: &str,
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+) -> Result<String, ParseError> {
+    if cache.local == "multiLvlStrCache" {
+        return Err(ParseError::UnsupportedEdit(
+            "a multi-level category cache cannot be regenerated".into(),
+        ));
+    }
+    let numeric = cache.local == "numCache";
+    let cells = resolve_reference(formula, workbook, owner)?;
+    let prefix = &cache.prefix;
+    let mut out = String::new();
+    if let Some(format_code) = &cache.format_code {
+        out.push_str(&format!(
+            "<{prefix}formatCode>{}</{prefix}formatCode>",
+            escape_text(format_code)
+        ));
+    }
+    out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
+    for (index, value) in cells.iter().enumerate() {
+        let Some(text) = cache_point(value, numeric)? else {
+            continue;
+        };
+        out.push_str(&format!(
+            "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
+            escape_text(&text)
+        ));
+    }
+    Ok(out)
+}
+
+/// One cached point, or `None` for a cell a cache omits. A string cache over a
+/// value that is not text cannot be rebuilt without applying the cell's number
+/// format, so it is refused instead of guessed at.
+fn cache_point(value: &CellValue, numeric: bool) -> Result<Option<String>, ParseError> {
+    Ok(match (value, numeric) {
+        (CellValue::Empty, _) => None,
+        (CellValue::Number { value }, true) => Some(format_number(*value)),
+        (_, true) => None,
+        (CellValue::Text { value }, false) => Some(value.clone()),
+        (_, false) => {
+            return Err(ParseError::UnsupportedEdit(
+                "a string cache over non-text cells cannot be regenerated".into(),
+            ));
+        }
+    })
+}
+
+fn format_number(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value}")
+    } else {
+        "0".to_owned()
+    }
+}
+
+/// The cells one chart reference names, in the order a cache lists them. Only
+/// a single contiguous one-dimensional area on a sheet this workbook holds can
+/// be resolved; `#REF!` resolves to nothing, which is the correct empty cache.
+fn resolve_reference(
+    formula: &str,
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+) -> Result<Vec<CellValue>, ParseError> {
+    let trimmed = formula.trim();
+    if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
+        return Ok(Vec::new());
+    }
+    let refused = |reason: &str| {
+        ParseError::UnsupportedEdit(format!(
+            "chart reference {trimmed} moved but its cache {reason}"
+        ))
+    };
+    let (sheet_name, area) = split_qualifier(trimmed).ok_or_else(|| refused("is not one area"))?;
+    let sheet_name = sheet_name.unwrap_or_else(|| owner.to_owned());
+    let Some(sheet) = workbook
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name.eq_ignore_ascii_case(&sheet_name))
+    else {
+        return Err(refused("names a sheet this workbook does not hold"));
+    };
+    let (start, end) = parse_area(area).ok_or_else(|| refused("is not a cell range"))?;
+    let (rows, cols) = (end.row - start.row + 1, end.col - start.col + 1);
+    if rows > 1 && cols > 1 {
+        return Err(refused("spans more than one row and column"));
+    }
+    let count = u64::from(rows) * u64::from(cols);
+    if count > u64::from(MAX_CACHE_POINTS) {
+        return Err(refused("would hold more points than a chart can carry"));
+    }
+    let mut values = Vec::with_capacity(count as usize);
+    for row in start.row..=end.row {
+        for col in start.col..=end.col {
+            values.push(
+                sheet
+                    .cell(CellRef::new(row, col))
+                    .map(|cell| cell.value.clone())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    Ok(values)
+}
+
+/// Splits `Sheet!$A$1:$A$5` into its sheet name and its area. `None` when the
+/// reference carries anything else: a union, an external book, a defined name.
+fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
+    if source.contains(',') || source.contains('(') || source.contains('[') {
+        return None;
+    }
+    let Some(rest) = source.strip_prefix('\'') else {
+        return match source.split_once('!') {
+            Some((name, area)) if !name.is_empty() && !name.contains(':') => {
+                Some((Some(name.to_owned()), area))
+            }
+            Some(_) => None,
+            None => Some((None, source)),
+        };
+    };
+    let mut name = String::new();
+    let mut cursor = 0;
+    let bytes = rest.as_bytes();
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\'' {
+            if bytes.get(cursor + 1) == Some(&b'\'') {
+                name.push('\'');
+                cursor += 2;
+                continue;
+            }
+            let area = rest.get(cursor + 1..)?.strip_prefix('!')?;
+            return (!name.contains(':')).then_some((Some(name), area));
+        }
+        let character = rest[cursor..].chars().next()?;
+        name.push(character);
+        cursor += character.len_utf8();
+    }
+    None
+}
+
+/// `$A$1:$A$5` or `$A$1` as an inclusive corner pair.
+fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
+    let (start, end) = match source.split_once(':') {
+        Some((start, end)) => (start, end),
+        None => (source, source),
+    };
+    let start = CellRef::parse_a1(start).ok()?;
+    let end = CellRef::parse_a1(end).ok()?;
+    Some((
+        CellRef::new(start.row.min(end.row), start.col.min(end.col)),
+        CellRef::new(start.row.max(end.row), start.col.max(end.col)),
+    ))
 }
 
 /// Write moved anchors back into their drawing part. Only `col` and `row`
@@ -429,7 +663,7 @@ pub(crate) fn patch_drawing_anchors(
     let source = Part::decode(part)?;
     let root = source.tree()?;
     let indexed = root.child_elements().filter(is_anchor).collect::<Vec<_>>();
-    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    let mut edits: Vec<Edit> = Vec::new();
     for (index, anchor) in anchors {
         let Some(element) = indexed.get(*index) else {
             return Err(ParseError::UnsupportedEdit(
@@ -457,7 +691,7 @@ pub(crate) fn patch_drawing_anchors(
 fn push_cell_edits(
     element: Option<&Element>,
     cell: AnchorCell,
-    out: &mut Vec<(Range<usize>, String)>,
+    out: &mut Vec<Edit>,
 ) -> Result<(), ParseError> {
     let Some(element) = element else {
         return Ok(());
@@ -473,7 +707,7 @@ fn push_cell_edits(
         let span = child.splice_target().ok_or_else(|| {
             ParseError::UnsupportedEdit("a self-closing anchor index cannot be moved".into())
         })?;
-        out.push((span, value));
+        out.push((span, Replacement::Text(value)));
     }
     Ok(())
 }

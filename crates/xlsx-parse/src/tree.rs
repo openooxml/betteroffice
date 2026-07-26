@@ -255,11 +255,21 @@ impl Part {
     }
 
     /// rewrite disjoint spans of the decoded text and re-encode the result.
-    pub(crate) fn splice(&self, edits: &[(Range<usize>, String)]) -> Result<Vec<u8>, ParseError> {
+    pub(crate) fn splice(&self, edits: &[Edit]) -> Result<Vec<u8>, ParseError> {
         let spliced = splice_text(&self.text, edits)?;
         Ok(self.encoding.encode(&spliced))
     }
 }
+
+/// what replaces one span of a part.
+pub(crate) enum Replacement {
+    /// element content, escaped on the way in.
+    Text(String),
+    /// markup this crate generated, written verbatim.
+    Markup(String),
+}
+
+pub(crate) type Edit = (Range<usize>, Replacement);
 
 /// The byte-order mark, or the shape of the first characters when there is
 /// none. `FF FE 00 00` is utf-32, which opc does not permit.
@@ -508,7 +518,7 @@ fn push_text(text: &str, stack: &mut [Element], budget: &mut Budget) -> Result<(
 
 /// rewrite disjoint spans of `source` in one pass. spans must be sorted and
 /// non-overlapping, which every caller derives from document order.
-fn splice_text(source: &str, edits: &[(Range<usize>, String)]) -> Result<String, ParseError> {
+fn splice_text(source: &str, edits: &[Edit]) -> Result<String, ParseError> {
     let mut out = String::with_capacity(source.len());
     let mut cursor = 0usize;
     for (span, replacement) in edits {
@@ -519,7 +529,10 @@ fn splice_text(source: &str, edits: &[(Range<usize>, String)]) -> Result<String,
             .get(cursor..span.start)
             .ok_or_else(|| ParseError::Malformed("rewrite span split a character".into()))?;
         out.push_str(head);
-        out.push_str(&escape_text(replacement));
+        match replacement {
+            Replacement::Text(text) => out.push_str(&escape_text(text)),
+            Replacement::Markup(markup) => out.push_str(markup),
+        }
         cursor = span.end;
     }
     let tail = source
@@ -531,7 +544,7 @@ fn splice_text(source: &str, edits: &[(Range<usize>, String)]) -> Result<String,
 
 /// escape element content. `>` is escaped too so a replacement can never
 /// reopen the `]]>` sequence.
-fn escape_text(value: &str) -> String {
+pub(crate) fn escape_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
