@@ -11,6 +11,7 @@ use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
     ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, Subscription, Transact, Update,
+    WriteTxn,
 };
 
 mod deck;
@@ -232,9 +233,16 @@ fn validate_client_id(client_id: u64) -> EditResult<()> {
 
 fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
     let update = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
-    doc.transact_mut_with(HYDRATE_ORIGIN)
-        .apply_update(update)
-        .map_err(|error| EditError::InvalidUpdate(error.to_string()))
+    let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
+    txn.apply_update(update)
+        .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+    // An empty container carries no items, so an update cannot carry it either.
+    // Every peer registers the roots the same way, which stays convergent.
+    txn.get_or_insert_array(SLIDE_ORDER);
+    for root in [SLIDES, SHAPES, STORIES] {
+        txn.get_or_insert_map(root);
+    }
+    Ok(())
 }
 
 fn decode_update_v1(bytes: &[u8]) -> Result<Update, String> {

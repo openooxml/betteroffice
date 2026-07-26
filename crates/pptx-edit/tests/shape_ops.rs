@@ -286,3 +286,45 @@ fn assert_history_round_trip(session: &DeckSession, before: pptx_edit::DeckSnaps
     assert_eq!(session.snapshot().unwrap(), after);
     session.add_undo_barrier();
 }
+
+/// A chart-only deck has no text stories at all, so the schema roots have to
+/// survive the hydrate round trip while they are still empty.
+#[test]
+fn a_deck_without_any_text_opens_and_accepts_edits() {
+    const CHART_DECK: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/chart-deck.pptx");
+
+    let session = DeckSession::open(CHART_DECK, 702).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.slides.len(), 2);
+    assert!(
+        snapshot.slides[0]
+            .shapes
+            .iter()
+            .all(|shape| shape.text_stories.is_empty())
+    );
+
+    let slide_id = snapshot.slides[0].id.clone();
+    let receipt = session
+        .add_shape(
+            &EditCtx::local("test"),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Note".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 100_000,
+                    y: 100_000,
+                    width: 900_000,
+                    height: 400_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    assert!(
+        session.snapshot().unwrap().slides[0]
+            .shapes
+            .iter()
+            .any(|shape| shape.id == receipt.shape_id)
+    );
+}
