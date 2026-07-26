@@ -2097,6 +2097,54 @@ fn chartsheet_package() -> Vec<(String, Vec<u8>)> {
     parts
 }
 
+/// Dropping a charted sheet must take its whole part graph with it, so deleted
+/// user data is not still recoverable from the saved package.
+#[test]
+fn dropping_a_charted_sheet_prunes_its_unreachable_parts() {
+    let mut parts = charted_package();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec(),
+    ));
+    parts.push((
+        "_rels/.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdBook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.sheets[0].charts.len(), 1);
+    let mut dropped = parsed.workbook.clone();
+    dropped.sheets.remove(0);
+
+    let saved = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &dropped,
+        &parsed.package,
+        &[Some(1)],
+        &vec![SharedStringCells::new(); 1],
+        true,
+    )
+    .unwrap();
+    let names = saved
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>();
+    for orphan in [
+        "xl/worksheets/sheet1.xml",
+        "xl/drawings/drawing1.xml",
+        "xl/drawings/_rels/drawing1.xml.rels",
+        "xl/charts/chart1.xml",
+    ] {
+        assert!(!names.contains(&orphan), "{orphan} is still in {names:?}");
+    }
+    let content_types = String::from_utf8(part_bytes(&saved, "[Content_Types].xml")).unwrap();
+    assert!(!content_types.contains("chart1.xml"), "{content_types}");
+    assert!(names.contains(&"xl/worksheets/sheet2.xml"), "{names:?}");
+}
+
 /// Reordering, dropping and renaming sheets no longer trips the guard now that
 /// chart references are modelled.
 #[test]

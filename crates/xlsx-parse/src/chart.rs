@@ -798,7 +798,7 @@ pub(crate) fn relationship_part_path(path: &str) -> String {
     }
 }
 
-fn directory_of(path: &str) -> &str {
+pub(crate) fn directory_of(path: &str) -> &str {
     path.rsplit_once('/')
         .map(|(directory, _)| directory)
         .unwrap_or("")
@@ -818,12 +818,19 @@ fn relationship_target<'a>(
         .map(|(_, _, target)| target.as_str())
 }
 
-/// `(Id, Type, Target)` for every internal relationship in a `.rels` part.
-fn parse_relationships(data: &[u8]) -> Result<Vec<(String, String, String)>, ParseError> {
+/// `(Id, Type, Target)` for every internal relationship in a `.rels` part. The
+/// `.rels` vocabulary has one element name, so an undeclared namespace is read
+/// rather than treated as a different part shape.
+pub(crate) fn parse_relationships(
+    data: &[u8],
+) -> Result<Vec<(String, String, String)>, ParseError> {
     let root = parse_tree(data)?;
     Ok(root
         .child_elements()
-        .filter(|child| child.is(NS_PACKAGE_RELATIONSHIPS, "Relationship"))
+        .filter(|child| {
+            child.local_name() == "Relationship"
+                && matches!(child.namespace(), None | Some(NS_PACKAGE_RELATIONSHIPS))
+        })
         .filter(|child| {
             !child
                 .attribute_local("TargetMode")

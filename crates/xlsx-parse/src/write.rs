@@ -19,7 +19,7 @@ use crate::package::{
     remove_attribute, set_attribute,
 };
 use crate::read::SharedStringCells;
-use crate::xml::xml_err;
+use crate::xml::{resolve_part_path, xml_err};
 
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
@@ -335,6 +335,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         "_rels/.rels".to_owned(),
         merged_root_relationships(package)?,
     )?;
+    let pruned = prune_unreachable_parts(&mut parts, package)?;
     parts.set(
         "[Content_Types].xml".to_owned(),
         merged_content_types(
@@ -344,6 +345,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             styles.as_ref(),
             theme.as_ref(),
             edited,
+            &pruned,
         )?,
     )?;
 
@@ -966,6 +968,17 @@ impl<'a> PartStore<'a> {
         Ok(())
     }
 
+    fn entries(&self) -> Vec<(&str, &[u8])> {
+        self.slots
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Source(path, bytes) => Some((*path, *bytes)),
+                Slot::Owned(path, bytes) => Some((path.as_str(), bytes.as_slice())),
+                Slot::Removed => None,
+            })
+            .collect()
+    }
+
     fn finish(self) -> Vec<(String, Vec<u8>)> {
         self.slots
             .into_iter()
@@ -976,6 +989,70 @@ impl<'a> PartStore<'a> {
             })
             .collect()
     }
+}
+
+/// Drops the parts this save left unreachable from the package roots: a
+/// removed sheet's drawing, its chart, their caches and the images only they
+/// referenced. A part the source package already held unreachable is left
+/// alone, and one still reachable through another relationship stays.
+fn prune_unreachable_parts(
+    parts: &mut PartStore<'_>,
+    package: &PreservedPackage,
+) -> Result<HashSet<String>, ParseError> {
+    let before = reachable_parts(
+        &package
+            .parts
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>(),
+    )?;
+    let current = parts.entries();
+    let after = reachable_parts(&current)?;
+    let pruned = current
+        .iter()
+        .map(|(path, _)| normalized_part_name(path))
+        .filter(|path| before.contains(path) && !after.contains(path))
+        .collect::<HashSet<_>>();
+    for path in &pruned {
+        parts.remove(path);
+    }
+    Ok(pruned)
+}
+
+/// Every part reachable from `_rels/.rels` by following internal
+/// relationships, plus the `.rels` parts that carry them.
+fn reachable_parts(parts: &[(&str, &[u8])]) -> Result<HashSet<String>, ParseError> {
+    let lookup = parts
+        .iter()
+        .map(|(path, bytes)| (normalized_part_name(path), *bytes))
+        .collect::<HashMap<_, _>>();
+    let mut reachable = HashSet::new();
+    reachable.insert(normalized_part_name("[Content_Types].xml"));
+    let root = normalized_part_name("_rels/.rels");
+    let Some(bytes) = lookup.get(&root) else {
+        return Ok(reachable);
+    };
+    reachable.insert(root);
+    let mut queue = crate::chart::parse_relationships(bytes)?
+        .into_iter()
+        .map(|(_, _, target)| resolve_part_path("", &target))
+        .collect::<VecDeque<String>>();
+    while let Some(path) = queue.pop_front() {
+        let normalized = normalized_part_name(&path);
+        if !reachable.insert(normalized.clone()) {
+            continue;
+        }
+        let rels = normalized_part_name(&relationship_part_path(&normalized));
+        let Some(bytes) = lookup.get(&rels) else {
+            continue;
+        };
+        reachable.insert(rels);
+        let directory = crate::chart::directory_of(&normalized).to_owned();
+        for (_, _, target) in crate::chart::parse_relationships(bytes)? {
+            queue.push_back(resolve_part_path(&directory, &target));
+        }
+    }
+    Ok(reachable)
 }
 
 /// run a builder against a fresh writer that already emitted the xml decl.
@@ -1117,6 +1194,7 @@ fn merged_content_types(
     styles: Option<&PlannedPart>,
     theme: Option<&PlannedPart>,
     edited: bool,
+    pruned: &HashSet<String>,
 ) -> Result<Vec<u8>, ParseError> {
     let mut desired = BTreeMap::new();
     let strict = package.workbook_template.root_namespace() == Some(NS_STRICT_MAIN);
@@ -1218,7 +1296,7 @@ fn merged_content_types(
             continue;
         };
         let normalized = normalized_part_name(part_name);
-        if edited && calc_chain_paths.contains(&normalized) {
+        if (edited && calc_chain_paths.contains(&normalized)) || pruned.contains(&normalized) {
             continue;
         }
         if source_owned.contains(&normalized) {
