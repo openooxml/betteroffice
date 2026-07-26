@@ -3973,3 +3973,68 @@ fn refuses_chart_state_the_writer_could_not_express() {
     Workbook::from_model(charted_model(sample_chart()))
         .expect("a chart the writer can express is accepted");
 }
+
+/// An insertion that would push a marker a chart must move past the last row
+/// is refused. Clamping it would shrink an object whose `editAs` forbids
+/// resizing, or collapse it outright.
+#[test]
+fn refuses_an_insertion_that_would_push_a_chart_anchor_off_the_grid() {
+    for edit_as in [AnchorEditAs::TwoCell, AnchorEditAs::OneCell] {
+        let mut chart = sample_chart();
+        chart.anchor = ChartAnchor::TwoCell {
+            from: AnchorCell {
+                row: MAX_ROWS - 6,
+                ..AnchorCell::default()
+            },
+            to: AnchorCell {
+                col: 4,
+                row: MAX_ROWS - 2,
+                ..AnchorCell::default()
+            },
+            edit_as,
+        };
+        let mut workbook = Workbook::from_model(charted_model(chart)).unwrap();
+        let error = workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 4,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message)
+                if message.contains("push a chart anchor past the sheet boundary")),
+            "{edit_as:?}: {error:?}"
+        );
+        assert_eq!(
+            workbook.model().sheets[0].charts[0].anchor,
+            ChartAnchor::TwoCell {
+                from: AnchorCell {
+                    row: MAX_ROWS - 6,
+                    ..AnchorCell::default()
+                },
+                to: AnchorCell {
+                    col: 4,
+                    row: MAX_ROWS - 2,
+                    ..AnchorCell::default()
+                },
+                edit_as,
+            },
+            "a refused insertion must leave the anchor alone"
+        );
+
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                }],
+                CalculationOptions::default(),
+            )
+            .expect("an insertion every marker survives is accepted");
+    }
+}

@@ -27,6 +27,7 @@ pub enum OpError {
     FormulaNotRewritable { sheet: SheetId, cell: CellRef },
     DefinedNameNotRewritable { name: String },
     ChartRefNotRewritable { part: String },
+    ChartAnchorNotMovable { part: String },
     InvalidStyle(String),
 }
 
@@ -46,6 +47,9 @@ impl fmt::Display for OpError {
             }
             OpError::ChartRefNotRewritable { part } => {
                 write!(f, "chart reference in {part} cannot be safely rewritten")
+            }
+            OpError::ChartAnchorNotMovable { part } => {
+                write!(f, "the anchor of {part} would leave the sheet grid")
             }
             OpError::InvalidStyle(message) => f.write_str(message),
         }

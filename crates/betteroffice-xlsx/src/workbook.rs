@@ -13,7 +13,7 @@ use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
-    cell_state_for_input_no_eval,
+    cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
     DisplayList, GhostEdit, GridGeometry, Viewport, build_display_list_with_ghosts, display_text,
@@ -2178,6 +2178,7 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                     "row insertion would discard content at the sheet boundary".to_string(),
                 ));
             }
+            refuse_off_grid_chart_anchors(sheet, op, "row")?;
         }
         Op::InsertCols {
             sheet, at, count, ..
@@ -2204,10 +2205,26 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                     "column insertion would discard content at the sheet boundary".to_string(),
                 ));
             }
+            refuse_off_grid_chart_anchors(sheet, op, "column")?;
         }
         _ => {}
     }
     Ok(())
+}
+
+/// An insertion that would push a marker a chart must move off the grid is
+/// refused: clamping it would resize an object whose `editAs` forbids resizing.
+fn refuse_off_grid_chart_anchors(sheet: &Sheet, op: &Op, axis: &str) -> Result<()> {
+    if sheet
+        .charts
+        .iter()
+        .all(|chart| insertion_keeps_chart_anchor_on_grid(chart.anchor, op))
+    {
+        return Ok(());
+    }
+    Err(Error::InvalidOperation(format!(
+        "{axis} insertion would push a chart anchor past the sheet boundary"
+    )))
 }
 
 fn require_sheet(model: &WorkbookModel, sheet: SheetId) -> Result<&Sheet> {

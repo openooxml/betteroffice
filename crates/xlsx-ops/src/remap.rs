@@ -252,9 +252,16 @@ pub(crate) fn remap_charts(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpErro
                     _ => {}
                 }
             }
-            if anchored_on_target && let Some(anchor) = remap_anchor(chart.anchor, op) {
-                chart.anchor = anchor;
-                changed_sheet = true;
+            if anchored_on_target {
+                let moved = remap_anchor(chart.anchor, op).map_err(|()| {
+                    OpError::ChartAnchorNotMovable {
+                        part: chart.part.clone(),
+                    }
+                })?;
+                if let Some(anchor) = moved {
+                    chart.anchor = anchor;
+                    changed_sheet = true;
+                }
             }
         }
         if changed_sheet {
@@ -313,68 +320,80 @@ fn paren_group(source: &str) -> Option<&str> {
     (depth == 0).then_some(inner)
 }
 
+/// Whether every marker `op` must move stays on the grid. An insertion that
+/// would push one off is refused in preflight rather than clamped, which would
+/// silently resize an object whose `editAs` forbids resizing.
+pub fn insertion_keeps_chart_anchor_on_grid(anchor: ChartAnchor, op: &Op) -> bool {
+    remap_anchor(anchor, op).is_ok()
+}
+
 /// Moves a drawing anchor through a grid edit on its own sheet, honouring
 /// `editAs`: a two-cell anchor moves and resizes with the grid, a one-cell
-/// anchor moves without resizing, an absolute anchor does neither. `None` when
-/// the anchor does not move.
-fn remap_anchor(anchor: ChartAnchor, op: &Op) -> Option<ChartAnchor> {
+/// anchor moves without resizing, an absolute anchor does neither. `Ok(None)`
+/// when the anchor does not move, `Err` when a marker it must move would leave
+/// the grid.
+fn remap_anchor(anchor: ChartAnchor, op: &Op) -> Result<Option<ChartAnchor>, ()> {
     let (axis, at, count, inserting) = match *op {
         Op::InsertRows { at, count, .. } => (Axis::Row, at, count, true),
         Op::DeleteRows { at, count, .. } => (Axis::Row, at, count, false),
         Op::InsertCols { at, count, .. } => (Axis::Col, at, count, true),
         Op::DeleteCols { at, count, .. } => (Axis::Col, at, count, false),
-        _ => return None,
+        _ => return Ok(None),
     };
     let limit = axis.limit();
     let shift = |index: u32| shift_anchor_index(index, at, count, inserting, limit);
     match anchor {
-        ChartAnchor::Absolute { .. } => None,
+        ChartAnchor::Absolute { .. } => Ok(None),
         ChartAnchor::OneCell { from, extent } => {
-            let moved = shift_anchor_cell(from, axis, &shift);
-            (moved != from).then_some(ChartAnchor::OneCell {
+            let moved = shift_anchor_cell(from, axis, &shift).ok_or(())?;
+            Ok((moved != from).then_some(ChartAnchor::OneCell {
                 from: moved,
                 extent,
-            })
+            }))
         }
         ChartAnchor::TwoCell { from, to, edit_as } => {
             if edit_as == AnchorEditAs::Absolute {
-                return None;
+                return Ok(None);
             }
-            let moved_from = shift_anchor_cell(from, axis, &shift);
+            let moved_from = shift_anchor_cell(from, axis, &shift).ok_or(())?;
             let moved_to = match edit_as {
-                AnchorEditAs::TwoCell => shift_anchor_cell(to, axis, &shift),
+                AnchorEditAs::TwoCell => shift_anchor_cell(to, axis, &shift).ok_or(())?,
                 _ => translate_anchor_cell(
                     to,
                     axis,
                     i64::from(anchor_index(moved_from, axis)) - i64::from(anchor_index(from, axis)),
                     limit,
-                ),
+                )
+                .ok_or(())?,
             };
-            (moved_from != from || moved_to != to).then_some(ChartAnchor::TwoCell {
-                from: moved_from,
-                to: moved_to,
-                edit_as,
-            })
+            Ok(
+                (moved_from != from || moved_to != to).then_some(ChartAnchor::TwoCell {
+                    from: moved_from,
+                    to: moved_to,
+                    edit_as,
+                }),
+            )
         }
     }
 }
 
 /// An index the edit pushes along, or pulls back onto the deletion point when
-/// the row or column it named is gone.
-fn shift_anchor_index(index: u32, at: u32, count: u32, inserting: bool, limit: u32) -> u32 {
+/// the row or column it named is gone. `None` when an insertion would push it
+/// past the last row or column.
+fn shift_anchor_index(index: u32, at: u32, count: u32, inserting: bool, limit: u32) -> Option<u32> {
     let ceiling = limit.saturating_sub(1);
     if inserting {
         if index >= at {
-            index.saturating_add(count).min(ceiling)
+            index.checked_add(count).filter(|moved| *moved <= ceiling)
         } else {
-            index
+            Some(index)
         }
     } else if index >= at.saturating_add(count) {
-        index - count
+        Some(index - count)
     } else if index >= at {
-        at
+        Some(at)
     } else {
-        index
+        Some(index)
     }
 }
 
@@ -385,24 +404,36 @@ fn anchor_index(cell: AnchorCell, axis: Axis) -> u32 {
     }
 }
 
-fn shift_anchor_cell(cell: AnchorCell, axis: Axis, shift: &dyn Fn(u32) -> u32) -> AnchorCell {
+fn shift_anchor_cell(
+    cell: AnchorCell,
+    axis: Axis,
+    shift: &dyn Fn(u32) -> Option<u32>,
+) -> Option<AnchorCell> {
     let mut moved = cell;
     match axis {
-        Axis::Row => moved.row = shift(cell.row),
-        Axis::Col => moved.col = shift(cell.col),
+        Axis::Row => moved.row = shift(cell.row)?,
+        Axis::Col => moved.col = shift(cell.col)?,
     }
-    moved
+    Some(moved)
 }
 
-fn translate_anchor_cell(cell: AnchorCell, axis: Axis, delta: i64, limit: u32) -> AnchorCell {
+fn translate_anchor_cell(
+    cell: AnchorCell,
+    axis: Axis,
+    delta: i64,
+    limit: u32,
+) -> Option<AnchorCell> {
     let ceiling = i64::from(limit.saturating_sub(1));
-    let moved = (i64::from(anchor_index(cell, axis)) + delta).clamp(0, ceiling) as u32;
+    let moved = i64::from(anchor_index(cell, axis)) + delta;
+    if !(0..=ceiling).contains(&moved) {
+        return None;
+    }
     let mut out = cell;
     match axis {
-        Axis::Row => out.row = moved,
-        Axis::Col => out.col = moved,
+        Axis::Row => out.row = moved as u32,
+        Axis::Col => out.col = moved as u32,
     }
-    out
+    Some(out)
 }
 
 /// Rewrites the sheet qualifier in every chart reference on a rename. A chart
