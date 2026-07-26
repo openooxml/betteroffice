@@ -1,7 +1,7 @@
 # OpenOOXML Individual Contributor License Agreement
 
 Thank you for your interest in contributing to software projects
-maintained by the OpenOOXML project and its maintainers ("Us"). This Agreement clarifies the
+maintained by Elia Hilse, the OpenOOXML project and its maintainers ("Us"). This Agreement clarifies the
 intellectual property license granted with Contributions from any
 person or entity. This license is for Your protection as a
 Contributor as well as the protection of Us and recipients of
