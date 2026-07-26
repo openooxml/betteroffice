@@ -298,6 +298,35 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
     })
 }
 
+fn parse_num_cache_with_strings<E: ChartXml>(
+    parent: Option<&E>,
+    budget: &mut Budget,
+) -> (Vec<String>, Vec<f64>) {
+    let Some(parent) = parent else {
+        return (Vec::new(), Vec::new());
+    };
+    let Some(cache) = first_deep(parent, "numCache", 0).or_else(|| first_deep(parent, "numLit", 0))
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let entries = take_points(children(cache, "pt"), budget, |point| {
+        let text = child(point, "v")
+            .map(E::descendant_text)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let number = parse_number(Some(&text));
+        Some((text, number))
+    });
+    let mut strings = Vec::with_capacity(entries.len());
+    let mut numbers = Vec::with_capacity(entries.len());
+    for (string, number) in entries {
+        strings.push(string);
+        numbers.extend(number);
+    }
+    (strings, numbers)
+}
+
 fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
     text_from_rich_text(child(series, "tx"))
 }
@@ -321,7 +350,7 @@ fn parse_series<E: ChartXml>(
         .take(cap)
         .map(|(index, series)| {
             let x_value = child(series, "xVal");
-            let category = child(series, "cat").or(x_value);
+            let category = child(series, "cat");
             let value = child(series, "val").or_else(|| child(series, "yVal"));
             let marker = child(series, "marker");
             let marker_symbol =
@@ -342,14 +371,24 @@ fn parse_series<E: ChartXml>(
                     color: parse_series_color(point, index),
                 })
             });
+            let uses_x_as_category = category.is_none() && x_value.is_some();
+            let (categories, mut x_values) = if uses_x_as_category {
+                parse_num_cache_with_strings(x_value, budget)
+            } else {
+                (parse_string_cache(category, budget), Vec::new())
+            };
+            let values = parse_num_cache(value, budget);
+            if !uses_x_as_category {
+                x_values = parse_num_cache(x_value, budget);
+            }
             ChartSeries {
                 name: parse_series_name(series),
-                categories: parse_string_cache(category, budget),
-                values: parse_num_cache(value, budget),
+                categories,
+                values,
                 color: parse_series_color(series, index),
                 index: parse_index(val_attr(child(series, "idx"))),
                 order: parse_index(val_attr(child(series, "order"))),
-                category_formula: child_formula(category),
+                category_formula: child_formula(category.or(x_value)),
                 value_formula: child_formula(value),
                 axis_ids: (!axis_ids.is_empty()).then(|| axis_ids.to_vec()),
                 points: (!points.is_empty()).then_some(points),
@@ -363,9 +402,7 @@ fn parse_series<E: ChartXml>(
                     color: marker_color,
                 }),
                 smooth: (val_attr(child(series, "smooth")) == Some("1")).then_some(true),
-                x_values: x_value
-                    .map(|element| parse_num_cache(Some(element), budget))
-                    .filter(|values| !values.is_empty()),
+                x_values: (!x_values.is_empty()).then_some(x_values),
                 bubble_sizes: child(series, "bubbleSize")
                     .map(|element| parse_num_cache(Some(element), budget))
                     .filter(|values| !values.is_empty()),
@@ -1075,6 +1112,29 @@ mod tests {
             group.series[0].x_values.as_deref(),
             Some([1.0, 4.0].as_ref())
         );
+    }
+
+    #[test]
+    fn a_scatter_x_cache_is_charged_once_when_it_also_supplies_categories() {
+        let chart = Node::el(
+            "c:scatterChart",
+            vec![Node::el(
+                "c:ser",
+                vec![
+                    num_cache("c:xVal", &[1.0, 4.0]),
+                    num_cache("c:yVal", &[10.0, 20.0]),
+                ],
+            )],
+        );
+        let mut budget = Budget::new();
+        budget.spend_points(MAX_CHART_POINTS - 4);
+
+        let series = parse_series(&chart, None, &[], &mut budget);
+
+        assert_eq!(series[0].categories, ["1", "4"]);
+        assert_eq!(series[0].values, [10.0, 20.0]);
+        assert_eq!(series[0].x_values.as_deref(), Some([1.0, 4.0].as_ref()));
+        assert_eq!(budget.point_cap(MAX_CHART_POINTS), 0);
     }
 
     #[test]

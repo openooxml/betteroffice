@@ -791,6 +791,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             }
             let series = series_views(&group.series, scan);
             let (x_axis, axis) = group_value_axes(chart, group);
+            let category_axis = group_category_axis(chart, group);
+            let legacy_axes = chart.axes.is_empty() && group.axis_ids.is_empty();
             let secondary = match (axis, primary) {
                 (Some(axis), Some(primary)) => axis.id != primary.id,
                 _ => false,
@@ -800,14 +802,21 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 PlotFamily {
                     chart_type: group.chart_type.unwrap_or(chart.chart_type),
                     series: &series,
-                    value_axis: chart.value_axis,
-                    axis_titles: chart.axis_titles,
+                    value_axis: legacy_axes.then_some(chart.value_axis).flatten(),
+                    axis_titles: if legacy_axes {
+                        chart.axis_titles
+                    } else {
+                        PlotAxisTitles {
+                            category: category_axis.and_then(|axis| axis.title),
+                            value: axis.and_then(|axis| axis.title),
+                        }
+                    },
                     group: Some(group),
                     chart_text,
                     label: label_style,
                     axis,
                     x_axis,
-                    category_axis: group_category_axis(chart, group),
+                    category_axis,
                     secondary,
                 },
                 plot,
@@ -979,25 +988,46 @@ enum Stacking {
     Percent,
 }
 
-/// The value axes `group` names as `(x, y)`. A scatter or bubble group names
-/// two, x first; every other family names one, which is the y axis.
+fn unique_axis_by_id<'a>(chart: &'a PlotChart<'a>, id: &str) -> Option<&'a PlotAxis<'a>> {
+    let mut matches = chart.axes.iter().filter(|axis| axis.id == Some(id));
+    let axis = matches.next()?;
+    matches.next().is_none().then_some(axis)
+}
+
+fn referenced_axis<'a>(
+    chart: &'a PlotChart<'a>,
+    id: &str,
+    kind: PlotAxisKind,
+) -> Option<&'a PlotAxis<'a>> {
+    unique_axis_by_id(chart, id).filter(|axis| axis.kind == kind)
+}
+
+/// Resolves a group's value-axis references as `(x, y)`.
 fn group_value_axes<'a>(
     chart: &'a PlotChart<'a>,
     group: &PlotGroup<'a>,
 ) -> (Option<&'a PlotAxis<'a>>, Option<&'a PlotAxis<'a>>) {
-    let mut named = chart.axes.iter().filter(|axis| {
-        axis.kind == PlotAxisKind::Value && axis.id.is_some_and(|id| group.axis_ids.contains(&id))
-    });
+    if matches!(
+        group.chart_type.unwrap_or(chart.chart_type),
+        "scatter" | "bubble"
+    ) {
+        let x_id = group.axis_ids.first().copied();
+        let y_id = group.axis_ids.get(1).copied();
+        if x_id.is_some() && x_id == y_id {
+            return (None, None);
+        }
+        return (
+            x_id.and_then(|id| referenced_axis(chart, id, PlotAxisKind::Value)),
+            y_id.and_then(|id| referenced_axis(chart, id, PlotAxisKind::Value)),
+        );
+    }
+    let mut named = group
+        .axis_ids
+        .iter()
+        .filter_map(|id| referenced_axis(chart, id, PlotAxisKind::Value));
     match (named.next(), named.next()) {
-        (Some(first), Some(second)) => (Some(first), Some(second)),
-        (Some(only), None) => (None, Some(only)),
-        _ => (
-            None,
-            chart
-                .axes
-                .iter()
-                .find(|axis| axis.kind == PlotAxisKind::Value),
-        ),
+        (Some(axis), None) => (None, Some(axis)),
+        _ => (None, None),
     }
 }
 
@@ -1007,31 +1037,21 @@ fn primary_value_axis<'a>(chart: &'a PlotChart<'a>) -> Option<&'a PlotAxis<'a>> 
         .plot_groups
         .first()
         .and_then(|group| group_value_axes(chart, group).1)
-        .or_else(|| {
-            chart
-                .axes
-                .iter()
-                .find(|axis| axis.kind == PlotAxisKind::Value)
-        })
 }
 
 fn group_category_axis<'a>(
     chart: &'a PlotChart<'a>,
     group: &PlotGroup<'a>,
 ) -> Option<&'a PlotAxis<'a>> {
-    chart
-        .axes
+    let mut named = group
+        .axis_ids
         .iter()
-        .find(|axis| {
-            axis.kind != PlotAxisKind::Value
-                && axis.id.is_some_and(|id| group.axis_ids.contains(&id))
-        })
-        .or_else(|| {
-            chart
-                .axes
-                .iter()
-                .find(|axis| axis.kind != PlotAxisKind::Value)
-        })
+        .filter_map(|id| unique_axis_by_id(chart, id))
+        .filter(|axis| matches!(axis.kind, PlotAxisKind::Category | PlotAxisKind::Date));
+    match (named.next(), named.next()) {
+        (Some(axis), None) => Some(axis),
+        _ => None,
+    }
 }
 
 /// A second value axis some plot group plots against, which needs its own
@@ -1126,11 +1146,14 @@ impl<'a> SeriesView<'a> {
     }
 
     fn value(&self, index: usize) -> f64 {
+        self.data_value(index).unwrap_or(0.0)
+    }
+
+    fn data_value(&self, index: usize) -> Option<f64> {
         self.point(index)
             .and_then(|point| point.value)
             .or_else(|| self.series.values.get(index).copied())
             .filter(|value| value.is_finite())
-            .unwrap_or(0.0)
     }
 
     fn point_color(&self, point_index: usize, series_index: usize) -> String {
@@ -1167,6 +1190,10 @@ impl<'a> SeriesView<'a> {
             .get(index)
             .copied()
             .filter(|value| value.is_finite())
+    }
+
+    fn xy_value(&self, index: usize) -> Option<(f64, f64)> {
+        Some((self.x_value(index)?, self.data_value(index)?))
     }
 
     fn bubble_size(&self, index: usize) -> f64 {
@@ -2164,9 +2191,8 @@ fn emit_area<S: PlotSink + ?Sized>(
     }
 }
 
-/// The x scale of a scatter or bubble family: its `c:xVal` range, or the
-/// category indexes when no series carries one.
-fn scatter_x_scale(family: PlotFamily<'_>, count: usize) -> ValueScale {
+/// The x scale of a scatter or bubble family.
+fn scatter_x_scale(family: PlotFamily<'_>) -> ValueScale {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     let mut remaining = MAX_PLOT_DATA_SCAN;
@@ -2174,7 +2200,7 @@ fn scatter_x_scale(family: PlotFamily<'_>, count: usize) -> ValueScale {
         let samples = series.series.x_values.len().min(remaining);
         remaining -= samples;
         for index in 0..samples {
-            if let Some(value) = series.x_value(index) {
+            if let Some((value, _)) = series.xy_value(index) {
                 seen = true;
                 min = min.min(value);
                 max = max.max(value);
@@ -2183,7 +2209,7 @@ fn scatter_x_scale(family: PlotFamily<'_>, count: usize) -> ValueScale {
     }
     if !seen {
         min = 0.0;
-        max = count.saturating_sub(1).max(1) as f64;
+        max = 1.0;
     }
     let axis = family.x_axis;
     if let Some(value) = axis
@@ -2212,21 +2238,17 @@ fn scatter_x_scale(family: PlotFamily<'_>, count: usize) -> ValueScale {
     }
 }
 
-/// Ticks along the x value axis, or the category labels when no series in the
-/// family carries a `c:xVal` to place them by.
+/// Ticks along the x value axis.
 fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: PlotFamily<'_>,
     plot: PlotArea,
     scale: ValueScale,
-    count: usize,
 ) {
-    if !family
-        .series
-        .iter()
-        .any(|series| !series.series.x_values.is_empty())
-    {
-        emit_category_labels(ops, family, plot, count);
+    if !family.series.iter().any(|series| {
+        (0..series.series.x_values.len().min(MAX_PLOT_DATA_SCAN))
+            .any(|index| series.xy_value(index).is_some())
+    }) {
         return;
     }
     let format = family.x_axis.and_then(|axis| axis.number_format);
@@ -2266,8 +2288,8 @@ fn emit_scatter<S: PlotSink + ?Sized>(
     }
     emit_axes(ops, family, plot);
     let y_scale = value_scale(family);
-    let x_scale = scatter_x_scale(family, count);
-    emit_scatter_x_labels(ops, family, plot, x_scale, count);
+    let x_scale = scatter_x_scale(family);
+    emit_scatter_x_labels(ops, family, plot, x_scale);
     let (lines, markers) = scatter_parts(family.group.and_then(|group| group.scatter_style));
     for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series.series), ser_idx);
@@ -2276,8 +2298,12 @@ fn emit_scatter<S: PlotSink + ?Sized>(
             if ops.exhausted() {
                 return;
             }
-            let x = x_scale.x(plot, series.x_value(i).unwrap_or(i as f64));
-            let y = y_scale.y(plot, series.value(i));
+            let Some((x_value, y_value)) = series.xy_value(i) else {
+                prev = None;
+                continue;
+            };
+            let x = x_scale.x(plot, x_value);
+            let y = y_scale.y(plot, y_value);
             if lines && let Some((prev_x, prev_y)) = prev {
                 push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
             }
@@ -2318,8 +2344,8 @@ fn emit_bubble<S: PlotSink + ?Sized>(
     }
     emit_axes(ops, family, plot);
     let y_scale = value_scale(family);
-    let x_scale = scatter_x_scale(family, count);
-    emit_scatter_x_labels(ops, family, plot, x_scale, count);
+    let x_scale = scatter_x_scale(family);
+    emit_scatter_x_labels(ops, family, plot, x_scale);
     let group = family.group;
     let scale_percent = group
         .and_then(|group| group.bubble_scale)
@@ -2332,7 +2358,8 @@ fn emit_bubble<S: PlotSink + ?Sized>(
         .series
         .iter()
         .flat_map(|series| {
-            (0..series.length().min(MAX_PLOT_DATA_SCAN)).map(move |index| series.bubble_size(index))
+            (0..series.length().min(MAX_PLOT_DATA_SCAN))
+                .filter_map(move |index| series.xy_value(index).map(|_| series.bubble_size(index)))
         })
         .fold(0.0_f64, f64::max);
     let max_radius = plot.w.min(plot.h) * 0.125 * scale_percent;
@@ -2341,14 +2368,17 @@ fn emit_bubble<S: PlotSink + ?Sized>(
             if ops.exhausted() {
                 return;
             }
+            let Some((x_value, y_value)) = series.xy_value(i) else {
+                continue;
+            };
             let size = series.bubble_size(i);
             if size <= 0.0 || largest <= 0.0 {
                 continue;
             }
             let ratio = (size / largest).clamp(0.0, 1.0);
             let radius = (max_radius * if by_area { ratio.sqrt() } else { ratio }).max(1.0);
-            let x = x_scale.x(plot, series.x_value(i).unwrap_or(i as f64));
-            let y = y_scale.y(plot, series.value(i));
+            let x = x_scale.x(plot, x_value);
+            let y = y_scale.y(plot, y_value);
             ops.push(PlotOp::Path {
                 x: x - radius,
                 y: y - radius,
@@ -3855,6 +3885,222 @@ mod tests {
     }
 
     #[test]
+    fn scatter_and_bubble_never_substitute_indexes_for_missing_x_values() {
+        let data = source(&[10.0, 20.0]);
+        let x = [3.0];
+        let sizes = [2.0, 4.0];
+        let mut scatter_series = series("XY", &data);
+        scatter_series.x_values = &x;
+        let scatter = plot_chart(
+            &grouped("scatter", group("scatter", vec![scatter_series])),
+            rect(),
+        );
+        assert_eq!(
+            rects(&scatter)
+                .iter()
+                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .count(),
+            1
+        );
+        assert!(
+            scatter
+                .iter()
+                .all(|op| !matches!(op, PlotOp::Line { width, .. } if *width == 2.0))
+        );
+
+        let mut bubble_series = series("Bubbles", &data);
+        bubble_series.bubble_sizes = &sizes;
+        let bubble = plot_chart(
+            &grouped("bubble", group("bubble", vec![bubble_series])),
+            rect(),
+        );
+        assert!(bubble.iter().all(|op| !matches!(op, PlotOp::Path { .. })));
+        assert!(!texts(&bubble).contains(&"Q1".to_owned()));
+        assert!(!texts(&bubble).contains(&"Q2".to_owned()));
+    }
+
+    #[test]
+    fn scatter_and_bubble_skip_points_without_y_values() {
+        let data = Source {
+            categories: Vec::new(),
+            values: vec![10.0],
+        };
+        let x = [1.0, 2.0];
+        let sizes = [2.0, 4.0];
+        let mut scatter_series = series("XY", &data);
+        scatter_series.x_values = &x;
+        let scatter = plot_chart(
+            &grouped("scatter", group("scatter", vec![scatter_series])),
+            rect(),
+        );
+        assert_eq!(
+            rects(&scatter)
+                .iter()
+                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .count(),
+            1
+        );
+
+        let mut bubble_series = series("Bubbles", &data);
+        bubble_series.x_values = &x;
+        bubble_series.bubble_sizes = &sizes;
+        let bubble = plot_chart(
+            &grouped("bubble", group("bubble", vec![bubble_series])),
+            rect(),
+        );
+        assert_eq!(paths(&bubble), 1);
+    }
+
+    #[test]
+    fn scatter_axis_references_are_independent_of_definition_order() {
+        let data = Source {
+            categories: Vec::new(),
+            values: vec![80.0],
+        };
+        let x = [2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let mut scatter = group("scatter", vec![xy]);
+        scatter.axis_ids = vec!["x", "y"];
+        let x_axis = value_axis("x", 0.0, 10.0);
+        let y_axis = value_axis("y", 0.0, 100.0);
+        let chart = |axes| PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![scatter.clone()],
+            axes,
+            ..PlotChart::default()
+        };
+
+        assert_eq!(
+            plot_chart(&chart(vec![x_axis, y_axis]), rect()),
+            plot_chart(&chart(vec![y_axis, x_axis]), rect())
+        );
+    }
+
+    #[test]
+    fn unresolved_axis_references_never_select_another_definition() {
+        let x_axis = value_axis("x", 0.0, 10.0);
+        let y_axis = value_axis("y", 0.0, 100.0);
+        let chart = PlotChart {
+            chart_type: "scatter",
+            axes: vec![x_axis, y_axis],
+            ..PlotChart::default()
+        };
+        let resolve = |chart_type, axis_ids| {
+            let group = PlotGroup {
+                chart_type: Some(chart_type),
+                axis_ids,
+                ..PlotGroup::default()
+            };
+            let (x, y) = group_value_axes(&chart, &group);
+            (x.and_then(|axis| axis.id), y.and_then(|axis| axis.id))
+        };
+
+        for chart_type in ["scatter", "bubble"] {
+            assert_eq!(resolve(chart_type, Vec::new()), (None, None));
+            assert_eq!(resolve(chart_type, vec!["missing", "y"]), (None, Some("y")));
+            assert_eq!(resolve(chart_type, vec!["x"]), (Some("x"), None));
+            assert_eq!(resolve(chart_type, vec!["x", "missing"]), (Some("x"), None));
+            assert_eq!(resolve(chart_type, vec!["x", "x"]), (None, None));
+        }
+
+        let duplicated = PlotChart {
+            chart_type: "scatter",
+            axes: vec![x_axis, x_axis, y_axis],
+            ..PlotChart::default()
+        };
+        let group = PlotGroup {
+            chart_type: Some("scatter"),
+            axis_ids: vec!["x", "y"],
+            ..PlotGroup::default()
+        };
+        let (x, y) = group_value_axes(&duplicated, &group);
+        assert!(x.is_none());
+        assert_eq!(y.and_then(|axis| axis.id), Some("y"));
+    }
+
+    #[test]
+    fn categorical_families_require_unique_referenced_axes() {
+        let category = PlotAxis {
+            id: Some("category"),
+            kind: PlotAxisKind::Category,
+            ..PlotAxis::default()
+        };
+        let value = value_axis("value", 0.0, 10.0);
+        let chart = PlotChart {
+            chart_type: "line",
+            axes: vec![value, category],
+            ..PlotChart::default()
+        };
+        for chart_type in ["bar", "column", "line", "area", "radar", "surface", "stock"] {
+            let valid = PlotGroup {
+                chart_type: Some(chart_type),
+                axis_ids: vec!["category", "value"],
+                ..PlotGroup::default()
+            };
+            assert_eq!(
+                group_value_axes(&chart, &valid).1.and_then(|axis| axis.id),
+                Some("value")
+            );
+            assert_eq!(
+                group_category_axis(&chart, &valid).and_then(|axis| axis.id),
+                Some("category")
+            );
+            for axis_ids in [Vec::new(), vec!["missing"]] {
+                let unresolved = PlotGroup {
+                    chart_type: Some(chart_type),
+                    axis_ids,
+                    ..PlotGroup::default()
+                };
+                assert!(group_value_axes(&chart, &unresolved).1.is_none());
+                assert!(group_category_axis(&chart, &unresolved).is_none());
+            }
+        }
+
+        let duplicated = PlotChart {
+            chart_type: "line",
+            axes: vec![value, value, category, category],
+            ..PlotChart::default()
+        };
+        let group = PlotGroup {
+            chart_type: Some("line"),
+            axis_ids: vec!["category", "value"],
+            ..PlotGroup::default()
+        };
+        assert!(group_value_axes(&duplicated, &group).1.is_none());
+        assert!(group_category_axis(&duplicated, &group).is_none());
+    }
+
+    #[test]
+    fn a_surface_category_axis_is_distinct_from_its_series_axis() {
+        let category = PlotAxis {
+            id: Some("category"),
+            kind: PlotAxisKind::Category,
+            ..PlotAxis::default()
+        };
+        let series = PlotAxis {
+            id: Some("series"),
+            kind: PlotAxisKind::Series,
+            ..PlotAxis::default()
+        };
+        let chart = PlotChart {
+            chart_type: "surface",
+            axes: vec![series, value_axis("value", 0.0, 10.0), category],
+            ..PlotChart::default()
+        };
+        let group = PlotGroup {
+            chart_type: Some("surface"),
+            axis_ids: vec!["category", "value", "series"],
+            ..PlotGroup::default()
+        };
+
+        assert_eq!(
+            group_category_axis(&chart, &group).and_then(|axis| axis.id),
+            Some("category")
+        );
+    }
+
+    #[test]
     fn a_scatter_style_without_lines_draws_only_markers() {
         let data = source(&[10.0, 20.0]);
         let x = [1.0, 2.0];
@@ -3901,6 +4147,22 @@ mod tests {
         assert_eq!(area.len(), 2);
         assert!((area[0] / area[1] - 0.5).abs() < 0.01, "{area:?}");
         assert!((width[0] / width[1] - 0.25).abs() < 0.01, "{width:?}");
+    }
+
+    #[test]
+    fn a_bubble_without_coordinates_does_not_scale_visible_bubbles() {
+        let data = source(&[10.0, 10.0]);
+        let x = [1.0];
+        let visible_size = [2.0];
+        let hidden_size = [2.0, 400.0];
+        let render = |sizes: &[f64]| {
+            let mut bubbles = series("Bubbles", &data);
+            bubbles.x_values = &x;
+            bubbles.bubble_sizes = sizes;
+            plot_chart(&grouped("bubble", group("bubble", vec![bubbles])), rect())
+        };
+
+        assert_eq!(render(&visible_size), render(&hidden_size));
     }
 
     #[test]
@@ -4235,6 +4497,47 @@ mod tests {
         assert!(
             marker.1 > bar.1,
             "the same value sits lower against the wider axis"
+        );
+    }
+
+    #[test]
+    fn secondary_axis_groups_ignore_all_four_definition_positions() {
+        let primary_data = source(&[10.0, 10.0]);
+        let secondary_data = source(&[60.0, 60.0]);
+        let mut primary = group("column", vec![series("Units", &primary_data)]);
+        primary.axis_ids = vec!["cat-primary", "val-primary"];
+        let mut secondary = group("line", vec![series("Rate", &secondary_data)]);
+        secondary.axis_ids = vec!["cat-secondary", "val-secondary"];
+        let category = |id| PlotAxis {
+            id: Some(id),
+            kind: PlotAxisKind::Category,
+            ..PlotAxis::default()
+        };
+        let primary_category = category("cat-primary");
+        let secondary_category = category("cat-secondary");
+        let primary_value = value_axis("val-primary", 0.0, 20.0);
+        let secondary_value = value_axis("val-secondary", 0.0, 100.0);
+        let chart = |axes| combo_with_axes(primary.clone(), secondary.clone(), axes);
+
+        assert_eq!(
+            plot_chart(
+                &chart(vec![
+                    primary_category,
+                    primary_value,
+                    secondary_category,
+                    secondary_value,
+                ]),
+                rect(),
+            ),
+            plot_chart(
+                &chart(vec![
+                    secondary_value,
+                    primary_category,
+                    primary_value,
+                    secondary_category,
+                ]),
+                rect(),
+            )
         );
     }
 
