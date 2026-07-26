@@ -642,6 +642,36 @@ fn configurations() -> Vec<(String, Value, f64, f64)> {
         260.0,
         180.0,
     ));
+    cases.push((
+        "text-properties".to_owned(),
+        json!({
+            "type": "chart",
+            "chartType": "column",
+            "title": "Revenue",
+            "legend": { "position": "right", "visible": true, "text": { "bold": true } },
+            "text": { "font": "Georgia", "sizePt": 9.0, "color": "#112233" },
+            "titleText": { "sizePt": 21.0, "italic": true },
+            "axisList": [
+                { "id": "0", "axisType": "category", "text": { "sizePt": 15.0 } },
+                {
+                    "id": "1",
+                    "axisType": "value",
+                    "min": 0.0,
+                    "max": 20.0,
+                    "majorGridlines": true,
+                    "text": { "sizePt": 6.0, "color": "#884400" }
+                }
+            ],
+            "plotGroups": [{
+                "chartType": "column",
+                "axisIds": ["0", "1"],
+                "dataLabels": { "showValue": true, "text": { "bold": true, "sizePt": 12.0 } },
+                "series": [series("North", json!([10.0, 20.0]))]
+            }]
+        }),
+        260.0,
+        180.0,
+    ));
     cases.push(("zero-rect".to_owned(), basic("column"), 0.0, 0.0));
     cases.push(("tiny-rect".to_owned(), basic("column"), 12.0, 8.0));
     cases.push(("tiny-rect-pie".to_owned(), basic("pie"), 12.0, 8.0));
@@ -2213,6 +2243,30 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, pie chart, 1 series, 2 cat
 {"fill":"#ED7D31","geometryPath":"15 commands {\"type\":\"move\",\"x\":148.8,\"y\":128.2} .. {\"type\":\"close\"} #606b0a726cc1069a","h":115.6,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":115.6,"x":91,"y":70.4}
 {"fill":"#ED7D31","h":7,"kind":"rect","w":7,"x":91.799,"y":74.199}
 {"baselineY":81.199,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"25%","width":48,"x":101.799}
+# text-properties
+attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
+{"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
+{"baselineY":58,"color":"#112233","font":"italic 600 28px Georgia","kind":"text","text":"Revenue","width":244,"x":58}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":196,"y1":68,"y2":68}
+{"baselineY":71,"color":"#884400","font":"400 8px Georgia","kind":"text","text":"20","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":196,"y1":97.5,"y2":97.5}
+{"baselineY":100.5,"color":"#884400","font":"400 8px Georgia","kind":"text","text":"15","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":196,"y1":127,"y2":127}
+{"baselineY":130,"color":"#884400","font":"400 8px Georgia","kind":"text","text":"10","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":196,"y1":156.5,"y2":156.5}
+{"baselineY":159.5,"color":"#884400","font":"400 8px Georgia","kind":"text","text":"5","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":196,"y1":186,"y2":186}
+{"baselineY":189,"color":"#884400","font":"400 8px Georgia","kind":"text","text":"0","width":34,"x":54}
+{"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":92,"y1":68,"y2":186}
+{"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":196,"y1":186,"y2":186}
+{"baselineY":200,"color":"#112233","font":"400 20px Georgia","kind":"text","text":"Q1","width":48,"x":94}
+{"fill":"#4472C4","h":59,"kind":"rect","w":20.8,"x":107.6,"y":127}
+{"baselineY":124,"color":"#112233","font":"700 16px Georgia","kind":"text","text":"10","width":32,"x":107.6}
+{"baselineY":200,"color":"#112233","font":"400 20px Georgia","kind":"text","text":"Q2","width":48,"x":146}
+{"fill":"#4472C4","h":118,"kind":"rect","w":20.8,"x":159.6,"y":68}
+{"baselineY":65,"color":"#112233","font":"700 16px Georgia","kind":"text","text":"20","width":32,"x":159.6}
+{"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":76}
+{"baselineY":84,"color":"#112233","font":"700 12px Georgia","kind":"text","text":"North","width":80,"x":224}
 # zero-rect
 attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column chart, 2 series, 2 categories"},"docEnd":5,"docStart":4}
 {"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":116,"y1":68,"y2":68}

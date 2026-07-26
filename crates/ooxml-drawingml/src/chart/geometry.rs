@@ -12,16 +12,30 @@ pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
 pub const CHART_SERIES_COLORS: [&str; 8] = [
     "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#264478", "#9E480E",
 ];
-pub const CHART_LABEL_FONT: PlotFont = PlotFont {
-    weight: 400,
-    size_px: 10.0,
-    family: "Calibri, sans-serif",
-};
-pub const CHART_TITLE_FONT: PlotFont = PlotFont {
-    weight: 600,
-    size_px: 13.0,
-    family: "Calibri, sans-serif",
-};
+/// The font family every chart text falls back to when `c:txPr` names none.
+pub const CHART_FONT_FAMILY: &str = "Calibri, sans-serif";
+pub const CHART_LABEL_SIZE_PX: f64 = 10.0;
+pub const CHART_TITLE_SIZE_PX: f64 = 13.0;
+
+/// The label font of a chart whose `c:txPr` says nothing.
+pub fn chart_label_font() -> PlotFont {
+    PlotFont {
+        weight: 400,
+        size_px: CHART_LABEL_SIZE_PX,
+        family: CHART_FONT_FAMILY.to_owned(),
+        italic: false,
+    }
+}
+
+/// The title font of a chart whose `c:txPr` says nothing.
+pub fn chart_title_font() -> PlotFont {
+    PlotFont {
+        weight: 600,
+        size_px: CHART_TITLE_SIZE_PX,
+        family: CHART_FONT_FAMILY.to_owned(),
+        italic: false,
+    }
+}
 
 /// Hard ceiling on the ops one chart may emit, whatever its data length.
 pub const MAX_PLOT_OPS: usize = 100_000;
@@ -45,18 +59,87 @@ pub const MAX_PLOT_COORD: f64 = 1e9;
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlotFont {
     pub weight: u16,
     pub size_px: f64,
-    pub family: &'static str,
+    pub family: String,
+    pub italic: bool,
 }
 
 impl PlotFont {
     /// CSS `font` shorthand, for hosts that paint through a browser.
     pub fn css(&self) -> String {
-        format!("{} {}px {}", self.weight, self.size_px, self.family)
+        let style = if self.italic { "italic " } else { "" };
+        format!("{style}{} {}px {}", self.weight, self.size_px, self.family)
     }
+}
+
+/// One `c:txPr`, every field optional so an unset one inherits.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotTextStyle<'a> {
+    pub font: Option<&'a str>,
+    pub size_pt: Option<f64>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub color: Option<&'a str>,
+}
+
+impl<'a> PlotTextStyle<'a> {
+    /// `self` over `base`, for the chart-scope style a scoped one inherits.
+    fn over(self, base: PlotTextStyle<'a>) -> Self {
+        Self {
+            font: self.font.or(base.font),
+            size_pt: self.size_pt.or(base.size_pt),
+            bold: self.bold.or(base.bold),
+            italic: self.italic.or(base.italic),
+            color: self.color.or(base.color),
+        }
+    }
+
+    /// The style resolved against a default size and weight.
+    fn resolve(self, size_px: f64, weight: u16) -> ResolvedText {
+        ResolvedText {
+            font: PlotFont {
+                weight: match self.bold {
+                    Some(true) => 700,
+                    Some(false) => 400,
+                    None => weight,
+                },
+                size_px: self
+                    .size_pt
+                    .filter(|size| size.is_finite() && *size > 0.0)
+                    .map(|size| (size * 4.0 / 3.0).clamp(1.0, 400.0))
+                    .unwrap_or(size_px),
+                family: self
+                    .font
+                    .filter(|font| !font.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| CHART_FONT_FAMILY.to_owned()),
+                italic: self.italic.unwrap_or(false),
+            },
+            color: self
+                .color
+                .filter(|color| !color.is_empty())
+                .map(hex)
+                .unwrap_or_else(|| CHART_TEXT_COLOR.to_owned()),
+        }
+    }
+}
+
+/// What one text op paints with.
+#[derive(Clone, Debug, PartialEq)]
+struct ResolvedText {
+    font: PlotFont,
+    color: String,
+}
+
+/// Chart-scope `c:txPr` plus the scopes that inherit from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotChartText<'a> {
+    pub chart: PlotTextStyle<'a>,
+    pub title: PlotTextStyle<'a>,
+    pub legend: PlotTextStyle<'a>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -133,6 +216,8 @@ pub struct PlotChart<'a> {
     pub axis_titles: PlotAxisTitles<'a>,
     pub series: Vec<PlotSeries<'a>>,
     pub plot_groups: Vec<PlotGroup<'a>>,
+    /// `c:txPr` at chart, title and legend scope.
+    pub text: PlotChartText<'a>,
     /// Every `c:catAx`, `c:valAx`, `c:dateAx` and `c:serAx` of the plot area,
     /// in document order, so a plot group can find the axis it names.
     pub axes: Vec<PlotAxis<'a>>,
@@ -196,6 +281,8 @@ pub struct PlotAxis<'a> {
     pub position: Option<&'a str>,
     pub title: Option<&'a str>,
     pub hidden: bool,
+    /// `c:txPr` on this axis.
+    pub text: PlotTextStyle<'a>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -267,6 +354,8 @@ pub struct PlotDataLabels<'a> {
     /// `t` or `b`.
     pub position: Option<&'a str>,
     pub number_format: Option<&'a str>,
+    /// `c:txPr` on this `c:dLbls`.
+    pub text: PlotTextStyle<'a>,
 }
 
 impl PlotDataLabels<'_> {
@@ -407,8 +496,29 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                 .flatten()
                 .map(plot_axis_from_model)
                 .collect(),
+            text: PlotChartText {
+                chart: plot_text_from_model(space.text.as_ref()),
+                title: plot_text_from_model(space.title_text.as_ref()),
+                legend: plot_text_from_model(
+                    space
+                        .legend
+                        .as_ref()
+                        .and_then(|legend| legend.text.as_ref()),
+                ),
+            },
         }
     }
+}
+
+fn plot_text_from_model(text: Option<&super::model::ChartTextProperties>) -> PlotTextStyle<'_> {
+    text.map(|text| PlotTextStyle {
+        font: text.font.as_deref(),
+        size_pt: text.size_pt,
+        bold: text.bold,
+        italic: text.italic,
+        color: text.color.as_deref(),
+    })
+    .unwrap_or_default()
 }
 
 fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
@@ -431,6 +541,7 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
+        text: plot_text_from_model(axis.text.as_ref()),
     }
 }
 
@@ -507,6 +618,11 @@ fn plot_labels_from_model<'a>(
         separator: text(|labels| labels.separator.as_deref()),
         position: text(|labels| labels.position.as_deref()),
         number_format: text(|labels| labels.number_format.as_deref()),
+        text: plot_text_from_model(
+            series
+                .and_then(|labels| labels.text.as_ref())
+                .or_else(|| group.and_then(|labels| labels.text.as_ref())),
+        ),
     })
 }
 
@@ -590,6 +706,13 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         remaining: MAX_PLOT_OPS,
     };
     let scan = &mut ScanBudget::new();
+    let chart_text = chart.text.chart;
+    let label_style = &chart_text.resolve(CHART_LABEL_SIZE_PX, 400);
+    let legend_style = &chart
+        .text
+        .legend
+        .over(chart_text)
+        .resolve(CHART_LABEL_SIZE_PX, 400);
 
     push_rect(ops, x, y, width, height, CHART_BACKGROUND_COLOR);
 
@@ -600,7 +723,11 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             x + 8.0,
             y + 18.0,
             (width - 16.0).max(0.0),
-            CHART_TITLE_FONT,
+            &chart
+                .text
+                .title
+                .over(chart_text)
+                .resolve(CHART_TITLE_SIZE_PX, 600),
         );
         28.0
     } else {
@@ -640,6 +767,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 value_axis: chart.value_axis,
                 axis_titles: chart.axis_titles,
                 group: None,
+                chart_text,
+                label: label_style,
                 axis: None,
                 x_axis: None,
                 category_axis: chart
@@ -674,6 +803,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                     value_axis: chart.value_axis,
                     axis_titles: chart.axis_titles,
                     group: Some(group),
+                    chart_text,
+                    label: label_style,
                     axis,
                     x_axis,
                     category_axis: group_category_axis(chart, group),
@@ -700,6 +831,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         legend_x,
         y + title_h + 8.0,
         legend_w - 12.0,
+        legend_style,
     );
 }
 
@@ -790,6 +922,10 @@ struct PlotFamily<'a> {
     value_axis: Option<PlotAxisRange>,
     axis_titles: PlotAxisTitles<'a>,
     group: Option<&'a PlotGroup<'a>>,
+    /// Chart-scope `c:txPr`, which every scoped style inherits from.
+    chart_text: PlotTextStyle<'a>,
+    /// Chart-scope text already resolved, for labels with no scope of their own.
+    label: &'a ResolvedText,
     axis: Option<&'a PlotAxis<'a>>,
     /// The x value axis of a scatter or bubble group.
     x_axis: Option<&'a PlotAxis<'a>>,
@@ -799,6 +935,22 @@ struct PlotFamily<'a> {
 }
 
 impl<'a> PlotFamily<'a> {
+    fn label(&self) -> &ResolvedText {
+        self.label
+    }
+
+    /// `scope` resolved over the chart's own `c:txPr`.
+    fn scoped(&self, scope: PlotTextStyle<'a>) -> ResolvedText {
+        scope
+            .over(self.chart_text)
+            .resolve(CHART_LABEL_SIZE_PX, 400)
+    }
+
+    /// The style the category axis gives its own tick labels.
+    fn category_text(&self) -> ResolvedText {
+        self.scoped(self.category_axis.map(|axis| axis.text).unwrap_or_default())
+    }
+
     fn grouping(&self) -> &'a str {
         self.group
             .and_then(|group| group.grouping)
@@ -1096,7 +1248,7 @@ fn push_text<S: PlotSink + ?Sized>(
     x: f64,
     baseline_y: f64,
     width: f64,
-    font: PlotFont,
+    style: &ResolvedText,
 ) {
     if text.is_empty() || width <= 0.0 {
         return;
@@ -1106,8 +1258,8 @@ fn push_text<S: PlotSink + ?Sized>(
         x,
         baseline_y,
         width,
-        font,
-        color: CHART_TEXT_COLOR.to_owned(),
+        font: style.font.clone(),
+        color: style.color.clone(),
     });
 }
 
@@ -1410,6 +1562,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
     let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
     let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines);
     let number_format = axis.and_then(|axis| axis.number_format);
+    let tick_style = &family.scoped(axis.map(|axis| axis.text).unwrap_or_default());
     let (edge, outward) = if family.secondary {
         (plot.x + plot.w, 1.0)
     } else {
@@ -1447,7 +1600,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
             label_x,
             y + 3.0,
             34.0,
-            CHART_LABEL_FONT,
+            tick_style,
         );
         if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
             push_line(
@@ -1498,7 +1651,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
             plot.x - 38.0,
             plot.y - 5.0,
             plot.w + 38.0,
-            CHART_LABEL_FONT,
+            tick_style,
         );
     }
     if let Some(title) = family
@@ -1512,7 +1665,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
             plot.x,
             plot.y + plot.h + 26.0,
             plot.w,
-            CHART_LABEL_FONT,
+            tick_style,
         );
     }
 }
@@ -1618,8 +1771,14 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
     };
+    let scope = series
+        .point(index)
+        .and_then(|point| point.labels)
+        .or(series.series.labels)
+        .map(|labels| labels.text)
+        .unwrap_or_default();
     push_legend_key(ops, series, series_index, index, x, baseline_y);
-    push_text(ops, &text, x, baseline_y, width, CHART_LABEL_FONT);
+    push_text(ops, &text, x, baseline_y, width, &family.scoped(scope));
 }
 
 /// The `c:dLblPos` the family's first labelled series names.
@@ -1759,6 +1918,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
     let scale = value_scale(family);
     let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
     let label_position = family_label_position(family);
+    let category_style = &family.category_text();
     let spans = &mut Vec::with_capacity(family.series.len());
     for cat_idx in 0..cat_count {
         if ops.exhausted() {
@@ -1773,7 +1933,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 plot.x - 38.0,
                 plot.y + slot + bands.slot * 0.55,
                 36.0,
-                CHART_LABEL_FONT,
+                category_style,
             );
         } else {
             push_text(
@@ -1782,7 +1942,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 plot.x + slot + 2.0,
                 plot.y + plot.h + 14.0,
                 bands.slot - 4.0,
-                CHART_LABEL_FONT,
+                category_style,
             );
         }
         stacked_spans(family, cat_idx, spans);
@@ -1852,6 +2012,7 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
     plot: PlotArea,
     count: usize,
 ) {
+    let style = &family.category_text();
     for index in 0..count {
         if ops.exhausted() {
             return;
@@ -1862,7 +2023,7 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
             line_x(family, plot, index, count) - 16.0,
             plot.y + plot.h + 14.0,
             32.0,
-            CHART_LABEL_FONT,
+            style,
         );
     }
 }
@@ -2079,7 +2240,7 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
             scale.x(plot, value) - 16.0,
             plot.y + plot.h + 14.0,
             32.0,
-            CHART_LABEL_FONT,
+            family.label(),
         );
     }
 }
@@ -2264,7 +2425,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
             cx + (outer.0 - cx) * 1.1 - 16.0,
             cy + (outer.1 - cy) * 1.1,
             32.0,
-            CHART_LABEL_FONT,
+            family.label(),
         );
     }
 
@@ -2377,7 +2538,7 @@ fn emit_stock<S: PlotSink + ?Sized>(
             plot.x + slot + 2.0,
             plot.y + plot.h + 14.0,
             bands.slot - 4.0,
-            CHART_LABEL_FONT,
+            family.label(),
         );
         let value = |index: usize| family.series[index].value(cat_idx);
         let (high_y, low_y) = (scale.y(plot, value(high)), scale.y(plot, value(low)));
@@ -2518,7 +2679,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
             plot.x - 38.0,
             y + cell_h * 0.6,
             36.0,
-            CHART_LABEL_FONT,
+            family.label(),
         );
     }
     for column in 0..columns {
@@ -2531,7 +2692,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
             plot.x + cell_w * category_position(family, column, columns) as f64 + 2.0,
             plot.y + plot.h + 14.0,
             cell_w - 4.0,
-            CHART_LABEL_FONT,
+            family.label(),
         );
     }
 }
@@ -2835,6 +2996,7 @@ fn pie_wedge_path(
     path
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_legend<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     chart: &PlotChart<'_>,
@@ -2842,6 +3004,7 @@ fn emit_legend<S: PlotSink + ?Sized>(
     x: f64,
     y: f64,
     width: f64,
+    style: &ResolvedText,
 ) {
     if !has_legend(chart) || width <= 0.0 {
         return;
@@ -2902,14 +3065,7 @@ fn emit_legend<S: PlotSink + ?Sized>(
     for (i, (label, color)) in entries.iter().enumerate() {
         let yy = y + i as f64 * 15.0;
         push_rect(ops, x, yy, 8.0, 8.0, color);
-        push_text(
-            ops,
-            label,
-            x + 12.0,
-            yy + 8.0,
-            width - 12.0,
-            CHART_LABEL_FONT,
-        );
+        push_text(ops, label, x + 12.0, yy + 8.0, width - 12.0, style);
     }
 }
 
@@ -3050,13 +3206,19 @@ mod tests {
         }
     }
 
-    fn family<'a>(chart: &'a PlotChart<'a>, series: &'a [SeriesView<'a>]) -> PlotFamily<'a> {
+    fn family<'a>(
+        chart: &'a PlotChart<'a>,
+        series: &'a [SeriesView<'a>],
+        label: &'a ResolvedText,
+    ) -> PlotFamily<'a> {
         PlotFamily {
             chart_type: chart.chart_type,
             series,
             value_axis: chart.value_axis,
             axis_titles: chart.axis_titles,
             group: chart.plot_groups.first(),
+            chart_text: chart.text.chart,
+            label,
             axis: None,
             x_axis: None,
             category_axis: None,
@@ -3066,8 +3228,21 @@ mod tests {
 
     #[test]
     fn fonts_render_the_css_shorthand() {
-        assert_eq!(CHART_LABEL_FONT.css(), "400 10px Calibri, sans-serif");
-        assert_eq!(CHART_TITLE_FONT.css(), "600 13px Calibri, sans-serif");
+        assert_eq!(chart_label_font().css(), "400 10px Calibri, sans-serif");
+        assert_eq!(chart_title_font().css(), "600 13px Calibri, sans-serif");
+        assert_eq!(
+            PlotTextStyle {
+                font: Some("Georgia"),
+                size_pt: Some(18.0),
+                bold: Some(true),
+                italic: Some(true),
+                color: Some("FF0000"),
+            }
+            .resolve(CHART_LABEL_SIZE_PX, 400)
+            .font
+            .css(),
+            "italic 700 24px Georgia"
+        );
     }
 
     #[test]
@@ -3083,7 +3258,7 @@ mod tests {
 
         assert!(matches!(&ops[0], PlotOp::Rect { fill, .. } if fill == CHART_BACKGROUND_COLOR));
         assert!(matches!(&ops[1], PlotOp::Text { text, font, .. }
-            if text == "Revenue" && *font == CHART_TITLE_FONT));
+            if text == "Revenue" && *font == chart_title_font()));
         assert_eq!(
             ops.iter()
                 .filter(|op| matches!(op, PlotOp::Line { .. }))
@@ -3198,7 +3373,8 @@ mod tests {
             ..PlotChart::default()
         };
         let views = series_views(&chart.series, &mut ScanBudget::new());
-        assert_eq!(value_range(family(&chart, &views)), (-10.0, 10.0));
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        assert_eq!(value_range(family(&chart, &views, &label)), (-10.0, 10.0));
     }
 
     #[test]
@@ -4397,6 +4573,77 @@ mod tests {
         assert!(placed("outEnd") < placed("inEnd"));
         assert!(placed("inEnd") < placed("ctr"));
         assert!(placed("ctr") < placed("inBase"));
+    }
+
+    #[test]
+    fn chart_text_properties_reach_every_scope_and_inherit() {
+        let data = source(&[1.0, 2.0]);
+        let mut labelled = series("North", &data);
+        labelled.labels = Some(PlotDataLabels {
+            show_value: true,
+            number_format: Some("0.0"),
+            text: PlotTextStyle {
+                size_pt: Some(6.0),
+                ..PlotTextStyle::default()
+            },
+            ..PlotDataLabels::default()
+        });
+        let axis = PlotAxis {
+            id: Some("1"),
+            kind: PlotAxisKind::Value,
+            range: PlotAxisRange {
+                min: Some(0.0),
+                max: Some(4.0),
+            },
+            major_gridlines: true,
+            text: PlotTextStyle {
+                italic: Some(true),
+                ..PlotTextStyle::default()
+            },
+            ..PlotAxis::default()
+        };
+        let mut group = group("column", vec![labelled]);
+        group.axis_ids = vec!["1"];
+        let chart = PlotChart {
+            chart_type: "column",
+            title: Some("Revenue"),
+            plot_groups: vec![group],
+            axes: vec![axis],
+            text: PlotChartText {
+                chart: PlotTextStyle {
+                    font: Some("Georgia"),
+                    color: Some("#112233"),
+                    ..PlotTextStyle::default()
+                },
+                title: PlotTextStyle {
+                    size_pt: Some(30.0),
+                    ..PlotTextStyle::default()
+                },
+                legend: PlotTextStyle {
+                    bold: Some(true),
+                    ..PlotTextStyle::default()
+                },
+            },
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let font = |needle: &str| {
+            ops.iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text, font, color, ..
+                    } if text == needle => Some((font.css(), color.clone())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{needle} is missing"))
+        };
+        assert_eq!(
+            font("Revenue"),
+            ("600 40px Georgia".to_owned(), "#112233".to_owned())
+        );
+        assert_eq!(font("4").0, "italic 400 10px Georgia");
+        assert_eq!(font("North").0, "700 10px Georgia");
+        assert_eq!(font("2.0").0, "400 8px Georgia");
     }
 
     #[test]

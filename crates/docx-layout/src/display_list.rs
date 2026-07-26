@@ -31,9 +31,9 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotDataLabels, PlotGroup,
-    PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint, PlotRect, PlotSeries, PlotSink,
-    chart_aria_label, plot_chart_into,
+    PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
+    PlotDataLabels, PlotGroup, PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint,
+    PlotRect, PlotSeries, PlotSink, PlotTextStyle, chart_aria_label, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2173,6 +2173,25 @@ struct ChartIn {
     plot_groups: Vec<ChartPlotGroupIn>,
     #[serde(default)]
     axis_list: Vec<ChartAxisIn>,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
+    #[serde(default)]
+    title_text: Option<ChartTextIn>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartTextIn {
+    #[serde(default)]
+    font: Option<String>,
+    #[serde(default)]
+    size_pt: Option<f64>,
+    #[serde(default)]
+    bold: Option<bool>,
+    #[serde(default)]
+    italic: Option<bool>,
+    #[serde(default)]
+    color: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2239,6 +2258,8 @@ struct ChartDataLabelsIn {
     position: Option<String>,
     #[serde(default)]
     number_format: Option<String>,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2292,6 +2313,8 @@ struct ChartLegendIn {
     position: Option<String>,
     #[serde(default)]
     visible: Option<bool>,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2335,6 +2358,8 @@ struct ChartAxisIn {
     title: Option<String>,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
 }
 
 #[derive(Deserialize)]
@@ -7778,7 +7803,28 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
             })
             .collect(),
         axes: chart.axis_list.iter().map(plot_axis_from).collect(),
+        text: PlotChartText {
+            chart: plot_text_from(chart.text.as_ref()),
+            title: plot_text_from(chart.title_text.as_ref()),
+            legend: plot_text_from(
+                chart
+                    .legend
+                    .as_ref()
+                    .and_then(|legend| legend.text.as_ref()),
+            ),
+        },
     }
+}
+
+fn plot_text_from(text: Option<&ChartTextIn>) -> PlotTextStyle<'_> {
+    text.map(|text| PlotTextStyle {
+        font: text.font.as_deref(),
+        size_pt: text.size_pt,
+        bold: text.bold,
+        italic: text.italic,
+        color: text.color.as_deref(),
+    })
+    .unwrap_or_default()
 }
 
 /// Merges a series `dataLabels` over its plot group's, matching the shared
@@ -7810,6 +7856,11 @@ fn plot_labels_from<'a>(
         separator: text(|labels| labels.separator.as_deref()),
         position: text(|labels| labels.position.as_deref()),
         number_format: text(|labels| labels.number_format.as_deref()),
+        text: plot_text_from(
+            series
+                .and_then(|labels| labels.text.as_ref())
+                .or_else(|| group.and_then(|labels| labels.text.as_ref())),
+        ),
     })
 }
 
@@ -7837,6 +7888,7 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
+        text: plot_text_from(axis.text.as_ref()),
     }
 }
 
