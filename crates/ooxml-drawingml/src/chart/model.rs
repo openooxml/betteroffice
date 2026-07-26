@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+/// A parsed `c:chartSpace`, free of any host-package metadata.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartSpace {
+    pub chart_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legend: Option<ChartLegend>,
+    pub series: Vec<ChartSeries>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axes: Option<ChartAxes>,
+    pub plot_groups: Vec<ChartPlotGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axis_list: Option<Vec<ChartAxis>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChartLegend {
     #[serde(skip_serializing_if = "Option::is_none")]

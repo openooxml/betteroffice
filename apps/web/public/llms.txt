@@ -1,30 +1,56 @@
 # BetterOffice
 
-> BetterOffice is the open-source office suite built by the OpenOOXML project (openooxml.org). It packages OpenOOXML's native OOXML engines — written in Rust, in-house, and compiled to WebAssembly — as ready-to-use editors and SDKs. A Word-faithful DOCX editor and viewer for React, Vue and plain JavaScript is available today; spreadsheet (XLSX) and slide (PPTX) editors are coming on the same shared core. Documents are edited natively in their own format (no lossy conversion), real-time collaboration is built into the core, and everything also runs headless for agent pipelines. Apache 2.0 licensed. BetterOffice also offers a very similar API to the deprecated eigenpal editor, so most eigenpal integrations port with minimal changes.
+> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship two ways — compiled to WebAssembly for the browser packages, and published to crates.io as native crates for servers. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
 
-## Packages
+All three formats are available today. The packages work as full editors or as read-only viewers. Versions are `0.0.x` and the APIs are still settling; breaking changes are listed in each package changelog.
 
-npm packages ship under the @betteroffice scope. Install the React editor with `npm install @betteroffice/docx-react`. The packages work as a full editor or a read-only DOCX viewer.
+## npm packages
 
-- [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): headless DOCX core for plain JavaScript — document model, layout, rendering
-- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the full DOCX editor/viewer as a React component
-- [@betteroffice/docx-vue](https://www.npmjs.com/package/@betteroffice/docx-vue): the same editor/viewer for Vue, feature parity contract-tested against React
+Published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are drop-in editor components; the unsuffixed packages are the framework-free cores for custom UIs and headless use.
 
-## Docs
+- [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): framework-free DOCX core — OOXML parse/serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips against the original package so untouched parts are preserved.
+- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes.
+- [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n): UI locale strings for the DOCX React editor.
+- [@betteroffice/xlsx](https://www.npmjs.com/package/@betteroffice/xlsx): framework-free XLSX core — SpreadsheetML parse/serialize, formula recalculation, grid display lists, hit-testing, PNG export, and agent proposals a human accepts or rejects.
+- [@betteroffice/xlsx-react](https://www.npmjs.com/package/@betteroffice/xlsx-react): the spreadsheet editor and viewer as a React component.
+- [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n): UI locale strings for the XLSX React editor.
+- [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): framework-free PPTX core — PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing and collaboration are live; writing edits back to a .pptx file is not yet exposed here.
+- [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component.
+- [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the PPTX React editor.
 
-- [Documentation](https://docs.betteroffice.dev): guides and API reference for all packages
+There is no Vue package. React and framework-free JavaScript are the supported entry points.
+
+## Rust crates
+
+Published to crates.io, Apache-2.0. Use the three facades unless you need a single layer of the pipeline.
+
+- [betteroffice-docx](https://crates.io/crates/betteroffice-docx): typed native API for opening, editing, laying out, and saving DOCX documents.
+- [betteroffice-xlsx](https://crates.io/crates/betteroffice-xlsx): typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks.
+- [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx): typed native API for opening, editing, collaborating, and rendering PPTX presentations.
+- [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone formula engine — lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376.
+- [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all three formats.
+
+The per-layer crates (`betteroffice-docx-parse`, `-docx-layout`, `-docx-edit`, `-xlsx-model`, `-xlsx-parse`, `-xlsx-ops`, `-xlsx-render`, `-xlsx-raster`, `-pptx-parse`, `-pptx-edit`, `-pptx-render`, `-ooxml-text`, `-drawingml`) are published for direct use.
+
+## Collaboration
+
+Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the standard Yjs sync-v1 wire protocol used by y-websocket. Room routing, authentication, awareness, and reconnection stay transport concerns, so any reliable binary transport works. Updates flow between the connection and the Rust replica without a second JavaScript `Y.Doc`.
+
+## Docs and demos
+
+- [Documentation](https://docs.betteroffice.dev): guides and API reference.
+- [Live demos](https://demo.betteroffice.dev): DOCX, XLSX, and PPTX editors running in the browser.
 
 ## Migrating from eigenpal
 
-eigenpal was a popular DOCX editor, deprecated when its maintainers moved to a commercial product. BetterOffice offers a very similar public API under Apache 2.0 — an independent implementation, not a fork — so most integrations port with minimal changes.
+eigenpal was a popular DOCX editor, deprecated when its maintainers moved to a commercial product. BetterOffice offers a very similar public API under Apache-2.0 — an independent implementation, not a fork — so most integrations port with minimal changes.
 
-- [Migration guide (eigenpal → BetterOffice)](https://openooxml.org/eigenpal): package mapping, API differences, import diff, FAQ
+- [Migration guide (eigenpal to BetterOffice)](https://openooxml.org/eigenpal): package mapping, API differences, import diff, FAQ.
 
 ## Links
 
-- [Website](https://betteroffice.dev): BetterOffice product home
-- [Documentation](https://docs.betteroffice.dev): docs for all packages
-- [OpenOOXML](https://openooxml.org): the project building the engines
-- [GitHub](https://github.com/openooxml/betteroffice): source code, issues, and roadmap
-- [npm organization](https://www.npmjs.com/org/betteroffice): all published packages
-- [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0): license
+- [Website](https://betteroffice.dev): product home.
+- [GitHub](https://github.com/openooxml/betteroffice): source, issues, and roadmap.
+- [OpenOOXML](https://openooxml.org): the project building the engines.
+- [npm organization](https://www.npmjs.com/org/betteroffice): all published packages.
+- [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0): the license for every package and crate.

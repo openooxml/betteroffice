@@ -7,6 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Pilcrow-stream yrs editing foundation for collaborative DOCX documents."
+readme = "README.md"
 keywords = ["docx", "word", "ooxml", "collaboration"]
 categories = ["text-processing", "data-structures"]
 

@@ -114,13 +114,14 @@ const JSON_LD = {
   applicationCategory: "BusinessApplication",
   operatingSystem: "Web",
   description:
-    "The open-source office suite by the OpenOOXML project. Word-faithful DOCX and XLSX editors for React and JavaScript with real-time collaboration, on native OOXML engines written in Rust.",
+    "The open-source office suite by the OpenOOXML project. DOCX, XLSX and PPTX editors and viewers for React and JavaScript with real-time collaboration, on native OOXML engines written in Rust.",
   offers: {
     "@type": "Offer",
     price: "0",
     priceCurrency: "USD",
   },
   license: "https://www.apache.org/licenses/LICENSE-2.0",
+  softwareHelp: "https://docs.betteroffice.dev",
   creator: {
     "@type": "Organization",
     name: "OpenOOXML",
