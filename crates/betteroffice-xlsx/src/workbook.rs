@@ -841,6 +841,7 @@ impl Workbook {
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet(sheet)?;
             }
+            self.ensure_references_stay_valid(op)?;
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
             xlsx_ops::apply(&mut preview, op)?;
@@ -1333,6 +1334,34 @@ impl Workbook {
 
     fn validate_cell(&self, cell: CellRef) -> Result<()> {
         validate_cell_ref(cell)
+    }
+
+    /// Charts, pivot tables and external links reference sheets by name and
+    /// address, and neither this crate nor the model can rewrite them. Refuse
+    /// the ops that would strand those references rather than write a workbook
+    /// whose parts disagree.
+    fn ensure_references_stay_valid(&self, op: &Op) -> Result<()> {
+        if !matches!(
+            op,
+            Op::RenameSheet { .. }
+                | Op::RemoveSheet { .. }
+                | Op::InsertRows { .. }
+                | Op::DeleteRows { .. }
+                | Op::InsertCols { .. }
+                | Op::DeleteCols { .. }
+        ) {
+            return Ok(());
+        }
+        let Some(part) = self
+            .source_package
+            .as_ref()
+            .and_then(xlsx_parse::PreservedPackage::unpatchable_reference_part)
+        else {
+            return Ok(());
+        };
+        Err(Error::InvalidOperation(format!(
+            "{part} references sheets this edit would move, and it cannot be rewritten"
+        )))
     }
 
     /// Rejects edits aimed at a preserved chartsheet or dialogsheet.

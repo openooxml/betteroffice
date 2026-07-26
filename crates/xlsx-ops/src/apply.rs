@@ -10,8 +10,8 @@ use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, She
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_defined_names,
-    rename_hyperlink_location, rename_sheet_references,
+    remap_defined_names, remap_formulas, remap_hyperlink_locations, remap_hyperlink_range,
+    rename_defined_names, rename_hyperlink_location, rename_sheet_references,
 };
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
@@ -384,6 +384,7 @@ fn insert_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op);
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -405,6 +406,7 @@ fn insert_rows(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -417,6 +419,7 @@ fn delete_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op);
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -448,6 +451,7 @@ fn delete_rows(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -460,6 +464,7 @@ fn insert_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op);
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -481,6 +486,7 @@ fn insert_cols(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -493,6 +499,7 @@ fn delete_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op);
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -524,6 +531,7 @@ fn delete_cols(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }

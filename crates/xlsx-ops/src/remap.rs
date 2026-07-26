@@ -139,6 +139,47 @@ pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
     restores
 }
 
+/// Rewrites defined-name formulas through a row or column op, the same way
+/// cell formulas are. A scoped name resolves unqualified references against
+/// its own sheet; a global name only follows qualified ones.
+pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Option<Op> {
+    let target = structural_target(op)?;
+    if wb.defined_names.is_empty() {
+        return None;
+    }
+    let names: HashMap<String, SheetId> = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
+        .collect();
+
+    let previous = wb.defined_names.clone();
+    let mut rewritten = Vec::with_capacity(previous.len());
+    for defined in &previous {
+        let mut updated = defined.clone();
+        if let Ok(expr) = parse_formula(&defined.formula) {
+            let matches = |ref_sheet: &Option<String>| match ref_sheet {
+                Some(name) => names.get(&name.to_lowercase()).copied() == Some(target),
+                None => defined.local_sheet == Some(target),
+            };
+            let mut changed = false;
+            let formula = transform(&expr, op, &matches, &mut changed).to_formula();
+            if changed && formula.len() <= MAX_FORMULA_BYTES && parse_formula(&formula).is_ok() {
+                updated.formula = formula;
+            }
+        }
+        rewritten.push(updated);
+    }
+    if rewritten == previous {
+        return None;
+    }
+    wb.defined_names = rewritten;
+    Some(Op::SetDefinedNames {
+        defined_names: previous,
+    })
+}
+
 pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
     match remap_span(range, op) {
         Remapped::Unchanged => Some(range),
@@ -853,6 +894,46 @@ mod tests {
             local_sheet: None,
             hidden: false,
         }
+    }
+
+    /// Row and column ops rewrote cell formulas but left defined names on
+    /// their pre-edit addresses.
+    #[test]
+    fn row_insertion_shifts_defined_name_formulas() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![
+            defined("Global", "Data!$A$5"),
+            defined("Elsewhere", "Other!$A$5"),
+            DefinedName {
+                local_sheet: Some(SheetId(0)),
+                ..defined("Scoped", "$A$5")
+            },
+        ];
+        let op = Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        };
+
+        let inverse = remap_defined_names(&mut workbook, &op).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "Data!$A$7");
+        assert_eq!(workbook.defined_names[1].formula, "Other!$A$5");
+        assert_eq!(workbook.defined_names[2].formula, "$A$7");
+        assert!(matches!(inverse, Op::SetDefinedNames { .. }));
+    }
+
+    #[test]
+    fn row_deletion_collapses_defined_names_onto_ref_errors() {
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![defined("Global", "Data!$A$1")];
+        let op = Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        };
+
+        remap_defined_names(&mut workbook, &op).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "#REF!");
     }
 
     #[test]

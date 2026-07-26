@@ -165,6 +165,20 @@ impl PreservedPackage {
         self.sheets.len()
     }
 
+    /// A preserved part that names sheets or addresses this crate never
+    /// patches, so a rename, removal or axis edit would strand it.
+    #[doc(hidden)]
+    pub fn unpatchable_reference_part(&self) -> Option<&str> {
+        const REFERENCE_BEARING: [&str; 3] = ["xl/charts/", "xl/pivottables/", "xl/pivotcache/"];
+        self.parts.iter().find_map(|(path, _)| {
+            let normalized = path.trim_start_matches('/').to_ascii_lowercase();
+            REFERENCE_BEARING
+                .iter()
+                .any(|prefix| normalized.starts_with(prefix))
+                .then_some(path.as_str())
+        })
+    }
+
     /// False for chartsheets, dialogsheets and any other non-worksheet sheet.
     #[doc(hidden)]
     pub fn source_sheet_is_worksheet(&self, index: usize) -> bool {

@@ -3142,6 +3142,51 @@ fn collaborative_materialization_retains_source_package() {
     assert!(!after.contains_key("xl/calcChain.xml"));
 }
 
+/// Chart and pivot references into this workbook cannot be rewritten, so the
+/// ops that would strand them are refused rather than silently retargeted.
+#[test]
+fn refuses_structural_ops_that_would_strand_chart_references() {
+    let mut parts = ooxml_opc::unzip_parts(&preservation_fixture()).unwrap();
+    parts.push((
+        "xl/charts/chart1.xml".to_owned(),
+        br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#.to_vec(),
+    ));
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RemoveSheet { index: 0 },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+    ] {
+        let mut workbook = Workbook::open(&original).unwrap();
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains("chart1.xml")),
+            "{op:?} was allowed: {error:?}"
+        );
+    }
+
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
 #[test]
 fn non_worksheet_sheets_stay_typed_and_byte_identical() {
     let original = non_worksheet_fixture();
