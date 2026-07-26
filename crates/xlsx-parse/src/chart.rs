@@ -16,7 +16,7 @@ use xlsx_model::{
     SheetChart,
 };
 
-use crate::tree::{Element, parse_tree, splice};
+use crate::tree::{Element, Part, parse_tree};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
@@ -393,7 +393,8 @@ fn slot_kind(local: &str) -> Option<ChartRefKind> {
 /// alone. Refuses when the part no longer holds the references the model was
 /// built from, rather than writing them into the wrong slots.
 pub(crate) fn patch_chart_refs(part: &[u8], refs: &[ChartRef]) -> Result<Vec<u8>, ParseError> {
-    let sites = ref_sites(&parse_tree(part)?)?;
+    let source = Part::decode(part)?;
+    let sites = ref_sites(&source.tree()?)?;
     if sites.len() != refs.len() {
         return Err(ParseError::UnsupportedEdit(format!(
             "chart part holds {} references but the model carries {}",
@@ -416,7 +417,7 @@ pub(crate) fn patch_chart_refs(part: &[u8], refs: &[ChartRef]) -> Result<Vec<u8>
     if edits.is_empty() {
         return Ok(part.to_vec());
     }
-    splice(part, &edits)
+    source.splice(&edits)
 }
 
 /// Write moved anchors back into their drawing part. Only `col` and `row`
@@ -425,7 +426,8 @@ pub(crate) fn patch_drawing_anchors(
     part: &[u8],
     anchors: &[(usize, ChartAnchor)],
 ) -> Result<Vec<u8>, ParseError> {
-    let root = parse_tree(part)?;
+    let source = Part::decode(part)?;
+    let root = source.tree()?;
     let indexed = root.child_elements().filter(is_anchor).collect::<Vec<_>>();
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     for (index, anchor) in anchors {
@@ -449,7 +451,7 @@ pub(crate) fn patch_drawing_anchors(
         return Ok(part.to_vec());
     }
     edits.sort_by_key(|(span, _)| span.start);
-    splice(part, &edits)
+    source.splice(&edits)
 }
 
 fn push_cell_edits(

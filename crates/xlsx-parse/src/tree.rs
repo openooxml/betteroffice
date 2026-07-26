@@ -182,13 +182,182 @@ fn split_prefix(name: &str) -> (&str, &str) {
     }
 }
 
+/// how a part's bytes carry its text. opc permits utf-8 and utf-16 only, and a
+/// rewrite is written back in the encoding it was read in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Encoding {
+    Utf8 { bom: bool },
+    Utf16 { big_endian: bool, bom: bool },
+}
+
+impl Encoding {
+    fn encode(self, text: &str) -> Vec<u8> {
+        match self {
+            Encoding::Utf8 { bom } => {
+                let mut out = Vec::with_capacity(text.len() + 3);
+                if bom {
+                    out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+                }
+                out.extend_from_slice(text.as_bytes());
+                out
+            }
+            Encoding::Utf16 { big_endian, bom } => {
+                let mut out = Vec::with_capacity(text.len() * 2 + 2);
+                if bom {
+                    out.extend_from_slice(if big_endian {
+                        &[0xFE, 0xFF]
+                    } else {
+                        &[0xFF, 0xFE]
+                    });
+                }
+                for unit in text.encode_utf16() {
+                    out.extend_from_slice(&if big_endian {
+                        unit.to_be_bytes()
+                    } else {
+                        unit.to_le_bytes()
+                    });
+                }
+                out
+            }
+        }
+    }
+}
+
+/// a part decoded to utf-8, remembering the encoding its bytes were in. every
+/// span an [`Element`] records indexes this decoded text, so a rewrite splices
+/// there and is re-encoded on the way out.
+pub(crate) struct Part {
+    text: String,
+    encoding: Encoding,
+}
+
+impl Part {
+    pub(crate) fn decode(data: &[u8]) -> Result<Self, ParseError> {
+        if data.len() > MAX_TREE_BYTES {
+            return Err(ParseError::TreeTooLarge);
+        }
+        let (encoding, body) = detect_encoding(data)?;
+        let text = match encoding {
+            Encoding::Utf8 { .. } => std::str::from_utf8(body)
+                .map(str::to_owned)
+                .map_err(|_| ParseError::Malformed("part is not valid utf-8".into()))?,
+            Encoding::Utf16 { big_endian, .. } => decode_utf16(body, big_endian)?,
+        };
+        if text.len() > MAX_TREE_BYTES {
+            return Err(ParseError::TreeTooLarge);
+        }
+        reject_foreign_declared_encoding(&text)?;
+        Ok(Self { text, encoding })
+    }
+
+    pub(crate) fn tree(&self) -> Result<Element, ParseError> {
+        parse_text(&self.text)
+    }
+
+    /// rewrite disjoint spans of the decoded text and re-encode the result.
+    pub(crate) fn splice(&self, edits: &[(Range<usize>, String)]) -> Result<Vec<u8>, ParseError> {
+        let spliced = splice_text(&self.text, edits)?;
+        Ok(self.encoding.encode(&spliced))
+    }
+}
+
+/// The byte-order mark, or the shape of the first characters when there is
+/// none. `FF FE 00 00` is utf-32, which opc does not permit.
+fn detect_encoding(data: &[u8]) -> Result<(Encoding, &[u8]), ParseError> {
+    Ok(match data {
+        [0xFF, 0xFE, 0x00, 0x00, ..] | [0x00, 0x00, 0xFE, 0xFF, ..] => {
+            return Err(ParseError::Malformed("part is not utf-8 or utf-16".into()));
+        }
+        [0xEF, 0xBB, 0xBF, rest @ ..] => (Encoding::Utf8 { bom: true }, rest),
+        [0xFF, 0xFE, rest @ ..] => (
+            Encoding::Utf16 {
+                big_endian: false,
+                bom: true,
+            },
+            rest,
+        ),
+        [0xFE, 0xFF, rest @ ..] => (
+            Encoding::Utf16 {
+                big_endian: true,
+                bom: true,
+            },
+            rest,
+        ),
+        [0x3C, 0x00, ..] => (
+            Encoding::Utf16 {
+                big_endian: false,
+                bom: false,
+            },
+            data,
+        ),
+        [0x00, 0x3C, ..] => (
+            Encoding::Utf16 {
+                big_endian: true,
+                bom: false,
+            },
+            data,
+        ),
+        _ => (Encoding::Utf8 { bom: false }, data),
+    })
+}
+
+fn decode_utf16(data: &[u8], big_endian: bool) -> Result<String, ParseError> {
+    if !data.len().is_multiple_of(2) {
+        return Err(ParseError::Malformed(
+            "utf-16 part has an odd byte length".into(),
+        ));
+    }
+    let units = data.chunks_exact(2).map(|pair| {
+        let pair = [pair[0], pair[1]];
+        if big_endian {
+            u16::from_be_bytes(pair)
+        } else {
+            u16::from_le_bytes(pair)
+        }
+    });
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .map_err(|_| ParseError::Malformed("utf-16 part has an unpaired surrogate".into()))
+}
+
+/// An xml declaration naming something other than utf-8 or utf-16 would make
+/// the bytes we write back mean something else, so it is refused.
+fn reject_foreign_declared_encoding(text: &str) -> Result<(), ParseError> {
+    let Some(declaration) = text
+        .strip_prefix("<?xml")
+        .and_then(|rest| rest.split_once("?>"))
+        .map(|(declaration, _)| declaration)
+    else {
+        return Ok(());
+    };
+    let Some(value) = declaration.split_once("encoding").and_then(|(_, rest)| {
+        let rest = rest.trim_start().strip_prefix('=')?.trim_start();
+        let quote = rest.chars().next()?;
+        matches!(quote, '"' | '\'')
+            .then(|| rest[1..].split(quote).next())
+            .flatten()
+    }) else {
+        return Ok(());
+    };
+    if ["utf-8", "utf8", "utf-16", "utf16", "utf-16le", "utf-16be"]
+        .iter()
+        .any(|known| value.eq_ignore_ascii_case(known))
+    {
+        return Ok(());
+    }
+    Err(ParseError::Malformed(format!(
+        "part declares the unsupported encoding {value}"
+    )))
+}
+
 /// parse a whole part into an element tree. rejects doctypes outright and caps
 /// depth, node count and total text so hostile markup cannot exhaust memory.
 pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
-    if data.len() > MAX_TREE_BYTES {
-        return Err(ParseError::TreeTooLarge);
-    }
-    let mut reader = Reader::from_reader(data);
+    Part::decode(data)?.tree()
+}
+
+fn parse_text(text: &str) -> Result<Element, ParseError> {
+    let mut reader = Reader::from_str(text);
     let config = reader.config_mut();
     config.expand_empty_elements = false;
     config.check_end_names = true;
@@ -200,11 +369,9 @@ pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
     let mut stack: Vec<Element> = Vec::new();
     let mut namespaces = Namespaces::default();
     let mut root: Option<Element> = None;
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
         let opened = reader.buffer_position() as usize;
-        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        let event = reader.read_event().map_err(xml_err)?;
         let closed = reader.buffer_position() as usize;
         match event {
             Event::Start(start) => {
@@ -336,23 +503,26 @@ fn push_text(text: &str, stack: &mut [Element], budget: &mut Budget) -> Result<(
     Ok(())
 }
 
-/// rewrite disjoint byte spans of `source` in one pass. spans must be sorted
-/// and non-overlapping, which every caller derives from document order.
-pub(crate) fn splice(
-    source: &[u8],
-    edits: &[(Range<usize>, String)],
-) -> Result<Vec<u8>, ParseError> {
-    let mut out = Vec::with_capacity(source.len());
+/// rewrite disjoint spans of `source` in one pass. spans must be sorted and
+/// non-overlapping, which every caller derives from document order.
+fn splice_text(source: &str, edits: &[(Range<usize>, String)]) -> Result<String, ParseError> {
+    let mut out = String::with_capacity(source.len());
     let mut cursor = 0usize;
     for (span, replacement) in edits {
         if span.start < cursor || span.end > source.len() || span.start > span.end {
             return Err(ParseError::Malformed("overlapping rewrite span".into()));
         }
-        out.extend_from_slice(&source[cursor..span.start]);
-        out.extend_from_slice(escape_text(replacement).as_bytes());
+        let head = source
+            .get(cursor..span.start)
+            .ok_or_else(|| ParseError::Malformed("rewrite span split a character".into()))?;
+        out.push_str(head);
+        out.push_str(&escape_text(replacement));
         cursor = span.end;
     }
-    out.extend_from_slice(&source[cursor..]);
+    let tail = source
+        .get(cursor..)
+        .ok_or_else(|| ParseError::Malformed("rewrite span split a character".into()))?;
+    out.push_str(tail);
     Ok(out)
 }
 

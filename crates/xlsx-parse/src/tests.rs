@@ -1874,6 +1874,71 @@ fn refuses_structural_edits_while_a_chart_part_is_not_covered() {
     }
 }
 
+/// OPC permits utf-8 and utf-16 alike. A utf-16 chart part must parse, and a
+/// rewrite must come back in the encoding it was authored in.
+#[test]
+fn reads_and_rewrites_a_utf16_chart_part() {
+    let text = String::from_utf8(CHART.to_vec()).unwrap();
+    for (label, big_endian, bom) in [
+        ("le+bom", false, true),
+        ("be+bom", true, true),
+        ("le", false, false),
+        ("be", true, false),
+    ] {
+        let encoded = encode_utf16(&text, big_endian, bom);
+        let mut parts = charted_package();
+        set_part(&mut parts, "xl/charts/chart1.xml", &encoded);
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let charts = &parsed.workbook.sheets[0].charts;
+        assert_eq!(charts.len(), 1, "{label}");
+        assert_eq!(charts[0].refs.len(), 3, "{label}");
+        assert_eq!(parsed.package.unpatchable_reference_part(), None, "{label}");
+
+        let mut refs = charts[0].refs.clone();
+        refs[1].formula = "Data!$A$2:$A$5".to_owned();
+        let patched = crate::chart::patch_chart_refs(&encoded, &refs).unwrap();
+        assert_eq!(
+            patched,
+            encode_utf16(
+                &text.replace("Data!$A$2:$A$4", "Data!$A$2:$A$5"),
+                big_endian,
+                bom
+            ),
+            "{label}"
+        );
+        assert!(
+            crate::chart_space(&encoded, &Default::default()).is_some(),
+            "{label}"
+        );
+    }
+}
+
+/// A part whose declaration names an encoding we cannot write back is refused
+/// rather than reinterpreted as utf-8.
+#[test]
+fn refuses_a_part_declaring_a_foreign_encoding() {
+    let source = br#"<?xml version="1.0" encoding="windows-1252"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"/>"#;
+    assert!(matches!(
+        crate::chart::patch_chart_refs(source, &[]).unwrap_err(),
+        ParseError::Malformed(message) if message.contains("windows-1252")
+    ));
+}
+
+fn encode_utf16(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    if bom {
+        out.extend_from_slice(if big_endian { b"\xFE\xFF" } else { b"\xFF\xFE" });
+    }
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&if big_endian {
+            unit.to_be_bytes()
+        } else {
+            unit.to_le_bytes()
+        });
+    }
+    out
+}
+
 fn set_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: &[u8]) {
     let slot = parts
         .iter_mut()
