@@ -145,6 +145,22 @@ pub enum Primitive {
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
     },
+    /// A plotted chart: one addressable object whose parts paint clipped to
+    /// its rectangle, and whose `label` is the screen-reader summary.
+    Chart {
+        object_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_id: Option<String>,
+        name: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: String,
+        primitives: Vec<Primitive>,
+        #[serde(default, skip_serializing_if = "Transform::is_identity")]
+        transform: Transform,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

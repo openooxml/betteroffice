@@ -1,4 +1,5 @@
 import type {
+  ChartPrimitive,
   GeometryPathCommand,
   ImagePrimitive,
   Paint,
@@ -79,10 +80,24 @@ async function paintPrimitive(
       case 'placeholder':
         paintPlaceholder(ctx, primitive);
         break;
+      case 'chart':
+        await paintChart(ctx, primitive, options);
+        break;
     }
   } finally {
     ctx.restore();
   }
+}
+
+async function paintChart(
+  ctx: CanvasRenderingContext2D,
+  chart: ChartPrimitive,
+  options: PaintSlideOptions
+): Promise<void> {
+  ctx.beginPath();
+  ctx.rect(chart.x, chart.y, chart.w, chart.h);
+  ctx.clip();
+  for (const primitive of chart.primitives) await paintPrimitive(ctx, primitive, options);
 }
 
 function applyTransform(

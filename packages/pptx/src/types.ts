@@ -316,11 +316,21 @@ export interface PlaceholderPrimitive extends PrimitiveBase {
   label?: string;
 }
 
+/** A plotted chart. Its parts paint clipped to the chart rectangle, and
+ *  `label` is the screen-reader summary of the whole chart. */
+export interface ChartPrimitive extends PrimitiveBase {
+  kind: 'chart';
+  name: string;
+  label: string;
+  primitives: SlidePrimitive[];
+}
+
 export type SlidePrimitive =
   | ShapePrimitive
   | ImagePrimitive
   | TextBoxPrimitive
-  | PlaceholderPrimitive;
+  | PlaceholderPrimitive
+  | ChartPrimitive;
 
 export interface SlideDisplayList {
   contractVersion: number;

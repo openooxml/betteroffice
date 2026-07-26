@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use ooxml_drawingml::chart::PlotRect;
 use ooxml_drawingml::{
     ShapeFill, ShapeOutline, Theme, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_theme_font_ref,
@@ -7,12 +8,13 @@ use ooxml_drawingml::{
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    GraphicFrameData, ParagraphProperties, Placeholder, PptxPackage, RunProperties, ShapeNode,
-    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    ChartSpace, GraphicFrameData, ParagraphProperties, Placeholder, PptxPackage, RunProperties,
+    ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, Paint, PositionedGlyph,
     PositionedTextLine, PositionedTextRun, Primitive, Stroke, SurfaceDisplayList, TextAlign,
@@ -31,6 +33,8 @@ const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
+/// Chart parts one slide may draw, shared across its charts.
+pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
 
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -175,6 +179,7 @@ impl SlideRenderer {
         let height = emu_to_px(deck.height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
+            package,
             theme,
             master,
             layout,
@@ -183,6 +188,7 @@ impl SlideRenderer {
             hit_regions: Vec::new(),
             shape_count: 0,
             line_count: 0,
+            chart_budget: MAX_CHART_PRIMITIVES,
         };
         let root_space = Space::root();
         let show_master = parsed_slide.is_none_or(|slide| slide.show_master_shapes)
@@ -294,6 +300,7 @@ impl RenderedSlide {
 
 struct LayoutBuilder<'a> {
     renderer: &'a SlideRenderer,
+    package: &'a PptxPackage,
     theme: &'a Theme,
     master: Option<&'a SlideMaster>,
     layout: Option<&'a SlideLayout>,
@@ -302,9 +309,10 @@ struct LayoutBuilder<'a> {
     hit_regions: Vec<HitRegion>,
     shape_count: usize,
     line_count: usize,
+    chart_budget: usize,
 }
 
-impl LayoutBuilder<'_> {
+impl<'a> LayoutBuilder<'a> {
     fn charge_shape(&mut self) -> Result<(), RenderError> {
         self.shape_count += 1;
         if self.shape_count > MAX_RENDER_SHAPES {
@@ -415,17 +423,14 @@ impl LayoutBuilder<'_> {
                 });
             }
             ShapeKind::GraphicFrame => {
-                self.primitives.push(Primitive::Placeholder {
-                    object_id: shape.source_id,
-                    shape_id: Some(stable_id.clone()),
-                    name: shape.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    label: graphic_label(shape.graphic.as_ref()),
+                self.render_graphic_frame(
+                    shape.source_id,
+                    &stable_id,
+                    &shape.name,
+                    rect,
                     transform,
-                });
+                    shape.graphic.as_ref(),
+                )?;
             }
             ShapeKind::Group => unreachable!(),
         }
@@ -529,17 +534,14 @@ impl LayoutBuilder<'_> {
                 });
             }
             ShapeNode::GraphicFrame(value) => {
-                self.primitives.push(Primitive::Placeholder {
-                    object_id: base.id,
-                    shape_id: Some(stable_id.to_owned()),
-                    name: base.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    label: graphic_label(Some(&value.data)),
+                self.render_graphic_frame(
+                    base.id,
+                    stable_id,
+                    &base.name,
+                    rect,
                     transform,
-                });
+                    Some(&value.data),
+                )?;
             }
             ShapeNode::Group(_) => unreachable!(),
         }
@@ -568,6 +570,69 @@ impl LayoutBuilder<'_> {
             text: text_hit,
         });
         Ok(())
+    }
+
+    /// Plots a chart frame, or keeps the placeholder for graphics that carry
+    /// no drawable data.
+    fn render_graphic_frame(
+        &mut self,
+        object_id: u32,
+        shape_id: &str,
+        name: &str,
+        rect: PxRect,
+        transform: Transform,
+        graphic: Option<&GraphicFrameData>,
+    ) -> Result<(), RenderError> {
+        if let Some(space) = self.chart_space(graphic) {
+            let frame = ChartFrame {
+                object_id,
+                shape_id: Some(shape_id),
+                name,
+                rect: PlotRect {
+                    x: f64::from(rect.x),
+                    y: f64::from(rect.y),
+                    w: f64::from(rect.w),
+                    h: f64::from(rect.h),
+                },
+                transform,
+            };
+            let (renderer, theme) = (self.renderer, self.theme);
+            let chart = chart_primitive(frame, space, self.chart_budget, &mut |text| {
+                chart_text_primitive(renderer, theme, shape_id, text)
+            })?;
+            if let Primitive::Chart { primitives, .. } = &chart {
+                self.chart_budget -= primitives.len();
+            }
+            self.primitives.push(chart);
+            return Ok(());
+        }
+        self.primitives.push(Primitive::Placeholder {
+            object_id,
+            shape_id: Some(shape_id.to_owned()),
+            name: name.to_owned(),
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            label: graphic_label(graphic),
+            transform,
+        });
+        Ok(())
+    }
+
+    fn chart_space(&self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
+        let GraphicFrameData::Chart {
+            part_path: Some(part_path),
+            ..
+        } = graphic?
+        else {
+            return None;
+        };
+        self.package
+            .charts
+            .iter()
+            .find(|part| &part.part_path == part_path)
+            .map(|part| &part.chart)
     }
 
     fn render_text_box(
@@ -985,6 +1050,94 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
         color,
+    })
+}
+
+/// One shaped line of chart text, in the deck's minor font at the weight and
+/// pixel size the plot geometry asked for.
+fn chart_text_primitive(
+    renderer: &SlideRenderer,
+    theme: &Theme,
+    shape_id: &str,
+    text: ChartText<'_>,
+) -> Result<Primitive, RenderError> {
+    let bold = text.font.weight >= 600;
+    let family = resolve_theme_font_ref(Some(theme), "+mn-lt");
+    let face = renderer.resolve_face(&family, bold, false)?;
+    let size_px = safe_geometry(text.font.size_px as f32).clamp(1.0, 4_096.0);
+    let shaped = shape(&renderer.fonts, face.id, text.text, size_px, &[])
+        .map_err(|error| RenderError::Font(error.to_string()))?;
+    let metrics = renderer
+        .fonts
+        .metrics(face.id)
+        .map_err(|error| RenderError::Font(error.to_string()))?;
+    let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
+    let x = safe_geometry(text.x as f32);
+    let baseline = safe_geometry(text.baseline_y as f32);
+    let mut glyphs = Vec::with_capacity(shaped.len());
+    let mut cursor = 0.0_f32;
+    for glyph in &shaped {
+        glyphs.push(PositionedGlyph {
+            glyph_id: glyph.glyph_id,
+            cluster: glyph.cluster,
+            x: x + cursor,
+            advance: glyph.x_advance,
+            x_offset: glyph.x_offset,
+            y_offset: baseline + glyph.y_offset,
+        });
+        cursor += glyph.x_advance;
+    }
+    let run = PositionedTextRun {
+        text: text.text.to_owned(),
+        start: 0,
+        end: utf16_len(text.text),
+        x,
+        width: cursor.max(0.0),
+        font_id: face.id.to_u32(),
+        font_family: face.family.clone(),
+        font_size_px: size_px,
+        bold,
+        italic: false,
+        underline: false,
+        color: text.color.to_owned(),
+        glyphs,
+    };
+    let width = run.width;
+    Ok(Primitive::TextBox {
+        object_id: text.object_id,
+        shape_id: Some(shape_id.to_owned()),
+        story_id: None,
+        x,
+        y: baseline - line_box.ascent,
+        w: safe_geometry(text.width as f32).max(width),
+        h: line_box.height(),
+        anchor: TextAnchor::Top,
+        paragraphs: vec![TextParagraph {
+            align: Some(TextAlign::Left),
+            level: 0,
+            runs: vec![TextRun {
+                text: text.text.to_owned(),
+                font_family: face.family.clone(),
+                font_size_pt: size_px * 72.0 / 96.0,
+                bold,
+                italic: false,
+                underline: false,
+                color: text.color.to_owned(),
+            }],
+        }],
+        lines: vec![PositionedTextLine {
+            x,
+            y: baseline - line_box.ascent,
+            width,
+            height: line_box.height(),
+            baseline,
+            start: 0,
+            end: run.end,
+            runs: vec![run],
+            caret_stops: Vec::new(),
+        }],
+        overflow: false,
+        transform: Transform::default(),
     })
 }
 
@@ -1814,6 +1967,7 @@ mod tests {
     use super::*;
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+    const CHART_FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/chart-deck.pptx");
     const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
     fn renderer() -> SlideRenderer {
@@ -1996,6 +2150,128 @@ mod tests {
             })
             .unwrap();
         assert!(font_size < 40.0);
+    }
+
+    fn chart_slide(index: usize) -> Vec<Primitive> {
+        let package = pptx_parse::parse_pptx(CHART_FIXTURE).unwrap();
+        let session = DeckSession::open(CHART_FIXTURE, 8_004 + index as u64).unwrap();
+        renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), index)
+            .unwrap()
+            .display_list
+            .primitives
+    }
+
+    #[test]
+    fn a_chart_frame_plots_with_the_deck_theme_and_an_aria_label() {
+        let primitives = chart_slide(0);
+        let (label, parts, rect) = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Chart {
+                    label,
+                    primitives,
+                    x,
+                    y,
+                    w,
+                    h,
+                    name,
+                    shape_id: Some(_),
+                    ..
+                } if name == "Revenue chart" => Some((label, primitives, (*x, *y, *w, *h))),
+                _ => None,
+            })
+            .expect("the chart frame plots");
+        assert_eq!(label, "Revenue, column chart, 2 series, 3 categories");
+        assert_eq!(rect, (96.0, 96.0, 576.0, 336.0));
+        let fills = parts
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Shape {
+                    fill: Some(Paint::Solid { color }),
+                    ..
+                } => Some(color.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(fills.contains(&"#6254E7"), "theme accent1 bars are missing");
+        assert!(fills.contains(&"#1FA97A"), "theme accent2 bars are missing");
+        let text = parts
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::TextBox { lines, .. } => Some(
+                    lines
+                        .iter()
+                        .flat_map(|line| line.runs.iter())
+                        .map(|run| run.text.clone())
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(text.contains(&"Revenue".to_owned()));
+        assert!(text.contains(&"North".to_owned()));
+        assert!(text.contains(&"Q1".to_owned()));
+        assert!(text.contains(&"12".to_owned()), "data labels are missing");
+        assert!(
+            parts.iter().any(|primitive| matches!(
+                primitive,
+                Primitive::TextBox { lines, .. }
+                    if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty())
+            )),
+            "chart text is not shaped"
+        );
+    }
+
+    #[test]
+    fn a_graphic_frame_without_a_chart_part_keeps_its_placeholder() {
+        assert!(chart_slide(0).iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Placeholder { name, label, .. }
+                if name == "Broken chart" && label.as_deref() == Some("Chart")
+        )));
+    }
+
+    #[test]
+    fn a_chart_inside_a_group_plots_in_the_group_space() {
+        let primitives = chart_slide(1);
+        let (label, parts) = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Chart {
+                    label, primitives, ..
+                } => Some((label, primitives)),
+                _ => None,
+            })
+            .expect("the grouped chart plots");
+        assert_eq!(label, "Untitled chart, pie chart, 1 series, 2 categories");
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|primitive| matches!(primitive, Primitive::Shape { geometry, .. } if geometry == "custom"))
+                .count(),
+            2
+        );
+        assert!(parts.iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Shape { fill: Some(Paint::Solid { color }), .. } if color == "#E7A954"
+        )));
+    }
+
+    #[test]
+    fn a_deck_without_charts_plots_no_chart_primitives() {
+        let package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_009).unwrap();
+        let rendered = renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap();
+        assert!(
+            !rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(primitive, Primitive::Chart { .. }))
+        );
     }
 
     #[test]

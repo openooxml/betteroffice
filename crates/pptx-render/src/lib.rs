@@ -1,13 +1,19 @@
 //! PPTX display-list compiler.
 
+mod chart;
 mod display_list;
 mod layout;
 
 pub use display_list::*;
 pub use layout::*;
 
+use ooxml_drawingml::chart::PlotRect;
+use pptx_parse::ChartSpace;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+
+use crate::chart::{ChartFrame, chart_primitive};
+use crate::layout::MAX_CHART_PRIMITIVES;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,9 +57,13 @@ enum ComposedShape {
         #[serde(flatten)]
         base: ShapeBase,
     },
-    ChartPlaceholder {
+    #[serde(rename = "chart", alias = "chartPlaceholder")]
+    Chart {
         #[serde(flatten)]
         base: ShapeBase,
+        /// Absent for hosts that compose a chart frame without its part.
+        #[serde(default)]
+        chart: Option<Box<ChartSpace>>,
     },
     Unknown {
         #[serde(flatten)]
@@ -203,9 +213,10 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             ComposedShape::TablePlaceholder { base } => {
                 primitives.push(placeholder(base, Some("Table")))
             }
-            ComposedShape::ChartPlaceholder { base } => {
-                primitives.push(placeholder(base, Some("Chart")))
-            }
+            ComposedShape::Chart { base, chart } => match chart {
+                Some(chart) => primitives.push(composed_chart(base, &chart)),
+                None => primitives.push(placeholder(base, Some("Chart"))),
+            },
             ComposedShape::Unknown { base } => primitives.push(placeholder(base, None)),
         }
     }
@@ -245,6 +256,52 @@ fn transform(base: &ShapeBase) -> Transform {
         flip_h: base.flip_h,
         flip_v: base.flip_v,
     }
+}
+
+/// The composed contract carries no fonts, so chart text is emitted the way
+/// every other run on this path is: paragraphs the host lays out itself.
+fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
+    let frame = ChartFrame {
+        object_id: base.id,
+        shape_id: None,
+        name: &base.name,
+        rect: PlotRect {
+            x: f64::from(base.rect.x),
+            y: f64::from(base.rect.y),
+            w: f64::from(base.rect.w),
+            h: f64::from(base.rect.h),
+        },
+        transform: transform(&base),
+    };
+    let plotted = chart_primitive(frame, chart, MAX_CHART_PRIMITIVES, &mut |text| {
+        Ok(Primitive::TextBox {
+            object_id: text.object_id,
+            shape_id: None,
+            story_id: None,
+            x: text.x as f32,
+            y: (text.baseline_y - text.font.size_px) as f32,
+            w: text.width as f32,
+            h: (text.font.size_px * 1.25) as f32,
+            anchor: TextAnchor::Top,
+            paragraphs: vec![TextParagraph {
+                align: Some(TextAlign::Left),
+                level: 0,
+                runs: vec![TextRun {
+                    text: text.text.to_owned(),
+                    font_family: text.font.family.to_owned(),
+                    font_size_pt: (text.font.size_px * 72.0 / 96.0) as f32,
+                    bold: text.font.weight >= 600,
+                    italic: false,
+                    underline: false,
+                    color: text.color.to_owned(),
+                }],
+            }],
+            lines: Vec::new(),
+            overflow: false,
+            transform: Transform::default(),
+        })
+    });
+    plotted.unwrap_or_else(|_| placeholder(base, Some("Chart")))
 }
 
 fn placeholder(base: ShapeBase, label: Option<&str>) -> Primitive {
@@ -354,6 +411,60 @@ mod tests {
         assert_eq!(output["primitives"][1]["kind"], "textBox");
         assert_eq!(output["primitives"][1]["objectId"], 7);
         assert_eq!(output["primitives"][1]["anchor"], "center");
+    }
+
+    #[test]
+    fn a_composed_chart_compiles_into_a_labelled_chart_primitive() {
+        let json = r##"{
+          "widthPx":320,"heightPx":180,
+          "shapes":[{
+            "kind":"chart","id":4,"name":"Revenue chart",
+            "rect":{"x":10,"y":20,"w":300,"h":150},"rotationDeg":0,
+            "chart":{
+              "chartType":"column","title":"Revenue",
+              "legend":{"position":"right","visible":true},
+              "series":[{"name":"North","categories":["Q1","Q2"],"values":[3,1],"color":"#6254E7"}],
+              "plotGroups":[{"chartType":"column","axisIds":[],"varyColors":false,
+                "showDataLabels":true,
+                "series":[{"name":"North","categories":["Q1","Q2"],"values":[3,1],"color":"#6254E7"}]}]
+            }
+          }]
+        }"##;
+
+        let output: serde_json::Value =
+            serde_json::from_str(&compile_json(json).expect("compile")).expect("json");
+        let chart = &output["primitives"][0];
+        assert_eq!(chart["kind"], "chart");
+        assert_eq!(
+            chart["label"],
+            "Revenue, column chart, 1 series, 2 categories"
+        );
+        let parts = chart["primitives"].as_array().expect("chart parts");
+        assert!(parts.iter().any(|part| part["fill"]["color"] == "#6254E7"));
+        assert!(
+            parts
+                .iter()
+                .any(|part| { part["paragraphs"][0]["runs"][0]["text"] == "Revenue" })
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| { part["paragraphs"][0]["runs"][0]["text"] == "3" })
+        );
+    }
+
+    #[test]
+    fn a_composed_chart_without_its_part_keeps_the_placeholder() {
+        for kind in ["chart", "chartPlaceholder"] {
+            let json = format!(
+                r#"{{"widthPx":320,"heightPx":180,"shapes":[{{"kind":"{kind}","id":4,
+                   "name":"Chart","rect":{{"x":0,"y":0,"w":10,"h":10}},"rotationDeg":0}}]}}"#
+            );
+            let output: serde_json::Value =
+                serde_json::from_str(&compile_json(&json).expect("compile")).expect("json");
+            assert_eq!(output["primitives"][0]["kind"], "placeholder", "{kind}");
+            assert_eq!(output["primitives"][0]["label"], "Chart", "{kind}");
+        }
     }
 
     #[test]
