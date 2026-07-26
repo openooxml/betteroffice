@@ -732,6 +732,94 @@ fn preserved_shared_strings_pair_duplicate_values_in_order() {
     assert!(written.contains(&format!("{rich_item}<si><t>Dup</t></si>")));
 }
 
+fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
+    String::from_utf8(
+        parts
+            .iter()
+            .find(|(path, _)| path == "[Content_Types].xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap()
+}
+
+/// A part typed by `<Default Extension=…>` must keep that type; inventing an
+/// override retypes chartsheets and macro-enabled workbooks.
+#[test]
+fn keeps_content_types_resolved_through_default_extensions() {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/vnd.ms-excel.worksheet+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>"#.to_vec(),
+    ));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let types = content_types_text(&saved);
+
+    assert!(types.contains("application/vnd.ms-excel.sheet.macroEnabled.main+xml"));
+    assert!(
+        !types.contains("spreadsheetml.worksheet+xml"),
+        "worksheet was retyped away from its Default: {types}"
+    );
+    assert!(
+        !types.contains(r#"PartName="/xl/worksheets/sheet1.xml""#),
+        "redundant override added over a Default: {types}"
+    );
+}
+
+/// `saturating_add` handed every new sheet `u32::MAX` once the source used it.
+#[test]
+fn allocates_distinct_sheet_ids_past_the_maximum() {
+    let workbook_xml = format!(
+        r#"<workbook><sheets><sheet name="Sheet1" sheetId="{}" r:id="rId1"/></sheets></workbook>"#,
+        u32::MAX
+    );
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = ("xl/workbook.xml".to_owned(), workbook_xml.into_bytes());
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets.push(xlsx_model::Sheet::new("Added"));
+    workbook.sheets.push(xlsx_model::Sheet::new("AlsoAdded"));
+    let saved = crate::serialize_workbook_with_package_and_origins(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None, None],
+    )
+    .unwrap();
+
+    let written = String::from_utf8(
+        saved
+            .iter()
+            .find(|(path, _)| path == "xl/workbook.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    let mut ids = written
+        .match_indices("sheetId=\"")
+        .map(|(index, needle)| {
+            let rest = &written[index + needle.len()..];
+            rest[..rest.find('"').unwrap()].to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 3);
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "duplicate sheetId in {written}");
+}
+
 /// `<sst/>` and `<styleSheet/>` are schema-valid; capture must treat a
 /// self-closing root as an empty template rather than a missing one.
 #[test]

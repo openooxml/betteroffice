@@ -165,7 +165,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         &mut used_relationship_ids,
         &mut used_paths,
         &worksheet_relationship_type,
-    );
+    )?;
     let shared_strings = have_sst.then(|| {
         plan_part(
             package.shared_strings.as_ref(),
@@ -306,21 +306,47 @@ struct PlannedPart {
     relationship: Relationship,
 }
 
+/// Hands out `sheetId` values that collide with no source sheet, continuing
+/// past the highest source id before reusing gaps.
+struct SheetIds {
+    used: HashSet<u32>,
+    next: u64,
+}
+
+impl SheetIds {
+    fn new(package: &PreservedPackage) -> Self {
+        let used = package
+            .sheets
+            .iter()
+            .map(|sheet| sheet.sheet_id)
+            .collect::<HashSet<_>>();
+        let next = u64::from(used.iter().copied().max().unwrap_or(0)) + 1;
+        Self { used, next }
+    }
+
+    fn allocate(&mut self) -> Result<u32, ParseError> {
+        while self.next <= u64::from(u32::MAX) {
+            let candidate = self.next as u32;
+            self.next += 1;
+            if self.used.insert(candidate) {
+                return Ok(candidate);
+            }
+        }
+        (1..=u32::MAX)
+            .find(|candidate| self.used.insert(*candidate))
+            .ok_or_else(|| ParseError::Malformed("worksheet ids exhausted".to_owned()))
+    }
+}
+
 fn plan_sheets(
     package: &PreservedPackage,
     origins: &[Option<usize>],
     used_relationship_ids: &mut HashSet<String>,
     used_paths: &mut HashSet<String>,
     worksheet_relationship_type: &str,
-) -> Vec<PlannedSheet> {
+) -> Result<Vec<PlannedSheet>, ParseError> {
     let mut claimed_origins = HashSet::new();
-    let mut next_sheet_id = package
-        .sheets
-        .iter()
-        .map(|sheet| sheet.sheet_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1);
+    let mut sheet_ids = SheetIds::new(package);
     origins
         .iter()
         .map(|origin| {
@@ -345,13 +371,13 @@ fn plan_sheets(
                         relative_to_xl(&source.path),
                     ),
                 };
-                return PlannedSheet {
+                return Ok(PlannedSheet {
                     origin: Some(origin),
                     path: source.path.clone(),
                     relationship,
                     sheet_id: source.sheet_id,
                     attributes: source.attributes.clone(),
-                };
+                });
             }
 
             let path = next_sheet_path(used_paths);
@@ -360,15 +386,13 @@ fn plan_sheets(
                 worksheet_relationship_type,
                 relative_to_xl(&path),
             );
-            let sheet_id = next_sheet_id;
-            next_sheet_id = next_sheet_id.saturating_add(1);
-            PlannedSheet {
+            Ok(PlannedSheet {
                 origin: None,
                 path,
                 relationship,
-                sheet_id,
+                sheet_id: sheet_ids.allocate()?,
                 attributes: Vec::new(),
-            }
+            })
         })
         .collect()
 }
@@ -826,7 +850,7 @@ fn merged_content_types(
 
     let mut entries = Vec::new();
     let mut emitted_parts = HashSet::new();
-    let mut default_extensions = HashSet::new();
+    let mut default_extensions = HashMap::new();
     let calc_chain_paths = package
         .calc_chains
         .iter()
@@ -835,7 +859,13 @@ fn merged_content_types(
     for entry in &package.content_types {
         if entry.element == "Default" {
             if let Some(extension) = entry.attribute("Extension") {
-                default_extensions.insert(extension.to_ascii_lowercase());
+                default_extensions.insert(
+                    extension.to_ascii_lowercase(),
+                    entry
+                        .attribute("ContentType")
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
             }
             entries.push(entry.clone());
             continue;
@@ -858,6 +888,14 @@ fn merged_content_types(
     }
 
     for (path, content_type) in desired {
+        let covered_by_default = path
+            .rsplit_once('.')
+            .and_then(|(_, extension)| default_extensions.get(extension))
+            .is_some_and(|default| default == content_type);
+        if covered_by_default {
+            emitted_parts.insert(path);
+            continue;
+        }
         if emitted_parts.insert(path.clone()) {
             entries.push(ContentTypeEntry {
                 element: "Override".to_owned(),
@@ -874,7 +912,13 @@ fn merged_content_types(
             });
         }
     }
-    if default_extensions.insert("rels".to_owned()) {
+    if default_extensions
+        .insert(
+            "rels".to_owned(),
+            "application/vnd.openxmlformats-package.relationships+xml".to_owned(),
+        )
+        .is_none()
+    {
         entries.insert(
             0,
             ContentTypeEntry {
@@ -893,9 +937,12 @@ fn merged_content_types(
             },
         );
     }
-    if default_extensions.insert("xml".to_owned()) {
+    if default_extensions
+        .insert("xml".to_owned(), "application/xml".to_owned())
+        .is_none()
+    {
         entries.insert(
-            default_extensions.contains("rels") as usize,
+            default_extensions.contains_key("rels") as usize,
             ContentTypeEntry {
                 element: "Default".to_owned(),
                 attributes: vec![
@@ -926,13 +973,32 @@ fn merged_content_types(
     })
 }
 
+/// The type OPC actually resolves for a part: its exact `Override`, else the
+/// `Default` for its extension. Chartsheets and macro-enabled workbooks are
+/// commonly typed by extension alone.
 fn source_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<&'a str> {
     let normalized = normalized_part_name(path);
+    package
+        .content_types
+        .iter()
+        .find_map(|entry| {
+            (entry.element == "Override"
+                && entry
+                    .attribute("PartName")
+                    .is_some_and(|part| normalized_part_name(part) == normalized))
+            .then(|| entry.attribute("ContentType"))
+            .flatten()
+        })
+        .or_else(|| default_content_type(package, path))
+}
+
+fn default_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<&'a str> {
+    let extension = path.rsplit_once('.')?.1;
     package.content_types.iter().find_map(|entry| {
-        (entry.element == "Override"
+        (entry.element == "Default"
             && entry
-                .attribute("PartName")
-                .is_some_and(|part| normalized_part_name(part) == normalized))
+                .attribute("Extension")
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension)))
         .then(|| entry.attribute("ContentType"))
         .flatten()
     })
