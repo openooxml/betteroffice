@@ -2024,6 +2024,51 @@ fn refuses_structural_edits_while_a_chart_part_is_not_covered() {
     }
 }
 
+/// OPC types a part by its `Override` or, failing that, by the `Default` for
+/// its extension. A chart typed the second way, at a path nothing conventional
+/// would find, must still be refused.
+#[test]
+fn refuses_a_chart_typed_by_a_default_extension_mapping() {
+    let mut parts = charted_package();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="cxml" ContentType="application/vnd.ms-office.chartex+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/extras/plot1.cxml".to_owned(),
+        br#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"/>"#
+            .to_vec(),
+    ));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(
+        parsed.package.unpatchable_reference_part(),
+        Some("xl/extras/plot1.cxml")
+    );
+}
+
+/// Every part of an ordinary package resolves to `application/xml` through a
+/// `Default`, so a chart type must not be the only thing discovery trusts.
+#[test]
+fn still_covers_a_conventional_chart_a_default_types_as_plain_xml() {
+    let mut parts = charted_package();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/charts/chart2.xml".to_owned(),
+        b"<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"/>"
+            .to_vec(),
+    ));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(
+        parsed.package.unpatchable_reference_part(),
+        Some("xl/charts/chart2.xml")
+    );
+}
+
 /// A cache is only patchable when the reference beside it is one this crate
 /// can resolve. A defined name, a union, an external book and a two-
 /// dimensional area all survive a structural edit unchanged, so their caches

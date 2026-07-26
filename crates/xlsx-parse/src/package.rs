@@ -136,7 +136,7 @@ impl PreservedPackage {
             .unwrap_or_default();
         let unmodelled_chart_part = crate::chart::unmodelled_chart_part(
             parts,
-            &part_content_types(&content_types),
+            &part_content_types(&content_types, parts),
             workbook,
         )?;
 
@@ -284,6 +284,59 @@ impl ContentTypeEntry {
             .find(|attribute| attribute.local_name() == local_name)
             .map(|attribute| attribute.value.as_str())
     }
+}
+
+/// A content type OPC resolved for a part, and whether an `Override` named it
+/// rather than a `Default` for its extension.
+pub(crate) struct ResolvedContentType<'a> {
+    pub(crate) value: &'a str,
+    pub(crate) overridden: bool,
+}
+
+/// The type OPC actually resolves for a part: its exact `Override`, else the
+/// `Default` for its extension. Chartsheets, charts and macro-enabled
+/// workbooks are all commonly typed by extension alone.
+pub(crate) fn effective_content_type<'a>(
+    entries: &'a [ContentTypeEntry],
+    path: &str,
+) -> Option<ResolvedContentType<'a>> {
+    let normalized = normalized_part_name(path);
+    entries
+        .iter()
+        .find_map(|entry| {
+            (entry.element == "Override"
+                && entry
+                    .attribute("PartName")
+                    .is_some_and(|part| normalized_part_name(part) == normalized))
+            .then(|| entry.attribute("ContentType"))
+            .flatten()
+        })
+        .map(|value| ResolvedContentType {
+            value,
+            overridden: true,
+        })
+        .or_else(|| {
+            default_content_type(entries, path).map(|value| ResolvedContentType {
+                value,
+                overridden: false,
+            })
+        })
+}
+
+fn default_content_type<'a>(entries: &'a [ContentTypeEntry], path: &str) -> Option<&'a str> {
+    let extension = path.rsplit_once('.')?.1;
+    entries.iter().find_map(|entry| {
+        (entry.element == "Default"
+            && entry
+                .attribute("Extension")
+                .is_some_and(|value| value.eq_ignore_ascii_case(extension)))
+        .then(|| entry.attribute("ContentType"))
+        .flatten()
+    })
+}
+
+pub(crate) fn normalized_part_name(path: &str) -> String {
+    path.trim_start_matches('/').to_ascii_lowercase()
 }
 
 #[derive(Clone, Debug)]
@@ -939,24 +992,30 @@ fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError>
     Ok(entries)
 }
 
-/// `(normalized part path, content type)` for every `Override`.
-fn part_content_types(entries: &[ContentTypeEntry]) -> Vec<(String, String)> {
-    entries
+/// The type OPC resolves for every part the package holds, so a lookup covers
+/// `Default` mappings as well as `Override` ones.
+fn part_content_types(
+    entries: &[ContentTypeEntry],
+    parts: &[(String, Vec<u8>)],
+) -> Vec<PartContentType> {
+    parts
         .iter()
-        .filter(|entry| entry.element == "Override")
-        .filter_map(|entry| {
-            Some((
-                entry
-                    .attribute("PartName")?
-                    .trim_start_matches('/')
-                    .to_ascii_lowercase(),
-                entry
-                    .attribute("ContentType")
-                    .unwrap_or_default()
-                    .to_owned(),
-            ))
+        .filter_map(|(path, _)| {
+            let resolved = effective_content_type(entries, path)?;
+            Some(PartContentType {
+                path: normalized_part_name(path),
+                content_type: resolved.value.to_owned(),
+                overridden: resolved.overridden,
+            })
         })
         .collect()
+}
+
+/// One part's resolved content type, owned so the chart walk can hold it.
+pub(crate) struct PartContentType {
+    pub(crate) path: String,
+    pub(crate) content_type: String,
+    pub(crate) overridden: bool,
 }
 
 struct SheetEntry {

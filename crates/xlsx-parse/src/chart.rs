@@ -16,6 +16,7 @@ use xlsx_model::{
     ChartRefKind, ErrorValue, SheetChart,
 };
 
+use crate::package::PartContentType;
 use crate::tree::{Edit, Element, Part, Replacement, escape_text, parse_tree};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
@@ -757,7 +758,7 @@ const CHART_CONTENT_TYPES: [&str; 2] = [
 /// while such a part is present, because moving cells would strand it.
 pub(crate) fn unmodelled_chart_part(
     parts: &[(String, Vec<u8>)],
-    content_types: &[(String, String)],
+    content_types: &[PartContentType],
     workbook: &xlsx_model::Workbook,
 ) -> Result<Option<String>, ParseError> {
     let modelled = workbook
@@ -815,21 +816,27 @@ fn normalize_part_path(path: &str) -> &str {
     path.trim_start_matches('/')
 }
 
-/// Whether a part holds a chart, by its declared content type when the package
-/// declares one and by the conventional layout otherwise.
-fn is_chart_part(path: &str, content_types: &[(String, String)]) -> bool {
+/// Whether a part holds a chart. An `Override` is authoritative; a type a
+/// `Default` extension mapping resolved names a chart when it is a chart type
+/// and otherwise leaves the conventional layout to answer, so a package that
+/// types its charts by extension alone is still covered.
+fn is_chart_part(path: &str, content_types: &[PartContentType]) -> bool {
     let normalized = normalize_part_path(path).to_ascii_lowercase();
-    if let Some((_, content_type)) = content_types
-        .iter()
-        .find(|(declared, _)| *declared == normalized)
-    {
-        return CHART_CONTENT_TYPES
-            .iter()
-            .any(|known| content_type.eq_ignore_ascii_case(known));
+    match content_types.iter().find(|part| part.path == normalized) {
+        Some(part)
+            if CHART_CONTENT_TYPES
+                .iter()
+                .any(|known| part.content_type.eq_ignore_ascii_case(known)) =>
+        {
+            true
+        }
+        Some(part) if part.overridden => false,
+        _ => {
+            normalized.starts_with("xl/charts/chart")
+                && normalized.ends_with(".xml")
+                && !normalized.contains("/_rels/")
+        }
     }
-    normalized.starts_with("xl/charts/chart")
-        && normalized.ends_with(".xml")
-        && !normalized.contains("/_rels/")
 }
 
 /// Whether a chart part carries a reference this crate cannot rewrite. Only a

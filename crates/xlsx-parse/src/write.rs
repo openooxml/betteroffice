@@ -15,8 +15,8 @@ use xlsx_model::{Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sh
 use crate::ParseError;
 use crate::package::{
     ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
-    XmlTemplate, attributes_from_fragment, parse_relationships, relationship_part_path,
-    remove_attribute, set_attribute,
+    XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
+    parse_relationships, relationship_part_path, remove_attribute, set_attribute,
 };
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
@@ -847,10 +847,6 @@ fn relative_to_xl(path: &str) -> String {
         .to_owned()
 }
 
-fn normalized_part_name(path: &str) -> String {
-    path.trim_start_matches('/').to_ascii_lowercase()
-}
-
 fn replace_optional_part(
     parts: &mut PartStore,
     source: Option<&PartReference>,
@@ -1394,35 +1390,8 @@ fn merged_content_types(
     })
 }
 
-/// The type OPC actually resolves for a part: its exact `Override`, else the
-/// `Default` for its extension. Chartsheets and macro-enabled workbooks are
-/// commonly typed by extension alone.
 fn source_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<&'a str> {
-    let normalized = normalized_part_name(path);
-    package
-        .content_types
-        .iter()
-        .find_map(|entry| {
-            (entry.element == "Override"
-                && entry
-                    .attribute("PartName")
-                    .is_some_and(|part| normalized_part_name(part) == normalized))
-            .then(|| entry.attribute("ContentType"))
-            .flatten()
-        })
-        .or_else(|| default_content_type(package, path))
-}
-
-fn default_content_type<'a>(package: &'a PreservedPackage, path: &str) -> Option<&'a str> {
-    let extension = path.rsplit_once('.')?.1;
-    package.content_types.iter().find_map(|entry| {
-        (entry.element == "Default"
-            && entry
-                .attribute("Extension")
-                .is_some_and(|value| value.eq_ignore_ascii_case(extension)))
-        .then(|| entry.attribute("ContentType"))
-        .flatten()
-    })
+    effective_content_type(&package.content_types, path).map(|resolved| resolved.value)
 }
 
 fn write_empty_element(
