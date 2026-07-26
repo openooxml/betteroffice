@@ -6,7 +6,8 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, Fill, HAlign,
-    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
+    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId, VAlign,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -37,6 +38,9 @@ const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
 const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
 const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
+const MAX_CHARTS_PER_SHEET: usize = 4_096;
+const MAX_CHART_REFS_PER_CHART: usize = 16_384;
+const MAX_CHART_FIELD_BYTES: usize = 32_767;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
 /// Largest browser-safe collaboration client identifier.
@@ -166,10 +170,10 @@ impl Workbook {
     /// Opens a replica. `client_id` must be unique among connected peers.
     ///
     /// The source package is local state and base compatibility covers only the
-    /// modeled workbook, so peers whose cells agree but whose charts, macros or
-    /// custom XML differ are accepted as the same base and save different
-    /// documents. Distributing package identity needs the next authority schema
-    /// version.
+    /// modeled workbook, so peers whose cells and charts agree but whose macros
+    /// or custom XML differ are accepted as the same base and save different
+    /// documents. Distributing whole-package identity needs a further authority
+    /// schema version.
     pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
         Self::open_internal(bytes, true, Some(client_id))
     }
@@ -2019,6 +2023,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::SetCharts { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
         | Op::PatchRangeStyle { sheet, .. }
@@ -2104,6 +2109,10 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetHyperlinks { sheet, hyperlinks } => {
             require_sheet(model, *sheet)?;
             validate_hyperlinks(hyperlinks)?;
+        }
+        Op::SetCharts { sheet, charts } => {
+            require_sheet(model, *sheet)?;
+            validate_charts(charts)?;
         }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
@@ -2235,6 +2244,39 @@ fn validate_range(range: CellRange) -> Result<()> {
         return Err(Error::InvalidOperation(
             "range start must be above and left of range end".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_charts(charts: &[SheetChart]) -> Result<()> {
+    if charts.len() > MAX_CHARTS_PER_SHEET {
+        return Err(Error::InvalidOperation(
+            "sheet contains too many charts".to_string(),
+        ));
+    }
+    for chart in charts {
+        if chart.part.is_empty() || chart.drawing.is_empty() {
+            return Err(Error::InvalidOperation(
+                "chart must name its part and drawing".to_string(),
+            ));
+        }
+        if chart.part.len() > MAX_CHART_FIELD_BYTES
+            || chart.drawing.len() > MAX_CHART_FIELD_BYTES
+            || chart.refs.len() > MAX_CHART_REFS_PER_CHART
+        {
+            return Err(Error::InvalidOperation(
+                "chart exceeds the supported size".to_string(),
+            ));
+        }
+        if chart
+            .refs
+            .iter()
+            .any(|reference| reference.formula.len() > MAX_CHART_FIELD_BYTES)
+        {
+            return Err(Error::InvalidOperation(
+                "chart reference exceeds the supported length".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2592,6 +2634,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
             | Op::SetHyperlinks { .. }
+            | Op::SetCharts { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }

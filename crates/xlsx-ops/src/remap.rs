@@ -7,7 +7,10 @@ use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
-use xlsx_model::{CellRange, CellRef, DefinedName, ErrorValue, SheetId, Workbook};
+use xlsx_model::{
+    AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
+    Workbook,
+};
 
 use crate::apply::OpError;
 use crate::apply::remap_ref;
@@ -194,6 +197,308 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<O
     Ok(Some(Op::SetDefinedNames {
         defined_names: previous,
     }))
+}
+
+/// Rewrites chart references through a row or column op, the same way defined
+/// names are, and moves the anchors of charts on the edited sheet. A chart's
+/// unqualified references resolve against the sheet it is anchored on. A
+/// reference aimed at the edited sheet that the rewriter cannot express is
+/// refused rather than left pointing at the pre-edit addresses.
+pub(crate) fn remap_charts(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpError> {
+    let Some(target) = structural_target(op) else {
+        return Ok(Vec::new());
+    };
+    let names: HashMap<String, SheetId> = wb
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
+        .collect();
+    let target_name = wb
+        .sheet(target)
+        .map(|sheet| sheet.name.clone())
+        .unwrap_or_default();
+
+    let mut restores = Vec::new();
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        if sheet.charts.is_empty() {
+            continue;
+        }
+        let owner = SheetId(index as u32);
+        let anchored_on_target = owner == target;
+        let matches =
+            |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, target, &names);
+        let mut charts = sheet.charts.clone();
+        let mut changed_sheet = false;
+        for chart in &mut charts {
+            for reference in &mut chart.refs {
+                if reference.formula.trim().is_empty() {
+                    continue;
+                }
+                match rewrite_chart_ref(&reference.formula, op, &matches) {
+                    DefinedNameRewrite::Unchanged => {}
+                    DefinedNameRewrite::Rewritten(formula)
+                        if formula.len() <= MAX_FORMULA_BYTES =>
+                    {
+                        reference.formula = formula;
+                        changed_sheet = true;
+                    }
+                    _ if binds_to_target(&reference.formula, &target_name, anchored_on_target) => {
+                        return Err(OpError::ChartRefNotRewritable {
+                            part: chart.part.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            if anchored_on_target && let Some(anchor) = remap_anchor(chart.anchor, op) {
+                chart.anchor = anchor;
+                changed_sheet = true;
+            }
+        }
+        if changed_sheet {
+            restores.push(Op::SetCharts {
+                sheet: owner,
+                charts: sheet.charts.clone(),
+            });
+            edits.push((owner, charts));
+        }
+    }
+    for (sheet, charts) in edits {
+        wb.sheet_mut(sheet)
+            .expect("sheet exists during chart remap")
+            .charts = charts;
+    }
+    Ok(restores)
+}
+
+/// Whether an unrewritable chart reference points at the edited sheet: either
+/// it names it, or it carries no qualifier at all and the chart sits there.
+fn binds_to_target(source: &str, target_name: &str, anchored_on_target: bool) -> bool {
+    mentions_sheet(source, target_name) || (anchored_on_target && !source.contains('!'))
+}
+
+/// A chart `c:f` is a defined-name formula that may additionally be wrapped in
+/// the parentheses Excel writes around a multi-area reference.
+fn rewrite_chart_ref(
+    source: &str,
+    op: &Op,
+    matches_target: &dyn Fn(&Option<String>) -> bool,
+) -> DefinedNameRewrite {
+    let trimmed = source.trim();
+    let Some(inner) = paren_group(trimmed) else {
+        return rewrite_defined_name(trimmed, op, matches_target);
+    };
+    match rewrite_defined_name(inner, op, matches_target) {
+        DefinedNameRewrite::Rewritten(formula) => {
+            DefinedNameRewrite::Rewritten(format!("({formula})"))
+        }
+        other => other,
+    }
+}
+
+/// The inside of `(...)` when the whole reference is one parenthesized group,
+/// rather than an expression that merely starts and ends with a bracket.
+fn paren_group(source: &str) -> Option<&str> {
+    let inner = source.strip_prefix('(')?.strip_suffix(')')?;
+    let mut depth = 0_u32;
+    for byte in inner.bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(inner)
+}
+
+/// Moves a drawing anchor through a grid edit on its own sheet, honouring
+/// `editAs`: a two-cell anchor moves and resizes with the grid, a one-cell
+/// anchor moves without resizing, an absolute anchor does neither. `None` when
+/// the anchor does not move.
+fn remap_anchor(anchor: ChartAnchor, op: &Op) -> Option<ChartAnchor> {
+    let (axis, at, count, inserting) = match *op {
+        Op::InsertRows { at, count, .. } => (Axis::Row, at, count, true),
+        Op::DeleteRows { at, count, .. } => (Axis::Row, at, count, false),
+        Op::InsertCols { at, count, .. } => (Axis::Col, at, count, true),
+        Op::DeleteCols { at, count, .. } => (Axis::Col, at, count, false),
+        _ => return None,
+    };
+    let limit = axis.limit();
+    let shift = |index: u32| shift_anchor_index(index, at, count, inserting, limit);
+    match anchor {
+        ChartAnchor::Absolute { .. } => None,
+        ChartAnchor::OneCell { from, extent } => {
+            let moved = shift_anchor_cell(from, axis, &shift);
+            (moved != from).then_some(ChartAnchor::OneCell {
+                from: moved,
+                extent,
+            })
+        }
+        ChartAnchor::TwoCell { from, to, edit_as } => {
+            if edit_as == AnchorEditAs::Absolute {
+                return None;
+            }
+            let moved_from = shift_anchor_cell(from, axis, &shift);
+            let moved_to = match edit_as {
+                AnchorEditAs::TwoCell => shift_anchor_cell(to, axis, &shift),
+                _ => translate_anchor_cell(
+                    to,
+                    axis,
+                    i64::from(anchor_index(moved_from, axis)) - i64::from(anchor_index(from, axis)),
+                    limit,
+                ),
+            };
+            (moved_from != from || moved_to != to).then_some(ChartAnchor::TwoCell {
+                from: moved_from,
+                to: moved_to,
+                edit_as,
+            })
+        }
+    }
+}
+
+/// An index the edit pushes along, or pulls back onto the deletion point when
+/// the row or column it named is gone.
+fn shift_anchor_index(index: u32, at: u32, count: u32, inserting: bool, limit: u32) -> u32 {
+    let ceiling = limit.saturating_sub(1);
+    if inserting {
+        if index >= at {
+            index.saturating_add(count).min(ceiling)
+        } else {
+            index
+        }
+    } else if index >= at.saturating_add(count) {
+        index - count
+    } else if index >= at {
+        at
+    } else {
+        index
+    }
+}
+
+fn anchor_index(cell: AnchorCell, axis: Axis) -> u32 {
+    match axis {
+        Axis::Row => cell.row,
+        Axis::Col => cell.col,
+    }
+}
+
+fn shift_anchor_cell(cell: AnchorCell, axis: Axis, shift: &dyn Fn(u32) -> u32) -> AnchorCell {
+    let mut moved = cell;
+    match axis {
+        Axis::Row => moved.row = shift(cell.row),
+        Axis::Col => moved.col = shift(cell.col),
+    }
+    moved
+}
+
+fn translate_anchor_cell(cell: AnchorCell, axis: Axis, delta: i64, limit: u32) -> AnchorCell {
+    let ceiling = i64::from(limit.saturating_sub(1));
+    let moved = (i64::from(anchor_index(cell, axis)) + delta).clamp(0, ceiling) as u32;
+    let mut out = cell;
+    match axis {
+        Axis::Row => out.row = moved,
+        Axis::Col => out.col = moved,
+    }
+    out
+}
+
+/// Rewrites the sheet qualifier in every chart reference on a rename. A chart
+/// reference that names the old sheet as a bare token carries no `!` to bind
+/// it, so it is left alone rather than guessed at.
+pub(crate) fn rename_chart_refs(wb: &mut Workbook, old_name: &str, new_name: &str) -> Vec<Op> {
+    if old_name == new_name {
+        return Vec::new();
+    }
+    let mut restores = Vec::new();
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        if sheet.charts.is_empty() {
+            continue;
+        }
+        let mut charts = sheet.charts.clone();
+        for chart in &mut charts {
+            for reference in &mut chart.refs {
+                reference.formula = rename_formula_sheet(&reference.formula, old_name, new_name);
+            }
+        }
+        if charts != sheet.charts {
+            restores.push(Op::SetCharts {
+                sheet: SheetId(index as u32),
+                charts: sheet.charts.clone(),
+            });
+            edits.push((SheetId(index as u32), charts));
+        }
+    }
+    for (sheet, charts) in edits {
+        wb.sheet_mut(sheet)
+            .expect("sheet exists during chart rename")
+            .charts = charts;
+    }
+    restores
+}
+
+/// Collapses the chart references that name a sheet the workbook no longer
+/// has. The rest of a multi-area reference survives.
+pub(crate) fn strand_chart_refs(wb: &mut Workbook, removed_name: &str) -> Vec<Op> {
+    let mut restores = Vec::new();
+    let mut edits = Vec::new();
+    for (index, sheet) in wb.sheets.iter().enumerate() {
+        if sheet.charts.is_empty() {
+            continue;
+        }
+        let mut charts = sheet.charts.clone();
+        for chart in &mut charts {
+            for reference in &mut chart.refs {
+                if let Some(dropped) = drop_removed_sheet(&reference.formula, removed_name) {
+                    reference.formula = dropped;
+                }
+            }
+        }
+        if charts != sheet.charts {
+            restores.push(Op::SetCharts {
+                sheet: SheetId(index as u32),
+                charts: sheet.charts.clone(),
+            });
+            edits.push((SheetId(index as u32), charts));
+        }
+    }
+    for (sheet, charts) in edits {
+        wb.sheet_mut(sheet)
+            .expect("sheet exists during chart sheet removal")
+            .charts = charts;
+    }
+    restores
+}
+
+fn drop_removed_sheet(source: &str, removed_name: &str) -> Option<String> {
+    let trimmed = source.trim();
+    if !mentions_sheet(trimmed, removed_name) {
+        return None;
+    }
+    let (inner, wrapped) = match paren_group(trimmed) {
+        Some(inner) => (inner, true),
+        None => (trimmed, false),
+    };
+    let components = split_union(inner)?;
+    let rewritten = components
+        .iter()
+        .map(|component| {
+            if mentions_sheet(component, removed_name) {
+                ErrorValue::Ref.as_str().to_owned()
+            } else {
+                (*component).to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(if wrapped {
+        format!("({rewritten})")
+    } else {
+        rewritten
+    })
 }
 
 /// What the defined-name rewriter made of one formula.
@@ -991,6 +1296,191 @@ mod tests {
 
     fn formula(wb: &Workbook, sheet: SheetId, at: &str) -> Option<String> {
         wb.formula(sheet, r(at)).map(str::to_string)
+    }
+
+    fn charted(wb: &mut Workbook, sheet: SheetId, formulas: &[&str]) {
+        wb.sheet_mut(sheet).unwrap().charts = vec![xlsx_model::SheetChart {
+            part: "xl/charts/chart1.xml".to_owned(),
+            drawing: "xl/drawings/drawing1.xml".to_owned(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: AnchorCell {
+                    col: 2,
+                    col_off: 0,
+                    row: 4,
+                    row_off: 0,
+                },
+                to: AnchorCell {
+                    col: 8,
+                    col_off: 0,
+                    row: 19,
+                    row_off: 0,
+                },
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: formulas
+                .iter()
+                .map(|formula| xlsx_model::ChartRef {
+                    kind: xlsx_model::ChartRefKind::Values,
+                    formula: (*formula).to_owned(),
+                })
+                .collect(),
+        }];
+    }
+
+    fn chart_formulas(wb: &Workbook, sheet: SheetId) -> Vec<String> {
+        wb.sheet(sheet).unwrap().charts[0]
+            .refs
+            .iter()
+            .map(|reference| reference.formula.clone())
+            .collect()
+    }
+
+    #[test]
+    fn chart_references_shift_clip_and_collapse_like_cell_formulas() {
+        let mut w = wb(&["Data", "Other"]);
+        charted(
+            &mut w,
+            SheetId(1),
+            &[
+                "Data!$A$5",
+                "Data!$A$1:$A$10",
+                "Data!$A$6:$A$7",
+                "Other!$A$5",
+                "Data!$A:$A",
+            ],
+        );
+        let op = Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 5,
+            count: 3,
+        };
+        let inverse = remap_charts(&mut w, &op).unwrap();
+        assert_eq!(
+            chart_formulas(&w, SheetId(1)),
+            [
+                "Data!$A$5",
+                "Data!$A$1:$A$7",
+                "#REF!",
+                "Other!$A$5",
+                "Data!$A:$A"
+            ]
+        );
+        assert!(matches!(inverse.as_slice(), [Op::SetCharts { .. }]));
+    }
+
+    #[test]
+    fn multi_area_chart_references_keep_their_parentheses() {
+        let mut w = wb(&["Data"]);
+        charted(
+            &mut w,
+            SheetId(0),
+            &["(Data!$A$5:$A$6,Data!$C$5:$C$6)", "(Data!$A$1)"],
+        );
+        let op = Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        };
+        remap_charts(&mut w, &op).unwrap();
+        assert_eq!(
+            chart_formulas(&w, SheetId(0)),
+            ["(Data!$A$7:$A$8,Data!$C$7:$C$8)", "(Data!$A$3)"]
+        );
+    }
+
+    #[test]
+    fn unrewritable_chart_reference_aimed_at_the_edited_sheet_refuses_the_edit() {
+        let mut w = wb(&["Data"]);
+        charted(
+            &mut w,
+            SheetId(0),
+            &["OFFSET(Data!$A$1,0,0,COUNTA(Data!$A:$A),1)"],
+        );
+        let original = w.clone();
+        let error = remap_charts(
+            &mut w,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            OpError::ChartRefNotRewritable {
+                part: "xl/charts/chart1.xml".to_owned()
+            }
+        );
+        assert_eq!(w, original, "a refusal must leave the workbook untouched");
+    }
+
+    #[test]
+    fn unrewritable_chart_reference_aimed_elsewhere_survives_the_edit() {
+        let mut w = wb(&["Data", "Other"]);
+        charted(
+            &mut w,
+            SheetId(1),
+            &[
+                "OFFSET(Other!$A$1,0,0,COUNTA(Other!$A:$A),1)",
+                "[Book.xlsx]Sheet1!$A$1",
+                "",
+            ],
+        );
+        remap_charts(
+            &mut w,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            chart_formulas(&w, SheetId(1)),
+            [
+                "OFFSET(Other!$A$1,0,0,COUNTA(Other!$A:$A),1)",
+                "[Book.xlsx]Sheet1!$A$1",
+                ""
+            ]
+        );
+    }
+
+    #[test]
+    fn chart_anchors_move_only_on_their_own_sheet() {
+        let mut w = wb(&["Data", "Other"]);
+        charted(&mut w, SheetId(1), &["Data!$A$1"]);
+        remap_charts(
+            &mut w,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 4,
+            },
+        )
+        .unwrap();
+        let ChartAnchor::TwoCell { from, .. } = w.sheets[1].charts[0].anchor else {
+            panic!("two-cell anchor");
+        };
+        assert_eq!(from.row, 4, "an edit on another sheet cannot move it");
+    }
+
+    #[test]
+    fn removing_a_sheet_collapses_the_chart_references_into_it() {
+        let mut w = wb(&["Data", "Report"]);
+        charted(
+            &mut w,
+            SheetId(1),
+            &["Data!$A$1:$A$4", "(Data!$A$1,Report!$B$1)", "Report!$C$1"],
+        );
+        w.sheets.remove(0);
+        let inverse = strand_chart_refs(&mut w, "Data");
+        assert_eq!(
+            chart_formulas(&w, SheetId(0)),
+            ["#REF!", "(#REF!,Report!$B$1)", "Report!$C$1"]
+        );
+        assert!(matches!(inverse.as_slice(), [Op::SetCharts { .. }]));
     }
 
     #[test]

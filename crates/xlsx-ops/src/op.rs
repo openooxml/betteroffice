@@ -3,7 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, FreezePane, Hyperlink, RowId, SheetId,
+    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, FreezePane, Hyperlink, RowId,
+    SheetChart, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -98,6 +99,12 @@ pub enum Op {
     SetHyperlinks {
         sheet: SheetId,
         hyperlinks: Vec<Hyperlink>,
+    },
+    /// Absolute replacement emitted as the inverse of a chart remap.
+    #[doc(hidden)]
+    SetCharts {
+        sheet: SheetId,
+        charts: Vec<SheetChart>,
     },
     MergeCells {
         sheet: SheetId,
