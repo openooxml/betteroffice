@@ -383,6 +383,9 @@ fn parse_text(text: &str) -> Result<Element, ParseError> {
                 stack.push(element);
             }
             Event::Empty(start) => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(ParseError::DepthExceeded);
+                }
                 namespaces.open(&start)?;
                 let element = open_element(&start, closed, true, &mut budget, &namespaces);
                 namespaces.close();

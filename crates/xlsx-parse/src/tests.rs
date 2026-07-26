@@ -2034,6 +2034,16 @@ fn hostile_chart_markup_is_refused_not_survived() {
         ParseError::DepthExceeded
     );
 
+    let self_closing = format!(
+        "<c:chartSpace xmlns:c=\"c\">{}<x/>{}</c:chartSpace>",
+        "<x>".repeat(crate::MAX_DEPTH - 1),
+        "</x>".repeat(crate::MAX_DEPTH - 1)
+    );
+    assert_eq!(
+        crate::chart::patch_chart_refs(self_closing.as_bytes(), &[]).unwrap_err(),
+        ParseError::DepthExceeded
+    );
+
     let doctype = br#"<!DOCTYPE c:chartSpace [<!ENTITY x "boom">]><c:chartSpace xmlns:c="c"/>"#;
     assert!(matches!(
         crate::chart::patch_chart_refs(doctype, &[]).unwrap_err(),
