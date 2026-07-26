@@ -1,27 +1,4 @@
-//! Streaming typed-page serialization for the FrameDelta encoder.
-//!
-//! Rebuilt pages previously detoured through `serde_json::to_value` — one
-//! fully allocated `Value` tree per page, then four independent walks
-//! (structural hash, visual hash, string collection, wire emission). The
-//! three serializers here run directly over the typed [`DisplayPage`] via
-//! serde, so a rebuilt page costs three allocation-free passes:
-//!
-//! - [`hash_page`] — structural + visual fingerprints in one pass;
-//! - [`collect_page_strings`] — string-table population (upsert pages only);
-//! - [`encode_page`] — the typed value stream (upsert pages only).
-//!
-//! Wire compatibility: the emitted value stream uses the same opcodes,
-//! container framing, and glyph compaction as the `Value`-based encoder. The
-//! only difference is object field ORDER (declaration order instead of
-//! `serde_json::Map`'s sorted order), which the browser decoder is agnostic
-//! to — it materializes fields one by one and rejects duplicates only.
-//! Numeric opcode selection mirrors the old `as_i64`-first introspection:
-//! unsigned values within `i64` range emit `VALUE_I64`. Non-finite floats
-//! emit `VALUE_NULL`, exactly as `serde_json::to_value` mapped them.
-//!
-//! Fingerprints hash the same logical structure as before minus the key
-//! sorting; they only ever compare against fingerprints produced by the same
-//! session, so the definition change is invisible outside this module.
+//! Streaming typed-page serialization for frame deltas.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -922,12 +899,7 @@ struct EmitContainer<'a> {
     payload_at: usize,
     count: u32,
     key_buf: String,
-    /// Object entries as `(key id, byte offset of the entry's key id)`, so a
-    /// duplicate key — a named struct field colliding with a `serde(flatten)`
-    /// member — can be compacted to the last write, exactly like
-    /// `serde_json::Map` insertion did on the old `to_value` path. The browser
-    /// decoder rejects duplicate object keys, so this is a correctness rule,
-    /// not cosmetics.
+    /// Object entries used to compact duplicate flattened keys to the last write.
     entries: Vec<(u32, usize)>,
 }
 

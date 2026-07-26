@@ -1,9 +1,4 @@
-//! Typed op results, errors, and the public position vocabulary (op-contract R4 + "Positions").
-//!
-//! Public/wire positions are [`Loc`] `{story, para, offset}` — paragraph-keyed so they survive
-//! remote edits. Story-global `u32` indices ([`crate::Position`] / [`crate::StoryRange`]) remain
-//! the *transient* vocabulary used inside a transaction to call yrs APIs and by the PM step
-//! translator; the converters here are the only sanctioned crossing between the two.
+//! Operation results, errors, and positions.
 
 use std::fmt;
 
@@ -15,7 +10,7 @@ use crate::{
 
 pub type OpResult<T> = Result<T, OpError>;
 
-/// Typed error surface (op-contract R4). The agent tool layer maps these back to strings.
+/// Typed operation error.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpError {
     UnknownStory(StoryId),
@@ -45,11 +40,9 @@ pub enum OpError {
     },
     CannotMergeFinalParagraph(ParagraphId),
     NoParagraphBefore(ParagraphId),
-    /// Reserved for S4 accept/reject guards.
     OverlapsTrackedChange,
-    /// Reserved for S3 (tables) — op targets content nested below the top level of a story.
+    /// Operation targets nested story content.
     NotTopLevel,
-    /// Reserved for S5 (structured document tags).
     LockedSdt,
     /// `insert_text`/`replace_range` text may not contain paragraph or line breaks.
     TextContainsBreak,
@@ -143,7 +136,7 @@ impl From<EditError> for OpError {
     }
 }
 
-/// The receipt every non-split mutating op returns (op-contract R4).
+/// Receipt returned by non-split mutations.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Receipt {
     /// Paragraph IDs minted by this op.
@@ -165,7 +158,7 @@ pub struct SplitReceipt {
     pub revision_ids: Vec<RevisionId>,
 }
 
-/// Public/wire position: paragraph-keyed, UTF-16 offsets (op-contract "Positions & selection").
+/// Paragraph-keyed public position with UTF-16 offsets.
 ///
 /// `offset` lives in `[0, para_len]` where `para_len` excludes the paragraph's own pilcrow;
 /// `offset == para_len` addresses the paragraph mark itself.

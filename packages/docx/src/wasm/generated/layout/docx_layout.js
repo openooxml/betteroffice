@@ -170,10 +170,9 @@ export function layout_document_json(input) {
 }
 
 /**
- * wasm wrapper over [`ooxml_text::measure_paragraph_json`]: measurement
- * input JSON in, `ParagraphExtent` JSON out. An `Err` whose message starts
- * with `"UNSUPPORTED"` means the caller must fall back to browser
- * measurement for that block.
+ * Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
+ * out. An `Err` whose message starts with `"UNSUPPORTED"` means the caller
+ * must fall back to browser measurement for that block.
  * @param {string} input
  * @returns {string}
  */
@@ -472,7 +471,7 @@ export function vertical_move_json(display_list, position, direction, goal_x) {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg_error_73f4720a6c53102a: function(arg0, arg1) {
+        __wbg_error_25e7706a73a81f28: function(arg0, arg1) {
             console.error(getStringFromWasm0(arg0, arg1));
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {

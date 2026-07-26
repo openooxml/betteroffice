@@ -1632,17 +1632,6 @@ export type DocumentPosition = {
   pmPos?: number;
 };
 
-// =============================================================================
-// relocated from the deleted DOM painter (RETIREMENT G1)
-// =============================================================================
-//
-// DOM-free geometry + render-model types/helpers that a RETAINED consumer
-// (`editor/computeLayout.ts`, the Rust `paginationSource` seam host) depends on.
-// They were previously defined under the DOM painter directory, deleted when
-// the canvas renderer became the sole renderer; they live here in the kept
-// wasm-contract types module. See
-// openspec/changes/rust-canvas-engine/RETIREMENT.md.
-
 /**
  * Page geometry needed to translate OOXML `relativeFrom` anchors into painter
  * coordinates. All values are in CSS pixels.

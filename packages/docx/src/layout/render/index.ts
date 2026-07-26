@@ -1,9 +1,6 @@
 /**
  * Display-list rendering surface: the renderer-agnostic contract between
  * layout output and every backend, plus the web canvas replay backend.
- *
- * @experimental The display-list pipeline is under active development
- * (rust-canvas-engine change); shape may evolve while the Rust builder lands.
  */
 
 import type { DisplayList } from './displayList';
@@ -188,8 +185,7 @@ export {
 } from './displayListTables';
 
 /**
- * Demo display list used as the default provider value until the Rust
- * display-list builder plugs in. One page, one paragraph of two runs with a
+ * Demo display list used when no provider value is injected. One page, one paragraph of two runs with a
  * highlight and underline, a table border line, and an image reference.
  */
 export const demoDisplayList: DisplayList = demoDisplayListJson as DisplayList;

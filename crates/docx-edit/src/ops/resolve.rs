@@ -1,28 +1,4 @@
-//! Tracked-change RESOLVE ops: `accept_change`, `reject_change` (S4b).
-//!
-//! The op-contract 3-way matrix, mirroring the PM resolver
-//! (`packages/core/src/prosemirror/commands/comments.ts` `resolveById`):
-//!
-//! - **accept:** `ins` text → drop the stamp (text stays); `del` text → physical removal;
-//!   `pPrIns` → clear the marker (the split stays); `pPrDel` → remove the pilcrow (join).
-//! - **reject:** `ins` text → physical removal; `del` text → drop the stamp (text stays);
-//!   `pPrIns` → remove the pilcrow (join back); `pPrDel` → clear the marker (the split stays).
-//!
-//! Removing a boundary pilcrow joins two paragraphs; the FOLLOWING paragraph's pilcrow
-//! survives, so the merged paragraph keeps the SECOND paragraph's pPr + paraId — exactly the
-//! PM resolver's `inheritFromSecond` join and the OOXML rule (the surviving `w:p` owns the
-//! properties). This deliberately differs from the plain-delete R6 donor rule, which models
-//! a USER deletion, not a revision resolution. A story's FINAL pilcrow is never removed
-//! (Word keeps the last paragraph mark): a join that would remove it clears the markers
-//! instead — the PM resolver's last-paragraph edge case.
-//!
-//! Resolving is APPLYING a revision, not authoring one: no new revision is ever stamped and
-//! the context's suggesting mode is ignored (the PM twin sets `SUGGESTION_BYPASS_META`).
-//!
-//! Structural table-row revisions (`trIns`/`trDel`) live in each structural
-//! row's `trPr` bag. They are resolved in the same transaction as story-unit
-//! revisions; physical row removal also removes unreachable cell stories.
-//! `pPrChange`/`rPrChange` property-revision payloads remain a separate path.
+//! Tracked-change acceptance and rejection operations.
 
 use std::sync::Arc;
 
@@ -38,8 +14,7 @@ use crate::{
     StoryRange, check_range, story_ref,
 };
 
-/// What a resolve op targets: an explicit story range (the PM range commands) or one
-/// coalesced revision id across every story (the PM by-id commands).
+/// Resolve target by story range or coalesced revision ID.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChangeTarget {
     /// Resolve every tracked change overlapping the range (no id filtering).
@@ -261,9 +236,7 @@ fn resolve_story(
             ChunkKind::Text(_) | ChunkKind::Embed(_) => {
                 let ins = active_stamp(chunk.attrs.get(INS).cloned(), filter);
                 let del = active_stamp(chunk.attrs.get(DEL).cloned(), filter);
-                // A unit carrying BOTH stamps (concurrent suggest-over-suggest, case E) is
-                // physically removed in either mode — matching the PM range resolver, where
-                // the "remove" mark class wins over the "keep" class on the same text.
+                // Units carrying both stamps are removed in either mode.
                 let remove = match mode {
                     ResolveMode::Accept => del.is_some(),
                     ResolveMode::Reject => ins.is_some(),
@@ -295,10 +268,7 @@ fn resolve_story(
 }
 
 impl EditingDoc {
-    /// Accepts tracked changes (op-contract §1 "Resolve", S4b): pending insertions become
-    /// plain content, pending deletions are carried out. See the module docs for the full
-    /// 3-way matrix and join semantics. The receipt lists the resolved revision ids; a
-    /// range target also echoes the surviving range.
+    /// Accepts insertions and applies deletions for the targeted changes.
     pub fn accept_change(&self, ctx: &EditCtx, target: &ChangeTarget) -> OpResult<Receipt> {
         self.resolve_change(ctx, target, ResolveMode::Accept)
     }

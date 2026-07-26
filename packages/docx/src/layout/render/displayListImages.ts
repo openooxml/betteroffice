@@ -12,7 +12,6 @@
  * Body primitives only: header/footer image primitives carry doc positions in a
  * different PM doc (the HF editor), so a body image pmPos must never match one.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { DisplayList, DisplayPage, ImagePrimitive } from './displayList';

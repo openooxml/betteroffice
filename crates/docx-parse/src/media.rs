@@ -1,4 +1,4 @@
-//! Embedded media table and the incumbent image-resolution aliases.
+//! Embedded media table and image-resolution aliases.
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -142,7 +142,7 @@ mod tests {
     use crate::relationships::{Relationship, TargetMode};
 
     #[test]
-    fn aliases_bytes_and_case_insensitive_resolution_match_the_incumbent() {
+    fn aliases_bytes_and_resolves_paths_case_insensitively() {
         let parts = vec![("word/media/IMAGE.PNG".to_owned(), vec![0, 255, 16])];
         let media = build_media_map(&parts);
         assert_eq!(

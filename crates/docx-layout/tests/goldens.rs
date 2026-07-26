@@ -1,17 +1,9 @@
-//! Native golden-corpus harness — no wasm, no browser.
-//!
-//! Replays every fixture pair exported by `scripts/export-golden-fixtures.ts`
-//! through the pure engine. A scenario the engine accepts MUST reproduce the
-//! committed golden canonical layout byte-for-byte; a scenario that engages a
-//! not-yet-ported feature may report UNSUPPORTED — except the required
-//! paragraph scenarios, which must pass. Prints a one-line PASS/UNSUPPORTED
-//! table (visible via `cargo test -- --nocapture`, or on failure).
+//! Native golden-corpus tests.
 
 use std::fs;
 use std::path::PathBuf;
 
-/// Scenarios the spine must handle (kept in sync with `SUPPORTED` in
-/// `packages/core/src/layout/pagination/__golden__/rustParity.test.ts`).
+/// Scenarios required to pass the native layout corpus.
 const REQUIRED: [&str; 2] = [
     "single-page-multi-paragraph",
     "multi-page-paragraph-overflow",

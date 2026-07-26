@@ -1,12 +1,4 @@
-/**
- * Monaco-style textarea input surface for the experimental yrs core.
- *
- * The textarea owns browser text/IME events but never owns document text.
- * Outside composition it is reset after every event; during composition it
- * temporarily holds the browser's composing string and commits exactly once
- * on compositionend. The document selection itself is the session's pair of
- * Rust-backed sticky positions.
- */
+/** Text and IME input surface backed by sticky session positions. */
 
 import React, {
   forwardRef,

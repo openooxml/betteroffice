@@ -25,7 +25,6 @@
  * in `displayListTables.ts`). The HF *caret + selection* on canvas are covered
  * by `CanvasHfSelectionOverlay`.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import React, { useLayoutEffect, useMemo, useState } from 'react';

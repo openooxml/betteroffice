@@ -1,5 +1,4 @@
-//! Local undo (op-contract §1 "Undo"): a yrs `UndoManager` tracking ONLY the local origin, so
-//! remote, agent, and system transactions are never reverted by the local user.
+//! Local-origin undo management.
 //!
 //! WASM note: yrs gates `SystemClock`, `Options::default()`, and `UndoManager::new` off
 //! `wasm32-unknown-unknown`, so this module builds its `Options` explicitly around an injectable
@@ -16,11 +15,10 @@ use yrs::{Origin, Transact};
 use crate::op::OpResult;
 use crate::{EditingDoc, story_ref};
 
-/// Capture window, byte-for-byte today's PM `HistoryExtension` `newGroupDelay`.
+/// Undo capture window.
 pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 
-/// The PM history depth. yrs 0.27 exposes no stack-trim API, so this is the documented target
-/// rather than a hard cap; [`DocUndoManager::undo_depth`] reports the actual stack size.
+/// Target undo depth; yrs exposes no stack-trim API.
 pub const UNDO_DEPTH: usize = 100;
 
 /// The contract-shaped undo surface over yrs [`yrs::undo::UndoManager`].
@@ -121,8 +119,7 @@ impl DocUndoManager {
         self.inner.can_redo()
     }
 
-    /// Closes the current capture group so the next tracked transaction starts a fresh undo
-    /// step (PM `closeHistory` equivalent).
+    /// Closes the current capture group.
     pub fn add_undo_barrier(&mut self) {
         self.inner.reset();
     }

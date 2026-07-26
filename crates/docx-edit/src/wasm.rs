@@ -1,23 +1,4 @@
-//! The wasm-bindgen session boundary over [`EditingDoc`].
-//!
-//! This module is the ONLY JS-visible surface of the crate (compiled behind
-//! `--features wasm`; see `scripts/embed-edit-wasm.mjs`). Its JS twin is the
-//! `packages/core/src/yrs/` facade — the sole JS entry to this crate, the
-//! `docx/zipContainer.ts` precedent.
-//!
-//! Boundary conventions (mirrors `crates/docx-layout/src/lib.rs`):
-//! - values cross as JSON strings (receipts, queries) or raw bytes (yrs
-//!   updates); errors cross as `Err(JsValue)` carrying a display string;
-//! - op addressing is the op-contract public vocabulary
-//!   `Loc { story, paraId, offset }` — offsets are UTF-16 units within one
-//!   paragraph (`offset ∈ [0, para_len]`, the paragraph's own pilcrow
-//!   excluded). Story-global u32 indices stay transient inside each call;
-//! - suggesting mode is an optional `(author_name, author_date)` pair — both
-//!   or neither; it maps to an [`EditCtx`] (a plain local edit uses an empty
-//!   author, which is stamped only in suggesting mode).
-//!
-//! Everything here is composition of the crate's PUBLIC ops — no op internals
-//! live in this file (the ops track owns those).
+//! wasm-bindgen session boundary over [`EditingDoc`].
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -181,21 +162,18 @@ struct LocalCellSelection {
     head: LocalCellPoint,
 }
 
-/// Applies one boundary "mark" to `range`, routing the six simple toggles
-/// through [`EditingDoc::toggle_format`] and font/size/color through the
-/// tri-state [`EditingDoc::format_range`] (a set, not a toggle — the
-/// op-contract inline-formatting split). `mark_json`:
+/// Applies one boundary mark to `range`. `mark_json`:
 /// `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
 /// {"type":"fontFamily"|"color","value":string} |
-/// {"type":"fontSize","value":number}`.
+/// {"type":"fontSize","value":number}`. The six simple types toggle; font,
+/// size and color set.
 fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -> Result<(), JsValue> {
     let value: Value = serde_json::from_str(mark_json).map_err(js_err)?;
     let kind = value
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| js_err("mark JSON requires a string \"type\""))?;
-    // Formatting is not itself tracked at S1 (op-contract deviation 3), so a
-    // plain local context is correct regardless of the caret's suggest mode.
+    // Formatting uses a plain local context.
     let ctx = EditCtx::local(String::new(), String::new());
     let simple = match kind {
         "bold" => Some(SimpleFormat::Bold),
@@ -250,10 +228,9 @@ fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -> Result<()
     Ok(())
 }
 
-/// Decodes the public facade's tri-state inline-formatting delta. An omitted
-/// key is [`Patch::Keep`], `null` is [`Patch::Clear`], and any typed value is
-/// [`Patch::Set`]. Boolean `false` values also clear in
-/// [`InlineFormatDelta::to_attrs`], matching the PM formatting commands.
+/// Decodes a tri-state inline-formatting delta. An omitted key is
+/// [`Patch::Keep`], `null` is [`Patch::Clear`], any typed value is
+/// [`Patch::Set`]. Boolean `false` also clears.
 fn parse_inline_format_delta(delta_json: &str) -> Result<InlineFormatDelta, JsValue> {
     let value: Value = serde_json::from_str(delta_json).map_err(js_err)?;
     let object = value
@@ -625,7 +602,7 @@ fn parse_payload(value: Option<&Value>) -> Result<Vec<(String, Any)>, JsValue> {
     Ok(out)
 }
 
-/// Parses one `{ "op", "index", … }` coexistence mirror op.
+/// Parses one `{ "op", "index", … }` raw operation.
 fn parse_raw_op(value: &Value) -> Result<RawOp, JsValue> {
     let op = value
         .get("op")
@@ -1090,8 +1067,7 @@ impl EditSession {
         self.engine.measure_paragraph_json(input).map_err(js_err)
     }
 
-    /// Paginate and retain the measured input and Layout. The full JSON return
-    /// remains the migration parity bridge until binary frames consume it.
+    /// Paginates and retains measured input and layout.
     pub fn layout_document_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_document_json(input)
@@ -1450,8 +1426,6 @@ impl EditSession {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
-    // -- lifecycle (op-contract §1.6: load / encode_state / apply_update / subscribe) --
-
     /// Hydrates this replica from an encoded yrs update (the bytes form of
     /// `load` — typically another replica's `encode_state()` output).
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
@@ -1479,12 +1453,10 @@ impl EditSession {
         Ok(Some(json))
     }
 
-    /// Seeds stories from JSON (the json form of `load`):
+    /// Seeds stories from JSON:
     /// `[{"storyId","paragraphs":[{"text","pStyle"?,"alignment"?}, …]}, …]`.
     /// Paragraph text must not contain paragraph breaks. Returns
-    /// `{storyId: [paraId, …]}` in document order. This is an S1 seeding
-    /// scaffold composed from public ops; the real `load(ParsedDocument)`
-    /// belongs to the ops track.
+    /// `{storyId: [paraId, …]}` in document order.
     pub fn load_json(&self, stories_json: &str) -> Result<String, JsValue> {
         let value: Value = serde_json::from_str(stories_json).map_err(js_err)?;
         let entries = value
@@ -1514,11 +1486,7 @@ impl EditSession {
             let seed_ctx = EditCtx::local(String::new(), String::new());
             for paragraph in &paragraphs[1..] {
                 let (text, p_style, alignment) = seed_paragraph(paragraph);
-                // Boundary = index of the final pilcrow, before which the new
-                // paragraph's text lands and at which the split inserts a new
-                // pilcrow. Under the S1 split the FIRST half keeps the original
-                // id and the SECOND half is re-minted, so the just-appended
-                // paragraph is `second_para_id` — restamp ITS properties.
+                // The first split half keeps its ID and the second receives a new ID.
                 let boundary = self.engine.doc().story_len(story_id).map_err(js_err)? - 1;
                 if !text.is_empty() {
                     self.engine
@@ -1983,8 +1951,6 @@ impl EditSession {
         serde_json::to_string(&TableRange { anchor, head }).map_err(js_err)
     }
 
-    // -- S1 ops (Loc addressing; JSON receipts) --
-
     /// Adds a story with one paragraph. Receipt: `{"paraId"}` (the final
     /// pilcrow's paragraph).
     pub fn create_story(
@@ -2267,8 +2233,8 @@ impl EditSession {
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
-    /// pilcrow. Under the S1 split the FIRST half keeps the original paraId and
-    /// the SECOND half is re-minted. Receipt:
+    /// pilcrow. The first half keeps the original paraId, the second is
+    /// re-minted. Receipt:
     /// `{"firstParaId","secondParaId","revisionId": string|null}`.
     pub fn split_paragraph(
         &self,
@@ -2414,9 +2380,8 @@ impl EditSession {
     }
 
     /// Applies a paragraph style id to every paragraph intersecting
-    /// `[start, end)`. With no host style resolver at this boundary, this is
-    /// the PM fallback path: write `pStyle` without fabricating a resolved
-    /// paragraph/run formatting projection.
+    /// `[start, end)`, writing `pStyle` without fabricating a resolved
+    /// paragraph or run formatting projection.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -2715,14 +2680,14 @@ impl EditSession {
         Ok(json!({ "commentId": comment_id }).to_string())
     }
 
-    /// Accepts tracked changes (S4b): pending insertions become plain content,
+    /// Accepts tracked changes: pending insertions become plain content,
     /// pending deletions are carried out; `pPrIns` marks clear (the split
     /// stays), `pPrDel` marks join with the following paragraph (its pPr
     /// survives). `target_json`: `{"revisionId": string}` for one coalesced
-    /// revision (any story) or
+    /// revision, or
     /// `{"story","startPara","startOffset","endPara","endOffset"}` for a Loc
-    /// range. Receipt: `{"revisionIds": [string, …]}` — the revision ids
-    /// resolved. Resolving never stamps a new revision.
+    /// range. Receipt: `{"revisionIds": [string, …]}`. Never stamps a new
+    /// revision.
     pub fn accept_change(&self, target_json: &str) -> Result<String, JsValue> {
         let target = parse_change_target(self.engine.doc(), target_json)?;
         let ctx = EditCtx::local(String::new(), String::new());
@@ -2749,14 +2714,12 @@ impl EditSession {
         Ok(json!({ "revisionIds": receipt.revision_ids }).to_string())
     }
 
-    /// Applies a batch of raw story mutations in ONE transaction — the
-    /// coexistence bridge's mirror-into-yrs path (not a user-intent op). `ops_json`
+    /// Applies a batch of raw story mutations in one transaction. `ops_json`
     /// is `[{ "op":"insert"|"delete"|"format"|"insertEmbed"|"setEmbedAttr"
-    /// |"setComment"|"removeComment", "index", … }, …]`; each op's index (and each
-    /// `setComment` `[start, end)` range) is read against the story state after all
-    /// prior ops in the batch. Attributes/payloads are faithful mirrors of the
-    /// bridge's lowered PM state (tracked-change stamps arrive inside `attrs`;
-    /// comments are keyed by the PM comment id and anchored sticky, side-map only).
+    /// |"setComment"|"removeComment", "index", … }, …]`. Each op's index, and
+    /// each `setComment` `[start, end)` range, is read against the story state
+    /// after all prior ops in the batch. Tracked-change stamps arrive inside
+    /// `attrs`; comments are keyed by comment id and anchored sticky.
     pub fn apply_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
         let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
         let entries = value
@@ -2878,20 +2841,17 @@ impl EditSession {
         self.engine.doc().story_len(story).map_err(js_err)
     }
 
-    /// The story's `canonical-stream-v1` FNV-1a checksum as a decimal string
-    /// (u64 exceeds JS safe-integer range). The coexistence watchdog compares
-    /// this against the PM projector's checksum after every mirrored edit.
+    /// The story's `canonical-stream-v1` FNV-1a checksum, as a decimal
+    /// string because u64 exceeds the JS safe-integer range.
     pub fn story_checksum(&self, story: &str) -> Result<String, JsValue> {
         crate::story_checksum(self.engine.doc(), story)
             .map(|checksum| checksum.to_string())
             .map_err(js_err)
     }
 
-    /// Lowers a story through the resident Rust bridge. Errors with an
-    /// unsupported-embed message on any non-native content until that class is
-    /// promoted to native.
-    /// `env_json` carries theme colors, the default tab stop, and list numeric
-    /// ids (see [`parse_render_env`]).
+    /// Lowers a story for layout. Errors with an unsupported-embed message on
+    /// any non-native content. `env_json` carries theme colors, the default tab
+    /// stop and list numeric ids (see [`parse_render_env`]).
     pub fn yrs_blocks_for_story(&self, story: &str, env_json: &str) -> Result<String, JsValue> {
         let env = parse_render_env(env_json)?;
         self.engine.lower_story_json(story, &env).map_err(js_err)

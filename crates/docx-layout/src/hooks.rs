@@ -1,16 +1,4 @@
-//! FEATURE HOOKS — seams for the pagination features not yet ported.
-//!
-//! Each function here is a thin stub that mirrors a TS export being ported
-//! CONCURRENTLY as a standalone module. A stub returns
-//! `LayoutError::Unsupported` the moment its feature is actually engaged by
-//! the input (and the neutral value otherwise), so paragraph-only documents
-//! flow while uncovered features surface `Unsupported` to the caller.
-//!
-//! Integration contract: when the sibling module lands, replace the stub body
-//! with a call into it — the call sites in `place.rs`/`prescan.rs` do not
-//! change. Signatures mirror the TS exports modulo the `Result` wrapper that
-//! carries the Unsupported signal (the real ports return `Ok(..)`
-//! unconditionally).
+//! Pagination feature hooks.
 
 use crate::LayoutError;
 use crate::page_flow::Paginator;
@@ -26,28 +14,18 @@ fn unsupported(feature: &str) -> LayoutError {
     LayoutError::Unsupported(format!("not ported yet: {feature}"))
 }
 
-// ---------------------------------------------------------------------------
-// break / keep policy (breakPolicy.ts + keepTogether.ts) — WIRED
-// ---------------------------------------------------------------------------
-
 // the scan types live with their producer; re-exported so the spine's
 // `prescan`/`place` keep importing them from the hooks seam
 pub use crate::keep_together::{KeepWithNextGroup, KeepWithNextScan};
 
-/// Wired seam for `breaksBeforeBlock(block: LayoutBlock): boolean` in
-/// `packages/core/src/layout/pagination/breakPolicy.ts`.
 pub fn breaks_before_block(block: &LayoutBlock) -> Result<bool, LayoutError> {
     Ok(break_policy::breaks_before_block(block))
 }
 
-/// Wired seam for `analyzeKeepWithNext(blocks: LayoutBlock[]): KeepWithNextScan`
-/// in `packages/core/src/layout/pagination/keepTogether.ts`.
 pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> Result<KeepWithNextScan, LayoutError> {
     Ok(keep_together::analyze_keep_with_next(measured))
 }
 
-/// Wired seam for `measureKeepWithNextGroup(group, measured): number` in
-/// `keepTogether.ts`.
 pub fn measure_keep_with_next_group(
     group: &KeepWithNextGroup,
     measured: &[MeasuredBlock],
@@ -55,8 +33,6 @@ pub fn measure_keep_with_next_group(
     Ok(keep_together::measure_keep_with_next_group(group, measured))
 }
 
-/// Wired seam for `keepWithNextGroupMustAdvance(fit: KeepWithNextFit): boolean`
-/// in `breakPolicy.ts`. The TS `KeepWithNextFit` fields arrive positionally.
 pub fn keep_with_next_group_must_advance(
     group_height: f64,
     available_height: f64,
@@ -73,15 +49,6 @@ pub fn keep_with_next_group_must_advance(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// section breaks + column balancing (sectionBreaks.ts + columnBalancing.ts) —
-// WIRED
-// ---------------------------------------------------------------------------
-
-/// Wired seam for `handleSectionBreak(block, paginator, nextSectionConfig,
-/// nextSectionType): void` in
-/// `packages/core/src/layout/pagination/sectionBreaks.ts`. The paginator's
-/// section-break slice is the `SectionBreakPaginator` impl in `page_flow.rs`.
 pub fn handle_section_break(
     block: &SectionBreakBlock,
     paginator: &mut Paginator,
@@ -91,10 +58,6 @@ pub fn handle_section_break(
     section_breaks::handle_section_break(block, paginator, next_section_config, next_section_type)
 }
 
-/// Wired seam for `balanceTerminalContinuousTextColumns({ measured, paginator,
-/// start, end }): void` in
-/// `packages/core/src/layout/pagination/columnBalancing.ts`. The paginator's
-/// balancing slice is the `ColumnBalancePaginator` impl in `page_flow.rs`.
 pub fn balance_terminal_continuous_text_columns(
     measured: &[MeasuredBlock],
     paginator: &mut Paginator,
@@ -105,13 +68,6 @@ pub fn balance_terminal_continuous_text_columns(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// table placement (index.ts layoutTable + tableWidthUtils.ts +
-// cellBlockLayout.ts + tableRowBreak.ts)
-// ---------------------------------------------------------------------------
-
-/// `tallyHeaderRows` (index.ts) — length of the leading run of isHeader rows,
-/// the band that repeats on continuation pages.
 fn tally_header_rows(block: &TableBlock) -> usize {
     let mut count = 0usize;
     for row in &block.rows {
@@ -124,8 +80,6 @@ fn tally_header_rows(block: &TableBlock) -> usize {
     count
 }
 
-/// `getHeaderRowsHeight` (index.ts) — summed measured height of the leading
-/// header rows, the overhead a continuation fragment pays to repeat them.
 fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64 {
     let mut height = 0.0f64;
     let mut i = 0usize;
@@ -136,17 +90,7 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
-/// Port of `layoutTable(block, measure, paginator): void` in
-/// `packages/core/src/layout/pagination/index.ts`, leaning on
-/// `buildTableRowBreakInfo` / `snapRowBreak` (`tableRowBreak.ts`),
-/// `layoutCellContent` (`cellBlockLayout.ts`) and the grid geometry in
-/// `tableWidthUtils.ts`.
-///
-/// Rows are placed in order. A row that doesn't fit in the remaining space is
-/// broken across the page boundary (Word's "allow row to break across pages")
-/// at the deepest whole line that fits — the leftover continues on the next
-/// page. The cursor into the table is `(row_index, consumed)` where `consumed`
-/// is how many px of `row_index` were already placed on a previous fragment.
+/// Places table rows, splitting at the deepest whole-line boundary that fits.
 pub fn layout_table(
     block: &TableBlock,
     measure: &TableExtent,
@@ -184,8 +128,7 @@ pub fn layout_table(
             continue;
         }
 
-        // Account for trailing spacing from the previous block that addFragment
-        // will consume (only the first fragment butts against prior content).
+        // Only the first fragment consumes deferred spacing.
         let pending_spacing = if is_first_fragment {
             paginator.state(state_idx).deferred_spacing
         } else {
@@ -285,7 +228,6 @@ pub fn layout_table(
             && indent != 0.0
             && !indent.is_nan()
         {
-            // TS `else if (block.indent)` — truthiness skips 0 / NaN
             desired_x += indent;
         }
 
@@ -313,9 +255,6 @@ pub fn layout_table(
 
         paginator.add_fragment(fragment, fragment_height, 0.0, 0.0);
 
-        // The TS re-asserts the justified/indented x after addFragment (which
-        // wrote the plain column x); mirror by patching the fragment just
-        // pushed onto the page addFragment landed on.
         let landed_idx = paginator.get_current();
         let page_index = paginator.state(landed_idx).page_index;
         if let Some(Fragment::Table(placed)) = paginator.pages[page_index].fragments.last_mut() {
@@ -355,14 +294,6 @@ pub fn layout_table(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// floating objects (floatingObjects.ts)
-// ---------------------------------------------------------------------------
-
-/// HOOK for `layoutFloatingTable(block, measure, paginator, contentWidth):
-/// void` in `packages/core/src/layout/pagination/index.ts`, which reads
-/// `MIN_WRAP_SEGMENT_WIDTH` from
-/// `packages/core/src/layout/pagination/floatingObjects.ts`.
 pub fn layout_floating_table(
     block: &TableBlock,
     measure: &TableExtent,

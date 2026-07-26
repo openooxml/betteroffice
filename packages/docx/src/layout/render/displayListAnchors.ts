@@ -7,7 +7,6 @@
  * layout-math derivation (DOM painter path) and the display-list derivation
  * here, so both register identical keys in identical order.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { YrsRevisionInfo, YrsSession } from '../../yrs';
@@ -100,8 +99,7 @@ export function visitAnchorKeys(
 }
 
 /**
- * Display-list variant of the adapters' layout-based anchor derivation for
- * the experimental canvas renderer: anchor Ys come from Rust `range_rects`
+ * Display-list anchor derivation: anchor Ys come from Rust `range_rects`
  * queries over the display list (page-local px) plus the canvas page stack
  * math, instead of layout-fragment scans in the DOM viewport's coordinate
  * space. Returns `.canvas-pages`-host Y offsets keyed by

@@ -1,42 +1,9 @@
-//! Display-list builder: `{ measured, options } + Layout -> DisplayList`.
-//!
-//! A twin of the contract in `packages/core/src/layout/render/displayList.ts`
-//! (camelCase JSON, renderer-agnostic paint primitives per page). The builder
-//! takes the SAME measured/options JSON the layout engine consumes PLUS the
-//! computed `Layout`, so it works regardless of whether the TS or the Rust
-//! engine paginated — the display list is derived from a Layout, never built
-//! inside the paginator.
-//!
-//! Paint decisions are ported from the TS painter (renderPage / renderParagraph
-//! / renderTable / renderTableBorders / renderImage): run positions come from
-//! resolved line segments, decorations (underline / strike / highlight /
-//! comment-range) ride with their run, table borders collapse the same way and
-//! close fragments with cut edges at page breaks, paragraph shading paints as
-//! a fragment-sized rect, and every text primitive carries docStart / docEnd /
-//! blockId — the replacement for the painted-DOM dataset contract.
-//!
-//! Legacy browser-measured rows may omit authoritative advance metadata. Those
-//! rows retain the deterministic proportional fallback for backwards
-//! compatibility. Rust-measured rows carry exact run/cluster/bidi slices and
-//! are never reconstructed from character counts.
-//! - DATE/TIME fields resolve to their stored fallback (never `Date.now` —
-//!   the display list must be byte-deterministic).
-//! - text boxes nested inside table cells emit nothing yet.
-//!
-//! Header/footer bands: when the input envelope carries the optional
-//! `headersFooters` payload (see [`crate::hf_bands`] for the exact JSON shape),
-//! each page gains `header` / `footer` [`HfRegion`]s composed by the same
-//! paragraph/table emitters. The payload is optional and additive — an
-//! envelope without it produces byte-identical output to before.
+//! Display-list construction from measured layout state.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::collections::{HashMap, HashSet};
-
-// ---------------------------------------------------------------------------
-// output contract (mirrors displayList.ts exactly, camelCase)
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -59,10 +26,7 @@ pub struct DisplayPage {
     pub content_bounds: Option<DisplayBounds>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_bounds: Vec<DisplayBounds>,
-    /// Effective section/page-number state from pagination. These members are
-    /// additive because Batch A retained them on `Layout.Page` but omitted
-    /// them from `DisplayPage`; native/PDF/mirror consumers still need the
-    /// formatted PAGE label and section-relative ordinals.
+    /// Effective section and page-number state from pagination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub section_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,8 +86,7 @@ pub struct NoteRegion {
     pub notes: Vec<NoteRegionNote>,
 }
 
-/// backlink metadata for one note in a [`NoteRegion`] (mirrors
-/// `NoteRegionNote` in displayList.ts)
+/// Backlink metadata for one note region entry.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteRegionNote {
@@ -139,11 +102,7 @@ pub struct NoteRegionNote {
     pub label: Option<String>,
 }
 
-/// header/footer band (mirrors `HfRegion` in displayList.ts). Primitives are
-/// in page coordinates like body primitives; doc positions inside refer to
-/// the HF ProseMirror doc identified by `rId`, NOT the body doc — hit-testing
-/// must scope by region (the painted-DOM analogue of `.layout-page-header` /
-/// `.layout-page-footer`).
+/// Header or footer band in page coordinates.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HfRegion {
@@ -206,11 +165,7 @@ pub struct DocAttrs {
     pub fragment_doc_start: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment_doc_end: Option<i64>,
-    /// stable Word `w14:paraId` / PM `paraId` of the enclosing paragraph, when
-    /// the source carries one. The a11y mirror stamps it as `data-para-id` on
-    /// the paragraph wrapper so `scrollToParaId`-style lookups resolve against
-    /// the mirror. Additive + serde-optional: fixtures without a paraId
-    /// serialize byte-identically to before.
+    /// Stable Word `w14:paraId` / PM `paraId` of the enclosing paragraph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub para_id: Option<String>,
     /// measured line window `[from_line, to_line)` of the paragraph fragment
@@ -219,8 +174,7 @@ pub struct DocAttrs {
     /// the a11y mirror surfaces as a paragraph wrapper (body, header/footer,
     /// text box); table-cell paragraphs are omitted because the mirror renders
     /// them as ARIA cells, which have no fragment element to hang the range on.
-    /// Additive + serde-optional: fixtures without a stamped range serialize
-    /// byte-identically to before.
+    /// Omitted when no stamped range exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_line: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,10 +227,7 @@ pub struct DocAttrs {
     /// innermost block-level content-control identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sdt: Option<SdtAttrs>,
-    /// Full outer-to-inner content-control ancestry. The Batch-A contract only
-    /// exposed `sdt` (the innermost control), which is insufficient to rebuild
-    /// nested, page-spanning boundary overlays. This additive path lets the
-    /// overlay owner union the already-exact primitive geometry per group.
+    /// Full outer-to-inner content-control ancestry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sdt_path: Vec<SdtAttrs>,
     /// inline content-control widget metadata when this text primitive is its glyph.
@@ -305,19 +256,17 @@ pub struct DocAttrs {
     pub comment: Option<CommentMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip_group: Option<ClipGroupMetadata>,
-    /// Flattened here so text and glyph primitives serialize the Batch-A
-    /// `leaderGlyphs` member without duplicating the common primitive attrs.
+    /// Leader glyph metadata shared by text and glyph primitives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_glyphs: Option<LeaderGlyphMetadata>,
-    /// Decoration-only Batch-A members. They remain optional on the common
-    /// flattened attrs so historical primitive constructors stay compact.
+    /// Optional decoration metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight_slice: Option<HighlightSliceMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<DisplayBorderStyle>,
     /// Primitive-class-specific additive fields are flattened through the
     /// shared attrs so legacy constructors in the HF compositor remain source
-    /// compatible while the JSON shape still matches `displayList.ts`.
+    /// compatible.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "opacity")]
     pub primitive_opacity: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "flipH")]
@@ -353,9 +302,6 @@ pub struct DocAttrs {
     /// from `RunFormatting.modernEffects`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modern_effects: Option<Value>,
-    /// Table semantics beyond the original cell coordinates. Batch A's TS
-    /// interface did not expose this typed bundle; it is emitted additively for
-    /// H and documented in the handoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<TableMetadata>,
 }
@@ -408,7 +354,7 @@ pub struct CommentMetadata {
     pub replies: Vec<CommentReplyMetadata>,
 }
 
-/// one reply summary inside [`CommentMetadata`] (mirrors `DisplayCommentReply`)
+/// One reply summary inside [`CommentMetadata`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentReplyMetadata {
@@ -420,8 +366,7 @@ pub struct CommentReplyMetadata {
     pub text: Option<String>,
 }
 
-/// inert field identity on a primitive (mirrors `DisplayFieldMetadata` in
-/// displayList.ts). The instruction is announce-only — never executed.
+/// Inert field identity carried by a primitive.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldMetadata {
@@ -436,8 +381,7 @@ pub struct FieldMetadata {
     pub instruction: Option<String>,
 }
 
-/// footnote/endnote reference identity on the body reference-mark primitive
-/// (mirrors `DisplayNoteRef` in displayList.ts)
+/// Footnote or endnote identity on a body reference mark.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteRefMetadata {
@@ -517,14 +461,7 @@ pub struct ChartA11yAttrs {
     pub label: String,
 }
 
-/// grid position of the table cell a primitive paints inside (mirrors
-/// `TableCellRef` in displayList.ts). `row`/`col` are 0-based anchor-grid
-/// coordinates with vmerge/colspan resolved (a vertically-merged cell keeps
-/// its anchor row); spans are >= 1. `continuation` marks the synthetic slice
-/// of a vertically-merged cell re-painted on a continuation page — the
-/// display-list analogue of `data-vmerge-continuation` (not selectable, doc
-/// positions stripped). Repeated header rows re-painted on later pages are
-/// literal re-paints and are NOT flagged, matching the DOM painter.
+/// Resolved anchor-grid coordinates for a table cell.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCellRef {
@@ -677,7 +614,7 @@ pub struct TextRunPrimitive {
     pub baseline_y: Number,
     /// measured advance of the whole run
     pub width: Number,
-    /// CSS font shorthand (v0, browser-shaped); phase 2 adds fontId+glyphs
+    /// CSS font shorthand.
     pub font: String,
     pub color: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -715,15 +652,7 @@ pub struct TextRunPrimitive {
     pub attrs: DocAttrs,
 }
 
-/// A shaped run of positioned glyphs — the phase-2 replacement for
-/// [`TextRunPrimitive`] on the Rust-measured path. The canvas backend paints
-/// each glyph as a `Path2D` outline from `font_id`'s bytes; the a11y mirror
-/// renders `text` as real characters. Emitted only when the measurement font
-/// store is populated AND the run's font chain resolves (see the builder's
-/// `ShapeFonts`); otherwise the builder falls back to `TextRunPrimitive`,
-/// keeping the browser-measured path byte-identical. A GlyphRun is single-font
-/// by contract: a run spanning multiple fallback fonts is split into one
-/// GlyphRun per maximal same-font subrange (`emit_text_segment`).
+/// Single-font shaped glyph run with source text for accessibility.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GlyphRunPrimitive {
@@ -738,7 +667,7 @@ pub struct GlyphRunPrimitive {
     pub text: String,
     pub glyphs: Vec<PlacedGlyph>,
     /// extra advance added after each U+0020 cluster on a justified line (px) —
-    /// parity with [`TextRunPrimitive::word_spacing`]; the glyph `x` positions
+    /// equivalent to [`TextRunPrimitive::word_spacing`]; the glyph `x` positions
     /// already fold this stretch in, so it is an interchange hint, not
     /// re-applied by the renderer.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -788,7 +717,7 @@ pub struct PlacedGlyph {
     /// folded in for a U+0020 cluster). `x + advance` is the next glyph's pen
     /// origin; for the trailing glyph it closes the run's true right extent, so
     /// hit-testing and the a11y mirror read the real run width off the glyphs
-    /// instead of estimating a uniform trailing advance (F3 right-edge drift).
+    /// instead of estimating a uniform trailing advance.
     pub advance: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_order: Option<u64>,
@@ -832,8 +761,7 @@ pub struct LinePrimitive {
     /// names the owning grid cell (with its border-ownership flags) and
     /// `attrs.table` the enclosing fragment, replacing the consumer-side
     /// geometric fallback association. Every field is optional/defaulted, so
-    /// a default `DocAttrs` serializes to zero extra bytes and pre-contract
-    /// emissions still deserialize. NOTE: `doc_attrs_mut` deliberately keeps
+    /// a default `DocAttrs` serializes to zero extra bytes. `doc_attrs_mut` deliberately keeps
     /// returning `None` for lines so the generic sdt/clip/paragraph stamping
     /// passes stay line-inert; table emission stamps these attrs explicitly.
     #[serde(flatten, default)]
@@ -1076,8 +1004,7 @@ pub struct DecorationPrimitive {
     pub color: String,
     /// dashed rule instead of a solid one — set for the tracked-change
     /// insertion underline (the painter's `border-bottom: 2px dashed`).
-    /// additive + serde-optional so pre-existing fixtures/snapshots that omit
-    /// it still parse and a plain solid decoration serializes unchanged.
+    /// omitted for a plain solid decoration.
     #[serde(default, skip_serializing_if = "is_false")]
     pub dashed: bool,
     /// dotted rule instead of a solid one — set for hidden-run dotted underline.
@@ -1107,25 +1034,15 @@ pub enum DecoKind {
     Spell,
 }
 
-// ---------------------------------------------------------------------------
-// input: measured blocks + options + layout (feature-slice mirrors of the TS
-// types; serde ignores fields the builder doesn't read)
-// ---------------------------------------------------------------------------
-
 pub struct BuildInput {
     contract_version: Option<u32>,
     measured: Vec<MeasuredBlockIn>,
     options: Value,
     layout: LayoutIn,
-    /// optional header/footer payload (see [`crate::hf_bands`] for the shape);
-    /// absent ⇒ output identical to the pre-HF builder
+    /// Optional header/footer payload.
     headers_footers: Option<crate::hf_bands::HeadersFootersIn>,
     headers_footers_content: Option<HeadersFootersContentIn>,
-    /// font fallback chains, `"<family lowercase>|<b 0|1>|<i 0|1>"` → ordered
-    /// `FontStore` ids — the SAME map the measurement input carries. Present
-    /// only under Rust measurement; when absent (browser measurement) the
-    /// builder emits `TextRunPrimitive` exactly as before. Resolving these ids
-    /// against a populated store is what gates GlyphRun emission.
+    /// Font fallback chains keyed by family, bold, and italic state.
     font_chains: HashMap<String, Vec<u32>>,
     resolved_comment_ids: Vec<i64>,
     comment_authors: Vec<CommentAuthorIn>,
@@ -1255,9 +1172,7 @@ struct CommentAuthorIn {
     color: Option<String>,
 }
 
-/// one comment thread of the `commentThreads` envelope field (mirrors
-/// `DisplayListCommentThread` in rustDisplayList.ts) — the comment-id keyed
-/// join the a11y announcement metadata comes from
+/// One comment thread from the display-list envelope.
 #[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct CommentThreadIn {
@@ -1642,7 +1557,7 @@ struct ImageRunIn {
     width: f64,
     #[serde(default)]
     height: f64,
-    /// `wp:docPr` descr, threaded from ImageRun.alt (parser: imageParser.ts)
+    /// Alternative text from `wp:docPr` `descr`.
     #[serde(default)]
     alt: Option<String>,
     #[serde(default)]
@@ -1778,8 +1693,7 @@ struct FieldRunIn {
 pub(crate) struct ParaAttrsIn {
     #[serde(default)]
     alignment: Option<String>,
-    /// resolved paragraph spacing; only `before` is read (HF flow offsets a
-    /// paragraph fragment by spacing.before, renderPage/headerFooter.ts:323)
+    /// Resolved paragraph spacing.
     #[serde(default)]
     pub(crate) spacing: Option<SpacingIn>,
     #[serde(default)]
@@ -1790,9 +1704,7 @@ pub(crate) struct ParaAttrsIn {
     indent: Option<IndentIn>,
     #[serde(default)]
     borders: Option<ParaBordersIn>,
-    /// pre-computed list marker text (e.g. "1.", "•"); its presence means the
-    /// first line reserves a marker slot in the hanging/first-line region so
-    /// body text sits at the text indent, not the marker x (renderParagraph.ts)
+    /// Pre-computed list marker text.
     #[serde(default)]
     list_marker: Option<String>,
     /// w:vanish on the numbering level rPr — a hidden marker reserves no slot
@@ -1962,9 +1874,7 @@ struct TableCellIn {
     borders: Option<CellBordersIn>,
     #[serde(default)]
     padding: Option<CellPaddingIn>,
-    /// w:vAlign (§17.4.84): vertical alignment of the cell's content within its
-    /// box ("top" | "center" | "bottom"). The painter offsets the leftover
-    /// slack (renderTable.ts renderTableCell); "top"/absent stacks from the top.
+    /// Cell content vertical alignment.
     #[serde(default)]
     vertical_align: Option<String>,
     #[serde(default)]
@@ -2016,7 +1926,7 @@ pub(crate) struct ImageBlockIn {
     pub(crate) width: f64,
     #[serde(default)]
     pub(crate) height: f64,
-    /// `wp:docPr` descr, threaded from ImageBlock.alt (parser: imageParser.ts)
+    /// Alternative text from `wp:docPr` `descr`.
     #[serde(default)]
     pub(crate) alt: Option<String>,
     #[serde(default)]
@@ -2312,11 +2222,7 @@ struct ShapeTransformIn {
     flip_v: Option<bool>,
 }
 
-/// text-box block (mirrors `TextBoxBlock`): a positioned container with a
-/// fill, a border, internal padding, and inner paragraph content. The
-/// paginator places it as a [`TextBoxFragmentIn`]; the builder paints the
-/// container chrome and the inner paragraphs at the content origin
-/// (`emit_text_box_fragment`, ported from renderTextBox.ts).
+/// Positioned text-box input.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TextBoxBlockIn {
@@ -2359,8 +2265,7 @@ pub(crate) struct TextBoxBlockIn {
 struct TextBoxMarginsIn {
     #[serde(default)]
     top: f64,
-    /// padding-bottom — does not shift the top-down content stack, so it is
-    /// parsed for shape parity but not read when placing inner paragraphs
+    /// Parsed but unused bottom padding.
     #[serde(default)]
     #[allow(dead_code)]
     bottom: f64,
@@ -2370,8 +2275,7 @@ struct TextBoxMarginsIn {
     right: f64,
 }
 
-/// OOXML text-box default internal margins in px (mirrors
-/// `DEFAULT_TEXTBOX_MARGINS` in types.ts).
+/// OOXML default text-box margins in pixels.
 const DEFAULT_TEXTBOX_MARGINS: TextBoxMarginsIn = TextBoxMarginsIn {
     top: 4.0,
     bottom: 4.0,
@@ -2808,8 +2712,7 @@ struct TextBoxFragmentIn {
     pm_start: Option<i64>,
     #[serde(default)]
     pm_end: Option<i64>,
-    /// stacking hints carried by the fragment; not needed for the flattened
-    /// display-list paint order (kept for shape parity, unread)
+    /// Unused stacking hint.
     #[serde(default)]
     #[allow(dead_code)]
     is_floating: Option<bool>,
@@ -2897,11 +2800,7 @@ fn round3(v: f64) -> f64 {
     if r == 0.0 { 0.0 } else { r }
 }
 
-/// block identity as carried on primitive attrs: numeric ids (golden
-/// fixtures) emit `blockId`, string ids (the live pipeline's compound
-/// `block-N` keys) emit `blockKey` with the raw id. Exactly one side is set
-/// for the TS `BlockId = string | number` domain, so numeric-id inputs
-/// serialize byte-identically to the pre-`blockKey` contract.
+/// Primitive block identity for string or numeric identifiers.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub(crate) struct BlockRef {
     id: Option<Number>,
@@ -2933,17 +2832,13 @@ impl BlockRef {
     }
 }
 
-/// canonical string key for a block id (matches the TS `String(blockId)` map key).
+/// Returns the canonical string key for a block identifier.
 fn block_key(id: &Value) -> String {
     match id {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
 }
-
-// ---------------------------------------------------------------------------
-// font + direction helpers (ported paint decisions)
-// ---------------------------------------------------------------------------
 
 const DEFAULT_FONT_PT: f64 = 11.0;
 const DEFAULT_FONT_FAMILY: &str = "Calibri";
@@ -3160,10 +3055,7 @@ fn row_parent_revision_id(row: &TableRowIn) -> Option<i64> {
         .or_else(|| row.tracked_del.as_ref().and_then(|r| r.revision_id))
 }
 
-/// CSS font shorthand for a run:
-/// "{italic} {small-caps} {weight} {size}px {family}, sans-serif".
-/// v0 uses a single generic fallback rather than porting the full font-resolver
-/// stacks; the shorthand is an interchange hint, not shaping input.
+/// Returns CSS font shorthand for a run.
 fn css_font(fmt: &RunFormattingIn) -> String {
     let size = px(effective_font_px_of(fmt));
     let weight = if fmt.bold == Some(true) { 700 } else { 400 };
@@ -3180,9 +3072,7 @@ fn css_font(fmt: &RunFormattingIn) -> String {
     }
 }
 
-/// resolved paint color for a run (ports applyRunStyles / renderTextRun):
-/// deletions paint red, hyperlinks without an explicit color fall back to
-/// Word's default blue unless the source opted out.
+/// Resolves deletion, hyperlink, and explicit run colors.
 fn run_color(fmt: &RunFormattingIn) -> String {
     if fmt.is_deletion == Some(true) {
         return "#c62828".to_string();
@@ -3234,8 +3124,7 @@ fn hyperlink_href(fmt: &RunFormattingIn) -> Option<String> {
     sanitized_href(fmt.hyperlink.as_ref().and_then(|h| h.href.as_deref()))
 }
 
-// first strong-directional character classes (subset of UBA L vs R/AL), same
-// ranges as renderParagraph.paragraphBaseIsRtl
+// Strong directional character ranges for automatic paragraph direction.
 fn is_rtl_strong(c: char) -> bool {
     matches!(u32::from(c),
         0x0590..=0x085F | 0x08A0..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
@@ -3285,7 +3174,7 @@ fn is_floating_wrap_type(wrap: Option<&str>) -> bool {
     )
 }
 
-/// ports isFloatingImageRun: positioned at page/cell level, never inline
+/// Returns whether an image is positioned outside inline flow.
 fn is_floating_image_run(run: &ImageRunIn) -> bool {
     is_floating_wrap_type(run.wrap_type.as_deref()) || run.display_mode.as_deref() == Some("float")
 }
@@ -3326,7 +3215,6 @@ fn emit_watermark(prims: &mut Vec<Primitive>, watermark: &WatermarkIn, page: &Pa
     }
 }
 
-/// Port of renderWatermark.ts:autoFontSizePx.
 fn watermark_auto_font_px(text: &str, available_width_px: f64) -> f64 {
     let chars = text.trim().chars().count().max(1) as f64;
     let size = available_width_px / (chars * 0.62);
@@ -3572,10 +3460,6 @@ fn image_layout_height(run: &ImageRunIn) -> f64 {
         .and_then(|bounds| bounds.height)
         .unwrap_or(run.height)
 }
-
-// ---------------------------------------------------------------------------
-// resolved line segments (port of resolveLineSegments)
-// ---------------------------------------------------------------------------
 
 /// one run's visible slice on a laid-out line: the (possibly sliced) run plus
 /// its on-line text; non-text runs pass through whole with empty text
@@ -3885,12 +3769,7 @@ fn push_bidi_text_items<'a>(
 // builder
 // ---------------------------------------------------------------------------
 
-/// Per-page resolved widths for one PAGE/NUMPAGES field run, keyed on the
-/// field's pm position (F2). `fallback` is the width the measure baked into
-/// `line.width` (the field's fallback text, e.g. "1"); `per_page[i]` is the
-/// width of the field's resolved text on layout page index `i`. Supplied by the
-/// JS input for HF field lines so a centered/right line re-centers per page;
-/// absent ⇒ the field rides the char-distributed width, byte-identical to before.
+/// Per-page resolved widths for one PAGE/NUMPAGES field run.
 pub(crate) struct FieldWidthEntry {
     pub(crate) fallback: f64,
     pub(crate) per_page: Vec<f64>,
@@ -3901,22 +3780,19 @@ pub(crate) type FieldWidthMap = HashMap<i64, FieldWidthEntry>;
 
 pub(crate) struct RenderCtx<'a> {
     pub(crate) page_number: u64,
-    /// 0-based layout page index — the key into per-page field-width arrays (F2).
+    /// Zero-based key into per-page field-width arrays.
     /// Distinct from `page_number`, which restarts per section.
     pub(crate) page_index: usize,
     pub(crate) total_pages: u64,
-    /// shaping fonts for GlyphRun emission; `None` ⇒ the browser-measured v0
-    /// path (emit `TextRunPrimitive`, byte-identical to before).
+    /// Shaping fonts for glyph-run emission.
     pub(crate) shape: Option<&'a ShapeFonts<'a>>,
-    /// per-page PAGE/NUMPAGES field widths for HF field lines (F2); `None` on
-    /// the body path and whenever the input supplies none.
+    /// Per-page PAGE/NUMPAGES widths for header/footer field lines.
     pub(crate) field_widths: Option<&'a FieldWidthMap>,
 }
 
 impl RenderCtx<'_> {
     /// `(fallback_width, resolved_width_on_this_page)` for a field run, when the
-    /// input supplied a per-page width keyed on its pm position. `None` ⇒ the
-    /// caller uses the char-distributed width (unchanged pre-F2 behavior).
+    /// input supplied a per-page width keyed on its pm position.
     fn field_width(&self, pm_start: Option<i64>) -> Option<(f64, f64)> {
         let entry = self.field_widths?.get(&pm_start?)?;
         let resolved = entry.per_page.get(self.page_index).copied()?;
@@ -4668,7 +4544,7 @@ fn build_display_list_selected(
     let render_options =
         serde_json::from_value::<RenderOptionsIn>(input.options.clone()).unwrap_or_default();
 
-    // block directory keyed like the TS BlockDirectory: String(block.id)
+    // Index measured blocks by canonical block key.
     let mut by_id: HashMap<String, &MeasuredBlockIn> = HashMap::new();
     for mb in &input.measured {
         let key = match &mb.block {
@@ -4716,9 +4592,7 @@ fn build_display_list_selected(
             page_borders.push(border);
         }
 
-        // page geometry for anchored-float resolution (mirrors
-        // pageGeometryFromPage): the coordinate frame `resolve_anchored_position`
-        // resolves an image run's OOXML anchor against.
+        // Page coordinate frame for anchored-float resolution.
         let float_geom = PageFloatGeom {
             page_width: page.size.w,
             page_height: page.size.h,
@@ -4728,9 +4602,7 @@ fn build_display_list_selected(
             content_height: page.size.h - page.margins.top - page.margins.bottom,
         };
 
-        // behind-doc floating images paint before body content (renderPage
-        // PHASE 3): iterate the page's paragraph fragments and emit each
-        // `behind` floating image run at its resolved page rect.
+        // Behind-document floating images paint before body content.
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
                 && let Some(mb) = by_id.get(&block_key(&pf.block_id))
@@ -4740,8 +4612,7 @@ fn build_display_list_selected(
             }
         }
 
-        // paragraph border grouping needs the neighbor fragments' borders
-        // (ECMA-376 §17.3.1.24); peek helper mirrors renderPage.getParaBorders
+        // Paragraph border grouping uses neighboring fragment borders.
         let para_borders_of = |frag: &FragmentIn| -> Option<ParaBordersIn> {
             if let FragmentIn::Paragraph(p) = frag
                 && let Some(mb) = by_id.get(&block_key(&p.block_id))
@@ -4868,9 +4739,7 @@ fn build_display_list_selected(
             }
         }
 
-        // front floating images paint after body content (renderPage PHASE:
-        // frontFloatingImages layer, appended after the fragments) — every
-        // non-`behind` floating image run on the page.
+        // Front floating images paint after body content.
         for frag in &page.fragments {
             if let FragmentIn::Paragraph(pf) = frag
                 && let Some(mb) = by_id.get(&block_key(&pf.block_id))
@@ -5153,14 +5022,7 @@ fn apply_review_metadata(
     }
 }
 
-/// per-fragment paint of one paragraph slice (ports renderParagraphFragment +
-/// renderLine): shading rect, grouped borders, then each measured line's runs
-/// with indent padding, per-line float margins, and alignment shift. `origin_*`
-/// are the fragment's page coordinates; cell content passes its own origin and
-/// suppresses border grouping. `stamp_line_range` records the fragment's
-/// `[from_line, to_line)` on every primitive (the a11y mirror's `data-from-line`
-/// / `data-to-line`); table-cell callers pass `false` — the mirror renders their
-/// paragraphs as ARIA cells, so there is no fragment node to carry the range.
+/// Emits one paragraph fragment in page coordinates.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_paragraph_fragment(
     prims: &mut Vec<Primitive>,
@@ -5265,8 +5127,7 @@ pub(crate) fn emit_paragraph_fragment(
     let total_lines = measure.lines.len();
     let carried_from_prev = frag.carried_from_prev == Some(true);
     let alignment = attrs.and_then(|a| a.alignment.as_deref());
-    // a rendered list marker (non-hidden) occupies the hang on the first line;
-    // body text then aligns at the text indent instead of the marker x (F4)
+    // A visible list marker occupies the first-line hanging indent.
     let has_list_marker = attrs
         .and_then(|a| a.list_marker.as_deref())
         .is_some_and(|m| !m.is_empty())
@@ -5414,11 +5275,9 @@ struct LineGeom<'a> {
     is_rtl: bool,
     alignment: Option<&'a str>,
     frag_pm_start: Option<i64>,
-    /// paragraph carries a rendered list marker: the first line reserves the
-    /// hang for the marker so body text sits at the text indent (F4)
+    /// Whether the first line reserves the hanging indent for a list marker.
     has_list_marker: bool,
-    /// the paragraph's last run is a `<w:br>` — makes even the closing line
-    /// justify (renderParagraph/line.ts `paragraphEndsWithLineBreak`)
+    /// A trailing explicit line break allows the closing line to justify.
     para_ends_with_line_break: bool,
 }
 
@@ -5582,9 +5441,7 @@ fn emit_line(
         .as_ref()
         .map(|items| items.iter().map(LinePaintItem::width).sum::<f64>());
 
-    // per-line indent padding, ported from renderParagraphFragment: the first
-    // line carries the hanging/firstLine shift; body lines of a hanging-indent
-    // paragraph without left indent pad by the hang
+    // The first line carries the hanging or first-line shift.
     let has_hanging = geom.hanging > 0.0;
     let has_first_line = geom.first_line > 0.0;
     let mut pad_left = geom.indent_left;
@@ -5592,11 +5449,7 @@ fn emit_line(
     if geom.is_first_line {
         if geom.indent_left > 0.0 && has_hanging {
             text_indent = if geom.has_list_marker {
-                // the marker inline-block fills the hang (min-width = hanging,
-                // renderParagraph.ts getListMarkerInlineWidth), so the body
-                // text sits at the text indent — max(indent_left, hanging) —
-                // rather than being pulled left by the hang like a plain
-                // hanging paragraph (F4)
+                // The marker consumes the hanging width before body text.
                 (geom.hanging - geom.indent_left).max(0.0)
             } else {
                 -geom.hanging
@@ -5621,14 +5474,7 @@ fn emit_line(
     // individually: fixed-width runs (tabs, inline images) subtract first, the
     // rest splits across text-ish segments by character count.
     //
-    // F2: PAGE/NUMPAGES fields whose per-page resolved width the input supplied
-    // are pulled OUT of the char pool and treated as fixed-width runs at the
-    // page's resolved width. The fallback width they contributed to the measured
-    // `line.width` is subtracted from the pool baseline, so the line's true
-    // extent — and the centered/right `align_shift` below — tracks the page's
-    // actual field digits instead of the once-measured fallback ("1"). Absent
-    // supply ⇒ the field rides the pool exactly as before and
-    // `effective_line_width` equals `line.width`.
+    // Per-page field widths are fixed and removed from the character pool.
     let mut fixed_width = 0.0;
     let mut pool_chars: usize = 0;
     let mut field_fixed = 0.0; // Σ per-page resolved widths of supplied fields
@@ -5742,11 +5588,7 @@ fn emit_line(
         }));
     }
 
-    // justification (F6): jc=both/distribute stretches expandable space
-    // clusters to fill the usable width. The DOM painter does this via CSS
-    // `text-align: justify` (renderParagraph/line.ts). Distribute the line's
-    // slack equally across U+0020 space clusters and carry the per-space add as
-    // `word_spacing` so the canvas backend paints the stretched gaps.
+    // Distribute justification slack across U+0020 clusters.
     let justified = geom.alignment == Some("justify")
         && ooxml_text::line_is_justified(
             geom.is_last_line,
@@ -5827,8 +5669,7 @@ fn emit_line(
                 }
                 RunIn::Field(f) => {
                     let text = field_text(f, ctx);
-                    // supplied per-page width renders the field at its resolved
-                    // extent (F2); otherwise it rides the char-distributed pool
+                    // Supplied field widths override character distribution.
                     let (w, item_word_space_extra) = match ctx.field_width(seg.pm_start) {
                         Some((_, resolved)) => (resolved, 0.0),
                         None => (
@@ -5968,8 +5809,7 @@ fn emit_line(
                 level,
                 logical_order,
             } => {
-                // image-only lines center in the line box; images flowing with
-                // text seat their bottom on the baseline (renderLine's flex rules)
+                // Image-only lines center; inline images sit on the baseline.
                 let layout_width = imr
                     .rotation_bounds
                     .as_ref()
@@ -6336,10 +6176,7 @@ fn emit_text_segment(
             attrs: attrs.clone(),
         }));
     }
-    // suggested insertion: green wash behind the glyphs, full line band. Mirrors
-    // the DOM painter's `background-color: rgba(52,168,83,0.08)` padded to the
-    // line box (renderParagraph/runs.ts). Same geometry as a highlight wash; the
-    // green dashed underline is emitted after the text, below.
+    // Paint the insertion wash across the full line band.
     if fmt.is_insertion == Some(true) {
         prims.push(Primitive::Decoration(DecorationPrimitive {
             deco: DecoKind::Highlight,
@@ -6371,10 +6208,7 @@ fn emit_text_segment(
     }
 
     let color = run_color(fmt);
-    // GlyphRun path: shape the segment from the measurement font bytes when a
-    // store is threaded AND the run's font chain resolves. On any miss (no
-    // fonts, no chain for the family, empty text, or a shaping failure) fall
-    // back to the v0 TextRunPrimitive below, byte-identical to before.
+    // Unresolved or failed shaping falls back to a text primitive.
     let emitted_glyphs = match shape {
         Some(sf) => try_emit_glyph_runs(
             prims,
@@ -6676,12 +6510,7 @@ fn try_emit_glyph_runs(
         let sub_bytes = sub_text.as_bytes();
         let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(glyphs.len());
         for g in &glyphs {
-            // this glyph's pen advance = the shaped x_advance plus the
-            // equal-share space stretch for a justified U+0020 cluster (a space
-            // is one single-byte glyph, so the stretch fires exactly once per
-            // gap — parity with word_metrics::stretch_spaces). Folding it in here
-            // keeps `x + advance` equal to the next glyph's origin and lets the
-            // trailing glyph close the run's true right extent (F3).
+            // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
             if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
                 advance += ws_px;
@@ -7068,8 +6897,7 @@ fn emit_paragraph_borders(
 // floating images + text boxes
 // ---------------------------------------------------------------------------
 
-/// page coordinate frame an anchored float resolves against (mirrors
-/// `PageGeometry` / pageGeometryFromPage). All px.
+/// Page coordinate frame for anchored floats, in pixels.
 struct PageFloatGeom {
     page_width: f64,
     page_height: f64,
@@ -7086,12 +6914,12 @@ struct AnchorBand {
     size: f64,
 }
 
-/// EMU → px, matching drawingml `emuToPixels` (round(emu * 96 / 914400)).
+/// Converts EMU to rounded pixels at 96 DPI.
 fn emu_to_px(emu: f64) -> f64 {
     (emu * 96.0 / 914400.0).round()
 }
 
-/// horizontal band for a `relativeFrom` value (port of horizontalAnchorBand)
+/// Resolves the horizontal band for a `relativeFrom` value.
 fn horizontal_anchor_band(relative_to: Option<&str>, geom: &PageFloatGeom) -> AnchorBand {
     match relative_to {
         Some("page") => AnchorBand {
@@ -7118,7 +6946,7 @@ fn horizontal_anchor_band(relative_to: Option<&str>, geom: &PageFloatGeom) -> An
     }
 }
 
-/// vertical band for a `relativeFrom` value (port of verticalAnchorBand)
+/// Resolves the vertical band for a `relativeFrom` value.
 fn vertical_anchor_band(
     relative_to: Option<&str>,
     fragment_y: f64,
@@ -7149,15 +6977,12 @@ fn vertical_anchor_band(
     }
 }
 
-/// resolve a floating image run's OOXML anchor to a content-relative (x, y)
-/// origin (port of resolveAnchoredObjectPosition). `fragment_y` is the paragraph
-/// fragment's content-relative top (the `paragraph`/`line` anchor base).
+/// Resolves a floating image anchor to a content-relative origin.
 fn resolve_anchored_position(
     imr: &ImageRunIn,
     fragment_y: f64,
     geom: &PageFloatGeom,
 ) -> (f64, f64) {
-    // horizontal (port of resolveHorizontalAnchor)
     let x = match imr.position.as_ref().and_then(|p| p.horizontal.as_ref()) {
         None => {
             if imr.css_float.as_deref() == Some("right") {
@@ -7192,7 +7017,6 @@ fn resolve_anchored_position(
         }
     };
 
-    // vertical (port of resolveVerticalAnchor)
     let y = match imr.position.as_ref().and_then(|p| p.vertical.as_ref()) {
         None => fragment_y,
         Some(v) => {
@@ -7230,13 +7054,7 @@ fn resolve_anchored_position(
     (x, y)
 }
 
-/// emit a paragraph's floating image runs as Image primitives at their resolved
-/// page rects (ports extractFloatingImagesFromParagraph + the DOM painter's
-/// float layer). `frag_y` is the fragment's page-local top; `want_behind`
-/// selects the `behind`-doc pass (paints before body) vs the front pass (after).
-/// The painter resolves floats at paint time — not in the layout — so the
-/// builder re-derives the same geometry here rather than reading it off the
-/// fragment.
+/// Emits paragraph floating images at their resolved page rectangles.
 fn emit_paragraph_floating_images(
     prims: &mut Vec<Primitive>,
     block: &ParagraphBlockIn,
@@ -8372,11 +8190,7 @@ fn chart_aria_label(chart: &ChartIn) -> String {
     format!("{title}, {kind}, {series_count} series, {category_count} categories")
 }
 
-/// paint one text-box fragment (port of renderTextBoxFragment): the container's
-/// fill rect and border edges at the box's page rect, then the inner paragraphs
-/// at the content origin (inside the border + internal padding). The box uses
-/// CSS `box-sizing: border-box`, so the border and padding sit inside the
-/// fragment rect and the content origin is `x + outlineWidth + margin`.
+/// Paints one text-box fragment.
 fn emit_text_box_fragment(
     prims: &mut Vec<Primitive>,
     frag: &TextBoxFragmentIn,
@@ -8438,9 +8252,7 @@ fn emit_text_box_fragment(
         edge(l, t, l, b); // left
     }
 
-    // inner paragraphs stack from the content origin; box-sizing:border-box puts
-    // the content box inside the border + padding. innerWidth ignores the border
-    // width, matching renderTextBox (`fragment.width - margins.left - margins.right`).
+    // The inner width excludes margins but not the border.
     let margins = block.margins.unwrap_or(DEFAULT_TEXTBOX_MARGINS);
     let content_x = frag.x + border_w + margins.left;
     let content_top = frag.y + border_w + margins.top;
@@ -8477,7 +8289,7 @@ fn emit_text_box_fragment(
 // tables
 // ---------------------------------------------------------------------------
 
-/// a cell resolved onto the column grid (port of resolveCellGrid + pixel x)
+/// A cell resolved onto the column grid.
 struct GridCell {
     row_index: usize,
     cell_index: usize,
@@ -8542,8 +8354,7 @@ fn compute_cell_grid(block: &TableBlockIn, column_widths: &[f64]) -> Vec<GridCel
     out
 }
 
-/// cumulative per-row y offsets, each rounded to a whole pixel (port of
-/// buildRowYPositions — paint crispness rule); length rows+1
+/// Returns whole-pixel cumulative row offsets.
 fn row_y_positions(rows: &[TableRowExtentIn]) -> Vec<f64> {
     let mut out = Vec::with_capacity(rows.len() + 1);
     let mut y: f64 = 0.0;
@@ -8624,10 +8435,7 @@ fn table_metadata(
     }
 }
 
-/// paint one table fragment: the windowed row slice this page shows. Ports
-/// renderTableFragment's geometry (winTop / headerHeight / visibleHeight,
-/// vmerge re-emit, shared-edge border collapse) and renderTableBorders' cut
-/// edges that close the fragment at a page break.
+/// Emits a windowed table fragment with merged cells and cut-edge borders.
 pub(crate) fn emit_table_fragment(
     prims: &mut Vec<Primitive>,
     frag: &TableFragmentIn,
@@ -8813,8 +8621,7 @@ pub(crate) fn emit_table_fragment(
         let cell = &block.rows[p.g.row_index].cells[p.g.cell_index];
         let cx = frag.x + p.g.x;
         let cy = frag.y + p.cell_y;
-        // the table's outer left edge draws a left border on this cell; the
-        // box-sizing:border-box cell then insets its content by that width (F1)
+        // The outer left border insets cell content by its width.
         let is_first_col = if bidi {
             p.g.column_index + p.g.col_span >= col_count
         } else {
@@ -9122,8 +8929,7 @@ pub(crate) fn emit_table_fragment(
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
 }
 
-/// paragraphs and nested tables stacked inside a cell with Word's spacing
-/// collapse (port of renderCellContent/layoutCellContent)
+/// Paints stacked cell content with collapsed paragraph spacing.
 #[allow(clippy::too_many_arguments)]
 fn emit_cell_content(
     prims: &mut Vec<Primitive>,
@@ -9154,10 +8960,7 @@ fn emit_cell_content(
     let pad_bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(1.0);
     let content_width = (p.width - pad_left - pad_right).max(0.0);
 
-    // box-sizing:border-box insets content by the rendered border widths on the
-    // sides this cell draws (renderTable.ts collapse: outer top/left only,
-    // bottom always). Left shifts the content x (F1); top/bottom bound the
-    // vertical box the w:vAlign offset is measured against (F5).
+    // Drawn border widths inset the cell content box.
     let edge_w = |e: &Option<BorderEdgeIn>| -> f64 {
         e.as_ref()
             .filter(|b| border_visible(b))
@@ -9173,12 +8976,7 @@ fn emit_cell_content(
         None => (0.0, 0.0, 0.0),
     };
 
-    // Stack the cell's flow blocks the way the DOM painter's renderCellContent
-    // does: paragraphs max-collapse spacing.after/spacing.before, nested tables
-    // flow after the previous paragraph's after-spacing, and a trailing
-    // spacing.after paints as padding-bottom. `block_tops[i]` is the y of block i
-    // relative to the content-box top; `content_height` is the full stacked box
-    // the vAlign slack is measured against.
+    // Paragraph spacing collapses within the cell flow.
     let mut block_tops: Vec<f64> = Vec::with_capacity(cell.blocks.len());
     let mut stack_cursor = 0.0_f64;
     let mut prev_after = 0.0_f64;
@@ -9228,10 +9026,7 @@ fn emit_cell_content(
     // a trailing spacing.after becomes the content box's padding-bottom
     let content_height = stack_cursor + prev_after;
 
-    // w:vAlign offsets the leftover slack when the content is shorter than the
-    // cell box; Word (and the painter) top-anchor content that fills/overflows
-    // the box (renderTable.ts contentFillsBox), so vmerge-distributed cells stay
-    // put and match the paginator's top-anchored break offsets (F5).
+    // Content that fills or overflows the cell remains top-aligned.
     let avail = (cell_h - border_top - border_bottom - pad_top - pad_bottom).max(0.0);
     let content_fills = cell_measure.height >= cell_h - 0.5;
     let v_offset = if content_fills {
@@ -9247,8 +9042,7 @@ fn emit_cell_content(
     let content_x = cx + border_left + pad_left;
     let content_top = cy + border_top + pad_top + v_offset;
 
-    // behind-doc cell floats paint under the cell content (renderCellContent
-    // appends the behind layer before the paragraph flow, #188)
+    // Behind-document floats paint below cell content.
     emit_cell_floating_images(
         prims,
         cell,
@@ -9446,8 +9240,7 @@ fn emit_cell_content(
         }
     }
 
-    // front cell floats paint above the cell content (renderCellContent appends
-    // the front layer after the paragraph flow, #188)
+    // Front cell floats paint above cell content.
     emit_cell_floating_images(
         prims,
         cell,
@@ -9489,13 +9282,7 @@ fn postprocess_cell_primitives(
     }
 }
 
-/// resolve a cell-anchored floating image run to a cell-content-relative
-/// `(x, y)` origin (port of `extractCellFloatingImages`' horizontal/vertical
-/// logic in renderTableCellFloating.ts). `paragraph_y` is the top of the
-/// anchoring paragraph relative to the cell content box; the caller offsets the
-/// result into page space. Unlike the page-float `resolve_anchored_position`,
-/// the cell path has no `relativeFrom` bands — the cell content box is the only
-/// frame — and clamps the image inside it.
+/// Resolves a cell-anchored image to a cell-content-relative origin.
 fn resolve_cell_float_position(
     imr: &ImageRunIn,
     paragraph_y: f64,
@@ -9536,15 +9323,7 @@ fn resolve_cell_float_position(
     (x, y)
 }
 
-/// emit a table cell's floating image runs as Image primitives at their
-/// cell-relative resolved geometry (#188 — port of `extractCellFloatingImages`
-/// + `renderFloatingImagesLayer`). `want_behind` selects the behind-doc pass
-/// (paints under the cell content) vs the front pass (over it). The anchoring
-/// `paragraph_y` accumulates the cell's measured block heights the same way the
-/// painter's extractor does (bare `totalHeight`, no spacing collapse). Each
-/// image clips to the fragment window, carries the cell's grid ref, and keeps
-/// its doc positions only on a selectable (non-vmerge-continuation) slice —
-/// matching the cell paragraph-content path.
+/// Emits a table cell's floating image runs.
 #[allow(clippy::too_many_arguments)]
 fn emit_cell_floating_images(
     prims: &mut Vec<Primitive>,
@@ -9591,8 +9370,7 @@ fn emit_cell_floating_images(
             let layout_height = image_layout_height(imr);
             let mut attrs = block_ref.attrs();
             attrs.cell = Some(cell_ref.clone());
-            // a vmerge-continuation slice is a re-paint — not selectable, so it
-            // carries no doc positions (strip_doc_positions parity)
+            // A continuation repaint carries no document positions.
             if selectable {
                 attrs.doc_start = imr.pm_start;
                 attrs.doc_end = imr.pm_end;
@@ -9730,15 +9508,13 @@ pub fn build_display_list_json_with_fonts(
     serde_json::to_string(&dl).map_err(|e| format!("serialize: {e}"))
 }
 
-/// Typed counterpart to [`build_display_list_json_with_fonts`]. Engine
-/// sessions retain this value and serialize it only while the legacy JSON
-/// facade remains the production parity oracle.
+/// Typed counterpart to [`build_display_list_json_with_fonts`].
 pub fn build_display_list_value_with_fonts(
     input: &str,
     fonts: &ooxml_text::FontStore,
 ) -> Result<DisplayList, String> {
     let mut wire: Value = serde_json::from_str(input).map_err(|e| format!("parse: {e}"))?;
-    normalize_js_integral_numbers(&mut wire);
+    normalize_integral_json_numbers(&mut wire);
     let parsed: BuildInput = serde_json::from_value(wire).map_err(|e| format!("parse: {e}"))?;
     Ok(build_display_list(&parsed, fonts))
 }
@@ -9814,7 +9590,7 @@ fn resident_build_input(
         serde_json::to_value(layout).map_err(|e| format!("encode resident layout: {e}"))?,
     );
     let mut wire = Value::Object(wire);
-    normalize_js_integral_numbers(&mut wire);
+    normalize_integral_json_numbers(&mut wire);
     serde_json::from_value(wire).map_err(|e| format!("parse resident display input: {e}"))
 }
 
@@ -10028,7 +9804,7 @@ fn convert_resident_value<T: Serialize, U: DeserializeOwned>(
 ) -> Result<U, String> {
     let mut value =
         serde_json::to_value(input).map_err(|error| format!("encode {label}: {error}"))?;
-    normalize_js_integral_numbers(&mut value);
+    normalize_integral_json_numbers(&mut value);
     serde_json::from_value(value).map_err(|error| format!("parse {label}: {error}"))
 }
 
@@ -10106,22 +9882,17 @@ fn shift_page_body_positions(page: &mut DisplayPage, deltas: &HashMap<String, i6
     }
 }
 
-/// The legacy bridge serializes Rust layout JSON, parses it in JavaScript, and
-/// stringifies it again before display compilation. JavaScript has one number
-/// kind, so an integral Rust `f64` such as `16.0` returns as JSON `16`; several
-/// established display-input fields intentionally deserialize as `i64`.
-/// Resident injection skips that browser round trip, so reproduce only its
-/// lossless integral-number canonicalization inside the Rust adapter.
-fn normalize_js_integral_numbers(value: &mut Value) {
+/// Canonicalizes lossless integral JSON floats for integer-valued fields.
+fn normalize_integral_json_numbers(value: &mut Value) {
     match value {
         Value::Array(values) => {
             for value in values {
-                normalize_js_integral_numbers(value);
+                normalize_integral_json_numbers(value);
             }
         }
         Value::Object(fields) => {
             for value in fields.values_mut() {
-                normalize_js_integral_numbers(value);
+                normalize_integral_json_numbers(value);
             }
         }
         Value::Number(number) if !number.is_i64() && !number.is_u64() => {
@@ -10141,18 +9912,18 @@ fn normalize_js_integral_numbers(value: &mut Value) {
 }
 
 #[cfg(test)]
-mod batch_f_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn resident_adapter_matches_javascript_integral_number_shape() {
+    fn resident_adapter_normalizes_integral_json_numbers() {
         let mut value = serde_json::json!({
             "pmStart": 16.0,
             "fractional": 16.25,
             "nested": [3.0, -4.0],
             "fontChains": { "calibri|0|0": [1.0] }
         });
-        normalize_js_integral_numbers(&mut value);
+        normalize_integral_json_numbers(&mut value);
         assert!(value["pmStart"].as_i64().is_some());
         assert_eq!(value["fractional"].as_f64(), Some(16.25));
         assert_eq!(value["nested"][0].as_i64(), Some(3));
@@ -10662,9 +10433,7 @@ mod batch_f_tests {
         assert_eq!(linked["sdtPath"][1]["groupId"], "inner");
     }
 
-    /// a11y mirror metadata (Batch H follow-ups): inert field identity on
-    /// field-run primitives, note backlink anchors on body reference marks and
-    /// note regions, and comment-thread announcement metadata joined by id.
+    /// Emits field, note, and comment accessibility metadata.
     #[test]
     fn field_note_and_comment_thread_a11y_metadata_emit() {
         let note = json!({

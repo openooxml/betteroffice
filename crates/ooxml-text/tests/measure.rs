@@ -10,8 +10,7 @@
 //!   descent = 16 ×  434/2048 =  3.390625
 //!   external leading = 16 × max(0, (1854+434+67)−(1854+434))/2048 = 0.5234375
 //!   single line = 16 × (1854+434)/2048 + leading = 17.875 + 0.5234375 = 18.3984375
-//!   (word_metrics::single_line_box includes the GDI tmExternalLeading term the
-//!   TS engine's singleLineRatio table omits — the documented divergence.)
+//!   External leading is included in the line height.
 
 use ooxml_text::{FontStore, measure_paragraph_json};
 use serde_json::{Value, json};
@@ -108,8 +107,7 @@ fn single_line_fits() {
     approx(v["totalHeight"].as_f64().unwrap(), LH, "totalHeight");
 }
 
-// 2. forced wrap at the UAX-14 space opportunity; the trailing space's
-// advance stays in the first line's width (TS keeps whole-word widths)
+// 2. forced wrap keeps the trailing space in the first line's width
 #[test]
 fn wrap_at_space_keeps_trailing_space_in_line_width() {
     let v = measure(json!([{ "kind": "text", "text": "00 00" }]), 30.0).unwrap();
@@ -162,8 +160,7 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 1)]);
 
-    // trailing soft return leaves an empty final line measured with the
-    // TS metrics-less fallback (0.8/0.2 em split, 1.15 basis at defaults)
+    // A trailing soft return uses the fontless 0.8/0.2 em fallback.
     let v = measure(
         json!([{ "kind": "text", "text": "0" }, { "kind": "lineBreak" }]),
         200.0,
@@ -220,7 +217,7 @@ fn multi_run_line_takes_max_font_basis() {
     approx(line["lineHeight"].as_f64().unwrap(), 2.0 * LH, "24pt line");
 }
 
-// 6. line rules mirror calculateTypographyMetrics
+// 6. line rules preserve typography metrics
 #[test]
 fn line_rules_match_typography_semantics() {
     let with_spacing = |spacing: Value| {
@@ -267,7 +264,7 @@ fn line_rules_match_typography_semantics() {
     let v = measure(json!([{ "kind": "text", "text": "0" }]), 200.0).unwrap();
     approx(v["lines"][0]["lineHeight"].as_f64().unwrap(), LH, "default");
 
-    // before/after land in totalHeight (TS adds them after the line sum)
+    // Before and after spacing contribute to total height.
     let v = measure_with(
         json!({
             "kind": "paragraph",
@@ -437,9 +434,9 @@ fn unsupported_inputs_bail_with_reason() {
     assert!(err.starts_with("UNSUPPORTED"), "missing chain: {err:?}");
 }
 
-// 10. serialized field names match the TS TypesetRow contract exactly
+// 10. serialized field names use the camelCase contract
 #[test]
-fn json_round_trip_uses_ts_field_names() {
+fn json_round_trip_uses_camel_case_contract_fields() {
     let v = measure(json!([{ "kind": "text", "text": "0 0" }]), 200.0).unwrap();
 
     let mut top: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
@@ -465,9 +462,7 @@ fn json_round_trip_uses_ts_field_names() {
     );
 }
 
-// deliberate deviations from TS measurement, pinned by test:
-// allCaps shapes uppercase; horizontalScale multiplies advances;
-// letterSpacing adds per UTF-16 gap within a word
+// Caps, horizontal scaling, and UTF-16 letter spacing affect widths.
 #[test]
 fn formatting_effects_on_widths() {
     // allCaps: 'a' measures as 'A'
@@ -505,8 +500,8 @@ fn formatting_effects_on_widths() {
 
 // ---- tab runs -----------------------------------------------------------
 //
-// Tab expectations are hand-computed from the ported grid math: 720 twips =
-// 48px default stride, custom stops in twips (1500tw = 100px), positions
+// Tab expectations use a 720-twip (48px) stride, custom stops in twips
+// (1500tw = 100px), and positions
 // content-area-relative. Glyph widths from the fixture table above.
 
 // 11. default 48px grid with no custom stops; a mid-line tab spans to the
@@ -540,9 +535,7 @@ fn tab_advances_to_default_grid_stops() {
     );
 }
 
-// 12. custom stop alignment semantics: start spans to the stop; end/center
-// anchor the following text on the stop; decimal measures like start (the
-// TS measurer passes no decimalPrefixWidth); bar consumes nothing
+// 12. end and center anchor following text; decimal uses start; bar is zero
 #[test]
 fn tab_stop_alignment_semantics() {
     let with_tabs = |val: &str, text: &str| {
@@ -630,9 +623,7 @@ fn tab_falls_back_to_default_grid() {
     );
 }
 
-// 14. a stop past the line edge snaps to the margin, reserving room for the
-// following runs (Word's TOC pattern); a tab on a full line wraps and keeps
-// its pre-wrap width (TS does not recompute)
+// 14. an over-edge stop clamps; a wrapped tab keeps its pre-wrap width
 #[test]
 fn tab_clamps_to_line_edge_and_wraps_when_full() {
     // end stop at 200px on a 100px line: clamp to 100 − W0
@@ -690,7 +681,7 @@ fn tab_in_hanging_indent_lands_on_the_body_edge() {
     );
 }
 
-// 16. a tab's font feeds line metrics exactly like TS updateMaxFont
+// 16. a tab's font contributes to line metrics
 #[test]
 fn tab_font_size_drives_line_metrics() {
     let v = measure(
@@ -705,9 +696,7 @@ fn tab_font_size_drives_line_metrics() {
 
 // ---- field runs ---------------------------------------------------------
 
-// 17. fields measure at their fallback text with the run's formatting; the
-// fallback defaults to "1" (TS `run.fallback || '1'`), and the field's font
-// feeds line metrics
+// 17. fields use fallback text, run formatting, and a `"1"` default
 #[test]
 fn field_measures_at_fallback_text() {
     // '1' and '0' share the 1139-unit digit advance
@@ -728,7 +717,7 @@ fn field_measures_at_fallback_text() {
         approx(v["lines"][0]["width"].as_f64().unwrap(), W0, "default '1'");
     }
 
-    // field font size drives line metrics like any run (updateMaxFont)
+    // Field font size drives line metrics like any run.
     let v = measure(
         json!([{ "kind": "field", "fontSize": 24.0 }, { "kind": "text", "text": "0" }]),
         200.0,
@@ -781,7 +770,7 @@ fn field_wraps_whole_and_anchors_after_tabs() {
 
 // ---- list markers -------------------------------------------------------
 //
-// Marker footprints are hand-computed from the ported getListMarkerInlineWidth
+// Marker footprints are hand-computed from the marker-width
 // rules: "0" = W0, "1." = W0 + 4.4453125 (period = space advance) = 13.34375,
 // default 720tw grid line at 48px. The footprint is pinned by wrap thresholds:
 // text that fits exactly at (maxWidth − footprint) stays on one line, and one
@@ -867,9 +856,7 @@ fn list_marker_font_and_zero_width_paths() {
     let hidden = json!({ "listMarker": "00000000", "listMarkerHidden": true });
     assert_eq!(marker_lines(hidden, TEXT_00_00), 1);
 
-    // hanging != 0 zeroes the inline footprint (TS's exact `=== 0` guard);
-    // the marker font is never resolved, so even an unresolvable marker
-    // family measures fine here
+    // Nonzero hanging removes the marker footprint and font lookup.
     let hanging = json!({
         "listMarker": "1.",
         "listMarkerFontFamily": "Nope",
@@ -899,8 +886,7 @@ fn list_marker_font_and_zero_width_paths() {
 
 // ---- inline images ------------------------------------------------------
 //
-// Line-growth expectations follow the TS finalizeLine rules. Lines without a
-// font-bearing run use the metrics-less fallback at the 12pt default: ascent
+// Lines without a font-bearing run use the fallback at the 12pt default: ascent
 // 0.8 × 16 = 12.8, descent 0.2 × 16 = 3.2, ruled height 16 × 1.15 = 18.4.
 
 // 22. an image alone on the line grows it to the image height plus the
@@ -981,9 +967,7 @@ fn inline_image_grows_the_line_box() {
     );
 }
 
-// 23. wrap behavior: an image that doesn't fit wraps (even off an empty
-// line, emitting an empty row — TS parity), and one wider than the column
-// reserves its column-fitted rendered height
+// 23. oversize images wrap from empty lines and reserve fitted height
 #[test]
 fn inline_image_wrapping_and_column_fit() {
     // 22 zeros fill 195.77px; the 50px image wraps to its own line
@@ -1002,8 +986,7 @@ fn inline_image_wrapping_and_column_fit() {
         "wrapped image line",
     );
 
-    // 400px image in a 200px column: TS wraps it off the empty line first
-    // (empty leading row), then reserves the 0.5×-scaled height
+    // A 400px image wraps from a 200px empty line and reserves half height.
     let v = measure(
         json!([{ "kind": "image", "width": 400.0, "height": 100.0 }]),
         200.0,
@@ -1027,8 +1010,7 @@ fn inline_image_wrapping_and_column_fit() {
     );
 }
 
-// 24. truly floating images (anchored + float/wrap mode) skip the line box
-// but their declared width still counts after a tab (TS parity)
+// 24. floating images skip line boxes but count after tabs
 #[test]
 fn floating_images_skip_but_count_after_tabs() {
     let v = measure(
@@ -1076,7 +1058,7 @@ fn floating_images_skip_but_count_after_tabs() {
 
 // ---- block / topAndBottom (own-line) images -----------------------------
 //
-// Ported from the non-inline branch of measureParagraph: a block image
+// A block image
 // (`displayMode == "block"` or `wrapType == "topAndBottom"`) takes its own
 // line, its DECLARED height plus wrap distances (default 6px, NOT column-
 // fitted) is the line box, it adds no width to the advance, and a fresh line
@@ -1169,8 +1151,7 @@ fn own_line_image_finishes_the_current_line_first() {
     );
 }
 
-// 24c. an own-line image's declared width still counts toward the
-// following-runs width after a tab (TS sums `next.width || 0` for any image)
+// 24c. own-line image width counts toward following-run width after a tab
 #[test]
 fn own_line_image_width_counts_after_a_tab() {
     let v = measure_with(
@@ -1195,8 +1176,7 @@ fn own_line_image_width_counts_after_a_tab() {
     );
 }
 
-// 24d. a dimensionless image (missing width/height) is measured as zero-size,
-// never refused — mirrors TS treating the required-by-type dims as 0.
+// 24d. a dimensionless image measures as zero size
 #[test]
 fn dimensionless_image_is_zero_size() {
     // lone image with no dims: one line, zero width, no growth
@@ -1233,11 +1213,7 @@ fn dimensionless_image_is_zero_size() {
 
 // ---- smallCaps ----------------------------------------------------------
 
-// 25. w:smallCaps: lowercase shapes as its uppercase glyph with the advance
-// scaled by the synthesized-small-caps factor 0.7 (Chromium/WebKit — the
-// painter's `font-variant: small-caps` with no smcp in the font). Pinned
-// deviations: Gecko synthesizes at 0.8, Word renders ≈0.8, and the TS
-// measurer ignores smallCaps entirely (full-size lowercase).
+// 25. small caps use uppercase glyphs at a 0.7 synthesized scale
 #[test]
 fn small_caps_scales_uppercased_lowercase() {
     // 'a' → 'A' at 0.7: WA × 0.7
@@ -1375,9 +1351,7 @@ fn mixed_ltr_rtl_line_sums_segment_advances() {
     );
 }
 
-// 28. wrapping across the direction boundary keeps LOGICAL UTF-16 spans —
-// headChar/tailChar feed String.prototype.slice in resolveLineSegments;
-// visual reordering is the painter's job
+// 28. wrapping across direction boundaries keeps logical UTF-16 spans
 #[test]
 fn wrap_between_ltr_and_rtl_keeps_logical_spans() {
     // "00 " = 22.24px fits 40px; "שלום" (35.16) wraps whole to line 2
@@ -1433,16 +1407,14 @@ fn first_line_indent_narrows_only_the_first_line() {
 
 // ---- float exclusion zones ----------------------------------------------
 //
-// The float context mirrors measureParagraph's per-line zone math. Zone
+// The float context exercises per-line zone geometry. Zone
 // probes use the default-font-size single-line estimate as the line height:
 // defaults.fontSize is 12pt here, so the probe box is 16px tall, while the
-// paragraph's cumulative Y advances by the ACTUAL ruled line height LH =
-// 18.3984375 per finalized line (the TS estimate-vs-actual split).
+// paragraph Y advances by the ruled line height of 18.3984375.
 //
 // Word widths at 12pt: "000 " = 3·W0 + SP = 31.140625, "000" = 26.6953125.
 
-/// Measure a full block with a float context (zones in the TS
-/// `FloatingImageZone` shape, offset in px).
+/// Measures a full block with floating zones.
 fn measure_block_floats(
     block: Value,
     max_width: f64,
@@ -1470,9 +1442,7 @@ fn measure_floats(runs: Value, max_width: f64, zones: Value) -> Result<Value, St
     )
 }
 
-/// Sorted JSON keys of one emitted line — the optional float fields must be
-/// ABSENT when unset (TS assigns them conditionally), so raw key sets are
-/// part of the contract.
+/// Returns sorted line keys, including only present float fields.
 fn line_keys(v: &Value, line: usize) -> Vec<String> {
     let mut keys: Vec<String> = v["lines"][line]
         .as_object()
@@ -1646,8 +1616,7 @@ fn obstructed_lines_skip_below_floats() {
     );
 }
 
-// 32. a float's left margin shifts the tab's content-x (TS `lineX = width +
-// leftOffset`), composing with left indent and hanging first-line offset:
+// 32. a float's left margin shifts tab x with indent and hanging offset:
 // grid coordinates move right by the offset, so the tab advance shrinks
 #[test]
 fn tab_content_x_includes_float_left_offset() {
@@ -1730,8 +1699,7 @@ fn zone_composes_with_marker_and_first_line_indent() {
 
 // 34. a centered (segment-splitting) zone: the line fills against the strip
 // sum and splits into TypesetRowSegments at the widest prefix fitting the
-// first strip; a line fitting the first strip gets one segment; a multi-run
-// line that would need a two-way split emits none (TS bail)
+// first strip; a multi-run line needing two strips emits no segments
 #[test]
 fn centered_zone_splits_line_into_segments() {
     let zones = json!([{
@@ -1790,7 +1758,7 @@ fn centered_zone_splits_line_into_segments() {
         7.0 * W0 + SP,
         "strip 2 text",
     );
-    // segment field names match TS TypesetRowSegment exactly
+    // Segment fields use the camelCase contract.
     let mut keys: Vec<&str> = segments[0]
         .as_object()
         .unwrap()
@@ -1831,8 +1799,7 @@ fn centered_zone_splits_line_into_segments() {
         "strip 1 room",
     );
 
-    // multi-run line needing a split: TS createLineSegments bails to
-    // undefined → no segments key at all
+    // A multi-run line needing a split omits segments.
     let v = measure_floats(
         json!([
             { "kind": "text", "text": "00000" },

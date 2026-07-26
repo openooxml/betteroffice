@@ -1,13 +1,9 @@
 //! Word-specific measurement rules.
 //!
-//! This module makes Rust measurement reproduce *Word*, not a generic text
-//! engine. ECMA-376 references are to Part 1 (WordprocessingML); element
+//! ECMA-376 references are to Part 1 (WordprocessingML); element
 //! semantics are summarized in `reference/quick-ref/wordprocessingml.md`
 //! ("Spacing (w:spacing)" section for line-rule value semantics and the
-//! twips/240ths unit table). Rules are gated by the Word-parity corpus
-//! (design test gate 3); the differential harness (gate 2) diffs these
-//! results against the browser-measured TS engine, so every deliberate
-//! divergence from the TS convention is called out below.
+//! twips/240ths unit table).
 //!
 //! # 1. Font-unit line height (single spacing) — [`single_line_box`]
 //!
@@ -26,17 +22,6 @@
 //! (line pitch = ascent + descent + external leading, baseline hugging the
 //! top of the pitch). The `w:noLeading` compatibility flag (`w:compat`,
 //! ECMA-376 §17.15.3) drops that external leading entirely.
-//!
-//! **Documented divergence from the TS engine**: the TS layout's
-//! `singleLineRatio` is `(usWinAscent + usWinDescent) / unitsPerEm` with no
-//! external leading at all (`packages/core/src/utils/fontResolver.ts`,
-//! `DEFAULT_SINGLE_LINE_RATIO` block; consumed by
-//! `calculateTypographyMetrics` in
-//! `packages/core/src/layout/measure/measureParagraph.ts`). Rust includes
-//! the GDI external-leading term because that is Word's actual line pitch;
-//! the differential harness must expect per-line deltas of
-//! `tmExternalLeading × size / upem` (Liberation Sans: 67/2048 em) against
-//! the TS oracle, and the Word-parity corpus is the tiebreaker.
 //!
 //! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
 //!
@@ -68,9 +53,7 @@
 //! that does stretch inter-character; not implemented here). The final line
 //! of a paragraph is not justified, but a line ended by a soft return
 //! (shift-enter, `w:br`) *is* — unless the `w:doNotExpandShiftReturn`
-//! compat flag (§17.15.3) restores the non-stretching behavior. This
-//! matches the TS painter's gate `!isLastLine || paragraphEndsWithLineBreak`
-//! (`packages/core/src/layout/paint/renderParagraph/line.ts`): the
+//! compat flag (§17.15.3) restores the non-stretching behavior. The
 //! soft-return test takes precedence over the last-line flag. Space stretch
 //! happens at line layout, after shaping: shaped cluster advances stay
 //! fixed, only space-cluster advances grow.
@@ -80,10 +63,7 @@
 //! When a section defines a document grid (`w:docGrid`, §17.6.5), line
 //! pitch snaps each line's height up to the next grid multiple unless the
 //! paragraph/run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2).
-//! Required for CJK document fidelity; a no-op for the common Western case.
-//! Deferred until the CJK slice of the Word-parity corpus lands — the rule
-//! needs the section's grid pitch threaded through layout, which does not
-//! exist yet.
+//! Required for CJK document fidelity; the layout input does not carry grid pitch.
 //!
 //! # 5. Kerning threshold — [`kern_enabled`], [`kern_features`]
 //!
@@ -249,11 +229,7 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
 /// inter-letter). `is_space[i]` marks advance i as an expandable space
 /// cluster. No-op when slack <= 0 or no spaces. Mutates advances in place.
 ///
-/// Distribution is an **equal share per expandable space cluster** —
-/// Word widens every stretchable space by the same amount rather than
-/// proportionally to its advance. (This is also what CSS `text-align:
-/// justify` does in the TS painter, so the differential harness agrees by
-/// construction; the Word-parity corpus is the final arbiter.)
+/// Distribution is an equal share per expandable space cluster.
 ///
 /// Mismatched slice lengths are a caller bug but must not panic: pairing
 /// stops at the shorter slice and the excess is left untouched.
@@ -279,16 +255,7 @@ pub fn stretch_spaces(advances: &mut [f32], is_space: &[bool], slack: f32) {
     }
 }
 
-/// Rule 3 gating: whether this line participates in justification at all.
-/// last_line_of_paragraph is never justified; soft-return lines are justified
-/// unless compat.do_not_expand_shift_return.
-///
-/// The soft-return test takes precedence: a paragraph whose *last* line ends
-/// with a `w:br` still stretches (matching the TS painter's
-/// `!isLastLine || paragraphEndsWithLineBreak` gate in
-/// `packages/core/src/layout/paint/renderParagraph/line.ts`), and under
-/// [`CompatFlags::do_not_expand_shift_return`] a *mid-paragraph* soft-return
-/// line stops stretching.
+/// Tests whether a line participates in justification.
 pub fn line_is_justified(
     last_line_of_paragraph: bool,
     ends_with_soft_return: bool,

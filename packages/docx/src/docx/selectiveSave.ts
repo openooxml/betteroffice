@@ -10,7 +10,7 @@ export interface SelectiveSaveOptions {
 }
 
 /**
- * Patch changed paragraphs through the Rust S13 writer. Returns `null` when
+ * Patch changed paragraphs through the Rust package writer. Returns `null` when
  * selective save is unsafe so callers can fall back to a full repack.
  */
 export async function attemptSelectiveSave(

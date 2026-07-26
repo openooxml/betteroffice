@@ -7,20 +7,7 @@ interface FloatingCommentBtn {
   left: number;
 }
 
-/**
- * Owns the comment-management surface: controlled / uncontrolled routing
- * of the `comments` array, the new-comment workflow state (range,
- * Y-position anchor, `isAddingComment` flag), the floating add-comment
- * button position, the synchronous `commentsRef` mirror, and the
- * orphaned-comments debouncer.
- *
- * Controlled mode: when consumer passes `comments` as a prop, the editor
- * reads it directly and routes every mutation through `onCommentsChange`
- * instead of touching internal state.
- *
- * Uncontrolled mode: internal state owns the array; `onCommentsChange`
- * still fires for parity but is optional.
- */
+/** Manages controlled and uncontrolled comments. */
 export function useCommentManagement({
   commentsProp,
   onCommentDelete,

@@ -2,7 +2,7 @@ import type { ZipContainerReader } from './zipContainer';
 
 /**
  * Legacy raw-package shape retained for the public rezip compatibility
- * signature. Live parsing no longer constructs it; Rust S9 owns extraction.
+ * signature. Live parsing uses Rust extraction.
  */
 export interface RawDocxContent {
   documentXml: string | null;

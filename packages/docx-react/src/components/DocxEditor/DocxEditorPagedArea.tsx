@@ -189,7 +189,7 @@ export function DocxEditorPagedArea({
   resolvedIdsForRender: Set<number>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   onTotalPagesChange: (totalPages: number) => void;
-  /** Layout of each pass, surfaced for the experimental canvas renderer. */
+  /** Receives each computed layout. */
   onLayoutComputed?: (layout: Layout | null) => void;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
@@ -403,9 +403,6 @@ export function DocxEditorPagedArea({
         author={author}
         measurementFontProvider={measurementFontProvider}
         rustFontChainsProviderRef={rustFontChainsProviderRef}
-        // Click routing through `onHfPagesMouseDown` was retired; usePagesPointer
-        // now routes every HF gesture (click, drag, dblclick, image, hyperlink,
-        // context menu) through the active-surface helper directly.
         zoom={zoom}
         readOnly={readOnly}
         onYrsContentChange={onYrsContentChange}

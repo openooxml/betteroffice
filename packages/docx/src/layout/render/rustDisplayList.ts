@@ -1,29 +1,11 @@
-/**
- * JS seam to the Rust display-list builder (crates/docx-layout).
- *
- * Marshals the same `{ measured, options, layout }` triple the golden
- * fixtures pin (see scripts/export-displaylist-fixtures.ts) across the wasm
- * boundary and parses the resulting DisplayList. All paint/geometry decisions
- * happen in Rust — this module is serialization glue only.
- *
- * The wasm module is loaded lazily via dynamic import on first build, so the
- * ~800KB inlined binary costs nothing until the experimental canvas renderer
- * is actually enabled.
- *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
- */
+/** Serializes layout inputs through the Rust display-list builder. */
 
 import type { Layout } from '../pagination/types';
 import type { MeasuredBlock } from '../pagination/measuredBlock';
 import type { DisplayList } from './displayList';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from './frameDelta';
 
-/**
- * One header/footer part in the `headersFooters` envelope field: the measured
- * blocks of the HF ProseMirror doc identified by `rId`, plus the band metrics
- * `convertHeaderFooterPmDocToContent` computed (passed through verbatim — the
- * Rust builder re-derives nothing).
- */
+/** Measured header/footer variant and band geometry. */
 export interface DisplayListHfVariant {
   rId: string;
   kind: 'header' | 'footer';
@@ -243,19 +225,7 @@ export class RustDisplayListSourceError extends Error {
   }
 }
 
-/**
- * Query surface over an already-built display list, injectable so tests can
- * fake the wasm module.
- *
- * The `*Json` calls take the display-list JSON string as an argument (the Rust
- * side re-parses it per query — callers should cache the string). The
- * session-handle members parse the list ONCE (`openDisplayList` → handle) and
- * answer many queries by handle with no re-serialization, reusing the same
- * hit/range logic so results are byte-identical. The handle members are
- * OPTIONAL: the embedded wasm carries them only after the integrator re-embeds,
- * so `createDisplayListQueries` feature-detects `hasDisplayListSession` and
- * falls back to the `*Json` path when they are absent.
- */
+/** Injectable display-list query surface with optional session handles. */
 export interface RustDisplayListQueryEngine {
   /** region-aware hit test → `{"region","rId"?,"pos"}` or `"null"` JSON */
   hitTestRegionsJson(displayList: string, pageIndex: number, x: number, y: number): string;
@@ -268,13 +238,7 @@ export interface RustDisplayListQueryEngine {
   ): string;
   /** body PM range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
-  /**
-   * Region-aware PM range → JSON array of rects. `region` is
-   * `'body' | 'header' | 'footer'`; `rId` scopes header/footer to one HF part
-   * (empty for body / match-any). OPTIONAL: the embedded wasm carries it only
-   * after the integrator re-embeds, so `createDisplayListQueries` falls back to
-   * `[]` when absent (HF selection geometry stays a documented gap until then).
-   */
+  /** Region-aware PM range rectangles when supported. */
   rangeRectsRegionJson?(
     displayList: string,
     region: string,
@@ -487,10 +451,7 @@ export async function buildRustDisplayList(
   }
 }
 
-/**
- * Production display build. Resident editing engines return FrameDelta v1;
- * older/stateless engines retain the full-JSON parity path.
- */
+/** Builds a display frame with JSON fallback when frame deltas are unavailable. */
 export async function buildRustDisplayFrame(
   inputs: DisplayListBuildInputs,
   engine?: RustDisplayListEngine,

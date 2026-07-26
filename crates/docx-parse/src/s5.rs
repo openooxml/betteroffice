@@ -1,4 +1,4 @@
-//! Complete S5 runs/inline package projection used by the differential corpus gate.
+//! S5 run and inline projection.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::inline::{
     parse_hyperlink, parse_inline_container, parse_run, parse_sdt_properties, parse_simple_field,
 };
 use crate::relationships::{RelationshipMap, parse_relationships};
-use crate::settings::{incumbent_utf8_text_boundary, parse_settings};
+use crate::settings::{is_valid_utf8_xml_text, parse_settings};
 use crate::styles::{DocDefaults, StyleMap, parse_style_definitions};
 use crate::theme::{apply_theme_font_lang, parse_theme};
 use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
@@ -105,7 +105,7 @@ pub fn parse_docx_s5_projection(data: &[u8]) -> Result<S5Projection, ParseError>
 
     let mut xml_parts = Vec::new();
     for (path, bytes) in &parts {
-        if !path.to_ascii_lowercase().ends_with(".xml") || !incumbent_utf8_text_boundary(bytes) {
+        if !path.to_ascii_lowercase().ends_with(".xml") || !is_valid_utf8_xml_text(bytes) {
             continue;
         }
         let document = parse_xml(bytes, path, &mut budget)?;

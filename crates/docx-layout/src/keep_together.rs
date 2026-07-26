@@ -1,23 +1,11 @@
-//! Port of `packages/core/src/layout/pagination/keepTogether.ts`.
-//!
-//! Exported fns (1:1 with the TS module's exports):
-//! - `analyze_keep_with_next`        ← `analyzeKeepWithNext(blocks)`
-//! - `measure_keep_with_next_group`  ← `measureKeepWithNextGroup(group, measured)`
-//! - `paragraph_keeps_lines`         ← `paragraphKeepsLines(block)`
-//! - `paragraph_breaks_before`       ← `paragraphBreaksBefore(block)`
-//!
-//! Consumes the spine types (`types.rs`). The TS `analyzeKeepWithNext` takes
-//! the plain block projection (`measured.map((m) => m.block)`); the Rust port
-//! takes `&[MeasuredBlock]` and reads `mb.block` directly to avoid cloning the
-//! projection — the visitation order and decisions are identical.
+//! Keep-with-next grouping and measurement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock};
 
-/// A maximal run of consecutive keep-with-next paragraphs together with the
-/// paragraph they must share a page with. Mirrors TS `KeepWithNextGroup`.
+/// A maximal keep-with-next run and its follower.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeepWithNextGroup {
     /// Index of the run's leading paragraph.
@@ -31,11 +19,7 @@ pub struct KeepWithNextGroup {
     pub follower: Option<usize>,
 }
 
-/// The two indexes placement needs: group lookup by head block, plus every
-/// non-head member so the loop can skip re-evaluating them. Mirrors TS
-/// `KeepWithNextScan`; the TS `Map`/`Set` are insertion-ordered, and the scan
-/// only ever inserts strictly increasing indices, so ordered B-tree
-/// collections iterate in the identical order.
+/// Group lookup and ascending interior membership indexes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeepWithNextScan {
     /// Groups keyed by their leading block index.
@@ -118,17 +102,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
     }
 }
 
-/// Vertical space (px) a group needs so its keepNext contract holds on one page.
-///
-/// The budget is the member paragraphs in full (before-spacing + measured
-/// height + after-spacing) plus exactly one witness line of the follower —
-/// keepNext binds to the START of the follower, not the follower in full.
-///
-/// parity: spacing is read through the shared `paragraph_spacing` helpers
-/// exactly as the TS does (they suppress style-inherited spacing on empty
-/// paragraphs), and the f64 summation order (witness line first, then before +
-/// height + after per member, in member order) matches the TS loop
-/// byte-for-byte.
+/// Returns the group height plus its follower's first unbreakable slice.
 pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[MeasuredBlock]) -> f64 {
     // follower's witness line first: zero when there is no follower, or when
     // it is not a laid-out paragraph
@@ -158,7 +132,7 @@ pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[Measu
 }
 
 /// Whether a paragraph forbids splitting its own lines across a page (keepLines).
-#[allow(dead_code)] // parity export; keepLines handling stays in layout_paragraph for now
+#[allow(dead_code)]
 pub fn paragraph_keeps_lines(block: &LayoutBlock) -> bool {
     match block {
         LayoutBlock::Paragraph(p) => p.attrs.as_ref().and_then(|a| a.keep_lines) == Some(true),
@@ -175,8 +149,6 @@ pub fn paragraph_breaks_before(block: &LayoutBlock) -> bool {
         _ => false,
     }
 }
-
-// ---- tests (ported from keepTogether.test.ts) --------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -209,8 +181,6 @@ mod tests {
         })
     }
 
-    // mirrors integration/helpers.ts makeParagraphBlock (only the fields this
-    // module reads: one text run + the keep/break attrs)
     fn make_paragraph_block(text: &str, keep_next: bool) -> LayoutBlock {
         paragraph(
             vec![text_run(text)],
@@ -221,7 +191,6 @@ mod tests {
         )
     }
 
-    // mirrors integration/helpers.ts makeLine (only lineHeight is consumed here)
     fn make_line(line_height: f64) -> TypesetRow {
         TypesetRow {
             line_height,
@@ -229,7 +198,6 @@ mod tests {
         }
     }
 
-    // mirrors integration/helpers.ts makeParagraphMeasure
     fn make_paragraph_measure(lines: Vec<TypesetRow>) -> BlockExtent {
         let total_height = lines.iter().map(|l| l.line_height).sum();
         BlockExtent::Paragraph(ParagraphExtent {
@@ -262,7 +230,6 @@ mod tests {
         )
     }
 
-    // mirrors measuredBlock.ts toMeasuredBlocks
     fn to_measured_blocks(
         blocks: Vec<LayoutBlock>,
         measures: Vec<BlockExtent>,
@@ -325,12 +292,6 @@ mod tests {
         );
     }
 
-    // TS original runs layoutDocument end-to-end (content height 864, filler
-    // 620 leaves 244 available) and asserts one page with fragments [0,1,2,3].
-    // This port asserts the same decision through the exact hooks the loop
-    // calls: the effective group height is 40 (not the raw-spacing 340), so
-    // the advance predicate keeps the group in place. The full layoutDocument
-    // assertion lives in the golden keep-with-next-chain scenario.
     #[test]
     fn does_not_advance_a_group_that_fits_once_inherited_empty_paragraph_spacing_is_dropped() {
         let blocks = vec![

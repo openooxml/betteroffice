@@ -15,7 +15,6 @@
  * nothing off the canvas path (the parent only mounts it once
  * `overlayTarget` + `displayListQueries` resolve, i.e. while the canvas paints).
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';

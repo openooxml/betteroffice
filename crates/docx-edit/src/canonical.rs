@@ -1,36 +1,4 @@
-//! Deterministic `canonical-stream-v1` projection for the coexistence invariant watchdog.
-//!
-//! The byte format is deliberately small enough to reproduce exactly in TypeScript:
-//!
-//! 1. UTF-8 bytes for `canonical-stream-v1`, followed by LF (`0x0a`).
-//! 2. One compact JSON object per item, followed by LF (including the final item). Items use
-//!    serde's externally-tagged spelling: `{"CharItem":{"ch":"x","marks":{...}}}`,
-//!    `{"ParaMark":{"ppr":{...}}}`, `{"Table":{"tblPr":{...},"grid":[],"rows":[]}}`,
-//!    `{"Embed":{"kind":"break","payload":{...}}}`, or `{"OpaqueBlk":{"blob":...}}`.
-//! 3. Object keys at every depth are ordered by Rust `str`/`BTreeMap` lexicographic order. Arrays
-//!    retain their input order. JSON is compact and uses `serde_json`'s escaping and number format.
-//! 4. JSON `null` (including yrs `Any::Undefined`) is removed from objects at every depth. A null
-//!    array slot remains `null`, because removing it would change array positions. A top-level
-//!    opaque blob may also be `null` because its field itself cannot be made absent.
-//!
-//! Text is projected as one [`CanonicalItem::CharItem`] per Unicode scalar value (Rust `char`),
-//! not per UTF-16 code unit and never as coalesced runs. A pilcrow's `_kind` discriminator and
-//! volatile `paraId` are excluded from [`CanonicalItem::ParaMark`], so equivalent documents with
-//! freshly minted paragraph IDs compare equal. Tabs are ordinary `"\t"` character items. Current
-//! non-pilcrow atoms (including hard breaks and native `noteRef` footnote anchors) are map embeds
-//! whose `_kind` becomes `kind` and whose remaining map becomes `payload`.
-//!
-//! Comments (S4a) are projected as PRESENCE/GROUPING, not identity: every char item fully covered
-//! by a side-map comment's resolved anchors carries a sorted `commentIds` array of per-story
-//! comment ORDINALS. Ordinals are assigned by sorting each covering comment's covered story units
-//! (UTF-16 units, every embed = 1) lexicographically, so volatile comment ids (`{client}:{counter}`
-//! keys, PM numeric ids) never reach the stream — exactly like the excluded `paraId`. The field is
-//! omitted when empty, so documents without comments project byte-identical streams to before.
-//! Comments whose anchors no longer resolve, resolve empty, or live in another story are skipped.
-//!
-//! [`CanonicalItem::OpaqueBlk`] is reserved for the coexistence two-tier representation. The
-//! current editing schema has no opaque-block discriminator, so [`project_story`] does not invent
-//! one; Wave 1b can add the schema-aware projection while retaining this byte vocabulary.
+//! Deterministic `canonical-stream-v1` projection.
 
 use std::collections::BTreeMap;
 
@@ -43,7 +11,7 @@ use crate::{EditingDoc, KIND_KEY, PARA_ID, is_pilcrow, map_string, story_ref};
 
 const VERSION: &str = "canonical-stream-v1";
 
-/// One semantic unit in the cross-language coexistence stream.
+/// One semantic canonical-stream unit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanonicalItem {
     /// One Unicode scalar of story text and its active formatting attributes.
@@ -68,7 +36,7 @@ pub enum CanonicalItem {
         kind: String,
         payload: BTreeMap<String, Value>,
     },
-    /// A sealed PM block JSON blob. Reserved until the Wave 1b opaque tier is added to the model.
+    /// Sealed ProseMirror block JSON.
     OpaqueBlk { blob: Value },
 }
 
@@ -134,8 +102,7 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
                 unit += 1;
             }
             other => {
-                // The current public schema creates map-backed embeds. Preserve a deterministic
-                // identity for legacy/non-schema atom values instead of silently dropping them.
+                // Preserve deterministic identity for non-map atoms.
                 let mut payload = BTreeMap::new();
                 if let Some(value) = canonical_out(other, &txn) {
                     payload.insert("value".to_owned(), value);
@@ -187,11 +154,7 @@ fn exclude_cell_story_ids(rows: &mut Value) {
     }
 }
 
-/// Resolves the side-map comments anchored in `story_id` to ordinal-ordered interval
-/// lists: index = the comment's per-story ordinal, value = its merged, sorted
-/// `[start, end)` UTF-16 story-unit intervals. Ordinals order groups by their covered
-/// story units, compared lexicographically — a volatile-id-free grouping that the
-/// TypeScript projector (`canonicalStream.ts`) reproduces from PM comment marks.
+/// Resolves comments to ordinal-ordered UTF-16 intervals.
 fn story_comment_groups<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<Vec<(u32, u32)>> {
     let Some(comments) = txn.get_map(crate::COMMENTS) else {
         return Vec::new();
@@ -624,10 +587,7 @@ mod tests {
         let para = doc.create_story("body", "end", "Normal", "left").unwrap();
         doc.set_paragraph_attr(&para, "sectionBreakType", Any::from("nextPage"))
             .unwrap();
-        // Integers use Any::BigInt: the coexistence pipeline delivers whole
-        // JSON numbers as integers, which serialize without a fraction — the
-        // exact bytes the TypeScript projector emits. The null entry checks
-        // the shared null-strip inside the sectPr sub-map.
+        // Big integers serialize without fractional bytes.
         doc.set_paragraph_attr(
             &para,
             "sectPr",

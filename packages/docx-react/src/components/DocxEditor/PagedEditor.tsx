@@ -1211,9 +1211,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       ]
     );
 
-    // Paragraph flash (G2): scrollToParaId's flash is drawn as an overlay over
-    // display-list geometry. The scroll API bumps the nonce to (re)start; the
-    // overlay clears itself after the flash and calls back to drop the request.
     const [canvasFlashRequest, setCanvasFlashRequest] =
       useState<CanvasParagraphFlashRequest | null>(null);
     const requestCanvasParagraphFlash = useCallback(
@@ -1679,9 +1676,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           onCaretInterrupt={handleLocalCaretInterrupt}
         />
 
-        {/* Non-rendering orchestration host. Visible pages are canvas-only;
-            this empty ref remains while legacy interaction signatures are
-            collapsed in later retirement phases. */}
         <div ref={viewportLayoutRef} style={{ display: 'contents' }}>
           <div
             ref={pagesContainerRef}
@@ -1774,8 +1768,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             />
           )}
 
-          {/* Canvas-path scrollToParaId flash (G2) — painter is parked, so the
-              flash is drawn over the paragraph's display-list geometry. */}
           {canvasOverlayTarget && displayListQueries && (
             <CanvasParagraphFlashOverlay
               request={canvasFlashRequest}

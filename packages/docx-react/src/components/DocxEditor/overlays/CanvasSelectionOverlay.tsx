@@ -16,7 +16,6 @@
  * (in place of its inline overlay) once `overlayTarget` resolves, which
  * `useCanvasOverlayTarget` returns non-null only while the canvas paints.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import { useLayoutEffect, useState } from 'react';

@@ -668,7 +668,7 @@ export class XlsxDocument {
         }
     }
     /**
-     * serialized `SheetInfo`: sheet names, active index, content extent.
+     * serialized `SheetInfo`: stable IDs, names, active index, content extent.
      * @returns {string}
      */
     sheetInfoJson() {

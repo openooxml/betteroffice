@@ -1,21 +1,9 @@
-//! Port of `packages/core/src/layout/pagination/cellBlockLayout.ts`.
-//!
-//! Vertical layout of a table cell's stacked blocks — single source of truth
-//! for where the lines of a cell's content sit. Adjacent paragraphs'
-//! before/after spacing collapses to the larger of the two; a paragraph's
-//! lines stack from its content top with no before/after between them.
-//!
-//! Exported fns (1:1 with the TS module):
-//! - `layout_cell_content` ← `layoutCellContent(blocks, blockMeasures, startY)`
-//!
-//! Consumes the spine's types (`types.rs`) directly, same as the TS module
-//! consumes `pagination/types.ts`.
+//! Vertical table-cell layout with collapsed paragraph spacing.
 
 use serde::Serialize;
 
 use crate::types::{BlockExtent, LayoutBlock};
 
-/// Mirror of the TS `CellContentLayout` result.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellContentLayout {
@@ -28,9 +16,7 @@ pub struct CellContentLayout {
     pub content_height: f64,
 }
 
-/// TS `'totalHeight' in measure && typeof measure.totalHeight === 'number'` —
-/// of the extent union only paragraph and table extents carry a numeric
-/// `totalHeight`.
+/// Returns the numeric total height carried by paragraph and table extents.
 fn extent_total_height(measure: &BlockExtent) -> Option<f64> {
     match measure {
         BlockExtent::Paragraph(p) => Some(p.total_height),
@@ -88,8 +74,6 @@ pub fn layout_cell_content(
     }
 }
 
-// Ported from packages/core/src/layout/pagination/__tests__/cellBlockLayout.test.ts
-// — every case preserved. Fixtures are built through serde like real inputs.
 #[cfg(test)]
 mod tests {
     use super::*;

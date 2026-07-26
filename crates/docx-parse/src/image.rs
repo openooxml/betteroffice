@@ -228,7 +228,7 @@ fn parse_anchor(
         .filter(|value| value.is_finite());
     let simple_pos_flag = container.attribute(None, "simplePos") == Some("1");
     let simple_pos = container.child_by_full_name("wp:simplePos");
-    // Incumbent direct-child lookup means nested graphicFrameLocks is ignored.
+    // Nested `graphicFrameLocks` elements are ignored.
     let locked = container
         .child_by_full_name("a:graphicFrameLocks")
         .is_some();
@@ -709,8 +709,7 @@ fn parse_wrap_element(
     wrap
 }
 
-/// Chart drawings intentionally ignore anchor-level distance fallbacks, matching
-/// the incumbent `parseWrapElement(wrap, behindDoc)` call site.
+/// Parses chart wrapping without anchor distance fallbacks.
 pub fn parse_wrap_element_without_distances(
     element: Option<&XmlElement>,
     behind_doc: bool,

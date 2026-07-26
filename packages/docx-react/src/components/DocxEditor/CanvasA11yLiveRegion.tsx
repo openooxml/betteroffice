@@ -1,14 +1,4 @@
-/**
- * Polite live region for the experimental canvas renderer.
- *
- * While pages paint on canvas, caret/selection state has no visible DOM for
- * assistive tech to observe; this region announces the meaningful transitions
- * (selection made/cleared, caret entering commented / tracked-change / list
- * content) derived from the authoritative Yrs selection. Rendered inside the LocaleProvider tree (all strings via
- * `t('a11y.*')`); the host `DocxEditor` — which sits outside that tree —
- * drives it through `notifyRef`, assigned on mount and called from its
- * selection-change handlers.
- */
+/** Announces canvas selection and caret transitions. */
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import type { YrsSession } from '@betteroffice/docx/yrs';

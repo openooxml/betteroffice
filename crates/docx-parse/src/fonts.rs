@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::incumbent_utf8_text_boundary;
+use crate::settings::is_valid_utf8_xml_text;
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ pub fn parse_font_table(
     let Some(xml) = xml.filter(|value| !value.iter().all(u8::is_ascii_whitespace)) else {
         return Ok(FontTable::default());
     };
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(FontTable::default());
     }
     let document = parse_xml(xml, part, budget)?;
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_metadata_faces_and_incumbent_enum_filtering() {
+    fn parses_metadata_faces_and_filters_unknown_enums() {
         let table = parse(Some(
             r#"<w:fonts><w:font w:name="Calibri"><w:altName w:val="Arial"/><w:family w:val="swiss"/><w:pitch w:val="variable"/><w:charset w:val="00"/><w:panose1 w:val="020F"/><w:embedRegular r:id="rId1" w:fontKey="{GUID}" w:subsetted="1"/><w:embedBold r:id=""/></w:font><w:font w:name="Future"><w:family w:val="future"/><w:pitch w:val="future"/></w:font><w:font/></w:fonts>"#,
         ))

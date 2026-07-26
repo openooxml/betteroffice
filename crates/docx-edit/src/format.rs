@@ -1,11 +1,4 @@
-//! Inline formatting surface: `toggle_format`, `format_range`, `clear_formatting`
-//! (op-contract §1 "Inline formatting").
-//!
-//! Attribute names and value shapes mirror the PM mark vocabulary so the render bridge's
-//! `lower_attrs` stays mechanical: `bold`/`italic` are booleans, `underline` is `{style}`,
-//! `strike` is `{double}`, `textColor` is `{rgb, themeColor}`, `highlight` is `{color}`,
-//! `fontSize` is `{size, sizeCs}` (half-points), `fontFamily` is `{ascii, hAnsi}`, and
-//! `superscript`/`subscript` are separate boolean attrs.
+//! Inline formatting operations.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -20,13 +13,10 @@ use crate::{DEL, EditCtx, EditingDoc, INS, StoryRange, out_len, story_ref};
 /// The hyperlink text attribute; retained by [`EditingDoc::clear_formatting`].
 pub const HYPERLINK: &str = "hyperlink";
 
-/// Attributes that are never touched by formatting sweeps: tracked-change stamps and hyperlinks
-/// (clear_formatting keeps hyperlinks — Word Ctrl+Space semantics, a deliberate improvement over
-/// the PM-era strip-everything).
+/// Attributes protected from formatting sweeps.
 pub(crate) const PROTECTED_ATTRS: [&str; 3] = [INS, DEL, HYPERLINK];
 
-/// Word's closed `w:highlight` palette, keyed by uppercase hex (port of
-/// `packages/core/src/utils/highlightColors.ts` — an EXACT lookup, no nearest-color search).
+/// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [
     ("FFFF00", "yellow"),
     ("00FF00", "green"),
@@ -46,8 +36,7 @@ const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [
     ("FFFFFF", "white"),
 ];
 
-/// Maps a hex highlight to Word's named palette; unmapped values pass through raw (parity with
-/// the PM path, which stores a custom hex and serializes it as `w:shd` fill).
+/// Maps exact palette colors and preserves other values.
 pub fn highlight_color_name(input: &str) -> String {
     let normalized = input.trim_start_matches('#').to_ascii_uppercase();
     HIGHLIGHT_HEX_TO_NAME
@@ -57,7 +46,7 @@ pub fn highlight_color_name(input: &str) -> String {
         .unwrap_or_else(|| input.to_owned())
 }
 
-/// Tri-state field patch (op-contract "tri-state `Patch<T>` per field").
+/// Tri-state field patch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Patch<T> {
     /// Leave the attribute as it is.
@@ -69,7 +58,7 @@ pub enum Patch<T> {
     Set(T),
 }
 
-/// The six simple toggles (PM `toggleMark` range semantics).
+/// Six simple formatting toggles.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SimpleFormat {
     Bold,
@@ -106,12 +95,7 @@ pub struct FontFamilyPatch {
     pub h_ansi: Option<String>,
 }
 
-/// Tri-state inline formatting delta (port of `ApplyFormattingOptions.marks` in
-/// `packages/core/src/prosemirror/applyFormatting.ts`). `Keep` = untouched; `Clear` = remove;
-/// `Set` = write. The `other` bag carries the 14 passive run formats (`superscript`, `subscript`,
-/// `allCaps`, `smallCaps`, `characterSpacing`, `emboss`, `imprint`, `textShadow`, `emphasisMark`,
-/// `textOutline`, `hidden`, `rtl`, `textEffect`, `modernTextEffects`, plus `runStyle`) as opaque
-/// attr values; `None` clears the key.
+/// Tri-state inline formatting patch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineFormatDelta {
     pub bold: Patch<bool>,
@@ -254,7 +238,7 @@ impl InlineFormatDelta {
     }
 }
 
-/// Formatting policy for [`EditingDoc::insert_text`] (op-contract §1).
+/// Formatting policy for [`EditingDoc::insert_text`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum FormatPolicy {
     /// Match typing: copy the formatting attributes of the character before the insertion point
@@ -272,9 +256,7 @@ pub(crate) fn is_active(attrs: Option<&Attrs>, key: &str) -> bool {
     matches!(attrs.and_then(|attrs| attrs.get(key)), Some(value) if *value != Any::Null)
 }
 
-/// True when every TEXT unit in the range carries a non-null `key` attribute (PM `toggleMark`
-/// looks at inline text only; embeds neither veto nor satisfy the check). Returns false for a
-/// range without any text unit so a toggle always applies.
+/// Tests whether every text unit carries a non-null attribute.
 fn all_text_has<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32, key: &str) -> bool {
     let mut offset = 0;
     let mut saw_text = false;
@@ -297,9 +279,7 @@ fn all_text_has<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32, key:
 }
 
 impl EditingDoc {
-    /// Toggles one simple format across a range: if EVERY text unit already carries it, remove
-    /// it; otherwise add it (PM `toggleMark` range semantics). Superscript and subscript are
-    /// mutually exclusive.
+    /// Toggles one simple format across a range.
     pub fn toggle_format(
         &self,
         ctx: &EditCtx,
@@ -352,10 +332,7 @@ impl EditingDoc {
         })
     }
 
-    /// Applies a tri-state formatting delta across a range in one transaction (op-contract §1).
-    ///
-    /// S1 formats directly even in suggesting mode (`rPrChange` payloads arrive in S4 — flagged
-    /// deviation 3), so the receipt carries no revision IDs.
+    /// Applies a formatting delta across a range in one transaction.
     pub fn format_range(
         &self,
         ctx: &EditCtx,
@@ -411,8 +388,7 @@ impl EditingDoc {
         })
     }
 
-    /// Removes every formatting attribute present on the range while KEEPING tracked-change
-    /// stamps (`ins`/`del`) and hyperlinks (op-contract §1 — Word Ctrl+Space semantics).
+    /// Clears formatting while retaining tracked-change stamps and hyperlinks.
     pub fn clear_formatting(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
         let len = range_len(&range)?;
         if len == 0 {

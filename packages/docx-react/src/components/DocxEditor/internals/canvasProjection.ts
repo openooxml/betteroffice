@@ -11,7 +11,6 @@
  * paints at logical px (CSS size == display-list page size) and stay correct if
  * a future zoom scales the canvas.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import {

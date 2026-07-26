@@ -1,15 +1,4 @@
-//! Page-flow state machine — port of
-//! `packages/core/src/layout/pagination/pageFlow.ts` (`createPageFlow`).
-//!
-//! Tracks the page being built, the pen position, and available space, and
-//! creates new pages/columns when content doesn't fit. All numeric behavior is
-//! f64, in the same operation order as the TS closure. Two deliberate
-//! omissions, both output-invariant:
-//! - checkpoint capture (`setOnNewPage` / `snapshotGeometry`): resume
-//!   bookmarks are derived data, omitted from golden serialization, and the
-//!   `resume` option is only exercised by incremental pagination which stays
-//!   on the TS side for now;
-//! - the oversized-fragment `console.warn` (log only).
+//! Page and column flow state.
 
 use crate::LayoutError;
 use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
@@ -27,8 +16,7 @@ pub struct PageFlowGeometry {
     pub pending_margins: Option<PageMargins>,
 }
 
-/// TS `PageFlow` — current state of a page being laid out. `page_index`
-/// replaces the TS object reference into `pages`.
+/// Current state of a page being laid out.
 #[derive(Debug, Clone)]
 pub struct FlowState {
     pub page_index: usize,
@@ -44,7 +32,6 @@ pub struct FlowState {
     pub deferred_spacing: f64,
 }
 
-/// TS `calculateColumnWidth`.
 fn calculate_column_width(
     page_width: f64,
     left_margin: f64,
@@ -56,8 +43,6 @@ fn calculate_column_width(
     (content_width - total_gaps) / columns.count
 }
 
-/// TS `createPageFlow` return value, as a struct. Methods mirror the closure's
-/// functions one-to-one.
 pub struct Paginator {
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
@@ -74,8 +59,7 @@ pub struct Paginator {
 }
 
 impl Paginator {
-    /// Construct with the initial section geometry (TS `createPageFlow`
-    /// body up to the content-area guard).
+    /// Constructs a paginator with the initial section geometry.
     pub fn new(
         page_size: Size,
         margins: PageMargins,
@@ -175,22 +159,21 @@ impl Paginator {
         self.page_size.h - self.margins.bottom
     }
 
-    /// TS `getContentWidth` — content width for the active section.
+    /// Returns the active section's content width.
     pub fn get_content_width(&self) -> f64 {
         self.page_size.w - self.margins.left - self.margins.right
     }
 
-    /// Current column width (TS `columnWidth` getter).
+    /// Returns the current column width.
     pub fn column_width(&self) -> f64 {
         self.column_width
     }
 
-    /// TS `getColumnX`.
+    /// Returns the horizontal origin of a column.
     pub fn get_column_x(&self, column_index: usize) -> f64 {
         self.margins.left + column_index as f64 * (self.column_width + self.columns.gap)
     }
 
-    /// TS `createNewPage`. Returns the new state's index.
     fn create_new_page(&mut self) -> usize {
         // apply any geometry queued by a continuous section break before
         // computing the new page's size / margins
@@ -274,8 +257,7 @@ impl Paginator {
         self.states.len() - 1
     }
 
-    /// TS `getCurrentState` — index of the current state, creating page 1 if
-    /// none exists.
+    /// Returns the current state index, creating the first page if needed.
     pub fn get_current(&mut self) -> usize {
         if self.states.is_empty() {
             return self.create_new_page();
@@ -298,7 +280,7 @@ impl Paginator {
         s.content_limit - s.pen_y
     }
 
-    /// TS `getAvailableHeight()` on the current state.
+    /// Returns the current state's available height.
     pub fn get_available_height(&mut self) -> f64 {
         let idx = self.get_current();
         self.available_height_of(idx)
@@ -308,7 +290,6 @@ impl Paginator {
         self.available_height_of(idx) >= height
     }
 
-    /// TS `advanceColumn` — next column, or a new page when columns are spent.
     fn advance_column(&mut self, idx: usize) -> usize {
         if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
             let region_top = self.column_region_top;
@@ -321,8 +302,7 @@ impl Paginator {
         self.create_new_page()
     }
 
-    /// TS `ensureFits` — advance column/page until `height` fits; oversized
-    /// fragments are placed with overflow rather than looping forever.
+    /// Advances until a height fits or an oversized fragment can overflow.
     pub fn ensure_fits(&mut self, height: f64) -> usize {
         let mut idx = self.get_current();
         let safe_height = if height.is_finite() && height > 0.0 {
@@ -347,9 +327,7 @@ impl Paginator {
         idx
     }
 
-    /// TS `addFragment` — position the fragment at the cursor (collapsing
-    /// adjacent spacing to the larger of the two), push it, advance the pen.
-    /// Returns `(x, y)`.
+    /// Places a fragment at the cursor and collapses adjacent spacing.
     pub fn add_fragment(
         &mut self,
         mut fragment: Fragment,
@@ -357,9 +335,7 @@ impl Paginator {
         space_before: f64,
         space_after: f64,
     ) -> (f64, f64) {
-        // Word collapses spaceAfter / next.spaceBefore to the larger of the
-        // two (CSS-style margin-collapse), not the sum. NOTE: read from the
-        // CURRENT state before ensureFits, exactly like the TS.
+        // Read deferred spacing before fitting can advance the state.
         let cur = self.get_current();
         let effective_space_before = space_before.max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
@@ -384,7 +360,7 @@ impl Paginator {
         (x, y)
     }
 
-    /// TS `forcePageBreak` — idempotent on a pristine page.
+    /// Forces a page break and is idempotent on a pristine page.
     pub fn force_page_break(&mut self) -> usize {
         if let Some(idx) = self.states.len().checked_sub(1) {
             let current = &self.states[idx];
@@ -403,15 +379,12 @@ impl Paginator {
         self.create_new_page()
     }
 
-    /// TS `forceColumnBreak`.
     pub fn force_column_break(&mut self) -> usize {
         let idx = self.get_current();
         self.advance_column(idx)
     }
 
-    /// TS `updateColumns` — swap the column layout mid-document. The new
-    /// column region starts at the current pen so continuous breaks keep the
-    /// band below existing content.
+    /// Applies a column layout below content already placed in the region.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
         self.columns = new_columns;
         self.column_width = calculate_column_width(
@@ -433,8 +406,7 @@ impl Paginator {
         self.states[idx].column_index = 0;
     }
 
-    /// TS `updatePageLayout` — swap (or queue, for continuous breaks) the page
-    /// geometry used by subsequently created pages.
+    /// Applies or queues page geometry for subsequently created pages.
     pub fn update_page_layout(
         &mut self,
         new_page_size: Option<Size>,
@@ -473,24 +445,19 @@ impl Paginator {
         Ok(())
     }
 
-    /// Push a fragment straight onto the current page without moving the pen
-    /// (TS sites do `state.page.fragments.push(fragment)` for anchored /
-    /// floating content).
+    /// Pushes a fragment onto the current page without moving the pen.
     pub fn push_fragment_direct(&mut self, fragment: Fragment) {
         let idx = self.get_current();
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
     }
 
-    /// Raise the current pen to `y` (TS sites assign `state.penY` directly).
     #[allow(dead_code)] // reached once the floating-table hook is swapped in
     pub fn set_pen_y(&mut self, idx: usize, y: f64) {
         self.states[idx].pen_y = y;
     }
 }
 
-/// The section-break slice of the paginator (`sectionBreaks.ts` calls exactly
-/// these four `pageFlow.ts` methods).
 impl crate::section_breaks::SectionBreakPaginator for Paginator {
     fn update_page_layout(
         &mut self,
@@ -526,9 +493,6 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
     }
 }
 
-/// The column-balancing slice of the paginator (`columnBalancing.ts` reads
-/// `columns` and the current state's `penY`/`contentLimit`, and writes
-/// `contentLimit` back).
 impl crate::column_balancing::ColumnBalancePaginator for Paginator {
     fn columns(&self) -> ColumnLayout {
         self.columns.clone()

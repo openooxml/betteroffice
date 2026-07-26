@@ -1,8 +1,7 @@
 //! Pure-Rust text shaping and measurement for the DOCX layout engine.
 //!
-//! This crate is the `ooxml-text` module described in
-//! `openspec/changes/rust-canvas-engine/design.md`. It owns everything the
-//! layout engine needs to turn run text into positioned glyphs and line-break
+//! It owns everything the layout engine needs to turn run text into
+//! positioned glyphs and line-break
 //! decisions, with no browser APIs in the loop:
 //!
 //! - [`FontStore`] — registry over raw font **bytes** (never font names) with
@@ -31,9 +30,6 @@
 //! embedded `.odttf`, bundled metric-compatible fonts, Local Font Access, or
 //! browser-measured fallback — happens entirely on the host side. That keeps
 //! this crate deterministic and identical across web and native shells.
-//!
-//! No `wasm-bindgen` here by design: this mirrors `docx-layout`'s
-//! pure-`layout_to_json` lesson. A thin WASM facade crate can wrap this later.
 
 #![allow(clippy::type_complexity)]
 

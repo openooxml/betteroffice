@@ -1,26 +1,4 @@
-//! Display-list hit-testing: point -> PM position and PM range -> rects.
-//!
-//! Behavioral port of the painted-DOM resolvers (`clickToPositionDom` /
-//! `getSelectionRectsFromDom` in `packages/core/src/layout/geometry`): a click
-//! first tries a direct hit on a text primitive's box, then snaps to the
-//! nearest line by vertical center distance and the nearest primitive on it,
-//! choosing docStart or docEnd by which side the pointer is on. Range rects
-//! emit one rect per overlapped text primitive (proportional sub-span), a
-//! 4px sliver for blank-line markers, and the full box for images — the same
-//! shapes the DOM version reads off `span[data-doc-start]` elements.
-//!
-//! Region awareness: [`hit_test_regions`] first tests the page's HF bands
-//! (`DisplayPage.header` / `.footer`) and resolves within the winning band's
-//! primitives, identifying the region and its `rId` so callers can route the
-//! click to that HF PM doc; [`range_rects_in_region`] mirrors that scoping for
-//! selection geometry — given a region + rId it resolves the from/to inside
-//! that HF band (the same HF doc is painted on every page carrying the part,
-//! so it emits one rect-set per such page). [`range_rects`] is the body-only
-//! convenience wrapper.
-//!
-//! Text bands derive from the CSS font size. Caret stops use UTF-16 grapheme
-//! boundaries for text primitives and shaped cluster boundaries for glyph
-//! primitives, with physical edges mapped through the run direction.
+//! Display-list hit testing and selection geometry.
 
 use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive, TableCellRef};
 use serde::Serialize;
@@ -232,12 +210,7 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
             #[cfg(test)]
             TEXT_HIT_BUILD_COUNT.with(|count| count.set(count.get() + 1));
             let fp = g.size;
-            // baseline / extent are derived from the real glyph geometry:
-            // each PlacedGlyph carries its pen advance, so the run's left edge
-            // is the min glyph x and its right edge is the trailing glyph's
-            // `x + advance` (F3 — no more uniform trailing-advance estimate
-            // that drifted ~3px on mixed-font lines). Marks sit above the
-            // baseline (smaller y), so the max glyph y is the base baseline.
+            // Bounds use glyph positions and advances; marks sit above the base baseline.
             let baseline = g
                 .glyphs
                 .iter()
@@ -655,10 +628,7 @@ pub fn vertical_move(
     })
 }
 
-/// PM position under a page-local point, or None when the page has no
-/// positioned content. Ports the clickToPositionDom resolution order:
-/// direct span hit -> image hit -> nearest line -> nearest span on it.
-/// Body-only; region-aware callers use [`hit_test_regions`].
+/// Resolves a body position through direct, image, then nearest-line hits.
 pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i64> {
     let page = dl.pages.get(page_index)?;
     resolve_point(&page.primitives, x, y)
@@ -877,10 +847,7 @@ fn collect_range_rects(
     }
 }
 
-/// highlight rectangles for a PM range in the BODY doc across all pages (port of
-/// getSelectionRectsFromDom). The `from`/`to` refer to the body PM doc; HF
-/// regions (a different PM doc) are never consulted. Region-aware callers use
-/// [`range_rects_in_region`].
+/// Returns body-document highlight rectangles across all pages.
 pub fn range_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
     range_rects_in_region(dl, HitRegion::Body, None, from, to)
 }

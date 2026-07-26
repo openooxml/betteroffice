@@ -860,14 +860,6 @@
   padding: 4px 0;
 }
 
-/*
- * Phase 5 of HF editing unification (openspec/changes/unify-hf-editing/):
- * the inline overlay no longer mounts a PM EditorView, so the entire
- * `.hf-editor-pm` rule block (font-strut zeroing, table-layout overrides,
- * `top: 0.4em` shim, line-height resets) is gone. Painter + persistent
- * hidden PM are the only HF rendering paths now.
- */
-
 /* Dim body content when editing header/footer */
 .paged-editor--hf-editing .layout-page-content {
   opacity: 0.4;
@@ -894,12 +886,6 @@
   border-top: 1px dotted var(--doc-primary);
   cursor: text;
 }
-
-/*
- * HF editing unification phase 2 (openspec/changes/unify-hf-editing/):
- * removed; the painter is now the sole visible HF renderer in both modes
- * and the inline overlay's PM container moves off-screen instead.
- */
 
 /* Remove hover effect on header/footer when in editing mode */
 .paged-editor--hf-editing .layout-page-header:hover,

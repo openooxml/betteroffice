@@ -1,18 +1,4 @@
-//! Header/footer band gates, replaying the fixtures exported by
-//! `scripts/export-hf-fixtures.ts` (tests/fixtures/hf/):
-//! 1. per-page rId mapping — default / first-page (titlePg) / even-odd rules
-//!    must match the executed TS rules (getHeaderForPage / getFooterForPage);
-//! 2. band geometry — HfRegion y/height must equal the values harvested from
-//!    the REAL DOM painter (renderPage under happy-dom) on identical input;
-//! 3. determinism snapshots — byte-identical run-over-run, pinned by
-//!    committed `<name>.displaylist.json` files. Regenerate deliberately:
-//!    DL_SNAPSHOT_UPDATE=1 cargo test -p docx-layout
-//! 4. region-aware hit-testing — a point inside a band resolves within that
-//!    band's HF PM doc and identifies the region + rId.
-//!
-//! An envelope WITHOUT the headersFooters payload emits no header/footer
-//! keys at all — pinned here and, transitively, by the untouched body
-//! display-list snapshots in display_list.rs.
+//! Header/footer fixture and interaction gates.
 
 use docx_layout::display_list::{DisplayList, HfKind, build_display_list_json};
 use docx_layout::hit::{HitRegion, hit_test, hit_test_regions, range_rects, range_rects_in_region};
@@ -41,7 +27,7 @@ fn approx(a: f64, b: f64) {
 }
 
 #[test]
-fn hf_regions_match_executed_ts_mapping_and_geometry() {
+fn hf_regions_follow_variant_mapping_and_band_geometry() {
     for name in SCENARIOS {
         let dl = build(name);
         let expect: serde_json::Value = serde_json::from_str(&read(name, "expect")).unwrap();

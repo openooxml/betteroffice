@@ -1,12 +1,4 @@
-/**
- * Direct Document -> yrs load projection.
- *
- * This is the Document-model twin of the coexistence seed path. It emits the
- * same flat story vocabulary as `seedFromPm`, but never constructs a
- * ProseMirror node: text becomes attributed Y.Text, paragraphs become pilcrow
- * embeds, tables/block SDTs become structural embeds with child stories, and
- * comments become root-story side-map entries.
- */
+/** Direct Document-to-yrs load projection. */
 
 /* eslint-disable max-lines -- the complete load projection is intentionally co-located */
 

@@ -38,14 +38,12 @@
  * Thin (wght=100) instance, and the Rust engine reads default-instance
  * advances while the browser applies wght=400 — same bytes, different
  * numbers. The static Regulars keep both sides identical (the Rust FontStore
- * parses CFF via skrifa; verified against the measure pipeline).
+ * parses CFF via skrifa).
  *
  * All other binaries are raw TTF (sfnt). Nothing is woff2, because the same
  * bytes must be consumed by two sides at once: the browser (registered via
  * `FontFace`, so DOM measurement uses these exact bytes) and the Rust/WASM
- * `FontStore` (which parses raw sfnt). Byte-identity across both consumers is
- * a hard requirement of the differential measurement harness — see
- * `openspec/changes/rust-canvas-engine/design.md`.
+ * `FontStore` (which parses raw sfnt). Both consumers require identical bytes.
  *
  * Fonts are fetched lazily and same-origin (`new URL(..., import.meta.url)`
  * so bundlers emit the assets). Importing this module performs no network

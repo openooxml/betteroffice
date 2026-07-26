@@ -1,24 +1,4 @@
-//! The placement walk — port of `layoutDocument`/`place` and the per-kind
-//! placers in `packages/core/src/layout/pagination/index.ts`.
-//!
-//! One pass over the measured blocks, a per-kind placer for each, the
-//! paginator holding page/column state, and all look-ahead answered from the
-//! prescan plan. Paragraph placement (including spacing collapse, float line
-//! offsets, page/column splits, per-fragment PM ranges and resolved lines) is
-//! fully ported; the features listed in `hooks.rs` are stubbed there and make
-//! the engine return `Unsupported`.
-//!
-//! Checkpoint capture (`controls.checkpoints` in the TS walk) is not ported:
-//! checkpoints are derived resume bookmarks, excluded from golden
-//! serialization, and only consumed by incremental pagination which stays on
-//! the TS side for now. They influence no fragment or page output.
-//!
-//! Also ported here, because the spine depends on them:
-//! - `getParagraphFragmentPmRange` from `paragraphFragmentRange.ts`,
-//! - `isFloatingTextBoxBlock` from `textBoxFlow.ts` (+ `docx/wrapTypes.ts`).
-//!
-//! `resolvePageMargins` lives in `section_breaks.rs` and the spacing helpers
-//! in `paragraph_spacing.rs`, mirroring the TS module layout.
+//! Placement of measured blocks into pages and columns.
 
 use crate::LayoutError;
 use crate::hooks;
@@ -86,17 +66,12 @@ impl ConvergenceInput<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// spine helpers ported from sibling TS modules
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, PartialEq)]
 enum Edge {
     Start,
     End,
 }
 
-/// `runBoundaryPmPos` (paragraphFragmentRange.ts).
 fn run_boundary_pm_pos(run: Option<&Run>, char_offset: usize, edge: Edge) -> Option<f64> {
     let run = run?;
 
@@ -117,7 +92,6 @@ fn run_boundary_pm_pos(run: Option<&Run>, char_offset: usize, edge: Edge) -> Opt
     run.pm_start()
 }
 
-/// `getParagraphFragmentPmRange` (paragraphFragmentRange.ts).
 fn get_paragraph_fragment_pm_range(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -165,7 +139,6 @@ fn get_paragraph_fragment_pm_range(
     (pm_start, pm_end)
 }
 
-/// `isFloatingWrapType` (docx/wrapTypes.ts).
 fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
     matches!(
         wrap_type,
@@ -173,19 +146,13 @@ fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
     )
 }
 
-/// `isFloatingTextBoxBlock` (textBoxFlow.ts).
 fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
     block.display_mode.as_deref() == Some("float")
         || is_floating_wrap_type(block.wrap_type.as_deref())
         || block.wrap_type.as_deref() == Some("topAndBottom")
 }
 
-// ---------------------------------------------------------------------------
-// contextual spacing (index.ts applyContextualSpacing)
-// ---------------------------------------------------------------------------
-
-/// Suppress spacing between two adjacent same-style contextual paragraphs
-/// (OOXML §17.3.1.9). Mutates in place, exactly like the TS.
+/// Suppresses spacing between adjacent same-style contextual paragraphs.
 fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     let (LayoutBlock::Paragraph(c), LayoutBlock::Paragraph(n)) = (curr, next) else {
         return;
@@ -216,7 +183,7 @@ fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     }
 }
 
-/// `applyContextualSpacing` over a plain block list (table-cell recursion).
+/// Applies contextual spacing recursively through table cells.
 fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
@@ -233,8 +200,7 @@ fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     }
 }
 
-/// `applyContextualSpacing` over the measured list (TS mutates the shared
-/// block references; here the blocks live inside `MeasuredBlock`).
+/// Applies contextual spacing across measured blocks.
 fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
     for i in 0..measured.len().saturating_sub(1) {
         let (head, tail) = measured.split_at_mut(i + 1);
@@ -251,12 +217,7 @@ fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// entry point (index.ts layoutDocument)
-// ---------------------------------------------------------------------------
-
-/// `layoutDocument` — convert measured blocks into pages with positioned
-/// fragments, or `Unsupported` when a not-yet-ported feature is engaged.
+/// Converts measured blocks into positioned pages.
 pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
     Ok(layout_document_checkpointed(input)?.layout)
 }
@@ -477,10 +438,6 @@ pub fn layout_document_incremental(
         rebuilt_page_end,
     })
 }
-
-// ---------------------------------------------------------------------------
-// placement walk (index.ts place)
-// ---------------------------------------------------------------------------
 
 struct PlacementOutcome {
     checkpoints: Vec<LayoutCheckpoint>,
@@ -765,8 +722,7 @@ fn refresh_reused_paragraph_pages(pages: &mut [crate::types::Page], measured: &[
 // per-kind placers
 // ---------------------------------------------------------------------------
 
-/// `buildResolvedLines` — materialize resolved run segments for the
-/// fragment's lines `[from_line, to_line)`.
+/// Materializes resolved run segments for a fragment line range.
 fn build_resolved_lines(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -785,8 +741,7 @@ fn build_resolved_lines(
     resolved
 }
 
-/// `layoutParagraph` — place a paragraph's measured lines, splitting into
-/// carried fragments whenever the page or column runs out of room.
+/// Places measured paragraph lines across pages and columns.
 fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -854,8 +809,7 @@ fn layout_paragraph(
         let deferred_spacing = paginator.state(state_idx).deferred_spacing;
         let column_index = paginator.state(state_idx).column_index;
 
-        // reserve the space addFragment will consume before this fragment's
-        // first line so the greedy fit budgets against what actually remains
+        // Reserve leading space before fitting the first fragment.
         let reserved_before = if current_line_index == 0 {
             space_before.max(deferred_spacing)
         } else {
@@ -951,8 +905,7 @@ fn layout_paragraph(
     Ok(())
 }
 
-/// `layoutImage` — inline images consume flow height; anchored ones route to
-/// the anchored placer and float over the page instead.
+/// Places inline images in flow and anchored images over the page.
 fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Paginator) {
     if block
         .anchor
@@ -1100,8 +1053,7 @@ fn resolve_object_position(
     )
 }
 
-/// `layoutAnchoredImage` — absolute placement at the anchor's offsets;
-/// behindDoc picks the z-order. Never moves the pen.
+/// Places an anchored image without moving the flow position.
 fn layout_anchored_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Paginator) {
     let anchor = block.anchor.as_ref().expect("anchored image has anchor");
 
@@ -1167,8 +1119,7 @@ fn layout_anchored_image(block: &ImageBlock, measure: &ImageExtent, paginator: &
     paginator.push_fragment_direct(fragment);
 }
 
-/// `layoutTextBox` — floating text boxes overlay the page at the current pen
-/// without consuming height; inline ones flow like any other block.
+/// Places floating text boxes as overlays and inline text boxes in flow.
 fn layout_text_box(block: &TextBoxBlock, measure: &TextBoxExtent, paginator: &mut Paginator) {
     if is_floating_text_box_block(block) {
         let (x, y) = resolve_object_position(

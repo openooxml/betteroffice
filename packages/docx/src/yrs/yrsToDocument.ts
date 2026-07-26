@@ -1,11 +1,4 @@
-/**
- * yrs -> OOXML Document save projection.
- *
- * The yrs coexistence model stores each editable container as a flat story:
- * text carries inline formatting attributes, pilcrows carry paragraph
- * properties, and structural/inline atoms are map embeds. This module reads
- * that representation directly and rebuilds the serializer-facing Document.
- */
+/** yrs-to-OOXML save projection. */
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
@@ -290,7 +283,7 @@ function formattingAttrs(attributes: Attrs): Attrs {
   return result;
 }
 
-/** Mirrors fromProseDoc/marks.ts without manufacturing PM Mark objects. */
+/** Converts attributes without manufacturing ProseMirror Mark objects. */
 function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const formatting: TextFormatting = {};
 

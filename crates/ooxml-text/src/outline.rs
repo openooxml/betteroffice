@@ -3,9 +3,7 @@
 //!
 //! This closes the loop the [`crate::font_store`] docs anticipated: metrics,
 //! shaping, and rasterization all read the same bytes through skrifa, so the
-//! glyph a run measured with is the glyph it paints with (WYSIWYG by
-//! construction — see `openspec/changes/rust-canvas-engine/design.md`, "Glyph
-//! rendering").
+//! glyph a run measured with is the glyph it paints with.
 //!
 //! Coordinates are emitted in **font design units** at [`Size::unscaled`]
 //! (unscaled, y-UP per the font convention, relative to the glyph origin).
@@ -30,14 +28,7 @@ use skrifa::{FontRef, GlyphId, MetadataProvider};
 
 use crate::font_store::{FontError, FontId, FontStore};
 
-/// One command of a glyph outline, in **font design units** (unscaled,
-/// relative to the glyph origin, y-UP per the font convention). The canvas
-/// scales by `size/upem` and flips y at draw time.
-///
-/// Serializes to the pinned wire shape the TS canvas backend parses: an
-/// internally tagged object with `"t"` ∈ `"M" | "L" | "Q" | "C" | "Z"` and the
-/// coordinate fields named exactly as below, e.g. `{"t":"Q","cx":..,"cy":..,
-/// "x":..,"y":..}`.
+/// Glyph command serialized for the canvas display-list boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(tag = "t")]
 pub enum PathCmd {
@@ -186,7 +177,7 @@ mod tests {
             .glyph_id(id, 'A')
             .expect("known font")
             .expect("cmap covers 'A'");
-        // Sanity-check the fixture's cmap matches the roadmap's referenced gid.
+        // Sanity-check the fixture cmap.
         assert_eq!(gid, 36, "LiberationSans 'A' glyph id");
 
         let outline = store.outline_glyph(id, gid).expect("outline 'A'");

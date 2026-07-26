@@ -1,7 +1,7 @@
-//! DrawingML theme color/font subset required by S2 and future style resolution.
+//! DrawingML theme colors and fonts.
 
 use crate::settings::ThemeFontLanguage;
-use crate::settings::incumbent_utf8_text_boundary;
+use crate::settings::is_valid_utf8_xml_text;
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
 pub use ooxml_drawingml::{
@@ -17,7 +17,7 @@ pub fn parse_theme(
     let Some(xml) = xml.filter(|value| !is_blank(value)) else {
         return Ok(Theme::default());
     };
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(Theme::default());
     }
     let document = parse_xml(xml, part, budget)?;
@@ -82,8 +82,7 @@ fn parse_theme_color_element(element: &XmlElement) -> Option<String> {
                 _ => None,
             }
         }
-        // The incumbent deliberately leaves scheme references unresolved when
-        // they occur inside the scheme itself.
+        // Scheme references inside the scheme remain unresolved.
         "schemeClr" => None,
         _ => None,
     }

@@ -1,9 +1,4 @@
-//! Read-only lowering from the pilcrow-stream editing model to the existing layout contract.
-//!
-//! The renderer continues to consume [`LayoutBlock`] values. This module is the model-specific
-//! seam: it walks one yrs story in UTF-16 units, resolves side-map comment anchors, lowers the
-//! authored OOXML properties carried by yrs, and synthesizes the ProseMirror integer positions
-//! required during coexistence.
+//! Read-only lowering from editing stories to layout blocks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -29,13 +24,7 @@ mod shapes;
 
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 
-/// Pre-flattened document values needed while lowering a story.
-///
-/// Styles remain represented on each pilcrow through `pStyle` and `defaultTextFormatting`.
-/// `theme_colors` contains raw six-digit RGB values keyed by OOXML theme slot. Missing slots use
-/// the same Office default palette as the TypeScript color resolver. `numeric_ids` is the explicit
-/// coexistence adapter for the current numeric layout contract: callers that mirror a PM document
-/// should map yrs' client-scoped IDs to the PM revision/comment IDs here.
+/// Preflattened values and ID mappings used during story lowering.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
@@ -104,10 +93,7 @@ impl From<EditError> for BridgeError {
     }
 }
 
-/// The coexistence position formula from `render-bridge.md` section 2.1.
-///
-/// `story_index` counts UTF-16 units and counts every pilcrow as one. A PM paragraph contributes
-/// two tag positions, so each already-crossed pilcrow adds the one extra unit not present in yrs.
+/// Maps UTF-16 story offsets to paragraph-node positions.
 pub const fn pm_position(story_index: u32, pilcrows_before: u32) -> u64 {
     story_index as u64 + 1 + pilcrows_before as u64
 }
@@ -153,8 +139,7 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
-        // S5a: section-break margin cascade, per story (sections are body-level;
-        // cell/HF stories simply never carry section properties).
+        // Section-break margins cascade per story.
         let mut section_margins = SectionMarginsTwips::default();
 
         for diff in story.diff(txn, YChange::identity) {
@@ -191,9 +176,7 @@ fn lower_story<T: ReadTxn>(
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     blocks.extend(paragraph_blocks);
-                    // S5a: a pilcrow carrying section properties ends a section —
-                    // emit the section-break block right after its paragraph,
-                    // exactly like the PM path (`toLayoutBlocks`).
+                    // Section properties emit a break after the paragraph.
                     let values = pilcrow_values(&pilcrow, txn);
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
                     {
@@ -437,8 +420,7 @@ fn lower_story<T: ReadTxn>(
                         formatting: RunFormatting {
                             italic: Some(true),
                             font_family: Some("Cambria Math".to_owned()),
-                            // Sentinel consumed by `stamp_logical_order`: the
-                            // PM math fallback omits logicalOrder.
+                            // Sentinel for math fallback without logical order.
                             logical_order: Some(u64::MAX),
                             ..RunFormatting::default()
                         },
@@ -538,7 +520,7 @@ fn lower_story<T: ReadTxn>(
     result
 }
 
-/// Exact migration-spelling alias used by the build specification.
+/// CamelCase alias for story lowering.
 #[allow(non_snake_case)]
 pub fn yrsDocToLayoutBlocks(
     doc: &EditingDoc,
@@ -1454,9 +1436,7 @@ fn lower_inline_sdt_values(
                     runs,
                 )
             }),
-            // Shape/chart children nested inside an inline SDT are omitted by
-            // the current PM run lowering too; all other leaves occupy one PM
-            // position even when they have no layout run.
+            // Nested shapes and charts are omitted; other leaves occupy one position.
             _ => 1,
         };
         content_size += child_size;
@@ -1757,9 +1737,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
         ))];
     }
 
-    // `convertParagraphWithShapes` splits the PM paragraph around direct
-    // shape/chart children and omits empty paragraph slices. Reproduce that
-    // exact geometry while retaining the original child PM positions.
+    // Direct shape and chart children split paragraphs without empty slices.
     let mut blocks = Vec::new();
     let mut segment_start = 0_u32;
     for drawing in drawings {
@@ -1867,18 +1845,13 @@ fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any
         .collect()
 }
 
-/// OOXML defaults used when a `sectPr` overrides only part of the page
-/// geometry: US-Letter page size, one-inch margins, half-inch column gap
-/// (all in twips) — the same constants the PM path (`toLayoutBlocks`) uses.
+/// OOXML page geometry defaults in twips.
 const DEFAULT_PAGE_WIDTH_TWIPS: f64 = 12240.0;
 const DEFAULT_PAGE_HEIGHT_TWIPS: f64 = 15840.0;
 const DEFAULT_SECTION_MARGIN_TWIPS: f64 = 1440.0;
 const DEFAULT_COLUMN_GAP_TWIPS: f64 = 720.0;
 
-/// The running per-side margin cascade across section breaks, in twips. A
-/// section that overrides any margin emits a FULL margins record; its unset
-/// sides inherit from the prior section instead of resetting to the OOXML
-/// default. Mirrors `lastSectionMarginsTwips` in `toLayoutBlocks`.
+/// Running per-side margin cascade across section breaks.
 #[derive(Clone, Copy, Debug)]
 struct SectionMarginsTwips {
     top: f64,
@@ -1909,11 +1882,7 @@ fn section_break_type(value: &str) -> Option<SectionBreakType> {
     }
 }
 
-/// Lowers a section-boundary pilcrow's `sectPr` sub-map + `sectionBreakType`
-/// to the [`SectionBreakBlock`] the renderer consumes, or `None` when the
-/// pilcrow carries no section properties. Geometry math mirrors the PM path
-/// (`toLayoutBlocks`): twips → px, page size only when a dimension is
-/// overridden, the margin cascade above, and columns only when count > 1.
+/// Lowers section properties to a layout break.
 fn section_break_block(
     values: &BTreeMap<String, Any>,
     cascade: &mut SectionMarginsTwips,
@@ -2424,8 +2393,7 @@ fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
         return;
     };
     match value {
-        // Scalar Wave-0 marks represent authored `w:sz`; the PM-compatible object form preserves
-        // independent `w:sz`/`w:szCs`. Both stay in half-points until this bridge.
+        // Scalar marks hold `w:sz`; object marks preserve independent `w:sz` and `w:szCs`.
         Any::Number(half_points) => result.font_size = Some(*half_points / 2.0),
         Any::BigInt(half_points) => result.font_size = Some(*half_points as f64 / 2.0),
         Any::Map(map) => {
@@ -3089,8 +3057,7 @@ fn numeric_id(id: &str, env: &RenderEnv) -> f64 {
     {
         return value;
     }
-    // Stable JS-safe fallback for standalone native rendering. The coexistence A/B path supplies
-    // an explicit map because the numeric contract cannot losslessly carry `{client}:{counter}`.
+    // Hash unmapped IDs into the safe-integer range.
     let hash = id.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });
@@ -3293,7 +3260,7 @@ mod tests {
     }
 
     #[test]
-    fn native_two_by_two_table_matches_pm_layout_contract_json() {
+    fn native_two_by_two_table_lowers_to_expected_layout_json() {
         let doc = EditingDoc::new(41);
         for (story, para, text) in [
             ("body:t0:r0c0", "c00p", "A"),
@@ -3564,8 +3531,8 @@ mod tests {
     }
 
     #[test]
-    fn pm_formula_matches_explicit_paragraph_node_sizes() {
-        // Story: "a😀¶¶wxyz¶". PM paragraph node sizes are text UTF-16 length + 2.
+    fn position_formula_accounts_for_paragraph_node_sizes() {
+        // Story: "a😀¶¶wxyz¶". Paragraph node sizes are UTF-16 length plus two.
         assert_eq!(utf16_len("a😀"), 3);
         let paragraphs = [(0, 3, 0), (4, 4, 1), (5, 9, 2)];
         let expected_blocks = [(0, 5), (5, 7), (7, 13)];
@@ -3703,7 +3670,7 @@ mod tests {
     }
 
     #[test]
-    fn representative_s1_story_matches_pm_layout_contract_json() {
+    fn representative_story_lowers_to_expected_layout_json() {
         let doc = EditingDoc::new(41);
         doc.create_story("body", "Alpha link Omega", "Normal", "left")
             .unwrap();
@@ -3714,9 +3681,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        // New S1 split (op-contract R6): the FIRST half keeps the original paraId and the second
-        // half is re-minted — the reverse of the retired foundation split, so the second-half
-        // paragraph attrs below target `second_para`.
+        // The first half keeps its ID and the second receives a new one.
         let first_para = split.first_para_id.clone();
         let second_para = split.second_para_id.clone();
 

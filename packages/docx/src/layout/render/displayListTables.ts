@@ -44,7 +44,6 @@
  * nearest-viewport page pick the HF caret uses (the part paints on every page).
  * HF tables are rare, so this is deferred.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { DisplayList, DisplayPage, DisplayPrimitive, TableCellRef } from './displayList';

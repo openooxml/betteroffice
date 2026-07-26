@@ -1,4 +1,4 @@
-//! Complete S4 drawing/media package projection for the differential corpus gate.
+//! S4 drawing and media projection.
 
 use base64::Engine as _;
 use indexmap::IndexMap;

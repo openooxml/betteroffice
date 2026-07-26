@@ -1,4 +1,4 @@
-//! Paragraph orchestration, inline tracked structures, and S4/S5 composition.
+//! Paragraphs and tracked inline structures.
 
 use serde::{Deserialize, Serialize};
 
@@ -578,8 +578,7 @@ fn parse_paragraph_contents(
             "oMath" | "oMathPara" => output.push(ParagraphContent::Inline(InlineNode::Math(
                 parse_math(child),
             ))),
-            // pPr is handled by the paragraph orchestrator. The remaining
-            // markers are deliberately inert in the incumbent parser.
+            // Paragraph properties are handled by the orchestrator.
             "pPr" | "proofErr" | "permStart" | "permEnd" | "customXml" | "smartTag" => {}
             _ => {}
         }
@@ -983,7 +982,7 @@ fn parse_math(element: &XmlElement) -> MathEquation {
             "inline"
         }
         .to_owned(),
-        omml_xml: element.to_incumbent_xml(),
+        omml_xml: element.to_raw_inline_xml(),
         plain_text: (!text.is_empty()).then_some(text),
     }
 }
@@ -1628,7 +1627,7 @@ mod tests {
         let ParagraphContent::CommentRange(comment) = &paragraph.content[3] else {
             panic!("comment marker")
         };
-        // JS String#length semantics: A + astral emoji + deleted B = 4.
+        // A, an astral emoji, and deleted B span four UTF-16 code units.
         assert_eq!(comment.offset, Some(4.0));
         let ParagraphContent::Inline(InlineNode::ComplexField(field)) = &paragraph.content[4]
         else {

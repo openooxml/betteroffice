@@ -8,7 +8,6 @@
  * display list's unit space), and ask the Rust `hit_test_regions` query for
  * the region + doc position.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { DisplayListQueries, DisplayListRegionHit } from './displayListQueries';
@@ -43,13 +42,7 @@ function pageCanvases(host: HTMLElement): HTMLCanvasElement[] {
   return Array.from(host.querySelectorAll<HTMLCanvasElement>('canvas[data-page-index]'));
 }
 
-/**
- * Resolve the client-space shell for one display-list page. A mounted canvas
- * is the preferred projection host. During the Phase-2 transition the DOM
- * painter may still be the visible renderer, so its *container* is used as a
- * page-stack projection host without inspecting any painted page/text/table
- * node. Page sizes remain display-list-owned.
- */
+/** Resolves a display-list page rectangle from canvas or DOM page hosts. */
 export function resolveDisplayPageClientRect(
   host: HTMLElement,
   queries: DisplayListQueries,

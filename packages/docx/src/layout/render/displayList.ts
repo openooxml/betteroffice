@@ -1,9 +1,4 @@
-// renderer-agnostic display list: the single contract between layout output and
-// every rendering backend (web canvas, DOM mirror, native, PDF). Derived from a
-// computed Layout — never built inside the paginator — so any pagination engine
-// (TS or Rust) feeds any backend. All coordinates are page-local px, same unit
-// space as Layout. v0 carries shaped-by-browser text runs (string + CSS font);
-// phase 2 (docx-text) adds glyph-run primitives without breaking consumers.
+/** Renderer-agnostic display contract with page-local pixel coordinates. */
 
 import type { DrawingScene, ShapeTextBodyProperties } from '../drawing';
 
@@ -338,10 +333,7 @@ export interface DocAttrs {
   groupId?: string;
   /** Review presentation for comment-associated primitives. */
   comment?: DisplayCommentMetadata;
-  /**
-   * Scoped clip/group membership. Undefined = ungrouped. Kept as metadata
-   * until the canvas/mirror batch activates `ClipGroupPrimitive` in the union.
-   */
+  /** Scoped clip/group membership. Undefined = ungrouped. */
   clipGroup?: DisplayClipGroupMetadata;
   /** Enclosing table-fragment identity and accessibility semantics. */
   table?: DisplayTableMetadata;
@@ -353,7 +345,7 @@ export interface TextRunPrimitive extends DocAttrs {
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run
-  font: string; // CSS font shorthand (v0, browser-shaped); phase 2 adds fontId+glyphs
+  font: string;
   color: string;
   letterSpacing?: number;
   // extra advance (px) added after each U+0020 space cluster — the canvas
@@ -374,7 +366,7 @@ export interface TextRunPrimitive extends DocAttrs {
   smallCaps?: boolean;
   /** Hidden run shown in editing view as dimmed/dotted, matching the DOM painter. */
   hidden?: boolean;
-  /** CSS-like shadow effect ported from run formatting. */
+  /** CSS-like shadow effect from run formatting. */
   textShadow?: 'shadow' | 'emboss' | 'imprint';
   /** Outlined / hollow text. */
   textOutline?: boolean;
@@ -412,13 +404,7 @@ export interface PositionedGlyph {
   bidiLevel?: number;
 }
 
-// phase-2 text primitive: a run shaped by the Rust engine into font glyphs
-// rather than a browser-shaped CSS string (TextRunPrimitive). The canvas
-// backend paints each glyph as a Path2D outline fetched from the font bytes
-// (fontId → FontStore), scaled by `size`/upem; the a11y mirror renders `text`
-// as a real text node at the run's geometry. `color` is "#rrggbb"; `size` is
-// px. Coexists with TextRunPrimitive so v0 (browser-shaped) and phase-2
-// (glyph-shaped) runs can share one display list.
+/** Shaped glyph run with source text for accessibility. */
 export interface GlyphRunPrimitive extends DocAttrs {
   kind: 'glyphRun';
   fontId: number;
@@ -449,7 +435,7 @@ export interface GlyphRunPrimitive extends DocAttrs {
   smallCaps?: boolean;
   /** Hidden run shown in editing view as dimmed/dotted, matching the DOM painter. */
   hidden?: boolean;
-  /** CSS-like shadow effect ported from run formatting. */
+  /** CSS-like shadow effect from run formatting. */
   textShadow?: 'shadow' | 'emboss' | 'imprint';
   /** Outlined / hollow text. */
   textOutline?: boolean;
@@ -714,7 +700,7 @@ export interface DecorationPrimitive extends DocAttrs {
 
 /** Scoped opacity/transform/clip group. Empty/missing members are no-ops. */
 export interface ClipGroupPrimitive extends DocAttrs {
-  /** Primitive tag. Undefined until Batch F activates the union arm. */
+  /** Primitive tag. */
   kind?: 'clipGroup';
   clip?: { x?: number; y?: number; w?: number; h?: number };
   opacity?: number;

@@ -1,5 +1,4 @@
-//! Paragraph ops: `split_paragraph`, `merge_paragraphs`, `set_paragraph_attrs` (+ wrappers),
-//! `apply_paragraph_style` (op-contract §1 "Paragraph"), and the R5 paraId re-uniquing pass.
+//! Paragraph editing operations.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -18,8 +17,7 @@ use crate::{
     Position, StoryRange, check_position, insertion_attrs, next_pilcrow, revision_value, story_ref,
 };
 
-/// The paragraph attrs a style definition controls. Applying a style resets every one of these
-/// to the style's value or clears it (port of `paragraphAttrsFromResolvedStyle`).
+/// Paragraph attributes controlled by style application.
 pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 15] = [
     "alignment",
     "spaceBefore",
@@ -38,8 +36,7 @@ pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 15] = [
     "defaultTextFormatting",
 ];
 
-/// The 7 style-controlled marks swept before a style's run formats are applied (port of
-/// `makeApplyStyle`'s `styleControlledMarks`).
+/// Marks cleared before applying style run formatting.
 pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
     "bold",
     "italic",
@@ -50,8 +47,7 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
     "strike",
 ];
 
-/// The pPr subset an empty second half inherits on split (port of `INHERITED_PARA_ATTRS`;
-/// `styleId` is `pStyle` in the story vocabulary).
+/// Paragraph properties inherited by an empty split half.
 const INHERITED_PARA_ATTRS: [&str; 7] = [
     "defaultTextFormatting",
     "pStyle",
@@ -62,8 +58,7 @@ const INHERITED_PARA_ATTRS: [&str; 7] = [
     "contextualSpacing",
 ];
 
-/// The `defaultTextFormatting` keys that cross a split (port of `styleCarryDtf` — the
-/// font/size/color subset; bold/italic/underline etc. deliberately do not carry).
+/// Default text-formatting keys carried across a split.
 const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
 
 const BORDERS: &str = "borders";
@@ -71,7 +66,7 @@ const TABS: &str = "tabs";
 const INDENT_LEFT: &str = "indentLeft";
 const DEFAULT_TEXT_FORMATTING: &str = "defaultTextFormatting";
 
-/// Default indent step in twips (0.5 inch), matching the PM commands.
+/// Default half-inch indent step in twips.
 pub const INDENT_STEP_TWIPS: f64 = 720.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,7 +77,7 @@ pub enum MergeDirection {
     Backward,
 }
 
-/// Which paragraphs an op targets (op-contract "paras: One|Range").
+/// Paragraphs targeted by an operation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParaSelector {
     One(ParagraphId),
@@ -113,8 +108,7 @@ impl TabStop {
     }
 }
 
-/// Tri-state paragraph attribute delta (op-contract §1 "Paragraph"). Spacing and indent values
-/// are authored OOXML units (twips / line-spacing units), never pixels.
+/// Tri-state paragraph attributes in authored OOXML units.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParaAttrDelta {
     pub alignment: Patch<String>,
@@ -134,14 +128,7 @@ pub struct ParaAttrDelta {
     pub other: BTreeMap<String, Option<Any>>,
 }
 
-/// A host-resolved paragraph style, injected because style resolution (styles.xml cascade) stays
-/// outside the CRDT until S5.
-///
-/// `paragraph_attrs` is the `paragraphAttrsFromResolvedStyle` projection: values for the
-/// [`STYLE_CONTROLLED_PARA_ATTRS`] keys (a missing or `Any::Null` entry clears the attr), plus
-/// any list attrs when the style defines numbering. `run_marks` is the style's run formatting
-/// lowered to story attr values (`bold`, `fontSize`, ...), applied after sweeping the
-/// [`STYLE_CONTROLLED_MARKS`].
+/// Host-resolved paragraph and run style attributes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedStyleProjection {
     pub style_id: String,
@@ -242,8 +229,7 @@ fn set_or_remove(txn: &mut TransactionMut<'_>, map: &MapRef, key: &str, value: O
     }
 }
 
-/// Writes a style's paragraph-attr projection: the 15 style-controlled attrs are reset to the
-/// projection's value (or cleared), extra projection keys (list attrs) applied as-is.
+/// Writes style-controlled and extra paragraph attributes.
 fn apply_paragraph_attr_projection(
     txn: &mut TransactionMut<'_>,
     map: &MapRef,
@@ -282,19 +268,7 @@ fn style_carry_dtf(value: &Any) -> Option<Any> {
 }
 
 impl EditingDoc {
-    /// Splits a paragraph by inserting exactly ONE pilcrow embed (op-contract §1).
-    ///
-    /// The new pilcrow terminates the FIRST half with the source paragraph's full pPr and its
-    /// ORIGINAL paraId; the original pilcrow is re-minted with a fresh paraId and becomes the
-    /// second half's mark. Second-half inheritance ports `applyPostSplitInheritance`:
-    ///
-    /// - mid-paragraph split: the second half keeps its pPr, borders ALWAYS cleared;
-    /// - split at the paragraph end (empty second half): the second half keeps only the
-    ///   `INHERITED_PARA_ATTRS` subset, with `defaultTextFormatting` reduced to font/size/color;
-    /// - split at the end WITH a host-injected `w:next` style: the second half switches to that
-    ///   style's projection instead (borders cleared either way).
-    ///
-    /// Suggesting mode stamps the inserted pilcrow with `ins` and `pPrIns`.
+    /// Splits a paragraph with one pilcrow and inherited properties.
     pub fn split_paragraph(
         &self,
         ctx: &EditCtx,
@@ -353,8 +327,7 @@ impl EditingDoc {
         orig_map.insert(&mut txn, PARA_ID, second_para_id.as_str());
         if second_half_empty {
             if let Some(next) = next_style {
-                // `w:next` switch (port of applyNextParagraphStyle): fresh attrs + the next
-                // style's projection; borders cleared.
+                // A `w:next` switch uses fresh projected attributes.
                 for (key, _) in &props {
                     orig_map.remove(&mut txn, key);
                 }
@@ -572,8 +545,7 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Increases `indentLeft` by `step` twips (default 720 — half an inch, the PM command
-    /// default).
+    /// Increases left indent by a default half-inch step.
     pub fn increase_indent(
         &self,
         ctx: &EditCtx,
@@ -592,8 +564,7 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Decreases `indentLeft` by `step` twips (default 720), clamping at zero — a zero indent
-    /// clears the attr (PM parity).
+    /// Decreases left indent and clears it at zero.
     pub fn decrease_indent(
         &self,
         ctx: &EditCtx,
@@ -641,10 +612,7 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Applies a host-resolved paragraph style (compound; port of `makeApplyStyle`): sets the
-    /// styleId, resets every style-controlled paragraph attr, sweeps the 7 style-controlled
-    /// marks from the paragraph text, and applies the new style's run formats — all in ONE
-    /// transaction. An unknown style errors before any mutation.
+    /// Applies a host-resolved paragraph style atomically.
     pub fn apply_paragraph_style(
         &self,
         ctx: &EditCtx,
