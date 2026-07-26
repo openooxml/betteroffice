@@ -732,6 +732,98 @@ fn preserved_shared_strings_pair_duplicate_values_in_order() {
     assert!(written.contains(&format!("{rich_item}<si><t>Dup</t></si>")));
 }
 
+/// Two worksheets sharing one workbook, so an edit to the second can be
+/// checked against the first.
+fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8>)> {
+    let workbook = r#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    vec![
+        ("xl/workbook.xml".to_owned(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".to_owned(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_owned(),
+            format!("<worksheet>{first_body}</worksheet>").into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet2.xml".to_owned(),
+            format!("<worksheet>{second_body}</worksheet>").into_bytes(),
+        ),
+    ]
+}
+
+fn part_bytes(parts: &[(String, Vec<u8>)], path: &str) -> Vec<u8> {
+    parts
+        .iter()
+        .find(|(name, _)| name == path)
+        .unwrap_or_else(|| panic!("missing {path}"))
+        .1
+        .clone()
+}
+
+/// The parser models a subset of row, column and cell markup. An edit to one
+/// sheet must not push every other sheet through that lossy round-trip.
+#[test]
+fn leaves_untouched_worksheets_byte_identical() {
+    let untouched = concat!(
+        r#"<sheetPr><outlinePr summaryBelow="0"/></sheetPr>"#,
+        r#"<cols><col min="1" max="1" width="12" hidden="1" outlineLevel="1"/></cols>"#,
+        r#"<sheetData>"#,
+        r#"<row r="1" hidden="1" outlineLevel="2" collapsed="1" s="3" customFormat="1">"#,
+        r#"<c r="A1" t="inlineStr"><is><r><rPr><b/></rPr><t>Rich</t></r><r><t> mix</t></r></is></c>"#,
+        r#"<c r="B1"><f t="shared" si="0" ref="B1:B2">SUM(A1:A2)</f><v>3</v></c>"#,
+        r#"</row>"#,
+        r#"<row r="2"><c r="B2"><f t="shared" si="0"/><v>3</v></c></row>"#,
+        r#"</sheetData>"#,
+    );
+    let parts = two_sheet_package(untouched, r#"<sheetData/>"#);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[1].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+
+    assert_eq!(
+        String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap(),
+        String::from_utf8(part_bytes(&parts, "xl/worksheets/sheet1.xml")).unwrap(),
+    );
+    assert!(
+        String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet2.xml"))
+            .unwrap()
+            .contains("<v>7</v>")
+    );
+}
+
+/// A rename touches only the workbook part, so worksheet bytes still survive.
+#[test]
+fn keeps_worksheet_bytes_across_a_rename() {
+    let body = r#"<sheetData><row r="1" hidden="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts = two_sheet_package(body, r#"<sheetData/>"#);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].name = "Renamed".to_owned();
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+
+    assert_eq!(
+        part_bytes(&saved, "xl/worksheets/sheet1.xml"),
+        part_bytes(&parts, "xl/worksheets/sheet1.xml")
+    );
+    assert!(
+        String::from_utf8(part_bytes(&saved, "xl/workbook.xml"))
+            .unwrap()
+            .contains(r#"name="Renamed""#)
+    );
+}
+
 fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
     String::from_utf8(
         parts

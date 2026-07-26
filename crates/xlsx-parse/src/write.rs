@@ -215,9 +215,19 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         }
     }
 
+    let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     for (sheet, plan) in wb.sheets.iter().zip(&sheets) {
-        let bytes = match plan.origin.and_then(|origin| package.sheets.get(origin)) {
+        let source = plan.origin.and_then(|origin| package.sheets.get(origin));
+        let bytes = match source {
             Some(source) if source.is_worksheet() => {
+                let unchanged = shared_strings_stable
+                    && plan
+                        .origin
+                        .and_then(|origin| package.original_workbook.sheets.get(origin))
+                        .is_some_and(|original| sheet_body_matches(sheet, original));
+                if unchanged {
+                    continue;
+                }
                 worksheet_xml_with_template(sheet, wb, &source.template)?
             }
             Some(_) => continue,
@@ -289,6 +299,17 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     Ok(parts.finish())
+}
+
+/// Everything a worksheet part carries. The sheet name lives in the workbook
+/// part, so a rename leaves the worksheet bytes reusable.
+fn sheet_body_matches(sheet: &Sheet, original: &Sheet) -> bool {
+    sheet.freeze_pane == original.freeze_pane
+        && sheet.hyperlinks == original.hyperlinks
+        && sheet.merges == original.merges
+        && sheet.col_widths == original.col_widths
+        && sheet.row_heights == original.row_heights
+        && sheet.iter_cells().eq(original.iter_cells())
 }
 
 #[derive(Clone)]
