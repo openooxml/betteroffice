@@ -205,11 +205,28 @@ pub(crate) fn rename_hyperlink_location(location: &str, old_name: &str, new_name
 }
 
 pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
+    scan_sheet_rename(source, old_name, new_name).formula
+}
+
+/// A formula rewritten for a sheet rename, plus whether it still names the old
+/// sheet in a position the rewriter could not resolve.
+struct SheetRename {
+    formula: String,
+    ambiguous: bool,
+}
+
+/// Single pass over `source`: rewrites every qualified reference to `old_name`
+/// and flags bare tokens that match it but carry no `!` to bind them.
+fn scan_sheet_rename(source: &str, old_name: &str, new_name: &str) -> SheetRename {
     if old_name == new_name {
-        return source.to_string();
+        return SheetRename {
+            formula: source.to_string(),
+            ambiguous: false,
+        };
     }
     let bytes = source.as_bytes();
     let mut replacements = Vec::new();
+    let mut ambiguous = false;
     let mut index = 0;
     let mut bracket_depth = 0_u32;
     while index < bytes.len() {
@@ -228,19 +245,11 @@ pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str)
             continue;
         }
         if bracket_depth != 0 {
-            index += source[index..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
+            index += next_char_len(source, index);
             continue;
         }
         let Some(first) = parse_sheet_token(source, index) else {
-            index += source[index..]
-                .chars()
-                .next()
-                .map(char::len_utf8)
-                .unwrap_or(1);
+            index += next_char_len(source, index);
             continue;
         };
         let external = first.start > 0 && bytes[first.start - 1] == b']';
@@ -264,25 +273,38 @@ pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str)
             index = second.end + 1;
             continue;
         }
+        if !external
+            && sheet_names_equal(&first.name, old_name)
+            && !is_function_call(source, &first)
+        {
+            ambiguous = true;
+        }
         index = first.end;
     }
-    if replacements.is_empty() {
-        return source.to_string();
-    }
-    let replacement = sheet_token(new_name);
-    let mut output = String::with_capacity(source.len());
-    let mut copied_until = 0;
-    for (start, end) in replacements {
-        output.push_str(&source[copied_until..start]);
-        output.push_str(&replacement);
-        copied_until = end;
-    }
-    output.push_str(&source[copied_until..]);
-    output
+    let formula = if replacements.is_empty() {
+        source.to_string()
+    } else {
+        let replacement = sheet_token(new_name);
+        let mut output = String::with_capacity(source.len());
+        let mut copied_until = 0;
+        for (start, end) in replacements {
+            output.push_str(&source[copied_until..start]);
+            output.push_str(&replacement);
+            copied_until = end;
+        }
+        output.push_str(&source[copied_until..]);
+        output
+    };
+    SheetRename { formula, ambiguous }
+}
+
+/// An unquoted token followed by `(` is a function call, never a sheet name.
+fn is_function_call(source: &str, token: &ParsedSheetToken) -> bool {
+    !source[token.start..].starts_with('\'') && source[token.end..].trim_start().starts_with('(')
 }
 
 /// Rewrites defined names through a sheet rename, dropping any whose formula
-/// mentions the old name without a `!` because the intent cannot be resolved.
+/// names the old sheet as a bare token, where the intent cannot be resolved.
 /// Returns the inverse op when the list changed.
 pub(crate) fn rename_defined_names(
     wb: &mut Workbook,
@@ -295,11 +317,12 @@ pub(crate) fn rename_defined_names(
     let previous = wb.defined_names.clone();
     let mut rewritten: Vec<DefinedName> = Vec::with_capacity(previous.len());
     for defined in &previous {
-        if mentions_sheet_ambiguously(&defined.formula, old_name) {
+        let renamed = scan_sheet_rename(&defined.formula, old_name, new_name);
+        if renamed.ambiguous {
             continue;
         }
         let mut defined = defined.clone();
-        defined.formula = rename_formula_sheet(&defined.formula, old_name, new_name);
+        defined.formula = renamed.formula;
         rewritten.push(defined);
     }
     if rewritten == previous {
@@ -309,54 +332,6 @@ pub(crate) fn rename_defined_names(
     Some(Op::SetDefinedNames {
         defined_names: previous,
     })
-}
-
-/// True when the old sheet name appears as a bare token that is neither a
-/// sheet reference nor safely unrelated.
-fn mentions_sheet_ambiguously(source: &str, old_name: &str) -> bool {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    let mut bracket_depth = 0_u32;
-    while index < bytes.len() {
-        if bytes[index] == b'"' {
-            index = skip_string(source, index);
-            continue;
-        }
-        if bytes[index] == b'[' {
-            bracket_depth = bracket_depth.saturating_add(1);
-            index += 1;
-            continue;
-        }
-        if bytes[index] == b']' {
-            bracket_depth = bracket_depth.saturating_sub(1);
-            index += 1;
-            continue;
-        }
-        if bracket_depth != 0 {
-            index += next_char_len(source, index);
-            continue;
-        }
-        let Some(first) = parse_sheet_token(source, index) else {
-            index += next_char_len(source, index);
-            continue;
-        };
-        if bytes.get(first.end) == Some(&b'!') {
-            index = first.end + 1;
-            continue;
-        }
-        if bytes.get(first.end) == Some(&b':')
-            && let Some(second) = parse_sheet_token(source, first.end + 1)
-            && bytes.get(second.end) == Some(&b'!')
-        {
-            index = second.end + 1;
-            continue;
-        }
-        if sheet_names_equal(&first.name, old_name) {
-            return true;
-        }
-        index = first.end;
-    }
-    false
 }
 
 fn next_char_len(source: &str, index: usize) -> usize {
@@ -869,6 +844,71 @@ mod tests {
             "Renamed!A1"
         );
         assert_eq!(rename_formula_sheet("S!A1", "S", "R4C"), "'R4C'!A1");
+    }
+
+    fn defined(name: &str, formula: &str) -> DefinedName {
+        DefinedName {
+            name: name.to_owned(),
+            formula: formula.to_owned(),
+            local_sheet: None,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn rename_keeps_defined_names_whose_formulas_only_call_same_named_functions() {
+        for function in ["SUM", "MAX", "IF", "DATE", "TEXT", "PI"] {
+            let formula = format!("{function}(A1:A10)");
+            let mut workbook = wb(&[function, "Other"]);
+            workbook.defined_names = vec![defined("Total", &formula)];
+            let inverse = rename_defined_names(&mut workbook, function, "Renamed");
+            assert!(inverse.is_none(), "{formula} must not change");
+            assert_eq!(workbook.defined_names, vec![defined("Total", &formula)]);
+        }
+    }
+
+    #[test]
+    fn rename_rewrites_qualified_defined_names_and_drops_bare_mentions() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![
+            defined("Qualified", "Data!$A$1"),
+            defined("ThreeD", "Data:Other!$A$1"),
+            defined("Bare", "Data"),
+            defined("Literal", "42"),
+            defined("Quoted", "\"Data\""),
+            defined("External", "[Book.xlsx]Data!$A$1"),
+        ];
+        let inverse = rename_defined_names(&mut workbook, "Data", "New Data");
+        assert!(inverse.is_some());
+        assert_eq!(
+            workbook.defined_names,
+            vec![
+                defined("Qualified", "'New Data'!$A$1"),
+                defined("ThreeD", "'New Data':Other!$A$1"),
+                defined("Literal", "42"),
+                defined("Quoted", "\"Data\""),
+                defined("External", "[Book.xlsx]Data!$A$1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_drops_defined_names_that_mix_a_bare_mention_with_a_reference() {
+        let mut workbook = wb(&["SUM", "Other"]);
+        workbook.defined_names = vec![
+            defined("Callable", "SUM(SUM!A1:A10)"),
+            defined("Shadowed", "SUM(SUM,1)"),
+            defined("Spaced", "SUM (A1:A10)"),
+            defined("Quoted", "'SUM'"),
+        ];
+        rename_defined_names(&mut workbook, "SUM", "Renamed");
+        assert_eq!(
+            workbook.defined_names,
+            vec![
+                defined("Callable", "SUM(Renamed!A1:A10)"),
+                defined("Spaced", "SUM (A1:A10)"),
+            ]
+        );
     }
 
     #[test]

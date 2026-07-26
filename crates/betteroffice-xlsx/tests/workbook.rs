@@ -3269,6 +3269,34 @@ fn defined_names_follow_renames_and_drop_ambiguous_references() {
 }
 
 #[test]
+fn renaming_a_function_named_sheet_keeps_its_defined_names() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("SUM"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="SUM" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="Qualified">SUM(SUM!$A$1:$A$10)</definedName><definedName name="Unqualified">SUM($A$1:$A$10)</definedName></definedNames></workbook>"#.to_vec(),
+    );
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Renamed".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let workbook_xml = String::from_utf8(package_map(&saved)["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains(r#"name="Qualified">SUM(Renamed!$A$1:$A$10)</definedName>"#));
+    assert!(workbook_xml.contains(r#"name="Unqualified">SUM($A$1:$A$10)</definedName>"#));
+    Workbook::open(&saved).unwrap();
+}
+
+#[test]
 fn scoped_defined_names_remap_indices_and_drop_deleted_scopes() {
     let original = defined_names_fixture();
     let mut workbook = Workbook::open(&original).unwrap();
