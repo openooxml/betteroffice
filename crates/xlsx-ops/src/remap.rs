@@ -50,16 +50,28 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
         .map(|(i, s)| (s.name.to_lowercase(), SheetId(i as u32)))
         .collect();
 
+    let target_name = wb
+        .sheet(target)
+        .map(|sheet| sheet.name.clone())
+        .unwrap_or_default();
+    let index = SheetIndex {
+        names: &names,
+        target,
+        target_name: &target_name,
+    };
+
     let mut restores: Vec<Op> = Vec::new();
     let mut edits: Vec<(SheetId, CellRef, String)> = Vec::new();
     for (i, sheet) in wb.sheets.iter().enumerate() {
         let owner = SheetId(i as u32);
-        let matches =
-            |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, target, &names);
+        let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &index);
         for (cell, c) in sheet.iter_cells() {
             let Some(src) = &c.formula else {
                 continue;
             };
+            if has_unresolvable_binding(src, &index) {
+                return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
+            }
             let expr = parse_formula(src)
                 .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?;
             let mut changed = false;
@@ -98,12 +110,20 @@ pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
         .enumerate()
         .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
         .collect();
+    let target_name = wb
+        .sheet(target)
+        .map(|sheet| sheet.name.clone())
+        .unwrap_or_default();
+    let sheets = SheetIndex {
+        names: &names,
+        target,
+        target_name: &target_name,
+    };
     let mut restores = Vec::new();
     let mut edits = Vec::new();
     for (index, sheet) in wb.sheets.iter().enumerate() {
         let owner = SheetId(index as u32);
-        let matches =
-            |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, target, &names);
+        let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &sheets);
         let mut hyperlinks = sheet.hyperlinks.clone();
         let mut changed_sheet = false;
         for hyperlink in &mut hyperlinks {
@@ -166,22 +186,37 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<O
         .map(|sheet| sheet.name.clone())
         .unwrap_or_default();
 
+    let sheets = SheetIndex {
+        names: &names,
+        target,
+        target_name: &target_name,
+    };
     let previous = wb.defined_names.clone();
     let mut rewritten = Vec::with_capacity(previous.len());
     for defined in &previous {
         let mut updated = defined.clone();
         let scoped = defined.local_sheet == Some(target);
         let matches = |ref_sheet: &Option<String>| match ref_sheet {
-            Some(name) => names.get(&name.to_lowercase()).copied() == Some(target),
+            Some(name) => {
+                let (first, last) = quoted_endpoints(name);
+                sheets.names.contains_key(&first.to_lowercase())
+                    && sheets.names.contains_key(&last.to_lowercase())
+                    && sheets.covers(&first, &last)
+            }
             None => scoped,
         };
+        if has_unresolvable_binding(&defined.formula, &sheets) {
+            return Err(OpError::DefinedNameNotRewritable {
+                name: defined.name.clone(),
+            });
+        }
         let rewrite = rewrite_defined_name(&defined.formula, op, &matches);
         match rewrite {
             DefinedNameRewrite::Unchanged => {}
             DefinedNameRewrite::Rewritten(formula) if formula.len() <= MAX_FORMULA_BYTES => {
                 updated.formula = formula;
             }
-            _ if scoped || mentions_sheet(&defined.formula, &target_name) => {
+            _ if scoped || mentions_sheet(&defined.formula, &sheets) => {
                 return Err(OpError::DefinedNameNotRewritable {
                     name: defined.name.clone(),
                 });
@@ -219,6 +254,11 @@ pub(crate) fn remap_charts(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpErro
         .map(|sheet| sheet.name.clone())
         .unwrap_or_default();
 
+    let sheets = SheetIndex {
+        names: &names,
+        target,
+        target_name: &target_name,
+    };
     let mut restores = Vec::new();
     let mut edits = Vec::new();
     for (index, sheet) in wb.sheets.iter().enumerate() {
@@ -227,14 +267,18 @@ pub(crate) fn remap_charts(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpErro
         }
         let owner = SheetId(index as u32);
         let anchored_on_target = owner == target;
-        let matches =
-            |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, target, &names);
+        let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &sheets);
         let mut charts = sheet.charts.clone();
         let mut changed_sheet = false;
         for chart in &mut charts {
             for reference in &mut chart.refs {
                 if reference.formula.trim().is_empty() {
                     continue;
+                }
+                if has_unresolvable_binding(&reference.formula, &sheets) {
+                    return Err(OpError::ChartRefNotRewritable {
+                        part: chart.part.clone(),
+                    });
                 }
                 match rewrite_chart_ref(&reference.formula, op, &matches) {
                     DefinedNameRewrite::Unchanged => {}
@@ -244,7 +288,7 @@ pub(crate) fn remap_charts(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpErro
                         reference.formula = formula;
                         changed_sheet = true;
                     }
-                    _ if binds_to_target(&reference.formula, &target_name, anchored_on_target) => {
+                    _ if binds_to_target(&reference.formula, &sheets, anchored_on_target) => {
                         return Err(OpError::ChartRefNotRewritable {
                             part: chart.part.clone(),
                         });
@@ -282,8 +326,8 @@ pub(crate) fn remap_charts(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpErro
 
 /// Whether an unrewritable chart reference points at the edited sheet: either
 /// it names it, or it carries no qualifier at all and the chart sits there.
-fn binds_to_target(source: &str, target_name: &str, anchored_on_target: bool) -> bool {
-    mentions_sheet(source, target_name) || (anchored_on_target && !source.contains('!'))
+fn binds_to_target(source: &str, index: &SheetIndex<'_>, anchored_on_target: bool) -> bool {
+    mentions_sheet(source, index) || (anchored_on_target && !source.contains('!'))
 }
 
 /// A chart `c:f` is a defined-name formula that may additionally be wrapped in
@@ -472,8 +516,14 @@ pub(crate) fn rename_chart_refs(wb: &mut Workbook, old_name: &str, new_name: &st
 }
 
 /// Collapses the chart references that name a sheet the workbook no longer
-/// has. The rest of a multi-area reference survives.
-pub(crate) fn strand_chart_refs(wb: &mut Workbook, removed_name: &str) -> Vec<Op> {
+/// has. A 3-D reference whose endpoint was removed shrinks onto the sheets
+/// that remain instead; one that loses every sheet it covered collapses. The
+/// rest of a multi-area reference survives either way.
+pub(crate) fn strand_chart_refs(
+    wb: &mut Workbook,
+    removed_name: &str,
+    order_before: &[String],
+) -> Vec<Op> {
     let mut restores = Vec::new();
     let mut edits = Vec::new();
     for (index, sheet) in wb.sheets.iter().enumerate() {
@@ -483,7 +533,9 @@ pub(crate) fn strand_chart_refs(wb: &mut Workbook, removed_name: &str) -> Vec<Op
         let mut charts = sheet.charts.clone();
         for chart in &mut charts {
             for reference in &mut chart.refs {
-                if let Some(dropped) = drop_removed_sheet(&reference.formula, removed_name) {
+                if let Some(dropped) =
+                    drop_removed_sheet(&reference.formula, removed_name, order_before)
+                {
                     reference.formula = dropped;
                 }
             }
@@ -504,32 +556,116 @@ pub(crate) fn strand_chart_refs(wb: &mut Workbook, removed_name: &str) -> Vec<Op
     restores
 }
 
-fn drop_removed_sheet(source: &str, removed_name: &str) -> Option<String> {
+fn drop_removed_sheet(source: &str, removed_name: &str, order_before: &[String]) -> Option<String> {
     let trimmed = source.trim();
-    if !mentions_sheet(trimmed, removed_name) {
-        return None;
-    }
     let (inner, wrapped) = match paren_group(trimmed) {
         Some(inner) => (inner, true),
         None => (trimmed, false),
     };
     let components = split_union(inner)?;
-    let rewritten = components
-        .iter()
-        .map(|component| {
-            if mentions_sheet(component, removed_name) {
-                ErrorValue::Ref.as_str().to_owned()
-            } else {
-                (*component).to_owned()
+    let mut changed = false;
+    let mut rewritten = Vec::with_capacity(components.len());
+    for component in &components {
+        match rewrite_component_for_removal(component, removed_name, order_before) {
+            ComponentRemoval::Unchanged => rewritten.push((*component).to_owned()),
+            ComponentRemoval::Rewritten(text) => {
+                changed = true;
+                rewritten.push(text);
             }
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+            ComponentRemoval::Collapsed => {
+                changed = true;
+                rewritten.push(ErrorValue::Ref.as_str().to_owned());
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let rewritten = rewritten.join(",");
     Some(if wrapped {
         format!("({rewritten})")
     } else {
         rewritten
     })
+}
+
+enum ComponentRemoval {
+    Unchanged,
+    Rewritten(String),
+    Collapsed,
+}
+
+/// What a sheet removal does to one component of a reference: nothing, a
+/// narrowed 3-D span, or `#REF!` when nothing it named survives.
+fn rewrite_component_for_removal(
+    component: &str,
+    removed_name: &str,
+    order_before: &[String],
+) -> ComponentRemoval {
+    let mut replacements = Vec::new();
+    for qualifier in sheet_qualifiers(component) {
+        if !qualifier.bound || qualifier.external {
+            continue;
+        }
+        if !qualifier.is_span() {
+            if sheet_names_equal(&qualifier.first, removed_name) {
+                return ComponentRemoval::Collapsed;
+            }
+            continue;
+        }
+        match narrowed_span(&qualifier, removed_name, order_before) {
+            Some(Some(replacement)) => replacements.push((qualifier.span, replacement)),
+            Some(None) => return ComponentRemoval::Collapsed,
+            None => {}
+        }
+    }
+    if replacements.is_empty() {
+        return ComponentRemoval::Unchanged;
+    }
+    let mut out = String::with_capacity(component.len());
+    let mut copied = 0;
+    for (span, replacement) in replacements {
+        out.push_str(&component[copied..span.start]);
+        out.push_str(&replacement);
+        copied = span.end;
+    }
+    out.push_str(&component[copied..]);
+    ComponentRemoval::Rewritten(out)
+}
+
+/// `Some(Some(text))` narrows the span onto the sheets that remain,
+/// `Some(None)` means nothing it covered survives, `None` means the removal
+/// does not touch it.
+fn narrowed_span(
+    qualifier: &Qualifier,
+    removed_name: &str,
+    order_before: &[String],
+) -> Option<Option<String>> {
+    let position = |name: &str| {
+        order_before
+            .iter()
+            .position(|sheet| sheet_names_equal(sheet, name))
+    };
+    let (Some(start), Some(end)) = (position(&qualifier.first), position(&qualifier.last)) else {
+        return (sheet_names_equal(&qualifier.first, removed_name)
+            || sheet_names_equal(&qualifier.last, removed_name))
+        .then_some(None);
+    };
+    let covered = &order_before[start.min(end)..=start.max(end)];
+    if !covered
+        .iter()
+        .any(|sheet| sheet_names_equal(sheet, removed_name))
+    {
+        return None;
+    }
+    let remaining = covered
+        .iter()
+        .filter(|sheet| !sheet_names_equal(sheet, removed_name))
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (remaining.first(), remaining.last()) else {
+        return Some(None);
+    };
+    Some(Some(qualifier_token(first, last)))
 }
 
 /// What the defined-name rewriter made of one formula.
@@ -728,10 +864,32 @@ fn parse_axis_endpoint(source: &str) -> Option<(bool, Axis, u32)> {
     Some((absolute, Axis::Col, cell.col))
 }
 
-/// Whether an unrewritable formula names `sheet` as a reference qualifier, so
-/// leaving it untouched would strand it on the pre-edit addresses.
-fn mentions_sheet(source: &str, sheet: &str) -> bool {
+/// One sheet qualifier found in a formula. A 3-D qualifier names two
+/// endpoints and covers every sheet between them in workbook order, whether it
+/// is written `Jan:Mar!` or, as Excel writes it, `'Jan:Mar'!`.
+struct Qualifier {
+    span: core::ops::Range<usize>,
+    first: String,
+    last: String,
+    /// preceded by `]`, so it names a sheet in another workbook.
+    external: bool,
+    /// followed by `!`, so it really qualifies a reference.
+    bound: bool,
+    /// followed by `(`, so it is a function call rather than a sheet name.
+    call: bool,
+}
+
+impl Qualifier {
+    fn is_span(&self) -> bool {
+        self.first != self.last
+    }
+}
+
+/// Every sheet qualifier in `source`, in order, skipping strings and the
+/// `[book]` prefixes of external references.
+fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
     let bytes = source.as_bytes();
+    let mut out = Vec::new();
     let mut index = 0;
     let mut bracket_depth = 0_u32;
     while index < bytes.len() {
@@ -758,12 +916,16 @@ fn mentions_sheet(source: &str, sheet: &str) -> bool {
             continue;
         };
         let external = first.start > 0 && bytes[first.start - 1] == b']';
-        let qualified_by =
-            |token: &ParsedSheetToken| !external && sheet_names_equal(&token.name, sheet);
         if bytes.get(first.end) == Some(&b'!') {
-            if qualified_by(&first) {
-                return true;
-            }
+            let (start, end) = quoted_endpoints(&first.name);
+            out.push(Qualifier {
+                span: first.start..first.end,
+                first: start,
+                last: end,
+                external,
+                bound: true,
+                call: false,
+            });
             index = first.end + 1;
             continue;
         }
@@ -771,15 +933,88 @@ fn mentions_sheet(source: &str, sheet: &str) -> bool {
             && let Some(second) = parse_sheet_token(source, first.end + 1)
             && bytes.get(second.end) == Some(&b'!')
         {
-            if qualified_by(&first) || qualified_by(&second) {
-                return true;
-            }
+            out.push(Qualifier {
+                span: first.start..second.end,
+                first: first.name,
+                last: second.name,
+                external,
+                bound: true,
+                call: false,
+            });
             index = second.end + 1;
             continue;
         }
+        let call = is_function_call(source, &first);
         index = first.end;
+        out.push(Qualifier {
+            span: first.start..first.end,
+            first: first.name.clone(),
+            last: first.name,
+            external,
+            bound: false,
+            call,
+        });
     }
-    false
+    out
+}
+
+/// `'Jan:Mar'` names the span from `Jan` to `Mar`; a sheet name cannot itself
+/// contain a colon, so the split is unambiguous.
+fn quoted_endpoints(name: &str) -> (String, String) {
+    match name.split_once(':') {
+        Some((first, last)) => (first.to_owned(), last.to_owned()),
+        None => (name.to_owned(), name.to_owned()),
+    }
+}
+
+/// How a qualifier resolves against the workbook the edit targets.
+struct SheetIndex<'a> {
+    names: &'a HashMap<String, SheetId>,
+    target: SheetId,
+    target_name: &'a str,
+}
+
+impl SheetIndex<'_> {
+    /// Whether a qualifier covers the edited sheet. A span covers every sheet
+    /// between its endpoints in workbook order; one whose endpoints this
+    /// workbook does not hold falls back to naming them outright, so an
+    /// unresolvable qualifier still binds rather than silently missing.
+    fn covers(&self, first: &str, last: &str) -> bool {
+        match (
+            self.names.get(&first.to_lowercase()),
+            self.names.get(&last.to_lowercase()),
+        ) {
+            (Some(start), Some(end)) => {
+                (start.0.min(end.0)..=start.0.max(end.0)).contains(&self.target.0)
+            }
+            _ => {
+                sheet_names_equal(first, self.target_name)
+                    || sheet_names_equal(last, self.target_name)
+            }
+        }
+    }
+}
+
+/// Whether a qualifier that names the edited sheet cannot be resolved through
+/// workbook order, so nothing can be said about what it covers and leaving it
+/// alone would silently strand it.
+fn has_unresolvable_binding(source: &str, index: &SheetIndex<'_>) -> bool {
+    sheet_qualifiers(source).iter().any(|qualifier| {
+        qualifier.bound
+            && !qualifier.external
+            && !(index.names.contains_key(&qualifier.first.to_lowercase())
+                && index.names.contains_key(&qualifier.last.to_lowercase()))
+            && index.covers(&qualifier.first, &qualifier.last)
+    })
+}
+
+/// Whether an unrewritable formula names the edited sheet as a reference
+/// qualifier, so leaving it untouched would strand it on the pre-edit
+/// addresses.
+fn mentions_sheet(source: &str, index: &SheetIndex<'_>) -> bool {
+    sheet_qualifiers(source).iter().any(|qualifier| {
+        qualifier.bound && !qualifier.external && index.covers(&qualifier.first, &qualifier.last)
+    })
 }
 
 pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
@@ -858,8 +1093,9 @@ struct SheetRename {
     ambiguous: bool,
 }
 
-/// Single pass over `source`: rewrites every qualified reference to `old_name`
-/// and flags bare tokens that match it but carry no `!` to bind them.
+/// Single pass over `source`: rewrites every qualified reference to `old_name`,
+/// including one that is only an endpoint of a 3-D span, and flags bare tokens
+/// that match it but carry no `!` to bind them.
 fn scan_sheet_rename(source: &str, old_name: &str, new_name: &str) -> SheetRename {
     if old_name == new_name {
         return SheetRename {
@@ -867,73 +1103,44 @@ fn scan_sheet_rename(source: &str, old_name: &str, new_name: &str) -> SheetRenam
             ambiguous: false,
         };
     }
-    let bytes = source.as_bytes();
     let mut replacements = Vec::new();
     let mut ambiguous = false;
-    let mut index = 0;
-    let mut bracket_depth = 0_u32;
-    while index < bytes.len() {
-        if bytes[index] == b'"' {
-            index = skip_string(source, index);
+    for qualifier in sheet_qualifiers(source) {
+        if qualifier.external {
             continue;
         }
-        if bytes[index] == b'[' {
-            bracket_depth = bracket_depth.saturating_add(1);
-            index += 1;
+        let renames_first = sheet_names_equal(&qualifier.first, old_name);
+        let renames_last = sheet_names_equal(&qualifier.last, old_name);
+        if !qualifier.bound {
+            if renames_first && !qualifier.call {
+                ambiguous = true;
+            }
             continue;
         }
-        if bytes[index] == b']' {
-            bracket_depth = bracket_depth.saturating_sub(1);
-            index += 1;
+        if !renames_first && !renames_last {
             continue;
         }
-        if bracket_depth != 0 {
-            index += next_char_len(source, index);
-            continue;
-        }
-        let Some(first) = parse_sheet_token(source, index) else {
-            index += next_char_len(source, index);
-            continue;
+        let first = if renames_first {
+            new_name
+        } else {
+            &qualifier.first
         };
-        let external = first.start > 0 && bytes[first.start - 1] == b']';
-        if bytes.get(first.end) == Some(&b'!') {
-            if !external && sheet_names_equal(&first.name, old_name) {
-                replacements.push((first.start, first.end));
-            }
-            index = first.end + 1;
-            continue;
-        }
-        if bytes.get(first.end) == Some(&b':')
-            && let Some(second) = parse_sheet_token(source, first.end + 1)
-            && bytes.get(second.end) == Some(&b'!')
-        {
-            if !external && sheet_names_equal(&first.name, old_name) {
-                replacements.push((first.start, first.end));
-            }
-            if !external && sheet_names_equal(&second.name, old_name) {
-                replacements.push((second.start, second.end));
-            }
-            index = second.end + 1;
-            continue;
-        }
-        if !external
-            && sheet_names_equal(&first.name, old_name)
-            && !is_function_call(source, &first)
-        {
-            ambiguous = true;
-        }
-        index = first.end;
+        let last = if renames_last {
+            new_name
+        } else {
+            &qualifier.last
+        };
+        replacements.push((qualifier.span, qualifier_token(first, last)));
     }
     let formula = if replacements.is_empty() {
         source.to_string()
     } else {
-        let replacement = sheet_token(new_name);
         let mut output = String::with_capacity(source.len());
         let mut copied_until = 0;
-        for (start, end) in replacements {
-            output.push_str(&source[copied_until..start]);
+        for (span, replacement) in replacements {
+            output.push_str(&source[copied_until..span.start]);
             output.push_str(&replacement);
-            copied_until = end;
+            copied_until = span.end;
         }
         output.push_str(&source[copied_until..]);
         output
@@ -1087,7 +1294,31 @@ fn is_unquoted_sheet_char(character: char) -> bool {
 }
 
 fn sheet_token(name: &str) -> String {
-    let simple = !name.is_empty()
+    if is_simple_sheet_name(name) {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+/// A qualifier naming one sheet, or the span between two. Excel writes a span
+/// unquoted when both endpoints are simple and `'first:last'` otherwise.
+fn qualifier_token(first: &str, last: &str) -> String {
+    if sheet_names_equal(first, last) {
+        return sheet_token(first);
+    }
+    if is_simple_sheet_name(first) && is_simple_sheet_name(last) {
+        return format!("{first}:{last}");
+    }
+    format!(
+        "'{}:{}'",
+        first.replace('\'', "''"),
+        last.replace('\'', "''")
+    )
+}
+
+fn is_simple_sheet_name(name: &str) -> bool {
+    !name.is_empty()
         && name
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || character == '_')
@@ -1096,12 +1327,7 @@ fn sheet_token(name: &str) -> String {
             .next()
             .is_some_and(|character| character.is_ascii_digit())
         && CellRef::parse_a1(name).is_err()
-        && !is_r1c1_reference(name);
-    if simple {
-        name.to_string()
-    } else {
-        format!("'{}'", name.replace('\'', "''"))
-    }
+        && !is_r1c1_reference(name)
 }
 
 fn is_r1c1_reference(name: &str) -> bool {
@@ -1116,19 +1342,19 @@ fn is_r1c1_reference(name: &str) -> bool {
     rest.as_bytes().get(digits) == Some(&b'C')
 }
 
-/// whether a reference read from `owner` points at the edited sheet `target`.
-/// unqualified refs bind to `owner`; unknown sheet names never match.
-fn resolves_to_target(
-    ref_sheet: &Option<String>,
-    owner: SheetId,
-    target: SheetId,
-    names: &HashMap<String, SheetId>,
-) -> bool {
-    let resolved = match ref_sheet {
-        None => Some(owner),
-        Some(name) => names.get(&name.to_lowercase()).copied(),
-    };
-    resolved == Some(target)
+/// whether a reference read from `owner` points at the edited sheet.
+/// unqualified refs bind to `owner`; a 3-D qualifier binds when the edited
+/// sheet lies between its endpoints in workbook order.
+fn resolves_to_target(ref_sheet: &Option<String>, owner: SheetId, index: &SheetIndex<'_>) -> bool {
+    match ref_sheet {
+        None => owner == index.target,
+        Some(name) => {
+            let (first, last) = quoted_endpoints(name);
+            index.names.contains_key(&first.to_lowercase())
+                && index.names.contains_key(&last.to_lowercase())
+                && index.covers(&first, &last)
+        }
+    }
 }
 
 /// rebuild `expr`, remapping every reference to the edited sheet; sets
@@ -1497,6 +1723,115 @@ mod tests {
         assert_eq!(from.row, 4, "an edit on another sheet cannot move it");
     }
 
+    /// Excel's 3-D reference covers every sheet between its endpoints in
+    /// workbook order, so an edit on an interior sheet moves it just as one on
+    /// an endpoint does.
+    #[test]
+    fn a_three_dimensional_reference_follows_an_edit_on_any_sheet_it_covers() {
+        for target in 0..3 {
+            let mut workbook = wb(&["Jan", "Feb", "Mar", "Report"]);
+            set_formula(&mut workbook, SheetId(3), "A1", "SUM('Jan:Mar'!$A$1:$A$5)");
+            charted(&mut workbook, SheetId(3), &["'Jan:Mar'!$A$1:$A$5"]);
+            workbook.defined_names = vec![defined("Span", "'Jan:Mar'!$A$1:$A$5")];
+            let op = Op::InsertRows {
+                sheet: SheetId(target),
+                at: 0,
+                count: 2,
+            };
+            remap_formulas(&mut workbook, &op).unwrap();
+            remap_defined_names(&mut workbook, &op).unwrap();
+            remap_charts(&mut workbook, &op).unwrap();
+            assert_eq!(
+                formula(&workbook, SheetId(3), "A1").as_deref(),
+                Some("SUM('Jan:Mar'!$A$3:$A$7)"),
+                "sheet {target}"
+            );
+            assert_eq!(
+                chart_formulas(&workbook, SheetId(3)),
+                ["'Jan:Mar'!$A$3:$A$7"],
+                "sheet {target}"
+            );
+            assert_eq!(
+                workbook.defined_names[0].formula, "'Jan:Mar'!$A$3:$A$7",
+                "sheet {target}"
+            );
+        }
+    }
+
+    /// A span whose endpoints this workbook does not hold cannot be resolved,
+    /// so an edit that might move it is refused rather than left stale.
+    #[test]
+    fn an_unresolvable_span_refuses_an_edit_on_a_sheet_it_names() {
+        let mut workbook = wb(&["Jan", "Report"]);
+        charted(&mut workbook, SheetId(1), &["'Jan:Missing'!$A$1:$A$5"]);
+        let error = remap_charts(
+            &mut workbook,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, OpError::ChartRefNotRewritable { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// Renaming an endpoint rewrites the span as Excel writes it, quoting the
+    /// whole qualifier rather than one half of it.
+    #[test]
+    fn renaming_an_endpoint_rewrites_the_whole_span() {
+        let mut workbook = wb(&["Jan", "Feb", "Mar"]);
+        charted(
+            &mut workbook,
+            SheetId(2),
+            &["'Jan:Mar'!$A$1", "Jan:Mar!$B$1"],
+        );
+        rename_chart_refs(&mut workbook, "Jan", "New Year");
+        assert_eq!(
+            chart_formulas(&workbook, SheetId(2)),
+            ["'New Year:Mar'!$A$1", "'New Year:Mar'!$B$1"]
+        );
+
+        let mut simple = wb(&["Jan", "Feb", "Mar"]);
+        charted(&mut simple, SheetId(2), &["Jan:Mar!$A$1"]);
+        rename_chart_refs(&mut simple, "Mar", "Dec");
+        assert_eq!(chart_formulas(&simple, SheetId(2)), ["Jan:Dec!$A$1"]);
+    }
+
+    /// Removing an endpoint narrows the span onto the sheets that remain;
+    /// removing an interior sheet leaves it alone; removing every sheet it
+    /// covered collapses it.
+    #[test]
+    fn removing_a_sheet_narrows_the_spans_that_covered_it() {
+        let order = ["Jan", "Feb", "Mar", "Report"].map(str::to_owned);
+        for (removed, expected) in [
+            ("Jan", "Feb:Mar!$A$1"),
+            ("Feb", "Jan:Mar!$A$1"),
+            ("Mar", "Jan:Feb!$A$1"),
+        ] {
+            let mut workbook = wb(&["Jan", "Feb", "Mar", "Report"]);
+            charted(&mut workbook, SheetId(3), &["Jan:Mar!$A$1"]);
+            let index = order.iter().position(|name| name == removed).unwrap();
+            workbook.sheets.remove(index);
+            strand_chart_refs(&mut workbook, removed, &order);
+            assert_eq!(
+                chart_formulas(&workbook, SheetId(2)),
+                [expected],
+                "removing {removed}"
+            );
+        }
+
+        let single = ["Jan".to_owned(), "Report".to_owned()];
+        let mut workbook = wb(&["Jan", "Report"]);
+        charted(&mut workbook, SheetId(1), &["Jan:Jan!$A$1"]);
+        workbook.sheets.remove(0);
+        strand_chart_refs(&mut workbook, "Jan", &single);
+        assert_eq!(chart_formulas(&workbook, SheetId(0)), ["#REF!"]);
+    }
+
     #[test]
     fn removing_a_sheet_collapses_the_chart_references_into_it() {
         let mut w = wb(&["Data", "Report"]);
@@ -1506,7 +1841,7 @@ mod tests {
             &["Data!$A$1:$A$4", "(Data!$A$1,Report!$B$1)", "Report!$C$1"],
         );
         w.sheets.remove(0);
-        let inverse = strand_chart_refs(&mut w, "Data");
+        let inverse = strand_chart_refs(&mut w, "Data", &["Data".to_owned(), "Report".to_owned()]);
         assert_eq!(
             chart_formulas(&w, SheetId(0)),
             ["#REF!", "(#REF!,Report!$B$1)", "Report!$C$1"]
@@ -1949,7 +2284,7 @@ mod tests {
             workbook.defined_names,
             vec![
                 defined("Qualified", "'New Data'!$A$1"),
-                defined("ThreeD", "'New Data':Other!$A$1"),
+                defined("ThreeD", "'New Data:Other'!$A$1"),
                 defined("Literal", "42"),
                 defined("Quoted", "\"Data\""),
                 defined("External", "[Book.xlsx]Data!$A$1"),

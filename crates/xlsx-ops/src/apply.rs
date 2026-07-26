@@ -724,9 +724,14 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
     if index >= wb.sheets.len() {
         return Err(OpError::SheetIndexOutOfRange(index));
     }
+    let order_before = wb
+        .sheets
+        .iter()
+        .map(|sheet| sheet.name.clone())
+        .collect::<Vec<_>>();
     let removed = wb.sheets.remove(index);
     let previous_defined_names = drop_defined_name_scopes(wb, index);
-    let chart_restores = strand_chart_refs(wb, &removed.name);
+    let chart_restores = strand_chart_refs(wb, &removed.name, &order_before);
     let sheet = SheetId(index as u32);
     let mut inv = vec![Op::AddSheet {
         index,
