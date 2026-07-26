@@ -36,7 +36,9 @@ the same engine operations without its JSON argument and result wrappers.
 
 ## Limits
 
-`save` byte-preserves the source package. Yrs edits reach the deck snapshot and
+`save` re-zips the retained parts: every part's bytes survive unchanged, but the
+ZIP container is rebuilt, so the output is not byte-identical to the input. Yrs
+edits reach the deck snapshot and
 the rendered display lists but are not projected back into PresentationML, so
 added and removed slides and shapes stay live editing and collaboration state
 rather than something you can write to a file. Persisting edited deck state is
@@ -50,7 +52,7 @@ a lower-engine follow-up.
 | Yrs slide, shape, and text editing | Yes |
 | Yrs v1 state vectors, diffs, updates, undo, and redo | Yes |
 | Slide display lists and hit testing | Yes |
-| Byte-preserving source package save | Yes |
+| Part-preserving package save | Yes |
 | Persist Yrs edits into PresentationML | Follow-up |
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

@@ -1,4 +1,4 @@
-//! Bounded PresentationML parsing and byte-preserving package writes.
+//! Bounded PresentationML parsing and part-preserving package writes.
 
 mod drawing;
 mod error;

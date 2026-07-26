@@ -13,6 +13,7 @@ counts, and no allocation sized from a value in the file.
 | `MAX_SHARED_STRINGS` | 10,000,000 |
 | `MAX_DEFINED_NAMES` | 65,536 |
 | `MAX_HYPERLINKS` | 65,536 per worksheet |
+| `MAX_STYLE_ENTRIES` | 65,536 |
 
 `serialize_workbook` writes the model back out. It regenerates the parts the
 model represents; package parts the model does not cover are not retained.
