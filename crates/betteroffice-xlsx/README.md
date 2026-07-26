@@ -75,12 +75,23 @@ are refused.
 
 A chart part is refused, and with it every rename, sheet removal and row or
 column edit on the workbook, when it is a ChartEx (`cx:chartSpace`) part, when
-no sheet claims it, or when it carries a pivot source, an external data cache,
-a reference outside the chart namespace, or a `sqref` extension reference. A
-cache is refused when it is a multi-level category cache, when the moved
-reference is not a single one-dimensional area on a sheet the workbook holds,
-when it is a string cache over cells that are not text, or when it would hold
-more points than a chart can carry.
+no sheet claims it, when it carries a pivot source, an external data cache, a
+reference outside the chart namespace or a `sqref` extension reference, or when
+a cache sits beside a reference this crate cannot resolve — a defined name, a
+union, an external book, an area spanning two dimensions, or a multi-level
+category cache. Part types are resolved the way OPC resolves them, an
+`Override` first and the `Default` for the extension after, so a chart typed by
+extension alone is found too.
+
+A save is refused when a moved reference names a sheet the workbook does not
+hold, when a string cache covers cells that are not text, when a cache would
+hold more points than a chart can carry, or when the cache carries content this
+crate does not model, such as an `extLst` or a per-point `formatCode`.
+
+Charts are preserved, never created. A model carrying charts with no source
+package is refused, as is a chart that appeared on or vanished from a sheet
+between open and save, and an anchor change beyond the row and column a save
+writes back.
 
 ## Support Matrix
 
