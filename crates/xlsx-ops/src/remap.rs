@@ -168,15 +168,32 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<O
     for defined in &previous {
         let mut updated = defined.clone();
         let scoped = defined.local_sheet == Some(target);
+        let global_target =
+            defined.local_sheet.is_none() && wb.sheets.len() == 1 && target == SheetId(0);
         let matches = |ref_sheet: &Option<String>| match ref_sheet {
             Some(name) => names.get(&name.to_lowercase()).copied() == Some(target),
-            None => scoped,
+            None => scoped || global_target,
         };
-        let rewrite = rewrite_defined_name(&defined.formula, op, &matches);
+        let rewrite = rewrite_defined_name(
+            &defined.formula,
+            op,
+            &matches,
+            defined.local_sheet.is_none() && !global_target,
+        );
         match rewrite {
             DefinedNameRewrite::Unchanged => {}
             DefinedNameRewrite::Rewritten(formula) if formula.len() <= MAX_FORMULA_BYTES => {
                 updated.formula = formula;
+            }
+            DefinedNameRewrite::Rewritten(_) | DefinedNameRewrite::AffectedUnsupported => {
+                return Err(OpError::DefinedNameNotRewritable {
+                    name: defined.name.clone(),
+                });
+            }
+            DefinedNameRewrite::Ambiguous => {
+                return Err(OpError::DefinedNameNotRewritable {
+                    name: defined.name.clone(),
+                });
             }
             _ if scoped || mentions_sheet(&defined.formula, &target_name) => {
                 return Err(OpError::DefinedNameNotRewritable {
@@ -200,6 +217,8 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<O
 enum DefinedNameRewrite {
     Unchanged,
     Rewritten(String),
+    Ambiguous,
+    AffectedUnsupported,
     /// A component neither the formula parser nor the whole-axis reader
     /// accepts, so nothing in it can be moved.
     Unsupported,
@@ -211,7 +230,12 @@ fn rewrite_defined_name(
     source: &str,
     op: &Op,
     matches_target: &dyn Fn(&Option<String>) -> bool,
+    global: bool,
 ) -> DefinedNameRewrite {
+    let (prefix, source) = match source.strip_prefix('=') {
+        Some(source) => ("=", source),
+        None => ("", source),
+    };
     let Some(components) = split_union(source) else {
         return DefinedNameRewrite::Unsupported;
     };
@@ -219,6 +243,9 @@ fn rewrite_defined_name(
     let mut changed = false;
     for component in components {
         if let Some(axis) = AxisRange::parse(component) {
+            if global && axis.sheet.is_none() && axis.axis.is_edited_by(op) {
+                return DefinedNameRewrite::Ambiguous;
+            }
             match axis.remapped(op, matches_target) {
                 Remapped::Unchanged => rewritten.push(component.to_owned()),
                 Remapped::Moved((start, end)) => {
@@ -233,8 +260,14 @@ fn rewrite_defined_name(
             continue;
         }
         let Ok(expr) = parse_formula(component) else {
+            if global && mentions_unqualified_reference(component) {
+                return DefinedNameRewrite::Ambiguous;
+            }
             return DefinedNameRewrite::Unsupported;
         };
+        if global && contains_unqualified_reference(&expr) {
+            return DefinedNameRewrite::Ambiguous;
+        }
         let mut component_changed = false;
         let formula = transform(&expr, op, matches_target, &mut component_changed).to_formula();
         if !component_changed {
@@ -242,7 +275,7 @@ fn rewrite_defined_name(
             continue;
         }
         if parse_formula(&formula).is_err() {
-            return DefinedNameRewrite::Unsupported;
+            return DefinedNameRewrite::AffectedUnsupported;
         }
         changed = true;
         rewritten.push(formula);
@@ -250,7 +283,68 @@ fn rewrite_defined_name(
     if !changed {
         return DefinedNameRewrite::Unchanged;
     }
-    DefinedNameRewrite::Rewritten(rewritten.join(","))
+    DefinedNameRewrite::Rewritten(format!("{prefix}{}", rewritten.join(",")))
+}
+
+fn contains_unqualified_reference(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ref { sheet: None, .. } | Expr::Range { sheet: None, .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_unqualified_reference(expr),
+        Expr::Binary { lhs, rhs, .. } => {
+            contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
+        }
+        Expr::FuncCall { args, .. } => args.iter().any(contains_unqualified_reference),
+        _ => false,
+    }
+}
+
+fn mentions_unqualified_reference(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = skip_string(source, index);
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            index = parse_sheet_token(source, index)
+                .map(|token| token.end)
+                .unwrap_or(source.len());
+            continue;
+        }
+        if bytes[index] == b'[' {
+            index += 1;
+            while index < bytes.len() && bytes[index] != b']' {
+                index += next_char_len(source, index);
+            }
+            index = (index + 1).min(bytes.len());
+            continue;
+        }
+        if bytes[index] != b'$' && !bytes[index].is_ascii_alphanumeric() {
+            index += next_char_len(source, index);
+            continue;
+        }
+        let start = index;
+        while index < bytes.len()
+            && (bytes[index] == b'$'
+                || bytes[index] == b':'
+                || bytes[index].is_ascii_alphanumeric())
+        {
+            index += 1;
+        }
+        let candidate = &source[start..index];
+        let qualified_before = source[..start].trim_end().ends_with('!');
+        let qualified_after = source[index..].trim_start().starts_with('!');
+        if !qualified_before
+            && !qualified_after
+            && (CellRef::parse_a1(candidate).is_ok()
+                || CellRange::parse_a1(candidate).is_ok()
+                || AxisRange::parse(candidate).is_some())
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Splits a formula on its top-level `,` union separators, keeping strings,
@@ -1212,6 +1306,17 @@ mod tests {
         assert_eq!(workbook.defined_names[1].formula, "Other!$A$5");
         assert_eq!(workbook.defined_names[2].formula, "$A$7");
         assert!(matches!(inverse, Some(Op::SetDefinedNames { .. })));
+    }
+
+    #[test]
+    fn one_sheet_workbook_names_rewrite_unqualified_references() {
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![defined("Input", "$A$5"), defined("Qualified", "=Data!$B$5")];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 2)).unwrap();
+
+        assert_eq!(workbook.defined_names[0].formula, "$A$7");
+        assert_eq!(workbook.defined_names[1].formula, "=Data!$B$7");
     }
 
     #[test]

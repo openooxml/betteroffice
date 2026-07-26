@@ -732,6 +732,155 @@ fn preserved_shared_strings_pair_duplicate_values_in_order() {
     assert!(written.contains(&format!("{rich_item}<si><t>Dup</t></si>")));
 }
 
+#[test]
+fn new_duplicate_shared_strings_do_not_claim_authored_rich_items() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.insert(0, "Dup".to_owned());
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "Dup".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(strings.contains(&format!(
+        r#"<si><t xml:space="preserve">Dup</t></si>{bold}{italic}"#
+    )));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>1</v></c>"#));
+    assert!(sheet.contains(r#"<c r="B1" t="s"><v>2</v></c>"#));
+    assert!(sheet.contains(r#"<c r="C1" t="s"><v>0</v></c>"#));
+}
+
+#[test]
+fn new_duplicates_do_not_consume_previously_unique_rich_items() {
+    let rich = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="1" uniqueCount="1">{rich}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.insert(0, "Dup".to_owned());
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("B1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "Dup".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(strings.contains(&format!(
+        r#"<si><t xml:space="preserve">Dup</t></si>{rich}"#
+    )));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>1</v></c>"#));
+    assert!(sheet.contains(r#"<c r="B1" t="s"><v>0</v></c>"#));
+}
+
+#[test]
+fn new_duplicate_cells_without_table_entries_use_inline_text() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "Dup".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(strings.contains(&format!("{bold}{italic}")));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>0</v></c>"#));
+    assert!(sheet.contains(r#"<c r="B1" t="s"><v>1</v></c>"#));
+    assert!(
+        sheet.contains(r#"<c r="C1" t="inlineStr"><is><t xml:space="preserve">Dup</t></is></c>"#)
+    );
+}
+
+#[test]
+fn duplicate_removal_keeps_the_entry_still_used_by_a_cell() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.pop();
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(!strings.contains("<b/>"));
+    assert!(strings.contains(italic));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>0</v></c>"#));
+}
+
+#[test]
+fn ambiguous_duplicate_removal_is_refused() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.pop();
+
+    let error = serialize_workbook_with_package(&workbook, &parsed.package).unwrap_err();
+
+    assert!(matches!(error, ParseError::UnsupportedEdit(_)));
+}
+
 /// Two worksheets sharing one workbook, so an edit to the second can be
 /// checked against the first.
 fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8>)> {

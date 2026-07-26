@@ -102,7 +102,7 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
         let links = HyperlinkPlan::new(sheet, &[], REL_HYPERLINK);
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links)?,
+            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, NS_R, &links, None)?,
         ));
         if !links.relationships.is_empty() {
             parts.push((
@@ -226,6 +226,18 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             &mut used_relationship_ids,
         )
     });
+    let shared_string_plan = package
+        .shared_strings_template
+        .as_ref()
+        .map(|template| {
+            SharedStringPlan::new(
+                &package.original_workbook.shared_strings,
+                template.children_named("si").count(),
+                wb,
+                shared_string_cells,
+            )
+        })
+        .transpose()?;
     let styles = have_styles.then(|| {
         plan_part(
             package.styles.as_ref(),
@@ -281,7 +293,15 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
                 {
                     continue;
                 }
-                worksheet_xml_with_template(sheet, wb, original, source, package, provenance)?
+                worksheet_xml_with_template(
+                    sheet,
+                    wb,
+                    original,
+                    source,
+                    package,
+                    provenance,
+                    shared_string_plan.as_ref(),
+                )?
             }
             Some(_) => continue,
             None => {
@@ -301,6 +321,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
                         main_namespace,
                         &relationship_namespace,
                         &links,
+                        shared_string_plan.as_ref(),
                     )?,
                     relationships: Some(links.relationships),
                 }
@@ -352,6 +373,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         package,
         shared_strings.as_ref(),
         main_namespace,
+        shared_string_plan.as_ref(),
     )?;
     let styles_retained = matches!(
         (package.styles.as_ref(), styles.as_ref()),
@@ -804,6 +826,7 @@ fn replace_shared_strings(
     package: &PreservedPackage,
     planned: Option<&PlannedPart>,
     main_namespace: &str,
+    shared_string_plan: Option<&SharedStringPlan>,
 ) -> Result<(), ParseError> {
     match (package.shared_strings.as_ref(), planned) {
         (Some(source), Some(planned))
@@ -816,7 +839,13 @@ fn replace_shared_strings(
                 parts.remove(&source.path);
             }
             let bytes = match &package.shared_strings_template {
-                Some(template) => shared_strings_xml_with_template(wb, package, template)?,
+                Some(template) => shared_strings_xml_with_template(
+                    wb,
+                    template,
+                    shared_string_plan.ok_or_else(|| {
+                        ParseError::Malformed("shared string identity plan is missing".to_owned())
+                    })?,
+                )?,
                 None => shared_strings_xml_with_namespace(wb, main_namespace)?,
             };
             parts.set(planned.path.clone(), bytes)?;
@@ -1705,17 +1734,12 @@ fn shared_strings_xml_with_namespace(
 
 fn shared_strings_xml_with_template(
     wb: &Workbook,
-    package: &PreservedPackage,
     template: &XmlTemplate,
+    plan: &SharedStringPlan,
 ) -> Result<Vec<u8>, ParseError> {
     let source_items = template.children_named("si").collect::<Vec<_>>();
-    let retained = retained_shared_string_items(
-        &package.original_workbook.shared_strings,
-        source_items.len(),
-        &wb.shared_strings,
-    );
     let mut items = Vec::with_capacity(wb.shared_strings.len());
-    for (value, source) in wb.shared_strings.iter().zip(retained) {
+    for (value, source) in wb.shared_strings.iter().zip(&plan.retained) {
         match source.and_then(|source| source_items.get(source)) {
             Some(source) => items.push(source.bytes.clone()),
             None => {
@@ -1732,31 +1756,116 @@ fn shared_strings_xml_with_template(
     )
 }
 
-/// Pairs each output shared string with the source `<si>` whose markup it may
-/// reuse. Source items are claimed by plain value, in order and at most once,
-/// so inserts, deletions and reorders carry rich runs, `phoneticPr` and
-/// `extLst` along instead of stranding them on a stale index. A value with no
-/// unclaimed source item is regenerated as plain text.
-fn retained_shared_string_items(
-    original: &[String],
-    source_count: usize,
-    values: &[String],
-) -> Vec<Option<usize>> {
-    let mut unclaimed: HashMap<&str, VecDeque<usize>> = HashMap::new();
-    for (index, value) in original.iter().enumerate().take(source_count) {
-        unclaimed
-            .entry(value.as_str())
-            .or_default()
-            .push_back(index);
-    }
-    values
-        .iter()
-        .map(|value| {
-            unclaimed
-                .get_mut(value.as_str())
-                .and_then(VecDeque::pop_front)
+struct SharedStringPlan {
+    retained: Vec<Option<usize>>,
+    source_to_output: HashMap<usize, usize>,
+    generated: HashMap<String, usize>,
+}
+
+impl SharedStringPlan {
+    fn new(
+        original: &[String],
+        source_count: usize,
+        wb: &Workbook,
+        shared_string_cells: &[SharedStringCells],
+    ) -> Result<Self, ParseError> {
+        let values = &wb.shared_strings;
+        let mut sources: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut output_counts: HashMap<&str, usize> = HashMap::new();
+        for (index, value) in original.iter().enumerate().take(source_count) {
+            sources.entry(value.as_str()).or_default().push(index);
+        }
+        for value in values {
+            *output_counts.entry(value.as_str()).or_default() += 1;
+        }
+        let mut required = HashSet::new();
+        for (sheet, cells) in wb.sheets.iter().zip(shared_string_cells) {
+            for (&(row, col), &source) in cells {
+                let Some(value) = original.get(source).filter(|_| source < source_count) else {
+                    continue;
+                };
+                let matches = sheet
+                    .cell(CellRef::new(row, col))
+                    .filter(|cell| cell.formula.is_none())
+                    .is_some_and(|cell| {
+                        matches!(&cell.value, CellValue::Text { value: current } if current == value)
+                    });
+                if matches {
+                    required.insert(source);
+                }
+            }
+        }
+        let mut selected: HashMap<&str, VecDeque<usize>> = HashMap::new();
+        let mut generated_remaining = HashMap::new();
+        for (&value, &count) in &output_counts {
+            let candidates = sources.get(value).map(Vec::as_slice).unwrap_or_default();
+            let retained_count = count.min(candidates.len());
+            let required_for_value = candidates
+                .iter()
+                .copied()
+                .filter(|source| required.contains(source))
+                .collect::<Vec<_>>();
+            if required_for_value.len() > retained_count {
+                return Err(ParseError::UnsupportedEdit(
+                    "shared string duplicates cannot retain every authored entry".to_owned(),
+                ));
+            }
+            let mut retained_sources = required_for_value.into_iter().collect::<HashSet<_>>();
+            for source in candidates {
+                if retained_sources.len() == retained_count {
+                    break;
+                }
+                retained_sources.insert(*source);
+            }
+            let retained = candidates
+                .iter()
+                .copied()
+                .filter(|source| retained_sources.contains(source))
+                .collect::<Vec<_>>();
+            generated_remaining.insert(value, count - retained.len());
+            selected.insert(value, retained.into());
+        }
+        let retained = values
+            .iter()
+            .map(|value| {
+                let generated = generated_remaining
+                    .get_mut(value.as_str())
+                    .filter(|remaining| **remaining > 0);
+                if let Some(remaining) = generated {
+                    *remaining -= 1;
+                    None
+                } else {
+                    selected
+                        .get_mut(value.as_str())
+                        .and_then(VecDeque::pop_front)
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut source_to_output = HashMap::new();
+        let mut generated = HashMap::new();
+        for (output, (value, source)) in values.iter().zip(&retained).enumerate() {
+            match source {
+                Some(source) => {
+                    source_to_output.insert(*source, output);
+                }
+                None => {
+                    generated.entry(value.clone()).or_insert(output);
+                }
+            }
+        }
+        Ok(Self {
+            retained,
+            source_to_output,
+            generated,
         })
-        .collect()
+    }
+
+    fn index_for(&self, value: &str, source: Option<usize>, values: &[String]) -> Option<usize> {
+        source
+            .and_then(|source| self.source_to_output.get(&source).copied())
+            .filter(|output| values.get(*output).is_some_and(|stored| stored == value))
+            .or_else(|| self.generated.get(value).copied())
+    }
 }
 
 fn write_shared_string_item(writer: &mut Writer<Vec<u8>>, value: &str) -> io::Result<()> {
@@ -1773,6 +1882,7 @@ fn worksheet_xml_with_namespace(
     main_namespace: &str,
     relationship_namespace: &str,
     links: &HyperlinkPlan,
+    shared_string_plan: Option<&SharedStringPlan>,
 ) -> Result<Vec<u8>, ParseError> {
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
@@ -1783,7 +1893,13 @@ fn worksheet_xml_with_namespace(
         writer.write_event(Event::Start(root))?;
         write_sheet_views(writer, sheet)?;
         write_cols(writer, sheet)?;
-        write_sheet_data(writer, sheet, wb, &SharedStringCells::new())?;
+        write_sheet_data(
+            writer,
+            sheet,
+            wb,
+            &SharedStringCells::new(),
+            shared_string_plan,
+        )?;
         write_merges(writer, sheet)?;
         write_hyperlinks(writer, sheet, &links.ids, REL_ID_ATTRIBUTE, &[])?;
         writer.write_event(Event::End(BytesEnd::new("worksheet")))?;
@@ -1807,13 +1923,14 @@ fn worksheet_xml_with_template(
     source: &PreservedSheet,
     package: &PreservedPackage,
     shared_string_cells: &SharedStringCells,
+    shared_string_plan: Option<&SharedStringPlan>,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
     let columns = (!sheet.col_widths.is_empty())
         .then(|| fragment(|writer| write_cols(writer, sheet)))
         .transpose()?;
     let sheet_data = Some(fragment(|writer| {
-        write_sheet_data(writer, sheet, wb, shared_string_cells)
+        write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
     })?);
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
@@ -1973,10 +2090,13 @@ fn write_sheet_data(
     sheet: &Sheet,
     wb: &Workbook,
     retained: &SharedStringCells,
+    shared_string_plan: Option<&SharedStringPlan>,
 ) -> io::Result<()> {
     let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
-    for (index, value) in wb.shared_strings.iter().enumerate() {
-        sst_index.entry(value.as_str()).or_insert(index);
+    if shared_string_plan.is_none() {
+        for (index, value) in wb.shared_strings.iter().enumerate() {
+            sst_index.entry(value.as_str()).or_insert(index);
+        }
     }
 
     let mut rows: Vec<RowId> = sheet.iter_cells().map(|(r, _)| r.row).collect();
@@ -1988,7 +2108,15 @@ fn write_sheet_data(
         .create_element("sheetData")
         .write_inner_content(|writer| {
             for &row in &rows {
-                write_row(writer, sheet, row, wb, &sst_index, retained)?;
+                write_row(
+                    writer,
+                    sheet,
+                    row,
+                    wb,
+                    &sst_index,
+                    retained,
+                    shared_string_plan,
+                )?;
             }
             Ok(())
         })?;
@@ -2098,6 +2226,7 @@ fn write_row(
     wb: &Workbook,
     sst_index: &HashMap<&str, usize>,
     retained: &SharedStringCells,
+    shared_string_plan: Option<&SharedStringPlan>,
 ) -> io::Result<()> {
     let r = (row as u64 + 1).to_string();
     let mut start = BytesStart::new("row");
@@ -2109,13 +2238,16 @@ fn write_row(
     }
     w.write_event(Event::Start(start))?;
     for (addr, cell) in sheet.iter_cells().filter(|(a, _)| a.row == row) {
-        let retained = retained
-            .get(&(addr.row, addr.col))
-            .copied()
-            .filter(|index| match &cell.value {
-                CellValue::Text { value } => wb.shared_strings.get(*index) == Some(value),
-                _ => false,
-            });
+        let source = retained.get(&(addr.row, addr.col)).copied();
+        let retained = match (&cell.value, shared_string_plan) {
+            (CellValue::Text { value }, Some(plan)) => {
+                plan.index_for(value, source, &wb.shared_strings)
+            }
+            (CellValue::Text { value }, None) => source
+                .filter(|index| wb.shared_strings.get(*index) == Some(value))
+                .or_else(|| sst_index.get(value.as_str()).copied()),
+            _ => None,
+        };
         write_cell(w, addr, cell, sst_index, retained)?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;

@@ -252,11 +252,29 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 defined_names: previous,
             }]))
         }
-        Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
-        Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
-        Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
-        Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
+        Op::InsertRows { sheet, at, count } => {
+            apply_atomically(wb, |next| insert_rows(next, *sheet, *at, *count, op))
+        }
+        Op::DeleteRows { sheet, at, count } => {
+            apply_atomically(wb, |next| delete_rows(next, *sheet, *at, *count, op))
+        }
+        Op::InsertCols { sheet, at, count } => {
+            apply_atomically(wb, |next| insert_cols(next, *sheet, *at, *count, op))
+        }
+        Op::DeleteCols { sheet, at, count } => {
+            apply_atomically(wb, |next| delete_cols(next, *sheet, *at, *count, op))
+        }
     }
+}
+
+fn apply_atomically(
+    wb: &mut Workbook,
+    apply: impl FnOnce(&mut Workbook) -> Result<InvertedOp, OpError>,
+) -> Result<InvertedOp, OpError> {
+    let mut next = wb.clone();
+    let inverse = apply(&mut next)?;
+    *wb = next;
+    Ok(inverse)
 }
 
 fn apply_range_formats(
@@ -387,6 +405,7 @@ fn insert_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
@@ -422,6 +441,7 @@ fn delete_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
@@ -467,6 +487,7 @@ fn insert_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
@@ -502,6 +523,7 @@ fn delete_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
     let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
@@ -1343,6 +1365,96 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, OpError::FormulaNotRewritable { .. }));
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn structural_edits_capture_defined_name_rewrites_for_undo() {
+        let mut wb = wb_one_sheet();
+        wb.defined_names.push(DefinedName {
+            name: "Input".into(),
+            formula: "Sheet1!$A$2".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        let inverse = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(wb.defined_names[0].formula, "Sheet1!$A$3");
+        assert!(
+            inverse
+                .0
+                .iter()
+                .any(|op| matches!(op, Op::SetDefinedNames { .. }))
+        );
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn structural_edits_refuse_workbook_names_with_unqualified_references() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        wb.defined_names.push(DefinedName {
+            name: "Input".into(),
+            formula: "$A$2".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        let error = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn refused_defined_name_rewrites_leave_the_workbook_unchanged() {
+        let mut wb = wb_one_sheet();
+        wb.sheets[0].set_cell(
+            r("B1"),
+            Cell {
+                formula: Some("A2".into()),
+                ..Cell::default()
+            },
+        );
+        wb.defined_names.push(DefinedName {
+            name: "Dynamic".into(),
+            formula: "OFFSET($A$1,0,0,COUNTA($A:$A),1)".into(),
+            local_sheet: Some(SheetId(0)),
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        let error = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
         assert_eq!(wb, before);
     }
 }

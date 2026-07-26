@@ -443,6 +443,84 @@ fn defined_names_survive_the_facade_and_drive_incremental_recalculation() {
 }
 
 #[test]
+fn structural_edits_rewrite_defined_names_through_save_and_undo() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook.model().defined_names.clone();
+
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let global = workbook
+        .model()
+        .defined_names
+        .iter()
+        .find(|defined| defined.name == "GlobalData")
+        .unwrap();
+    let local = workbook
+        .model()
+        .defined_names
+        .iter()
+        .find(|defined| defined.name == "LocalData")
+        .unwrap();
+    assert_eq!(global.formula, "Data!$B$3");
+    assert_eq!(local.formula, "Data!$B$3");
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
+#[test]
+fn structural_edits_refuse_ambiguous_workbook_name_bindings() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Other"));
+    model.defined_names.push(DefinedName {
+        name: "Input".into(),
+        formula: "$A$1".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be safely rewritten"));
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
 fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
     let mut sheet = Sheet::new("Data");
     sheet.freeze_pane = Some(FreezePane::new(1, 1, cell("D5")));
