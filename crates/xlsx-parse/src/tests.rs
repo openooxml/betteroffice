@@ -824,6 +824,39 @@ fn keeps_worksheet_bytes_across_a_rename() {
     );
 }
 
+/// Several local `_xlnm.Print_Area` entries are normal, and the model has no
+/// source identity to tell them apart. Dropping one must not hand its markup
+/// to the survivor.
+#[test]
+fn does_not_reattach_duplicate_defined_name_markup() {
+    let workbook_xml = concat!(
+        r#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>"#,
+        r#"<definedNames>"#,
+        r#"<definedName name="_xlnm.Print_Area" localSheetId="0" comment="first">Sheet1!$A$1</definedName>"#,
+        r#"<definedName name="_xlnm.Print_Area" localSheetId="1" comment="second">Sheet1!$B$1</definedName>"#,
+        r#"</definedNames></workbook>"#,
+    );
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        workbook_xml.as_bytes().to_vec(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.defined_names.remove(0);
+    workbook.defined_names[0].local_sheet = Some(SheetId(0));
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = String::from_utf8(part_bytes(&saved, "xl/workbook.xml")).unwrap();
+
+    assert_eq!(written.matches("<definedName ").count(), 1, "{written}");
+    assert!(
+        !written.contains(r#"comment="first""#),
+        "the removed entry's markup was reattached: {written}"
+    );
+    assert!(written.contains("Sheet1!$B$1"), "{written}");
+}
+
 /// A long root prefix used to be repeated on every generated element, turning
 /// a bounded input into quadratic output.
 #[test]

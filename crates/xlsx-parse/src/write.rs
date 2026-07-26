@@ -1273,21 +1273,29 @@ fn write_defined_names(w: &mut Writer<Vec<u8>>, wb: &Workbook) -> io::Result<()>
     }
     w.create_element("definedNames").write_inner_content(|w| {
         for defined in &wb.defined_names {
-            let mut element = BytesStart::new("definedName");
-            element.push_attribute(("name", defined.name.as_str()));
-            let local_sheet = defined.local_sheet.map(|sheet| sheet.0.to_string());
-            if let Some(local_sheet) = &local_sheet {
-                element.push_attribute(("localSheetId", local_sheet.as_str()));
-            }
-            if defined.hidden {
-                element.push_attribute(("hidden", "1"));
-            }
-            w.write_event(Event::Start(element))?;
-            w.write_event(Event::Text(BytesText::new(&defined.formula)))?;
-            w.write_event(Event::End(BytesEnd::new("definedName")))?;
+            write_defined_name(w, defined)?;
         }
         Ok(())
     })?;
+    Ok(())
+}
+
+fn write_defined_name(
+    w: &mut Writer<Vec<u8>>,
+    defined: &xlsx_model::DefinedName,
+) -> io::Result<()> {
+    let mut element = BytesStart::new("definedName");
+    element.push_attribute(("name", defined.name.as_str()));
+    let local_sheet = defined.local_sheet.map(|sheet| sheet.0.to_string());
+    if let Some(local_sheet) = &local_sheet {
+        element.push_attribute(("localSheetId", local_sheet.as_str()));
+    }
+    if defined.hidden {
+        element.push_attribute(("hidden", "1"));
+    }
+    w.write_event(Event::Start(element))?;
+    w.write_event(Event::Text(BytesText::new(&defined.formula)))?;
+    w.write_event(Event::End(BytesEnd::new("definedName")))?;
     Ok(())
 }
 
@@ -1402,6 +1410,8 @@ fn render_defined_names(
     if sources.len() != package.original_workbook.defined_names.len() {
         return Ok(Some(fragment.to_vec()));
     }
+    let ambiguous =
+        ambiguous_defined_names(&package.original_workbook.defined_names, &wb.defined_names);
     let mut current = wb.defined_names.iter().peekable();
     let mut replacements = Vec::new();
     for (source, original) in sources.iter().zip(&package.original_workbook.defined_names) {
@@ -1413,11 +1423,16 @@ fn render_defined_names(
         };
         let defined = *defined;
         current.next();
-        if defined == original {
+        if defined == original && !ambiguous.contains(defined.name.as_str()) {
             replacements.push(source.bytes.clone());
             continue;
         }
-        replacements.push(template.qualify_fragment(&patch_defined_name(&source.bytes, defined)?)?);
+        let patched = if ambiguous.contains(defined.name.as_str()) {
+            written_defined_name(defined)?
+        } else {
+            patch_defined_name(&source.bytes, defined)?
+        };
+        replacements.push(template.qualify_fragment(&patched)?);
     }
     if replacements.is_empty() {
         return Ok(None);
@@ -1427,6 +1442,34 @@ fn render_defined_names(
         &replacements,
         &[],
     )?))
+}
+
+/// Several `_xlnm.Print_Area` entries with different scopes are normal, and the
+/// model carries no source identity to tell them apart. Once their count
+/// changes, no pairing is trustworthy, so those entries are rewritten from the
+/// model rather than inheriting another entry's markup.
+fn ambiguous_defined_names<'a>(
+    original: &'a [xlsx_model::DefinedName],
+    current: &[xlsx_model::DefinedName],
+) -> HashSet<&'a str> {
+    let mut counts: HashMap<&str, (usize, usize)> = HashMap::new();
+    for defined in original {
+        counts.entry(defined.name.as_str()).or_default().0 += 1;
+    }
+    for defined in current {
+        if let Some(entry) = counts.get_mut(defined.name.as_str()) {
+            entry.1 += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, (before, after))| *before > 1 && before != after)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn written_defined_name(defined: &xlsx_model::DefinedName) -> Result<Vec<u8>, ParseError> {
+    fragment(|writer| write_defined_name(writer, defined))
 }
 
 fn patch_defined_name(
