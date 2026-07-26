@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { prefersMarkdown } from "../lib/accept.ts";
+import { prefersMarkdown } from "../../../shared/accept.ts";
 import { homepageMarkdown } from "./markdown.ts";
 import { EDITORS, HERO, PACKAGES } from "./content.ts";
 
@@ -18,6 +18,15 @@ describe("accept negotiation", () => {
     expect(prefersMarkdown("text/markdown")).toBe(true);
     expect(prefersMarkdown("text/markdown, text/html;q=0.5")).toBe(true);
     expect(prefersMarkdown("TEXT/MARKDOWN")).toBe(true);
+  });
+
+  test("honours wildcard ranges", () => {
+    // text/* gives HTML an effective 0.9, above markdown's explicit 0.5
+    expect(prefersMarkdown("text/*;q=0.9, text/markdown;q=0.5")).toBe(false);
+    expect(prefersMarkdown("text/*;q=0.5, text/markdown;q=0.9")).toBe(true);
+    expect(prefersMarkdown("*/*;q=0.8, text/markdown")).toBe(true);
+    expect(prefersMarkdown("*/*, text/markdown;q=0.5")).toBe(false);
+    expect(prefersMarkdown("text/*")).toBe(false);
   });
 
   test("respects quality values in both directions", () => {
