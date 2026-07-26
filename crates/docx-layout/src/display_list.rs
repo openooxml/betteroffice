@@ -32,7 +32,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
     PlotAxisRange, PlotChart, PlotGroup, PlotLegend, PlotMarker, PlotOp, PlotPoint, PlotRect,
-    PlotSeries, chart_aria_label, plot_chart,
+    PlotSeries, PlotSink, chart_aria_label, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -7624,12 +7624,12 @@ fn scale_shape_y(n: &Number, frag: &ShapeFragmentIn) -> Number {
     px(frag.y + num_f64(n) * frag.height)
 }
 
-fn plot_chart_from(chart: &ChartIn) -> PlotChart {
+fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
     PlotChart {
-        chart_type: chart.chart_type.clone(),
-        title: chart.title.clone(),
+        chart_type: &chart.chart_type,
+        title: chart.title.as_deref(),
         legend: chart.legend.as_ref().map(|legend| PlotLegend {
-            position: legend.position.clone(),
+            position: legend.position.as_deref(),
             visible: legend.visible,
         }),
         value_axis: chart
@@ -7645,32 +7645,32 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart {
             .plot_groups
             .iter()
             .map(|group| PlotGroup {
-                chart_type: group.chart_type.clone(),
-                grouping: group.grouping.clone(),
+                chart_type: group.chart_type.as_deref(),
+                grouping: group.grouping.as_deref(),
                 series: group.series.iter().map(plot_series_from).collect(),
             })
             .collect(),
     }
 }
 
-fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries {
+fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
     PlotSeries {
-        name: series.name.clone(),
-        categories: series.categories.clone(),
-        values: series.values.clone(),
-        color: series.color.clone(),
+        name: series.name.as_deref(),
+        categories: &series.categories,
+        values: &series.values,
+        color: series.color.as_deref(),
         points: series
             .points
             .iter()
             .map(|point| PlotPoint {
                 index: point.index,
                 value: point.value,
-                color: point.color.clone(),
+                color: point.color.as_deref(),
                 marker: plot_marker_from(point.marker.as_ref()),
-                label: point.label.clone(),
+                label: point.label.as_deref(),
             })
             .collect(),
-        grouping: series.grouping.clone(),
+        grouping: series.grouping.as_deref(),
         marker: plot_marker_from(series.marker.as_ref()),
     }
 }
@@ -7716,7 +7716,7 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
         block.height
     };
 
-    let ops = plot_chart(
+    plot_chart_into(
         &chart,
         PlotRect {
             x: frag.x,
@@ -7724,13 +7724,23 @@ fn emit_chart_fragment(prims: &mut Vec<Primitive>, frag: &ChartFragmentIn, block
             w: width,
             h: height,
         },
+        &mut PrimitiveSink {
+            prims,
+            attrs: &attrs,
+        },
     );
-    push_plot_ops(prims, ops, &attrs);
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
 }
 
-fn push_plot_ops(prims: &mut Vec<Primitive>, ops: Vec<PlotOp>, attrs: &DocAttrs) {
-    for op in ops {
+/// Translates plot ops into display-list primitives as they are emitted.
+struct PrimitiveSink<'a> {
+    prims: &'a mut Vec<Primitive>,
+    attrs: &'a DocAttrs,
+}
+
+impl PlotSink for PrimitiveSink<'_> {
+    fn push_op(&mut self, op: PlotOp) {
+        let (prims, attrs) = (&mut *self.prims, self.attrs);
         match op {
             PlotOp::Rect { x, y, w, h, fill } => prims.push(Primitive::Rect(RectPrimitive {
                 x: px(x),

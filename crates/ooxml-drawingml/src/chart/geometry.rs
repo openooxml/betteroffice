@@ -1,5 +1,5 @@
 //! Format-neutral chart geometry: a chart plus a rectangle in, an ordered
-//! [`PlotOp`] list out. Hosts translate the ops into their own primitives.
+//! [`PlotOp`] stream out. Hosts translate the ops into their own primitives.
 
 use crate::GeometryPathCommand;
 
@@ -22,6 +22,9 @@ pub const CHART_TITLE_FONT: PlotFont = PlotFont {
     size_px: 13.0,
     family: "Calibri, sans-serif",
 };
+
+/// Hard ceiling on the ops one chart may emit, whatever its data length.
+pub const MAX_PLOT_OPS: usize = 100_000;
 
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
@@ -91,70 +94,81 @@ pub enum PlotOp {
     },
 }
 
-/// What the geometry reads off a chart. Distinct from [`ChartSpace`], which is
-/// the parse-fidelity model: hosts may inject per-point values and labels that
-/// never appear in the chart part.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlotChart {
-    pub chart_type: String,
-    pub title: Option<String>,
-    pub legend: Option<PlotLegend>,
-    pub value_axis: Option<PlotAxisRange>,
-    pub series: Vec<PlotSeries>,
-    pub plot_groups: Vec<PlotGroup>,
+/// Receives plot ops in back-to-front order as they are produced.
+pub trait PlotSink {
+    fn push_op(&mut self, op: PlotOp);
 }
 
+impl PlotSink for Vec<PlotOp> {
+    fn push_op(&mut self, op: PlotOp) {
+        self.push(op);
+    }
+}
+
+/// What the geometry reads off a chart. Distinct from [`ChartSpace`], which is
+/// the parse-fidelity model: hosts may inject per-point values and labels that
+/// never appear in the chart part. Borrows its host's strings and data.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlotLegend {
-    pub position: Option<String>,
+pub struct PlotChart<'a> {
+    pub chart_type: &'a str,
+    pub title: Option<&'a str>,
+    pub legend: Option<PlotLegend<'a>>,
+    pub value_axis: Option<PlotAxisRange>,
+    pub series: Vec<PlotSeries<'a>>,
+    pub plot_groups: Vec<PlotGroup<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotLegend<'a> {
+    pub position: Option<&'a str>,
     pub visible: Option<bool>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlotAxisRange {
     pub min: Option<f64>,
     pub max: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlotGroup {
-    pub chart_type: Option<String>,
-    pub grouping: Option<String>,
-    pub series: Vec<PlotSeries>,
+pub struct PlotGroup<'a> {
+    pub chart_type: Option<&'a str>,
+    pub grouping: Option<&'a str>,
+    pub series: Vec<PlotSeries<'a>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlotSeries {
-    pub name: Option<String>,
-    pub categories: Vec<String>,
-    pub values: Vec<f64>,
-    pub color: Option<String>,
-    pub points: Vec<PlotPoint>,
-    pub grouping: Option<String>,
+pub struct PlotSeries<'a> {
+    pub name: Option<&'a str>,
+    pub categories: &'a [String],
+    pub values: &'a [f64],
+    pub color: Option<&'a str>,
+    pub points: Vec<PlotPoint<'a>>,
+    pub grouping: Option<&'a str>,
     pub marker: Option<PlotMarker>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct PlotPoint {
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotPoint<'a> {
     pub index: Option<usize>,
     pub value: Option<f64>,
-    pub color: Option<String>,
+    pub color: Option<&'a str>,
     pub marker: Option<PlotMarker>,
-    pub label: Option<String>,
+    pub label: Option<&'a str>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlotMarker {
     pub size: Option<f64>,
 }
 
-impl From<&ChartSpace> for PlotChart {
-    fn from(space: &ChartSpace) -> Self {
+impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
+    fn from(space: &'a ChartSpace) -> Self {
         Self {
-            chart_type: space.chart_type.clone(),
-            title: space.title.clone(),
+            chart_type: &space.chart_type,
+            title: space.title.as_deref(),
             legend: space.legend.as_ref().map(|legend| PlotLegend {
-                position: legend.position.clone(),
+                position: legend.position.as_deref(),
                 visible: Some(legend.visible),
             }),
             value_axis: space
@@ -170,8 +184,8 @@ impl From<&ChartSpace> for PlotChart {
                 .plot_groups
                 .iter()
                 .map(|group| PlotGroup {
-                    chart_type: group.chart_type.clone(),
-                    grouping: group.grouping.clone(),
+                    chart_type: group.chart_type.as_deref(),
+                    grouping: group.grouping.as_deref(),
                     series: group.series.iter().map(plot_series_from_model).collect(),
                 })
                 .collect(),
@@ -179,12 +193,12 @@ impl From<&ChartSpace> for PlotChart {
     }
 }
 
-fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries {
+fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries<'_> {
     PlotSeries {
-        name: series.name.clone(),
-        categories: series.categories.clone(),
-        values: series.values.clone(),
-        color: Some(series.color.clone()),
+        name: series.name.as_deref(),
+        categories: &series.categories,
+        values: &series.values,
+        color: Some(&series.color),
         points: series
             .points
             .iter()
@@ -192,12 +206,12 @@ fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries {
             .map(|point| PlotPoint {
                 index: point.index.map(|index| index as usize),
                 value: None,
-                color: Some(point.color.clone()),
+                color: Some(&point.color),
                 marker: None,
                 label: None,
             })
             .collect(),
-        grouping: series.grouping.clone(),
+        grouping: series.grouping.as_deref(),
         marker: series
             .marker
             .as_ref()
@@ -205,21 +219,24 @@ fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries {
     }
 }
 
-/// Draw ops for `chart` inside `rect`, back to front.
-pub fn plot_chart(chart: &PlotChart, rect: PlotRect) -> Vec<PlotOp> {
+/// Draw ops for `chart` inside `rect`, back to front, into `sink`.
+pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRect, sink: &mut S) {
     let PlotRect {
         x,
         y,
         w: width,
         h: height,
     } = rect;
-    let mut ops = Vec::new();
+    let ops = &mut Emitter {
+        sink,
+        remaining: MAX_PLOT_OPS,
+    };
 
-    push_rect(&mut ops, x, y, width, height, CHART_BACKGROUND_COLOR);
+    push_rect(ops, x, y, width, height, CHART_BACKGROUND_COLOR);
 
-    let title_h = if let Some(title) = chart.title.as_deref().filter(|s| !s.is_empty()) {
+    let title_h = if let Some(title) = chart.title.filter(|s| !s.is_empty()) {
         push_text(
-            &mut ops,
+            ops,
             title,
             x + 8.0,
             y + 18.0,
@@ -234,7 +251,7 @@ pub fn plot_chart(chart: &PlotChart, rect: PlotRect) -> Vec<PlotOp> {
     let legend_position = chart
         .legend
         .as_ref()
-        .and_then(|legend| legend.position.as_deref())
+        .and_then(|legend| legend.position)
         .unwrap_or("right");
     let legend_w = if has_legend(chart) { 104.0 } else { 8.0 };
     let plot_x = if legend_position == "left" {
@@ -251,8 +268,12 @@ pub fn plot_chart(chart: &PlotChart, rect: PlotRect) -> Vec<PlotOp> {
 
     if chart.plot_groups.is_empty() {
         emit_family(
-            &mut ops,
-            chart,
+            ops,
+            PlotFamily {
+                chart_type: chart.chart_type,
+                series: &chart.series,
+                value_axis: chart.value_axis,
+            },
             plot,
             x,
             y + title_h,
@@ -261,21 +282,13 @@ pub fn plot_chart(chart: &PlotChart, rect: PlotRect) -> Vec<PlotOp> {
         );
     } else {
         for group in &chart.plot_groups {
-            let mut group_chart = chart.clone();
-            group_chart.chart_type = group
-                .chart_type
-                .clone()
-                .unwrap_or_else(|| chart.chart_type.clone());
-            group_chart.series = group.series.clone();
-            for series in &mut group_chart.series {
-                if series.grouping.is_none() {
-                    series.grouping = group.grouping.clone();
-                }
-            }
-            group_chart.plot_groups.clear();
             emit_family(
-                &mut ops,
-                &group_chart,
+                ops,
+                PlotFamily {
+                    chart_type: group.chart_type.unwrap_or(chart.chart_type),
+                    series: &group.series,
+                    value_axis: chart.value_axis,
+                },
                 plot,
                 x,
                 y + title_h,
@@ -290,22 +303,22 @@ pub fn plot_chart(chart: &PlotChart, rect: PlotRect) -> Vec<PlotOp> {
     } else {
         x + width - legend_w + 6.0
     };
-    emit_legend(
-        &mut ops,
-        chart,
-        legend_x,
-        y + title_h + 8.0,
-        legend_w - 12.0,
-    );
+    emit_legend(ops, chart, legend_x, y + title_h + 8.0, legend_w - 12.0);
+}
+
+/// Draw ops for `chart` inside `rect`, collected into one vector.
+pub fn plot_chart(chart: &PlotChart<'_>, rect: PlotRect) -> Vec<PlotOp> {
+    let mut ops = Vec::new();
+    plot_chart_into(chart, rect, &mut ops);
     ops
 }
 
 /// Screen-reader summary of a chart.
-pub fn chart_aria_label(chart: &PlotChart) -> String {
+pub fn chart_aria_label(chart: &PlotChart<'_>) -> String {
     let kind = if chart.plot_groups.len() > 1 {
         "combo chart"
     } else {
-        match chart.chart_type.as_str() {
+        match chart.chart_type {
             "bar" => "bar chart",
             "line" => "line chart",
             "pie" => "pie chart",
@@ -315,7 +328,6 @@ pub fn chart_aria_label(chart: &PlotChart) -> String {
     };
     let title = chart
         .title
-        .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("Untitled chart");
     let series_count = if chart.series.is_empty() {
@@ -336,9 +348,38 @@ pub fn chart_aria_label(chart: &PlotChart) -> String {
             .max()
             .unwrap_or(0)
     } else {
-        category_count(chart)
+        category_count(&chart.series)
     };
     format!("{title}, {kind}, {series_count} series, {category_count} categories")
+}
+
+/// Op sink plus the remaining chart-wide op budget.
+struct Emitter<'s, S: PlotSink + ?Sized> {
+    sink: &'s mut S,
+    remaining: usize,
+}
+
+impl<S: PlotSink + ?Sized> Emitter<'_, S> {
+    fn push(&mut self, op: PlotOp) {
+        if self.remaining == 0 {
+            return;
+        }
+        self.remaining -= 1;
+        self.sink.push_op(op);
+    }
+
+    fn exhausted(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+/// The slice of a chart one plot family draws: a combo chart emits one per
+/// plot group, all sharing the outer chart's value axis.
+#[derive(Clone, Copy)]
+struct PlotFamily<'a, 'b> {
+    chart_type: &'a str,
+    series: &'b [PlotSeries<'a>],
+    value_axis: Option<PlotAxisRange>,
 }
 
 #[derive(Clone, Copy)]
@@ -349,24 +390,31 @@ struct PlotArea {
     h: f64,
 }
 
-fn emit_family(
-    ops: &mut Vec<PlotOp>,
-    chart: &PlotChart,
+fn emit_family<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_, '_>,
     plot: PlotArea,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) {
-    match chart.chart_type.as_str() {
-        "pie" | "doughnut" => emit_pie(ops, chart, x, y, width, height),
-        "line" | "scatter" | "radar" => emit_line(ops, chart, plot),
-        "bar" => emit_bar(ops, chart, plot, true),
-        _ => emit_bar(ops, chart, plot, false),
+    match family.chart_type {
+        "pie" | "doughnut" => emit_pie(ops, family, x, y, width, height),
+        "line" | "scatter" | "radar" => emit_line(ops, family, plot),
+        "bar" => emit_bar(ops, family, plot, true),
+        _ => emit_bar(ops, family, plot, false),
     }
 }
 
-fn push_rect(ops: &mut Vec<PlotOp>, x: f64, y: f64, w: f64, h: f64, fill: &str) {
+fn push_rect<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    fill: &str,
+) {
     if w <= 0.0 || h <= 0.0 {
         return;
     }
@@ -379,8 +427,8 @@ fn push_rect(ops: &mut Vec<PlotOp>, x: f64, y: f64, w: f64, h: f64, fill: &str) 
     });
 }
 
-fn push_text(
-    ops: &mut Vec<PlotOp>,
+fn push_text<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
     text: &str,
     x: f64,
     baseline_y: f64,
@@ -400,7 +448,15 @@ fn push_text(
     });
 }
 
-fn push_line(ops: &mut Vec<PlotOp>, x1: f64, y1: f64, x2: f64, y2: f64, color: &str, width: f64) {
+fn push_line<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    color: &str,
+    width: f64,
+) {
     ops.push(PlotOp::Line {
         x1,
         y1,
@@ -411,7 +467,7 @@ fn push_line(ops: &mut Vec<PlotOp>, x1: f64, y1: f64, x2: f64, y2: f64, color: &
     });
 }
 
-fn has_legend(chart: &PlotChart) -> bool {
+fn has_legend(chart: &PlotChart<'_>) -> bool {
     chart
         .legend
         .as_ref()
@@ -427,22 +483,22 @@ fn hex(color: &str) -> String {
     }
 }
 
-fn series_color(series: Option<&PlotSeries>, index: usize) -> String {
+fn series_color(series: Option<&PlotSeries<'_>>, index: usize) -> String {
     series
-        .and_then(|series| series.color.as_deref())
+        .and_then(|series| series.color)
         .filter(|color| !color.is_empty())
         .map(hex)
         .unwrap_or_else(|| CHART_SERIES_COLORS[index % CHART_SERIES_COLORS.len()].to_owned())
 }
 
-fn series_point(series: &PlotSeries, index: usize) -> Option<&PlotPoint> {
+fn series_point<'a, 'p>(series: &'p PlotSeries<'a>, index: usize) -> Option<&'p PlotPoint<'a>> {
     series
         .points
         .iter()
         .find(|point| point.index.unwrap_or(index) == index)
 }
 
-fn series_value(series: &PlotSeries, index: usize) -> f64 {
+fn series_value(series: &PlotSeries<'_>, index: usize) -> f64 {
     series_point(series, index)
         .and_then(|point| point.value)
         .or_else(|| series.values.get(index).copied())
@@ -450,14 +506,14 @@ fn series_value(series: &PlotSeries, index: usize) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn series_point_color(series: &PlotSeries, point_index: usize, series_index: usize) -> String {
+fn series_point_color(series: &PlotSeries<'_>, point_index: usize, series_index: usize) -> String {
     series_point(series, point_index)
-        .and_then(|point| point.color.as_deref())
+        .and_then(|point| point.color)
         .map(hex)
         .unwrap_or_else(|| series_color(Some(series), series_index))
 }
 
-fn series_length(series: &PlotSeries) -> usize {
+fn series_length(series: &PlotSeries<'_>) -> usize {
     series
         .categories
         .len()
@@ -465,22 +521,21 @@ fn series_length(series: &PlotSeries) -> usize {
         .max(series.points.len())
 }
 
-fn category_count(chart: &PlotChart) -> usize {
-    chart.series.iter().map(series_length).max().unwrap_or(0)
+fn category_count(series: &[PlotSeries<'_>]) -> usize {
+    series.iter().map(series_length).max().unwrap_or(0)
 }
 
-fn category_label(chart: &PlotChart, index: usize) -> String {
-    chart
-        .series
+fn category_label(series: &[PlotSeries<'_>], index: usize) -> String {
+    series
         .iter()
         .find_map(|series| series.categories.get(index).cloned())
         .unwrap_or_else(|| (index + 1).to_string())
 }
 
-fn value_range(chart: &PlotChart) -> (f64, f64) {
+fn value_range(family: PlotFamily<'_, '_>) -> (f64, f64) {
     let mut min = 0.0;
     let mut max = 0.0;
-    for series in &chart.series {
+    for series in family.series {
         for index in 0..series.values.len().max(series.points.len()) {
             let value = series_value(series, index);
             if value.is_finite() {
@@ -489,7 +544,7 @@ fn value_range(chart: &PlotChart) -> (f64, f64) {
             }
         }
     }
-    if let Some(axis) = chart.value_axis.as_ref() {
+    if let Some(axis) = family.value_axis.as_ref() {
         if let Some(value) = axis.min.filter(|value| value.is_finite()) {
             min = value;
         }
@@ -507,7 +562,7 @@ fn value_y(plot: PlotArea, value: f64, min: f64, max: f64) -> f64 {
     plot.y + (max - value) / (max - min) * plot.h
 }
 
-fn marker_size(series: &PlotSeries, index: usize) -> f64 {
+fn marker_size(series: &PlotSeries<'_>, index: usize) -> f64 {
     series_point(series, index)
         .and_then(|point| point.marker.as_ref())
         .or(series.marker.as_ref())
@@ -516,8 +571,12 @@ fn marker_size(series: &PlotSeries, index: usize) -> f64 {
         .clamp(1.0, 24.0)
 }
 
-fn emit_axes(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea) {
-    let (min, max) = value_range(chart);
+fn emit_axes<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_, '_>,
+    plot: PlotArea,
+) {
+    let (min, max) = value_range(family);
     for i in 0..=4 {
         let t = i as f64 / 4.0;
         let y = plot.y + t * plot.h;
@@ -552,20 +611,28 @@ fn emit_axes(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea) {
     );
 }
 
-fn emit_bar(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea, horizontal: bool) {
-    let cat_count = category_count(chart);
-    if cat_count == 0 || chart.series.is_empty() {
+fn emit_bar<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_, '_>,
+    plot: PlotArea,
+    horizontal: bool,
+) {
+    let cat_count = category_count(family.series);
+    if cat_count == 0 || family.series.is_empty() {
         return;
     }
-    emit_axes(ops, chart, plot);
-    let (min, max) = value_range(chart);
+    emit_axes(ops, family, plot);
+    let (min, max) = value_range(family);
     let zero_y = value_y(plot, 0.0_f64.clamp(min, max), min, max);
-    let series_count = chart.series.len().max(1);
+    let series_count = family.series.len().max(1);
     if horizontal {
         let row_h = plot.h / cat_count as f64;
         let bar_h = (row_h * 0.7 / series_count as f64).max(1.0);
         for cat_idx in 0..cat_count {
-            let label = category_label(chart, cat_idx);
+            if ops.exhausted() {
+                return;
+            }
+            let label = category_label(family.series, cat_idx);
             push_text(
                 ops,
                 &label,
@@ -574,7 +641,7 @@ fn emit_bar(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea, horizontal
                 36.0,
                 CHART_LABEL_FONT,
             );
-            for (ser_idx, series) in chart.series.iter().enumerate() {
+            for (ser_idx, series) in family.series.iter().enumerate() {
                 let value = series_value(series, cat_idx);
                 let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0);
                 let bar_w = ratio * plot.w;
@@ -593,7 +660,10 @@ fn emit_bar(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea, horizontal
         let group_w = plot.w / cat_count as f64;
         let bar_w = (group_w * 0.7 / series_count as f64).max(1.0);
         for cat_idx in 0..cat_count {
-            let label = category_label(chart, cat_idx);
+            if ops.exhausted() {
+                return;
+            }
+            let label = category_label(family.series, cat_idx);
             push_text(
                 ops,
                 &label,
@@ -602,7 +672,7 @@ fn emit_bar(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea, horizontal
                 group_w - 4.0,
                 CHART_LABEL_FONT,
             );
-            for (ser_idx, series) in chart.series.iter().enumerate() {
+            for (ser_idx, series) in family.series.iter().enumerate() {
                 let value = series_value(series, cat_idx);
                 let yv = value_y(plot, value.clamp(min, max), min, max);
                 let y0 = zero_y;
@@ -620,16 +690,23 @@ fn emit_bar(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea, horizontal
     }
 }
 
-fn emit_line(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea) {
-    let cat_count = category_count(chart);
-    if cat_count == 0 || chart.series.is_empty() {
+fn emit_line<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_, '_>,
+    plot: PlotArea,
+) {
+    let cat_count = category_count(family.series);
+    if cat_count == 0 || family.series.is_empty() {
         return;
     }
-    emit_axes(ops, chart, plot);
-    let (min, max) = value_range(chart);
+    emit_axes(ops, family, plot);
+    let (min, max) = value_range(family);
     let denom = (cat_count.saturating_sub(1)).max(1) as f64;
     for i in 0..cat_count {
-        let label = category_label(chart, i);
+        if ops.exhausted() {
+            return;
+        }
+        let label = category_label(family.series, i);
         let x = plot.x + plot.w * i as f64 / denom;
         push_text(
             ops,
@@ -640,10 +717,13 @@ fn emit_line(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea) {
             CHART_LABEL_FONT,
         );
     }
-    for (ser_idx, series) in chart.series.iter().enumerate() {
+    for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series), ser_idx);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..cat_count {
+            if ops.exhausted() {
+                return;
+            }
             let value = series_value(series, i);
             let x = plot.x + plot.w * i as f64 / denom;
             let y = value_y(plot, value.clamp(min, max), min, max);
@@ -660,7 +740,7 @@ fn emit_line(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea) {
                 size,
                 &point_color,
             );
-            if let Some(label) = series_point(series, i).and_then(|point| point.label.as_deref()) {
+            if let Some(label) = series_point(series, i).and_then(|point| point.label) {
                 push_text(ops, label, x + size, y - size, 48.0, CHART_LABEL_FONT);
             }
             prev = Some((x, y));
@@ -668,13 +748,21 @@ fn emit_line(ops: &mut Vec<PlotOp>, chart: &PlotChart, plot: PlotArea) {
     }
 }
 
-fn emit_pie(ops: &mut Vec<PlotOp>, chart: &PlotChart, x: f64, y: f64, width: f64, height: f64) {
-    let Some(series) = chart.series.first() else {
+fn emit_pie<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_, '_>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    let Some(series) = family.series.first() else {
         return;
     };
     let values: Vec<(usize, f64)> = (0..series.values.len().max(series.points.len()))
         .map(|index| (index, series_value(series, index)))
         .filter(|(_, value)| *value > 0.0 && value.is_finite())
+        .take(ops.remaining)
         .collect();
     let total: f64 = values.iter().map(|(_, value)| value).sum();
     if total <= 0.0 {
@@ -683,7 +771,7 @@ fn emit_pie(ops: &mut Vec<PlotOp>, chart: &PlotChart, x: f64, y: f64, width: f64
     let r = (width.min(height) * 0.34).max(10.0);
     let cx = x + width * 0.38;
     let cy = y + height * 0.46;
-    let inner_r = if chart.chart_type == "doughnut" {
+    let inner_r = if family.chart_type == "doughnut" {
         r * 0.48
     } else {
         0.0
@@ -755,31 +843,38 @@ fn pie_wedge_path(
     path
 }
 
-fn emit_legend(ops: &mut Vec<PlotOp>, chart: &PlotChart, x: f64, y: f64, width: f64) {
+fn emit_legend<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    chart: &PlotChart<'_>,
+    x: f64,
+    y: f64,
+    width: f64,
+) {
     if !has_legend(chart) || width <= 0.0 {
         return;
     }
-    let series: Vec<&PlotSeries> = if chart.series.is_empty() {
+    let series: Vec<&PlotSeries<'_>> = if chart.series.is_empty() {
         chart
             .plot_groups
             .iter()
             .flat_map(|group| group.series.iter())
+            .take(MAX_LEGEND_ENTRIES)
             .collect()
     } else {
-        chart.series.iter().collect()
+        chart.series.iter().take(MAX_LEGEND_ENTRIES).collect()
     };
     let pie_legend = chart.chart_type == "pie"
         || chart.chart_type == "doughnut"
         || chart
             .plot_groups
             .iter()
-            .any(|group| matches!(group.chart_type.as_deref(), Some("pie") | Some("doughnut")));
+            .any(|group| matches!(group.chart_type, Some("pie") | Some("doughnut")));
     let entries: Vec<(String, String)> = if pie_legend {
         series
             .as_slice()
             .first()
             .map(|series| {
-                (0..series_length(series))
+                (0..series_length(series).min(MAX_LEGEND_ENTRIES))
                     .map(|i| {
                         (
                             series
@@ -801,14 +896,14 @@ fn emit_legend(ops: &mut Vec<PlotOp>, chart: &PlotChart, x: f64, y: f64, width: 
                 (
                     series
                         .name
-                        .clone()
+                        .map(str::to_owned)
                         .unwrap_or_else(|| format!("Series {}", i + 1)),
                     series_color(Some(series), i),
                 )
             })
             .collect()
     };
-    for (i, (label, color)) in entries.iter().take(MAX_LEGEND_ENTRIES).enumerate() {
+    for (i, (label, color)) in entries.iter().enumerate() {
         let yy = y + i as f64 * 15.0;
         push_rect(ops, x, yy, 8.0, 8.0, color);
         push_text(
@@ -834,11 +929,23 @@ fn format_number(value: f64) -> String {
 mod tests {
     use super::*;
 
-    fn series(name: &str, values: Vec<f64>) -> PlotSeries {
-        PlotSeries {
-            name: Some(name.to_owned()),
+    struct Source {
+        categories: Vec<String>,
+        values: Vec<f64>,
+    }
+
+    fn source(values: &[f64]) -> Source {
+        Source {
             categories: vec!["Q1".to_owned(), "Q2".to_owned()],
-            values,
+            values: values.to_vec(),
+        }
+    }
+
+    fn series<'a>(name: &'a str, source: &'a Source) -> PlotSeries<'a> {
+        PlotSeries {
+            name: Some(name),
+            categories: &source.categories,
+            values: &source.values,
             ..PlotSeries::default()
         }
     }
@@ -852,6 +959,14 @@ mod tests {
         }
     }
 
+    fn family<'a, 'b>(chart: &'b PlotChart<'a>) -> PlotFamily<'a, 'b> {
+        PlotFamily {
+            chart_type: chart.chart_type,
+            series: &chart.series,
+            value_axis: chart.value_axis,
+        }
+    }
+
     #[test]
     fn fonts_render_the_css_shorthand() {
         assert_eq!(CHART_LABEL_FONT.css(), "400 10px Calibri, sans-serif");
@@ -860,10 +975,11 @@ mod tests {
 
     #[test]
     fn column_chart_emits_background_title_axes_bars_and_legend() {
+        let north = source(&[10.0, 20.0]);
         let chart = PlotChart {
-            chart_type: "column".to_owned(),
-            title: Some("Revenue".to_owned()),
-            series: vec![series("North", vec![10.0, 20.0])],
+            chart_type: "column",
+            title: Some("Revenue"),
+            series: vec![series("North", &north)],
             ..PlotChart::default()
         };
         let ops = plot_chart(&chart, rect());
@@ -889,9 +1005,10 @@ mod tests {
 
     #[test]
     fn pie_chart_emits_one_closed_wedge_per_positive_value() {
+        let share = source(&[3.0, 0.0, 1.0]);
         let chart = PlotChart {
-            chart_type: "pie".to_owned(),
-            series: vec![series("Share", vec![3.0, 0.0, 1.0])],
+            chart_type: "pie",
+            series: vec![series("Share", &share)],
             ..PlotChart::default()
         };
         let ops = plot_chart(&chart, rect());
@@ -910,21 +1027,23 @@ mod tests {
 
     #[test]
     fn axis_bounds_override_the_data_range() {
+        let north = source(&[1.0]);
         let chart = PlotChart {
-            chart_type: "column".to_owned(),
+            chart_type: "column",
             value_axis: Some(PlotAxisRange {
                 min: Some(-10.0),
                 max: Some(10.0),
             }),
-            series: vec![series("North", vec![1.0])],
+            series: vec![series("North", &north)],
             ..PlotChart::default()
         };
-        assert_eq!(value_range(&chart), (-10.0, 10.0));
+        assert_eq!(value_range(family(&chart)), (-10.0, 10.0));
     }
 
     #[test]
     fn point_marker_without_a_size_falls_back_to_the_default() {
-        let mut series = series("North", vec![1.0, 2.0]);
+        let north = source(&[1.0, 2.0]);
+        let mut series = series("North", &north);
         series.marker = Some(PlotMarker { size: Some(9.0) });
         series.points = vec![PlotPoint {
             index: Some(0),
@@ -937,17 +1056,19 @@ mod tests {
 
     #[test]
     fn combo_plot_groups_drive_the_label_and_the_legend() {
+        let revenue = source(&[5.0, 9.0]);
+        let trend = source(&[4.0, 8.0]);
         let chart = PlotChart {
-            chart_type: "column".to_owned(),
+            chart_type: "column",
             plot_groups: vec![
                 PlotGroup {
-                    chart_type: Some("column".to_owned()),
-                    series: vec![series("Revenue", vec![5.0, 9.0])],
+                    chart_type: Some("column"),
+                    series: vec![series("Revenue", &revenue)],
                     ..PlotGroup::default()
                 },
                 PlotGroup {
-                    chart_type: Some("line".to_owned()),
-                    series: vec![series("Trend", vec![4.0, 8.0])],
+                    chart_type: Some("line"),
+                    series: vec![series("Trend", &trend)],
                     ..PlotGroup::default()
                 },
             ],
@@ -966,5 +1087,41 @@ mod tests {
             ops.iter()
                 .any(|op| matches!(op, PlotOp::Text { text, .. } if text == "Trend"))
         );
+    }
+
+    #[test]
+    fn the_op_budget_bounds_a_chart_with_far_more_data_than_it_can_draw() {
+        let values: Vec<f64> = (0..200_000).map(|i| i as f64).collect();
+        let wide = Source {
+            categories: Vec::new(),
+            values,
+        };
+        let chart = PlotChart {
+            chart_type: "line",
+            series: vec![series("Wide", &wide)],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        assert_eq!(ops.len(), MAX_PLOT_OPS);
+    }
+
+    #[test]
+    fn the_sink_sees_the_same_ops_the_vector_wrapper_collects() {
+        let north = source(&[10.0, 20.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            title: Some("Revenue"),
+            series: vec![series("North", &north)],
+            ..PlotChart::default()
+        };
+        struct Counter(usize);
+        impl PlotSink for Counter {
+            fn push_op(&mut self, _: PlotOp) {
+                self.0 += 1;
+            }
+        }
+        let mut counter = Counter(0);
+        plot_chart_into(&chart, rect(), &mut counter);
+        assert_eq!(counter.0, plot_chart(&chart, rect()).len());
     }
 }
