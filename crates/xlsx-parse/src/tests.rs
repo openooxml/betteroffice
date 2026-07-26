@@ -1557,11 +1557,33 @@ const DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.or
 
 const CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache></c:strRef></c:tx><c:spPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></c:spPr><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
 
-/// The facade above refuses these ops, but the serializer is reachable on its
-/// own, so the same refusal has to live at that boundary too.
+/// A package whose pivot cache still names sheets this crate never rewrites.
+fn pivoted_package() -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/sheet2.xml".to_owned(),
+        br#"<worksheet><sheetData/></worksheet>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/pivotCacheDefinition1.xml".to_owned(),
+        br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    parts
+}
+
+/// Pivot caches are still unmodelled, so the serializer keeps refusing the
+/// saves that would strand them.
 #[test]
-fn refuses_to_strand_chart_references_at_the_serialization_boundary() {
-    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
+    let parsed = parse_workbook_with_package(&pivoted_package()).unwrap();
     let mut workbook = parsed.workbook.clone();
     edit_a1(&mut workbook, 1.0);
 
@@ -1575,9 +1597,31 @@ fn refuses_to_strand_chart_references_at_the_serialization_boundary() {
     )
     .unwrap_err();
     assert!(
-        matches!(&reordered, ParseError::UnsupportedEdit(message) if message.contains("chart1.xml")),
+        matches!(&reordered, ParseError::UnsupportedEdit(message) if message.contains("pivotCacheDefinition1.xml")),
         "{reordered:?}"
     );
+
+    let removed = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+        &provenance,
+        true,
+    )
+    .unwrap_err();
+    assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
+
+    let mut renamed = workbook.clone();
+    renamed.sheets[0].name = "Renamed".to_owned();
+    let renamed = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &renamed,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &provenance,
+        true,
+    )
+    .unwrap_err();
+    assert!(matches!(renamed, ParseError::UnsupportedEdit(_)));
 }
 
 /// Charts are modelled now: the anchor, its `editAs` mode and every `c:f` come
@@ -1732,6 +1776,99 @@ fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
     )
     .unwrap();
     assert_eq!(parse_workbook(&added).unwrap().sheets.len(), 3);
+}
+
+/// Reordering, dropping and renaming sheets no longer trips the guard now that
+/// chart references are modelled.
+#[test]
+fn saves_sheet_moves_on_a_charted_workbook() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+    let provenance = vec![SharedStringCells::new(); 2];
+
+    for origins in [[Some(1), Some(0)], [Some(0), Some(1)]] {
+        crate::serialize_workbook_with_package_and_origins_after_edits(
+            &workbook,
+            &parsed.package,
+            &origins,
+            &provenance,
+            true,
+        )
+        .expect("reordering a charted workbook saves");
+    }
+
+    let mut renamed = workbook.clone();
+    renamed.sheets[0].name = "Renamed".to_owned();
+    crate::serialize_workbook_with_package_and_origins_after_edits(
+        &renamed,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &provenance,
+        true,
+    )
+    .expect("renaming a charted workbook saves");
+
+    let mut dropped = workbook.clone();
+    dropped.sheets.pop();
+    crate::serialize_workbook_with_package_and_origins_after_edits(
+        &dropped,
+        &parsed.package,
+        &[Some(0)],
+        &vec![SharedStringCells::new(); 1],
+        true,
+    )
+    .expect("dropping a sheet from a charted workbook saves");
+}
+
+/// Chart XML is untrusted input reaching wasm, so the tree builder must bound
+/// or reject it rather than recurse or allocate without a ceiling.
+#[test]
+fn hostile_chart_markup_is_refused_not_survived() {
+    let deep = format!(
+        "<c:chartSpace xmlns:c=\"c\">{}{}</c:chartSpace>",
+        "<x>".repeat(crate::MAX_DEPTH + 2),
+        "</x>".repeat(crate::MAX_DEPTH + 2)
+    );
+    assert_eq!(
+        crate::chart::patch_chart_refs(deep.as_bytes(), &[]).unwrap_err(),
+        ParseError::DepthExceeded
+    );
+
+    let doctype = br#"<!DOCTYPE c:chartSpace [<!ENTITY x "boom">]><c:chartSpace xmlns:c="c"/>"#;
+    assert!(matches!(
+        crate::chart::patch_chart_refs(doctype, &[]).unwrap_err(),
+        ParseError::Malformed(_)
+    ));
+
+    let unclosed = br#"<c:chartSpace xmlns:c="c"><c:chart>"#;
+    assert!(matches!(
+        crate::chart::patch_chart_refs(unclosed, &[]).unwrap_err(),
+        ParseError::Malformed(_)
+    ));
+
+    assert!(crate::chart_space(b"<c:chartSpace xmlns:c=\"c\"/>", &Default::default()).is_none());
+    assert!(crate::chart_space(b"not xml at all", &Default::default()).is_none());
+}
+
+/// A reference carrying markup-significant characters must come back escaped,
+/// so a rewrite can never reshape the part.
+#[test]
+fn a_rewritten_reference_is_escaped_into_the_part() {
+    let source = br#"<c:chartSpace xmlns:c="c"><c:f>Data!$A$1</c:f></c:chartSpace>"#;
+    let patched = crate::chart::patch_chart_refs(
+        source,
+        &[xlsx_model::ChartRef {
+            kind: xlsx_model::ChartRefKind::Values,
+            formula: "'A<B&C'!$A$1".to_owned(),
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(patched).unwrap(),
+        r#"<c:chartSpace xmlns:c="c"><c:f>&apos;A&lt;B&amp;C&apos;!$A$1</c:f></c:chartSpace>"#
+            .replace("&apos;", "'")
+    );
 }
 
 /// The patcher addresses `c:f` by document order, so a part that no longer

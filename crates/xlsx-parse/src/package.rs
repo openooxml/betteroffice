@@ -166,10 +166,12 @@ impl PreservedPackage {
     }
 
     /// A preserved part that names sheets or addresses this crate never
-    /// patches, so a rename, removal or axis edit would strand it.
+    /// patches, so a rename, removal or axis edit would strand it. Charts are
+    /// no longer among them: their `c:f` references and `xdr:` anchors are
+    /// modelled and remapped. Pivot caches still are.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
-        const REFERENCE_BEARING: [&str; 3] = ["xl/charts/", "xl/pivottables/", "xl/pivotcache/"];
+        const REFERENCE_BEARING: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
         self.parts.iter().find_map(|(path, _)| {
             let normalized = path.trim_start_matches('/').to_ascii_lowercase();
             REFERENCE_BEARING

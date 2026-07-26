@@ -26,8 +26,8 @@ let saved = workbook.save()?;
 # Ok::<(), betteroffice_xlsx::Error>(())
 ```
 
-Saving regenerates the package from the XLSX features represented by the model;
-unsupported package parts are not retained.
+Saving preserves the source package: parts and sheets an edit did not touch are
+copied through byte for byte, and only what changed is reserialized.
 The API is experimental and may change before `0.1.0`.
 
 ## Collaboration
@@ -76,6 +76,7 @@ updates and accepted agent proposals are not added to local history.
 | Row/column insert and delete | Yes | No |
 | Merge and unmerge | Yes | No |
 | Add, remove, rename, and restore sheets | Yes | No |
+| Chart references and anchors follow structural edits | Yes | Yes |
 | Undo/redo | Yes | Yes, local user origin only |
 | Agent proposals | Yes | Yes; acceptance is not locally undoable |
 | Yrs v1 vectors, diffs, updates, and observers | Encode/observe only | Yes |
