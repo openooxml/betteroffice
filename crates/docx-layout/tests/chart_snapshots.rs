@@ -606,6 +606,42 @@ fn configurations() -> Vec<(String, Value, f64, f64)> {
             120.0,
         ));
     }
+    cases.push((
+        "data-labels-composed".to_owned(),
+        json!({
+            "type": "chart",
+            "chartType": "column",
+            "legend": { "visible": false },
+            "plotGroups": [{
+                "chartType": "column",
+                "dataLabels": { "showValue": true, "showCategoryName": true, "numberFormat": "0.0" },
+                "series": [{
+                    "name": "North",
+                    "categories": ["Q1", "Q2"],
+                    "values": [10.0, 20.0],
+                    "dataLabels": { "showSeriesName": true, "separator": " / ", "position": "inEnd" }
+                }]
+            }]
+        }),
+        260.0,
+        180.0,
+    ));
+    cases.push((
+        "data-labels-percent-and-key".to_owned(),
+        json!({
+            "type": "chart",
+            "chartType": "pie",
+            "legend": { "visible": false },
+            "plotGroups": [{
+                "chartType": "pie",
+                "varyColors": true,
+                "dataLabels": { "showPercent": true, "showLegendKey": true, "position": "outEnd" },
+                "series": [{ "name": "Share", "categories": ["Q1", "Q2"], "values": [3.0, 1.0] }]
+            }]
+        }),
+        260.0,
+        180.0,
+    ));
     cases.push(("zero-rect".to_owned(), basic("column"), 0.0, 0.0));
     cases.push(("tiny-rect".to_owned(), basic("column"), 12.0, 8.0));
     cases.push(("tiny-rect-pie".to_owned(), basic("pie"), 12.0, 8.0));
@@ -2147,6 +2183,36 @@ attrs {"blockId":42,"chart":{"label":"Untitled chart, line chart, 1 series, 2 ca
 {"baselineY":140,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":32,"x":76}
 {"baselineY":140,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":32,"x":176}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":192,"y1":88,"y2":50}
+# data-labels-composed
+attrs {"blockId":42,"chart":{"label":"Untitled chart, column chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
+{"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":292,"y1":50,"y2":50}
+{"baselineY":53,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"20","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":292,"y1":84,"y2":84}
+{"baselineY":87,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"15","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":292,"y1":118,"y2":118}
+{"baselineY":121,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"10","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":292,"y1":152,"y2":152}
+{"baselineY":155,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"5","width":34,"x":54}
+{"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":292,"y1":186,"y2":186}
+{"baselineY":189,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"0","width":34,"x":54}
+{"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":92,"y1":50,"y2":186}
+{"color":"#666666","kind":"line","strokeWidth":1,"x1":92,"x2":292,"y1":186,"y2":186}
+{"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q1","width":96,"x":94}
+{"fill":"#4472C4","h":68,"kind":"rect","w":40,"x":122,"y":118}
+{"baselineY":121,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North / Q1 / 10.0","width":40,"x":122}
+{"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":96,"x":194}
+{"fill":"#4472C4","h":136,"kind":"rect","w":40,"x":222,"y":50}
+{"baselineY":53,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North / Q2 / 20.0","width":40,"x":222}
+# data-labels-percent-and-key
+attrs {"blockId":42,"chart":{"label":"Untitled chart, pie chart, 1 series, 2 categories"},"docEnd":5,"docStart":4}
+{"fill":"#FFFFFF","h":180,"kind":"rect","w":260,"x":50,"y":40}
+{"fill":"#4472C4","geometryPath":"39 commands {\"type\":\"move\",\"x\":148.8,\"y\":128.2} .. {\"type\":\"close\"} #0004896313fec87b","h":115.6,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":115.6,"x":91,"y":70.4}
+{"fill":"#4472C4","h":7,"kind":"rect","w":7,"x":185.801,"y":168.201}
+{"baselineY":175.201,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"75%","width":48,"x":195.801}
+{"fill":"#ED7D31","geometryPath":"15 commands {\"type\":\"move\",\"x\":148.8,\"y\":128.2} .. {\"type\":\"close\"} #606b0a726cc1069a","h":115.6,"kind":"shape","stroke":{"color":"#FFFFFF","width":1},"w":115.6,"x":91,"y":70.4}
+{"fill":"#ED7D31","h":7,"kind":"rect","w":7,"x":91.799,"y":74.199}
+{"baselineY":81.199,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"25%","width":48,"x":101.799}
 # zero-rect
 attrs {"ariaLabel":"Revenue","blockId":42,"chart":{"label":"Revenue, column chart, 2 series, 2 categories"},"docEnd":5,"docStart":4}
 {"color":"#D9D9D9","kind":"line","strokeWidth":0.5,"x1":92,"x2":116,"y1":68,"y2":68}

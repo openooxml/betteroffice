@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
-    ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint, ChartSeries,
-    ChartSpace,
+    ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
+    ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

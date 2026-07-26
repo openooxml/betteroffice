@@ -31,8 +31,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotGroup, PlotLegend,
-    PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint, PlotRect, PlotSeries, PlotSink,
+    PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotDataLabels, PlotGroup,
+    PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint, PlotRect, PlotSeries, PlotSink,
     chart_aria_label, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
@@ -2212,6 +2212,33 @@ struct ChartPlotGroupIn {
     marker: Option<bool>,
     #[serde(default)]
     axis_ids: Vec<String>,
+    #[serde(default)]
+    data_labels: Option<ChartDataLabelsIn>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartDataLabelsIn {
+    #[serde(default)]
+    delete: Option<bool>,
+    #[serde(default)]
+    show_value: Option<bool>,
+    #[serde(default)]
+    show_category_name: Option<bool>,
+    #[serde(default)]
+    show_series_name: Option<bool>,
+    #[serde(default)]
+    show_percent: Option<bool>,
+    #[serde(default)]
+    show_legend_key: Option<bool>,
+    #[serde(default)]
+    show_bubble_size: Option<bool>,
+    #[serde(default)]
+    separator: Option<String>,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(default)]
+    number_format: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2237,6 +2264,8 @@ struct ChartSeriesIn {
     bubble_sizes: Vec<f64>,
     #[serde(default)]
     smooth: bool,
+    #[serde(default)]
+    data_labels: Option<ChartDataLabelsIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -7717,7 +7746,21 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
             .map(|group| PlotGroup {
                 chart_type: group.chart_type.as_deref(),
                 grouping: group.grouping.as_deref(),
-                series: group.series.iter().map(plot_series_from).collect(),
+                series: group
+                    .series
+                    .iter()
+                    .map(|series| {
+                        let mut plotted = plot_series_from(series);
+                        plotted.labels = plot_labels_from(
+                            group.data_labels.as_ref(),
+                            series.data_labels.as_ref(),
+                        );
+                        for point in &mut plotted.points {
+                            point.labels = plotted.labels;
+                        }
+                        plotted
+                    })
+                    .collect(),
                 overlap: group.overlap,
                 gap_width: group.gap_width,
                 hole_size: group.hole_size,
@@ -7736,6 +7779,38 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
             .collect(),
         axes: chart.axis_list.iter().map(plot_axis_from).collect(),
     }
+}
+
+/// Merges a series `dataLabels` over its plot group's, matching the shared
+/// geometry's inheritance.
+fn plot_labels_from<'a>(
+    group: Option<&'a ChartDataLabelsIn>,
+    series: Option<&'a ChartDataLabelsIn>,
+) -> Option<PlotDataLabels<'a>> {
+    let inherited = if series.is_some() { series } else { group };
+    if inherited?.delete == Some(true) {
+        return None;
+    }
+    let switch = |read: fn(&ChartDataLabelsIn) -> Option<bool>| {
+        series
+            .and_then(read)
+            .or_else(|| group.and_then(read))
+            .unwrap_or(false)
+    };
+    let text = |read: fn(&ChartDataLabelsIn) -> Option<&str>| {
+        series.and_then(read).or_else(|| group.and_then(read))
+    };
+    Some(PlotDataLabels {
+        show_value: switch(|labels| labels.show_value),
+        show_category_name: switch(|labels| labels.show_category_name),
+        show_series_name: switch(|labels| labels.show_series_name),
+        show_percent: switch(|labels| labels.show_percent),
+        show_legend_key: switch(|labels| labels.show_legend_key),
+        show_bubble_size: switch(|labels| labels.show_bubble_size),
+        separator: text(|labels| labels.separator.as_deref()),
+        position: text(|labels| labels.position.as_deref()),
+        number_format: text(|labels| labels.number_format.as_deref()),
+    })
 }
 
 fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
@@ -7781,6 +7856,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 marker: plot_marker_from(point.marker.as_ref()),
                 label: point.label.as_deref(),
                 explosion: point.explosion,
+                labels: None,
             })
             .collect(),
         grouping: series.grouping.as_deref(),
@@ -7788,6 +7864,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
         x_values: &series.x_values,
         bubble_sizes: &series.bubble_sizes,
         smooth: series.smooth,
+        labels: plot_labels_from(None, series.data_labels.as_ref()),
     }
 }
 

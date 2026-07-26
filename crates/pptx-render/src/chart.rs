@@ -2,16 +2,11 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotFont, PlotOp, PlotPoint, PlotRect, PlotSink, chart_aria_label,
-    format_number, plot_chart_into,
+    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, chart_aria_label,
+    plot_chart_into,
 };
-use pptx_parse::ChartPlotGroup;
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
-
-/// Value labels one chart may contribute, shared across its series, so a
-/// chart with thousands of categories cannot turn every one into a text op.
-const MAX_DATA_LABELS: usize = 4_096;
 
 /// The graphic frame a chart is drawn into.
 pub(crate) struct ChartFrame<'a> {
@@ -40,8 +35,7 @@ pub(crate) fn chart_primitive(
     budget: usize,
     text: &mut dyn FnMut(ChartText<'_>) -> Result<Primitive, RenderError>,
 ) -> Result<Primitive, RenderError> {
-    let labels = ChartLabels::new(space);
-    let chart = plot_model(space, &labels);
+    let chart = plot_model(space);
     let mut primitives = Vec::new();
     let mut sink = ChartSink {
         primitives: &mut primitives,
@@ -68,91 +62,29 @@ pub(crate) fn chart_primitive(
     })
 }
 
-/// Value labels, owned so the plot model can borrow them.
-struct ChartLabels {
-    groups: Vec<Vec<Vec<String>>>,
-}
-
-impl ChartLabels {
-    fn new(space: &ChartSpace) -> Self {
-        let mut budget = MAX_DATA_LABELS;
-        Self {
-            groups: space
-                .plot_groups
-                .iter()
-                .map(|group| group_labels(group, &mut budget))
-                .collect(),
-        }
-    }
-
-    fn get(&self, group: usize, series: usize) -> Option<&[String]> {
-        let labels = self.groups.get(group)?.get(series)?;
-        (!labels.is_empty()).then_some(labels.as_slice())
-    }
-}
-
-fn group_labels(group: &ChartPlotGroup, budget: &mut usize) -> Vec<Vec<String>> {
-    group
-        .series
-        .iter()
-        .map(|series| {
-            if !group.show_data_labels {
-                return Vec::new();
-            }
-            let labels = series
-                .values
-                .iter()
-                .take(*budget)
-                .map(|value| format_number(*value))
-                .collect::<Vec<_>>();
-            *budget -= labels.len();
-            labels
-        })
-        .collect()
-}
-
-fn plot_model<'a>(space: &'a ChartSpace, labels: &'a ChartLabels) -> PlotChart<'a> {
+/// The shared geometry reads `c:dLbls` itself. A part that only carries the
+/// legacy `show_data_labels` flag — one with no switches of its own — still
+/// gets the values Excel would default to.
+fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
     let mut chart = PlotChart::from(space);
-    for (group_index, group) in chart.plot_groups.iter_mut().enumerate() {
-        for (series_index, series) in group.series.iter_mut().enumerate() {
-            if let Some(labels) = labels.get(group_index, series_index) {
-                series.points = labelled_points(&series.points, labels);
+    for (group, plotted) in space.plot_groups.iter().zip(chart.plot_groups.iter_mut()) {
+        if !group.show_data_labels {
+            continue;
+        }
+        for (model, series) in group.series.iter().zip(plotted.series.iter_mut()) {
+            let declared = model.data_labels.is_some() || group.data_labels.is_some();
+            if declared && series.labels.is_none() {
+                continue;
+            }
+            if series.labels.is_none_or(|labels| !labels.shows_anything()) {
+                series.labels = Some(PlotDataLabels {
+                    show_value: true,
+                    ..PlotDataLabels::default()
+                });
             }
         }
     }
     chart
-}
-
-/// One labelled point per label, carrying whatever colour and marker the
-/// chart part already resolved for that index, ahead of the original points
-/// so the geometry's first-match lookup finds the labelled one.
-fn labelled_points<'a>(points: &[PlotPoint<'a>], labels: &'a [String]) -> Vec<PlotPoint<'a>> {
-    let wildcard = points.iter().position(|point| point.index.is_none());
-    let mut indexed = points
-        .iter()
-        .enumerate()
-        .filter_map(|(position, point)| point.index.map(|index| (index, position)))
-        .collect::<Vec<_>>();
-    indexed.sort_unstable();
-    indexed.dedup_by_key(|(index, _)| *index);
-    let mut output = Vec::with_capacity(labels.len() + points.len());
-    for (index, label) in labels.iter().enumerate() {
-        let exact = indexed
-            .binary_search_by_key(&index, |(key, _)| *key)
-            .ok()
-            .map(|slot| indexed[slot].1);
-        let source = match (wildcard, exact) {
-            (Some(wildcard), Some(exact)) => Some(wildcard.min(exact)),
-            (wildcard, exact) => wildcard.or(exact),
-        };
-        output.push(PlotPoint {
-            index: Some(index),
-            label: Some(label.as_str()),
-            ..source.map(|position| points[position]).unwrap_or_default()
-        });
-    }
-    output.extend_from_slice(points);
-    output
 }
 
 /// Translates plot ops into slide primitives as they are emitted. Chart parts
@@ -356,7 +288,10 @@ fn normalize(command: GeometryPathCommand, x: f64, y: f64, w: f64, h: f64) -> Ge
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pptx_parse::{ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPoint, ChartSeries};
+    use pptx_parse::{
+        ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup,
+        ChartPoint, ChartSeries,
+    };
 
     fn series(name: &str, values: &[f64], color: &str) -> ChartSeries {
         ChartSeries {
@@ -661,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn the_label_budget_is_chart_wide_rather_than_per_series() {
+    fn the_part_budget_still_bounds_a_chart_that_labels_every_point() {
         let values = (0..3_000).map(|value| value as f64).collect::<Vec<_>>();
         let mut group = group(
             "line",
@@ -671,10 +606,58 @@ mod tests {
             ],
         );
         group.show_data_labels = true;
-        let space = space("line", vec![group]);
-        let labels = ChartLabels::new(&space);
-        assert_eq!(labels.get(0, 0).unwrap().len(), 3_000);
-        assert_eq!(labels.get(0, 1).unwrap().len(), MAX_DATA_LABELS - 3_000);
+        let chart = chart_primitive(
+            frame("Wide"),
+            &space("line", vec![group]),
+            512,
+            &mut |text| {
+                Ok(Primitive::Placeholder {
+                    object_id: text.object_id,
+                    shape_id: None,
+                    name: text.text.to_owned(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                    label: None,
+                    transform: Transform::default(),
+                })
+            },
+        )
+        .expect("chart plots");
+        assert_eq!(parts(&chart).len(), 512);
+    }
+
+    #[test]
+    fn a_series_that_switches_its_own_labels_off_draws_none() {
+        let labelled = |delete: Option<bool>| {
+            let mut labelled_series = series("North", &[3.0, 1.0], "#112233");
+            labelled_series.data_labels = delete.map(|delete| ChartDataLabels {
+                delete: Some(delete),
+                show_value: Some(true),
+                ..ChartDataLabels::default()
+            });
+            let mut group = group("line", vec![labelled_series]);
+            group.show_data_labels = true;
+            texts(&plot(&space("line", vec![group]))).len()
+        };
+        assert!(labelled(Some(true)) < labelled(Some(false)));
+        assert_eq!(labelled(None), labelled(Some(false)));
+    }
+
+    #[test]
+    fn label_switches_compose_the_text_the_part_asks_for() {
+        let mut labelled = series("North", &[3.0, 1.0], "#112233");
+        labelled.data_labels = Some(ChartDataLabels {
+            show_value: Some(true),
+            show_category_name: Some(true),
+            show_percent: Some(true),
+            separator: Some(" | ".to_owned()),
+            ..ChartDataLabels::default()
+        });
+        let mut group = group("pie", vec![labelled]);
+        group.show_data_labels = true;
+        assert!(texts(&plot(&space("pie", vec![group]))).contains(&"Q1 | 3 | 75%".to_owned()));
     }
 
     #[test]
