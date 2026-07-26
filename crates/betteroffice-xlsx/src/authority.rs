@@ -1108,6 +1108,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
+            | Op::SetCharts { .. }
             | Op::SetDefinedNames { .. }
     )
 }
@@ -1868,6 +1869,8 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteCols { .. }
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
+            | Op::SetCharts { .. }
+            | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
     )
@@ -3088,6 +3091,67 @@ mod tests {
             error,
             "unsupported schema version 7; supported versions are 3 through 6"
         );
+    }
+
+    fn charted(name: &str, formula: &str) -> Sheet {
+        let mut sheet = Sheet::new(name);
+        sheet.charts.push(xlsx_model::SheetChart {
+            part: "xl/charts/chart1.xml".to_owned(),
+            drawing: "xl/drawings/drawing1.xml".to_owned(),
+            anchor_index: 0,
+            anchor: xlsx_model::ChartAnchor::Absolute {
+                pos: xlsx_model::AnchorPos::default(),
+                extent: xlsx_model::AnchorExtent::default(),
+            },
+            refs: vec![xlsx_model::ChartRef {
+                kind: xlsx_model::ChartRefKind::Values,
+                formula: formula.to_owned(),
+            }],
+        });
+        sheet
+    }
+
+    /// Removing a sheet strands the chart references that named it, so the
+    /// remaining sheets' chart state must reach the shared document. A partial
+    /// sync would leave a peer reading the pre-removal ranges.
+    #[test]
+    fn removing_a_sheet_carries_the_stranded_chart_state_into_the_document() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Data"));
+        model.sheets.push(charted("Report", "Data!$A$1:$A$2"));
+        let mut authority = WorkbookAuthority::from_model(&model).unwrap();
+
+        authority
+            .apply_ops(&[Op::RemoveSheet { index: 0 }], SyncOrigin::User)
+            .unwrap();
+
+        let shared = authority.materialize().unwrap();
+        assert_eq!(shared.sheets.len(), 1);
+        assert_eq!(shared.sheets[0].charts[0].refs[0].formula, "#REF!");
+    }
+
+    /// `SetCharts` replaces a whole sheet's chart state, so it can only travel
+    /// as a full semantic sync.
+    #[test]
+    fn set_charts_travels_as_a_full_semantic_sync() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(charted("Report", "Data!$A$1:$A$2"));
+        let mut authority = WorkbookAuthority::from_model(&model).unwrap();
+
+        let mut charts = model.sheets[0].charts.clone();
+        charts[0].refs[0].formula = "Data!$A$1:$A$9".to_owned();
+        authority
+            .apply_ops(
+                &[Op::SetCharts {
+                    sheet: SheetId(0),
+                    charts,
+                }],
+                SyncOrigin::User,
+            )
+            .expect("SetCharts is a full sync, not a rejected partial one");
+
+        let shared = authority.materialize().unwrap();
+        assert_eq!(shared.sheets[0].charts[0].refs[0].formula, "Data!$A$1:$A$9");
     }
 
     #[test]

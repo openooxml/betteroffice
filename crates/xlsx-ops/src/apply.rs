@@ -731,7 +731,10 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         .collect::<Vec<_>>();
     let removed = wb.sheets.remove(index);
     let previous_defined_names = drop_defined_name_scopes(wb, index);
-    let chart_restores = strand_chart_refs(wb, &removed.name, &order_before);
+    let chart_restores = strand_chart_refs(wb, &removed.name, &order_before)
+        .into_iter()
+        .map(|restore| rebase_chart_restore(restore, index))
+        .collect::<Vec<_>>();
     let sheet = SheetId(index as u32);
     let mut inv = vec![Op::AddSheet {
         index,
@@ -787,6 +790,22 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
     }
     inv.extend(chart_restores);
     Ok(InvertedOp(inv))
+}
+
+/// A chart restore is captured against the post-removal sheet order, but undo
+/// replays it after `AddSheet` has put the removed sheet back, so every index
+/// at or after it shifts up by one.
+fn rebase_chart_restore(restore: Op, removed_index: usize) -> Op {
+    match restore {
+        Op::SetCharts {
+            sheet: SheetId(at),
+            charts,
+        } if at as usize >= removed_index => Op::SetCharts {
+            sheet: SheetId(at + 1),
+            charts,
+        },
+        other => other,
+    }
 }
 
 /// Widens sheet scopes at or after an inserted sheet.

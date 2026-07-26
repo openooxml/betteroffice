@@ -4038,3 +4038,69 @@ fn refuses_an_insertion_that_would_push_a_chart_anchor_off_the_grid() {
             .expect("an insertion every marker survives is accepted");
     }
 }
+
+/// Removing a charted sheet strands the references that named it, so the
+/// remaining sheets' chart state must reach the shared document. Undo must put
+/// it back, and neither direction may leave the model ahead of the authority.
+#[test]
+fn removing_a_charted_sheet_synchronises_and_undoes_cleanly() {
+    let mut data = Sheet::new("Data");
+    data.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let mut report = Sheet::new("Report");
+    let mut chart = sample_chart();
+    chart.refs[0].formula = "Data!$A$1:$A$2".to_owned();
+    report.charts.push(chart);
+    let mut model = WorkbookModel::default();
+    model.sheets.push(data);
+    model.sheets.push(report);
+
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let formulas = |workbook: &Workbook| {
+        workbook.model().sheets.last().unwrap().charts[0].refs[0]
+            .formula
+            .clone()
+    };
+    assert_eq!(formulas(&workbook), "Data!$A$1:$A$2");
+
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 0 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(formulas(&workbook), "#REF!");
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(formulas(&workbook), "Data!$A$1:$A$2");
+    assert_eq!(workbook.model().sheets.len(), 2);
+
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(formulas(&workbook), "#REF!");
+    assert_eq!(workbook.model().sheets.len(), 1);
+}
+
+/// `SetCharts` is the inverse a remap emits; it is not something a caller may
+/// submit, because it replaces state the engine derives.
+#[test]
+fn set_charts_is_rejected_as_an_internal_operation() {
+    let mut workbook = Workbook::from_model(charted_model(sample_chart())).unwrap();
+    let Err(error) = workbook.apply_ops(
+        vec![Op::SetCharts {
+            sheet: SheetId(0),
+            charts: Vec::new(),
+        }],
+        CalculationOptions::default(),
+    ) else {
+        panic!("SetCharts must be refused");
+    };
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("internal")),
+        "{error:?}"
+    );
+}

@@ -973,13 +973,14 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
-        let Some(ops) = self.undo.undo(&mut self.model)? else {
+        let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
         let update = self
             .authority
             .apply_ops(&ops, SyncOrigin::Undo)
             .map_err(authority_error)?;
+        self.undo.undo(&mut self.model)?;
         if let Some(history) = self.preserved_undo.pop() {
             self.preserved = history.before.clone();
             self.preserved_redo.push(history);
@@ -1011,13 +1012,14 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
-        let Some(ops) = self.undo.redo(&mut self.model)? else {
+        let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
         let update = self
             .authority
             .apply_ops(&ops, SyncOrigin::Redo)
             .map_err(authority_error)?;
+        self.undo.redo(&mut self.model)?;
         if let Some(history) = self.preserved_redo.pop() {
             self.preserved = history.after.clone();
             self.preserved_undo.push(history);
@@ -1467,12 +1469,12 @@ impl Workbook {
                 origin: UpdateOrigin::Local,
             });
         } else {
-            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
             let update = self
                 .authority
                 .apply_ops(ops, SyncOrigin::User)
                 .map_err(authority_error)?;
+            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
+            self.undo.commit(&mut self.model, &transaction)?;
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -2110,10 +2112,6 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             require_sheet(model, *sheet)?;
             validate_hyperlinks(hyperlinks)?;
         }
-        Op::SetCharts { sheet, charts } => {
-            require_sheet(model, *sheet)?;
-            validate_charts(charts)?;
-        }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
             validate_range(*range)?;
@@ -2142,7 +2140,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RenameSheet { sheet, .. } => {
             require_sheet(model, *sheet)?;
         }
-        Op::RestoreSheet { .. } | Op::SetDefinedNames { .. } => {
+        Op::RestoreSheet { .. } | Op::SetDefinedNames { .. } | Op::SetCharts { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
