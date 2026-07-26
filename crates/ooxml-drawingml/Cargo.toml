@@ -14,7 +14,7 @@ categories = ["graphics", "rendering", "data-structures"]
 name = "ooxml_drawingml"
 
 [features]
-default = ["chart"]
+default = []
 chart = []
 
 [dependencies]

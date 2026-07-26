@@ -99,6 +99,12 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo test
 
+      # Optional features are only unified into `cargo test` while some other
+      # workspace member enables them.
+      - name: Test optional features
+        if: steps.ws.outputs.present == 'true'
+        run: cargo test -p betteroffice-drawingml --all-features
+
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
         run: node scripts/publish-crates.mjs --dry-run
