@@ -27,6 +27,8 @@ pub const CHART_TITLE_FONT: PlotFont = PlotFont {
 pub const MAX_PLOT_OPS: usize = 100_000;
 /// Hard ceiling on the data points one chart may index or scan for its range.
 pub const MAX_PLOT_DATA_SCAN: usize = 200_000;
+/// Coordinates are clamped here so every emitted op stays finite.
+pub const MAX_PLOT_COORD: f64 = 1e9;
 
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
@@ -205,12 +207,17 @@ fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries<'_> 
             .points
             .iter()
             .flatten()
-            .map(|point| PlotPoint {
-                index: point.index.map(|index| index as usize),
-                value: None,
-                color: Some(&point.color),
-                marker: None,
-                label: None,
+            .filter_map(|point| {
+                Some(PlotPoint {
+                    index: match point.index {
+                        Some(index) => Some(point_index(index)?),
+                        None => None,
+                    },
+                    value: None,
+                    color: Some(&point.color),
+                    marker: None,
+                    label: None,
+                })
             })
             .collect(),
         grouping: series.grouping.as_deref(),
@@ -221,14 +228,32 @@ fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries<'_> 
     }
 }
 
+/// A `c:idx` that is a usable point index: an in-range non-negative integer.
+/// Anything else is dropped rather than coerced, which would silently alias
+/// point 0 or match every point.
+fn point_index(index: f64) -> Option<usize> {
+    (index.is_finite() && index >= 0.0 && index.fract() == 0.0 && index <= f64::from(u32::MAX))
+        .then_some(index as usize)
+}
+
+/// Non-finite coordinates become zero and finite ones are clamped, so a
+/// degenerate rectangle cannot produce NaN or infinite output.
+fn finite(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(-MAX_PLOT_COORD, MAX_PLOT_COORD)
+    } else {
+        0.0
+    }
+}
+
 /// Draw ops for `chart` inside `rect`, back to front, into `sink`.
 pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRect, sink: &mut S) {
-    let PlotRect {
-        x,
-        y,
-        w: width,
-        h: height,
-    } = rect;
+    let (x, y, width, height) = (
+        finite(rect.x),
+        finite(rect.y),
+        finite(rect.w),
+        finite(rect.h),
+    );
     let ops = &mut Emitter {
         sink,
         remaining: MAX_PLOT_OPS,
@@ -621,6 +646,9 @@ fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
     }
     if max <= min {
         max = min + 1.0;
+    }
+    if !(max - min).is_finite() || max <= min {
+        (min, max) = (0.0, 1.0);
     }
     (min, max)
 }
@@ -1233,6 +1261,142 @@ mod tests {
             ops.iter()
                 .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#010203"))
         );
+    }
+
+    #[test]
+    fn out_of_schema_point_indexes_are_dropped_rather_than_coerced() {
+        let space = ChartSpace {
+            chart_type: "pie".to_owned(),
+            title: None,
+            legend: None,
+            series: Vec::new(),
+            axes: None,
+            axis_list: None,
+            plot_groups: vec![crate::chart::ChartPlotGroup {
+                chart_type: Some("pie".to_owned()),
+                grouping: None,
+                overlap: None,
+                gap_width: None,
+                axis_ids: Vec::new(),
+                vary_colors: false,
+                first_slice_angle: None,
+                hole_size: None,
+                show_data_labels: false,
+                series: vec![crate::chart::ChartSeries {
+                    name: None,
+                    categories: Vec::new(),
+                    values: vec![1.0, 2.0],
+                    color: "#4472C4".to_owned(),
+                    index: None,
+                    order: None,
+                    category_formula: None,
+                    value_formula: None,
+                    axis_ids: None,
+                    grouping: None,
+                    marker: None,
+                    smooth: None,
+                    points: Some(
+                        [-1.0, 1.5, 1e30, f64::NAN, 2.0]
+                            .into_iter()
+                            .map(|index| crate::chart::ChartPoint {
+                                index: Some(index),
+                                explosion: None,
+                                color: "#010203".to_owned(),
+                            })
+                            .collect(),
+                    ),
+                }],
+            }],
+        };
+        let chart = PlotChart::from(&space);
+        let points = &chart.plot_groups[0].series[0].points;
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].index, Some(2));
+    }
+
+    #[test]
+    fn degenerate_rects_and_extreme_ranges_stay_finite() {
+        let extremes = Source {
+            categories: Vec::new(),
+            values: vec![f64::MAX, -f64::MAX, 5.0],
+        };
+        let rects = [
+            PlotRect {
+                x: f64::NAN,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: f64::INFINITY,
+                h: 200.0,
+            },
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 1e308,
+                h: 1e308,
+            },
+            PlotRect::default(),
+        ];
+        for chart_type in ["column", "bar", "line", "pie"] {
+            let chart = PlotChart {
+                chart_type,
+                series: vec![series("Extreme", &extremes)],
+                ..PlotChart::default()
+            };
+            for rect in rects {
+                for op in plot_chart(&chart, rect) {
+                    assert!(op_is_finite(&op), "{chart_type} {rect:?} {op:?}");
+                }
+            }
+        }
+    }
+
+    fn op_is_finite(op: &PlotOp) -> bool {
+        let numbers: Vec<f64> = match op {
+            PlotOp::Rect { x, y, w, h, .. } => vec![*x, *y, *w, *h],
+            PlotOp::Text {
+                x,
+                baseline_y,
+                width,
+                ..
+            } => vec![*x, *baseline_y, *width],
+            PlotOp::Line { x1, y1, x2, y2, .. } => vec![*x1, *y1, *x2, *y2],
+            PlotOp::Path {
+                x,
+                y,
+                w,
+                h,
+                commands,
+                ..
+            } => {
+                let mut numbers = vec![*x, *y, *w, *h];
+                for command in commands {
+                    match command {
+                        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                            numbers.extend([*x, *y])
+                        }
+                        GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+                            numbers.extend([*cpx, *cpy, *x, *y]);
+                        }
+                        GeometryPathCommand::Cubic {
+                            cp1x,
+                            cp1y,
+                            cp2x,
+                            cp2y,
+                            x,
+                            y,
+                        } => numbers.extend([*cp1x, *cp1y, *cp2x, *cp2y, *x, *y]),
+                        GeometryPathCommand::Close => {}
+                    }
+                }
+                numbers
+            }
+        };
+        numbers.iter().all(|number| number.is_finite())
     }
 
     #[test]

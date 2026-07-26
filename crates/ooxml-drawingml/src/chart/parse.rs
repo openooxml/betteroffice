@@ -224,6 +224,13 @@ fn parse_number(raw: Option<&str>) -> Option<f64> {
     parsed.is_finite().then_some(parsed)
 }
 
+/// A schema `xsd:unsignedInt` index. Negative, fractional and out-of-range
+/// values are not indexes, so they never reach a host's `as usize`.
+fn parse_index(raw: Option<&str>) -> Option<f64> {
+    let value = parse_number(raw)?;
+    (value >= 0.0 && value.fract() == 0.0 && value <= f64::from(u32::MAX)).then_some(value)
+}
+
 fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<String> {
     let Some(parent) = parent else {
         return Vec::new();
@@ -297,7 +304,7 @@ fn parse_series<E: ChartXml>(
             let points = children(series, "dPt")
                 .take(budget.point_cap(MAX_POINTS))
                 .map(|point| ChartPoint {
-                    index: parse_number(val_attr(child(point, "idx"))),
+                    index: parse_index(val_attr(child(point, "idx"))),
                     explosion: parse_number(val_attr(child(point, "explosion"))),
                     color: parse_series_color(point, index),
                 })
@@ -308,8 +315,8 @@ fn parse_series<E: ChartXml>(
                 categories: parse_string_cache(category, budget),
                 values: parse_num_cache(value, budget),
                 color: parse_series_color(series, index),
-                index: parse_number(val_attr(child(series, "idx"))),
-                order: parse_number(val_attr(child(series, "order"))),
+                index: parse_index(val_attr(child(series, "idx"))),
+                order: parse_index(val_attr(child(series, "order"))),
                 category_formula: child_formula(category),
                 value_formula: child_formula(value),
                 axis_ids: (!axis_ids.is_empty()).then(|| axis_ids.to_vec()),
@@ -689,6 +696,40 @@ mod tests {
                 .len()
                 == MAX_AXIS_IDS)
         );
+    }
+
+    #[test]
+    fn out_of_schema_indexes_are_not_parsed_as_indexes() {
+        assert_eq!(parse_index(Some("2")), Some(2.0));
+        assert_eq!(parse_index(Some("0")), Some(0.0));
+        assert_eq!(parse_index(Some("-1")), None);
+        assert_eq!(parse_index(Some("1.5")), None);
+        assert_eq!(parse_index(Some("1e30")), None);
+        assert_eq!(parse_index(Some("nonsense")), None);
+
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![Node::el(
+                        "c:pieChart",
+                        vec![Node::el(
+                            "c:ser",
+                            vec![
+                                Node::el("c:dPt", vec![Node::val("c:idx", "-1")]),
+                                Node::el("c:dPt", vec![Node::val("c:idx", "3")]),
+                            ],
+                        )],
+                    )],
+                )],
+            )],
+        );
+        let parsed = parse_chart_space(&space).expect("chart space parses");
+        let points = parsed.plot_groups[0].series[0].points.as_ref().unwrap();
+        assert_eq!(points[0].index, None);
+        assert_eq!(points[1].index, Some(3.0));
     }
 
     #[test]
