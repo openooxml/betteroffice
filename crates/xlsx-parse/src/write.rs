@@ -1,5 +1,7 @@
-//! `xlsx_model::Workbook` -> minimal valid xlsx parts. structural round-trip:
-//! whatever `read` captures comes back out.
+//! `xlsx_model::Workbook` -> xlsx parts. Without a source package this writes a
+//! minimal valid workbook. With one, parts and sheets the model did not change
+//! are copied through byte for byte; only what changed is reserialized, and
+//! that reserialization carries just the subset `read` models.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;

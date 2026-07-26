@@ -116,6 +116,12 @@ impl Workbook {
     }
 
     /// Opens a replica. `client_id` must be unique among connected peers.
+    ///
+    /// The source package is local state and base compatibility covers only the
+    /// modeled workbook, so peers whose cells agree but whose charts, macros or
+    /// custom XML differ are accepted as the same base and save different
+    /// documents. Distributing package identity needs the next authority schema
+    /// version.
     pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
         Self::open_internal(bytes, true, Some(client_id))
     }
