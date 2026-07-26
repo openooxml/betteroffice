@@ -14,7 +14,7 @@
 // Measurement (the Rust source + float pipeline)
 export * from './measure';
 
-// Selection-overlay geometry value types. Hit-testing, click→PM position and
+// Selection-overlay geometry value types. Hit-testing, click→document position and
 // selection rectangles are Rust display-list queries now
 // (`layout/render/displayListQueries.ts`, `layout/render/canvasPointer.ts`);
 // only these value shapes remain adapter-facing.

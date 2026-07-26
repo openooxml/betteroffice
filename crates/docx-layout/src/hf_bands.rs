@@ -67,7 +67,7 @@ struct HfVariantIn {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FieldWidthsIn {
-    /// field run's pm position in this HF doc — the key the builder matches
+    /// field run's document position in this HF doc — the key the builder matches
     pm_start: i64,
     /// width the measure baked into `line.width` (the field's fallback text)
     fallback_width: f64,

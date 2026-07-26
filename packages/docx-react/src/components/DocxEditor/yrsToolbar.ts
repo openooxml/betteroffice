@@ -188,7 +188,7 @@ function textColorDelta(
   return null;
 }
 
-/** Translate a collapsed inline toolbar action into PM-style stored formatting. */
+/** Translate a collapsed inline toolbar action into stored formatting. */
 export function storedYrsToolbarFormatting(
   context: YrsSelectionContext,
   action: FormattingAction
@@ -274,7 +274,7 @@ export function withStoredYrsFormatting(
  * Apply one toolbar action to the live yrs selection.
  *
  * Returns false for commands outside the current yrs formatting surface. The
- * caller deliberately does not fall back to PM while yrs-authoritative input
+ * caller deliberately does not fall back while yrs-authoritative input
  * is active.
  */
 export function applyYrsToolbarFormatting(

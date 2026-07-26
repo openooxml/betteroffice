@@ -13,7 +13,7 @@ const REQUIRED: [&str; 2] = [
 fn golden_corpus_byte_identity() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut names: Vec<String> = fs::read_dir(&fixtures)
-        .expect("fixtures dir exists — run `bun scripts/export-golden-fixtures.ts`")
+        .expect("fixtures dir exists")
         .filter_map(|entry| {
             let name = entry.ok()?.file_name().into_string().ok()?;
             name.strip_suffix(".input.json").map(str::to_string)

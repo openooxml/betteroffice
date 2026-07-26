@@ -1582,7 +1582,7 @@ struct RawRun {
     formatting: RunFormatting,
     story_start: u32,
     story_end: u32,
-    /// PM offsets relative to the paragraph content start. Usually identical
+    /// Offsets relative to the paragraph content start. Usually identical
     /// to story offsets; a one-unit `noteRef` displays its possibly multi-digit id.
     pm_start: u32,
     pm_end: u32,
@@ -1592,7 +1592,7 @@ struct RawRun {
 
 #[derive(Clone, Debug)]
 struct DrawingMarker {
-    /// PM offset relative to the original paragraph content start.
+    /// Offset relative to the original paragraph content start.
     pm_offset: u32,
     block: LayoutBlock,
 }
@@ -3318,7 +3318,7 @@ mod tests {
         let paragraph = |para_id: &str, text: &str, start: f64| {
             json!({
                 "kind": "paragraph",
-                "id": "pm-block",
+                "id": "placeholder",
                 "paraId": para_id,
                 "runs": [{
                     "kind": "text", "text": text, "logicalOrder": 0,
@@ -3330,7 +3330,7 @@ mod tests {
         };
         let cell = |para_id: &str, text: &str, start: f64| {
             json!({
-                "id": "pm-block",
+                "id": "placeholder",
                 "blocks": [paragraph(para_id, text, start)],
                 "colSpan": 1.0,
                 "rowSpan": 1.0,
@@ -3339,10 +3339,10 @@ mod tests {
         };
         let mut expected = json!([{
             "kind": "table",
-            "id": "pm-block",
+            "id": "placeholder",
             "rows": [
                 {
-                    "id": "pm-block", "isHeader": false,
+                    "id": "placeholder", "isHeader": false,
                     "trackedIns": {
                         "revisionId": numeric_id("41:9", &RenderEnv::default()),
                         "author": "Ada", "date": "2025-01-01T00:00:00Z"
@@ -3350,7 +3350,7 @@ mod tests {
                     "cells": [cell("c00p", "A", 3.0), cell("c01p", "B", 8.0)]
                 },
                 {
-                    "id": "pm-block", "isHeader": false,
+                    "id": "placeholder", "isHeader": false,
                     "cells": [cell("c10p", "C", 15.0), cell("c11p", "D", 20.0)]
                 }
             ],

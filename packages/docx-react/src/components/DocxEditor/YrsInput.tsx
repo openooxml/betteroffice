@@ -930,8 +930,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           setSelection(nearby);
           return true;
         }
-        // Match ProseMirror tables' terminal-Tab behavior when the document
-        // has no trailing paragraph: append a row and enter its first cell.
+        // Terminal-Tab behavior when the document has no trailing paragraph:
+        // append a row and enter its first cell.
         session.insertRow(focused, 'below');
         row = lastRow + 1;
         column = 0;

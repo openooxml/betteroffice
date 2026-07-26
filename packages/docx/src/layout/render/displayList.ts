@@ -62,7 +62,7 @@ export interface NoteRegion {
   primitives?: DisplayPrimitive[];
   noteIds?: number[];
   /**
-   * Per-note backlink metadata (W17): the body-doc PM range of each note's
+   * Per-note backlink metadata (W17): the body-doc range of each note's
    * reference mark plus its formatted label, so the a11y mirror can wire
    * note ↔ reference associations (doc-noteref / doc-backlink). Parallel to
    * `noteIds`; undefined = legacy region without backlink data.
@@ -73,7 +73,7 @@ export interface NoteRegion {
 /** Backlink metadata for one note in a NoteRegion. */
 export interface NoteRegionNote {
   id?: number;
-  /** Body-doc PM range of the reference mark anchoring this note. */
+  /** Body-doc range of the reference mark anchoring this note. */
   anchorDocStart?: number;
   anchorDocEnd?: number;
   /** Formatted reference label (display number / custom mark). File-derived. */
@@ -81,7 +81,7 @@ export interface NoteRegionNote {
 }
 
 // header/footer band. Primitives are in page coordinates like body primitives;
-// doc positions inside refer to the HF ProseMirror doc identified by rId, NOT
+// doc positions inside refer to the HF doc identified by rId, NOT
 // the body doc — hit-testing and the mirror must scope by region (the painted
 // DOM analogue of .layout-page-header / .layout-page-footer).
 export interface HfRegion {
@@ -251,12 +251,12 @@ export interface DocAttrs {
   // pipeline's compound `block-N` keys). Group by blockKey ?? String(blockId)
   // — exactly one of the two is set whenever the primitive has block identity.
   blockKey?: string;
-  // Exact PM range of the paragraph fragment that owns this primitive. Run
+  // Exact document range of the paragraph fragment that owns this primitive. Run
   // ranges start inside the paragraph (normally pmStart+1), so the mirror
   // cannot reconstruct the painter wrapper's data-doc-start from docStart.
   fragmentDocStart?: number;
   fragmentDocEnd?: number;
-  // stable Word `w14:paraId` / PM `paraId` of the enclosing paragraph, when the
+  // stable Word `w14:paraId` of the enclosing paragraph, when the
   // source carries one. The a11y mirror stamps it as `data-para-id` on the
   // paragraph wrapper so `scrollToParaId`-style lookups resolve against the
   // mirror. Absent when the paragraph has no paraId (matches the DOM painter).

@@ -7,7 +7,7 @@ import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/lay
 /** Tint variant — mirrors the painter `<style>` colors. */
 export type CanvasBrightenVariant = 'comment' | 'insertion' | 'deletion';
 
-/** The expanded sidebar item's resolved body PM range + tint. */
+/** The expanded sidebar item's resolved body range + tint. */
 export interface CanvasBrightenRange {
   from: number;
   to: number;

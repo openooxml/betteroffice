@@ -681,7 +681,7 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
     serde_json::to_string(id).expect("block ids always serialize")
 }
 
-/// Retained suffix pages keep their geometry but absolute PM positions move
+/// Retained suffix pages keep their geometry but absolute document positions move
 /// after an earlier edit. Refresh paragraph fragment ranges and resolved run
 /// slices from the new measured arena before the display list consumes them.
 fn refresh_reused_paragraph_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
@@ -936,8 +936,8 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
 }
 
 /// Common DrawingML shapes consume their measured bbox in normal flow. The
-/// bridge currently emits the PM path's in-flow shape contract; exotic anchor
-/// scenes remain eligible for the PM fallback before they reach pagination.
+/// bridge currently emits the host path's in-flow shape contract; exotic anchor
+/// scenes remain eligible for the host fallback before they reach pagination.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;

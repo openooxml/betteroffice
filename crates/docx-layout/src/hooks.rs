@@ -11,7 +11,7 @@ use crate::types::{
 use crate::{break_policy, column_balancing, keep_together, section_breaks};
 
 fn unsupported(feature: &str) -> LayoutError {
-    LayoutError::Unsupported(format!("not ported yet: {feature}"))
+    LayoutError::Unsupported(feature.to_string())
 }
 
 // the scan types live with their producer; re-exported so the spine's

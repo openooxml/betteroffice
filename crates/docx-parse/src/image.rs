@@ -88,7 +88,7 @@ pub struct PositionAxis {
     pub alignment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pos_offset: Option<f64>,
-    // Pinned VML typo: that parser emits `offset`, not `posOffset`.
+    // Pinned VML typo: the VML parser emits `offset`, not `posOffset`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
 }

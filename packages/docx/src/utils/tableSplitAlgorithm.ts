@@ -3,8 +3,7 @@
  *
  * This module contains the pure layout computation for splitting a table cell:
  * column width redistribution, neighbor span adjustment, and new-cell placement.
- * Both the ProseMirror path (tableSplit.ts) and the Document-model path
- * (TableToolbar.tsx) delegate to these functions.
+ * The Document-model path (TableToolbar.tsx) delegates to these functions.
  */
 
 // ---------------------------------------------------------------------------
@@ -13,7 +12,7 @@
 
 /** A cell's position and span within the logical grid. */
 export interface CellAnchor<T> {
-  /** Opaque payload — the caller's cell type (PMNode, TableCell, etc.) */
+  /** Opaque payload — the caller's cell type (TableCell, etc.) */
   data: T;
   row: number;
   col: number;
@@ -87,9 +86,8 @@ export function redistributeColumnWidths(
 /**
  * Compute the new anchor layout after splitting a target cell.
  *
- * This is the core algorithm shared between ProseMirror and Document-model
- * paths. It adjusts neighbor spans, shifts positions for inserted rows/cols,
- * and creates placeholder anchors for the new split cells.
+ * This is the core algorithm. It adjusts neighbor spans, shifts positions for
+ * inserted rows/cols, and creates placeholder anchors for the new split cells.
  *
  * @param anchors     All cell anchors in the current table.
  * @param target      The anchor being split.

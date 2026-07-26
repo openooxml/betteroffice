@@ -255,7 +255,7 @@ export interface DocxEditorProps {
    * of internal state, and emits every change through `onCommentsChange`.
    *
    * Use this with collaboration backends (Yjs, Liveblocks, Automerge, …) so
-   * comment threads sync across peers — the PM document only carries the
+   * comment threads sync across peers — the document only carries the
    * range markers; thread metadata lives outside the doc and needs its own
    * sync channel.
    *
@@ -2017,7 +2017,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       />
       {/* Canvas-mode find-match highlights, portaled onto the visible canvas
         pages. On the DOM-painter path the target stays null (rendered nothing)
-        and the current match shows as an ordinary PM selection as before. */}
+        and the current match shows as an ordinary selection as before. */}
       {canvasFindOverlayTarget && canvasRenderer.queries ? (
         <CanvasFindHighlightOverlay
           matches={canvasFindMatches}

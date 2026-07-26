@@ -52,7 +52,7 @@ fn embed_has_id<T: ReadTxn>(map: &MapRef, txn: &T, embed_id: &str) -> bool {
 }
 
 /// Finds one map-backed embed by its stable authored payload identity. New yrs
-/// inserts use `embedId`; `id` (SDTs) and `rId` (images) keep mirrored PM
+/// inserts use `embedId`; `id` (SDTs) and `rId` (images) keep mirrored
 /// embeds addressable without rewriting their payload vocabulary.
 fn embed_map_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<MapRef> {
     let stories = txn

@@ -690,8 +690,8 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
 }
 
 /// region-aware hit result: which part of the page owns the point, and the
-/// resolved position inside that part's PM doc. For `header`/`footer` the
-/// position refers to the HF ProseMirror doc identified by `rId`, NOT the
+/// resolved position inside that part's doc. For `header`/`footer` the
+/// position refers to the HF doc identified by `rId`, NOT the
 /// body doc (the caller must route the selection to that HF editor, the way
 /// `usePagesPointer` scopes clicks to `.layout-page-header|footer`).
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -765,7 +765,7 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
     })
 }
 
-/// one highlight rectangle of a PM range, page-local coordinates
+/// one highlight rectangle of a document range, page-local coordinates
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RangeRect {
@@ -922,12 +922,12 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
     None
 }
 
-/// highlight rectangles for a PM range resolved inside a specific page region —
+/// highlight rectangles for a document range resolved inside a specific page region —
 /// the selection-geometry twin of [`hit_test_regions`]'s scoping.
 ///
 /// For [`HitRegion::Body`] this is exactly [`range_rects`] (`r_id` is ignored —
-/// the body has one PM doc). For [`HitRegion::Header`] / [`HitRegion::Footer`]
-/// the `from`/`to` refer to the header/footer ProseMirror doc identified by
+/// the body has one doc). For [`HitRegion::Header`] / [`HitRegion::Footer`]
+/// the `from`/`to` refer to the header/footer doc identified by
 /// `r_id`, so only bands whose `rId` matches are consulted — the display-list
 /// analogue of scoping selection to `.layout-page-header` /
 /// `.layout-page-footer` for the active HF part. The SAME HF doc is painted on

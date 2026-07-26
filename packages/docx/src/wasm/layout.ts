@@ -41,7 +41,7 @@ export function preloadLayoutWasm(input?: WasmAsyncInput): Promise<void> {
 /**
  * Region-aware hit test over a display list: page-local point in,
  * `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` (or `"null"` for
- * an out-of-range page) JSON out. Header/footer hits identify the HF PM doc
+ * an out-of-range page) JSON out. Header/footer hits identify the HF doc
  * by `rId`; their `pos` refers to that doc, not the body doc.
  */
 export function hitTestRegionsJson(
@@ -55,9 +55,9 @@ export function hitTestRegionsJson(
 }
 
 /**
- * Highlight rects for a body PM range over a display list: JSON array of
+ * Highlight rects for a body document range over a display list: JSON array of
  * `{pageIndex, x, y, width, height}` in page-local px. Body-only — HF doc
- * positions live in different PM docs and are never consulted.
+ * positions live in different docs and are never consulted.
  */
 export function rangeRectsJson(displayList: string, from: number, to: number): string {
   state.ensure();
@@ -204,7 +204,7 @@ export function verticalMoveByHandle(
 }
 
 /**
- * Highlight rects for a body PM range against a stored display list (by handle).
+ * Highlight rects for a body document range against a stored display list (by handle).
  * Throws when the export is absent or the handle is unknown/closed.
  */
 export function rangeRectsByHandle(handle: number, from: number, to: number): string {

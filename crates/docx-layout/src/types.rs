@@ -403,7 +403,7 @@ pub enum Run {
 }
 
 impl Run {
-    /// PM start offset, regardless of run flavor.
+    /// Document start offset, regardless of run flavor.
     pub fn pm_start(&self) -> Option<f64> {
         match self {
             Run::Text(r) => r.pm_start,
@@ -415,7 +415,7 @@ impl Run {
         }
     }
 
-    /// PM end offset, regardless of run flavor.
+    /// Document end offset, regardless of run flavor.
     pub fn pm_end(&self) -> Option<f64> {
         match self {
             Run::Text(r) => r.pm_end,

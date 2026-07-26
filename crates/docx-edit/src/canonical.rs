@@ -36,7 +36,7 @@ pub enum CanonicalItem {
         kind: String,
         payload: BTreeMap<String, Value>,
     },
-    /// Sealed ProseMirror block JSON.
+    /// Sealed block JSON.
     OpaqueBlk { blob: Value },
 }
 

@@ -31,7 +31,7 @@ import { resolveCaretPaintColor } from './paintedCaret';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
-// independently so hidden ProseMirror focus and IME state survive initial
+// independently so hidden input focus and IME state survive initial
 // loading and renderer errors.
 export function CanvasPagedArea({
   renderer,

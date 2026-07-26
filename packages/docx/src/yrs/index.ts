@@ -478,7 +478,7 @@ export interface YrsSelectionContext {
   strike: YrsTriState;
   /** Uniform ASCII font family, or `null` when absent/mixed. */
   fontFamily: string | null;
-  /** Uniform font size in half-points (the PM/OOXML `w:sz` unit). */
+  /** Uniform font size in half-points (the OOXML `w:sz` unit). */
   fontSize: number | null;
   /** Uniform RGB hex or theme-color name, or `null` when absent/mixed. */
   color: string | null;
@@ -487,7 +487,7 @@ export interface YrsSelectionContext {
   styleId: string | null;
   alignment: string | null;
   /**
-   * Full authored pilcrow property bag. Known toolbar fields retain their PM
+   * Full authored pilcrow property bag. Known toolbar fields retain their
    * names (`indentLeft`, `spaceBefore`, `lineSpacing`, `numPr`, and so on);
    * paragraph style is stored as `pStyle`.
    */
@@ -566,8 +566,8 @@ export interface YrsCellLoc extends YrsTableLoc {
 }
 
 /**
- * Anchor-cell to head-cell rectangular selection, analogous to PM's
- * `CellSelection` but independent of ProseMirror positions.
+ * Anchor-cell to head-cell rectangular selection, addressed by grid
+ * coordinates rather than document positions.
  *
  * @public
  */
@@ -593,7 +593,7 @@ export interface YrsTableReceipt {
 }
 
 /**
- * OOXML/PM-shaped cell border value passed through to `tcPr.borders`.
+ * OOXML-shaped cell border value passed through to `tcPr.borders`.
  *
  * @public
  */
@@ -769,7 +769,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets or clears the selected cells' background color. */
   setCellShading(range: YrsTableRange, color: string | null): YrsTableReceipt;
   /**
-   * Merges an OOXML/PM-shaped patch into selected cells' `tcPr`. JSON `null`
+   * Merges an OOXML-shaped patch into selected cells' `tcPr`. JSON `null`
    * clears a property; merge/split-owned span keys are rejected.
    */
   setCellTextFormat(
@@ -798,7 +798,10 @@ export interface YrsSession extends CollaborationReplica {
   splitParagraph(at: YrsLoc, suggesting?: YrsAuthor): YrsSplitReceipt;
   /** Merges `paraId` with the FOLLOWING paragraph. Errors on the final paragraph. */
   mergeParagraphs(story: string, paraId: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
-  /** Toggles one run mark across a range (PM toggleMark range semantics). */
+  /**
+   * Toggles one run mark across a range: removes it when every unit already
+   * carries it, otherwise adds it.
+   */
   toggleMark(range: YrsStoryRange, mark: YrsRunMark): void;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
   formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta): void;

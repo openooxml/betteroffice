@@ -126,8 +126,8 @@ export interface SelectionStateDelta {
 }
 
 /**
- * Selection-change handler: extracts the formatting state ProseMirror
- * sees at the cursor, derives table + image context from the PM
+ * Selection-change handler: extracts the formatting state the editor
+ * sees at the cursor, derives table + image context from the
  * selection, syncs the border-spec ref to the cell's actual color,
  * pushes the result into EditorState, refreshes the floating
  * add-comment button, and fans the SelectionState out to consumer-side

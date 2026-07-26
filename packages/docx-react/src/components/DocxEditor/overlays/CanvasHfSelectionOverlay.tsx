@@ -14,7 +14,7 @@ export interface CanvasHfSelectionOverlayProps {
   region: 'header' | 'footer';
   /** Relationship id of the active HF part (the display-list variant's `rId`). */
   rId: string;
-  /** Current HF ProseMirror selection (positions in the HF doc), or null. */
+  /** Current HF selection (positions in the HF doc), or null. */
   selection: { from: number; to: number } | null;
   /** Portal target — `editorContentRef.current` (shares the canvas host's top-left). */
   overlayTarget: HTMLElement;

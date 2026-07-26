@@ -29,7 +29,7 @@ export interface BuildInteractiveOverlayOptions {
   labels?: InteractiveOverlayLabels;
 }
 
-/** Apply PM-derived content-control focus to the interactive overlay boxes. */
+/** Apply content-control focus to the interactive overlay boxes. */
 export function applyInteractiveSdtFocus(
   root: ParentNode,
   focusedGroupIds: ReadonlySet<string>
@@ -77,7 +77,7 @@ export function buildInteractiveOverlayPage(
   root.style.pointerEvents = 'none';
 
   // Focus-steal guard: a mousedown that bubbles past the overlay reaches the
-  // adapters' canvas pointer routing, which would move the PM caret and shift
+  // adapters' canvas pointer routing, which would move the caret and shift
   // focus away from the hidden editor. Swallow it at the overlay root for the
   // interactive elements only — click still bubbles, so the adapters' existing
   // delegated `.layout-sdt-widget` / repeat handlers keep doing the activation.

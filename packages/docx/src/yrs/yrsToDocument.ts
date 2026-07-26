@@ -283,7 +283,7 @@ function formattingAttrs(attributes: Attrs): Attrs {
   return result;
 }
 
-/** Converts attributes without manufacturing ProseMirror Mark objects. */
+/** Converts attributes without manufacturing mark objects. */
 function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const formatting: TextFormatting = {};
 
@@ -533,7 +533,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
         return stored;
       }
     } catch {
-      // Malformed editor cache: rebuild the same minimal inert field as PM save.
+      // Malformed editor cache: rebuild the same minimal inert field as the save path.
     }
   }
 
@@ -938,7 +938,7 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks by fromProseDoc.
+    // A note reference is handled before tracked/link marks.
     if (item.kind === 'embed' && item.embedKind === 'noteRef') {
       flushRun();
       flushHyperlink();
@@ -1065,9 +1065,9 @@ function restoreOriginalRuns(
   }
 
   return boundaries.map((boundary, index) => {
-    // fromProseDoc restores the original segmentation/property-change cache,
-    // but non-empty runs keep formatting reconstructed from their live marks.
-    // Only empty runs have no PM node and therefore take cached formatting.
+    // restoreOriginalRuns restores the original segmentation/property-change
+    // cache, but non-empty runs keep formatting reconstructed from their live
+    // marks. Only empty runs have no node and therefore take cached formatting.
     const formatting =
       boundary.text.length === 0
         ? boundary.formatting

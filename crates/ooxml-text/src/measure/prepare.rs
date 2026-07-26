@@ -107,7 +107,7 @@ const WORD_SMALL_CAPS_ADVANCE_SCALE: f32 = 0.8;
 
 /// Characters that UAX-14 treats as mandatory breaks (plus tab, which DOCX
 /// represents as a `TabRun`). Their appearance inside a text run means the
-/// block needs the reference engine.
+/// block needs the host fallback.
 fn is_disallowed_control(c: char) -> bool {
     matches!(
         c,

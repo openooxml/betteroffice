@@ -31,7 +31,7 @@ export interface DisplayListHfVariant {
 
 /**
  * Per-page widths of one PAGE/NUMPAGES field run in an HF part. `pmStart` is the
- * field run's position in the HF ProseMirror doc (the key the Rust builder
+ * field run's position in the HF doc (the key the Rust builder
  * matches). `fallbackWidth` is the width the measure baked into `line.width`
  * (the field's fallback text); `perPage[i]` is the width of the field's resolved
  * text on layout page index `i` (PAGE → that page's number, NUMPAGES → total).
@@ -236,9 +236,9 @@ export interface RustDisplayListQueryEngine {
     direction: 'up' | 'down',
     goalX: number
   ): string;
-  /** body PM range → JSON array of `{pageIndex,x,y,width,height}` rects */
+  /** body document range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
-  /** Region-aware PM range rectangles when supported. */
+  /** Region-aware document range rectangles when supported. */
   rangeRectsRegionJson?(
     displayList: string,
     region: string,
@@ -267,9 +267,9 @@ export interface RustDisplayListQueryEngine {
     direction: 'up' | 'down',
     goalX: number
   ): string;
-  /** body PM range against a stored display list (by handle) */
+  /** body document range against a stored display list (by handle) */
   rangeRectsByHandle?(handle: number, from: number, to: number): string;
-  /** region-aware PM range against a stored display list (by handle) */
+  /** region-aware document range against a stored display list (by handle) */
   rangeRectsRegionByHandle?(
     handle: number,
     region: string,

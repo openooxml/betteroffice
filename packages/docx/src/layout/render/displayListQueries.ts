@@ -32,7 +32,7 @@ export type DisplayListHitRegion = 'body' | 'header' | 'footer';
 
 /**
  * Region-aware hit result. For `header`/`footer` the position refers to the
- * HF ProseMirror doc identified by `rId`, NOT the body doc — the caller must
+ * HF doc identified by `rId`, NOT the body doc — the caller must
  * route the selection to that HF editor, exactly like the DOM path scopes
  * clicks to `.layout-page-header|footer`.
  */
@@ -47,7 +47,7 @@ export interface DisplayListVerticalMove {
   goalX: number;
 }
 
-/** one highlight rectangle of a PM range, page-local px */
+/** one highlight rectangle of a document range, page-local px */
 export interface DisplayListRect {
   pageIndex: number;
   x: number;
@@ -130,11 +130,11 @@ export interface DisplayListQueries {
     direction: 'up' | 'down',
     goalX?: number
   ): DisplayListVerticalMove | null;
-  /** body PM range → highlight rects */
+  /** body document range → highlight rects */
   rangeRects(from: number, to: number): DisplayListRect[];
   /**
-   * Header/footer PM range → highlight rects for the region's band. `region` is
-   * `'header' | 'footer'`; `rId` identifies the HF ProseMirror doc, and
+   * Header/footer document range → highlight rects for the region's band. `region` is
+   * `'header' | 'footer'`; `rId` identifies the HF doc, and
    * `from`/`to` are positions in THAT doc. The same HF doc paints on every page
    * carrying the part, so this returns one rect-set per such page (each tagged
    * with its `pageIndex`) — the caller picks the page it is editing. Returns

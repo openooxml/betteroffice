@@ -781,8 +781,8 @@
  * HEADER / FOOTER EDITING
  *
  * These styles are needed when editing headers/footers inline (Google Docs style).
- * They must be in dist/styles.css since the runtime CSS import in
- * HiddenProseMirror.tsx is stripped by tsup (injectStyle: false).
+ * They must be in dist/styles.css since runtime CSS imports in components are
+ * stripped by tsup (injectStyle: false).
  * ============================================================================ */
 
 /* Page content area — show text cursor when hovering over editable content */
@@ -929,10 +929,10 @@
 }
 
 /* =============================================================================
- * ProseMirror decoration forwarding overlay
+ * Decoration forwarding overlay
  *
- * Generic surface for decorations published via PM plugins' `props.decorations`
- * (the layout-painter doesn't render them itself — see `DecorationLayer.tsx`).
+ * Generic surface for decorations published by plugins (the layout-painter
+ * doesn't render them itself).
  * Children are absolutely-positioned inside this container; pointer-events
  * are off by default so editing isn't blocked. Plugins that need hover/click
  * on a decoration (e.g. cursor name labels) opt in via inline styles.
@@ -947,8 +947,8 @@
   z-index: 11;
 }
 
-/* Default styles for y-prosemirror remote cursor decorations. Consumers can
- * override by providing their own `.ProseMirror-yjs-cursor` rules. */
+/* Default styles for remote cursor decorations. Consumers can override by
+ * providing their own `.ProseMirror-yjs-cursor` rules. */
 .ProseMirror-yjs-cursor {
   position: relative;
   margin-left: -1px;
@@ -972,9 +972,6 @@
   user-select: none;
   pointer-events: none;
 }
-
-/* Tracked-revision styles live in core (prosemirror/editor.css), shared
-   by React + Vue adapters. Do not duplicate here. */
 
 /* Interactive trigger for typed controls (checkbox/dropdown/date). The box is
    pointer-events:none; the trigger re-enables them so it is clickable. Sits at

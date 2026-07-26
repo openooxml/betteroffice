@@ -21,8 +21,8 @@ fn store_with_liberation() -> FontStore {
 /// Build a one-paragraph, one-line display-list input. `chain` is the
 /// `fontChains` value for `"liberation sans|0|0"` (None ⇒ no fontChains at all,
 /// the browser-measured shape). `trailing_break` appends a `<w:br>` run so a
-/// last line still justifies. Text runs are 1 PM position per char starting at
-/// pm 1.
+/// last line still justifies. Text runs are 1 document position per char
+/// starting at position 1.
 fn build_input(
     text: &str,
     line_width: f64,

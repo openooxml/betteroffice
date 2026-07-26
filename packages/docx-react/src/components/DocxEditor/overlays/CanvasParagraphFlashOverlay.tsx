@@ -8,7 +8,7 @@ import {
   DEFAULT_PARAGRAPH_FLASH_DURATION_MS,
 } from '@betteroffice/docx/utils';
 
-/** One flash request, addressed by the paragraph's live body PM range. */
+/** One flash request, addressed by the paragraph's live body range. */
 export interface CanvasParagraphFlashRequest {
   /** Paragraph node start position (inclusive). */
   from: number;

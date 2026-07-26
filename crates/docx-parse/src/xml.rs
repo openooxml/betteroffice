@@ -29,7 +29,7 @@ pub mod namespaces {
     pub const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 }
 
-/// Conservative defaults for the S1 XML/relationship foundation.
+/// Conservative defaults for the XML/relationship foundation.
 #[derive(Clone, Debug)]
 pub struct ParseLimits {
     pub max_xml_bytes: usize,

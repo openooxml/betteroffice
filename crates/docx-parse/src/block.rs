@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_block_sdts_empty_paragraphs_math_and_the_s7_table_boundary() {
+    fn preserves_block_sdts_empty_paragraphs_math_and_nested_tables() {
         let blocks = parse(
             r#"<w:body xmlns:w="w" xmlns:m="m">
               <w:p/>

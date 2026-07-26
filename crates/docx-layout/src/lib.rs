@@ -327,7 +327,7 @@ pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
 }
 
 /// wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
-/// point in, PM position (or `null`) as JSON out.
+/// point in, document position (or `null`) as JSON out.
 #[wasm_bindgen]
 pub fn hit_test_json(
     display_list: &str,
@@ -349,7 +349,7 @@ pub fn vertical_move_json(
         .map_err(|e| JsValue::from_str(&e))
 }
 
-/// wasm wrapper over [`hit::range_rects_json`]: display-list JSON + PM range
+/// wasm wrapper over [`hit::range_rects_json`]: display-list JSON + document range
 /// in, JSON array of page-local rects out.
 #[wasm_bindgen]
 pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String, JsValue> {
@@ -359,7 +359,7 @@ pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String
 /// wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
 /// `region` is `"body" | "header" | "footer"`; `r_id` scopes a header/footer to
 /// one HF part (empty for body / match-any). The `from`/`to` refer to that
-/// region's PM doc. The legacy `range_rects_json` export stays body-only.
+/// region's doc. The legacy `range_rects_json` export stays body-only.
 #[wasm_bindgen]
 pub fn range_rects_region_json(
     display_list: &str,

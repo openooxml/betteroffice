@@ -54,7 +54,7 @@ type Attrs = Record<string, unknown>;
 
 interface MarkDescriptor {
   name: string;
-  /** Complete PM-schema attrs, including non-null defaults. */
+  /** Complete schema attrs, including non-null defaults. */
   attrs: Attrs;
 }
 
@@ -62,7 +62,7 @@ interface TextUnit {
   kind: 'text';
   text: string;
   attrs: YrsAttrs;
-  /** PM node width, used only for bookmark offsets. */
+  /** Node width, used only for bookmark offsets. */
   pmSize: number;
   commentId?: number;
   marks: MarkDescriptor[];

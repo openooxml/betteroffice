@@ -1761,7 +1761,7 @@ enum FieldMode {
     Result,
 }
 
-/// Parse the S5-owned inline grammar at a paragraph/container boundary.
+/// Parse the inline grammar at a paragraph/container boundary.
 pub fn parse_inline_container(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,

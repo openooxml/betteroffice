@@ -84,7 +84,7 @@ pub struct NoteRegion {
     pub primitives: Vec<Primitive>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note_ids: Vec<i64>,
-    /// per-note backlink metadata (W17): body-doc anchor range + formatted
+    /// per-note backlink metadata: body-doc anchor range + formatted
     /// label per note, so the a11y mirror can wire note ↔ reference links.
     /// Additive; legacy regions omit it and serialize byte-identically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -97,7 +97,7 @@ pub struct NoteRegion {
 pub struct NoteRegionNote {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
-    /// body-doc PM range of the reference mark anchoring this note
+    /// body-doc range of the reference mark anchoring this note
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_doc_start: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,14 +163,14 @@ pub struct DocAttrs {
     /// whenever the primitive has block identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_key: Option<String>,
-    /// Exact PM range of the owning paragraph fragment. Primitive doc ranges
+    /// Exact document range of the owning paragraph fragment. Primitive doc ranges
     /// describe inline content (normally beginning at paragraph pmStart+1),
     /// while painter-compatible paragraph wrappers begin at fragment pmStart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment_doc_start: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment_doc_end: Option<i64>,
-    /// Stable Word `w14:paraId` / PM `paraId` of the enclosing paragraph.
+    /// Stable Word `w14:paraId` of the enclosing paragraph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub para_id: Option<String>,
     /// measured line window `[from_line, to_line)` of the paragraph fragment
@@ -198,7 +198,7 @@ pub struct DocAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<FieldMetadata>,
     /// footnote/endnote reference identity when this primitive is the body
-    /// reference mark (W17 backlinks). Additive + serde-optional.
+    /// reference mark (note backlinks). Additive + serde-optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_ref: Option<NoteRefMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1330,7 +1330,7 @@ pub(crate) struct ParagraphBlockIn {
     #[serde(default)]
     sdt_groups: Vec<SdtGroupIn>,
     pub(crate) id: Value,
-    /// stable Word `w14:paraId` / PM `paraId`, threaded onto the paragraph's
+    /// stable Word `w14:paraId`, threaded onto the paragraph's
     /// primitives so the a11y mirror can emit `data-para-id`
     #[serde(default)]
     pub(crate) para_id: Option<String>,
@@ -3470,7 +3470,7 @@ fn image_layout_height(run: &ImageRunIn) -> f64 {
 /// its on-line text; non-text runs pass through whole with empty text
 struct ResolvedSegment<'a> {
     run: &'a RunIn,
-    /// for boundary text runs: the sliced text + shifted pm positions
+    /// for boundary text runs: the sliced text + shifted document positions
     text: String,
     pm_start: Option<i64>,
     pm_end: Option<i64>,
@@ -3480,7 +3480,7 @@ fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-/// Slice using JavaScript/ProseMirror UTF-16 offsets. Start/end are snapped to
+/// Slice using UTF-16 offsets. Start/end are snapped to
 /// scalar boundaries so malformed hand-authored envelopes cannot split a
 /// surrogate pair; authoritative cluster metadata already lands on grapheme
 /// boundaries and therefore passes through unchanged.
@@ -3525,8 +3525,8 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
                 };
                 let end = end.max(start);
                 let text = slice_utf16_with_total(&t.text, total, start, end);
-                // an unsliced run keeps its own pm span; a boundary slice
-                // shifts the positions to match (text runs are 1 pm per char)
+                // an unsliced run keeps its own document span; a boundary slice
+                // shifts the positions to match (text runs are 1 position per char)
                 let (pm_start, pm_end) = if start == 0 && end == total {
                     (t.pm_start, t.pm_end.or(t.pm_start.map(|p| p + end as i64)))
                 } else {
@@ -3780,7 +3780,7 @@ pub(crate) struct FieldWidthEntry {
     pub(crate) per_page: Vec<f64>,
 }
 
-/// field pm position → per-page widths (see [`FieldWidthEntry`]).
+/// field document position → per-page widths (see [`FieldWidthEntry`]).
 pub(crate) type FieldWidthMap = HashMap<i64, FieldWidthEntry>;
 
 pub(crate) struct RenderCtx<'a> {
@@ -3797,7 +3797,7 @@ pub(crate) struct RenderCtx<'a> {
 
 impl RenderCtx<'_> {
     /// `(fallback_width, resolved_width_on_this_page)` for a field run, when the
-    /// input supplied a per-page width keyed on its pm position.
+    /// input supplied a per-page width keyed on its document position.
     fn field_width(&self, pm_start: Option<i64>) -> Option<(f64, f64)> {
         let entry = self.field_widths?.get(&pm_start?)?;
         let resolved = entry.per_page.get(self.page_index).copied()?;
@@ -4264,7 +4264,7 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
             separator_primitives,
             primitives,
             note_ids: area.notes.iter().filter_map(|note| note.id).collect(),
-            // W17 backlink metadata: emitted only for notes that actually
+            // backlink metadata: emitted only for notes that actually
             // carry anchor/label data, so anchor-less legacy inputs keep the
             // region serialization byte-identical
             notes: area
@@ -6126,7 +6126,7 @@ fn emit_text_segment(
     if let Some(field_run) = field {
         attrs.field = Some(field_metadata(field_run));
     }
-    // footnote/endnote body reference mark → note_ref, the W17 backlink hook
+    // footnote/endnote body reference mark → note_ref, the backlink hook
     // (the mirror renders it as a doc-noteref link to `oox-<kind>-<id>`)
     if let Some(id) = fmt.footnote_ref_id {
         attrs.note_ref = Some(NoteRefMetadata {
@@ -6532,7 +6532,7 @@ fn try_emit_glyph_runs(
             acc += advance;
         }
 
-        // text runs are 1 PM position per char, so a subrange's doc span shifts
+        // text runs are 1 document position per char, so a subrange's doc span shifts
         // pm_start by its char offset; the last subrange closes on pm_end so a
         // single-subrange run carries exactly the segment's [pm_start, pm_end]
         let mut sub_attrs = attrs.clone();
@@ -9988,7 +9988,7 @@ mod tests {
             .expect("plain text");
         assert!(plain["field"].is_null());
 
-        // 2) W17 note backlinks: body reference mark + region note metadata
+        // 2) note backlinks: body reference mark + region note metadata
         let ref_mark = primitives
             .iter()
             .find(|primitive| primitive["kind"] == "text" && primitive["text"] == "1")

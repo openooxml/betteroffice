@@ -104,7 +104,7 @@ export interface BuildMirrorPageOptions {
  * header/footer regions mirror the painter's structural classes: each HfRegion
  * becomes a `.layout-page-header` / `.layout-page-footer` wrapper at the band's
  * page-local y, and all of the region's primitives (including their block
- * wrappers and doc-range attrs, which refer to the HF PM doc identified by
+ * wrappers and doc-range attrs, which refer to the HF doc identified by
  * `data-hf-rid`) stay scoped inside it — never under `.layout-page-content`.
  *
  * data-from-line/to-line ride on paragraph fragment primitives (body, HF, text

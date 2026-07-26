@@ -1,5 +1,5 @@
 /**
- * Style Resolver for ProseMirror Editor
+ * Style Resolver
  *
  * Resolves OOXML style definitions to final paragraph and run properties.
  * Handles the cascade:

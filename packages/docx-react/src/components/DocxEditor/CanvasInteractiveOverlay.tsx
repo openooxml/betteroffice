@@ -6,12 +6,12 @@
  * clickable — they are the canvas path's `.layout-sdt-widget` /
  * `.layout-sdt-repeat-btn` triggers, so the existing delegated
  * ContentControlWidgets handlers pick their clicks up unchanged and route the
- * change through the active PM or yrs content-control write path.
+ * change through the active yrs content-control write path.
  *
  * The focus-steal guard lives INSIDE the core builder (a native mousedown
  * listener on the overlay root): a synthetic React handler here would fire at
  * the React root, after the canvas host's native pointer routing already moved
- * the PM caret. Rebuilt whenever the page's display list changes — the same
+ * the caret. Rebuilt whenever the page's display list changes — the same
  * trigger that re-rasters the canvas.
  */
 

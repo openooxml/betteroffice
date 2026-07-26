@@ -1970,7 +1970,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             first, expected,
-            "resident output must match the legacy oracle"
+            "resident output must match the uncached lowering"
         );
         let second = engine.lower_story_json("body", &env).unwrap();
         assert_eq!(first, second);

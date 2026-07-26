@@ -64,9 +64,8 @@ fn paragraph_scenarios_snapshot_and_determinism() {
     let update = std::env::var("DL_SNAPSHOT_UPDATE").as_deref() == Ok("1");
 
     for name in SCENARIOS {
-        let input = std::fs::read_to_string(fixture_path(name, "input")).unwrap_or_else(|_| {
-            panic!("missing input fixture for {name}; run scripts/export-displaylist-fixtures.ts")
-        });
+        let input = std::fs::read_to_string(fixture_path(name, "input"))
+            .unwrap_or_else(|_| panic!("missing input fixture for {name}"));
 
         // determinism gate: two runs are byte-identical
         let a = build_display_list_json(&input).expect("builds");
@@ -105,7 +104,7 @@ fn golden_corpus_display_list_determinism_and_snapshot() {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
 
     let mut names: Vec<String> = std::fs::read_dir(&fixtures)
-        .expect("fixtures dir exists — run `bun scripts/export-golden-fixtures.ts`")
+        .expect("fixtures dir exists")
         .filter_map(|e| {
             let n = e.ok()?.file_name().into_string().ok()?;
             n.strip_suffix(".input.json").map(str::to_string)
@@ -188,7 +187,7 @@ fn snapshot(name: &str) -> DisplayList {
 }
 
 // single-page-multi-paragraph: three one-line paragraphs at y 96/120/144,
-// x 96, widths 120/130/120, pm spans [1,16] [18,34] [36,51]
+// x 96, widths 120/130/120, doc spans [1,16] [18,34] [36,51]
 #[test]
 fn hit_test_resolves_clicks_to_nearest_text_position() {
     let dl = build("single-page-multi-paragraph");
@@ -197,7 +196,7 @@ fn hit_test_resolves_clicks_to_nearest_text_position() {
     // click at the very start of the first line lands on its first position
     assert_eq!(hit_test(&dl, 0, 96.0, 110.0), Some(1));
 
-    // click inside the first line resolves proportionally within its pm span
+    // click inside the first line resolves proportionally within its doc span
     let mid = hit_test(&dl, 0, 156.0, 110.0).unwrap();
     assert!((1..=16).contains(&mid), "mid-line hit out of span: {mid}");
     assert!(mid > 1, "mid-line hit should advance past the run start");
@@ -221,7 +220,7 @@ fn hit_test_reaches_content_on_later_pages() {
     let dl = build("multi-page-paragraph-overflow");
     assert_eq!(dl.pages.len(), 2);
 
-    // page 2's first paragraph is block 8 (pm 121..133), painted at y 96
+    // page 2's first paragraph is block 8 (positions 121..133), painted at y 96
     let pos = hit_test(&dl, 1, 100.0, 150.0).unwrap();
     assert!(pos >= 121, "page-2 hit resolved into page-1 content: {pos}");
 }
@@ -513,7 +512,7 @@ fn caret_rect_preserves_inline_image_edges() {
 #[test]
 fn range_rects_span_pages() {
     let dl = build("multi-page-paragraph-overflow");
-    // blocks 0..9 at pm i*15+1..i*15+13; select across the page break
+    // blocks 0..9 at positions i*15+1..i*15+13; select across the page break
     let rects = range_rects(&dl, 1, 148);
     let pages: std::collections::BTreeSet<usize> = rects.iter().map(|r| r.page_index).collect();
     assert_eq!(pages.into_iter().collect::<Vec<_>>(), vec![0, 1]);

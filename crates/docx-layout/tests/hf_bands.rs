@@ -12,9 +12,8 @@ fn fixture_path(name: &str, suffix: &str) -> std::path::PathBuf {
 }
 
 fn read(name: &str, suffix: &str) -> String {
-    std::fs::read_to_string(fixture_path(name, suffix)).unwrap_or_else(|_| {
-        panic!("missing {name}.{suffix}.json; run `bun scripts/export-hf-fixtures.ts`")
-    })
+    std::fs::read_to_string(fixture_path(name, suffix))
+        .unwrap_or_else(|_| panic!("missing {name}.{suffix}.json"))
 }
 
 fn build(name: &str) -> DisplayList {
@@ -123,7 +122,7 @@ fn hf_payload_absent_emits_no_regions() {
 #[test]
 fn hit_test_regions_resolves_bands_and_body() {
     // hf-default-both: header band y 48..72, footer band y 984..1008,
-    // margins.left 96; header paragraph pm span [1,15]
+    // margins.left 96; header paragraph doc span [1,15]
     let dl = build("hf-default-both");
 
     let hit = hit_test_regions(&dl, 0, 120.0, 60.0).unwrap();
@@ -162,7 +161,7 @@ fn hit_test_regions_resolves_bands_and_body() {
 #[test]
 fn range_rects_resolve_inside_hf_bands_scoped_by_rid() {
     // hf-default-both: header band y 48..72, footer band y 984..1008, header +
-    // footer paragraphs both span pm [1,15]. A range in the HEADER doc must
+    // footer paragraphs both span [1,15]. A range in the HEADER doc must
     // yield rects inside the header band only (not the footer, not the body).
     let dl = build("hf-default-both");
 
