@@ -31,8 +31,9 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    PlotAxisRange, PlotAxisTitles, PlotChart, PlotGroup, PlotLegend, PlotMarker, PlotOp, PlotPoint,
-    PlotRect, PlotSeries, PlotSink, chart_aria_label, plot_chart_into,
+    PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotGroup, PlotLegend,
+    PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint, PlotRect, PlotSeries, PlotSink,
+    chart_aria_label, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2170,6 +2171,8 @@ struct ChartIn {
     decorative: Option<bool>,
     #[serde(default)]
     plot_groups: Vec<ChartPlotGroupIn>,
+    #[serde(default)]
+    axis_list: Vec<ChartAxisIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2181,6 +2184,34 @@ struct ChartPlotGroupIn {
     grouping: Option<String>,
     #[serde(default)]
     series: Vec<ChartSeriesIn>,
+    #[serde(default)]
+    overlap: Option<f64>,
+    #[serde(default)]
+    gap_width: Option<f64>,
+    #[serde(default)]
+    hole_size: Option<f64>,
+    #[serde(default)]
+    first_slice_angle: Option<f64>,
+    #[serde(default)]
+    vary_colors: bool,
+    #[serde(default)]
+    scatter_style: Option<String>,
+    #[serde(default)]
+    radar_style: Option<String>,
+    #[serde(default)]
+    bubble_scale: Option<f64>,
+    #[serde(default)]
+    size_represents: Option<String>,
+    #[serde(default)]
+    wireframe: Option<bool>,
+    #[serde(default)]
+    hi_low_lines: bool,
+    #[serde(default)]
+    up_down_bars: bool,
+    #[serde(default)]
+    marker: Option<bool>,
+    #[serde(default)]
+    axis_ids: Vec<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2200,6 +2231,12 @@ struct ChartSeriesIn {
     grouping: Option<String>,
     #[serde(default)]
     marker: Option<Value>,
+    #[serde(default)]
+    x_values: Vec<f64>,
+    #[serde(default)]
+    bubble_sizes: Vec<f64>,
+    #[serde(default)]
+    smooth: bool,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2215,6 +2252,8 @@ struct ChartPointIn {
     marker: Option<Value>,
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    explosion: Option<f64>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2233,11 +2272,40 @@ struct ChartAxesIn {
 }
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ChartAxisIn {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     min: Option<f64>,
     #[serde(default)]
     max: Option<f64>,
+    #[serde(default)]
+    axis_type: Option<String>,
+    #[serde(default)]
+    logarithmic_base: Option<f64>,
+    #[serde(default)]
+    reversed: bool,
+    #[serde(default)]
+    major_unit: Option<f64>,
+    #[serde(default)]
+    minor_unit: Option<f64>,
+    #[serde(default)]
+    major_tick_mark: Option<String>,
+    #[serde(default)]
+    minor_tick_mark: Option<String>,
+    #[serde(default)]
+    major_gridlines: bool,
+    #[serde(default)]
+    minor_gridlines: bool,
+    #[serde(default)]
+    number_format: Option<String>,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    hidden: bool,
 }
 
 #[derive(Deserialize)]
@@ -7650,8 +7718,50 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 chart_type: group.chart_type.as_deref(),
                 grouping: group.grouping.as_deref(),
                 series: group.series.iter().map(plot_series_from).collect(),
+                overlap: group.overlap,
+                gap_width: group.gap_width,
+                hole_size: group.hole_size,
+                first_slice_angle: group.first_slice_angle,
+                vary_colors: group.vary_colors,
+                scatter_style: group.scatter_style.as_deref(),
+                radar_style: group.radar_style.as_deref(),
+                bubble_scale: group.bubble_scale,
+                size_represents: group.size_represents.as_deref(),
+                wireframe: group.wireframe,
+                hi_low_lines: group.hi_low_lines,
+                up_down_bars: group.up_down_bars,
+                markers: group.marker,
+                axis_ids: group.axis_ids.iter().map(String::as_str).collect(),
             })
             .collect(),
+        axes: chart.axis_list.iter().map(plot_axis_from).collect(),
+    }
+}
+
+fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
+    PlotAxis {
+        id: axis.id.as_deref(),
+        kind: axis
+            .axis_type
+            .as_deref()
+            .map(PlotAxisKind::from_name)
+            .unwrap_or(PlotAxisKind::Value),
+        range: PlotAxisRange {
+            min: axis.min,
+            max: axis.max,
+        },
+        log_base: axis.logarithmic_base,
+        reversed: axis.reversed,
+        major_unit: axis.major_unit,
+        minor_unit: axis.minor_unit,
+        major_tick_mark: axis.major_tick_mark.as_deref(),
+        minor_tick_mark: axis.minor_tick_mark.as_deref(),
+        major_gridlines: axis.major_gridlines,
+        minor_gridlines: axis.minor_gridlines,
+        number_format: axis.number_format.as_deref(),
+        position: axis.position.as_deref(),
+        title: axis.title.as_deref(),
+        hidden: axis.hidden,
     }
 }
 
@@ -7670,16 +7780,24 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 color: point.color.as_deref(),
                 marker: plot_marker_from(point.marker.as_ref()),
                 label: point.label.as_deref(),
+                explosion: point.explosion,
             })
             .collect(),
         grouping: series.grouping.as_deref(),
         marker: plot_marker_from(series.marker.as_ref()),
+        x_values: &series.x_values,
+        bubble_sizes: &series.bubble_sizes,
+        smooth: series.smooth,
     }
 }
 
 fn plot_marker_from(marker: Option<&Value>) -> Option<PlotMarker> {
     marker.map(|marker| PlotMarker {
         size: marker.get("size").and_then(Value::as_f64),
+        symbol: marker
+            .get("symbol")
+            .and_then(Value::as_str)
+            .and_then(PlotMarkerSymbol::from_name),
     })
 }
 

@@ -31,6 +31,12 @@ pub const MAX_PLOT_DATA_SCAN: usize = 200_000;
 pub const MAX_PLOT_GROUPS: usize = 64;
 /// Hard ceiling on the series one chart may draw, across all its plot groups.
 pub const MAX_PLOT_SERIES: usize = 1_024;
+/// Hard ceiling on the ticks one axis may place, whatever unit it asks for.
+pub const MAX_PLOT_AXIS_TICKS: usize = 64;
+/// Hard ceiling on the cells one surface chart may band.
+pub const MAX_PLOT_SURFACE_CELLS: usize = 16_384;
+/// Hard ceiling on the vertices one area or radar polygon may carry.
+pub const MAX_PLOT_POLYGON_POINTS: usize = 8_192;
 /// Coordinates are clamped here so every emitted op stays finite.
 pub const MAX_PLOT_COORD: f64 = 1e9;
 
@@ -125,6 +131,9 @@ pub struct PlotChart<'a> {
     pub axis_titles: PlotAxisTitles<'a>,
     pub series: Vec<PlotSeries<'a>>,
     pub plot_groups: Vec<PlotGroup<'a>>,
+    /// Every `c:catAx`, `c:valAx`, `c:dateAx` and `c:serAx` of the plot area,
+    /// in document order, so a plot group can find the axis it names.
+    pub axes: Vec<PlotAxis<'a>>,
 }
 
 /// Axis titles, drawn horizontally because [`PlotOp::Text`] has no rotation.
@@ -146,11 +155,67 @@ pub struct PlotAxisRange {
     pub max: Option<f64>,
 }
 
+/// Which family of values an axis carries; charts key their scales off it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlotAxisKind {
+    #[default]
+    Category,
+    Value,
+    Date,
+    Series,
+}
+
+impl PlotAxisKind {
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "value" => Self::Value,
+            "date" => Self::Date,
+            "series" => Self::Series,
+            _ => Self::Category,
+        }
+    }
+}
+
+/// One `c:catAx`, `c:valAx`, `c:dateAx` or `c:serAx`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotAxis<'a> {
+    pub id: Option<&'a str>,
+    pub kind: PlotAxisKind,
+    pub range: PlotAxisRange,
+    pub log_base: Option<f64>,
+    pub reversed: bool,
+    pub major_unit: Option<f64>,
+    pub minor_unit: Option<f64>,
+    pub major_tick_mark: Option<&'a str>,
+    pub minor_tick_mark: Option<&'a str>,
+    pub major_gridlines: bool,
+    pub minor_gridlines: bool,
+    pub number_format: Option<&'a str>,
+    pub position: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub hidden: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlotGroup<'a> {
     pub chart_type: Option<&'a str>,
     pub grouping: Option<&'a str>,
     pub series: Vec<PlotSeries<'a>>,
+    pub overlap: Option<f64>,
+    pub gap_width: Option<f64>,
+    pub hole_size: Option<f64>,
+    pub first_slice_angle: Option<f64>,
+    pub vary_colors: bool,
+    pub scatter_style: Option<&'a str>,
+    pub radar_style: Option<&'a str>,
+    pub bubble_scale: Option<f64>,
+    pub size_represents: Option<&'a str>,
+    pub wireframe: Option<bool>,
+    pub hi_low_lines: bool,
+    pub up_down_bars: bool,
+    /// `c:marker` of a line chart: `Some(false)` switches every marker off.
+    pub markers: Option<bool>,
+    pub axis_ids: Vec<&'a str>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -162,6 +227,11 @@ pub struct PlotSeries<'a> {
     pub points: Vec<PlotPoint<'a>>,
     pub grouping: Option<&'a str>,
     pub marker: Option<PlotMarker>,
+    /// `c:xVal` of a scatter or bubble series; empty means categorical x.
+    pub x_values: &'a [f64],
+    /// `c:bubbleSize` of a bubble series.
+    pub bubble_sizes: &'a [f64],
+    pub smooth: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -171,11 +241,68 @@ pub struct PlotPoint<'a> {
     pub color: Option<&'a str>,
     pub marker: Option<PlotMarker>,
     pub label: Option<&'a str>,
+    /// `c:explosion`, a percentage of the pie radius.
+    pub explosion: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlotMarker {
     pub size: Option<f64>,
+    pub symbol: Option<PlotMarkerSymbol>,
+}
+
+/// A `c:symbol`. An unset symbol keeps the square the geometry has always
+/// drawn; `Auto` cycles Excel's automatic sequence by series index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlotMarkerSymbol {
+    Auto,
+    None,
+    Circle,
+    Dash,
+    Diamond,
+    Dot,
+    Plus,
+    Square,
+    Star,
+    Triangle,
+    X,
+}
+
+impl PlotMarkerSymbol {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "auto" => Self::Auto,
+            "none" => Self::None,
+            "circle" => Self::Circle,
+            "dash" => Self::Dash,
+            "diamond" => Self::Diamond,
+            "dot" => Self::Dot,
+            "plus" => Self::Plus,
+            "square" => Self::Square,
+            "star" => Self::Star,
+            "triangle" => Self::Triangle,
+            "x" => Self::X,
+            _ => return None,
+        })
+    }
+
+    /// What `auto` resolves to for the `index`th series.
+    fn resolved(self, index: usize) -> Self {
+        const CYCLE: [PlotMarkerSymbol; 8] = [
+            PlotMarkerSymbol::Diamond,
+            PlotMarkerSymbol::Square,
+            PlotMarkerSymbol::Triangle,
+            PlotMarkerSymbol::X,
+            PlotMarkerSymbol::Star,
+            PlotMarkerSymbol::Dot,
+            PlotMarkerSymbol::Plus,
+            PlotMarkerSymbol::Dash,
+        ];
+        match self {
+            Self::Auto => CYCLE[index % CYCLE.len()],
+            symbol => symbol,
+        }
+    }
 }
 
 impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
@@ -215,9 +342,52 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                     chart_type: group.chart_type.as_deref(),
                     grouping: group.grouping.as_deref(),
                     series: group.series.iter().map(plot_series_from_model).collect(),
+                    overlap: group.overlap,
+                    gap_width: group.gap_width,
+                    hole_size: group.hole_size,
+                    first_slice_angle: group.first_slice_angle,
+                    vary_colors: group.vary_colors,
+                    scatter_style: group.scatter_style.as_deref(),
+                    radar_style: group.radar_style.as_deref(),
+                    bubble_scale: group.bubble_scale,
+                    size_represents: group.size_represents.as_deref(),
+                    wireframe: group.wireframe,
+                    hi_low_lines: group.hi_low_lines,
+                    up_down_bars: group.up_down_bars,
+                    markers: group.marker,
+                    axis_ids: group.axis_ids.iter().map(String::as_str).collect(),
                 })
                 .collect(),
+            axes: space
+                .axis_list
+                .iter()
+                .flatten()
+                .map(plot_axis_from_model)
+                .collect(),
         }
+    }
+}
+
+fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
+    PlotAxis {
+        id: axis.id.as_deref(),
+        kind: PlotAxisKind::from_name(&axis.axis_type),
+        range: PlotAxisRange {
+            min: axis.min,
+            max: axis.max,
+        },
+        log_base: axis.logarithmic_base,
+        reversed: axis.reversed,
+        major_unit: axis.major_unit,
+        minor_unit: axis.minor_unit,
+        major_tick_mark: axis.major_tick_mark.as_deref(),
+        minor_tick_mark: axis.minor_tick_mark.as_deref(),
+        major_gridlines: axis.major_gridlines,
+        minor_gridlines: axis.minor_gridlines,
+        number_format: axis.number_format.as_deref(),
+        position: axis.position.as_deref(),
+        title: axis.title.as_deref(),
+        hidden: axis.hidden,
     }
 }
 
@@ -241,14 +411,25 @@ fn plot_series_from_model(series: &super::model::ChartSeries) -> PlotSeries<'_> 
                     color: Some(&point.color),
                     marker: None,
                     label: None,
+                    explosion: point.explosion,
                 })
             })
             .collect(),
         grouping: series.grouping.as_deref(),
-        marker: series
-            .marker
-            .as_ref()
-            .map(|marker| PlotMarker { size: marker.size }),
+        marker: series.marker.as_ref().map(plot_marker_from_model),
+        x_values: series.x_values.as_deref().unwrap_or_default(),
+        bubble_sizes: series.bubble_sizes.as_deref().unwrap_or_default(),
+        smooth: series.smooth.unwrap_or(false),
+    }
+}
+
+fn plot_marker_from_model(marker: &super::model::ChartMarker) -> PlotMarker {
+    PlotMarker {
+        size: marker.size,
+        symbol: marker
+            .symbol
+            .as_deref()
+            .and_then(PlotMarkerSymbol::from_name),
     }
 }
 
@@ -311,10 +492,15 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         x + 42.0
     };
+    let secondary_w = if secondary_value_axis(chart).is_some() {
+        38.0
+    } else {
+        0.0
+    };
     let plot = PlotArea {
         x: plot_x,
         y: y + title_h,
-        w: (width - 42.0 - legend_w - 10.0).max(24.0),
+        w: (width - 42.0 - legend_w - 10.0 - secondary_w).max(24.0),
         h: (height - title_h - 34.0).max(24.0),
     };
 
@@ -327,6 +513,14 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 series: &series,
                 value_axis: chart.value_axis,
                 axis_titles: chart.axis_titles,
+                group: None,
+                axis: None,
+                x_axis: None,
+                category_axis: chart
+                    .axes
+                    .iter()
+                    .find(|axis| axis.kind != PlotAxisKind::Value),
+                secondary: false,
             },
             plot,
             x,
@@ -335,11 +529,17 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             height - title_h,
         );
     } else {
+        let primary = primary_value_axis(chart);
         for group in chart.plot_groups.iter().take(MAX_PLOT_GROUPS) {
             if ops.exhausted() {
                 break;
             }
             let series = series_views(&group.series, scan);
+            let (x_axis, axis) = group_value_axes(chart, group);
+            let secondary = match (axis, primary) {
+                (Some(axis), Some(primary)) => axis.id != primary.id,
+                _ => false,
+            };
             emit_family(
                 ops,
                 PlotFamily {
@@ -347,6 +547,11 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                     series: &series,
                     value_axis: chart.value_axis,
                     axis_titles: chart.axis_titles,
+                    group: Some(group),
+                    axis,
+                    x_axis,
+                    category_axis: group_category_axis(chart, group),
+                    secondary,
                 },
                 plot,
                 x,
@@ -384,11 +589,22 @@ pub fn chart_aria_label(chart: &PlotChart<'_>) -> String {
     let kind = if chart.plot_groups.len() > 1 {
         "combo chart"
     } else {
-        match chart.chart_type {
+        let family = chart
+            .plot_groups
+            .first()
+            .and_then(|group| group.chart_type)
+            .unwrap_or(chart.chart_type);
+        match family {
             "bar" => "bar chart",
             "line" => "line chart",
-            "pie" => "pie chart",
+            "pie" | "ofPie" => "pie chart",
             "doughnut" => "doughnut chart",
+            "area" => "area chart",
+            "scatter" => "scatter chart",
+            "bubble" => "bubble chart",
+            "radar" => "radar chart",
+            "stock" => "stock chart",
+            "surface" => "surface chart",
             _ => "column chart",
         }
     };
@@ -440,13 +656,114 @@ impl<S: PlotSink + ?Sized> Emitter<'_, S> {
 }
 
 /// The slice of a chart one plot family draws: a combo chart emits one per
-/// plot group, all sharing the outer chart's value axis.
+/// plot group, each against whichever value axis its `c:axId` list names.
 #[derive(Clone, Copy)]
 struct PlotFamily<'a> {
     chart_type: &'a str,
     series: &'a [SeriesView<'a>],
     value_axis: Option<PlotAxisRange>,
     axis_titles: PlotAxisTitles<'a>,
+    group: Option<&'a PlotGroup<'a>>,
+    axis: Option<&'a PlotAxis<'a>>,
+    /// The x value axis of a scatter or bubble group.
+    x_axis: Option<&'a PlotAxis<'a>>,
+    category_axis: Option<&'a PlotAxis<'a>>,
+    /// The group plots against a value axis other than the chart's first.
+    secondary: bool,
+}
+
+impl<'a> PlotFamily<'a> {
+    fn grouping(&self) -> &'a str {
+        self.group
+            .and_then(|group| group.grouping)
+            .or_else(|| {
+                self.series
+                    .first()
+                    .and_then(|series| series.series.grouping)
+            })
+            .unwrap_or("clustered")
+    }
+
+    fn stacking(&self) -> Stacking {
+        match self.grouping() {
+            "stacked" => Stacking::Stacked,
+            "percentStacked" => Stacking::Percent,
+            _ => Stacking::None,
+        }
+    }
+}
+
+/// How a family piles its series onto one another.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stacking {
+    None,
+    Stacked,
+    Percent,
+}
+
+/// The value axes `group` names as `(x, y)`. A scatter or bubble group names
+/// two, x first; every other family names one, which is the y axis.
+fn group_value_axes<'a>(
+    chart: &'a PlotChart<'a>,
+    group: &PlotGroup<'a>,
+) -> (Option<&'a PlotAxis<'a>>, Option<&'a PlotAxis<'a>>) {
+    let mut named = chart.axes.iter().filter(|axis| {
+        axis.kind == PlotAxisKind::Value && axis.id.is_some_and(|id| group.axis_ids.contains(&id))
+    });
+    match (named.next(), named.next()) {
+        (Some(first), Some(second)) => (Some(first), Some(second)),
+        (Some(only), None) => (None, Some(only)),
+        _ => (
+            None,
+            chart
+                .axes
+                .iter()
+                .find(|axis| axis.kind == PlotAxisKind::Value),
+        ),
+    }
+}
+
+/// The value axis the chart's first plot group measures against.
+fn primary_value_axis<'a>(chart: &'a PlotChart<'a>) -> Option<&'a PlotAxis<'a>> {
+    chart
+        .plot_groups
+        .first()
+        .and_then(|group| group_value_axes(chart, group).1)
+        .or_else(|| {
+            chart
+                .axes
+                .iter()
+                .find(|axis| axis.kind == PlotAxisKind::Value)
+        })
+}
+
+fn group_category_axis<'a>(
+    chart: &'a PlotChart<'a>,
+    group: &PlotGroup<'a>,
+) -> Option<&'a PlotAxis<'a>> {
+    chart
+        .axes
+        .iter()
+        .find(|axis| {
+            axis.kind != PlotAxisKind::Value
+                && axis.id.is_some_and(|id| group.axis_ids.contains(&id))
+        })
+        .or_else(|| {
+            chart
+                .axes
+                .iter()
+                .find(|axis| axis.kind != PlotAxisKind::Value)
+        })
+}
+
+/// A second value axis some plot group plots against, which needs its own
+/// scale and its own labels on the far side of the plot area.
+fn secondary_value_axis<'a>(chart: &'a PlotChart<'a>) -> Option<&'a PlotAxis<'a>> {
+    let primary = primary_value_axis(chart)?;
+    chart.plot_groups.iter().find_map(|group| {
+        let axis = group_value_axes(chart, group).1?;
+        (axis.id != primary.id).then_some(axis)
+    })
 }
 
 /// A series plus a first-match index over its points, so a lookup costs a
@@ -554,6 +871,43 @@ impl<'a> SeriesView<'a> {
             .clamp(1.0, 24.0)
     }
 
+    /// The symbol to draw at `index`, or `None` for a point that draws none.
+    fn marker_symbol(&self, index: usize, series_index: usize) -> Option<PlotMarkerSymbol> {
+        let symbol = self
+            .point(index)
+            .and_then(|point| point.marker.as_ref())
+            .or(self.series.marker.as_ref())
+            .and_then(|marker| marker.symbol)
+            .unwrap_or(PlotMarkerSymbol::Square)
+            .resolved(series_index);
+        (symbol != PlotMarkerSymbol::None).then_some(symbol)
+    }
+
+    fn x_value(&self, index: usize) -> Option<f64> {
+        self.series
+            .x_values
+            .get(index)
+            .copied()
+            .filter(|value| value.is_finite())
+    }
+
+    fn bubble_size(&self, index: usize) -> f64 {
+        self.series
+            .bubble_sizes
+            .get(index)
+            .copied()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(0.0)
+    }
+
+    fn explosion(&self, index: usize) -> f64 {
+        self.point(index)
+            .and_then(|point| point.explosion)
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+            .clamp(0.0, 400.0)
+    }
+
     fn length(&self) -> usize {
         series_length(self.series)
     }
@@ -578,7 +932,13 @@ fn emit_family<S: PlotSink + ?Sized>(
 ) {
     match family.chart_type {
         "pie" | "doughnut" | "ofPie" => emit_pie(ops, family, x, y, width, height),
-        "line" | "scatter" | "radar" => emit_line(ops, family, plot),
+        "line" => emit_line(ops, family, plot),
+        "area" => emit_area(ops, family, plot),
+        "scatter" => emit_scatter(ops, family, plot),
+        "bubble" => emit_bubble(ops, family, plot),
+        "radar" => emit_radar(ops, family, plot, x, y, width, height),
+        "stock" => emit_stock(ops, family, plot),
+        "surface" => emit_surface(ops, family, plot),
         "bar" => emit_bar(ops, family, plot, true),
         _ => emit_bar(ops, family, plot, false),
     }
@@ -674,6 +1034,8 @@ fn series_length(series: &PlotSeries<'_>) -> usize {
         .len()
         .max(series.values.len())
         .max(series.points.len())
+        .max(series.x_values.len())
+        .max(series.bubble_sizes.len())
 }
 
 fn category_count(series: &[SeriesView<'_>]) -> usize {
@@ -687,7 +1049,112 @@ fn category_label(series: &[SeriesView<'_>], index: usize) -> String {
         .unwrap_or_else(|| (index + 1).to_string())
 }
 
-fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
+/// Maps a value onto the plot area, honouring log bases and reversed axes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ValueScale {
+    min: f64,
+    max: f64,
+    log_base: Option<f64>,
+    reversed: bool,
+    percent: bool,
+}
+
+impl ValueScale {
+    /// Where `value` sits between the bounds, 0 at the axis start and 1 at its
+    /// end, before any reversal.
+    fn fraction(&self, value: f64) -> f64 {
+        let raw = match self.log_base {
+            Some(base) if base > 1.0 && self.min > 0.0 && self.max > self.min => {
+                let log = |value: f64| value.max(f64::MIN_POSITIVE).log(base);
+                (log(value.max(self.min)) - log(self.min)) / (log(self.max) - log(self.min))
+            }
+            _ => (value - self.min) / (self.max - self.min),
+        };
+        if raw.is_finite() { raw } else { 0.0 }
+    }
+
+    fn ratio(&self, value: f64) -> f64 {
+        let fraction = self.fraction(value).clamp(0.0, 1.0);
+        if self.reversed {
+            1.0 - fraction
+        } else {
+            fraction
+        }
+    }
+
+    fn y(&self, plot: PlotArea, value: f64) -> f64 {
+        plot.y + (1.0 - self.ratio(value)) * plot.h
+    }
+
+    fn x(&self, plot: PlotArea, value: f64) -> f64 {
+        plot.x + self.ratio(value) * plot.w
+    }
+
+    /// The value the axis carries zero at, pulled inside the bounds.
+    fn baseline(&self) -> f64 {
+        0.0_f64.clamp(self.min, self.max)
+    }
+
+    fn format(&self, value: f64, code: Option<&str>) -> String {
+        if let Some(formatted) = code.and_then(|code| format_with_code(value, code)) {
+            return formatted;
+        }
+        if self.percent {
+            return format_percent(value);
+        }
+        format_number(value)
+    }
+}
+
+/// Positive and negative running totals per category, for a stacked family.
+fn stacked_totals(family: PlotFamily<'_>) -> (f64, f64) {
+    let (mut low, mut high) = (0.0_f64, 0.0_f64);
+    let categories = category_count(family.series).min(MAX_PLOT_DATA_SCAN);
+    for index in 0..categories {
+        let (mut negative, mut positive) = (0.0_f64, 0.0_f64);
+        for series in family.series {
+            let value = series.value(index);
+            if !value.is_finite() {
+                continue;
+            }
+            if value < 0.0 {
+                negative += value;
+            } else {
+                positive += value;
+            }
+        }
+        low = low.min(negative);
+        high = high.max(positive);
+    }
+    (low, high)
+}
+
+/// A percent-stacked family reaches 100% upward and, when a category carries
+/// negative values, their share downward.
+fn percent_range(family: PlotFamily<'_>) -> (f64, f64) {
+    let (mut low, mut high) = (0.0_f64, 0.0_f64);
+    let categories = category_count(family.series).min(MAX_PLOT_DATA_SCAN);
+    for index in 0..categories {
+        let (mut negative, mut total) = (0.0_f64, 0.0_f64);
+        for series in family.series {
+            let value = series.value(index);
+            if !value.is_finite() {
+                continue;
+            }
+            total += value.abs();
+            if value < 0.0 {
+                negative += value;
+            }
+        }
+        if total > 0.0 {
+            low = low.min(negative / total);
+            high = high.max(1.0 + negative / total);
+        }
+    }
+    (low, if high > 0.0 { high } else { 1.0 })
+}
+
+fn plain_range(family: PlotFamily<'_>) -> (f64, f64) {
     let mut min = 0.0;
     let mut max = 0.0;
     let mut remaining = MAX_PLOT_DATA_SCAN;
@@ -707,13 +1174,32 @@ fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
             }
         }
     }
-    if let Some(axis) = family.value_axis.as_ref() {
-        if let Some(value) = axis.min.filter(|value| value.is_finite()) {
-            min = value;
-        }
-        if let Some(value) = axis.max.filter(|value| value.is_finite()) {
-            max = value;
-        }
+    (min, max)
+}
+
+#[cfg(test)]
+fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
+    let scale = value_scale(family);
+    (scale.min, scale.max)
+}
+
+fn value_scale(family: PlotFamily<'_>) -> ValueScale {
+    let stacking = family.stacking();
+    let (mut min, mut max) = match stacking {
+        Stacking::Percent => percent_range(family),
+        Stacking::Stacked => stacked_totals(family),
+        Stacking::None => plain_range(family),
+    };
+    let bounds = family
+        .axis
+        .map(|axis| axis.range)
+        .or(family.value_axis)
+        .unwrap_or_default();
+    if let Some(value) = bounds.min.filter(|value| value.is_finite()) {
+        min = value;
+    }
+    if let Some(value) = bounds.max.filter(|value| value.is_finite()) {
+        max = value;
     }
     if max <= min {
         max = min + 1.0;
@@ -721,11 +1207,70 @@ fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
     if !(max - min).is_finite() || max <= min {
         (min, max) = (0.0, 1.0);
     }
-    (min, max)
+    ValueScale {
+        min,
+        max,
+        log_base: family
+            .axis
+            .and_then(|axis| axis.log_base)
+            .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0),
+        reversed: family.axis.is_some_and(|axis| axis.reversed),
+        percent: stacking == Stacking::Percent,
+    }
 }
 
-fn value_y(plot: PlotArea, value: f64, min: f64, max: f64) -> f64 {
-    plot.y + (max - value) / (max - min) * plot.h
+/// The major tick values of `scale`: powers of the base on a log axis, at
+/// `c:majorUnit` when it names one, and at five even steps otherwise.
+fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
+    let span = scale.max - scale.min;
+    if let Some(base) = scale.log_base {
+        let first = scale.min.log(base).ceil();
+        let last = scale.max.log(base).floor();
+        if last >= first && (last - first) < MAX_PLOT_AXIS_TICKS as f64 {
+            let ticks: Vec<f64> = (0..=(last - first) as usize)
+                .map(|step| base.powf(first + step as f64))
+                .filter(|value| value.is_finite())
+                .collect();
+            if ticks.len() >= 2 {
+                return ticks;
+            }
+        }
+    }
+    if let Some(unit) = unit.filter(|unit| unit.is_finite() && *unit > 0.0) {
+        let steps = (span / unit).floor();
+        if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
+            let first = (scale.min / unit).ceil() * unit;
+            let mut ticks = Vec::new();
+            let mut index = 0;
+            while ticks.len() < MAX_PLOT_AXIS_TICKS {
+                let value = first + unit * index as f64;
+                if !value.is_finite() || value > scale.max + unit * 1e-9 {
+                    break;
+                }
+                ticks.push(value);
+                index += 1;
+            }
+            if ticks.len() >= 2 {
+                return ticks;
+            }
+        }
+    }
+    (0..=4)
+        .map(|step| match step {
+            4 => scale.max,
+            step => scale.min + span * step as f64 / 4.0,
+        })
+        .collect()
+}
+
+/// Half-length of a tick mark drawn for `mark`, and whether it crosses.
+fn tick_extents(mark: Option<&str>) -> Option<(f64, f64)> {
+    match mark? {
+        "in" => Some((0.0, 4.0)),
+        "out" => Some((4.0, 0.0)),
+        "cross" => Some((3.0, 3.0)),
+        _ => None,
+    }
 }
 
 fn emit_axes<S: PlotSink + ?Sized>(
@@ -733,20 +1278,74 @@ fn emit_axes<S: PlotSink + ?Sized>(
     family: PlotFamily<'_>,
     plot: PlotArea,
 ) {
-    let (min, max) = value_range(family);
-    for i in 0..=4 {
-        let t = i as f64 / 4.0;
-        let y = plot.y + t * plot.h;
-        push_line(ops, plot.x, y, plot.x + plot.w, y, CHART_GRID_COLOR, 0.5);
-        let value = max - t * (max - min);
+    let scale = value_scale(family);
+    let axis = family.axis;
+    let hidden = axis.is_some_and(|axis| axis.hidden);
+    let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
+    let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines);
+    let number_format = axis.and_then(|axis| axis.number_format);
+    let (edge, outward) = if family.secondary {
+        (plot.x + plot.w, 1.0)
+    } else {
+        (plot.x, -1.0)
+    };
+    let label_x = if family.secondary {
+        plot.x + plot.w + 4.0
+    } else {
+        plot.x - 38.0
+    };
+
+    if let Some(minor_unit) = axis.and_then(|axis| axis.minor_unit).filter(|_| minor_grid) {
+        for value in axis_ticks(scale, Some(minor_unit)) {
+            let y = scale.y(plot, value);
+            push_line(ops, plot.x, y, plot.x + plot.w, y, CHART_GRID_COLOR, 0.25);
+        }
+    }
+    for value in axis_ticks(scale, axis.and_then(|axis| axis.major_unit))
+        .into_iter()
+        .rev()
+    {
+        if ops.exhausted() {
+            return;
+        }
+        let y = scale.y(plot, value);
+        if major_grid {
+            push_line(ops, plot.x, y, plot.x + plot.w, y, CHART_GRID_COLOR, 0.5);
+        }
+        if hidden {
+            continue;
+        }
         push_text(
             ops,
-            &format_number(value),
-            plot.x - 38.0,
+            &scale.format(value, number_format),
+            label_x,
             y + 3.0,
             34.0,
             CHART_LABEL_FONT,
         );
+        if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
+            push_line(
+                ops,
+                edge + outward * outer,
+                y,
+                edge - outward * inner,
+                y,
+                CHART_AXIS_COLOR,
+                1.0,
+            );
+        }
+    }
+    if family.secondary {
+        push_line(
+            ops,
+            plot.x + plot.w,
+            plot.y,
+            plot.x + plot.w,
+            plot.y + plot.h,
+            CHART_AXIS_COLOR,
+            1.0,
+        );
+        return;
     }
     push_line(
         ops,
@@ -791,6 +1390,99 @@ fn emit_axes<S: PlotSink + ?Sized>(
         );
     }
 }
+/// Where one category's bars sit inside its slot, from `c:gapWidth` and
+/// `c:overlap`.
+#[derive(Clone, Copy)]
+struct BarBands {
+    slot: f64,
+    bar: f64,
+    lead: f64,
+    step: f64,
+}
+
+fn bar_bands(family: PlotFamily<'_>, categories: usize, extent: f64) -> BarBands {
+    let stacking = family.stacking();
+    let lanes = if stacking == Stacking::None {
+        family.series.len().max(1)
+    } else {
+        1
+    };
+    let gap = family
+        .group
+        .and_then(|group| group.gap_width)
+        .filter(|gap| gap.is_finite())
+        .unwrap_or(150.0)
+        .clamp(0.0, 500.0)
+        / 100.0;
+    let overlap = family
+        .group
+        .and_then(|group| group.overlap)
+        .filter(|overlap| overlap.is_finite())
+        .unwrap_or(if stacking == Stacking::None {
+            0.0
+        } else {
+            100.0
+        })
+        .clamp(-100.0, 100.0)
+        / 100.0;
+    let slot = extent / categories.max(1) as f64;
+    let span = lanes as f64 - (lanes as f64 - 1.0) * overlap;
+    let bar = (slot / (span + gap).max(0.1)).clamp(0.5, extent.max(0.5));
+    BarBands {
+        slot,
+        bar,
+        lead: (slot - bar * span).max(0.0) / 2.0,
+        step: bar * (1.0 - overlap),
+    }
+}
+
+/// Drawing position of the `index`th category, which a reversed category axis
+/// counts from the far end.
+fn category_position(family: PlotFamily<'_>, index: usize, count: usize) -> usize {
+    if family.category_axis.is_some_and(|axis| axis.reversed) {
+        count.saturating_sub(1).saturating_sub(index)
+    } else {
+        index
+    }
+}
+
+/// The `[start, end]` value span each series occupies in one category, piled
+/// up for a stacked family and measured from the baseline otherwise.
+fn stacked_spans(family: PlotFamily<'_>, category: usize, spans: &mut Vec<(f64, f64)>) {
+    spans.clear();
+    let stacking = family.stacking();
+    let total: f64 = if stacking == Stacking::Percent {
+        family
+            .series
+            .iter()
+            .map(|series| series.value(category).abs())
+            .filter(|value| value.is_finite())
+            .sum()
+    } else {
+        0.0
+    };
+    let (mut positive, mut negative) = (0.0_f64, 0.0_f64);
+    for series in family.series {
+        let mut value = series.value(category);
+        if !value.is_finite() {
+            value = 0.0;
+        }
+        if stacking == Stacking::Percent {
+            value = if total > 0.0 { value / total } else { 0.0 };
+        }
+        match stacking {
+            Stacking::None => spans.push((0.0, value)),
+            _ if value < 0.0 => {
+                spans.push((negative, negative + value));
+                negative += value;
+            }
+            _ => {
+                spans.push((positive, positive + value));
+                positive += value;
+            }
+        }
+    }
+}
 
 fn emit_bar<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
@@ -803,91 +1495,108 @@ fn emit_bar<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let (min, max) = value_range(family);
-    let zero_y = value_y(plot, 0.0_f64.clamp(min, max), min, max);
-    let series_count = family.series.len().max(1);
-    if horizontal {
-        let row_h = plot.h / cat_count as f64;
-        let bar_h = (row_h * 0.7 / series_count as f64).max(1.0);
-        for cat_idx in 0..cat_count {
-            if ops.exhausted() {
-                return;
-            }
-            let label = category_label(family.series, cat_idx);
+    let scale = value_scale(family);
+    let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
+    let spans = &mut Vec::with_capacity(family.series.len());
+    for cat_idx in 0..cat_count {
+        if ops.exhausted() {
+            return;
+        }
+        let slot = bands.slot * category_position(family, cat_idx, cat_count) as f64;
+        let label = category_label(family.series, cat_idx);
+        if horizontal {
             push_text(
                 ops,
                 &label,
                 plot.x - 38.0,
-                plot.y + row_h * (cat_idx as f64 + 0.55),
+                plot.y + slot + bands.slot * 0.55,
                 36.0,
                 CHART_LABEL_FONT,
             );
-            for (ser_idx, series) in family.series.iter().enumerate() {
-                let value = series.value(cat_idx);
-                let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0);
-                let bar_w = ratio * plot.w;
-                let y = plot.y + row_h * cat_idx as f64 + row_h * 0.15 + bar_h * ser_idx as f64;
-                push_rect(
-                    ops,
-                    plot.x,
-                    y,
-                    bar_w,
-                    bar_h,
-                    &series.point_color(cat_idx, ser_idx),
-                );
+        } else {
+            push_text(
+                ops,
+                &label,
+                plot.x + slot + 2.0,
+                plot.y + plot.h + 14.0,
+                bands.slot - 4.0,
+                CHART_LABEL_FONT,
+            );
+        }
+        stacked_spans(family, cat_idx, spans);
+        for (ser_idx, series) in family.series.iter().enumerate() {
+            let (start, end) = spans.get(ser_idx).copied().unwrap_or((0.0, 0.0));
+            let lane = if family.stacking() == Stacking::None {
+                ser_idx as f64
+            } else {
+                0.0
+            };
+            let offset = slot + bands.lead + bands.step * lane;
+            let color = series.point_color(cat_idx, ser_idx);
+            if horizontal {
+                let (x0, x1) = (scale.x(plot, start), scale.x(plot, end));
+                let y = plot.y + offset;
+                push_rect(ops, x0.min(x1), y, (x1 - x0).abs(), bands.bar, &color);
                 if let Some(label) = series.point(cat_idx).and_then(|point| point.label) {
                     push_text(
                         ops,
                         label,
-                        plot.x + bar_w + 3.0,
-                        y + bar_h,
+                        x0.max(x1) + 3.0,
+                        y + bands.bar,
                         48.0,
                         CHART_LABEL_FONT,
                     );
                 }
-            }
-        }
-    } else {
-        let group_w = plot.w / cat_count as f64;
-        let bar_w = (group_w * 0.7 / series_count as f64).max(1.0);
-        for cat_idx in 0..cat_count {
-            if ops.exhausted() {
-                return;
-            }
-            let label = category_label(family.series, cat_idx);
-            push_text(
-                ops,
-                &label,
-                plot.x + group_w * cat_idx as f64 + 2.0,
-                plot.y + plot.h + 14.0,
-                group_w - 4.0,
-                CHART_LABEL_FONT,
-            );
-            for (ser_idx, series) in family.series.iter().enumerate() {
-                let value = series.value(cat_idx);
-                let yv = value_y(plot, value.clamp(min, max), min, max);
-                let y0 = zero_y;
-                let x = plot.x + group_w * cat_idx as f64 + group_w * 0.15 + bar_w * ser_idx as f64;
+            } else {
+                let (y0, y1) = (scale.y(plot, start), scale.y(plot, end));
+                let x = plot.x + offset;
                 push_rect(
                     ops,
                     x,
-                    yv.min(y0),
-                    bar_w,
-                    (y0 - yv).abs().max(1.0),
-                    &series.point_color(cat_idx, ser_idx),
+                    y0.min(y1),
+                    bands.bar,
+                    (y0 - y1).abs().max(1.0),
+                    &color,
                 );
                 if let Some(label) = series.point(cat_idx).and_then(|point| point.label) {
                     push_text(
                         ops,
                         label,
                         x,
-                        yv.min(y0) - 3.0,
-                        bar_w.max(32.0),
+                        y0.min(y1) - 3.0,
+                        bands.bar.max(32.0),
                         CHART_LABEL_FONT,
                     );
                 }
             }
         }
+    }
+}
+
+/// Where the `index`th of `count` categories sits along a line or area axis.
+fn line_x(family: PlotFamily<'_>, plot: PlotArea, index: usize, count: usize) -> f64 {
+    let denom = count.saturating_sub(1).max(1) as f64;
+    plot.x + plot.w * category_position(family, index, count) as f64 / denom
+}
+
+fn emit_category_labels<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+    count: usize,
+) {
+    for index in 0..count {
+        if ops.exhausted() {
+            return;
+        }
+        push_text(
+            ops,
+            &category_label(family.series, index),
+            line_x(family, plot, index, count) - 16.0,
+            plot.y + plot.h + 14.0,
+            32.0,
+            CHART_LABEL_FONT,
+        );
     }
 }
 
@@ -901,52 +1610,780 @@ fn emit_line<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let (min, max) = value_range(family);
-    let denom = (cat_count.saturating_sub(1)).max(1) as f64;
-    for i in 0..cat_count {
-        if ops.exhausted() {
-            return;
-        }
-        let label = category_label(family.series, i);
-        let x = plot.x + plot.w * i as f64 / denom;
-        push_text(
-            ops,
-            &label,
-            x - 16.0,
-            plot.y + plot.h + 14.0,
-            32.0,
-            CHART_LABEL_FONT,
-        );
-    }
+    let scale = value_scale(family);
+    let stacking = family.stacking();
+    emit_category_labels(ops, family, plot, cat_count);
+    let spans = &mut Vec::with_capacity(family.series.len());
     for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series.series), ser_idx);
+        let markers = family.group.and_then(|group| group.markers) != Some(false);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..cat_count {
             if ops.exhausted() {
                 return;
             }
-            let value = series.value(i);
-            let x = plot.x + plot.w * i as f64 / denom;
-            let y = value_y(plot, value.clamp(min, max), min, max);
+            let value = if stacking == Stacking::None {
+                series.value(i)
+            } else {
+                stacked_spans(family, i, spans);
+                spans.get(ser_idx).map_or(0.0, |(_, end)| *end)
+            };
+            let x = line_x(family, plot, i, cat_count);
+            let y = scale.y(plot, value);
             if let Some((prev_x, prev_y)) = prev {
                 push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
             }
-            let size = series.marker_size(i);
-            let point_color = series.point_color(i, ser_idx);
-            push_rect(
-                ops,
-                x - size / 2.0,
-                y - size / 2.0,
-                size,
-                size,
-                &point_color,
-            );
+            if markers {
+                push_marker(
+                    ops,
+                    series.marker_symbol(i, ser_idx),
+                    x,
+                    y,
+                    series.marker_size(i),
+                    &series.point_color(i, ser_idx),
+                );
+            }
             if let Some(label) = series.point(i).and_then(|point| point.label) {
+                let size = series.marker_size(i);
                 push_text(ops, label, x + size, y - size, 48.0, CHART_LABEL_FONT);
             }
             prev = Some((x, y));
         }
     }
+}
+
+fn emit_area<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+) {
+    let cat_count = category_count(family.series);
+    if cat_count == 0 || family.series.is_empty() {
+        return;
+    }
+    emit_axes(ops, family, plot);
+    let scale = value_scale(family);
+    let stacking = family.stacking();
+    emit_category_labels(ops, family, plot, cat_count);
+    let vertices = cat_count.min(MAX_PLOT_POLYGON_POINTS);
+    let spans = &mut Vec::with_capacity(family.series.len());
+    for (ser_idx, series) in family.series.iter().enumerate() {
+        if ops.exhausted() {
+            return;
+        }
+        let mut upper = Vec::with_capacity(vertices);
+        let mut lower = Vec::with_capacity(vertices);
+        for i in 0..vertices {
+            let x = line_x(family, plot, i, cat_count);
+            let (base, top) = if stacking == Stacking::None {
+                (scale.baseline(), series.value(i))
+            } else {
+                stacked_spans(family, i, spans);
+                spans.get(ser_idx).copied().unwrap_or((0.0, 0.0))
+            };
+            upper.push((x, scale.y(plot, top)));
+            lower.push((x, scale.y(plot, base)));
+        }
+        let mut commands = Vec::with_capacity(vertices * 2 + 2);
+        for (index, (x, y)) in upper.iter().enumerate() {
+            commands.push(if index == 0 {
+                GeometryPathCommand::Move { x: *x, y: *y }
+            } else {
+                GeometryPathCommand::Line { x: *x, y: *y }
+            });
+        }
+        for (x, y) in lower.iter().rev() {
+            commands.push(GeometryPathCommand::Line { x: *x, y: *y });
+        }
+        commands.push(GeometryPathCommand::Close);
+        let color = series_color(Some(series.series), ser_idx);
+        push_path(ops, plot, commands, &color, None);
+        for window in upper.windows(2) {
+            if ops.exhausted() {
+                return;
+            }
+            push_line(
+                ops,
+                window[0].0,
+                window[0].1,
+                window[1].0,
+                window[1].1,
+                &color,
+                1.5,
+            );
+        }
+        for (i, (x, y)) in upper.iter().enumerate() {
+            if let Some(label) = series.point(i).and_then(|point| point.label) {
+                push_text(ops, label, *x, *y - 3.0, 48.0, CHART_LABEL_FONT);
+            }
+        }
+    }
+}
+
+/// The x scale of a scatter or bubble family: its `c:xVal` range, or the
+/// category indexes when no series carries one.
+fn scatter_x_scale(family: PlotFamily<'_>, count: usize) -> ValueScale {
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut seen = false;
+    let mut remaining = MAX_PLOT_DATA_SCAN;
+    for series in family.series {
+        let samples = series.series.x_values.len().min(remaining);
+        remaining -= samples;
+        for index in 0..samples {
+            if let Some(value) = series.x_value(index) {
+                seen = true;
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+    }
+    if !seen {
+        min = 0.0;
+        max = count.saturating_sub(1).max(1) as f64;
+    }
+    let axis = family.x_axis;
+    if let Some(value) = axis
+        .and_then(|axis| axis.range.min)
+        .filter(|value| value.is_finite())
+    {
+        min = value;
+    }
+    if let Some(value) = axis
+        .and_then(|axis| axis.range.max)
+        .filter(|value| value.is_finite())
+    {
+        max = value;
+    }
+    if !(max - min).is_finite() || max <= min {
+        (min, max) = (min.min(0.0), min.min(0.0) + 1.0);
+    }
+    ValueScale {
+        min,
+        max,
+        log_base: axis
+            .and_then(|axis| axis.log_base)
+            .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0),
+        reversed: axis.is_some_and(|axis| axis.reversed),
+        percent: false,
+    }
+}
+
+/// Ticks along the x value axis, or the category labels when no series in the
+/// family carries a `c:xVal` to place them by.
+fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+    scale: ValueScale,
+    count: usize,
+) {
+    if !family
+        .series
+        .iter()
+        .any(|series| !series.series.x_values.is_empty())
+    {
+        emit_category_labels(ops, family, plot, count);
+        return;
+    }
+    let format = family.x_axis.and_then(|axis| axis.number_format);
+    for value in axis_ticks(scale, family.x_axis.and_then(|axis| axis.major_unit)) {
+        if ops.exhausted() {
+            return;
+        }
+        push_text(
+            ops,
+            &scale.format(value, format),
+            scale.x(plot, value) - 16.0,
+            plot.y + plot.h + 14.0,
+            32.0,
+            CHART_LABEL_FONT,
+        );
+    }
+}
+
+/// What a `c:scatterStyle` draws.
+fn scatter_parts(style: Option<&str>) -> (bool, bool) {
+    match style {
+        Some("line" | "smooth") => (true, false),
+        Some("marker") => (false, true),
+        Some("none") => (false, false),
+        _ => (true, true),
+    }
+}
+
+fn emit_scatter<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+) {
+    let count = category_count(family.series);
+    if count == 0 || family.series.is_empty() {
+        return;
+    }
+    emit_axes(ops, family, plot);
+    let y_scale = value_scale(family);
+    let x_scale = scatter_x_scale(family, count);
+    emit_scatter_x_labels(ops, family, plot, x_scale, count);
+    let (lines, markers) = scatter_parts(family.group.and_then(|group| group.scatter_style));
+    for (ser_idx, series) in family.series.iter().enumerate() {
+        let color = series_color(Some(series.series), ser_idx);
+        let mut prev: Option<(f64, f64)> = None;
+        for i in 0..series.length().min(MAX_PLOT_DATA_SCAN) {
+            if ops.exhausted() {
+                return;
+            }
+            let x = x_scale.x(plot, series.x_value(i).unwrap_or(i as f64));
+            let y = y_scale.y(plot, series.value(i));
+            if lines && let Some((prev_x, prev_y)) = prev {
+                push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
+            }
+            if markers {
+                push_marker(
+                    ops,
+                    series.marker_symbol(i, ser_idx),
+                    x,
+                    y,
+                    series.marker_size(i),
+                    &series.point_color(i, ser_idx),
+                );
+            }
+            if let Some(label) = series.point(i).and_then(|point| point.label) {
+                push_text(ops, label, x + 4.0, y - 4.0, 48.0, CHART_LABEL_FONT);
+            }
+            prev = Some((x, y));
+        }
+    }
+}
+
+fn emit_bubble<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+) {
+    let count = category_count(family.series);
+    if count == 0 || family.series.is_empty() {
+        return;
+    }
+    emit_axes(ops, family, plot);
+    let y_scale = value_scale(family);
+    let x_scale = scatter_x_scale(family, count);
+    emit_scatter_x_labels(ops, family, plot, x_scale, count);
+    let group = family.group;
+    let scale_percent = group
+        .and_then(|group| group.bubble_scale)
+        .filter(|scale| scale.is_finite())
+        .unwrap_or(100.0)
+        .clamp(0.0, 300.0)
+        / 100.0;
+    let by_area = group.and_then(|group| group.size_represents) != Some("w");
+    let largest = family
+        .series
+        .iter()
+        .flat_map(|series| {
+            (0..series.length().min(MAX_PLOT_DATA_SCAN)).map(move |index| series.bubble_size(index))
+        })
+        .fold(0.0_f64, f64::max);
+    let max_radius = plot.w.min(plot.h) * 0.125 * scale_percent;
+    for (ser_idx, series) in family.series.iter().enumerate() {
+        for i in 0..series.length().min(MAX_PLOT_DATA_SCAN) {
+            if ops.exhausted() {
+                return;
+            }
+            let size = series.bubble_size(i);
+            if size <= 0.0 || largest <= 0.0 {
+                continue;
+            }
+            let ratio = (size / largest).clamp(0.0, 1.0);
+            let radius = (max_radius * if by_area { ratio.sqrt() } else { ratio }).max(1.0);
+            let x = x_scale.x(plot, series.x_value(i).unwrap_or(i as f64));
+            let y = y_scale.y(plot, series.value(i));
+            ops.push(PlotOp::Path {
+                x: x - radius,
+                y: y - radius,
+                w: radius * 2.0,
+                h: radius * 2.0,
+                commands: circle_path(x, y, radius),
+                fill: series.point_color(i, ser_idx),
+                stroke: Some(PlotStroke {
+                    color: CHART_BACKGROUND_COLOR.to_owned(),
+                    width: 1.0,
+                }),
+            });
+            if let Some(label) = series.point(i).and_then(|point| point.label) {
+                push_text(ops, label, x, y, 48.0, CHART_LABEL_FONT);
+            }
+        }
+    }
+}
+
+fn emit_radar<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    let cat_count = category_count(family.series);
+    if cat_count == 0 || family.series.is_empty() {
+        return;
+    }
+    let scale = value_scale(family);
+    let spokes = cat_count.min(MAX_PLOT_POLYGON_POINTS);
+    let radius = (width.min(height) * 0.34).max(6.0);
+    let (cx, cy) = (x + width * 0.38, y + height * 0.5);
+    let angle = |index: usize| {
+        -std::f64::consts::FRAC_PI_2
+            + std::f64::consts::TAU * category_position(family, index, spokes) as f64
+                / spokes as f64
+    };
+    let at = |index: usize, value: f64| {
+        let reach = radius * scale.ratio(value);
+        let angle = angle(index);
+        (cx + reach * angle.cos(), cy + reach * angle.sin())
+    };
+
+    for value in axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit)) {
+        if ops.exhausted() || scale.ratio(value) <= 0.0 {
+            continue;
+        }
+        let ring: Vec<(f64, f64)> = (0..spokes).map(|index| at(index, value)).collect();
+        for (from, to) in ring_edges(&ring) {
+            push_line(ops, from.0, from.1, to.0, to.1, CHART_GRID_COLOR, 0.5);
+        }
+    }
+    for index in 0..spokes {
+        if ops.exhausted() {
+            return;
+        }
+        let outer = at(index, scale.max);
+        push_line(ops, cx, cy, outer.0, outer.1, CHART_AXIS_COLOR, 0.5);
+        push_text(
+            ops,
+            &category_label(family.series, index),
+            cx + (outer.0 - cx) * 1.1 - 16.0,
+            cy + (outer.1 - cy) * 1.1,
+            32.0,
+            CHART_LABEL_FONT,
+        );
+    }
+
+    let style = family.group.and_then(|group| group.radar_style);
+    let filled = style == Some("filled");
+    for (ser_idx, series) in family.series.iter().enumerate() {
+        if ops.exhausted() {
+            return;
+        }
+        let color = series_color(Some(series.series), ser_idx);
+        let ring: Vec<(f64, f64)> = (0..spokes)
+            .map(|index| at(index, series.value(index)))
+            .collect();
+        if filled {
+            let mut commands = Vec::with_capacity(spokes + 1);
+            for (index, (x, y)) in ring.iter().enumerate() {
+                commands.push(if index == 0 {
+                    GeometryPathCommand::Move { x: *x, y: *y }
+                } else {
+                    GeometryPathCommand::Line { x: *x, y: *y }
+                });
+            }
+            commands.push(GeometryPathCommand::Close);
+            push_path(ops, plot, commands, &color, None);
+        }
+        if !filled {
+            for (from, to) in ring_edges(&ring) {
+                if ops.exhausted() {
+                    return;
+                }
+                push_line(ops, from.0, from.1, to.0, to.1, &color, 2.0);
+            }
+        }
+        for (index, (x, y)) in ring.iter().enumerate() {
+            if ops.exhausted() {
+                return;
+            }
+            if style != Some("standard") && !filled {
+                push_marker(
+                    ops,
+                    series.marker_symbol(index, ser_idx),
+                    *x,
+                    *y,
+                    series.marker_size(index),
+                    &series.point_color(index, ser_idx),
+                );
+            }
+            if let Some(label) = series.point(index).and_then(|point| point.label) {
+                push_text(ops, label, *x, *y - 4.0, 48.0, CHART_LABEL_FONT);
+            }
+        }
+    }
+}
+
+/// The edges of a closed radar ring, without the doubled edge two spokes
+/// would otherwise produce.
+fn ring_edges(ring: &[(f64, f64)]) -> impl Iterator<Item = ((f64, f64), (f64, f64))> + '_ {
+    let closes = ring.len() > 2;
+    ring.iter()
+        .enumerate()
+        .filter(move |(index, _)| closes || *index + 1 < ring.len())
+        .map(move |(index, point)| (*point, ring[(index + 1) % ring.len()]))
+}
+
+/// Which of a stock family's series carry open, high, low and close.
+fn stock_roles(count: usize) -> Option<(Option<usize>, usize, usize, usize)> {
+    match count {
+        3 => Some((None, 0, 1, 2)),
+        4 => Some((Some(0), 1, 2, 3)),
+        n if n > 4 => Some((Some(n - 4), n - 3, n - 2, n - 1)),
+        _ => None,
+    }
+}
+
+fn emit_stock<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+) {
+    let cat_count = category_count(family.series);
+    let Some((open, high, low, close)) = stock_roles(family.series.len()) else {
+        emit_line(ops, family, plot);
+        return;
+    };
+    if cat_count == 0 {
+        return;
+    }
+    emit_axes(ops, family, plot);
+    let scale = value_scale(family);
+    let bands = bar_bands(family, cat_count, plot.w);
+    let hi_lo = family.group.is_none_or(|group| group.hi_low_lines) || open.is_none();
+    let up_down = open.is_some() && family.group.is_none_or(|group| group.up_down_bars);
+    for cat_idx in 0..cat_count {
+        if ops.exhausted() {
+            return;
+        }
+        let slot = bands.slot * category_position(family, cat_idx, cat_count) as f64;
+        let center = plot.x + slot + bands.slot / 2.0;
+        push_text(
+            ops,
+            &category_label(family.series, cat_idx),
+            plot.x + slot + 2.0,
+            plot.y + plot.h + 14.0,
+            bands.slot - 4.0,
+            CHART_LABEL_FONT,
+        );
+        let value = |index: usize| family.series[index].value(cat_idx);
+        let (high_y, low_y) = (scale.y(plot, value(high)), scale.y(plot, value(low)));
+        if hi_lo {
+            push_line(ops, center, high_y, center, low_y, CHART_AXIS_COLOR, 1.0);
+        }
+        let tick = (bands.slot * 0.25).clamp(1.0, 12.0);
+        match open {
+            Some(open) if up_down => {
+                let (open_y, close_y) = (scale.y(plot, value(open)), scale.y(plot, value(close)));
+                let rising = value(close) >= value(open);
+                push_rect(
+                    ops,
+                    center - tick,
+                    open_y.min(close_y),
+                    tick * 2.0,
+                    (open_y - close_y).abs().max(1.0),
+                    if rising {
+                        CHART_BACKGROUND_COLOR
+                    } else {
+                        CHART_AXIS_COLOR
+                    },
+                );
+                if rising {
+                    push_line(
+                        ops,
+                        center - tick,
+                        open_y.min(close_y),
+                        center - tick,
+                        open_y.max(close_y),
+                        CHART_AXIS_COLOR,
+                        1.0,
+                    );
+                }
+            }
+            Some(open) => {
+                let open_y = scale.y(plot, value(open));
+                push_line(
+                    ops,
+                    center - tick,
+                    open_y,
+                    center,
+                    open_y,
+                    CHART_AXIS_COLOR,
+                    1.0,
+                );
+                let close_y = scale.y(plot, value(close));
+                push_line(
+                    ops,
+                    center,
+                    close_y,
+                    center + tick,
+                    close_y,
+                    CHART_AXIS_COLOR,
+                    1.0,
+                );
+            }
+            None => {
+                let close_y = scale.y(plot, value(close));
+                push_line(
+                    ops,
+                    center,
+                    close_y,
+                    center + tick,
+                    close_y,
+                    CHART_AXIS_COLOR,
+                    1.0,
+                );
+            }
+        }
+    }
+}
+
+/// Colour of the band `value` falls in, from a fixed contour ramp.
+fn contour_color(ratio: f64) -> &'static str {
+    const RAMP: [&str; 8] = [
+        "#264478", "#4472C4", "#5B9BD5", "#70AD47", "#A9D18E", "#FFC000", "#ED7D31", "#9E480E",
+    ];
+    let slot = (ratio.clamp(0.0, 1.0) * (RAMP.len() - 1) as f64).round() as usize;
+    RAMP[slot.min(RAMP.len() - 1)]
+}
+
+/// A 2D `c:surfaceChart` is Excel's contour chart: series are rows, categories
+/// columns, and each cell takes the colour of its value band. A `c:wireframe`
+/// surface draws the same mesh as lines. This is a flat contour, never a
+/// projected 3D surface.
+fn emit_surface<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    plot: PlotArea,
+) {
+    let cat_count = category_count(family.series);
+    let rows = family.series.len();
+    if cat_count == 0 || rows == 0 {
+        return;
+    }
+    push_line(
+        ops,
+        plot.x,
+        plot.y,
+        plot.x,
+        plot.y + plot.h,
+        CHART_AXIS_COLOR,
+        1.0,
+    );
+    push_line(
+        ops,
+        plot.x,
+        plot.y + plot.h,
+        plot.x + plot.w,
+        plot.y + plot.h,
+        CHART_AXIS_COLOR,
+        1.0,
+    );
+    let scale = value_scale(family);
+    let columns = cat_count.min(MAX_PLOT_SURFACE_CELLS / rows.max(1));
+    let cell_w = plot.w / columns.max(1) as f64;
+    let cell_h = plot.h / rows as f64;
+    let wireframe = family.group.and_then(|group| group.wireframe) == Some(true);
+    for (row, series) in family.series.iter().enumerate() {
+        if ops.exhausted() {
+            return;
+        }
+        let y = plot.y + plot.h - cell_h * (row + 1) as f64;
+        for column in 0..columns {
+            let x = plot.x + cell_w * category_position(family, column, columns) as f64;
+            if wireframe {
+                push_line(ops, x, y, x + cell_w, y, CHART_AXIS_COLOR, 0.5);
+                push_line(ops, x, y, x, y + cell_h, CHART_AXIS_COLOR, 0.5);
+            } else {
+                let color = contour_color(scale.fraction(series.value(column)));
+                push_rect(ops, x, y, cell_w, cell_h, color);
+            }
+        }
+        push_text(
+            ops,
+            series.series.name.unwrap_or_default(),
+            plot.x - 38.0,
+            y + cell_h * 0.6,
+            36.0,
+            CHART_LABEL_FONT,
+        );
+    }
+    for column in 0..columns {
+        if ops.exhausted() {
+            return;
+        }
+        push_text(
+            ops,
+            &category_label(family.series, column),
+            plot.x + cell_w * category_position(family, column, columns) as f64 + 2.0,
+            plot.y + plot.h + 14.0,
+            cell_w - 4.0,
+            CHART_LABEL_FONT,
+        );
+    }
+}
+
+fn push_path<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    plot: PlotArea,
+    commands: Vec<GeometryPathCommand>,
+    fill: &str,
+    stroke: Option<PlotStroke>,
+) {
+    if commands.is_empty() {
+        return;
+    }
+    ops.push(PlotOp::Path {
+        x: plot.x,
+        y: plot.y,
+        w: plot.w,
+        h: plot.h,
+        commands,
+        fill: fill.to_owned(),
+        stroke,
+    });
+}
+
+fn circle_path(cx: f64, cy: f64, r: f64) -> Vec<GeometryPathCommand> {
+    polygon_path(cx, cy, r, 24, 0.0)
+}
+
+fn polygon_path(cx: f64, cy: f64, r: f64, sides: usize, rotation: f64) -> Vec<GeometryPathCommand> {
+    let mut commands = Vec::with_capacity(sides + 1);
+    for index in 0..sides {
+        let angle = rotation + std::f64::consts::TAU * index as f64 / sides as f64;
+        let (x, y) = (cx + r * angle.cos(), cy + r * angle.sin());
+        commands.push(if index == 0 {
+            GeometryPathCommand::Move { x, y }
+        } else {
+            GeometryPathCommand::Line { x, y }
+        });
+    }
+    commands.push(GeometryPathCommand::Close);
+    commands
+}
+
+/// The outline of one marker symbol, centred on `(cx, cy)` across `size`.
+fn marker_path(symbol: PlotMarkerSymbol, cx: f64, cy: f64, size: f64) -> Vec<GeometryPathCommand> {
+    let half = size / 2.0;
+    let bar = |width: f64, height: f64| {
+        vec![
+            GeometryPathCommand::Move {
+                x: cx - width,
+                y: cy - height,
+            },
+            GeometryPathCommand::Line {
+                x: cx + width,
+                y: cy - height,
+            },
+            GeometryPathCommand::Line {
+                x: cx + width,
+                y: cy + height,
+            },
+            GeometryPathCommand::Line {
+                x: cx - width,
+                y: cy + height,
+            },
+            GeometryPathCommand::Close,
+        ]
+    };
+    match symbol {
+        PlotMarkerSymbol::Circle | PlotMarkerSymbol::Auto | PlotMarkerSymbol::None => {
+            circle_path(cx, cy, half)
+        }
+        PlotMarkerSymbol::Dot => circle_path(cx, cy, half * 0.5),
+        PlotMarkerSymbol::Diamond => polygon_path(cx, cy, half, 4, -std::f64::consts::FRAC_PI_2),
+        PlotMarkerSymbol::Triangle => polygon_path(cx, cy, half, 3, -std::f64::consts::FRAC_PI_2),
+        PlotMarkerSymbol::Square => polygon_path(cx, cy, half, 4, std::f64::consts::FRAC_PI_4),
+        PlotMarkerSymbol::Star => star_path(cx, cy, half),
+        PlotMarkerSymbol::Plus => cross_path(cx, cy, half, 0.0),
+        PlotMarkerSymbol::X => cross_path(cx, cy, half, std::f64::consts::FRAC_PI_4),
+        PlotMarkerSymbol::Dash => bar(half, half * 0.25),
+    }
+}
+
+fn star_path(cx: f64, cy: f64, r: f64) -> Vec<GeometryPathCommand> {
+    let mut commands = Vec::with_capacity(11);
+    for index in 0..10 {
+        let reach = if index % 2 == 0 { r } else { r * 0.42 };
+        let angle = -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * index as f64 / 5.0;
+        let (x, y) = (cx + reach * angle.cos(), cy + reach * angle.sin());
+        commands.push(if index == 0 {
+            GeometryPathCommand::Move { x, y }
+        } else {
+            GeometryPathCommand::Line { x, y }
+        });
+    }
+    commands.push(GeometryPathCommand::Close);
+    commands
+}
+
+/// A twelve-vertex cross, rotated by `rotation` to make a plus or an x.
+fn cross_path(cx: f64, cy: f64, r: f64, rotation: f64) -> Vec<GeometryPathCommand> {
+    const ARM: f64 = 0.3;
+    let corners = [
+        (-ARM, -1.0),
+        (ARM, -1.0),
+        (ARM, -ARM),
+        (1.0, -ARM),
+        (1.0, ARM),
+        (ARM, ARM),
+        (ARM, 1.0),
+        (-ARM, 1.0),
+        (-ARM, ARM),
+        (-1.0, ARM),
+        (-1.0, -ARM),
+        (-ARM, -ARM),
+    ];
+    let (sin, cos) = rotation.sin_cos();
+    let mut commands = Vec::with_capacity(corners.len() + 1);
+    for (index, (dx, dy)) in corners.into_iter().enumerate() {
+        let (x, y) = (
+            cx + r * (dx * cos - dy * sin),
+            cy + r * (dx * sin + dy * cos),
+        );
+        commands.push(if index == 0 {
+            GeometryPathCommand::Move { x, y }
+        } else {
+            GeometryPathCommand::Line { x, y }
+        });
+    }
+    commands.push(GeometryPathCommand::Close);
+    commands
+}
+
+/// Draws `symbol` at `(x, y)`. A square stays a rectangle op, which is what
+/// every host already paints fastest.
+fn push_marker<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    symbol: Option<PlotMarkerSymbol>,
+    x: f64,
+    y: f64,
+    size: f64,
+    color: &str,
+) {
+    let Some(symbol) = symbol else {
+        return;
+    };
+    if symbol == PlotMarkerSymbol::Square {
+        push_rect(ops, x - size / 2.0, y - size / 2.0, size, size, color);
+        return;
+    }
+    ops.push(PlotOp::Path {
+        x: x - size / 2.0,
+        y: y - size / 2.0,
+        w: size,
+        h: size,
+        commands: marker_path(symbol, x, y, size),
+        fill: color.to_owned(),
+        stroke: None,
+    });
 }
 
 fn emit_pie<S: PlotSink + ?Sized>(
@@ -978,33 +2415,60 @@ fn emit_pie<S: PlotSink + ?Sized>(
     let r = (width.min(height) * 0.34).max(10.0);
     let cx = x + width * 0.38;
     let cy = y + height * 0.46;
+    let group = family.group;
     let inner_r = if family.chart_type == "doughnut" {
-        r * 0.48
+        r * group
+            .and_then(|group| group.hole_size)
+            .filter(|size| size.is_finite())
+            .unwrap_or(50.0)
+            .clamp(1.0, 90.0)
+            / 100.0
     } else {
         0.0
     };
-    let mut angle = -std::f64::consts::FRAC_PI_2;
+    let start = -std::f64::consts::FRAC_PI_2
+        + group
+            .and_then(|group| group.first_slice_angle)
+            .filter(|angle| angle.is_finite())
+            .unwrap_or(0.0)
+            .rem_euclid(360.0)
+            .to_radians();
+    let vary = group.is_some_and(|group| group.vary_colors);
+    let mut angle = start;
     for (index, value) in &values {
         let sweep = (*value / total) * std::f64::consts::TAU;
+        let middle = angle + sweep / 2.0;
+        let offset = r * series.explosion(*index) / 100.0;
+        let (ox, oy) = (cx + offset * middle.cos(), cy + offset * middle.sin());
+        let color = if vary {
+            series
+                .point(*index)
+                .and_then(|point| point.color)
+                .map(hex)
+                .unwrap_or_else(|| {
+                    CHART_SERIES_COLORS[*index % CHART_SERIES_COLORS.len()].to_owned()
+                })
+        } else {
+            series.point_color(*index, *index)
+        };
         ops.push(PlotOp::Path {
-            x: cx - r,
-            y: cy - r,
+            x: ox - r,
+            y: oy - r,
             w: r * 2.0,
             h: r * 2.0,
-            commands: pie_wedge_path(cx, cy, r, inner_r, angle, angle + sweep),
-            fill: series.point_color(*index, *index),
+            commands: pie_wedge_path(ox, oy, r, inner_r, angle, angle + sweep),
+            fill: color,
             stroke: Some(PlotStroke {
                 color: CHART_BACKGROUND_COLOR.to_owned(),
                 width: 1.0,
             }),
         });
         if let Some(label) = series.point(*index).and_then(|point| point.label) {
-            let middle = angle + sweep / 2.0;
             push_text(
                 ops,
                 label,
-                cx + r * 0.62 * middle.cos(),
-                cy + r * 0.62 * middle.sin(),
+                ox + r * 0.62 * middle.cos(),
+                oy + r * 0.62 * middle.sin(),
                 48.0,
                 CHART_LABEL_FONT,
             );
@@ -1148,6 +2612,100 @@ pub fn format_number(value: f64) -> String {
     }
 }
 
+/// A fraction as a percentage, snapped so a tick that lands on a whole
+/// percent by arithmetic does not read as a fraction of one.
+pub fn format_percent(value: f64) -> String {
+    let scaled = value * 100.0;
+    let snapped = if (scaled - scaled.round()).abs() < 1e-6 {
+        scaled.round()
+    } else {
+        scaled
+    };
+    format_number(snapped) + "%"
+}
+
+/// Formats `value` through the subset of `c:numFmt` codes that changes what a
+/// reader sees: decimal places, thousands grouping, a percent scale, and the
+/// literal prefix and suffix around them. Anything richer — dates, fractions,
+/// conditions, colours — returns `None` so the caller keeps its own format.
+pub fn format_with_code(value: f64, code: &str) -> Option<String> {
+    if !value.is_finite() || code.is_empty() {
+        return None;
+    }
+    let section = code.split(';').next().unwrap_or(code);
+    if section.eq_ignore_ascii_case("general") {
+        return Some(format_number(value));
+    }
+    if section.contains(['y', 'd', 'h', 's', 'E', 'e', '?', '*', '[']) || section.contains("m/") {
+        return None;
+    }
+    let digits = section
+        .split('.')
+        .nth(1)
+        .map(|tail| {
+            tail.chars()
+                .take_while(|c| matches!(c, '0' | '#'))
+                .count()
+                .min(9)
+        })
+        .unwrap_or(0);
+    let percent = section.contains('%');
+    let scaled = if percent { value * 100.0 } else { value };
+    let factor = 10_f64.powi(digits as i32);
+    let rounded = (scaled.abs() * factor).round() / factor;
+    let mut body = format!("{rounded:.digits$}");
+    if section.contains(',') {
+        body = group_thousands(&body);
+    }
+    let mut out = String::new();
+    if scaled < 0.0 && !body.trim_start_matches(['0', '.', ',']).is_empty() {
+        out.push('-');
+    }
+    out.push_str(&literal(section, true));
+    out.push_str(&body);
+    out.push_str(&literal(section, false));
+    if percent {
+        out.push('%');
+    }
+    Some(out)
+}
+
+/// The literal characters a format code puts before or after its digits.
+fn literal(code: &str, leading: bool) -> String {
+    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '%' | '?');
+    let bytes: Vec<char> = code.chars().collect();
+    let range: Box<dyn Iterator<Item = &char>> = if leading {
+        Box::new(bytes.iter())
+    } else {
+        Box::new(bytes.iter().rev())
+    };
+    let mut literal: Vec<char> = range
+        .take_while(|c| !placeholder(**c))
+        .filter(|c| **c != '"' && **c != '\\' && **c != '_')
+        .copied()
+        .collect();
+    if !leading {
+        literal.reverse();
+    }
+    literal.into_iter().collect()
+}
+
+fn group_thousands(body: &str) -> String {
+    let (whole, rest) = body.split_once('.').unwrap_or((body, ""));
+    let mut grouped = String::with_capacity(whole.len() + whole.len() / 3 + rest.len() + 1);
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    if !rest.is_empty() {
+        grouped.push('.');
+        grouped.push_str(rest);
+    }
+    grouped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,6 +2746,11 @@ mod tests {
             series,
             value_axis: chart.value_axis,
             axis_titles: chart.axis_titles,
+            group: chart.plot_groups.first(),
+            axis: None,
+            x_axis: None,
+            category_axis: None,
+            secondary: false,
         }
     }
 
@@ -1332,10 +2895,16 @@ mod tests {
     fn point_marker_without_a_size_falls_back_to_the_default() {
         let north = source(&[1.0, 2.0]);
         let mut series = series("North", &north);
-        series.marker = Some(PlotMarker { size: Some(9.0) });
+        series.marker = Some(PlotMarker {
+            size: Some(9.0),
+            symbol: None,
+        });
         series.points = vec![PlotPoint {
             index: Some(0),
-            marker: Some(PlotMarker { size: None }),
+            marker: Some(PlotMarker {
+                size: None,
+                symbol: None,
+            }),
             ..PlotPoint::default()
         }];
         let view = SeriesView::new(&series, &mut ScanBudget::new());
@@ -1591,34 +3160,11 @@ mod tests {
     fn out_of_schema_point_indexes_are_dropped_rather_than_coerced() {
         let space = ChartSpace {
             chart_type: "pie".to_owned(),
-            title: None,
-            legend: None,
-            series: Vec::new(),
-            axes: None,
-            axis_list: None,
             plot_groups: vec![crate::chart::ChartPlotGroup {
                 chart_type: Some("pie".to_owned()),
-                grouping: None,
-                overlap: None,
-                gap_width: None,
-                axis_ids: Vec::new(),
-                vary_colors: false,
-                first_slice_angle: None,
-                hole_size: None,
-                show_data_labels: false,
                 series: vec![crate::chart::ChartSeries {
-                    name: None,
-                    categories: Vec::new(),
                     values: vec![1.0, 2.0],
                     color: "#4472C4".to_owned(),
-                    index: None,
-                    order: None,
-                    category_formula: None,
-                    value_formula: None,
-                    axis_ids: None,
-                    grouping: None,
-                    marker: None,
-                    smooth: None,
                     points: Some(
                         [-1.0, 1.5, 1e30, f64::NAN, 2.0]
                             .into_iter()
@@ -1629,8 +3175,11 @@ mod tests {
                             })
                             .collect(),
                     ),
+                    ..crate::chart::ChartSeries::default()
                 }],
+                ..crate::chart::ChartPlotGroup::default()
             }],
+            ..ChartSpace::default()
         };
         let chart = PlotChart::from(&space);
         let points = &chart.plot_groups[0].series[0].points;
@@ -1721,6 +3270,701 @@ mod tests {
             }
         };
         numbers.iter().all(|number| number.is_finite())
+    }
+
+    fn rects(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every rectangle but the chart background and the legend swatches.
+    fn bars(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
+        rects(ops)
+            .into_iter()
+            .skip(1)
+            .filter(|(_, _, w, h)| (*w - 8.0).abs() > 0.01 || (*h - 8.0).abs() > 0.01)
+            .collect()
+    }
+
+    fn paths(ops: &[PlotOp]) -> usize {
+        ops.iter()
+            .filter(|op| matches!(op, PlotOp::Path { .. }))
+            .count()
+    }
+
+    fn texts(ops: &[PlotOp]) -> Vec<String> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn group<'a>(chart_type: &'a str, series: Vec<PlotSeries<'a>>) -> PlotGroup<'a> {
+        PlotGroup {
+            chart_type: Some(chart_type),
+            series,
+            ..PlotGroup::default()
+        }
+    }
+
+    fn grouped<'a>(chart_type: &'a str, group: PlotGroup<'a>) -> PlotChart<'a> {
+        PlotChart {
+            chart_type,
+            plot_groups: vec![group],
+            ..PlotChart::default()
+        }
+    }
+
+    #[test]
+    fn every_family_draws_with_its_own_renderer() {
+        let data = source(&[3.0, 1.0]);
+        for chart_type in ["area", "radar"] {
+            let chart = grouped(chart_type, group(chart_type, vec![series("North", &data)]));
+            let ops = plot_chart(&chart, rect());
+            let columns = bars(&ops)
+                .into_iter()
+                .filter(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
+                .count();
+            assert_ne!(columns, 2, "{chart_type} still draws columns");
+        }
+        let area = grouped("area", group("area", vec![series("North", &data)]));
+        assert_eq!(
+            paths(&plot_chart(&area, rect())),
+            1,
+            "area fills one region"
+        );
+        let surface = grouped("surface", group("surface", vec![series("North", &data)]));
+        assert!(
+            plot_chart(&surface, rect())
+                .iter()
+                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#9E480E")),
+            "a contour band takes its colour from the value ramp"
+        );
+    }
+
+    #[test]
+    fn scatter_places_points_at_their_x_values() {
+        let categorical = source(&[10.0, 20.0]);
+        let x = [0.0, 30.0];
+        let mut xy = series("XY", &categorical);
+        xy.x_values = &x;
+        let chart = grouped("scatter", group("scatter", vec![xy]));
+        let ops = plot_chart(&chart, rect());
+        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .collect();
+        assert_eq!(markers.len(), 2);
+        assert!(markers[0].0 < markers[1].0);
+        assert!(
+            texts(&ops).contains(&"30".to_owned()),
+            "the x axis labels its own values"
+        );
+    }
+
+    #[test]
+    fn a_scatter_style_without_lines_draws_only_markers() {
+        let data = source(&[10.0, 20.0]);
+        let x = [1.0, 2.0];
+        let mut xy = series("XY", &data);
+        xy.x_values = &x;
+        let mut markers_only = group("scatter", vec![xy.clone()]);
+        markers_only.scatter_style = Some("marker");
+        let mut lines_only = group("scatter", vec![xy]);
+        lines_only.scatter_style = Some("line");
+        let series_lines = |chart: &PlotChart<'_>| {
+            plot_chart(chart, rect())
+                .iter()
+                .filter(|op| matches!(op, PlotOp::Line { width, .. } if *width == 2.0))
+                .count()
+        };
+        assert_eq!(series_lines(&grouped("scatter", markers_only)), 0);
+        assert_eq!(series_lines(&grouped("scatter", lines_only)), 1);
+    }
+
+    #[test]
+    fn bubbles_scale_by_area_or_by_width() {
+        let data = source(&[10.0, 10.0]);
+        let x = [1.0, 2.0];
+        let sizes = [1.0, 4.0];
+        let bubble = |represents: &'static str| {
+            let mut series = series("Bubbles", &data);
+            series.x_values = &x;
+            series.bubble_sizes = &sizes;
+            let mut group = group("bubble", vec![series]);
+            group.size_represents = Some(represents);
+            group
+        };
+        let radii = |chart: &PlotChart<'_>| {
+            plot_chart(chart, rect())
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { w, .. } => Some(*w),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let area = radii(&grouped("bubble", bubble("area")));
+        let width = radii(&grouped("bubble", bubble("w")));
+        assert_eq!(area.len(), 2);
+        assert!((area[0] / area[1] - 0.5).abs() < 0.01, "{area:?}");
+        assert!((width[0] / width[1] - 0.25).abs() < 0.01, "{width:?}");
+    }
+
+    #[test]
+    fn a_stock_family_draws_hi_lo_and_up_down_bars() {
+        let sources: Vec<Source> = [
+            vec![10.0, 12.0],
+            vec![20.0, 22.0],
+            vec![5.0, 6.0],
+            vec![18.0, 8.0],
+        ]
+        .into_iter()
+        .map(|values| Source {
+            categories: vec!["D1".to_owned(), "D2".to_owned()],
+            values,
+        })
+        .collect();
+        let names = ["Open", "High", "Low", "Close"];
+        let ohlc: Vec<PlotSeries<'_>> = names
+            .iter()
+            .zip(&sources)
+            .map(|(name, source)| series(name, source))
+            .collect();
+        let mut ohlc_group = group("stock", ohlc.clone());
+        ohlc_group.hi_low_lines = true;
+        ohlc_group.up_down_bars = true;
+        let ops = plot_chart(&grouped("stock", ohlc_group), rect());
+        let verticals = ops
+            .iter()
+            .filter(|op| {
+                matches!(op, PlotOp::Line { x1, x2, y1, y2, .. }
+                if (x1 - x2).abs() < 0.01 && (y1 - y2).abs() > 1.0 && (y1 - y2).abs() < 150.0)
+            })
+            .count();
+        assert_eq!(verticals, 3, "two hi-lo lines and one rising open edge");
+        let up_down: Vec<&str> = bars(&ops)
+            .iter()
+            .zip(
+                ops.iter()
+                    .filter_map(|op| match op {
+                        PlotOp::Rect { fill, .. } => Some(fill.as_str()),
+                        _ => None,
+                    })
+                    .skip(1),
+            )
+            .map(|(_, fill)| fill)
+            .collect();
+        assert!(
+            up_down.contains(&CHART_AXIS_COLOR),
+            "a falling bar fills dark"
+        );
+        assert!(
+            up_down.contains(&CHART_BACKGROUND_COLOR),
+            "a rising bar fills light"
+        );
+        let hlc = grouped("stock", group("stock", ohlc[1..].to_vec()));
+        assert!(
+            plot_chart(&hlc, rect())
+                .iter()
+                .any(|op| matches!(op, PlotOp::Line { .. })),
+            "three series still plot high-low-close"
+        );
+    }
+
+    #[test]
+    fn stacked_bars_pile_onto_one_another() {
+        let north = source(&[10.0, 20.0]);
+        let south = source(&[5.0, 5.0]);
+        let mut stacked = group(
+            "column",
+            vec![series("North", &north), series("South", &south)],
+        );
+        stacked.grouping = Some("stacked");
+        let ops = plot_chart(&grouped("column", stacked), rect());
+        let bars = bars(&ops);
+        assert_eq!(bars.len(), 4);
+        assert_eq!(bars[0].0, bars[1].0, "a stack shares one slot");
+        assert!(bars[1].1 < bars[0].1, "the second series sits on the first");
+        assert!(
+            texts(&ops).contains(&"25".to_owned()),
+            "the axis reaches the stack total"
+        );
+    }
+
+    #[test]
+    fn percent_stacked_normalizes_every_category() {
+        let north = source(&[1.0, 30.0]);
+        let south = source(&[3.0, 10.0]);
+        let mut percent = group(
+            "column",
+            vec![series("North", &north), series("South", &south)],
+        );
+        percent.grouping = Some("percentStacked");
+        let ops = plot_chart(&grouped("column", percent), rect());
+        let bars = bars(&ops);
+        assert_eq!(bars.len(), 4);
+        let height = |slot: usize| bars[slot].3;
+        assert!((height(0) + height(1) - (height(2) + height(3))).abs() < 0.01);
+        assert!(texts(&ops).contains(&"100%".to_owned()));
+    }
+
+    #[test]
+    fn gap_width_and_overlap_size_and_place_the_bars() {
+        let north = source(&[10.0, 20.0]);
+        let south = source(&[5.0, 5.0]);
+        let sized = |gap: f64, overlap: f64| {
+            let mut group = group(
+                "column",
+                vec![series("North", &north), series("South", &south)],
+            );
+            group.gap_width = Some(gap);
+            group.overlap = Some(overlap);
+            bars(&plot_chart(&grouped("column", group), rect()))
+        };
+        let wide = sized(0.0, 0.0);
+        let narrow = sized(300.0, 0.0);
+        assert!(wide[0].2 > narrow[0].2, "a wider gap leaves thinner bars");
+        let apart = sized(150.0, 0.0);
+        let over = sized(150.0, 100.0);
+        assert!((apart[1].0 - apart[0].0 - apart[0].2).abs() < 0.01);
+        assert!(
+            (over[1].0 - over[0].0).abs() < 0.01,
+            "full overlap shares a slot"
+        );
+    }
+
+    #[test]
+    fn marker_symbols_draw_their_own_outlines() {
+        let data = source(&[1.0, 2.0]);
+        for symbol in [
+            PlotMarkerSymbol::Circle,
+            PlotMarkerSymbol::Diamond,
+            PlotMarkerSymbol::Triangle,
+            PlotMarkerSymbol::Star,
+            PlotMarkerSymbol::Plus,
+            PlotMarkerSymbol::Dash,
+            PlotMarkerSymbol::Dot,
+            PlotMarkerSymbol::X,
+            PlotMarkerSymbol::Auto,
+        ] {
+            let mut marked = series("North", &data);
+            marked.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(symbol),
+            });
+            let chart = grouped("line", group("line", vec![marked]));
+            let ops = plot_chart(&chart, rect());
+            assert_eq!(paths(&ops), 2, "{symbol:?} draws one outline per point");
+        }
+        let mut square = series("North", &data);
+        square.marker = Some(PlotMarker {
+            size: Some(8.0),
+            symbol: Some(PlotMarkerSymbol::Square),
+        });
+        assert_eq!(
+            paths(&plot_chart(
+                &grouped("line", group("line", vec![square])),
+                rect()
+            )),
+            0,
+            "a square stays a rectangle op"
+        );
+        let mut none = series("North", &data);
+        none.marker = Some(PlotMarker {
+            size: Some(8.0),
+            symbol: Some(PlotMarkerSymbol::None),
+        });
+        let bare = plot_chart(&grouped("line", group("line", vec![none])), rect());
+        assert!(
+            bars(&bare).is_empty(),
+            "a none symbol draws nothing: {:?}",
+            bars(&bare)
+        );
+    }
+
+    #[test]
+    fn a_line_group_marker_switch_removes_every_marker() {
+        let data = source(&[1.0, 2.0]);
+        let mut off = group("line", vec![series("North", &data)]);
+        off.markers = Some(false);
+        let ops = plot_chart(&grouped("line", off), rect());
+        assert!(
+            !rects(&ops)
+                .iter()
+                .any(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+        );
+    }
+
+    #[test]
+    fn a_doughnut_honours_its_hole_size() {
+        let data = source(&[3.0, 1.0]);
+        let inner = |hole: Option<f64>| {
+            let mut group = group("doughnut", vec![series("Share", &data)]);
+            group.hole_size = hole;
+            let ops = plot_chart(&grouped("doughnut", group), rect());
+            let PlotOp::Path {
+                commands,
+                x,
+                y,
+                w,
+                h,
+                ..
+            } = ops
+                .iter()
+                .find(|op| matches!(op, PlotOp::Path { .. }))
+                .expect("a wedge")
+            else {
+                unreachable!()
+            };
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            commands
+                .iter()
+                .filter_map(|command| match command {
+                    GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                        Some(((x - cx).powi(2) + (y - cy).powi(2)).sqrt())
+                    }
+                    _ => None,
+                })
+                .fold(f64::INFINITY, f64::min)
+                / (w / 2.0)
+        };
+        assert!(inner(Some(20.0)) < inner(None));
+        assert!(inner(None) < inner(Some(80.0)));
+    }
+
+    #[test]
+    fn a_first_slice_angle_rotates_the_pie_and_explosion_offsets_a_slice() {
+        let data = source(&[1.0, 1.0]);
+        let start = |angle: Option<f64>| {
+            let mut group = group("pie", vec![series("Share", &data)]);
+            group.first_slice_angle = angle;
+            let ops = plot_chart(&grouped("pie", group), rect());
+            match ops.iter().find(|op| matches!(op, PlotOp::Path { .. })) {
+                Some(PlotOp::Path { commands, .. }) => match commands[1] {
+                    GeometryPathCommand::Line { x, y } => (x, y),
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }
+        };
+        let (upright_x, upright_y) = start(None);
+        let (turned_x, turned_y) = start(Some(90.0));
+        assert!((upright_x - turned_y).abs() > 1.0 || (upright_y - turned_x).abs() > 1.0);
+
+        let mut exploded = series("Share", &data);
+        exploded.points = vec![PlotPoint {
+            index: Some(0),
+            explosion: Some(50.0),
+            ..PlotPoint::default()
+        }];
+        let ops = plot_chart(&grouped("pie", group("pie", vec![exploded])), rect());
+        let centers: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Path { x, w, .. } => Some(x + w / 2.0),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            (centers[0] - centers[1]).abs() > 1.0,
+            "the exploded slice moves off centre"
+        );
+    }
+
+    #[test]
+    fn vary_colors_cycles_a_pie_through_the_palette() {
+        let data = source(&[3.0, 1.0]);
+        let mut varied = group("pie", vec![series("Share", &data)]);
+        varied.vary_colors = true;
+        let fills: Vec<String> = plot_chart(&grouped("pie", varied), rect())
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Path { fill, .. } => Some(fill.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, [CHART_SERIES_COLORS[0], CHART_SERIES_COLORS[1]]);
+    }
+
+    /// A chart with two value axes, the second one named by the second group.
+    fn combo_with_axes<'a>(
+        first: PlotGroup<'a>,
+        second: PlotGroup<'a>,
+        axes: Vec<PlotAxis<'a>>,
+    ) -> PlotChart<'a> {
+        PlotChart {
+            chart_type: "column",
+            plot_groups: vec![first, second],
+            axes,
+            ..PlotChart::default()
+        }
+    }
+
+    fn value_axis<'a>(id: &'a str, min: f64, max: f64) -> PlotAxis<'a> {
+        PlotAxis {
+            id: Some(id),
+            kind: PlotAxisKind::Value,
+            range: PlotAxisRange {
+                min: Some(min),
+                max: Some(max),
+            },
+            major_gridlines: true,
+            ..PlotAxis::default()
+        }
+    }
+
+    #[test]
+    fn a_secondary_value_axis_scales_only_the_group_that_names_it() {
+        let small = source(&[10.0, 10.0]);
+        let large = source(&[10.0, 10.0]);
+        let mut primary = group("column", vec![series("Units", &small)]);
+        primary.axis_ids = vec!["1", "2"];
+        let mut secondary = group("line", vec![series("Rate", &large)]);
+        secondary.axis_ids = vec!["1", "3"];
+        let chart = combo_with_axes(
+            primary,
+            secondary,
+            vec![value_axis("2", 0.0, 20.0), value_axis("3", 0.0, 100.0)],
+        );
+        let ops = plot_chart(&chart, rect());
+        assert!(
+            texts(&ops).contains(&"20".to_owned()) && texts(&ops).contains(&"100".to_owned()),
+            "both axes label their own range"
+        );
+        let bar = bars(&ops)
+            .into_iter()
+            .find(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
+            .expect("a column");
+        let marker = bars(&ops)
+            .into_iter()
+            .find(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .expect("a line marker");
+        assert!(
+            marker.1 > bar.1,
+            "the same value sits lower against the wider axis"
+        );
+    }
+
+    #[test]
+    fn a_log_axis_places_values_by_their_logarithm() {
+        let data = source(&[1.0, 100.0]);
+        let mut group = group("line", vec![series("Growth", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 1.0, 1000.0);
+        axis.log_base = Some(10.0);
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .collect();
+        let plot_h = 200.0 - 10.0 - 34.0;
+        let travelled = markers[0].1 - markers[1].1;
+        assert!(
+            (travelled / plot_h - 2.0 / 3.0).abs() < 0.02,
+            "two decades of three cover two thirds of the axis: {travelled}"
+        );
+    }
+
+    #[test]
+    fn a_reversed_axis_flips_the_value_direction_and_major_unit_places_the_ticks() {
+        let data = source(&[0.0, 10.0]);
+        let mut group = group("column", vec![series("North", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 0.0, 10.0);
+        axis.reversed = true;
+        axis.major_unit = Some(2.0);
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let labels = texts(&ops);
+        for tick in ["0", "2", "4", "6", "8", "10"] {
+            assert!(labels.contains(&tick.to_owned()), "{tick} is missing");
+        }
+        let tall = bars(&ops);
+        assert_eq!(tall.len(), 2);
+        assert!(
+            tall[1].1 < 11.0 && tall[1].3 > 150.0,
+            "a reversed axis grows the bar downward from the top: {tall:?}"
+        );
+    }
+
+    #[test]
+    fn gridlines_follow_the_axis_that_declares_them() {
+        let data = source(&[1.0, 2.0]);
+        let grid = |on: bool| {
+            let mut group = group("column", vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.major_gridlines = on;
+            let chart = PlotChart {
+                chart_type: "column",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .iter()
+                .filter(|op| matches!(op, PlotOp::Line { color, .. } if color == CHART_GRID_COLOR))
+                .count()
+        };
+        assert_eq!(grid(true), 5);
+        assert_eq!(grid(false), 0);
+    }
+
+    #[test]
+    fn a_hidden_axis_keeps_its_gridlines_but_drops_its_labels() {
+        let data = source(&[1.0, 2.0]);
+        let mut group = group("column", vec![series("North", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 0.0, 4.0);
+        axis.hidden = true;
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        assert!(!texts(&ops).contains(&"4".to_owned()));
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, PlotOp::Line { color, .. } if color == CHART_GRID_COLOR))
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn tick_marks_draw_only_when_the_axis_names_them() {
+        let data = source(&[1.0, 2.0]);
+        let ticks = |mark: Option<&'static str>| {
+            let mut group = group("column", vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.major_tick_mark = mark;
+            let chart = PlotChart {
+                chart_type: "column",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .iter()
+                .filter(|op| {
+                    matches!(op, PlotOp::Line { x1, x2, color, .. }
+                    if color == CHART_AXIS_COLOR && (x1 - x2).abs() < 8.0 && (x1 - x2).abs() > 0.0)
+                })
+                .count()
+        };
+        assert_eq!(ticks(None), 0);
+        assert_eq!(ticks(Some("none")), 0);
+        assert_eq!(ticks(Some("out")), 5);
+        assert_eq!(ticks(Some("cross")), 5);
+    }
+
+    #[test]
+    fn a_reversed_category_axis_draws_the_categories_from_the_far_end() {
+        let data = source(&[1.0, 9.0]);
+        let mut group = group("column", vec![series("North", &data)]);
+        group.axis_ids = vec!["1"];
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![PlotAxis {
+                id: Some("1"),
+                kind: PlotAxisKind::Category,
+                reversed: true,
+                ..PlotAxis::default()
+            }],
+            ..PlotChart::default()
+        };
+        let bars = bars(&plot_chart(&chart, rect()));
+        assert_eq!(bars.len(), 2);
+        assert!(
+            bars[0].0 > bars[1].0,
+            "the first category draws on the right"
+        );
+    }
+
+    #[test]
+    fn number_format_codes_change_what_the_axis_reads() {
+        assert_eq!(format_with_code(0.256, "0.0%").as_deref(), Some("25.6%"));
+        assert_eq!(format_with_code(1234.5, "#,##0").as_deref(), Some("1,235"));
+        assert_eq!(
+            format_with_code(1234.5, "\"$\"#,##0.00").as_deref(),
+            Some("$1,234.50")
+        );
+        assert_eq!(
+            format_with_code(-12.0, "0.0;(0.0)").as_deref(),
+            Some("-12.0")
+        );
+        assert_eq!(format_with_code(7.0, "General").as_deref(), Some("7"));
+        assert_eq!(format_with_code(7.0, "0 \"kg\"").as_deref(), Some("7 kg"));
+        assert_eq!(format_with_code(7.0, "yyyy-mm-dd"), None);
+        assert_eq!(format_with_code(f64::NAN, "0.0"), None);
+        assert_eq!(format_percent(0.5), "50%");
+    }
+
+    #[test]
+    fn an_axis_number_format_reaches_the_tick_labels() {
+        let data = source(&[0.2, 0.8]);
+        let mut group = group("column", vec![series("Share", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 0.0, 1.0);
+        axis.number_format = Some("0%");
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        assert!(texts(&plot_chart(&chart, rect())).contains(&"75%".to_owned()));
+    }
+
+    #[test]
+    fn every_family_stays_finite_and_bounded_on_hostile_input() {
+        let extremes = Source {
+            categories: Vec::new(),
+            values: vec![f64::MAX, -f64::MAX, 5.0, f64::NAN],
+        };
+        let wide: Vec<f64> = (0..50_000).map(|value| value as f64).collect();
+        let dense = Source {
+            categories: Vec::new(),
+            values: wide.clone(),
+        };
+        for chart_type in [
+            "area", "scatter", "bubble", "radar", "stock", "surface", "doughnut", "line", "column",
+            "bar",
+        ] {
+            for data in [&extremes, &dense] {
+                let mut plotted = series("Hostile", data);
+                plotted.x_values = &wide;
+                plotted.bubble_sizes = &wide;
+                let chart = grouped(chart_type, group(chart_type, vec![plotted]));
+                let ops = plot_chart(&chart, rect());
+                assert!(ops.len() <= MAX_PLOT_OPS, "{chart_type}");
+                for op in &ops {
+                    assert!(op_is_finite(op), "{chart_type} {op:?}");
+                }
+            }
+        }
     }
 
     #[test]

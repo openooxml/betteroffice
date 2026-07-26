@@ -368,15 +368,7 @@ mod tests {
                 .collect(),
             values: values.to_vec(),
             color: color.to_owned(),
-            index: None,
-            order: None,
-            category_formula: None,
-            value_formula: None,
-            axis_ids: None,
-            points: None,
-            grouping: None,
-            marker: None,
-            smooth: None,
+            ..ChartSeries::default()
         }
     }
 
@@ -384,14 +376,8 @@ mod tests {
         ChartPlotGroup {
             chart_type: Some(chart_type.to_owned()),
             grouping: Some("clustered".to_owned()),
-            overlap: None,
-            gap_width: None,
-            axis_ids: Vec::new(),
             series,
-            vary_colors: false,
-            first_slice_angle: None,
-            hole_size: None,
-            show_data_labels: false,
+            ..ChartPlotGroup::default()
         }
     }
 
@@ -402,15 +388,15 @@ mod tests {
             legend: Some(ChartLegend {
                 position: Some("right".to_owned()),
                 visible: true,
+                text: None,
             }),
             series: groups
                 .iter()
                 .flat_map(|group| group.series.iter())
                 .cloned()
                 .collect(),
-            axes: None,
             plot_groups: groups,
-            axis_list: None,
+            ..ChartSpace::default()
         }
     }
 
@@ -589,6 +575,7 @@ mod tests {
             space.legend = Some(ChartLegend {
                 position: Some(position.to_owned()),
                 visible: true,
+                text: None,
             });
             assert!(
                 texts(&plot(&space)).contains(&"North".to_owned()),
@@ -605,6 +592,7 @@ mod tests {
         hidden.legend = Some(ChartLegend {
             position: None,
             visible: false,
+            text: None,
         });
         assert!(!texts(&plot(&hidden)).contains(&"North".to_owned()));
     }
@@ -621,25 +609,12 @@ mod tests {
         space.axes = Some(ChartAxes {
             category: None,
             value: Some(ChartAxis {
-                id: None,
                 title: Some("Millions".to_owned()),
                 min: Some(0.0),
                 max: Some(10.0),
-                labels: None,
                 axis_type: "value".to_owned(),
                 position: Some("left".to_owned()),
-                cross_axis_id: None,
-                crosses: None,
-                crosses_at: None,
-                major_unit: None,
-                minor_unit: None,
-                logarithmic_base: None,
-                reversed: false,
-                number_format: None,
-                major_tick_mark: None,
-                minor_tick_mark: None,
-                tick_label_position: None,
-                hidden: false,
+                ..ChartAxis::default()
             }),
         });
         let chart = plot(&space);
@@ -661,6 +636,7 @@ mod tests {
         point_series.marker = Some(ChartMarker {
             symbol: Some("circle".to_owned()),
             size: Some(11.0),
+            color: None,
         });
         point_series.points = Some(vec![ChartPoint {
             index: Some(1.0),
@@ -672,10 +648,13 @@ mod tests {
         let chart = plot(&space("line", vec![group]));
 
         assert!(fills(&chart).contains(&"#AABBCC"));
-        assert!(parts(&chart).iter().any(
-            |primitive| matches!(primitive, Primitive::Shape { geometry, w, .. }
-                if geometry == "rect" && (*w - 11.0).abs() < 0.001)
-        ));
+        assert!(
+            parts(&chart).iter().any(
+                |primitive| matches!(primitive, Primitive::Shape { geometry, w, .. }
+                if geometry == "custom" && (*w - 11.0).abs() < 0.001)
+            ),
+            "a circle symbol draws its own outline at the marker size"
+        );
         for value in ["3", "1", "2"] {
             assert!(texts(&chart).contains(&value.to_owned()), "{value}");
         }
