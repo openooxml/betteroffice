@@ -788,6 +788,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     bar_h,
                     &series.point_color(cat_idx, ser_idx),
                 );
+                if let Some(label) = series.point(cat_idx).and_then(|point| point.label) {
+                    push_text(
+                        ops,
+                        label,
+                        plot.x + bar_w + 3.0,
+                        y + bar_h,
+                        48.0,
+                        CHART_LABEL_FONT,
+                    );
+                }
             }
         }
     } else {
@@ -819,6 +829,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     (y0 - yv).abs().max(1.0),
                     &series.point_color(cat_idx, ser_idx),
                 );
+                if let Some(label) = series.point(cat_idx).and_then(|point| point.label) {
+                    push_text(
+                        ops,
+                        label,
+                        x,
+                        yv.min(y0) - 3.0,
+                        bar_w.max(32.0),
+                        CHART_LABEL_FONT,
+                    );
+                }
             }
         }
     }
@@ -931,6 +951,17 @@ fn emit_pie<S: PlotSink + ?Sized>(
                 width: 1.0,
             }),
         });
+        if let Some(label) = series.point(*index).and_then(|point| point.label) {
+            let middle = angle + sweep / 2.0;
+            push_text(
+                ops,
+                label,
+                cx + r * 0.62 * middle.cos(),
+                cy + r * 0.62 * middle.sin(),
+                48.0,
+                CHART_LABEL_FONT,
+            );
+        }
         angle += sweep;
     }
 }
@@ -1060,7 +1091,8 @@ fn emit_legend<S: PlotSink + ?Sized>(
     }
 }
 
-fn format_number(value: f64) -> String {
+/// Axis-tick formatting, shared with hosts that inject value data labels.
+pub fn format_number(value: f64) -> String {
     if value.abs() >= 100.0 || value.fract().abs() < 0.01 {
         format!("{value:.0}")
     } else {
@@ -1197,6 +1229,39 @@ mod tests {
         let view = SeriesView::new(&series, &mut ScanBudget::new());
         assert_eq!(view.marker_size(0), 4.0);
         assert_eq!(view.marker_size(1), 9.0);
+    }
+
+    #[test]
+    fn point_labels_draw_on_every_chart_family() {
+        let data = source(&[3.0, 1.0]);
+        for chart_type in ["column", "bar", "line", "pie", "doughnut"] {
+            let mut labelled = series("North", &data);
+            labelled.points = vec![
+                PlotPoint {
+                    index: Some(0),
+                    label: Some("first"),
+                    ..PlotPoint::default()
+                },
+                PlotPoint {
+                    index: Some(1),
+                    label: Some("second"),
+                    ..PlotPoint::default()
+                },
+            ];
+            let chart = PlotChart {
+                chart_type,
+                series: vec![labelled],
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            for label in ["first", "second"] {
+                assert!(
+                    ops.iter()
+                        .any(|op| matches!(op, PlotOp::Text { text, .. } if text == label)),
+                    "{chart_type} drops {label}"
+                );
+            }
+        }
     }
 
     #[test]

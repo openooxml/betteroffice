@@ -482,8 +482,21 @@ fn parse_plot_group<E: ChartXml>(chart: &E, budget: &mut Budget) -> ChartPlotGro
         vary_colors: val_attr(child(chart, "varyColors")) == Some("1"),
         first_slice_angle: parse_number(val_attr(child(chart, "firstSliceAng"))),
         hole_size: parse_number(val_attr(child(chart, "holeSize"))),
-        show_data_labels: child(chart, "dLbls").is_some(),
+        show_data_labels: shows_data_labels(chart),
     }
+}
+
+/// `c:dLbls` may sit on the plot group, on a series, or on both, and either
+/// placement can switch the labels back off with `c:delete`.
+fn shows_data_labels<E: ChartXml>(chart: &E) -> bool {
+    data_labels_visible(child(chart, "dLbls"))
+        || children(chart, "ser")
+            .take(MAX_CHART_SERIES)
+            .any(|series| data_labels_visible(child(series, "dLbls")))
+}
+
+fn data_labels_visible<E: ChartXml>(labels: Option<&E>) -> bool {
+    labels.is_some_and(|labels| val_attr(child(labels, "delete")) != Some("1"))
 }
 
 fn nonempty_trimmed(value: &str) -> Option<String> {
@@ -850,6 +863,36 @@ mod tests {
         assert_eq!(budget.point_cap(MAX_POINTS), 5);
         budget.spend_points(9);
         assert_eq!(budget.point_cap(MAX_POINTS), 0);
+    }
+
+    #[test]
+    fn data_labels_count_from_either_placement_and_deletion_switches_them_off() {
+        fn shows(group_labels: Option<Node>, series_labels: Option<Node>) -> bool {
+            let mut series = Vec::new();
+            series.extend(series_labels);
+            let mut bar = vec![Node::val("c:barDir", "col"), Node::el("c:ser", series)];
+            bar.extend(group_labels);
+            let space = Node::el(
+                "c:chartSpace",
+                vec![Node::el(
+                    "c:chart",
+                    vec![Node::el("c:plotArea", vec![Node::el("c:barChart", bar)])],
+                )],
+            );
+            parse_chart_space(&space)
+                .expect("chart space parses")
+                .plot_groups[0]
+                .show_data_labels
+        }
+        let shown = || Node::el("c:dLbls", vec![Node::val("c:showVal", "1")]);
+        let deleted = || Node::el("c:dLbls", vec![Node::val("c:delete", "1")]);
+
+        assert!(shows(Some(shown()), None));
+        assert!(shows(None, Some(shown())));
+        assert!(shows(Some(deleted()), Some(shown())));
+        assert!(!shows(None, None));
+        assert!(!shows(Some(deleted()), None));
+        assert!(!shows(None, Some(deleted())));
     }
 
     #[test]
