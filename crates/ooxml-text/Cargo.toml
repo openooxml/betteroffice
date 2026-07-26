@@ -7,6 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Shared OOXML text shaping, measurement, line breaking, and bidirectional text support."
+readme = "README.md"
 keywords = ["ooxml", "text", "typography", "fonts"]
 categories = ["text-processing", "rendering"]
 

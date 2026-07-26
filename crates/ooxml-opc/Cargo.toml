@@ -7,6 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "OPC (OOXML zip) container reader/writer with zip-bomb and path-traversal guards enforced by construction."
+readme = "README.md"
 keywords = ["ooxml", "opc", "office", "zip", "docx"]
 categories = ["parser-implementations", "compression", "encoding"]
 

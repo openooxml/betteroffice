@@ -7,6 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Safe DOCX XML parsing, typed relationship models, and the versioned canonical document contract."
+readme = "README.md"
 keywords = ["docx", "word", "ooxml", "wordprocessingml"]
 categories = ["parser-implementations", "encoding"]
 
