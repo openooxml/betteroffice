@@ -31,8 +31,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    PlotAxisRange, PlotChart, PlotGroup, PlotLegend, PlotMarker, PlotOp, PlotPoint, PlotRect,
-    PlotSeries, PlotSink, chart_aria_label, plot_chart_into,
+    PlotAxisRange, PlotAxisTitles, PlotChart, PlotGroup, PlotLegend, PlotMarker, PlotOp, PlotPoint,
+    PlotRect, PlotSeries, PlotSink, chart_aria_label, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -7640,6 +7640,8 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 min: axis.min,
                 max: axis.max,
             }),
+        // The docx chart contract carries no axis titles to draw.
+        axis_titles: PlotAxisTitles::default(),
         series: chart.series.iter().map(plot_series_from).collect(),
         plot_groups: chart
             .plot_groups

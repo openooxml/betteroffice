@@ -122,8 +122,16 @@ pub struct PlotChart<'a> {
     pub title: Option<&'a str>,
     pub legend: Option<PlotLegend<'a>>,
     pub value_axis: Option<PlotAxisRange>,
+    pub axis_titles: PlotAxisTitles<'a>,
     pub series: Vec<PlotSeries<'a>>,
     pub plot_groups: Vec<PlotGroup<'a>>,
+}
+
+/// Axis titles, drawn horizontally because [`PlotOp::Text`] has no rotation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotAxisTitles<'a> {
+    pub category: Option<&'a str>,
+    pub value: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -187,6 +195,18 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                     min: axis.min,
                     max: axis.max,
                 }),
+            axis_titles: PlotAxisTitles {
+                category: space
+                    .axes
+                    .as_ref()
+                    .and_then(|axes| axes.category.as_ref())
+                    .and_then(|axis| axis.title.as_deref()),
+                value: space
+                    .axes
+                    .as_ref()
+                    .and_then(|axes| axes.value.as_ref())
+                    .and_then(|axis| axis.title.as_deref()),
+            },
             series: space.series.iter().map(plot_series_from_model).collect(),
             plot_groups: space
                 .plot_groups
@@ -306,6 +326,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 chart_type: chart.chart_type,
                 series: &series,
                 value_axis: chart.value_axis,
+                axis_titles: chart.axis_titles,
             },
             plot,
             x,
@@ -325,6 +346,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                     chart_type: group.chart_type.unwrap_or(chart.chart_type),
                     series: &series,
                     value_axis: chart.value_axis,
+                    axis_titles: chart.axis_titles,
                 },
                 plot,
                 x,
@@ -424,6 +446,7 @@ struct PlotFamily<'a> {
     chart_type: &'a str,
     series: &'a [SeriesView<'a>],
     value_axis: Option<PlotAxisRange>,
+    axis_titles: PlotAxisTitles<'a>,
 }
 
 /// A series plus a first-match index over its points, so a lookup costs a
@@ -743,6 +766,30 @@ fn emit_axes<S: PlotSink + ?Sized>(
         CHART_AXIS_COLOR,
         1.0,
     );
+    if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
+        push_text(
+            ops,
+            title,
+            plot.x - 38.0,
+            plot.y - 5.0,
+            plot.w + 38.0,
+            CHART_LABEL_FONT,
+        );
+    }
+    if let Some(title) = family
+        .axis_titles
+        .category
+        .filter(|title| !title.is_empty())
+    {
+        push_text(
+            ops,
+            title,
+            plot.x,
+            plot.y + plot.h + 26.0,
+            plot.w,
+            CHART_LABEL_FONT,
+        );
+    }
 }
 
 fn emit_bar<S: PlotSink + ?Sized>(
@@ -1140,6 +1187,7 @@ mod tests {
             chart_type: chart.chart_type,
             series,
             value_axis: chart.value_axis,
+            axis_titles: chart.axis_titles,
         }
     }
 
@@ -1198,6 +1246,44 @@ mod tests {
                 .iter()
                 .all(|op| matches!(op, PlotOp::Path { commands, .. }
             if matches!(commands.last(), Some(GeometryPathCommand::Close))))
+        );
+    }
+
+    #[test]
+    fn axis_titles_draw_beside_the_axes_they_name() {
+        let north = source(&[10.0, 20.0]);
+        for chart_type in ["column", "bar", "line"] {
+            let chart = PlotChart {
+                chart_type,
+                axis_titles: PlotAxisTitles {
+                    category: Some("Quarter"),
+                    value: Some("Millions"),
+                },
+                series: vec![series("North", &north)],
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            for title in ["Quarter", "Millions"] {
+                assert!(
+                    ops.iter()
+                        .any(|op| matches!(op, PlotOp::Text { text, .. } if text == title)),
+                    "{chart_type} drops {title}"
+                );
+            }
+        }
+        let pie = PlotChart {
+            chart_type: "pie",
+            axis_titles: PlotAxisTitles {
+                category: Some("Quarter"),
+                value: Some("Millions"),
+            },
+            series: vec![series("North", &north)],
+            ..PlotChart::default()
+        };
+        assert!(
+            !plot_chart(&pie, rect())
+                .iter()
+                .any(|op| matches!(op, PlotOp::Text { text, .. } if text == "Millions"))
         );
     }
 

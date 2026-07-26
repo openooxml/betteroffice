@@ -2214,6 +2214,11 @@ mod tests {
         assert!(text.contains(&"Q1".to_owned()));
         assert!(text.contains(&"12".to_owned()), "data labels are missing");
         assert!(
+            text.contains(&"Quarter".to_owned()),
+            "no category axis title"
+        );
+        assert!(text.contains(&"Millions".to_owned()), "no value axis title");
+        assert!(
             parts.iter().any(|primitive| matches!(
                 primitive,
                 Primitive::TextBox { lines, .. }
