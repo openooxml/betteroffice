@@ -149,6 +149,7 @@ pub struct Workbook {
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
+    moved_references_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
@@ -272,6 +273,7 @@ impl Workbook {
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
+            moved_references_since_open: false,
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
             graph,
@@ -494,7 +496,10 @@ impl Workbook {
                 package,
                 &self.preserved.origins,
                 &self.preserved.shared_string_cells,
-                self.edited_since_open,
+                xlsx_parse::SaveEdits {
+                    changed: self.edited_since_open,
+                    moved_references: self.moved_references_since_open,
+                },
             )?,
             None => xlsx_parse::serialize_workbook(&self.model)?,
         };
@@ -1620,6 +1625,7 @@ impl Workbook {
     }
 
     fn apply_preserved_state_ops(&mut self, ops: &[Op]) {
+        self.moved_references_since_open |= ops.iter().any(moves_cell_references);
         for op in ops {
             match *op {
                 Op::AddSheet { index, .. } => self.preserved.insert(index),
@@ -2700,6 +2706,17 @@ fn validate_axis(axis: &str, at: u32, count: u32, limit: u32) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Whether an op moves the cells preserved parts name by address.
+fn moves_cell_references(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::InsertRows { .. }
+            | Op::DeleteRows { .. }
+            | Op::InsertCols { .. }
+            | Op::DeleteCols { .. }
+    )
 }
 
 fn invalidates_proposals(op: &Op) -> bool {

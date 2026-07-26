@@ -9,7 +9,8 @@ use xlsx_model::{
 
 use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
 use crate::{
-    ParseError, SharedStringCells, parse_workbook, parse_workbook_with_package, serialize_workbook,
+    ParseError, SaveEdits, SharedStringCells, parse_workbook, parse_workbook_with_package,
+    serialize_workbook,
 };
 
 /// assemble a one-sheet package around a worksheet body and optional shared
@@ -1593,7 +1594,10 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
         &parsed.package,
         &[Some(1), Some(0)],
         &provenance,
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap_err();
     assert!(
@@ -1606,7 +1610,10 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
         &parsed.package,
         &[Some(0), None],
         &provenance,
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap_err();
     assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
@@ -1618,10 +1625,32 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
         &parsed.package,
         &[Some(0), Some(1)],
         &provenance,
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap_err();
     assert!(matches!(renamed, ParseError::UnsupportedEdit(_)));
+
+    let save_in_place = |moved_references| {
+        crate::serialize_workbook_with_package_and_origins_after_edits(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &provenance,
+            SaveEdits {
+                changed: true,
+                moved_references,
+            },
+        )
+    };
+    save_in_place(false).expect("a cell edit strands nothing");
+    let axis_edit = save_in_place(true).unwrap_err();
+    assert!(
+        matches!(&axis_edit, ParseError::UnsupportedEdit(message) if message.contains("pivotCacheDefinition1.xml")),
+        "{axis_edit:?}"
+    );
 }
 
 /// Charts are modelled now: the anchor, its `editAs` mode and every `c:f` come
@@ -1701,7 +1730,10 @@ fn patches_a_moved_chart_reference_together_with_its_cache() {
         &parsed.package,
         &[Some(0), Some(1)],
         &vec![SharedStringCells::new(); 2],
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap();
     let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
@@ -1834,13 +1866,126 @@ fn refuses_a_chart_that_no_longer_names_its_source_anchor() {
             &parsed.package,
             &[Some(0), Some(1)],
             &vec![SharedStringCells::new(); 2],
-            true,
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
         )
         .unwrap_err();
         assert!(
             matches!(&error, ParseError::UnsupportedEdit(message)
                 if message.contains("drawing and anchor it was read from")),
             "{error:?}"
+        );
+    }
+}
+
+/// This crate patches chart parts in place, so it can neither create one nor
+/// delete one. A chart that appeared on a sheet, one that vanished from a
+/// retained sheet and one carried onto a sheet with no source are all refused.
+#[test]
+fn refuses_chart_state_with_no_one_to_one_source() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let save = |workbook: &xlsx_model::Workbook, origins: &[Option<usize>]| {
+        crate::serialize_workbook_with_package_and_origins_after_edits(
+            workbook,
+            &parsed.package,
+            origins,
+            &vec![SharedStringCells::new(); origins.len()],
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
+        )
+    };
+
+    let mut appeared = parsed.workbook.clone();
+    let chart = appeared.sheets[0].charts[0].clone();
+    appeared.sheets[1].charts.push(chart.clone());
+    let error = save(&appeared, &[Some(0), Some(1)]).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("cannot create one")),
+        "{error:?}"
+    );
+
+    let mut dropped = parsed.workbook.clone();
+    dropped.sheets[0].charts.clear();
+    let error = save(&dropped, &[Some(0), Some(1)]).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("cannot delete one")),
+        "{error:?}"
+    );
+
+    let mut added_sheet = parsed.workbook.clone();
+    let mut sheet = xlsx_model::Sheet::new("Added");
+    sheet.charts.push(chart);
+    added_sheet.sheets.push(sheet);
+    let error = save(&added_sheet, &[Some(0), Some(1), None]).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("cannot create one")),
+        "{error:?}"
+    );
+}
+
+/// A save writes an anchor's row and column back and nothing else, so a model
+/// that also moved its mode, offsets, extent or kind is refused rather than
+/// saved with that change dropped.
+#[test]
+fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let xlsx_model::ChartAnchor::TwoCell { from, to, .. } =
+        parsed.workbook.sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    for (label, anchor) in [
+        (
+            "edit mode",
+            xlsx_model::ChartAnchor::TwoCell {
+                from,
+                to,
+                edit_as: xlsx_model::AnchorEditAs::TwoCell,
+            },
+        ),
+        (
+            "offset",
+            xlsx_model::ChartAnchor::TwoCell {
+                from: xlsx_model::AnchorCell {
+                    col_off: 4_242,
+                    ..from
+                },
+                to,
+                edit_as: xlsx_model::AnchorEditAs::OneCell,
+            },
+        ),
+        (
+            "kind",
+            xlsx_model::ChartAnchor::OneCell {
+                from,
+                extent: xlsx_model::AnchorExtent { cx: 100, cy: 100 },
+            },
+        ),
+    ] {
+        let mut workbook = parsed.workbook.clone();
+        workbook.sheets[0].charts[0].anchor = anchor;
+        let error = crate::serialize_workbook_with_package_and_origins_after_edits(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &vec![SharedStringCells::new(); 2],
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ParseError::UnsupportedEdit(message)
+                if message.contains("more than the row and column")),
+            "{label}: {error:?}"
         );
     }
 }
@@ -1882,7 +2027,10 @@ fn patches_only_the_moved_anchor_indices() {
         &parsed.package,
         &[Some(0), Some(1)],
         &vec![SharedStringCells::new(); 2],
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap();
     let patched = String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap();
@@ -1908,7 +2056,10 @@ fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
         &parsed.package,
         &[Some(0), Some(1)],
         &vec![SharedStringCells::new(); 2],
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap();
     assert_eq!(
@@ -1922,7 +2073,10 @@ fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
         &parsed.package,
         &[Some(0), None, Some(1)],
         &vec![SharedStringCells::new(); 3],
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap();
     assert_eq!(parse_workbook(&added).unwrap().sheets.len(), 3);
@@ -2254,7 +2408,10 @@ fn dropping_a_charted_sheet_prunes_its_unreachable_parts() {
         &parsed.package,
         &[Some(1)],
         &vec![SharedStringCells::new(); 1],
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .unwrap();
     let names = saved
@@ -2284,12 +2441,19 @@ fn saves_sheet_moves_on_a_charted_workbook() {
     let provenance = vec![SharedStringCells::new(); 2];
 
     for origins in [[Some(1), Some(0)], [Some(0), Some(1)]] {
+        let mut moved = workbook.clone();
+        if origins[0] == Some(1) {
+            moved.sheets.swap(0, 1);
+        }
         crate::serialize_workbook_with_package_and_origins_after_edits(
-            &workbook,
+            &moved,
             &parsed.package,
             &origins,
             &provenance,
-            true,
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
         )
         .expect("reordering a charted workbook saves");
     }
@@ -2301,7 +2465,10 @@ fn saves_sheet_moves_on_a_charted_workbook() {
         &parsed.package,
         &[Some(0), Some(1)],
         &provenance,
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .expect("renaming a charted workbook saves");
 
@@ -2312,7 +2479,10 @@ fn saves_sheet_moves_on_a_charted_workbook() {
         &parsed.package,
         &[Some(0)],
         &vec![SharedStringCells::new(); 1],
-        true,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
     )
     .expect("dropping a sheet from a charted workbook saves");
 }

@@ -687,21 +687,28 @@ fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
 }
 
 /// Write moved anchors back into their drawing part. Only `col` and `row`
-/// move; offsets, extents and every other byte stay as authored.
+/// move; an anchor whose kind, `editAs` mode, offsets, extent or absolute
+/// position also changed is refused, because none of that is written back.
 pub(crate) fn patch_drawing_anchors(
     part: &[u8],
     anchors: &[(usize, ChartAnchor)],
 ) -> Result<Vec<u8>, ParseError> {
     let source = Part::decode(part)?;
     let root = source.tree()?;
-    let indexed = root.child_elements().filter(is_anchor).collect::<Vec<_>>();
+    let indexed = anchor_elements(&root);
+    let authored = read_anchors(&root)?;
     let mut edits: Vec<Edit> = Vec::new();
     for (index, anchor) in anchors {
-        let Some(element) = indexed.get(*index) else {
+        let (Some(element), Some(authored)) = (indexed.get(*index), authored.get(*index)) else {
             return Err(ParseError::UnsupportedEdit(
                 "a chart anchor no longer exists in its drawing part".into(),
             ));
         };
+        if !only_grid_indices_moved(&authored.anchor, anchor) {
+            return Err(ParseError::UnsupportedEdit(
+                "a chart anchor changed more than the row and column a save writes back".into(),
+            ));
+        }
         match anchor {
             ChartAnchor::TwoCell { from, to, .. } => {
                 push_cell_edits(element.child("from"), *from, &mut edits)?;
@@ -718,6 +725,47 @@ pub(crate) fn patch_drawing_anchors(
     }
     edits.sort_by_key(|(span, _)| span.start);
     source.splice(&edits)
+}
+
+/// The anchor elements [`read_anchors`] modelled, in the same order, so an
+/// index selects the same anchor in both.
+fn anchor_elements(root: &Element) -> Vec<&Element> {
+    if !root.is(NS_SPREADSHEET_DRAWING, "wsDr") {
+        return Vec::new();
+    }
+    root.child_elements().filter(is_anchor).collect()
+}
+
+/// Whether the only difference between the authored anchor and the model's is
+/// a grid index, which is all [`push_cell_edits`] writes.
+fn only_grid_indices_moved(authored: &ChartAnchor, moved: &ChartAnchor) -> bool {
+    match (authored, moved) {
+        (
+            ChartAnchor::TwoCell { from, to, edit_as },
+            ChartAnchor::TwoCell {
+                from: moved_from,
+                to: moved_to,
+                edit_as: moved_edit_as,
+            },
+        ) => {
+            edit_as == moved_edit_as
+                && offsets_match(from, moved_from)
+                && offsets_match(to, moved_to)
+        }
+        (
+            ChartAnchor::OneCell { from, extent },
+            ChartAnchor::OneCell {
+                from: moved_from,
+                extent: moved_extent,
+            },
+        ) => extent == moved_extent && offsets_match(from, moved_from),
+        (ChartAnchor::Absolute { .. }, ChartAnchor::Absolute { .. }) => authored == moved,
+        _ => false,
+    }
+}
+
+fn offsets_match(authored: &AnchorCell, moved: &AnchorCell) -> bool {
+    authored.col_off == moved.col_off && authored.row_off == moved.row_off
 }
 
 fn push_cell_edits(

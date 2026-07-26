@@ -135,7 +135,7 @@ pub(crate) fn serialize_workbook_with_package_and_origins(
     package: &PreservedPackage,
     origins: &[Option<usize>],
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
-    let edited = wb != &package.original_workbook
+    let changed = wb != &package.original_workbook
         || origins.len() != package.sheets.len()
         || origins
             .iter()
@@ -154,28 +154,44 @@ pub(crate) fn serialize_workbook_with_package_and_origins(
         package,
         origins,
         &shared_string_cells,
-        edited,
+        SaveEdits {
+            changed,
+            moved_references: false,
+        },
     )
+}
+
+/// What a save must be told about the edits behind it, because neither the
+/// model nor the source package carries it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SaveEdits {
+    /// the model differs from the one the package was read with. False means
+    /// the caller guarantees an untouched model, which is returned as the
+    /// source bytes; true drops the now-stale calculation chain.
+    pub changed: bool,
+    /// an edit moved cell addresses, so every preserved part naming them must
+    /// be one this crate can rewrite.
+    pub moved_references: bool,
 }
 
 /// `origins` and `shared_string_cells` are indexed by current sheet and carry
 /// what the model does not: the source sheet each one came from and the shared
-/// string entry each of its cells was authored against. `edited` false means
-/// the caller guarantees an untouched model, which is returned as the source
-/// bytes; true drops the now-stale calculation chain.
+/// string entry each of its cells was authored against.
 #[doc(hidden)]
 pub fn serialize_workbook_with_package_and_origins_after_edits(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
     shared_string_cells: &[SharedStringCells],
-    edited: bool,
+    edits: SaveEdits,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
         ));
     }
+    let edited = edits.changed;
     if !edited
         && origins.len() == package.sheets.len()
         && origins
@@ -185,7 +201,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     {
         return Ok(package.parts.clone());
     }
-    ensure_preserved_references_stay_valid(wb, package, origins)?;
+    preflight_preserved_save(wb, package, origins, edits)?;
 
     let have_sst = !wb.shared_strings.is_empty();
     let have_styles = !wb.styles.is_empty() || package.styles.is_some();
@@ -412,9 +428,10 @@ fn patch_chart_parts(
             .map(|sheet| sheet.charts.as_slice())
             .unwrap_or_default();
         for chart in &sheet.charts {
-            let Some(original) = source.iter().find(|other| other.part == chart.part) else {
-                continue;
-            };
+            let original = source
+                .iter()
+                .find(|other| other.part == chart.part)
+                .ok_or_else(|| unwritable_chart(&chart.part, &sheet.name))?;
             if original.drawing != chart.drawing || original.anchor_index != chart.anchor_index {
                 return Err(ParseError::UnsupportedEdit(format!(
                     "chart {} no longer names the drawing and anchor it was read from",
@@ -448,18 +465,14 @@ fn patch_chart_parts(
         }
     }
     for (path, (refs, owner)) in chart_refs {
-        let Some(source) = package.part_bytes(path) else {
-            continue;
-        };
+        let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
         parts.set(
             path.to_owned(),
             crate::chart::patch_chart_refs(source, refs, wb, owner)?,
         )?;
     }
     for (path, moved) in anchors {
-        let Some(source) = package.part_bytes(path) else {
-            continue;
-        };
+        let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
         parts.set(
             path.to_owned(),
             crate::chart::patch_drawing_anchors(source, &moved)?,
@@ -468,14 +481,40 @@ fn patch_chart_parts(
     Ok(())
 }
 
-/// Charts, pivot caches and their friends name sheets this crate never
-/// patches. Dropping, reordering or renaming a source sheet while one of them
-/// is preserved strands it, so the serializer refuses that here instead of
-/// trusting every caller to have checked.
+fn missing_part(path: &str) -> ParseError {
+    ParseError::UnsupportedEdit(format!(
+        "{path} carries chart state to write back but is not in the source package"
+    ))
+}
+
+fn unwritable_chart(part: &str, sheet: &str) -> ParseError {
+    ParseError::UnsupportedEdit(format!(
+        "chart {part} was not read from sheet {sheet}, and this crate cannot create one"
+    ))
+}
+
+/// Everything a save over a preserved package must satisfy before a byte is
+/// written: no part this crate cannot rewrite is stranded, and every chart the
+/// model carries lines up one for one with the source it must be patched from.
+fn preflight_preserved_save(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    edits: SaveEdits,
+) -> Result<(), ParseError> {
+    ensure_preserved_references_stay_valid(wb, package, origins, edits)?;
+    ensure_chart_provenance(wb, package, origins)
+}
+
+/// Charts, pivot caches and their friends name sheets and cells this crate
+/// never patches. Moving cells, or dropping, reordering or renaming a source
+/// sheet while one of them is preserved strands it, so the serializer refuses
+/// that here instead of trusting every caller to have checked.
 fn ensure_preserved_references_stay_valid(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
+    edits: SaveEdits,
 ) -> Result<(), ParseError> {
     let Some(part) = package.unpatchable_reference_part() else {
         return Ok(());
@@ -495,12 +534,48 @@ fn ensure_preserved_references_stay_valid(
                 .is_some_and(|original| original.name != sheet.name)
         })
     });
-    if kept_in_order && !renamed {
+    if kept_in_order && !renamed && !edits.moved_references {
         return Ok(());
     }
     Err(ParseError::UnsupportedEdit(format!(
-        "{part} references sheets this save would move, and it cannot be rewritten"
+        "{part} references sheets or cells this save would move, and it cannot be rewritten"
     )))
+}
+
+/// This crate patches chart parts in place; it can neither create one nor
+/// delete one. Every chart a retained sheet carries must therefore name
+/// exactly one chart the same source sheet was read with, and every chart that
+/// source held must still be there.
+fn ensure_chart_provenance(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Result<(), ParseError> {
+    for (sheet, origin) in wb.sheets.iter().zip(origins) {
+        let source = origin
+            .and_then(|origin| package.original_workbook.sheets.get(origin))
+            .map(|sheet| sheet.charts.as_slice())
+            .unwrap_or_default();
+        for chart in &sheet.charts {
+            if source
+                .iter()
+                .filter(|other| other.part == chart.part)
+                .count()
+                != 1
+            {
+                return Err(unwritable_chart(&chart.part, &sheet.name));
+            }
+        }
+        for original in source {
+            if !sheet.charts.iter().any(|chart| chart.part == original.part) {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "chart {} was dropped from sheet {}, and this crate cannot delete one",
+                    original.part, sheet.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The relationship ids a worksheet's `<hyperlink>` elements point at, beside
