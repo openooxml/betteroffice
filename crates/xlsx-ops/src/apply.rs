@@ -24,6 +24,7 @@ pub enum OpError {
     SheetNotFound(SheetId),
     SheetIndexOutOfRange(usize),
     FormulaNotRewritable { sheet: SheetId, cell: CellRef },
+    DefinedNameNotRewritable { name: String },
     InvalidStyle(String),
 }
 
@@ -38,6 +39,9 @@ impl fmt::Display for OpError {
                 sheet.0,
                 cell.to_a1()
             ),
+            OpError::DefinedNameNotRewritable { name } => {
+                write!(f, "defined name {name} cannot be safely rewritten")
+            }
             OpError::InvalidStyle(message) => f.write_str(message),
         }
     }
@@ -384,7 +388,7 @@ fn insert_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
-    let defined_name_restore = remap_defined_names(wb, op);
+    let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -419,7 +423,7 @@ fn delete_rows(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
-    let defined_name_restore = remap_defined_names(wb, op);
+    let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -464,7 +468,7 @@ fn insert_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
-    let defined_name_restore = remap_defined_names(wb, op);
+    let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -499,7 +503,7 @@ fn delete_cols(
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
     let restores = remap_formulas(wb, op)?;
-    let defined_name_restore = remap_defined_names(wb, op);
+    let defined_name_restore = remap_defined_names(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
+use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::{CellRange, CellRef, DefinedName, ErrorValue, SheetId, Workbook};
 
 use crate::apply::OpError;
@@ -141,11 +142,15 @@ pub(crate) fn remap_hyperlink_locations(wb: &mut Workbook, op: &Op) -> Vec<Op> {
 
 /// Rewrites defined-name formulas through a row or column op, the same way
 /// cell formulas are. A scoped name resolves unqualified references against
-/// its own sheet; a global name only follows qualified ones.
-pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Option<Op> {
-    let target = structural_target(op)?;
+/// its own sheet; a global name only follows qualified ones. A name aimed at
+/// the edited sheet that the rewriter cannot express is refused rather than
+/// left pointing at the pre-edit addresses.
+pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Result<Option<Op>, OpError> {
+    let Some(target) = structural_target(op) else {
+        return Ok(None);
+    };
     if wb.defined_names.is_empty() {
-        return None;
+        return Ok(None);
     }
     let names: HashMap<String, SheetId> = wb
         .sheets
@@ -153,31 +158,292 @@ pub(crate) fn remap_defined_names(wb: &mut Workbook, op: &Op) -> Option<Op> {
         .enumerate()
         .map(|(index, sheet)| (sheet.name.to_lowercase(), SheetId(index as u32)))
         .collect();
+    let target_name = wb
+        .sheet(target)
+        .map(|sheet| sheet.name.clone())
+        .unwrap_or_default();
 
     let previous = wb.defined_names.clone();
     let mut rewritten = Vec::with_capacity(previous.len());
     for defined in &previous {
         let mut updated = defined.clone();
-        if let Ok(expr) = parse_formula(&defined.formula) {
-            let matches = |ref_sheet: &Option<String>| match ref_sheet {
-                Some(name) => names.get(&name.to_lowercase()).copied() == Some(target),
-                None => defined.local_sheet == Some(target),
-            };
-            let mut changed = false;
-            let formula = transform(&expr, op, &matches, &mut changed).to_formula();
-            if changed && formula.len() <= MAX_FORMULA_BYTES && parse_formula(&formula).is_ok() {
+        let scoped = defined.local_sheet == Some(target);
+        let matches = |ref_sheet: &Option<String>| match ref_sheet {
+            Some(name) => names.get(&name.to_lowercase()).copied() == Some(target),
+            None => scoped,
+        };
+        let rewrite = rewrite_defined_name(&defined.formula, op, &matches);
+        match rewrite {
+            DefinedNameRewrite::Unchanged => {}
+            DefinedNameRewrite::Rewritten(formula) if formula.len() <= MAX_FORMULA_BYTES => {
                 updated.formula = formula;
             }
+            _ if scoped || mentions_sheet(&defined.formula, &target_name) => {
+                return Err(OpError::DefinedNameNotRewritable {
+                    name: defined.name.clone(),
+                });
+            }
+            _ => {}
         }
         rewritten.push(updated);
     }
     if rewritten == previous {
-        return None;
+        return Ok(None);
     }
     wb.defined_names = rewritten;
-    Some(Op::SetDefinedNames {
+    Ok(Some(Op::SetDefinedNames {
         defined_names: previous,
-    })
+    }))
+}
+
+/// What the defined-name rewriter made of one formula.
+enum DefinedNameRewrite {
+    Unchanged,
+    Rewritten(String),
+    /// A component neither the formula parser nor the whole-axis reader
+    /// accepts, so nothing in it can be moved.
+    Unsupported,
+}
+
+/// Rewrites one defined-name formula: a union of components, each either a
+/// whole-row/whole-column reference or an expression the formula parser reads.
+fn rewrite_defined_name(
+    source: &str,
+    op: &Op,
+    matches_target: &dyn Fn(&Option<String>) -> bool,
+) -> DefinedNameRewrite {
+    let Some(components) = split_union(source) else {
+        return DefinedNameRewrite::Unsupported;
+    };
+    let mut rewritten = Vec::with_capacity(components.len());
+    let mut changed = false;
+    for component in components {
+        if let Some(axis) = AxisRange::parse(component) {
+            match axis.remapped(op, matches_target) {
+                Remapped::Unchanged => rewritten.push(component.to_owned()),
+                Remapped::Moved((start, end)) => {
+                    changed = true;
+                    rewritten.push(axis.to_formula(start, end));
+                }
+                Remapped::Deleted => {
+                    changed = true;
+                    rewritten.push(ErrorValue::Ref.as_str().to_owned());
+                }
+            }
+            continue;
+        }
+        let Ok(expr) = parse_formula(component) else {
+            return DefinedNameRewrite::Unsupported;
+        };
+        let mut component_changed = false;
+        let formula = transform(&expr, op, matches_target, &mut component_changed).to_formula();
+        if !component_changed {
+            rewritten.push(component.to_owned());
+            continue;
+        }
+        if parse_formula(&formula).is_err() {
+            return DefinedNameRewrite::Unsupported;
+        }
+        changed = true;
+        rewritten.push(formula);
+    }
+    if !changed {
+        return DefinedNameRewrite::Unchanged;
+    }
+    DefinedNameRewrite::Rewritten(rewritten.join(","))
+}
+
+/// Splits a formula on its top-level `,` union separators, keeping strings,
+/// quoted sheet names, brackets and call arguments intact. `None` when those
+/// do not balance.
+fn split_union(source: &str) -> Option<Vec<&str>> {
+    let bytes = source.as_bytes();
+    let mut components = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    let mut depth = 0_u32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => index = skip_string(source, index),
+            b'\'' => index = parse_sheet_token(source, index)?.end,
+            b'(' | b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' | b']' => {
+                depth = depth.checked_sub(1)?;
+                index += 1;
+            }
+            b',' if depth == 0 => {
+                components.push(&source[start..index]);
+                index += 1;
+                start = index;
+            }
+            _ => index += next_char_len(source, index),
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    components.push(&source[start..]);
+    Some(components)
+}
+
+/// A whole-row (`Sheet!$1:$5`) or whole-column (`Sheet!$A:$C`) reference. Print
+/// titles are written this way and the formula lexer has no token for it.
+struct AxisRange<'a> {
+    qualifier: &'a str,
+    sheet: Option<String>,
+    axis: Axis,
+    start: u32,
+    end: u32,
+    start_absolute: bool,
+    end_absolute: bool,
+}
+
+impl<'a> AxisRange<'a> {
+    fn parse(source: &'a str) -> Option<Self> {
+        let source = source.trim();
+        let (qualifier, sheet, rest) = match parse_sheet_token(source, 0) {
+            Some(token) if source.as_bytes().get(token.end) == Some(&b'!') => (
+                &source[..=token.end],
+                Some(token.name),
+                &source[token.end + 1..],
+            ),
+            _ => ("", None, source),
+        };
+        let (start_text, end_text) = rest.split_once(':')?;
+        let (start_absolute, start_axis, start) = parse_axis_endpoint(start_text)?;
+        let (end_absolute, end_axis, end) = parse_axis_endpoint(end_text)?;
+        if start_axis != end_axis {
+            return None;
+        }
+        Some(Self {
+            qualifier,
+            sheet,
+            axis: start_axis,
+            start: start.min(end),
+            end: start.max(end),
+            start_absolute,
+            end_absolute,
+        })
+    }
+
+    fn remapped(
+        &self,
+        op: &Op,
+        matches_target: &dyn Fn(&Option<String>) -> bool,
+    ) -> Remapped<(u32, u32)> {
+        if !matches_target(&self.sheet) || !self.axis.is_edited_by(op) {
+            return Remapped::Unchanged;
+        }
+        let (start, end) = match *op {
+            Op::DeleteRows { at, count, .. } | Op::DeleteCols { at, count, .. } => {
+                match clip_interval(self.start, self.end, at, count) {
+                    Some(interval) => interval,
+                    None => return Remapped::Deleted,
+                }
+            }
+            Op::InsertRows { at, count, .. } | Op::InsertCols { at, count, .. } => {
+                let last = self.axis.limit() - 1;
+                let shift = |index: u32| {
+                    if index < at {
+                        index
+                    } else {
+                        index.saturating_add(count).min(last)
+                    }
+                };
+                (shift(self.start), shift(self.end))
+            }
+            _ => return Remapped::Unchanged,
+        };
+        if (start, end) == (self.start, self.end) {
+            return Remapped::Unchanged;
+        }
+        Remapped::Moved((start, end))
+    }
+
+    fn to_formula(&self, start: u32, end: u32) -> String {
+        format!(
+            "{}{}:{}",
+            self.qualifier,
+            self.axis.endpoint(start, self.start_absolute),
+            self.axis.endpoint(end, self.end_absolute)
+        )
+    }
+}
+
+fn parse_axis_endpoint(source: &str) -> Option<(bool, Axis, u32)> {
+    let absolute = source.starts_with('$');
+    let text = source.strip_prefix('$').unwrap_or(source);
+    if text.is_empty() {
+        return None;
+    }
+    if text.bytes().all(|byte| byte.is_ascii_digit()) {
+        let row: u32 = text.parse().ok()?;
+        return (1..=MAX_ROWS)
+            .contains(&row)
+            .then_some((absolute, Axis::Row, row - 1));
+    }
+    if !text.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let cell = CellRef::parse_a1(&format!("{}1", text.to_ascii_uppercase())).ok()?;
+    Some((absolute, Axis::Col, cell.col))
+}
+
+/// Whether an unrewritable formula names `sheet` as a reference qualifier, so
+/// leaving it untouched would strand it on the pre-edit addresses.
+fn mentions_sheet(source: &str, sheet: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut bracket_depth = 0_u32;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = skip_string(source, index);
+            continue;
+        }
+        if bytes[index] == b'[' {
+            bracket_depth = bracket_depth.saturating_add(1);
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b']' {
+            bracket_depth = bracket_depth.saturating_sub(1);
+            index += 1;
+            continue;
+        }
+        if bracket_depth != 0 {
+            index += next_char_len(source, index);
+            continue;
+        }
+        let Some(first) = parse_sheet_token(source, index) else {
+            index += next_char_len(source, index);
+            continue;
+        };
+        let external = first.start > 0 && bytes[first.start - 1] == b']';
+        let qualified_by =
+            |token: &ParsedSheetToken| !external && sheet_names_equal(&token.name, sheet);
+        if bytes.get(first.end) == Some(&b'!') {
+            if qualified_by(&first) {
+                return true;
+            }
+            index = first.end + 1;
+            continue;
+        }
+        if bytes.get(first.end) == Some(&b':')
+            && let Some(second) = parse_sheet_token(source, first.end + 1)
+            && bytes.get(second.end) == Some(&b'!')
+        {
+            if qualified_by(&first) || qualified_by(&second) {
+                return true;
+            }
+            index = second.end + 1;
+            continue;
+        }
+        index = first.end;
+    }
+    false
 }
 
 pub(crate) fn remap_hyperlink_range(range: CellRange, op: &Op) -> Option<CellRange> {
@@ -613,9 +879,35 @@ fn remap_span(range: CellRange, op: &Op) -> Remapped<CellRange> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Axis {
     Row,
     Col,
+}
+
+impl Axis {
+    fn is_edited_by(self, op: &Op) -> bool {
+        matches!(
+            (self, op),
+            (Axis::Row, Op::InsertRows { .. } | Op::DeleteRows { .. })
+                | (Axis::Col, Op::InsertCols { .. } | Op::DeleteCols { .. })
+        )
+    }
+
+    fn limit(self) -> u32 {
+        match self {
+            Axis::Row => MAX_ROWS,
+            Axis::Col => MAX_COLS,
+        }
+    }
+
+    fn endpoint(self, index: u32, absolute: bool) -> String {
+        let anchor = if absolute { "$" } else { "" };
+        match self {
+            Axis::Row => format!("{anchor}{}", index + 1),
+            Axis::Col => format!("{anchor}{}", col_to_letters(index)),
+        }
+    }
 }
 
 /// clip a range's span on one axis under a delete of `count` starting at `at`.
@@ -919,7 +1211,7 @@ mod tests {
         assert_eq!(workbook.defined_names[0].formula, "Data!$A$7");
         assert_eq!(workbook.defined_names[1].formula, "Other!$A$5");
         assert_eq!(workbook.defined_names[2].formula, "$A$7");
-        assert!(matches!(inverse, Op::SetDefinedNames { .. }));
+        assert!(matches!(inverse, Some(Op::SetDefinedNames { .. })));
     }
 
     #[test]
@@ -934,6 +1226,177 @@ mod tests {
 
         remap_defined_names(&mut workbook, &op).unwrap();
         assert_eq!(workbook.defined_names[0].formula, "#REF!");
+    }
+
+    fn insert_rows(sheet: u32, at: u32, count: u32) -> Op {
+        Op::InsertRows {
+            sheet: SheetId(sheet),
+            at,
+            count,
+        }
+    }
+
+    /// Print areas are unions, which the formula parser has no expression for,
+    /// so structural edits used to leave every one of them stale.
+    #[test]
+    fn row_insertion_shifts_every_branch_of_a_print_area_union() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![
+            defined("_xlnm.Print_Area", "Data!$A$1:$D$20,Data!$F$1:$G$20"),
+            defined("Mixed", "Data!$A$1:$D$20,Other!$A$1:$B$2"),
+        ];
+
+        let inverse = remap_defined_names(&mut workbook, &insert_rows(0, 0, 2)).unwrap();
+        assert!(matches!(inverse, Some(Op::SetDefinedNames { .. })));
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "Data!$A$3:$D$22,Data!$F$3:$G$22"
+        );
+        assert_eq!(
+            workbook.defined_names[1].formula,
+            "Data!$A$3:$D$22,Other!$A$1:$B$2"
+        );
+    }
+
+    #[test]
+    fn whole_axis_print_titles_follow_only_their_own_axis() {
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![
+            defined("_xlnm.Print_Titles", "Data!$1:$2,Data!$A:$B"),
+            defined("Relative", "Data!1:2"),
+        ];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 3)).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "Data!$4:$5,Data!$A:$B");
+        assert_eq!(workbook.defined_names[1].formula, "Data!4:5");
+
+        remap_defined_names(
+            &mut workbook,
+            &Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "Data!$4:$5,Data!$B:$C");
+    }
+
+    #[test]
+    fn deleting_a_whole_axis_reference_collapses_it_to_a_ref_error() {
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![
+            defined("Titles", "Data!$1:$2,Data!$A:$A"),
+            defined("Clipped", "Data!$1:$9"),
+        ];
+
+        remap_defined_names(
+            &mut workbook,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "#REF!,Data!$A:$A");
+        assert_eq!(workbook.defined_names[1].formula, "Data!$1:$7");
+    }
+
+    #[test]
+    fn scoped_whole_axis_titles_resolve_against_their_own_sheet() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![
+            DefinedName {
+                local_sheet: Some(SheetId(0)),
+                ..defined("_xlnm.Print_Titles", "$1:$1")
+            },
+            DefinedName {
+                local_sheet: Some(SheetId(1)),
+                ..defined("_xlnm.Print_Titles", "$1:$1")
+            },
+        ];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "$2:$2");
+        assert_eq!(workbook.defined_names[1].formula, "$1:$1");
+    }
+
+    #[test]
+    fn quoted_and_three_dimensional_union_branches_keep_their_qualifiers() {
+        let mut workbook = wb(&["My Data", "Other"]);
+        workbook.defined_names = vec![defined("Area", "'My Data'!$A$1:$B$2,'My Data'!$1:$1")];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "'My Data'!$A$2:$B$3,'My Data'!$2:$2"
+        );
+    }
+
+    /// A whole-axis reference nested in a call is beyond the rewriter, and
+    /// leaving it stale is exactly what this refuses to do.
+    #[test]
+    fn unrewritable_name_aimed_at_the_edited_sheet_refuses_the_edit() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![defined(
+            "Dynamic",
+            "OFFSET(Data!$A$1,0,0,COUNTA(Data!$A:$A),1)",
+        )];
+        let original = workbook.clone();
+
+        let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();
+        assert_eq!(
+            error,
+            OpError::DefinedNameNotRewritable {
+                name: "Dynamic".to_owned()
+            }
+        );
+        assert_eq!(workbook, original);
+    }
+
+    #[test]
+    fn unrewritable_name_aimed_elsewhere_survives_the_edit_untouched() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![
+            defined("Dynamic", "OFFSET(Other!$A$1,0,0,COUNTA(Other!$A:$A),1)"),
+            defined("External", "[Book.xlsx]Data!$A:$A"),
+            defined("Structured", "Table1[#All]"),
+            defined("Area", "Data!$A$1"),
+        ];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "OFFSET(Other!$A$1,0,0,COUNTA(Other!$A:$A),1)"
+        );
+        assert_eq!(workbook.defined_names[1].formula, "[Book.xlsx]Data!$A:$A");
+        assert_eq!(workbook.defined_names[2].formula, "Table1[#All]");
+        assert_eq!(workbook.defined_names[3].formula, "Data!$A$2");
+    }
+
+    #[test]
+    fn a_scoped_name_the_rewriter_cannot_read_refuses_the_edit() {
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![DefinedName {
+            local_sheet: Some(SheetId(0)),
+            ..defined("Dynamic", "OFFSET($A$1,0,0,COUNTA($A:$A),1)")
+        }];
+
+        let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
+    }
+
+    #[test]
+    fn structural_edits_refuse_defined_names_that_would_outgrow_the_length_cap() {
+        let mut workbook = wb(&["Data"]);
+        let padding = "+0".repeat((MAX_FORMULA_BYTES - 16) / 2);
+        workbook.defined_names = vec![defined("Long", &format!("Data!$A$9{padding}"))];
+        let original = workbook.clone();
+
+        let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
+        assert_eq!(workbook, original);
     }
 
     #[test]
