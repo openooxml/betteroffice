@@ -66,6 +66,22 @@ therefore independent of local style-table indices. Collaborative undo and redo
 use a Yrs undo manager that tracks only local user-origin transactions; remote
 updates and accepted agent proposals are not added to local history.
 
+## Charts
+
+A classic `c:chartSpace` reached from a worksheet or chartsheet drawing is
+modelled: every `c:f` reference, the `c:numCache` and `c:strCache` beside it,
+and the `xdr:` anchor that pins it. Structural edits move all three together, or
+are refused.
+
+A chart part is refused, and with it every rename, sheet removal and row or
+column edit on the workbook, when it is a ChartEx (`cx:chartSpace`) part, when
+no sheet claims it, or when it carries a pivot source, an external data cache,
+a reference outside the chart namespace, or a `sqref` extension reference. A
+cache is refused when it is a multi-level category cache, when the moved
+reference is not a single one-dimensional area on a sheet the workbook holds,
+when it is a string cache over cells that are not text, or when it would hold
+more points than a chart can carry.
+
 ## Support Matrix
 
 | Capability | Standalone | Collaborative |
