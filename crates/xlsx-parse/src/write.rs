@@ -114,8 +114,12 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
     Ok(parts)
 }
 
-/// Serializes owned parts over a preserved source package.
-pub fn serialize_workbook_with_package(
+/// Serializes owned parts over a preserved source package, guessing each
+/// sheet's origin from its current index and its provenance from the source.
+/// Only correct when nothing structural moved, so it is a test convenience
+/// rather than an entry point.
+#[cfg(test)]
+pub(crate) fn serialize_workbook_with_package(
     wb: &Workbook,
     package: &PreservedPackage,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
@@ -125,8 +129,8 @@ pub fn serialize_workbook_with_package(
     serialize_workbook_with_package_and_origins(wb, package, &origins)
 }
 
-#[doc(hidden)]
-pub fn serialize_workbook_with_package_and_origins(
+#[cfg(test)]
+pub(crate) fn serialize_workbook_with_package_and_origins(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
@@ -181,6 +185,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     {
         return Ok(package.parts.clone());
     }
+    ensure_preserved_references_stay_valid(wb, package, origins)?;
 
     let have_sst = !wb.shared_strings.is_empty();
     let have_styles = !wb.styles.is_empty() || package.styles.is_some();
@@ -385,6 +390,41 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     Ok(parts.finish())
+}
+
+/// Charts, pivot caches and their friends name sheets this crate never
+/// patches. Dropping, reordering or renaming a source sheet while one of them
+/// is preserved strands it, so the serializer refuses that here instead of
+/// trusting every caller to have checked.
+fn ensure_preserved_references_stay_valid(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Result<(), ParseError> {
+    let Some(part) = package.unpatchable_reference_part() else {
+        return Ok(());
+    };
+    let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
+    let kept_in_order = retained.len() == package.sheets.len()
+        && retained
+            .iter()
+            .enumerate()
+            .all(|(position, origin)| *origin == position);
+    let renamed = origins.iter().zip(&wb.sheets).any(|(origin, sheet)| {
+        origin.is_some_and(|origin| {
+            package
+                .original_workbook
+                .sheets
+                .get(origin)
+                .is_some_and(|original| original.name != sheet.name)
+        })
+    });
+    if kept_in_order && !renamed {
+        return Ok(());
+    }
+    Err(ParseError::UnsupportedEdit(format!(
+        "{part} references sheets this save would move, and it cannot be rewritten"
+    )))
 }
 
 /// The relationship ids a worksheet's `<hyperlink>` elements point at, beside

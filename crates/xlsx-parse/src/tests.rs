@@ -7,9 +7,9 @@ use xlsx_model::{
     Workbook,
 };
 
+use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
 use crate::{
-    ParseError, parse_workbook, parse_workbook_with_package, serialize_workbook,
-    serialize_workbook_with_package,
+    ParseError, SharedStringCells, parse_workbook, parse_workbook_with_package, serialize_workbook,
 };
 
 /// assemble a one-sheet package around a worksheet body and optional shared
@@ -1077,12 +1077,9 @@ fn writes_relationships_for_hyperlinks_on_new_sheets() {
         display: None,
     }];
     workbook.sheets.push(added);
-    let saved = crate::serialize_workbook_with_package_and_origins(
-        &workbook,
-        &parsed.package,
-        &[Some(0), None],
-    )
-    .unwrap();
+    let saved =
+        serialize_workbook_with_package_and_origins(&workbook, &parsed.package, &[Some(0), None])
+            .unwrap();
 
     let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet2.xml")).unwrap();
     let rels =
@@ -1120,12 +1117,9 @@ fn binds_new_strict_sheets_to_the_strict_relationship_namespace() {
         display: None,
     }];
     workbook.sheets.push(added);
-    let saved = crate::serialize_workbook_with_package_and_origins(
-        &workbook,
-        &parsed.package,
-        &[Some(0), None],
-    )
-    .unwrap();
+    let saved =
+        serialize_workbook_with_package_and_origins(&workbook, &parsed.package, &[Some(0), None])
+            .unwrap();
 
     let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet2.xml")).unwrap();
     assert!(
@@ -1306,7 +1300,7 @@ fn allocates_distinct_sheet_ids_past_the_maximum() {
     let mut workbook = parsed.workbook.clone();
     workbook.sheets.push(xlsx_model::Sheet::new("Added"));
     workbook.sheets.push(xlsx_model::Sheet::new("AlsoAdded"));
-    let saved = crate::serialize_workbook_with_package_and_origins(
+    let saved = serialize_workbook_with_package_and_origins(
         &workbook,
         &parsed.package,
         &[Some(0), None, None],
@@ -1481,8 +1475,7 @@ fn generated_relationship_attributes_never_repeat_a_source_prefix() {
     });
     let origins = vec![Some(0), None];
     let saved =
-        crate::serialize_workbook_with_package_and_origins(&workbook, &parsed.package, &origins)
-            .unwrap();
+        serialize_workbook_with_package_and_origins(&workbook, &parsed.package, &origins).unwrap();
 
     let written = String::from_utf8(part_bytes(&saved, "xl/workbook.xml")).unwrap();
     assert_eq!(written.matches(&prefix).count(), 2, "{written}");
@@ -1526,4 +1519,106 @@ fn refuses_an_oversized_relationship_namespace() {
         matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("relationship namespace")),
         "{error:?}"
     );
+}
+
+/// A two-sheet package carrying a chart part, whose references name sheets
+/// this crate never rewrites.
+fn charted_package() -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/sheet2.xml".to_owned(),
+        br#"<worksheet><sheetData/></worksheet>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/charts/chart1.xml".to_owned(),
+        br#"<chartSpace><f>Data!$A$1:$A$2</f></chartSpace>"#.to_vec(),
+    ));
+    parts
+}
+
+/// The facade above refuses these ops, but the serializer is reachable on its
+/// own, so the same refusal has to live at that boundary too.
+#[test]
+fn refuses_to_strand_chart_references_at_the_serialization_boundary() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+
+    let provenance = vec![SharedStringCells::new(); 2];
+    let reordered = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(1), Some(0)],
+        &provenance,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&reordered, ParseError::UnsupportedEdit(message) if message.contains("chart1.xml")),
+        "{reordered:?}"
+    );
+
+    let removed = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+        &provenance,
+        true,
+    )
+    .unwrap_err();
+    assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
+
+    let mut renamed = workbook.clone();
+    renamed.sheets[0].name = "Renamed".to_owned();
+    let renamed = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &renamed,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &provenance,
+        true,
+    )
+    .unwrap_err();
+    assert!(matches!(renamed, ParseError::UnsupportedEdit(_)));
+}
+
+/// The guard must not fire on the edits a charted workbook can still take:
+/// cell changes, and appending a sheet that moves none of the existing ones.
+#[test]
+fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
+    let source = charted_package();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+
+    let edited = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        part_bytes(&edited, "xl/charts/chart1.xml"),
+        part_bytes(&source, "xl/charts/chart1.xml")
+    );
+
+    workbook.sheets.insert(1, xlsx_model::Sheet::new("Added"));
+    let added = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None, Some(1)],
+        &vec![SharedStringCells::new(); 3],
+        true,
+    )
+    .unwrap();
+    assert_eq!(parse_workbook(&added).unwrap().sheets.len(), 3);
 }
