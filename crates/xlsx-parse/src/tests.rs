@@ -824,6 +824,119 @@ fn keeps_worksheet_bytes_across_a_rename() {
     );
 }
 
+fn edit_a1(workbook: &mut Workbook, value: f64) {
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value },
+            ..Cell::default()
+        },
+    );
+}
+
+/// The model carries a subset of the stylesheet, so an edit that does not
+/// touch styles must not push the part through that subset.
+#[test]
+fn keeps_the_stylesheet_when_styles_are_untouched() {
+    let parts = package_styled(r#"<sheetData/>"#, Some(STYLED), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 5.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+
+    assert_eq!(
+        part_bytes(&saved, "xl/styles.xml"),
+        part_bytes(&parts, "xl/styles.xml")
+    );
+}
+
+/// A stylesheet holding only unmodeled pools still backs `dxfId` references
+/// from preserved conditional formatting; deleting it breaks the workbook.
+#[test]
+fn keeps_a_stylesheet_that_models_nothing() {
+    let styles = r#"<dxfs count="1"><dxf><font><b/></font></dxf></dxfs><tableStyles count="0"/>"#;
+    let body = r#"<sheetData/><conditionalFormatting sqref="A1:A9"><cfRule type="expression" dxfId="0" priority="1"><formula>TRUE()</formula></cfRule></conditionalFormatting>"#;
+    let parts = package_styled(body, Some(styles), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert!(parsed.workbook.styles.is_empty());
+
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 5.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+
+    assert_eq!(
+        part_bytes(&saved, "xl/styles.xml"),
+        part_bytes(&parts, "xl/styles.xml")
+    );
+    assert!(content_types_text(&saved).contains("/xl/styles.xml"));
+}
+
+/// Interning a new format appends one `xf`; every pool entry the model left
+/// alone must keep its source markup.
+#[test]
+fn patches_only_the_style_pool_entries_that_changed() {
+    let parts = package_styled(r#"<sheetData/>"#, Some(STYLED), None);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    let mut format = workbook.styles.cell_format(None);
+    format.font.italic = true;
+    let style = workbook.styles.intern_cell_format(&format);
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            style,
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = String::from_utf8(part_bytes(&saved, "xl/styles.xml")).unwrap();
+
+    assert!(
+        written.contains(r#"<patternFill patternType="gray125"/>"#),
+        "lost the gray125 convention fill: {written}"
+    );
+    assert!(
+        written.contains(r#"<bgColor indexed="64"/>"#),
+        "lost an unmodeled fill child: {written}"
+    );
+    assert!(
+        written.contains(r#"<numFmt numFmtId="164" formatCode="0.0&quot;%&quot;"/>"#),
+        "lost the source number format markup: {written}"
+    );
+    assert!(
+        written.contains("<i/>"),
+        "new font was not written: {written}"
+    );
+}
+
+/// A Strict package must not gain a Transitional DrawingML theme.
+#[test]
+fn writes_a_strict_theme_for_a_strict_package() {
+    let workbook_xml = r#"<workbook xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        workbook_xml.as_bytes().to_vec(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.styles.fonts.push(xlsx_model::styles::Font {
+        bold: true,
+        ..Default::default()
+    });
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let theme = String::from_utf8(part_bytes(&saved, "xl/theme/theme1.xml")).unwrap();
+
+    assert!(
+        theme.contains(r#"xmlns:a="http://purl.oclc.org/ooxml/drawingml/main""#),
+        "strict package gained a transitional theme: {theme}"
+    );
+}
+
 fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
     String::from_utf8(
         parts

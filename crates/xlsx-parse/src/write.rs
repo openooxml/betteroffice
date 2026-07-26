@@ -45,6 +45,16 @@ const REL_OFFICE_DOCUMENT: &str =
 const REL_HYPERLINK: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink";
 const NS_DML: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const NS_STRICT_DML: &str = "http://purl.oclc.org/ooxml/drawingml/main";
+
+/// A Strict package must not gain a Transitional DrawingML theme.
+fn drawingml_namespace(main_namespace: &str) -> &'static str {
+    if main_namespace == NS_STRICT_MAIN {
+        NS_STRICT_DML
+    } else {
+        NS_DML
+    }
+}
 
 /// serialize a workbook to opc parts in a fixed, deterministic order.
 pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
@@ -67,7 +77,10 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
     }
     if have_styles {
         parts.push(("xl/styles.xml".to_string(), styles_xml(&wb.styles)?));
-        parts.push(("xl/theme/theme1.xml".to_string(), theme_xml(&wb.styles)?));
+        parts.push((
+            "xl/theme/theme1.xml".to_string(),
+            theme_xml(&wb.styles, NS_DML)?,
+        ));
     }
     for (i, sheet) in wb.sheets.iter().enumerate() {
         parts.push((
@@ -139,7 +152,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     let have_sst = !wb.shared_strings.is_empty();
-    let have_styles = !wb.styles.is_empty();
+    let have_styles = !wb.styles.is_empty() || package.styles.is_some();
     let main_namespace = package
         .workbook_template
         .root_namespace()
@@ -186,7 +199,8 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             &mut used_relationship_ids,
         )
     });
-    let theme = have_styles.then(|| {
+    let synthesized_styles = package.styles.is_none() && !wb.styles.is_empty();
+    let theme = (package.theme.is_some() || synthesized_styles).then(|| {
         plan_part(
             package.theme.as_ref(),
             &package.workbook_relationships,
@@ -272,15 +286,22 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         shared_strings.as_ref(),
         main_namespace,
     )?;
-    replace_optional_part(
-        &mut parts,
-        package.styles.as_ref(),
-        styles.as_ref(),
-        || match &package.stylesheet_template {
-            Some(template) => styles_xml_with_template(&wb.styles, template),
-            None => styles_xml_with_namespace(&wb.styles, main_namespace),
-        },
-    )?;
+    let styles_retained = matches!(
+        (package.styles.as_ref(), styles.as_ref()),
+        (Some(source), Some(planned)) if source.path == planned.path
+    ) && wb.styles == package.original_workbook.styles;
+    if !styles_retained {
+        replace_optional_part(&mut parts, package.styles.as_ref(), styles.as_ref(), || {
+            match &package.stylesheet_template {
+                Some(template) => styles_xml_with_template(
+                    &wb.styles,
+                    &package.original_workbook.styles,
+                    template,
+                ),
+                None => styles_xml_with_namespace(&wb.styles, main_namespace),
+            }
+        })?;
+    }
 
     match (package.theme.as_ref(), theme.as_ref()) {
         (Some(source), Some(planned))
@@ -292,7 +313,10 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             {
                 parts.remove(&source.path);
             }
-            parts.set(planned.path.clone(), theme_xml(&wb.styles)?);
+            parts.set(
+                planned.path.clone(),
+                theme_xml(&wb.styles, drawingml_namespace(main_namespace))?,
+            );
         }
         (Some(source), None) => parts.remove(&source.path),
         (None, None) => {}
@@ -1859,25 +1883,100 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
     })
 }
 
+/// Reuses each source pool entry the model left alone, so font schemes,
+/// `gray125` fills and `xf` attributes the model does not carry survive an
+/// edit that only appends new entries.
+fn patched_pool<T: PartialEq>(
+    template: &XmlTemplate,
+    pool_name: &str,
+    item_name: &str,
+    values: &[T],
+    original: &[T],
+    write_item: impl Fn(&mut Writer<Vec<u8>>, &T) -> io::Result<()>,
+    write_pool: impl FnOnce() -> Result<Vec<u8>, ParseError>,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let Some(child) = template.child(pool_name) else {
+        return write_pool().map(Some);
+    };
+    let pool = XmlTemplate::capture(&child.bytes)?;
+    let sources = pool.children_named(item_name).collect::<Vec<_>>();
+    let mut items = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        match sources
+            .get(index)
+            .filter(|_| original.get(index) == Some(value))
+        {
+            Some(source) => items.push(source.bytes.clone()),
+            None => {
+                let item = fragment(|writer| write_item(writer, value))?;
+                items.push(pool.qualify_fragment(&item)?);
+            }
+        }
+    }
+    pool.render_repeated(item_name, &items, &[("count", values.len().to_string())])
+        .map(Some)
+}
+
 fn styles_xml_with_template(
     stylesheet: &Stylesheet,
+    original: &Stylesheet,
     template: &XmlTemplate,
 ) -> Result<Vec<u8>, ParseError> {
-    let num_fmts = (!stylesheet.num_fmts.is_empty())
-        .then(|| fragment(|writer| write_num_fmts(writer, stylesheet)))
-        .transpose()?;
-    let fonts = (!stylesheet.fonts.is_empty())
-        .then(|| fragment(|writer| write_fonts(writer, stylesheet)))
-        .transpose()?;
-    let fills = (!stylesheet.fills.is_empty())
-        .then(|| fragment(|writer| write_fills(writer, stylesheet)))
-        .transpose()?;
-    let borders = (!stylesheet.borders.is_empty())
-        .then(|| fragment(|writer| write_borders(writer, stylesheet)))
-        .transpose()?;
-    let cell_xfs = (!stylesheet.cell_xfs.is_empty())
-        .then(|| fragment(|writer| write_cell_xfs(writer, stylesheet)))
-        .transpose()?;
+    let num_fmts = patched_pool(
+        template,
+        "numFmts",
+        "numFmt",
+        &stylesheet.num_fmts,
+        &original.num_fmts,
+        |writer, (id, code)| {
+            writer
+                .create_element("numFmt")
+                .with_attribute(("numFmtId", id.to_string().as_str()))
+                .with_attribute(("formatCode", code.as_str()))
+                .write_empty()?;
+            Ok(())
+        },
+        || fragment(|writer| write_num_fmts(writer, stylesheet)),
+    )?;
+    let fonts = patched_pool(
+        template,
+        "fonts",
+        "font",
+        &stylesheet.fonts,
+        &original.fonts,
+        write_font,
+        || fragment(|writer| write_fonts(writer, stylesheet)),
+    )?;
+    let fills = patched_pool(
+        template,
+        "fills",
+        "fill",
+        &stylesheet.fills,
+        &original.fills,
+        write_fill,
+        || fragment(|writer| write_fills(writer, stylesheet)),
+    )?;
+    let borders = patched_pool(
+        template,
+        "borders",
+        "border",
+        &stylesheet.borders,
+        &original.borders,
+        write_border,
+        || fragment(|writer| write_borders(writer, stylesheet)),
+    )?;
+    let cell_xfs = patched_pool(
+        template,
+        "cellXfs",
+        "xf",
+        &stylesheet.cell_xfs,
+        &original.cell_xfs,
+        write_xf,
+        || fragment(|writer| write_cell_xfs(writer, stylesheet)),
+    )?;
     template.render(
         vec![
             ("numFmts", num_fmts),
@@ -2169,7 +2268,7 @@ fn write_color(w: &mut Writer<Vec<u8>>, name: &str, color: &Color) -> io::Result
 
 /// emit a minimal but schema-shaped `theme1.xml`: the 12-color clrScheme plus
 /// stub font/format schemes so excel accepts the part.
-fn theme_xml(ss: &Stylesheet) -> Result<Vec<u8>, ParseError> {
+fn theme_xml(ss: &Stylesheet, namespace: &str) -> Result<Vec<u8>, ParseError> {
     let c = &ss.theme.colors;
     let slots = [
         "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
@@ -2177,7 +2276,7 @@ fn theme_xml(ss: &Stylesheet) -> Result<Vec<u8>, ParseError> {
     ];
     doc(|w| {
         w.create_element("a:theme")
-            .with_attribute(("xmlns:a", NS_DML))
+            .with_attribute(("xmlns:a", namespace))
             .with_attribute(("name", "Office Theme"))
             .write_inner_content(|w| {
                 w.create_element("a:themeElements")
