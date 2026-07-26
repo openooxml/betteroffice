@@ -235,6 +235,25 @@ fn parse_index(raw: Option<&str>) -> Option<f64> {
     value.parse::<u32>().ok().map(f64::from)
 }
 
+/// Reads at most the remaining point budget from `elements`, charging every
+/// child it examines so malformed ones cost as much as parsed ones.
+fn take_points<'a, E: ChartXml + 'a, T>(
+    elements: impl Iterator<Item = &'a E>,
+    budget: &mut Budget,
+    mut parse: impl FnMut(&'a E) -> Option<T>,
+) -> Vec<T> {
+    let mut examined = 0;
+    let values = elements
+        .take(budget.point_cap(MAX_POINTS))
+        .filter_map(|element| {
+            examined += 1;
+            parse(element)
+        })
+        .collect::<Vec<_>>();
+    budget.spend_points(examined);
+    values
+}
+
 fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<String> {
     let Some(parent) = parent else {
         return Vec::new();
@@ -245,18 +264,15 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
     else {
         return Vec::new();
     };
-    let values = children(cache, "pt")
-        .take(budget.point_cap(MAX_POINTS))
-        .map(|point| {
+    take_points(children(cache, "pt"), budget, |point| {
+        Some(
             child(point, "v")
                 .map(E::descendant_text)
                 .unwrap_or_default()
                 .trim()
-                .to_owned()
-        })
-        .collect::<Vec<_>>();
-    budget.spend_points(values.len());
-    values
+                .to_owned(),
+        )
+    })
 }
 
 fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<f64> {
@@ -266,15 +282,10 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
     let Some(cache) = first_deep(parent, "numCache", 0) else {
         return Vec::new();
     };
-    let values = children(cache, "pt")
-        .take(budget.point_cap(MAX_POINTS))
-        .filter_map(|point| {
-            let text = child(point, "v")?.descendant_text();
-            parse_number(Some(text.trim()))
-        })
-        .collect::<Vec<_>>();
-    budget.spend_points(values.len());
-    values
+    take_points(children(cache, "pt"), budget, |point| {
+        let text = child(point, "v")?.descendant_text();
+        parse_number(Some(text.trim()))
+    })
 }
 
 fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
@@ -305,21 +316,17 @@ fn parse_series<E: ChartXml>(
             let marker_symbol =
                 val_attr(marker.and_then(|value| child(value, "symbol"))).map(str::to_owned);
             let marker_size = parse_number(val_attr(marker.and_then(|value| child(value, "size"))));
-            let points = children(series, "dPt")
-                .take(budget.point_cap(MAX_POINTS))
-                .filter_map(|point| {
-                    let point_index = match child(point, "idx") {
-                        Some(idx) => Some(parse_index(val_attr(Some(idx)))?),
-                        None => None,
-                    };
-                    Some(ChartPoint {
-                        index: point_index,
-                        explosion: parse_number(val_attr(child(point, "explosion"))),
-                        color: parse_series_color(point, index),
-                    })
+            let points = take_points(children(series, "dPt"), budget, |point| {
+                let point_index = match child(point, "idx") {
+                    Some(idx) => Some(parse_index(val_attr(Some(idx)))?),
+                    None => None,
+                };
+                Some(ChartPoint {
+                    index: point_index,
+                    explosion: parse_number(val_attr(child(point, "explosion"))),
+                    color: parse_series_color(point, index),
                 })
-                .collect::<Vec<_>>();
-            budget.spend_points(points.len());
+            });
             ChartSeries {
                 name: parse_series_name(series),
                 categories: parse_string_cache(category, budget),
@@ -803,6 +810,36 @@ mod tests {
         let points = space.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].index, None);
         assert_eq!(red_wedges(&space), 2);
+    }
+
+    #[test]
+    fn every_examined_point_costs_budget_even_when_it_yields_nothing() {
+        let cache = Node::el(
+            "c:numCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "nonsense")]),
+                Node::el("c:pt", vec![Node::text("c:v", "1")]),
+                Node::el("c:pt", Vec::new()),
+            ],
+        );
+        let mut budget = Budget::new();
+        assert_eq!(parse_num_cache(Some(&cache), &mut budget), [1.0]);
+        assert_eq!(budget.point_cap(MAX_CHART_POINTS), MAX_CHART_POINTS - 3);
+
+        let chart = Node::el(
+            "c:pieChart",
+            vec![Node::el(
+                "c:ser",
+                vec![
+                    Node::el("c:dPt", vec![Node::val("c:idx", "-1")]),
+                    Node::el("c:dPt", vec![Node::val("c:idx", "1")]),
+                ],
+            )],
+        );
+        let mut budget = Budget::new();
+        let series = parse_series(&chart, None, &[], &mut budget);
+        assert_eq!(series[0].points.as_ref().unwrap().len(), 1);
+        assert_eq!(budget.point_cap(MAX_CHART_POINTS), MAX_CHART_POINTS - 2);
     }
 
     #[test]

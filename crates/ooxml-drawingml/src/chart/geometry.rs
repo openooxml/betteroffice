@@ -27,6 +27,10 @@ pub const CHART_TITLE_FONT: PlotFont = PlotFont {
 pub const MAX_PLOT_OPS: usize = 100_000;
 /// Hard ceiling on the data points one chart may index or scan for its range.
 pub const MAX_PLOT_DATA_SCAN: usize = 200_000;
+/// Hard ceiling on the plot groups one chart may draw.
+pub const MAX_PLOT_GROUPS: usize = 64;
+/// Hard ceiling on the series one chart may draw, across all its plot groups.
+pub const MAX_PLOT_SERIES: usize = 1_024;
 /// Coordinates are clamped here so every emitted op stays finite.
 pub const MAX_PLOT_COORD: f64 = 1e9;
 
@@ -258,6 +262,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         sink,
         remaining: MAX_PLOT_OPS,
     };
+    let scan = &mut ScanBudget::new();
 
     push_rect(ops, x, y, width, height, CHART_BACKGROUND_COLOR);
 
@@ -294,7 +299,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     };
 
     if chart.plot_groups.is_empty() {
-        let series = series_views(&chart.series);
+        let series = series_views(&chart.series, scan);
         emit_family(
             ops,
             PlotFamily {
@@ -309,8 +314,11 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             height - title_h,
         );
     } else {
-        for group in &chart.plot_groups {
-            let series = series_views(&group.series);
+        for group in chart.plot_groups.iter().take(MAX_PLOT_GROUPS) {
+            if ops.exhausted() {
+                break;
+            }
+            let series = series_views(&group.series, scan);
             emit_family(
                 ops,
                 PlotFamily {
@@ -332,7 +340,14 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         x + width - legend_w + 6.0
     };
-    emit_legend(ops, chart, legend_x, y + title_h + 8.0, legend_w - 12.0);
+    emit_legend(
+        ops,
+        chart,
+        scan,
+        legend_x,
+        y + title_h + 8.0,
+        legend_w - 12.0,
+    );
 }
 
 /// Draw ops for `chart` inside `rect`, collected into one vector.
@@ -421,14 +436,47 @@ struct SeriesView<'a> {
     indexed: Vec<(usize, usize)>,
 }
 
-fn series_views<'a>(series: &'a [PlotSeries<'a>]) -> Vec<SeriesView<'a>> {
-    series.iter().map(SeriesView::new).collect()
+/// What one chart may still index, shared across its plot groups so a
+/// per-series limit cannot multiply by the series count.
+struct ScanBudget {
+    series: usize,
+    points: usize,
+}
+
+impl ScanBudget {
+    fn new() -> Self {
+        Self {
+            series: MAX_PLOT_SERIES,
+            points: MAX_PLOT_DATA_SCAN,
+        }
+    }
+
+    fn take_series(&mut self, requested: usize) -> usize {
+        let allowed = requested.min(self.series);
+        self.series -= allowed;
+        allowed
+    }
+
+    fn take_points(&mut self, requested: usize) -> usize {
+        let allowed = requested.min(self.points);
+        self.points -= allowed;
+        allowed
+    }
+}
+
+fn series_views<'a>(series: &'a [PlotSeries<'a>], budget: &mut ScanBudget) -> Vec<SeriesView<'a>> {
+    let allowed = budget.take_series(series.len());
+    series
+        .iter()
+        .take(allowed)
+        .map(|series| SeriesView::new(series, budget))
+        .collect()
 }
 
 impl<'a> SeriesView<'a> {
-    fn new(series: &'a PlotSeries<'a>) -> Self {
+    fn new(series: &'a PlotSeries<'a>, budget: &mut ScanBudget) -> Self {
         let mut wildcard = None;
-        let scanned = series.points.len().min(MAX_PLOT_DATA_SCAN);
+        let scanned = budget.take_points(series.points.len());
         let mut indexed = Vec::with_capacity(scanned);
         for (position, point) in series.points.iter().take(scanned).enumerate() {
             match point.index {
@@ -938,6 +986,7 @@ fn pie_wedge_path(
 fn emit_legend<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     chart: &PlotChart<'_>,
+    budget: &mut ScanBudget,
     x: f64,
     y: f64,
     width: f64,
@@ -965,7 +1014,7 @@ fn emit_legend<S: PlotSink + ?Sized>(
         series
             .as_slice()
             .first()
-            .map(|series| SeriesView::new(series))
+            .map(|series| SeriesView::new(series, budget))
             .map(|series| {
                 (0..series.length().min(MAX_LEGEND_ENTRIES))
                     .map(|i| {
@@ -1131,7 +1180,7 @@ mod tests {
             series: vec![series("North", &north)],
             ..PlotChart::default()
         };
-        let views = series_views(&chart.series);
+        let views = series_views(&chart.series, &mut ScanBudget::new());
         assert_eq!(value_range(family(&chart, &views)), (-10.0, 10.0));
     }
 
@@ -1145,7 +1194,7 @@ mod tests {
             marker: Some(PlotMarker { size: None }),
             ..PlotPoint::default()
         }];
-        let view = SeriesView::new(&series);
+        let view = SeriesView::new(&series, &mut ScanBudget::new());
         assert_eq!(view.marker_size(0), 4.0);
         assert_eq!(view.marker_size(1), 9.0);
     }
@@ -1202,6 +1251,104 @@ mod tests {
     }
 
     #[test]
+    fn the_index_budget_is_chart_wide_rather_than_per_series() {
+        let data = source(&[1.0, 2.0]);
+        let mut indexed = series("Indexed", &data);
+        indexed.points = vec![PlotPoint {
+            index: Some(1),
+            color: Some("#010203"),
+            ..PlotPoint::default()
+        }];
+        let both = [indexed.clone(), indexed];
+
+        let views = series_views(&both, &mut ScanBudget::new());
+        assert_eq!(views[1].indexed.len(), 1);
+
+        let mut spent = ScanBudget::new();
+        assert_eq!(spent.take_points(MAX_PLOT_DATA_SCAN), MAX_PLOT_DATA_SCAN);
+        assert_eq!(spent.take_points(1), 0);
+        assert!(series_views(&both, &mut spent)[1].indexed.is_empty());
+
+        let mut capped = ScanBudget::new();
+        assert_eq!(capped.take_series(MAX_PLOT_SERIES + 1), MAX_PLOT_SERIES);
+        assert!(series_views(&both, &mut capped).is_empty());
+    }
+
+    #[test]
+    fn the_series_and_group_caps_bound_a_directly_constructed_chart() {
+        let data = source(&[1.0, 2.0]);
+        let drawn = PlotSeries {
+            color: Some("#111111"),
+            ..series("Drawn", &data)
+        };
+        let beyond = PlotSeries {
+            color: Some("#ABCDEF"),
+            ..series("Beyond", &data)
+        };
+        fn group<'a>(series: Vec<PlotSeries<'a>>) -> PlotGroup<'a> {
+            PlotGroup {
+                chart_type: Some("column"),
+                series,
+                ..PlotGroup::default()
+            }
+        }
+
+        let mut wide = vec![drawn.clone(); MAX_PLOT_SERIES];
+        wide.push(beyond.clone());
+        let mut many = vec![group(vec![drawn]); MAX_PLOT_GROUPS];
+        many.push(group(vec![beyond]));
+
+        for plot_groups in [vec![group(wide)], many] {
+            let chart = PlotChart {
+                chart_type: "column",
+                plot_groups,
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            assert!(ops.len() < MAX_PLOT_OPS);
+            assert!(
+                ops.iter()
+                    .all(|op| !matches!(op, PlotOp::Rect { fill, .. } if fill == "#ABCDEF"))
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_plot_group_adds_nothing_once_the_op_budget_is_spent() {
+        let values: Vec<f64> = (0..200_000).map(|i| i as f64).collect();
+        let wide = Source {
+            categories: Vec::new(),
+            values,
+        };
+        let tail = source(&[1.0, 2.0]);
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![
+                PlotGroup {
+                    chart_type: Some("line"),
+                    series: vec![series("Wide", &wide)],
+                    ..PlotGroup::default()
+                },
+                PlotGroup {
+                    chart_type: Some("column"),
+                    series: vec![PlotSeries {
+                        color: Some("#ABCDEF"),
+                        ..series("Tail", &tail)
+                    }],
+                    ..PlotGroup::default()
+                },
+            ],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        assert_eq!(ops.len(), MAX_PLOT_OPS);
+        assert!(
+            ops.iter()
+                .all(|op| !matches!(op, PlotOp::Rect { fill, .. } if fill == "#ABCDEF"))
+        );
+    }
+
+    #[test]
     fn the_point_index_agrees_with_a_linear_first_match_scan() {
         let data = source(&[1.0, 2.0, 3.0, 4.0]);
         let cases: [Vec<Option<usize>>; 7] = [
@@ -1224,7 +1371,7 @@ mod tests {
                     ..PlotPoint::default()
                 })
                 .collect();
-            let view = SeriesView::new(&series);
+            let view = SeriesView::new(&series, &mut ScanBudget::new());
             for query in 0..12 {
                 let expected = series
                     .points
