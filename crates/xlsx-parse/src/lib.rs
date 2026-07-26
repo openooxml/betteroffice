@@ -27,9 +27,12 @@ pub struct ParsedWorkbook {
 pub fn parse_workbook_with_package(
     parts: &[(String, Vec<u8>)],
 ) -> Result<ParsedWorkbook, ParseError> {
-    let workbook = parse_workbook(parts)?;
-    let package = PreservedPackage::capture(parts, &workbook)?;
-    Ok(ParsedWorkbook { workbook, package })
+    let parsed = read::parse_workbook_indexed(parts)?;
+    let package = PreservedPackage::capture(parts, &parsed.workbook, &parsed.shared_string_cells)?;
+    Ok(ParsedWorkbook {
+        workbook: parsed.workbook,
+        package,
+    })
 }
 
 /// hard nesting limit for xml elements; deeper input is rejected as hostile.

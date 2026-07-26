@@ -16,6 +16,7 @@ use crate::package::{
     XmlTemplate, attributes_from_fragment, parse_relationships, relationship_part_path,
     remove_attribute, set_attribute,
 };
+use crate::read::SharedStringCells;
 use crate::xml::xml_err;
 
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -1599,7 +1600,7 @@ fn worksheet_xml_with_namespace(
         writer.write_event(Event::Start(root))?;
         write_sheet_views(writer, sheet)?;
         write_cols(writer, sheet)?;
-        write_sheet_data(writer, sheet, wb)?;
+        write_sheet_data(writer, sheet, wb, &SharedStringCells::new())?;
         write_merges(writer, sheet)?;
         write_hyperlinks(writer, sheet, &links.ids, &id_name, &[])?;
         writer.write_event(Event::End(BytesEnd::new("worksheet")))?;
@@ -1627,7 +1628,9 @@ fn worksheet_xml_with_template(
     let columns = (!sheet.col_widths.is_empty())
         .then(|| fragment(|writer| write_cols(writer, sheet)))
         .transpose()?;
-    let sheet_data = Some(fragment(|writer| write_sheet_data(writer, sheet, wb))?);
+    let sheet_data = Some(fragment(|writer| {
+        write_sheet_data(writer, sheet, wb, &source.shared_string_cells)
+    })?);
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
         .transpose()?;
@@ -1777,13 +1780,16 @@ fn worksheet_child_rank(name: &str) -> usize {
     }
 }
 
-fn write_sheet_data(writer: &mut Writer<Vec<u8>>, sheet: &Sheet, wb: &Workbook) -> io::Result<()> {
-    let sst_index: HashMap<&str, usize> = wb
-        .shared_strings
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.as_str(), i))
-        .collect();
+fn write_sheet_data(
+    writer: &mut Writer<Vec<u8>>,
+    sheet: &Sheet,
+    wb: &Workbook,
+    retained: &SharedStringCells,
+) -> io::Result<()> {
+    let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
+    for (index, value) in wb.shared_strings.iter().enumerate() {
+        sst_index.entry(value.as_str()).or_insert(index);
+    }
 
     let mut rows: Vec<RowId> = sheet.iter_cells().map(|(r, _)| r.row).collect();
     rows.extend(sheet.row_heights.keys().copied());
@@ -1794,7 +1800,7 @@ fn write_sheet_data(writer: &mut Writer<Vec<u8>>, sheet: &Sheet, wb: &Workbook) 
         .create_element("sheetData")
         .write_inner_content(|writer| {
             for &row in &rows {
-                write_row(writer, sheet, row, &sst_index)?;
+                write_row(writer, sheet, row, wb, &sst_index, retained)?;
             }
             Ok(())
         })?;
@@ -1901,7 +1907,9 @@ fn write_row(
     w: &mut Writer<Vec<u8>>,
     sheet: &Sheet,
     row: RowId,
+    wb: &Workbook,
     sst_index: &HashMap<&str, usize>,
+    retained: &SharedStringCells,
 ) -> io::Result<()> {
     let r = (row as u64 + 1).to_string();
     let mut start = BytesStart::new("row");
@@ -1913,7 +1921,14 @@ fn write_row(
     }
     w.write_event(Event::Start(start))?;
     for (addr, cell) in sheet.iter_cells().filter(|(a, _)| a.row == row) {
-        write_cell(w, addr, cell, sst_index)?;
+        let retained = retained
+            .get(&(addr.row, addr.col))
+            .copied()
+            .filter(|index| match &cell.value {
+                CellValue::Text { value } => wb.shared_strings.get(*index) == Some(value),
+                _ => false,
+            });
+        write_cell(w, addr, cell, sst_index, retained)?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;
     Ok(())
@@ -1926,6 +1941,7 @@ fn write_cell(
     addr: CellRef,
     cell: &Cell,
     sst_index: &HashMap<&str, usize>,
+    retained: Option<usize>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
     let has_formula = cell.formula.is_some();
@@ -1948,7 +1964,7 @@ fn write_cell(
             if has_formula {
                 ty = Some("str");
                 value = Some(s.clone());
-            } else if let Some(idx) = sst_index.get(s.as_str()) {
+            } else if let Some(idx) = retained.or_else(|| sst_index.get(s.as_str()).copied()) {
                 ty = Some("s");
                 value = Some(idx.to_string());
             } else {

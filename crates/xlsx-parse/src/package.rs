@@ -5,6 +5,7 @@ use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::Workbook;
 
+use crate::read::SharedStringCells;
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
@@ -33,6 +34,7 @@ impl PreservedPackage {
     pub(crate) fn capture(
         parts: &[(String, Vec<u8>)],
         workbook: &Workbook,
+        shared_string_cells: &[SharedStringCells],
     ) -> Result<Self, ParseError> {
         let workbook_xml = find_part(parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
@@ -83,6 +85,7 @@ impl PreservedPackage {
                 sheet_id: entry.sheet_id.unwrap_or((index + 1) as u32),
                 attributes: entry.attributes,
                 template: XmlTemplate::capture(bytes)?,
+                shared_string_cells: shared_string_cells.get(index).cloned().unwrap_or_default(),
             });
         }
 
@@ -179,6 +182,7 @@ pub(crate) struct PreservedSheet {
     pub(crate) sheet_id: u32,
     pub(crate) attributes: Vec<XmlAttribute>,
     pub(crate) template: XmlTemplate,
+    pub(crate) shared_string_cells: SharedStringCells,
 }
 
 impl PreservedSheet {

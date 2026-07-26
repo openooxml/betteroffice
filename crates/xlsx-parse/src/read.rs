@@ -1,7 +1,7 @@
 //! spreadsheetml -> `xlsx_model::Workbook`. streaming; nothing is sized from a
 //! file-supplied `count`/`dimension`, cells and shared strings are capped.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
@@ -19,30 +19,46 @@ use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, Pa
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
 pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseError> {
+    parse_workbook_indexed(parts).map(|parsed| parsed.workbook)
+}
+
+/// Per sheet, the shared-string index each cell was authored against, for the
+/// entries whose text alone cannot identify them.
+pub(crate) type SharedStringCells = BTreeMap<(u32, u32), usize>;
+
+pub(crate) struct IndexedWorkbook {
+    pub(crate) workbook: Workbook,
+    pub(crate) shared_string_cells: Vec<SharedStringCells>,
+}
+
+pub(crate) fn parse_workbook_indexed(
+    parts: &[(String, Vec<u8>)],
+) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
     let meta = parse_workbook_xml(wb_xml)?;
 
-    let rels = find_part(parts, "xl/_rels/workbook.xml.rels")
-        .map(parse_rels)
-        .transpose()?
-        .unwrap_or_default();
+    let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
+    let rels = wb_rels.map(parse_rels).transpose()?.unwrap_or_default();
 
-    let shared_strings = match find_part(parts, "xl/sharedStrings.xml") {
+    let shared_strings = match typed_part(parts, wb_rels, "sharedStrings", "xl/sharedStrings.xml")?
+    {
         Some(bytes) => parse_shared_strings(bytes)?,
         None => Vec::new(),
     };
+    let ambiguous = ambiguous_shared_strings(&shared_strings);
 
-    let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
     let styles = parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
+    let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
     for (idx, entry) in meta.sheets.iter().enumerate() {
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
             sheets.push(Sheet::new(&entry.name));
+            shared_string_cells.push(SharedStringCells::new());
             continue;
         }
         let path = worksheet_path(relationship, idx);
@@ -51,21 +67,42 @@ pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseErro
             .map(parse_rels)
             .transpose()?
             .unwrap_or_default();
+        let mut indices = SharedStringCells::new();
         sheets.push(parse_worksheet(
             &entry.name,
             bytes,
             &shared_strings,
             &sheet_rels,
+            &ambiguous,
+            &mut indices,
         )?);
+        shared_string_cells.push(indices);
     }
 
-    Ok(Workbook {
-        sheets,
-        date_system: meta.date_system,
-        defined_names: meta.defined_names,
-        shared_strings,
-        styles,
+    Ok(IndexedWorkbook {
+        workbook: Workbook {
+            sheets,
+            date_system: meta.date_system,
+            defined_names: meta.defined_names,
+            shared_strings,
+            styles,
+        },
+        shared_string_cells,
     })
+}
+
+/// Indices whose `<si>` text is shared with another entry. Only these need
+/// their identity remembered; every other index is recoverable from its text.
+fn ambiguous_shared_strings(shared: &[String]) -> HashSet<usize> {
+    let mut seen: HashMap<&str, usize> = HashMap::with_capacity(shared.len());
+    let mut ambiguous = HashSet::new();
+    for (index, value) in shared.iter().enumerate() {
+        if let Some(first) = seen.insert(value.as_str(), index) {
+            ambiguous.insert(first);
+            ambiguous.insert(index);
+        }
+    }
+    ambiguous
 }
 
 /// resolve an optional part by relationship type suffix, falling back to
@@ -278,6 +315,8 @@ fn parse_worksheet(
     data: &[u8],
     shared: &[String],
     relationships: &BTreeMap<String, Relationship>,
+    ambiguous: &HashSet<usize>,
+    shared_string_cells: &mut SharedStringCells,
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
@@ -369,7 +408,7 @@ fn parse_worksheet(
                 match name.local_name().as_ref() {
                     b"c" => {
                         if let Some(c) = cur.take() {
-                            finalize_cell(c, shared, &mut sheet)?;
+                            finalize_cell(c, shared, &mut sheet, ambiguous, shared_string_cells)?;
                         }
                         col_cursor += 1;
                     }
@@ -493,7 +532,13 @@ fn parse_col(e: &quick_xml::events::BytesStart, sheet: &mut Sheet) -> Result<(),
 
 /// turn accumulated cell state into a stored `Cell`, decoding the value per its
 /// `t` type. an empty non-styled, non-formula cell is dropped.
-fn finalize_cell(c: CellBuild, shared: &[String], sheet: &mut Sheet) -> Result<(), ParseError> {
+fn finalize_cell(
+    c: CellBuild,
+    shared: &[String],
+    sheet: &mut Sheet,
+    ambiguous: &HashSet<usize>,
+    shared_string_cells: &mut SharedStringCells,
+) -> Result<(), ParseError> {
     let addr = match c.addr {
         Some(a) => a,
         None => return Ok(()),
@@ -504,6 +549,9 @@ fn finalize_cell(c: CellBuild, shared: &[String], sheet: &mut Sheet) -> Result<(
                 .value_text
                 .as_deref()
                 .and_then(|v| v.trim().parse::<usize>().ok());
+            if let Some(idx) = idx.filter(|idx| ambiguous.contains(idx)) {
+                shared_string_cells.insert((addr.row, addr.col), idx);
+            }
             match idx.and_then(|i| shared.get(i)) {
                 Some(s) => CellValue::Text { value: s.clone() },
                 None => CellValue::Empty,

@@ -1287,6 +1287,86 @@ fn captures_self_closing_template_roots() {
     assert!(written.ends_with("</sst>"));
 }
 
+/// Two `<si>` entries can carry the same text with different runs. A cell must
+/// keep pointing at the entry it was authored against.
+#[test]
+fn keeps_cells_on_their_own_shared_string_entry() {
+    let rich = r#"<si><r><rPr><b/></rPr><t>Total</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1"><si><t>Total</t></si>{rich}</sst>"#);
+    let body = r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#;
+    let mut parts = package(body, &[], false);
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(
+        written.contains(r#"<c r="A1" t="s"><v>0</v></c>"#),
+        "{written}"
+    );
+    assert!(
+        written.contains(r#"<c r="B1" t="s"><v>1</v></c>"#),
+        "B1 was moved onto another entry with the same text: {written}"
+    );
+}
+
+/// A shared-string part reached through a non-conventional relationship target
+/// parsed as empty, so an edited save deleted it and blanked every cell.
+#[test]
+fn resolves_shared_strings_through_the_workbook_relationship() {
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="strings/custom.xml"/></Relationships>"#.to_vec(),
+    );
+    parts.push((
+        "xl/strings/custom.xml".to_owned(),
+        br#"<sst count="1" uniqueCount="1"><si><t>Hello</t></si></sst>"#.to_vec(),
+    ));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.shared_strings, vec!["Hello".to_owned()]);
+    assert_eq!(
+        cell_at(&parsed.workbook, "A1").value,
+        CellValue::Text {
+            value: "Hello".into()
+        }
+    );
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("B1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    assert_eq!(
+        part_bytes(&saved, "xl/strings/custom.xml"),
+        part_bytes(&parts, "xl/strings/custom.xml")
+    );
+    assert_eq!(
+        cell_at(&parse_workbook(&saved).unwrap(), "A1").value,
+        CellValue::Text {
+            value: "Hello".into()
+        }
+    );
+}
+
 fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
     String::from_utf8(
         parts
