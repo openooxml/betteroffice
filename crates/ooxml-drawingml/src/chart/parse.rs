@@ -14,6 +14,41 @@ const MAX_DEEP_DEPTH: usize = 64;
 const MAX_POINTS: usize = 100_000;
 const MAX_PLOT_GROUPS: usize = 64;
 const MAX_AXES: usize = 128;
+/// Chart-wide, so per-vector limits cannot multiply into an unbounded parse.
+const MAX_CHART_SERIES: usize = 1_024;
+const MAX_CHART_POINTS: usize = 200_000;
+const MAX_AXIS_IDS: usize = 16;
+
+/// What one `c:chartSpace` may still allocate, shared across its plot groups.
+struct Budget {
+    series: usize,
+    points: usize,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self {
+            series: MAX_CHART_SERIES,
+            points: MAX_CHART_POINTS,
+        }
+    }
+
+    fn series_cap(&self) -> usize {
+        self.series
+    }
+
+    fn spend_series(&mut self, used: usize) {
+        self.series = self.series.saturating_sub(used);
+    }
+
+    fn point_cap(&self, requested: usize) -> usize {
+        requested.min(self.points)
+    }
+
+    fn spend_points(&mut self, used: usize) {
+        self.points = self.points.saturating_sub(used);
+    }
+}
 
 /// Read-only XML access [`parse_chart_space`] needs. Hosts implement it for
 /// their own element type so the chart parser stays format-agnostic.
@@ -38,9 +73,10 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
     if chart_elements.is_empty() {
         return None;
     }
+    let budget = &mut Budget::new();
     let plot_groups = chart_elements
         .into_iter()
-        .map(parse_plot_group)
+        .map(|chart| parse_plot_group(chart, budget))
         .collect::<Vec<_>>();
     let first_type = plot_groups[0].chart_type.as_deref();
     let chart_type = match first_type {
@@ -177,7 +213,7 @@ fn parse_number(raw: Option<&str>) -> Option<f64> {
     parsed.is_finite().then_some(parsed)
 }
 
-fn parse_string_cache<E: ChartXml>(parent: Option<&E>) -> Vec<String> {
+fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<String> {
     let Some(parent) = parent else {
         return Vec::new();
     };
@@ -187,8 +223,8 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>) -> Vec<String> {
     else {
         return Vec::new();
     };
-    children(cache, "pt")
-        .take(MAX_POINTS)
+    let values = children(cache, "pt")
+        .take(budget.point_cap(MAX_POINTS))
         .map(|point| {
             child(point, "v")
                 .map(E::text)
@@ -196,23 +232,27 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>) -> Vec<String> {
                 .trim()
                 .to_owned()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    budget.spend_points(values.len());
+    values
 }
 
-fn parse_num_cache<E: ChartXml>(parent: Option<&E>) -> Vec<f64> {
+fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<f64> {
     let Some(parent) = parent else {
         return Vec::new();
     };
     let Some(cache) = first_deep(parent, "numCache", 0) else {
         return Vec::new();
     };
-    children(cache, "pt")
-        .take(MAX_POINTS)
+    let values = children(cache, "pt")
+        .take(budget.point_cap(MAX_POINTS))
         .filter_map(|point| {
             let text = child(point, "v")?.text();
             parse_number(Some(text.trim()))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    budget.spend_points(values.len());
+    values
 }
 
 fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
@@ -226,9 +266,16 @@ fn parse_series_color<E: ChartXml>(series: &E, index: usize) -> String {
     parsed.unwrap_or_else(|| DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned())
 }
 
-fn parse_series<E: ChartXml>(chart: &E, grouping: Option<&str>) -> Vec<ChartSeries> {
-    children(chart, "ser")
+fn parse_series<E: ChartXml>(
+    chart: &E,
+    grouping: Option<&str>,
+    axis_ids: &[String],
+    budget: &mut Budget,
+) -> Vec<ChartSeries> {
+    let cap = budget.series_cap();
+    let series = children(chart, "ser")
         .enumerate()
+        .take(cap)
         .map(|(index, series)| {
             let category = child(series, "cat");
             let value = child(series, "val");
@@ -236,31 +283,25 @@ fn parse_series<E: ChartXml>(chart: &E, grouping: Option<&str>) -> Vec<ChartSeri
             let marker_symbol =
                 val_attr(marker.and_then(|value| child(value, "symbol"))).map(str::to_owned);
             let marker_size = parse_number(val_attr(marker.and_then(|value| child(value, "size"))));
-            let axis_ids = children(chart, "axId")
-                .filter_map(|axis| {
-                    val_attr(Some(axis))
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                })
-                .collect::<Vec<_>>();
             let points = children(series, "dPt")
-                .take(MAX_POINTS)
+                .take(budget.point_cap(MAX_POINTS))
                 .map(|point| ChartPoint {
                     index: parse_number(val_attr(child(point, "idx"))),
                     explosion: parse_number(val_attr(child(point, "explosion"))),
                     color: parse_series_color(point, index),
                 })
                 .collect::<Vec<_>>();
+            budget.spend_points(points.len());
             ChartSeries {
                 name: parse_series_name(series),
-                categories: parse_string_cache(category),
-                values: parse_num_cache(value),
+                categories: parse_string_cache(category, budget),
+                values: parse_num_cache(value, budget),
                 color: parse_series_color(series, index),
                 index: parse_number(val_attr(child(series, "idx"))),
                 order: parse_number(val_attr(child(series, "order"))),
                 category_formula: child_formula(category),
                 value_formula: child_formula(value),
-                axis_ids: (!axis_ids.is_empty()).then_some(axis_ids),
+                axis_ids: (!axis_ids.is_empty()).then(|| axis_ids.to_vec()),
                 points: (!points.is_empty()).then_some(points),
                 grouping: grouping.map(str::to_owned),
                 marker: (marker_symbol.is_some() || marker_size.is_some()).then_some(ChartMarker {
@@ -270,7 +311,9 @@ fn parse_series<E: ChartXml>(chart: &E, grouping: Option<&str>) -> Vec<ChartSeri
                 smooth: (val_attr(child(series, "smooth")) == Some("1")).then_some(true),
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    budget.spend_series(series.len());
+    series
 }
 
 fn child_formula<E: ChartXml>(parent: Option<&E>) -> Option<String> {
@@ -384,21 +427,23 @@ fn parse_grouping<E: ChartXml>(chart: &E) -> Option<String> {
     }
 }
 
-fn parse_plot_group<E: ChartXml>(chart: &E) -> ChartPlotGroup {
+fn parse_plot_group<E: ChartXml>(chart: &E, budget: &mut Budget) -> ChartPlotGroup {
     let grouping = parse_grouping(chart);
+    let axis_ids = children(chart, "axId")
+        .filter_map(|axis| {
+            val_attr(Some(axis))
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .take(MAX_AXIS_IDS)
+        .collect::<Vec<_>>();
     ChartPlotGroup {
         chart_type: plot_type_for(chart),
         grouping: grouping.clone(),
         overlap: parse_number(val_attr(child(chart, "overlap"))),
         gap_width: parse_number(val_attr(child(chart, "gapWidth"))),
-        axis_ids: children(chart, "axId")
-            .filter_map(|axis| {
-                val_attr(Some(axis))
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-            })
-            .collect(),
-        series: parse_series(chart, grouping.as_deref()),
+        series: parse_series(chart, grouping.as_deref(), &axis_ids, budget),
+        axis_ids,
         vary_colors: val_attr(child(chart, "varyColors")) == Some("1"),
         first_slice_angle: parse_number(val_attr(child(chart, "firstSliceAng"))),
         hole_size: parse_number(val_attr(child(chart, "holeSize"))),
@@ -551,6 +596,39 @@ mod tests {
         let axes = parsed.axes.unwrap();
         assert_eq!(axes.category.unwrap().labels.unwrap(), ["Q1"]);
         assert_eq!(axes.value.unwrap().max, Some(9.0));
+    }
+
+    #[test]
+    fn chart_wide_budgets_cap_series_and_axis_ids() {
+        let mut bar = vec![val("barDir", "col")];
+        bar.extend((0..2_000).map(|_| el("ser", vec![el("tx", vec![text("v", "S")])])));
+        bar.extend((0..64).map(|_| val("axId", "1")));
+        let space = el(
+            "chartSpace",
+            vec![el("chart", vec![el("plotArea", vec![el("barChart", bar)])])],
+        );
+
+        let parsed = parse_chart_space(&space).expect("chart space parses");
+        assert_eq!(parsed.plot_groups[0].series.len(), MAX_CHART_SERIES);
+        assert_eq!(parsed.plot_groups[0].axis_ids.len(), MAX_AXIS_IDS);
+        assert!(
+            parsed.plot_groups[0].series.iter().all(|series| series
+                .axis_ids
+                .as_ref()
+                .unwrap()
+                .len()
+                == MAX_AXIS_IDS)
+        );
+    }
+
+    #[test]
+    fn the_point_budget_is_shared_across_every_cache_in_one_chart() {
+        let mut budget = Budget::new();
+        assert_eq!(budget.point_cap(MAX_POINTS), MAX_POINTS);
+        budget.spend_points(MAX_CHART_POINTS - 5);
+        assert_eq!(budget.point_cap(MAX_POINTS), 5);
+        budget.spend_points(9);
+        assert_eq!(budget.point_cap(MAX_POINTS), 0);
     }
 
     #[test]
