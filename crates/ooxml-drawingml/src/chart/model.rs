@@ -50,6 +50,8 @@ pub struct ChartSeries {
     pub marker: Option<ChartMarker>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_labels: Option<ChartDataLabels>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -67,6 +69,45 @@ pub struct ChartPoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explosion: Option<f64>,
     pub color: String,
+}
+
+/// Data-label settings at one cascade level.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartDataLabels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_value: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_category_name: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_series_name: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_percent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_legend_key: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_bubble_size: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<ChartPointLabel>>,
+}
+
+/// One point-level data-label override.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartPointLabel {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub labels: ChartDataLabels,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -87,7 +128,8 @@ pub struct ChartPlotGroup {
     pub first_slice_angle: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hole_size: Option<f64>,
-    pub show_data_labels: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_labels: Option<ChartDataLabels>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

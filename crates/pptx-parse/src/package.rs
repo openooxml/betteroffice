@@ -299,7 +299,7 @@ impl ChartSources<'_> {
             .and_then(|relationship| relationship.resolved_target.clone())
     }
 
-    fn theme_for(&self, source_part: &str) -> Option<&Theme> {
+    fn theme_for(&self, source_part: &str) -> Option<&ThemePart> {
         if let Some(slide) = self
             .slides
             .iter()
@@ -321,10 +321,10 @@ impl ChartSources<'_> {
         {
             return self.theme_via_master(Some(source_part));
         }
-        self.themes.first().map(|part| &part.theme)
+        self.themes.first()
     }
 
-    fn theme_via_layout(&self, layout_part_path: Option<&str>) -> Option<&Theme> {
+    fn theme_via_layout(&self, layout_part_path: Option<&str>) -> Option<&ThemePart> {
         let layout = layout_part_path
             .and_then(|path| self.layouts.iter().find(|layout| layout.part_path == path))
             .or_else(|| self.layouts.first());
@@ -345,7 +345,7 @@ impl ChartSources<'_> {
         self.theme_via_master(master_part_path)
     }
 
-    fn theme_via_master(&self, master_part_path: Option<&str>) -> Option<&Theme> {
+    fn theme_via_master(&self, master_part_path: Option<&str>) -> Option<&ThemePart> {
         let master = master_part_path
             .and_then(|path| self.masters.iter().find(|master| master.part_path == path))
             .or_else(|| self.masters.first());
@@ -353,7 +353,6 @@ impl ChartSources<'_> {
             .and_then(|master| master.theme_part_path.as_deref())
             .and_then(|path| self.themes.iter().find(|theme| theme.part_path == path))
             .or_else(|| self.themes.first())
-            .map(|part| &part.theme)
     }
 }
 
@@ -379,16 +378,22 @@ fn parse_chart_parts(
         let Some(part_path) = sources.chart_target(&source_part, &relationship_id) else {
             continue;
         };
-        if !loaded.insert(part_path.clone()) {
+        let theme_part = sources.theme_for(&source_part);
+        let theme_part_path = theme_part.map(|part| part.part_path.clone());
+        if !loaded.insert((part_path.clone(), theme_part_path.clone())) {
             continue;
         }
         let Some(bytes) = parts.get(part_path.as_str()) else {
             continue;
         };
         let root = parse_xml(bytes, &part_path, budget)?;
-        let theme = sources.theme_for(&source_part).unwrap_or(&default_theme);
+        let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
         if let Some(chart) = parse_chart_part(&root, theme) {
-            charts.push(ChartPart { part_path, chart });
+            charts.push(ChartPart {
+                part_path,
+                theme_part_path,
+                chart,
+            });
         }
     }
     Ok(charts)
@@ -594,7 +599,14 @@ mod tests {
         assert_eq!(column.series[1].color, "#1FA97A");
         assert_eq!(column.series[0].values, [12.0, 19.0, 7.0]);
         assert_eq!(column.plot_groups[0].gap_width, Some(150.0));
-        assert!(column.plot_groups[0].show_data_labels);
+        assert_eq!(
+            column.plot_groups[0].series[0]
+                .data_labels
+                .as_ref()
+                .and_then(|labels| labels.show_value),
+            Some(true)
+        );
+        assert!(column.plot_groups[0].data_labels.is_none());
         let axes = column.axis_list.as_ref().unwrap();
         assert_eq!(axes[0].title.as_deref(), Some("Quarter"));
         assert_eq!(axes[1].title.as_deref(), Some("Millions"));
@@ -607,6 +619,137 @@ mod tests {
         assert_eq!(points[0].color, "#E7A954");
         assert_eq!(points[1].color, "#112233");
         assert_eq!(points[1].explosion, Some(10.0));
+    }
+
+    #[test]
+    fn a_shared_chart_is_resolved_once_per_referencing_theme() {
+        fn chart_shape(id: u32) -> ShapeNode {
+            ShapeNode::GraphicFrame(GraphicFrame {
+                base: ShapeBase {
+                    id,
+                    name: format!("Chart {id}"),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform: ShapeTransform::default(),
+                },
+                data: GraphicFrameData::Chart {
+                    relationship_id: "rIdChart".to_owned(),
+                    part_path: Some("ppt/charts/chart1.xml".to_owned()),
+                },
+            })
+        }
+
+        fn slide(path: &str, layout: &str, id: u32) -> Slide {
+            Slide {
+                part_path: path.to_owned(),
+                name: None,
+                layout_part_path: Some(layout.to_owned()),
+                show_master_shapes: true,
+                background: None,
+                shapes: vec![chart_shape(id)],
+            }
+        }
+
+        fn chart_relationships() -> Vec<Relationship> {
+            vec![Relationship {
+                id: "rIdChart".to_owned(),
+                relationship_type: relationship_types::CHART.to_owned(),
+                target: "../charts/chart1.xml".to_owned(),
+                target_mode: Default::default(),
+                resolved_target: Some("ppt/charts/chart1.xml".to_owned()),
+            }]
+        }
+
+        let slides = vec![
+            slide("ppt/slides/slide1.xml", "ppt/slideLayouts/layout1.xml", 1),
+            slide("ppt/slides/slide2.xml", "ppt/slideLayouts/layout2.xml", 2),
+            slide("ppt/slides/slide3.xml", "ppt/slideLayouts/layout1.xml", 3),
+        ];
+        let layouts = vec![
+            SlideLayout {
+                part_path: "ppt/slideLayouts/layout1.xml".to_owned(),
+                name: None,
+                layout_type: None,
+                master_part_path: Some("ppt/slideMasters/master1.xml".to_owned()),
+                show_master_shapes: true,
+                background: None,
+                shapes: Vec::new(),
+            },
+            SlideLayout {
+                part_path: "ppt/slideLayouts/layout2.xml".to_owned(),
+                name: None,
+                layout_type: None,
+                master_part_path: Some("ppt/slideMasters/master2.xml".to_owned()),
+                show_master_shapes: true,
+                background: None,
+                shapes: Vec::new(),
+            },
+        ];
+        let masters = vec![
+            SlideMaster {
+                part_path: "ppt/slideMasters/master1.xml".to_owned(),
+                name: None,
+                theme_part_path: Some("ppt/theme/theme1.xml".to_owned()),
+                layout_part_paths: vec!["ppt/slideLayouts/layout1.xml".to_owned()],
+                background: None,
+                shapes: Vec::new(),
+                text_styles: TextStyleSet::default(),
+            },
+            SlideMaster {
+                part_path: "ppt/slideMasters/master2.xml".to_owned(),
+                name: None,
+                theme_part_path: Some("ppt/theme/theme2.xml".to_owned()),
+                layout_part_paths: vec!["ppt/slideLayouts/layout2.xml".to_owned()],
+                background: None,
+                shapes: Vec::new(),
+                text_styles: TextStyleSet::default(),
+            },
+        ];
+        let mut first_theme = Theme::default();
+        first_theme.color_scheme.accent1 = "112233".to_owned();
+        let mut second_theme = Theme::default();
+        second_theme.color_scheme.accent1 = "AABBCC".to_owned();
+        let themes = vec![
+            ThemePart {
+                part_path: "ppt/theme/theme1.xml".to_owned(),
+                theme: first_theme,
+            },
+            ThemePart {
+                part_path: "ppt/theme/theme2.xml".to_owned(),
+                theme: second_theme,
+            },
+        ];
+        let relationships = BTreeMap::from([
+            ("ppt/slides/slide1.xml".to_owned(), chart_relationships()),
+            ("ppt/slides/slide2.xml".to_owned(), chart_relationships()),
+            ("ppt/slides/slide3.xml".to_owned(), chart_relationships()),
+        ]);
+        let sources = ChartSources {
+            slides: &slides,
+            layouts: &layouts,
+            masters: &masters,
+            themes: &themes,
+            relationships: &relationships,
+        };
+        let chart_xml = br#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let parts: HashMap<&str, &[u8]> =
+            HashMap::from([("ppt/charts/chart1.xml", chart_xml.as_slice())]);
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+
+        let charts = parse_chart_parts(&parts, &sources, &mut budget).unwrap();
+
+        assert_eq!(charts.len(), 2);
+        assert_eq!(
+            charts
+                .iter()
+                .map(|chart| chart.theme_part_path.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("ppt/theme/theme1.xml"), Some("ppt/theme/theme2.xml")]
+        );
+        assert_eq!(charts[0].chart.series[0].color, "#112233");
+        assert_eq!(charts[1].chart.series[0].color, "#AABBCC");
     }
 
     #[test]

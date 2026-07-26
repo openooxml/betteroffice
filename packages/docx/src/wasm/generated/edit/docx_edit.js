@@ -3173,7 +3173,7 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1, arg2, arg3);
             return ret;
         }, arguments); },
-        __wbg_error_73f4720a6c53102a: function(arg0, arg1) {
+        __wbg_error_25e7706a73a81f28: function(arg0, arg1) {
             console.error(getStringFromWasm0(arg0, arg1));
         },
         __wbg_getRandomValues_3f44b700395062e5: function() { return handleError(function (arg0, arg1) {
@@ -3221,7 +3221,7 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
-        __wbg_now_7521c72b0797ac47: function() {
+        __wbg_now_d0bb76462549e961: function() {
             const ret = performance.now();
             return ret;
         },

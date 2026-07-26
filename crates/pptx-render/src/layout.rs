@@ -158,13 +158,12 @@ impl SlideRenderer {
                 })
             })
             .or_else(|| package.masters.first());
-        let theme = master
+        let theme_part = master
             .and_then(|master| master.theme_part_path.as_deref())
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
-            .map(|part| &part.theme)
-            .or_else(|| package.themes.first().map(|part| &part.theme));
+            .or_else(|| package.themes.first());
         let default_theme = Theme::default();
-        let theme = theme.unwrap_or(&default_theme);
+        let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
         let background = parsed_slide
             .and_then(|slide| slide.background.as_ref())
             .or_else(|| layout.and_then(|layout| layout.background.as_ref()))
@@ -181,6 +180,7 @@ impl SlideRenderer {
             renderer: self,
             package,
             theme,
+            theme_part_path: theme_part.map(|part| part.part_path.as_str()),
             master,
             layout,
             parsed_slide,
@@ -302,6 +302,7 @@ struct LayoutBuilder<'a> {
     renderer: &'a SlideRenderer,
     package: &'a PptxPackage,
     theme: &'a Theme,
+    theme_part_path: Option<&'a str>,
     master: Option<&'a SlideMaster>,
     layout: Option<&'a SlideLayout>,
     parsed_slide: Option<&'a Slide>,
@@ -631,7 +632,10 @@ impl<'a> LayoutBuilder<'a> {
         self.package
             .charts
             .iter()
-            .find(|part| &part.part_path == part_path)
+            .find(|part| {
+                &part.part_path == part_path
+                    && part.theme_part_path.as_deref() == self.theme_part_path
+            })
             .map(|part| &part.chart)
     }
 
@@ -2260,6 +2264,66 @@ mod tests {
         assert!(parts.iter().any(|primitive| matches!(
             primitive,
             Primitive::Shape { fill: Some(Paint::Solid { color }), .. } if color == "#E7A954"
+        )));
+    }
+
+    #[test]
+    fn a_shared_chart_uses_the_rendering_slides_theme_key() {
+        let mut package = pptx_parse::parse_pptx(CHART_FIXTURE).unwrap();
+        let session = DeckSession::open(CHART_FIXTURE, 8_006).unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        let mut theme = package.themes[0].clone();
+        theme.part_path = "ppt/theme/theme2.xml".to_owned();
+        let mut master = package.masters[0].clone();
+        master.part_path = "ppt/slideMasters/slideMaster2.xml".to_owned();
+        master.theme_part_path = Some(theme.part_path.clone());
+        master.layout_part_paths = vec!["ppt/slideLayouts/slideLayout2.xml".to_owned()];
+        let mut layout = package.layouts[0].clone();
+        layout.part_path = "ppt/slideLayouts/slideLayout2.xml".to_owned();
+        layout.master_part_path = Some(master.part_path.clone());
+        snapshot.slides[1].layout_part_path = Some(layout.part_path.clone());
+        package.themes.push(theme);
+        package.masters.push(master);
+        package.layouts.push(layout);
+        let mut chart = package
+            .charts
+            .iter()
+            .find(|part| part.part_path == "ppt/charts/chart2.xml")
+            .unwrap()
+            .clone();
+        chart.theme_part_path = Some("ppt/theme/theme2.xml".to_owned());
+        for series in &mut chart.chart.series {
+            series.color = "#ABCDEF".to_owned();
+        }
+        for series in chart
+            .chart
+            .plot_groups
+            .iter_mut()
+            .flat_map(|group| &mut group.series)
+        {
+            series.color = "#ABCDEF".to_owned();
+            for point in series.points.iter_mut().flatten() {
+                point.color = "#ABCDEF".to_owned();
+            }
+        }
+        package.charts.push(chart);
+
+        let rendered = renderer()
+            .layout_slide(&package, &snapshot, 1)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        assert!(rendered.iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Chart { primitives, .. }
+                if primitives.iter().any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape {
+                        fill: Some(Paint::Solid { color }),
+                        ..
+                    } if color == "#ABCDEF"
+                ))
         )));
     }
 

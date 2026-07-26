@@ -20,7 +20,7 @@ use crate::{
     SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 1.0;
+const SCHEMA_VERSION: f64 = 2.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -602,7 +602,15 @@ impl DeckSession {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
-    let package = package_from_doc(doc)?;
+    let package = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        validate_schema_version(&meta, &txn)?;
+        if map_string(&meta, &txn, "fingerprint").is_none() {
+            return Err(EditError::InvalidState("missing fingerprint".to_owned()));
+        }
+        package_from_meta(&meta, &txn)?
+    };
     let snapshot = snapshot_doc(doc, &package)?;
     if snapshot.width_emu <= 0 || snapshot.height_emu <= 0 {
         return Err(EditError::InvalidState(
@@ -610,15 +618,6 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
         ));
     }
     let txn = doc.transact();
-    let meta = required_map(&txn, META)?;
-    if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
-        return Err(EditError::InvalidState(
-            "unsupported deck schema version".to_owned(),
-        ));
-    }
-    if map_string(&meta, &txn, "fingerprint").is_none() {
-        return Err(EditError::InvalidState("missing fingerprint".to_owned()));
-    }
     let stories = required_map(&txn, STORIES)?;
     for (story_id, value) in stories.iter(&txn) {
         let story = value
@@ -632,7 +631,17 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
+    validate_schema_version(&meta, &txn)?;
     package_from_meta(&meta, &txn)
+}
+
+fn validate_schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<()> {
+    if map_number(meta, txn, "schemaVersion") != Some(SCHEMA_VERSION) {
+        return Err(EditError::InvalidState(
+            "unsupported deck schema version".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPackage> {
@@ -1095,6 +1104,32 @@ mod tests {
     use crate::TextStyle;
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+
+    #[test]
+    fn schema_version_is_validated_before_package_json() {
+        let session = DeckSession::open(FIXTURE, 100).unwrap();
+        {
+            let mut txn = session.doc.transact_mut();
+            let meta = required_map(&txn, META).unwrap();
+            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION - 1.0);
+            meta.insert(
+                &mut txn,
+                "packageJson",
+                Any::Buffer(Arc::from(b"{}".to_vec())),
+            );
+        }
+
+        assert!(matches!(
+            validate_doc(&session.doc),
+            Err(EditError::InvalidState(message))
+                if message == "unsupported deck schema version"
+        ));
+        assert!(matches!(
+            DeckSession::open_from_update(&session.encode_state_as_update_v1(), 101),
+            Err(EditError::InvalidState(message))
+                if message == "unsupported deck schema version"
+        ));
+    }
 
     #[test]
     fn delete_operations_remove_owned_map_entries() {

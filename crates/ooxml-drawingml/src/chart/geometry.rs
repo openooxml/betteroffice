@@ -1605,7 +1605,7 @@ mod tests {
                 vary_colors: false,
                 first_slice_angle: None,
                 hole_size: None,
-                show_data_labels: false,
+                data_labels: None,
                 series: vec![crate::chart::ChartSeries {
                     name: None,
                     categories: Vec::new(),
@@ -1619,6 +1619,7 @@ mod tests {
                     grouping: None,
                     marker: None,
                     smooth: None,
+                    data_labels: None,
                     points: Some(
                         [-1.0, 1.5, 1e30, f64::NAN, 2.0]
                             .into_iter()

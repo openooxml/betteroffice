@@ -1,8 +1,8 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
 use super::model::{
-    ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint, ChartSeries,
-    ChartSpace,
+    ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
+    ChartPointLabel, ChartSeries, ChartSpace,
 };
 
 pub const DEFAULT_SERIES_COLORS: [&str; 8] = [
@@ -16,6 +16,7 @@ const MAX_AXES: usize = 128;
 const MAX_CHART_SERIES: usize = 1_024;
 const MAX_CHART_POINTS: usize = 200_000;
 const MAX_AXIS_IDS: usize = 16;
+const MAX_POINT_LABELS: usize = 4_096;
 
 /// What one `c:chartSpace` may still allocate, shared across its plot groups.
 struct Budget {
@@ -107,6 +108,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
             grouping: None,
             marker: None,
             smooth: None,
+            data_labels: None,
         })
         .collect::<Vec<_>>();
     let axis_list = plot_area
@@ -344,11 +346,65 @@ fn parse_series<E: ChartXml>(
                     size: marker_size,
                 }),
                 smooth: (val_attr(child(series, "smooth")) == Some("1")).then_some(true),
+                data_labels: parse_data_labels(child(series, "dLbls"), budget),
             }
         })
         .collect::<Vec<_>>();
     budget.spend_series(series.len());
     series
+}
+
+fn flag<E: ChartXml>(parent: &E, local: &str) -> Option<bool> {
+    match val_attr(child(parent, local))? {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_data_labels<E: ChartXml>(
+    labels: Option<&E>,
+    budget: &mut Budget,
+) -> Option<ChartDataLabels> {
+    let labels = labels?;
+    let points = take_points(
+        children(labels, "dLbl").take(MAX_POINT_LABELS),
+        budget,
+        |point| {
+            let index = match child(point, "idx") {
+                Some(index) => Some(parse_index(val_attr(Some(index)))?),
+                None => None,
+            };
+            Some(ChartPointLabel {
+                index,
+                text: text_from_rich_text(child(point, "tx")),
+                labels: label_settings(point),
+            })
+        },
+    );
+    let mut parsed = label_settings(labels);
+    parsed.points = (!points.is_empty()).then_some(points);
+    Some(parsed)
+}
+
+fn label_settings<E: ChartXml>(labels: &E) -> ChartDataLabels {
+    ChartDataLabels {
+        delete: flag(labels, "delete"),
+        show_value: flag(labels, "showVal"),
+        show_category_name: flag(labels, "showCatName"),
+        show_series_name: flag(labels, "showSerName"),
+        show_percent: flag(labels, "showPercent"),
+        show_legend_key: flag(labels, "showLegendKey"),
+        show_bubble_size: flag(labels, "showBubbleSize"),
+        separator: child(labels, "separator")
+            .map(E::descendant_text)
+            .and_then(|value| nonempty_trimmed(&value)),
+        position: val_attr(child(labels, "dLblPos")).map(str::to_owned),
+        number_format: child(labels, "numFmt")
+            .and_then(|format| format.attribute(None, "formatCode"))
+            .and_then(nonempty_trimmed),
+        points: None,
+    }
 }
 
 fn child_formula<E: ChartXml>(parent: Option<&E>) -> Option<String> {
@@ -482,21 +538,8 @@ fn parse_plot_group<E: ChartXml>(chart: &E, budget: &mut Budget) -> ChartPlotGro
         vary_colors: val_attr(child(chart, "varyColors")) == Some("1"),
         first_slice_angle: parse_number(val_attr(child(chart, "firstSliceAng"))),
         hole_size: parse_number(val_attr(child(chart, "holeSize"))),
-        show_data_labels: shows_data_labels(chart),
+        data_labels: parse_data_labels(child(chart, "dLbls"), budget),
     }
-}
-
-/// `c:dLbls` may sit on the plot group, on a series, or on both, and either
-/// placement can switch the labels back off with `c:delete`.
-fn shows_data_labels<E: ChartXml>(chart: &E) -> bool {
-    data_labels_visible(child(chart, "dLbls"))
-        || children(chart, "ser")
-            .take(MAX_CHART_SERIES)
-            .any(|series| data_labels_visible(child(series, "dLbls")))
-}
-
-fn data_labels_visible<E: ChartXml>(labels: Option<&E>) -> bool {
-    labels.is_some_and(|labels| val_attr(child(labels, "delete")) != Some("1"))
 }
 
 fn nonempty_trimmed(value: &str) -> Option<String> {
@@ -866,33 +909,85 @@ mod tests {
     }
 
     #[test]
-    fn data_labels_count_from_either_placement_and_deletion_switches_them_off() {
-        fn shows(group_labels: Option<Node>, series_labels: Option<Node>) -> bool {
-            let mut series = Vec::new();
-            series.extend(series_labels);
-            let mut bar = vec![Node::val("c:barDir", "col"), Node::el("c:ser", series)];
-            bar.extend(group_labels);
-            let space = Node::el(
-                "c:chartSpace",
+    fn data_label_cascade_stays_scoped_to_group_series_and_point() {
+        let labels = Node::el(
+            "c:dLbls",
+            vec![
+                Node::val("c:showVal", "1"),
+                Node::el(
+                    "c:dLbl",
+                    vec![Node::val("c:idx", "1"), Node::val("c:delete", "1")],
+                ),
+            ],
+        );
+        let deleted = Node::el("c:dLbls", vec![Node::val("c:delete", "1")]);
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
                 vec![Node::el(
-                    "c:chart",
-                    vec![Node::el("c:plotArea", vec![Node::el("c:barChart", bar)])],
+                    "c:plotArea",
+                    vec![Node::el(
+                        "c:barChart",
+                        vec![
+                            Node::val("c:barDir", "col"),
+                            Node::el("c:ser", vec![labels]),
+                            Node::el("c:ser", Vec::new()),
+                            Node::el("c:ser", vec![deleted]),
+                        ],
+                    )],
                 )],
-            );
-            parse_chart_space(&space)
-                .expect("chart space parses")
-                .plot_groups[0]
-                .show_data_labels
-        }
-        let shown = || Node::el("c:dLbls", vec![Node::val("c:showVal", "1")]);
-        let deleted = || Node::el("c:dLbls", vec![Node::val("c:delete", "1")]);
+            )],
+        );
 
-        assert!(shows(Some(shown()), None));
-        assert!(shows(None, Some(shown())));
-        assert!(shows(Some(deleted()), Some(shown())));
-        assert!(!shows(None, None));
-        assert!(!shows(Some(deleted()), None));
-        assert!(!shows(None, Some(deleted())));
+        let group = &parse_chart_space(&space)
+            .expect("chart space parses")
+            .plot_groups[0];
+
+        assert!(group.data_labels.is_none());
+        let first = group.series[0].data_labels.as_ref().unwrap();
+        assert_eq!(first.show_value, Some(true));
+        let points = first.points.as_ref().unwrap();
+        assert_eq!(points[0].index, Some(1.0));
+        assert_eq!(points[0].labels.delete, Some(true));
+        assert!(group.series[1].data_labels.is_none());
+        assert_eq!(
+            group.series[2].data_labels.as_ref().unwrap().delete,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn group_data_labels_remain_defaults_for_an_unset_series() {
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![Node::el(
+                        "c:barChart",
+                        vec![
+                            Node::val("c:barDir", "col"),
+                            Node::el("c:ser", Vec::new()),
+                            Node::el(
+                                "c:dLbls",
+                                vec![Node::val("c:showVal", "1"), Node::val("c:showCatName", "0")],
+                            ),
+                        ],
+                    )],
+                )],
+            )],
+        );
+
+        let group = &parse_chart_space(&space)
+            .expect("chart space parses")
+            .plot_groups[0];
+
+        let labels = group.data_labels.as_ref().unwrap();
+        assert_eq!(labels.show_value, Some(true));
+        assert_eq!(labels.show_category_name, Some(false));
+        assert!(group.series[0].data_labels.is_none());
     }
 
     #[test]

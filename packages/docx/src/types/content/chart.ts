@@ -35,6 +35,27 @@ export interface ChartSeries {
   grouping?: ChartGrouping;
   marker?: { symbol?: string; size?: number; color?: string };
   smooth?: boolean;
+  dataLabels?: ChartDataLabels;
+}
+
+export interface ChartDataLabels {
+  delete?: boolean;
+  showValue?: boolean;
+  showCategoryName?: boolean;
+  showSeriesName?: boolean;
+  showPercent?: boolean;
+  showLegendKey?: boolean;
+  showBubbleSize?: boolean;
+  separator?: string;
+  position?: string;
+  numberFormat?: string;
+  points?: ChartPointLabel[];
+}
+
+export interface ChartPointLabel {
+  index?: number;
+  text?: string;
+  labels: ChartDataLabels;
 }
 
 export interface ChartAxis {
@@ -70,7 +91,7 @@ export interface ChartPlotGroup {
   varyColors?: boolean;
   firstSliceAngle?: number;
   holeSize?: number;
-  showDataLabels?: boolean;
+  dataLabels?: ChartDataLabels;
 }
 
 export interface ChartLegend {
