@@ -125,19 +125,37 @@ pub fn serialize_workbook_with_package_and_origins(
             .iter()
             .enumerate()
             .any(|(index, origin)| *origin != Some(index));
-    serialize_workbook_with_package_and_origins_after_edits(wb, package, origins, edited)
+    let shared_string_cells = origins
+        .iter()
+        .map(|origin| {
+            origin
+                .map(|origin| package.source_shared_string_cells(origin))
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    serialize_workbook_with_package_and_origins_after_edits(
+        wb,
+        package,
+        origins,
+        &shared_string_cells,
+        edited,
+    )
 }
 
-/// `edited` false means the caller guarantees an untouched model, which is
-/// returned as the source bytes; true drops the now-stale calculation chain.
+/// `origins` and `shared_string_cells` are indexed by current sheet and carry
+/// what the model does not: the source sheet each one came from and the shared
+/// string entry each of its cells was authored against. `edited` false means
+/// the caller guarantees an untouched model, which is returned as the source
+/// bytes; true drops the now-stale calculation chain.
 #[doc(hidden)]
 pub fn serialize_workbook_with_package_and_origins_after_edits(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
     edited: bool,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
-    if origins.len() != wb.sheets.len() {
+    if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
         ));
@@ -232,11 +250,13 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let (relationship_prefix, relationship_namespace) = workbook_relationship_namespace(package);
-    for (sheet, plan) in wb.sheets.iter().zip(&sheets) {
+    let empty_provenance = SharedStringCells::new();
+    for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
         let original = plan
             .origin
             .and_then(|origin| package.original_workbook.sheets.get(origin));
+        let provenance = shared_string_cells.get(index).unwrap_or(&empty_provenance);
         let output = match source {
             Some(source) if source.is_worksheet() => {
                 if shared_strings_stable
@@ -244,7 +264,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
                 {
                     continue;
                 }
-                worksheet_xml_with_template(sheet, wb, original, source, package)?
+                worksheet_xml_with_template(sheet, wb, original, source, package, provenance)?
             }
             Some(_) => continue,
             None => {
@@ -1702,13 +1722,14 @@ fn worksheet_xml_with_template(
     original: Option<&Sheet>,
     source: &PreservedSheet,
     package: &PreservedPackage,
+    shared_string_cells: &SharedStringCells,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
     let columns = (!sheet.col_widths.is_empty())
         .then(|| fragment(|writer| write_cols(writer, sheet)))
         .transpose()?;
     let sheet_data = Some(fragment(|writer| {
-        write_sheet_data(writer, sheet, wb, &source.shared_string_cells)
+        write_sheet_data(writer, sheet, wb, shared_string_cells)
     })?);
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))

@@ -22,9 +22,12 @@ pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseErro
     parse_workbook_indexed(parts).map(|parsed| parsed.workbook)
 }
 
-/// Per sheet, the shared-string index each cell was authored against, for the
-/// entries whose text alone cannot identify them.
-pub(crate) type SharedStringCells = BTreeMap<(u32, u32), usize>;
+/// Per sheet, the shared-string index each cell was authored against, keyed by
+/// `(row, column)`, for the entries whose text alone cannot identify them.
+/// Structural edits move the cells, so the caller owning them must move these
+/// keys with them.
+#[doc(hidden)]
+pub type SharedStringCells = BTreeMap<(u32, u32), usize>;
 
 pub(crate) struct IndexedWorkbook {
     pub(crate) workbook: Workbook,

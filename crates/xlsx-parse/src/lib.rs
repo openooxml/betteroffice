@@ -8,7 +8,7 @@ mod write;
 mod xml;
 
 pub use package::PreservedPackage;
-pub use read::parse_workbook;
+pub use read::{SharedStringCells, parse_workbook};
 pub use write::{
     serialize_workbook, serialize_workbook_with_package,
     serialize_workbook_with_package_and_origins,

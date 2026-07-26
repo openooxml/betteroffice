@@ -79,13 +79,61 @@ enum WorkbookMode {
     Collaborative { structure: WorkbookStructure },
 }
 
-/// Undo-issued identity token: the sheet origin vector on both sides of one
+/// Package identity the model does not carry: per current sheet, the source
+/// sheet it came from and the shared-string entry each of its cells was
+/// authored against.
+#[derive(Clone, Default)]
+struct PreservedSheetState {
+    origins: Vec<Option<usize>>,
+    shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+}
+
+impl PreservedSheetState {
+    fn insert(&mut self, index: usize) {
+        let index = index.min(self.origins.len());
+        self.origins.insert(index, None);
+        self.shared_string_cells
+            .insert(index, xlsx_parse::SharedStringCells::new());
+    }
+
+    fn remove(&mut self, index: usize) {
+        if index < self.origins.len() {
+            self.origins.remove(index);
+            self.shared_string_cells.remove(index);
+        }
+    }
+
+    /// Carries each cell's shared-string provenance to the address the op moves
+    /// it to; a cell inside a deleted span loses it with the cell.
+    fn shift(&mut self, sheet: SheetId, op: &Op) {
+        let Some(cells) = self.shared_string_cells.get_mut(sheet.0 as usize) else {
+            return;
+        };
+        *cells = cells
+            .iter()
+            .filter_map(|(&(row, col), &index)| {
+                let moved = xlsx_ops::remap_ref(CellRef::new(row, col), op)?;
+                Some(((moved.row, moved.col), index))
+            })
+            .collect();
+    }
+
+    /// Drops every cell's provenance, so each falls back to the shared-string
+    /// entry its text alone selects.
+    fn forget_shared_strings(&mut self) {
+        for cells in &mut self.shared_string_cells {
+            cells.clear();
+        }
+    }
+}
+
+/// Undo-issued identity token: the preserved sheet state on both sides of one
 /// committed transaction. Only replaying history restores a sheet's package
 /// identity; a fresh add never inherits one.
 #[derive(Clone)]
-struct SheetOriginHistory {
-    before: Vec<Option<usize>>,
-    after: Vec<Option<usize>>,
+struct PreservedStateHistory {
+    before: PreservedSheetState,
+    after: PreservedSheetState,
 }
 
 pub struct Workbook {
@@ -94,9 +142,9 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
-    sheet_origins: Vec<Option<usize>>,
-    sheet_origin_undo: Vec<SheetOriginHistory>,
-    sheet_origin_redo: Vec<SheetOriginHistory>,
+    preserved: PreservedSheetState,
+    preserved_undo: Vec<PreservedStateHistory>,
+    preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
@@ -197,23 +245,29 @@ impl Workbook {
             },
             None => WorkbookMode::Standalone,
         };
-        let sheet_origins = source_package
-            .as_ref()
-            .map(|package| {
-                (0..model.sheets.len())
+        let preserved = match &source_package {
+            Some(package) => PreservedSheetState {
+                origins: (0..model.sheets.len())
                     .map(|index| (index < package.source_sheet_count()).then_some(index))
-                    .collect()
-            })
-            .unwrap_or_else(|| vec![None; model.sheets.len()]);
+                    .collect(),
+                shared_string_cells: (0..model.sheets.len())
+                    .map(|index| package.source_shared_string_cells(index))
+                    .collect(),
+            },
+            None => PreservedSheetState {
+                origins: vec![None; model.sheets.len()],
+                shared_string_cells: vec![Default::default(); model.sheets.len()],
+            },
+        };
         Ok(Self {
             authority,
             mode,
             pending_remote_updates: Vec::new(),
             model,
             source_package,
-            sheet_origins,
-            sheet_origin_undo: Vec::new(),
-            sheet_origin_redo: Vec::new(),
+            preserved,
+            preserved_undo: Vec::new(),
+            preserved_redo: Vec::new(),
             edited_since_open: false,
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
@@ -379,8 +433,9 @@ impl Workbook {
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
         self.undo.clear();
-        self.sheet_origin_undo.clear();
-        self.sheet_origin_redo.clear();
+        self.preserved_undo.clear();
+        self.preserved_redo.clear();
+        self.preserved.forget_shared_strings();
         self.authority.clear_history();
         self.proposals.clear();
         self.edited_since_open = true;
@@ -434,7 +489,8 @@ impl Workbook {
             Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins_after_edits(
                 &self.model,
                 package,
-                &self.sheet_origins,
+                &self.preserved.origins,
+                &self.preserved.shared_string_cells,
                 self.edited_since_open,
             )?,
             None => xlsx_parse::serialize_workbook(&self.model)?,
@@ -921,11 +977,11 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Undo)
             .map_err(authority_error)?;
-        if let Some(history) = self.sheet_origin_undo.pop() {
-            self.sheet_origins = history.before.clone();
-            self.sheet_origin_redo.push(history);
+        if let Some(history) = self.preserved_undo.pop() {
+            self.preserved = history.before.clone();
+            self.preserved_redo.push(history);
         } else {
-            self.apply_sheet_origin_ops(&ops);
+            self.apply_preserved_state_ops(&ops);
         }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
@@ -959,11 +1015,11 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Redo)
             .map_err(authority_error)?;
-        if let Some(history) = self.sheet_origin_redo.pop() {
-            self.sheet_origins = history.after.clone();
-            self.sheet_origin_undo.push(history);
+        if let Some(history) = self.preserved_redo.pop() {
+            self.preserved = history.after.clone();
+            self.preserved_undo.push(history);
         } else {
-            self.apply_sheet_origin_ops(&ops);
+            self.apply_preserved_state_ops(&ops);
         }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
@@ -1004,6 +1060,7 @@ impl Workbook {
         self.model = history.model;
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
+        self.preserved.forget_shared_strings();
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);
@@ -1373,7 +1430,12 @@ impl Workbook {
     /// Rejects edits aimed at a preserved chartsheet or dialogsheet.
     fn ensure_worksheet_sheet(&self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
-        let origin = self.sheet_origins.get(sheet.0 as usize).copied().flatten();
+        let origin = self
+            .preserved
+            .origins
+            .get(sheet.0 as usize)
+            .copied()
+            .flatten();
         if origin.is_some_and(|origin| {
             self.source_package
                 .as_ref()
@@ -1388,7 +1450,7 @@ impl Workbook {
     }
 
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
-        let origin_before = (!self.is_collaborative()).then(|| self.sheet_origins.clone());
+        let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
@@ -1415,20 +1477,20 @@ impl Workbook {
                 });
             }
         }
-        self.apply_sheet_origin_ops(ops);
-        if let Some(before) = origin_before {
-            self.sheet_origin_undo.push(SheetOriginHistory {
+        self.apply_preserved_state_ops(ops);
+        if let Some(before) = preserved_before {
+            self.preserved_undo.push(PreservedStateHistory {
                 before,
-                after: self.sheet_origins.clone(),
+                after: self.preserved.clone(),
             });
-            self.sheet_origin_redo.clear();
+            self.preserved_redo.clear();
         }
         self.edited_since_open = true;
         Ok(())
     }
 
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
-        let origin_before = (!self.is_collaborative()).then(|| self.sheet_origins.clone());
+        let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
@@ -1455,13 +1517,13 @@ impl Workbook {
                 });
             }
         }
-        self.apply_sheet_origin_ops(ops);
-        if let Some(before) = origin_before {
-            self.sheet_origin_undo.push(SheetOriginHistory {
+        self.apply_preserved_state_ops(ops);
+        if let Some(before) = preserved_before {
+            self.preserved_undo.push(PreservedStateHistory {
                 before,
-                after: self.sheet_origins.clone(),
+                after: self.preserved.clone(),
             });
-            self.sheet_origin_redo.clear();
+            self.preserved_redo.clear();
         }
         self.edited_since_open = true;
         Ok(())
@@ -1552,16 +1614,15 @@ impl Workbook {
             .map(|sheet| sheet.name.clone())
     }
 
-    fn apply_sheet_origin_ops(&mut self, ops: &[Op]) {
+    fn apply_preserved_state_ops(&mut self, ops: &[Op]) {
         for op in ops {
-            match op {
-                Op::AddSheet { index, .. } => {
-                    let index = (*index).min(self.sheet_origins.len());
-                    self.sheet_origins.insert(index, None);
-                }
-                Op::RemoveSheet { index } if *index < self.sheet_origins.len() => {
-                    self.sheet_origins.remove(*index);
-                }
+            match *op {
+                Op::AddSheet { index, .. } => self.preserved.insert(index),
+                Op::RemoveSheet { index } => self.preserved.remove(index),
+                Op::InsertRows { sheet, .. }
+                | Op::DeleteRows { sheet, .. }
+                | Op::InsertCols { sheet, .. }
+                | Op::DeleteCols { sheet, .. } => self.preserved.shift(sheet, op),
                 _ => {}
             }
         }

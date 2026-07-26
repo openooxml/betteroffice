@@ -267,6 +267,46 @@ fn defined_names_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// Two `<si>` entries reading `Total`, one plain and one bold, with a cell on
+/// each. Text alone cannot tell them apart, so only the recorded index keeps
+/// each cell on its own run formatting.
+fn ambiguous_shared_string_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel {
+        shared_strings: vec!["Total".to_owned(), "Total".to_owned()],
+        ..WorkbookModel::default()
+    };
+    let mut sheet = Sheet::new("Data");
+    for address in ["B2", "D2"] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Text {
+                    value: "Total".to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/sharedStrings.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2"><si><t>Total</t></si><si><r><rPr><b/></rPr><t>Total</t></r></si></sst>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2" t="s"><v>0</v></c><c r="D2" t="s"><v>1</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn saved_sheet_text(workbook: &Workbook) -> String {
+    String::from_utf8(package_map(&workbook.save().unwrap())["xl/worksheets/sheet1.xml"].clone())
+        .unwrap()
+}
+
 fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
     parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
 }
@@ -3487,5 +3527,129 @@ fn remove_then_add_is_fresh_while_undo_restores_exact_sheet_identity() {
         String::from_utf8(restored_parts["xl/worksheets/sheet1.xml"].clone())
             .unwrap()
             .contains("<autoFilter")
+    );
+}
+
+/// Provenance is recorded against the address a cell was read from, so a row
+/// or column edit that moves the cell has to move it too.
+#[test]
+fn shared_string_provenance_follows_cells_through_row_and_column_edits() {
+    let mut workbook = Workbook::open(&ambiguous_shared_string_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let inserted = saved_sheet_text(&workbook);
+    assert!(
+        inserted.contains(r#"<c r="C4" t="s"><v>0</v></c>"#),
+        "{inserted}"
+    );
+    assert!(
+        inserted.contains(r#"<c r="E4" t="s"><v>1</v></c>"#),
+        "the bold entry collapsed onto the plain one: {inserted}"
+    );
+
+    workbook
+        .apply_ops(
+            vec![
+                Op::DeleteRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::DeleteCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let deleted = saved_sheet_text(&workbook);
+    assert!(
+        deleted.contains(r#"<c r="B2" t="s"><v>0</v></c>"#),
+        "{deleted}"
+    );
+    assert!(
+        deleted.contains(r#"<c r="D2" t="s"><v>1</v></c>"#),
+        "the bold entry collapsed onto the plain one: {deleted}"
+    );
+}
+
+/// Deleting the column a cell sits in drops its provenance with the cell; the
+/// surviving cell keeps its own.
+#[test]
+fn deleting_a_column_leaves_the_surviving_cell_on_its_own_entry() {
+    let mut workbook = Workbook::open(&ambiguous_shared_string_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let saved = saved_sheet_text(&workbook);
+    assert!(
+        saved.contains(r#"<c r="C2" t="s"><v>1</v></c>"#),
+        "the bold entry was lost when the plain one was deleted: {saved}"
+    );
+    assert!(!saved.contains(r#"<v>0</v>"#), "{saved}");
+}
+
+#[test]
+fn undo_and_redo_restore_shared_string_provenance() {
+    let mut workbook = Workbook::open(&ambiguous_shared_string_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let deleted = saved_sheet_text(&workbook);
+    assert!(
+        deleted.contains(r#"<c r="D1" t="s"><v>1</v></c>"#),
+        "{deleted}"
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let undone = saved_sheet_text(&workbook);
+    assert!(
+        undone.contains(r#"<c r="B2" t="s"><v>0</v></c>"#),
+        "{undone}"
+    );
+    assert!(
+        undone.contains(r#"<c r="D2" t="s"><v>1</v></c>"#),
+        "{undone}"
+    );
+
+    workbook.redo(CalculationOptions::default()).unwrap();
+    let redone = saved_sheet_text(&workbook);
+    assert!(
+        redone.contains(r#"<c r="D1" t="s"><v>1</v></c>"#),
+        "{redone}"
     );
 }

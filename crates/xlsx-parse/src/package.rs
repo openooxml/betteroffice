@@ -179,6 +179,15 @@ impl PreservedPackage {
         })
     }
 
+    /// The shared-string entries a source sheet's cells were authored against.
+    #[doc(hidden)]
+    pub fn source_shared_string_cells(&self, index: usize) -> SharedStringCells {
+        self.sheets
+            .get(index)
+            .map(|sheet| sheet.shared_string_cells.clone())
+            .unwrap_or_default()
+    }
+
     /// False for chartsheets, dialogsheets and any other non-worksheet sheet.
     #[doc(hidden)]
     pub fn source_sheet_is_worksheet(&self, index: usize) -> bool {
