@@ -101,17 +101,25 @@ struct WorkbookBase {
 }
 
 impl WorkbookBase {
+    /// A legacy fingerprint hashes no chart state, so it cannot prove two
+    /// bases carry the same charts. A charted workbook therefore registers a
+    /// fingerprint only for the current schema.
     fn from_model(model: &WorkbookModel) -> Result<Self, String> {
         let (fingerprint, bootstrap_client_id) = fingerprint_model(model)?;
+        let charted = model.sheets.iter().any(|sheet| !sheet.charts.is_empty());
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            if charted && version < SCHEMA_VERSION {
+                continue;
+            }
             let (version_fingerprint, _) = fingerprint_model_for_schema(model, version)?;
             fingerprints.insert(version, vec![version_fingerprint]);
         }
-        let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
-        let version_3 = fingerprints.get_mut(&3).unwrap();
-        if !version_3.contains(&defined_names_v3) {
-            version_3.push(defined_names_v3);
+        if let Some(version_3) = fingerprints.get_mut(&3) {
+            let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
+            if !version_3.contains(&defined_names_v3) {
+                version_3.push(defined_names_v3);
+            }
         }
         Ok(Self {
             bootstrap_client_id,
@@ -685,6 +693,12 @@ impl WorkbookAuthority {
             .and_then(|value| value.cast::<String>().ok())
             .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
         if !self.base.accepts_fingerprint(version, &fingerprint) {
+            if version < SCHEMA_VERSION && self.base.charts.iter().any(|charts| !charts.is_empty())
+            {
+                return Err(format!(
+                    "schema version {version} carries no chart state, so it cannot pair with a charted workbook"
+                ));
+            }
             return Err("workbook base fingerprint does not match shared state".to_string());
         }
         let generation = structure_generation(&meta, &txn)?;
@@ -705,7 +719,7 @@ impl WorkbookAuthority {
         let mut model = self.base.workbook();
         model.styles = styles;
         let expected_sheet_keys = sheet_schema_keys(version);
-        for (index, key) in keys.iter().enumerate() {
+        for key in keys.iter() {
             if !seen.insert(key.clone()) {
                 return Err(format!("duplicate sheet key {key}"));
             }
@@ -721,17 +735,17 @@ impl WorkbookAuthority {
                     &format!("sheet {key}"),
                 )?;
             }
-            let freeze_pane = self.base.freeze_panes.get(index).copied().flatten();
-            let hyperlinks = self
-                .base
-                .hyperlinks
-                .get(index)
+            let base_sheet = base_sheet_index(key);
+            let freeze_pane = base_sheet
+                .and_then(|base| self.base.freeze_panes.get(base))
+                .copied()
+                .flatten();
+            let hyperlinks = base_sheet
+                .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            let charts = self
-                .base
-                .charts
-                .get(index)
+            let charts = base_sheet
+                .and_then(|base| self.base.charts.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             model.sheets.push(materialize_sheet(
@@ -1091,6 +1105,14 @@ impl WorkbookAuthority {
         self.next_sheet_id += 1;
         key
     }
+}
+
+/// The base-model sheet a stable key names. Bootstrap mints `sheet:N` from the
+/// base order and a replica mints `replica:...`, so a legacy state whose sheets
+/// were reordered still reads its own fallback features rather than whichever
+/// sheet now sits at that position.
+fn base_sheet_index(key: &str) -> Option<usize> {
+    key.strip_prefix("sheet:")?.parse().ok()
 }
 
 pub(crate) fn is_structural_op(op: &Op) -> bool {
@@ -3072,6 +3094,83 @@ mod tests {
             authority.apply_update_v1(&staged.commit_update).unwrap();
             assert_eq!(authority.schema_version().unwrap(), SCHEMA_VERSION);
             assert_eq!(authority.strict_materialize().unwrap().0, model);
+        }
+    }
+
+    /// The legacy fallback is keyed on `sheet:N`, not on where a sheet sits
+    /// now, so a reordered legacy state still reads its own charts.
+    #[test]
+    fn a_reordered_legacy_state_keeps_each_sheet_its_own_charts() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(charted("First", "First!$A$1"));
+        model.sheets.push(charted("Second", "Second!$A$1"));
+        let base = WorkbookBase::from_model(&model).unwrap();
+        let doc = Doc::with_client_id(base.bootstrap_client_id);
+        seed(
+            &doc,
+            &base,
+            &model,
+            &["sheet:0".to_owned(), "sheet:1".to_owned()],
+        )
+        .unwrap();
+        {
+            let mut txn = doc.transact_mut_with("test:reordered-legacy");
+            let order = txn.get_array(SHEET_ORDER).unwrap();
+            order.remove(&mut txn, 0);
+            order.insert(&mut txn, 1, "sheet:0");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            for key in ["sheet:0", "sheet:1"] {
+                let sheet = sheets
+                    .get(&txn, key)
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .unwrap();
+                sheet.remove(&mut txn, CHARTS);
+            }
+            let (fingerprint, _) = fingerprint_model_with_schema(&model, 5, true).unwrap();
+            let meta = txn.get_map(META).unwrap();
+            meta.try_update(&mut txn, BASE_FINGERPRINT, fingerprint);
+            meta.try_update(&mut txn, "schemaVersion", 5);
+        }
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+
+        let mut uncharted = model.clone();
+        for sheet in &mut uncharted.sheets {
+            sheet.charts.clear();
+        }
+        let mut authority = authority_from_update(&uncharted, &update, 121);
+        let fingerprints = authority.base.fingerprints.clone();
+        authority.base = WorkbookBase::from_model(&model).unwrap();
+        authority.base.fingerprints = fingerprints;
+
+        let materialized = authority.materialize().unwrap();
+        assert_eq!(materialized.sheets[0].name, "Second");
+        assert_eq!(
+            materialized.sheets[0].charts[0].refs[0].formula, "Second!$A$1",
+            "the fallback must follow the stable key, not the position"
+        );
+        assert_eq!(materialized.sheets[1].name, "First");
+        assert_eq!(
+            materialized.sheets[1].charts[0].refs[0].formula,
+            "First!$A$1"
+        );
+    }
+
+    /// A v3-v5 fingerprint hashes no chart state, so it cannot prove two bases
+    /// carry the same charts; a charted workbook refuses to pair with one.
+    #[test]
+    fn a_charted_workbook_refuses_a_legacy_fingerprint() {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(charted("Report", "Report!$A$1"));
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+            let update = legacy_update(&model, version, true);
+            let authority = authority_from_update(&model, &update, 130 + version as u64);
+            let error = authority.materialize().unwrap_err();
+            assert!(
+                format!("{error:?}").contains("cannot pair with a charted workbook"),
+                "version {version}: {error:?}"
+            );
         }
     }
 
