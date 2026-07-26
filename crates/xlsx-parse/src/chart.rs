@@ -515,7 +515,7 @@ fn regenerated_cache(
     if let Some(format_code) = &cache.format_code {
         out.push_str(&format!(
             "<{prefix}formatCode>{}</{prefix}formatCode>",
-            escape_text(format_code)
+            escape_text(format_code)?
         ));
     }
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
@@ -525,7 +525,7 @@ fn regenerated_cache(
         };
         out.push_str(&format!(
             "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
-            escape_text(&text)
+            escape_text(&text)?
         ));
     }
     Ok(out)

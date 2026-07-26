@@ -1760,6 +1760,59 @@ fn refuses_a_moved_reference_whose_cache_cannot_be_regenerated() {
     );
 }
 
+/// The writer is the last line: a reference carrying a character xml 1.0
+/// cannot express is refused rather than written raw into a part Excel would
+/// then have to repair.
+#[test]
+fn refuses_to_write_a_reference_xml_cannot_carry() {
+    const CACHELESS: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:dLbls><c:f>Data!$C$1</c:f></c:dLbls></c:chart></c:chartSpace>"#;
+    let reference = |formula: &str| {
+        vec![xlsx_model::ChartRef {
+            kind: xlsx_model::ChartRefKind::DataLabels,
+            formula: formula.to_owned(),
+        }]
+    };
+    let error = patch_refs(CACHELESS, &reference("Data!\u{7}$C$1")).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message) if message.contains("U+0007")),
+        "{error:?}"
+    );
+
+    let patched =
+        String::from_utf8(patch_refs(CACHELESS, &reference("Data!$C$1\r\n")).unwrap()).unwrap();
+    assert!(patched.contains("<c:f>Data!$C$1&#13;\n</c:f>"), "{patched}");
+}
+
+/// A chart may only be patched through the drawing and anchor it was read
+/// from; a peer that repoints either is refused rather than moving somebody
+/// else's anchor.
+#[test]
+fn refuses_a_chart_that_no_longer_names_its_source_anchor() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    for mutate in [
+        (|chart: &mut xlsx_model::SheetChart| chart.anchor_index = 3) as fn(&mut _),
+        |chart: &mut xlsx_model::SheetChart| chart.drawing = "xl/drawings/drawing9.xml".to_owned(),
+    ] {
+        let mut workbook = parsed.workbook.clone();
+        let chart = &mut workbook.sheets[0].charts[0];
+        chart.refs[2].formula = "Data!$B$2:$B$3".to_owned();
+        mutate(chart);
+        let error = crate::serialize_workbook_with_package_and_origins_after_edits(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &vec![SharedStringCells::new(); 2],
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ParseError::UnsupportedEdit(message)
+                if message.contains("drawing and anchor it was read from")),
+            "{error:?}"
+        );
+    }
+}
+
 /// A reference the edit deletes outright carries an empty cache, not the
 /// values it used to hold.
 #[test]

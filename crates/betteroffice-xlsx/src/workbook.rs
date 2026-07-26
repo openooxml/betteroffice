@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, Weak};
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
-    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, Fill, HAlign,
-    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId, VAlign,
+    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
+    HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId, VAlign,
     Workbook as WorkbookModel,
 };
 use xlsx_ops::{
@@ -26,8 +26,8 @@ use crate::authority::{
     SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
 use crate::sheet_json::{
-    MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART, MAX_CHARTS_PER_SHEET,
-    MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
+    MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
+    MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
@@ -2254,6 +2254,7 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
             "sheet contains too many charts".to_string(),
         ));
     }
+    let mut identities = HashSet::with_capacity(charts.len());
     for chart in charts {
         if chart.part.is_empty() || chart.drawing.is_empty() {
             return Err(Error::InvalidOperation(
@@ -2268,17 +2269,77 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
                 "chart exceeds the supported size".to_string(),
             ));
         }
-        if chart
-            .refs
-            .iter()
-            .any(|reference| reference.formula.len() > MAX_CHART_FIELD_BYTES)
-        {
+        for path in [&chart.part, &chart.drawing] {
+            if !is_package_part_path(path) {
+                return Err(Error::InvalidOperation(format!(
+                    "chart names {path}, which is not a package part path"
+                )));
+            }
+        }
+        if chart.anchor_index >= MAX_CHART_ANCHORS_PER_DRAWING {
             return Err(Error::InvalidOperation(
-                "chart reference exceeds the supported length".to_string(),
+                "chart anchor index is out of range".to_string(),
+            ));
+        }
+        if !identities.insert((&chart.part, &chart.drawing, chart.anchor_index)) {
+            return Err(Error::InvalidOperation(
+                "two charts claim the same part, drawing and anchor".to_string(),
+            ));
+        }
+        validate_chart_anchor(chart.anchor)?;
+        for reference in &chart.refs {
+            if reference.formula.len() > MAX_CHART_FIELD_BYTES {
+                return Err(Error::InvalidOperation(
+                    "chart reference exceeds the supported length".to_string(),
+                ));
+            }
+            if !is_writable_xml_text(&reference.formula) {
+                return Err(Error::InvalidOperation(
+                    "chart reference contains a character xml cannot carry".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Both corners of an anchor must land on the grid; an off-grid one would be
+/// written back as an address no consumer can read.
+fn validate_chart_anchor(anchor: ChartAnchor) -> Result<()> {
+    let cells = match anchor {
+        ChartAnchor::TwoCell { from, to, .. } => vec![from, to],
+        ChartAnchor::OneCell { from, .. } => vec![from],
+        ChartAnchor::Absolute { .. } => Vec::new(),
+    };
+    for cell in cells {
+        if cell.row >= MAX_ROWS || cell.col >= MAX_COLS {
+            return Err(Error::InvalidOperation(
+                "chart anchor is off the sheet grid".to_string(),
             ));
         }
     }
     Ok(())
+}
+
+/// A relative, traversal-free package path, so a peer cannot name a part
+/// outside the package or one whose name the writer cannot round-trip.
+fn is_package_part_path(path: &str) -> bool {
+    !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+        && path.chars().all(|character| {
+            !character.is_control() && character != '"' && character != '<' && character != '>'
+        })
+}
+
+/// Whether every character is one xml 1.0 can carry in element content.
+fn is_writable_xml_text(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\t' | '\n' | '\r')
+            || (character >= ' ' && character != '\u{fffe}' && character != '\u{ffff}')
+    })
 }
 
 fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {

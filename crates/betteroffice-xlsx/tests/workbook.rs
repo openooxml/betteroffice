@@ -1,11 +1,12 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DefinedName,
-    DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
-    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind,
-    NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    AnchorCell, AnchorEditAs, CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState,
+    CellValue, ChartAnchor, ChartRef, ChartRefKind, DefinedName, DrawCmd, Error, FreezePane,
+    GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, UpdateOrigin,
+    Viewport, Workbook, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3884,4 +3885,91 @@ fn undo_and_redo_restore_shared_string_provenance() {
         redone.contains(r#"<c r="D1" t="s"><v>1</v></c>"#),
         "{redone}"
     );
+}
+
+fn charted_model(chart: SheetChart) -> WorkbookModel {
+    let mut sheet = Sheet::new("Data");
+    sheet.charts.push(chart);
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+    model
+}
+
+fn sample_chart() -> SheetChart {
+    SheetChart {
+        part: "xl/charts/chart1.xml".to_owned(),
+        drawing: "xl/drawings/drawing1.xml".to_owned(),
+        anchor_index: 0,
+        anchor: ChartAnchor::TwoCell {
+            from: AnchorCell::default(),
+            to: AnchorCell {
+                col: 4,
+                row: 8,
+                ..AnchorCell::default()
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        },
+        refs: vec![ChartRef {
+            kind: ChartRefKind::Values,
+            formula: "Data!$A$1:$A$2".to_owned(),
+        }],
+    }
+}
+
+/// Chart state a peer controls reaches the writer, so an off-grid anchor, a
+/// character xml cannot carry, a smuggled part path and two charts claiming one
+/// anchor are all refused before anything is written.
+#[test]
+fn refuses_chart_state_the_writer_could_not_express() {
+    let off_grid = {
+        let mut chart = sample_chart();
+        chart.anchor = ChartAnchor::TwoCell {
+            from: AnchorCell::default(),
+            to: AnchorCell {
+                col: 4,
+                row: MAX_ROWS,
+                ..AnchorCell::default()
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        };
+        (chart, "off the sheet grid")
+    };
+    let illegal_character = {
+        let mut chart = sample_chart();
+        chart.refs[0].formula = "Data!$A$1\u{7}".to_owned();
+        (chart, "xml cannot carry")
+    };
+    let traversal = {
+        let mut chart = sample_chart();
+        chart.part = "../../etc/passwd".to_owned();
+        (chart, "not a package part path")
+    };
+    let absolute = {
+        let mut chart = sample_chart();
+        chart.drawing = "/xl/drawings/drawing1.xml".to_owned();
+        (chart, "not a package part path")
+    };
+    for (chart, reason) in [off_grid, illegal_character, traversal, absolute] {
+        let Err(error) = Workbook::from_model(charted_model(chart)) else {
+            panic!("{reason} must be refused");
+        };
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains(reason)),
+            "{reason}: {error:?}"
+        );
+    }
+
+    let mut model = charted_model(sample_chart());
+    model.sheets[0].charts.push(sample_chart());
+    let Err(error) = Workbook::from_model(model) else {
+        panic!("two charts on one anchor must be refused");
+    };
+    assert!(
+        matches!(&error, Error::InvalidOperation(message)
+            if message.contains("same part, drawing and anchor")),
+        "{error:?}"
+    );
+
+    Workbook::from_model(charted_model(sample_chart()))
+        .expect("a chart the writer can express is accepted");
 }

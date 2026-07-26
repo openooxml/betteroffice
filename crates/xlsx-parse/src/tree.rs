@@ -530,7 +530,7 @@ fn splice_text(source: &str, edits: &[Edit]) -> Result<String, ParseError> {
             .ok_or_else(|| ParseError::Malformed("rewrite span split a character".into()))?;
         out.push_str(head);
         match replacement {
-            Replacement::Text(text) => out.push_str(&escape_text(text)),
+            Replacement::Text(text) => out.push_str(&escape_text(text)?),
             Replacement::Markup(markup) => out.push_str(markup),
         }
         cursor = span.end;
@@ -543,16 +543,26 @@ fn splice_text(source: &str, edits: &[Edit]) -> Result<String, ParseError> {
 }
 
 /// escape element content. `>` is escaped too so a replacement can never
-/// reopen the `]]>` sequence.
-pub(crate) fn escape_text(value: &str) -> String {
+/// reopen the `]]>` sequence, and `\r` numerically so parsing it back does not
+/// silently turn it into `\n`. a character xml 1.0 cannot carry is refused
+/// rather than written raw into a part no consumer could then read.
+pub(crate) fn escape_text(value: &str) -> Result<String, ParseError> {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#13;"),
+            '\t' | '\n' => out.push(ch),
+            _ if ch < ' ' || ch == '\u{fffe}' || ch == '\u{ffff}' => {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "a rewrite carries U+{:04X}, which xml cannot express",
+                    ch as u32
+                )));
+            }
             _ => out.push(ch),
         }
     }
-    out
+    Ok(out)
 }

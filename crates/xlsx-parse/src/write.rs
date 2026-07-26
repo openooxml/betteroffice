@@ -413,6 +413,24 @@ fn patch_chart_parts(
             let Some(original) = source.iter().find(|other| other.part == chart.part) else {
                 continue;
             };
+            if original.drawing != chart.drawing || original.anchor_index != chart.anchor_index {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "chart {} no longer names the drawing and anchor it was read from",
+                    chart.part
+                )));
+            }
+            if original.refs.len() != chart.refs.len()
+                || original
+                    .refs
+                    .iter()
+                    .zip(&chart.refs)
+                    .any(|(original, edited)| original.kind != edited.kind)
+            {
+                return Err(ParseError::UnsupportedEdit(format!(
+                    "chart {} no longer holds the references it was read from",
+                    chart.part
+                )));
+            }
             if original.refs != chart.refs {
                 chart_refs.insert(
                     chart.part.as_str(),

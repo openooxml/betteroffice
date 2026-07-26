@@ -14,6 +14,9 @@ use xlsx_model::{
 };
 
 pub(crate) const MAX_CHARTS_PER_SHEET: usize = 4_096;
+/// upper bound on the anchor index a chart may claim, matching the parser's
+/// per-drawing anchor cap.
+pub(crate) const MAX_CHART_ANCHORS_PER_DRAWING: usize = 4_096;
 pub(crate) const MAX_CHART_REFS_PER_CHART: usize = 16_384;
 pub(crate) const MAX_CHART_FIELD_BYTES: usize = 32_767;
 /// upper bound on one sheet's encoded chart state: [`MAX_CHARTS_PER_SHEET`] at
