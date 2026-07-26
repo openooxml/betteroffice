@@ -238,7 +238,7 @@ fn relationship_part_path(path: &str) -> String {
     }
 }
 
-/// parse the shared string table, flattening rich runs to plain text.
+/// parse shared strings as plain model text while package capture retains runs.
 fn parse_shared_strings(data: &[u8]) -> Result<Vec<String>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();

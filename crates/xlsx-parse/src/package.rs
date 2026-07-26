@@ -21,6 +21,7 @@ pub struct PreservedPackage {
     pub(crate) calc_pr_attributes: Option<Vec<XmlAttribute>>,
     pub(crate) sheets: Vec<PreservedSheet>,
     pub(crate) shared_strings: Option<PartReference>,
+    pub(crate) shared_strings_template: Option<XmlTemplate>,
     pub(crate) styles: Option<PartReference>,
     pub(crate) theme: Option<PartReference>,
     pub(crate) calc_chains: Vec<PartReference>,
@@ -98,6 +99,11 @@ impl PreservedPackage {
             "theme",
             "xl/theme/theme1.xml",
         );
+        let shared_strings_template = shared_strings
+            .as_ref()
+            .and_then(|part| find_part(parts, &part.path))
+            .map(XmlTemplate::capture)
+            .transpose()?;
         let mut calc_chains = workbook_relationships
             .iter()
             .filter(|relationship| relationship.has_type("calcChain"))
@@ -137,6 +143,7 @@ impl PreservedPackage {
             calc_pr_attributes,
             sheets,
             shared_strings,
+            shared_strings_template,
             styles,
             theme,
             calc_chains,

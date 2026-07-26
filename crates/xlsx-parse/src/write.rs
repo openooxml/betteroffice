@@ -255,11 +255,12 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         )?,
     );
 
-    replace_optional_part(
+    replace_shared_strings(
         &mut parts,
-        package.shared_strings.as_ref(),
+        wb,
+        package,
         shared_strings.as_ref(),
-        || shared_strings_xml_with_namespace(wb, main_namespace),
+        main_namespace,
     )?;
     replace_optional_part(
         &mut parts,
@@ -529,6 +530,37 @@ fn replace_optional_part(
                 parts.remove(&source.path);
             }
             parts.set(planned.path.clone(), serialize()?);
+        }
+        (Some(source), None) => parts.remove(&source.path),
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Regenerates only the shared string indices the model changed, so rich runs,
+/// phonetic properties and sst extensions survive untouched.
+fn replace_shared_strings(
+    parts: &mut PartStore,
+    wb: &Workbook,
+    package: &PreservedPackage,
+    planned: Option<&PlannedPart>,
+    main_namespace: &str,
+) -> Result<(), ParseError> {
+    match (package.shared_strings.as_ref(), planned) {
+        (Some(source), Some(planned))
+            if source.path == planned.path
+                && wb.shared_strings == package.original_workbook.shared_strings => {}
+        (source, Some(planned)) => {
+            if let Some(source) = source
+                && source.path != planned.path
+            {
+                parts.remove(&source.path);
+            }
+            let bytes = match &package.shared_strings_template {
+                Some(template) => shared_strings_xml_with_template(wb, package, template)?,
+                None => shared_strings_xml_with_namespace(wb, main_namespace)?,
+            };
+            parts.set(planned.path.clone(), bytes);
         }
         (Some(source), None) => parts.remove(&source.path),
         (None, None) => {}
@@ -1294,15 +1326,45 @@ fn shared_strings_xml_with_namespace(
             .with_attribute(("uniqueCount", count.as_str()))
             .write_inner_content(|w| {
                 for s in &wb.shared_strings {
-                    w.create_element("si").write_inner_content(|w| {
-                        write_text_el(w, s)?;
-                        Ok(())
-                    })?;
+                    write_shared_string_item(w, s)?;
                 }
                 Ok(())
             })?;
         Ok(())
     })
+}
+
+fn shared_strings_xml_with_template(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    template: &XmlTemplate,
+) -> Result<Vec<u8>, ParseError> {
+    let source_items = template.children_named("si").collect::<Vec<_>>();
+    let mut items = Vec::with_capacity(wb.shared_strings.len());
+    for (index, value) in wb.shared_strings.iter().enumerate() {
+        if package.original_workbook.shared_strings.get(index) == Some(value)
+            && let Some(source) = source_items.get(index)
+        {
+            items.push(source.bytes.clone());
+        } else {
+            let item = fragment(|writer| write_shared_string_item(writer, value))?;
+            items.push(template.qualify_fragment(&item)?);
+        }
+    }
+    let count = wb.shared_strings.len().to_string();
+    template.render_repeated(
+        "si",
+        &items,
+        &[("count", count.clone()), ("uniqueCount", count)],
+    )
+}
+
+fn write_shared_string_item(writer: &mut Writer<Vec<u8>>, value: &str) -> io::Result<()> {
+    writer.create_element("si").write_inner_content(|writer| {
+        write_text_el(writer, value)?;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {

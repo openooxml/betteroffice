@@ -7,7 +7,10 @@ use xlsx_model::{
     Workbook,
 };
 
-use crate::{ParseError, parse_workbook, serialize_workbook};
+use crate::{
+    ParseError, parse_workbook, parse_workbook_with_package, serialize_workbook,
+    serialize_workbook_with_package,
+};
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
@@ -624,4 +627,39 @@ fn full_circle_styles_round_trip() {
         .unwrap();
     assert!(ct.contains("/xl/styles.xml"));
     assert!(ct.contains("/xl/theme/theme1.xml"));
+}
+
+#[test]
+fn preserved_shared_strings_keep_rich_items_and_replace_only_changed_indices() {
+    let rich_item = r#"<si><r><rPr><b/></rPr><t>Rich </t></r><r><rPr><i/></rPr><t>Text</t></r><phoneticPr fontId="2"/></si>"#;
+    let sst = format!(
+        r#"<sst count="2" uniqueCount="2">{rich_item}<si><t>plain</t></si><extLst><ext uri="{{fixture}}"/></extLst></sst>"#
+    );
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.as_bytes().to_vec()));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(unchanged, parts);
+
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings[1] = "changed".to_owned();
+    let changed = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let changed_sst = String::from_utf8(
+        changed
+            .iter()
+            .find(|(path, _)| path == "xl/sharedStrings.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert!(changed_sst.contains(rich_item));
+    assert!(changed_sst.contains("<si><t xml:space=\"preserve\">changed</t></si>"));
+    assert!(!changed_sst.contains("<si><t>plain</t></si>"));
+    assert!(changed_sst.contains("<extLst>"));
 }

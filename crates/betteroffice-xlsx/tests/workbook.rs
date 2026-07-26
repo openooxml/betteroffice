@@ -88,6 +88,11 @@ fn preservation_fixture_parts() -> Vec<(String, Vec<u8>)> {
         "xl/worksheets/sheet1.xml",
         br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetPr><tabColor rgb="FF4472C4"/></sheetPr><dimension ref="A1:B2"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="B2"><v>1</v></c></row></sheetData><autoFilter ref="A1:B2"/><conditionalFormatting sqref="B2"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="whole" sqref="B2"><formula1>0</formula1></dataValidation></dataValidations><hyperlinks><hyperlink ref="B2" r:id="rIdHyperlink"/></hyperlinks><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup orientation="landscape"/><drawing r:id="rIdDrawing"/><legacyDrawing r:id="rIdVml"/><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
     );
+    set_test_part(
+        &mut parts,
+        "xl/sharedStrings.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><r><rPr><b/></rPr><t>orig</t></r><r><rPr><i/></rPr><t>inal</t></r><phoneticPr fontId="1"/></si><extLst><ext uri="{A68B0E0A-4E93-46C8-A4A4-57E4A6A3B123}"/></extLst></sst>"#.to_vec(),
+    );
     parts.push((
         "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
         br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/><Relationship Id="rIdVml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/><Relationship Id="rIdHyperlink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid" TargetMode="External"/></Relationships>"#.to_vec(),
@@ -3010,6 +3015,10 @@ fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
     assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
     assert!(!after.contains_key("xl/calcChain.xml"));
     assert!(workbook_xml.contains(r#"fullCalcOnLoad="1""#));
+    assert_eq!(
+        after["xl/sharedStrings.xml"],
+        before["xl/sharedStrings.xml"]
+    );
     let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
     let fragments = [
         "<sheetViews>",
