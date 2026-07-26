@@ -824,6 +824,176 @@ fn keeps_worksheet_bytes_across_a_rename() {
     );
 }
 
+/// Freeze-pane edits used to vanish, because the retained-sheet renderer never
+/// replaced `sheetViews`.
+#[test]
+fn overlays_freeze_panes_onto_retained_sheet_views() {
+    let body = r#"<sheetViews><sheetView tabSelected="1" zoomScale="120" workbookViewId="0"><selection activeCell="C3" sqref="C3"/></sheetView></sheetViews><sheetData/>"#;
+    let parts = package(body, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].freeze_pane = Some(FreezePane::new(1, 2, CellRef::parse_a1("C2").unwrap()));
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(written.contains(r#"state="frozen""#), "{written}");
+    assert!(written.contains(r#"zoomScale="120""#), "{written}");
+    assert!(
+        written.contains(r#"<selection activeCell="C3""#),
+        "{written}"
+    );
+    assert!(
+        written.find("<pane").unwrap() < written.find("<selection").unwrap(),
+        "pane must precede selection: {written}"
+    );
+
+    let reparsed = parse_workbook(&saved).unwrap();
+    assert_eq!(
+        reparsed.sheets[0].freeze_pane,
+        workbook.sheets[0].freeze_pane
+    );
+}
+
+#[test]
+fn removes_the_pane_when_a_sheet_is_unfrozen() {
+    let body = r#"<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft"/></sheetView></sheetViews><sheetData/>"#;
+    let parts = package(body, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert!(parsed.workbook.sheets[0].freeze_pane.is_some());
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].freeze_pane = None;
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(!written.contains("<pane"), "{written}");
+    assert!(written.contains("<selection"), "{written}");
+    assert!(
+        parse_workbook(&saved).unwrap().sheets[0]
+            .freeze_pane
+            .is_none()
+    );
+}
+
+/// Hyperlink edits must reach both the worksheet and its relationship part,
+/// without disturbing the drawings and comments living in the same part.
+#[test]
+fn overlays_hyperlinks_and_merges_the_worksheet_relationships() {
+    let body = r#"<sheetData/><hyperlinks><hyperlink ref="A1" r:id="rId1"/></hyperlinks><drawing r:id="rId2"/>"#;
+    let mut parts = package(body, &[], false);
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://old.example" TargetMode="External"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
+    ));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].hyperlinks = vec![Hyperlink {
+        range: xlsx_model::CellRange::parse_a1("B2").unwrap(),
+        external_target: Some("https://new.example/".to_owned()),
+        location: None,
+        tooltip: None,
+        display: None,
+    }];
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+    let rels =
+        String::from_utf8(part_bytes(&saved, "xl/worksheets/_rels/sheet1.xml.rels")).unwrap();
+
+    assert!(sheet.contains(r#"ref="B2""#), "{sheet}");
+    assert!(sheet.contains(r#"<drawing r:id="rId2"/>"#), "{sheet}");
+    assert!(rels.contains("../drawings/drawing1.xml"), "{rels}");
+    assert!(rels.contains("https://new.example/"), "{rels}");
+    assert!(!rels.contains("https://old.example"), "{rels}");
+
+    let id = sheet
+        .split_once("r:id=\"")
+        .map(|(_, rest)| rest.split_once('"').unwrap().0.to_owned())
+        .unwrap();
+    assert!(
+        rels.contains(&format!(r#"Id="{id}""#)),
+        "hyperlink id {id} is not backed by {rels}"
+    );
+    assert_eq!(
+        parse_workbook(&saved).unwrap().sheets[0].hyperlinks,
+        workbook.sheets[0].hyperlinks
+    );
+}
+
+/// A new sheet emitted `r:id` values with no relationship part behind them.
+#[test]
+fn writes_relationships_for_hyperlinks_on_new_sheets() {
+    let parts = package(r#"<sheetData/>"#, &[], false);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    let mut workbook = parsed.workbook.clone();
+    let mut added = xlsx_model::Sheet::new("Added");
+    added.hyperlinks = vec![Hyperlink {
+        range: xlsx_model::CellRange::parse_a1("A1").unwrap(),
+        external_target: Some("https://example.test/".to_owned()),
+        location: None,
+        tooltip: None,
+        display: None,
+    }];
+    workbook.sheets.push(added);
+    let saved = crate::serialize_workbook_with_package_and_origins(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+    )
+    .unwrap();
+
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet2.xml")).unwrap();
+    let rels =
+        String::from_utf8(part_bytes(&saved, "xl/worksheets/_rels/sheet2.xml.rels")).unwrap();
+    let id = sheet
+        .split_once("r:id=\"")
+        .map(|(_, rest)| rest.split_once('"').unwrap().0.to_owned())
+        .unwrap();
+    assert!(rels.contains(&format!(r#"Id="{id}""#)), "{rels}");
+    assert_eq!(
+        parse_workbook(&saved).unwrap().sheets[1].hyperlinks,
+        workbook.sheets[1].hyperlinks
+    );
+}
+
+/// A Strict package binds `r` to the Strict relationships namespace, so a new
+/// sheet must not hard-code the Transitional one.
+#[test]
+fn binds_new_strict_sheets_to_the_strict_relationship_namespace() {
+    let workbook_xml = r#"<workbook xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main" xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        workbook_xml.as_bytes().to_vec(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    let mut added = xlsx_model::Sheet::new("Added");
+    added.hyperlinks = vec![Hyperlink {
+        range: xlsx_model::CellRange::parse_a1("A1").unwrap(),
+        external_target: Some("https://example.test/".to_owned()),
+        location: None,
+        tooltip: None,
+        display: None,
+    }];
+    workbook.sheets.push(added);
+    let saved = crate::serialize_workbook_with_package_and_origins(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+    )
+    .unwrap();
+
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet2.xml")).unwrap();
+    assert!(
+        sheet.contains(r#"xmlns:r="http://purl.oclc.org/ooxml/officeDocument/relationships""#),
+        "{sheet}"
+    );
+}
+
 fn edit_a1(workbook: &mut Workbook, value: f64) {
     workbook.sheets[0].set_cell(
         CellRef::parse_a1("A1").unwrap(),

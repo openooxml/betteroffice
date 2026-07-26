@@ -210,6 +210,10 @@ impl Relationship {
         self.attribute("Target")
     }
 
+    pub(crate) fn is_hyperlink(&self) -> bool {
+        self.has_type("hyperlink")
+    }
+
     pub(crate) fn has_type(&self, suffix: &str) -> bool {
         self.attribute("Type")
             .and_then(|value| value.rsplit('/').next())
@@ -734,7 +738,7 @@ pub(crate) fn relationship_part_path(part_path: &str) -> String {
     }
 }
 
-fn parse_relationships(data: &[u8]) -> Result<Vec<Relationship>, ParseError> {
+pub(crate) fn parse_relationships(data: &[u8]) -> Result<Vec<Relationship>, ParseError> {
     let mut reader = reader(data);
     let mut buffer = Vec::new();
     let mut depth = 0;

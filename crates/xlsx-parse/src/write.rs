@@ -12,8 +12,9 @@ use xlsx_model::{Cell, CellRef, CellValue, DateSystem, Sheet, Workbook};
 
 use crate::ParseError;
 use crate::package::{
-    ContentTypeEntry, PartReference, PreservedPackage, Relationship, XmlAttribute, XmlTemplate,
-    attributes_from_fragment, relationship_part_path, remove_attribute, set_attribute,
+    ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
+    XmlTemplate, attributes_from_fragment, parse_relationships, relationship_part_path,
+    remove_attribute, set_attribute,
 };
 use crate::xml::xml_err;
 
@@ -83,18 +84,15 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
         ));
     }
     for (i, sheet) in wb.sheets.iter().enumerate() {
+        let links = HyperlinkPlan::new(sheet, &[], REL_HYPERLINK);
         parts.push((
             format!("xl/worksheets/sheet{}.xml", i + 1),
-            worksheet_xml(sheet, wb)?,
+            worksheet_xml_with_namespace(sheet, wb, NS_MAIN, "r", NS_R, &links)?,
         ));
-        if sheet
-            .hyperlinks
-            .iter()
-            .any(|link| link.external_target.is_some())
-        {
+        if !links.relationships.is_empty() {
             parts.push((
                 format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1),
-                worksheet_rels_xml(sheet)?,
+                relationships_xml(&links.relationships)?,
             ));
         }
     }
@@ -230,24 +228,54 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
+    let (relationship_prefix, relationship_namespace) = workbook_relationship_namespace(package);
     for (sheet, plan) in wb.sheets.iter().zip(&sheets) {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
-        let bytes = match source {
+        let original = plan
+            .origin
+            .and_then(|origin| package.original_workbook.sheets.get(origin));
+        let output = match source {
             Some(source) if source.is_worksheet() => {
-                let unchanged = shared_strings_stable
-                    && plan
-                        .origin
-                        .and_then(|origin| package.original_workbook.sheets.get(origin))
-                        .is_some_and(|original| sheet_body_matches(sheet, original));
-                if unchanged {
+                if shared_strings_stable
+                    && original.is_some_and(|original| sheet_body_matches(sheet, original))
+                {
                     continue;
                 }
-                worksheet_xml_with_template(sheet, wb, &source.template)?
+                worksheet_xml_with_template(sheet, wb, original, source, package)?
             }
             Some(_) => continue,
-            None => worksheet_xml_with_namespace(sheet, wb, main_namespace)?,
+            None => {
+                let links = HyperlinkPlan::new(
+                    sheet,
+                    &[],
+                    &relationship_type_from(
+                        &package.workbook_relationships,
+                        "hyperlink",
+                        REL_HYPERLINK,
+                    ),
+                );
+                WorksheetOutput {
+                    bytes: worksheet_xml_with_namespace(
+                        sheet,
+                        wb,
+                        main_namespace,
+                        &relationship_prefix,
+                        &relationship_namespace,
+                        &links,
+                    )?,
+                    relationships: Some(links.relationships),
+                }
+            }
         };
-        parts.set(plan.path.clone(), bytes);
+        parts.set(plan.path.clone(), output.bytes);
+        if let Some(relationships) = output.relationships {
+            let path = relationship_part_path(&plan.path);
+            if relationships.is_empty() {
+                parts.remove(&path);
+            } else {
+                parts.set(path, relationships_xml(&relationships)?);
+            }
+        }
     }
 
     let workbook = workbook_xml_with_template(wb, package, &sheets, edited)?;
@@ -323,6 +351,47 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     Ok(parts.finish())
+}
+
+/// The relationship ids a worksheet's `<hyperlink>` elements point at, beside
+/// the worksheet relationship part that must back them. Non-hyperlink source
+/// relationships (drawings, comments, tables) are carried through untouched.
+struct HyperlinkPlan {
+    ids: Vec<Option<String>>,
+    relationships: Vec<Relationship>,
+}
+
+impl HyperlinkPlan {
+    fn new(sheet: &Sheet, source: &[Relationship], fallback_type: &str) -> Self {
+        let relationship_type = relationship_type_from(source, "hyperlink", fallback_type);
+        let mut relationships = source
+            .iter()
+            .filter(|relationship| !relationship.has_type("hyperlink"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut used = relationships
+            .iter()
+            .filter_map(Relationship::id)
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let ids = sheet
+            .hyperlinks
+            .iter()
+            .map(|link| {
+                let target = link.external_target.as_ref()?;
+                let id = next_relationship_id(&mut used);
+                let mut relationship =
+                    new_relationship(id.clone(), &relationship_type, target.clone());
+                relationship.attributes.push(XmlAttribute {
+                    name: "TargetMode".to_owned(),
+                    value: "External".to_owned(),
+                });
+                relationships.push(relationship);
+                Some(id)
+            })
+            .collect();
+        Self { ids, relationships }
+    }
 }
 
 /// Everything a worksheet part carries. The sheet name lives in the workbook
@@ -1509,43 +1578,52 @@ fn write_shared_string_item(writer: &mut Writer<Vec<u8>>, value: &str) -> io::Re
     Ok(())
 }
 
-fn worksheet_xml(sheet: &Sheet, wb: &Workbook) -> Result<Vec<u8>, ParseError> {
-    worksheet_xml_with_namespace(sheet, wb, NS_MAIN)
-}
-
 fn worksheet_xml_with_namespace(
     sheet: &Sheet,
     wb: &Workbook,
     main_namespace: &str,
+    relationship_prefix: &str,
+    relationship_namespace: &str,
+    links: &HyperlinkPlan,
 ) -> Result<Vec<u8>, ParseError> {
+    let id_name = format!("{relationship_prefix}:id");
     doc(|writer| {
         let mut root = BytesStart::new("worksheet");
         root.push_attribute(("xmlns", main_namespace));
-        if sheet
-            .hyperlinks
-            .iter()
-            .any(|link| link.external_target.is_some())
-        {
-            root.push_attribute(("xmlns:r", NS_R));
+        if links.relationships.iter().any(Relationship::is_hyperlink) {
+            root.push_attribute((
+                format!("xmlns:{relationship_prefix}").as_str(),
+                relationship_namespace,
+            ));
         }
         writer.write_event(Event::Start(root))?;
         write_sheet_views(writer, sheet)?;
         write_cols(writer, sheet)?;
         write_sheet_data(writer, sheet, wb)?;
         write_merges(writer, sheet)?;
-        write_hyperlinks(writer, sheet)?;
+        write_hyperlinks(writer, sheet, &links.ids, &id_name, &[])?;
         writer.write_event(Event::End(BytesEnd::new("worksheet")))?;
         Ok(())
     })
 }
 
-/// Preserved fragments (filters, validations, anchors, hyperlink ranges) keep
-/// their source geometry: valid XML, but stale after a row or column edit.
+/// A retained worksheet and the relationship part backing it, when the model's
+/// hyperlinks moved and the part has to be rewritten.
+struct WorksheetOutput {
+    bytes: Vec<u8>,
+    relationships: Option<Vec<Relationship>>,
+}
+
+/// Preserved fragments (filters, validations, anchors) keep their source
+/// geometry: valid XML, but stale after a row or column edit.
 fn worksheet_xml_with_template(
     sheet: &Sheet,
     wb: &Workbook,
-    template: &XmlTemplate,
-) -> Result<Vec<u8>, ParseError> {
+    original: Option<&Sheet>,
+    source: &PreservedSheet,
+    package: &PreservedPackage,
+) -> Result<WorksheetOutput, ParseError> {
+    let template = &source.template;
     let columns = (!sheet.col_widths.is_empty())
         .then(|| fragment(|writer| write_cols(writer, sheet)))
         .transpose()?;
@@ -1553,14 +1631,106 @@ fn worksheet_xml_with_template(
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
         .transpose()?;
-    template.render(
-        vec![
-            ("cols", columns),
-            ("sheetData", sheet_data),
-            ("mergeCells", merges),
-        ],
-        worksheet_child_rank,
-    )
+    let mut replacements = vec![
+        ("cols", columns),
+        ("sheetData", sheet_data),
+        ("mergeCells", merges),
+    ];
+
+    if original.is_none_or(|original| original.freeze_pane != sheet.freeze_pane) {
+        replacements.push(("sheetViews", patched_sheet_views(template, sheet)?));
+    }
+
+    let mut relationships = None;
+    if original.is_none_or(|original| original.hyperlinks != sheet.hyperlinks) {
+        let source_relationships = package
+            .part_bytes(&relationship_part_path(&source.path))
+            .map(parse_relationships)
+            .transpose()?
+            .unwrap_or_default();
+        let links = HyperlinkPlan::new(
+            sheet,
+            &source_relationships,
+            &relationship_type_from(&package.workbook_relationships, "hyperlink", REL_HYPERLINK),
+        );
+        replacements.push((
+            "hyperlinks",
+            patched_hyperlinks(template, package, sheet, &links)?,
+        ));
+        relationships = Some(links.relationships);
+    }
+
+    Ok(WorksheetOutput {
+        bytes: template.render(replacements, worksheet_child_rank)?,
+        relationships,
+    })
+}
+
+/// Rewrites each `<sheetView>`'s pane while its zoom, selection and view flags
+/// stay on the element they were authored on.
+fn patched_sheet_views(
+    template: &XmlTemplate,
+    sheet: &Sheet,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let Some(child) = template.child("sheetViews") else {
+        return sheet
+            .freeze_pane
+            .map(|_| fragment(|writer| write_sheet_views(writer, sheet)))
+            .transpose();
+    };
+    let views = XmlTemplate::capture(&child.bytes)?;
+    let sources = views.children_named("sheetView").collect::<Vec<_>>();
+    if sources.is_empty() {
+        return sheet
+            .freeze_pane
+            .map(|_| fragment(|writer| write_sheet_views(writer, sheet)))
+            .transpose();
+    }
+    let pane = sheet
+        .freeze_pane
+        .map(|pane| fragment(|writer| write_pane(writer, pane)))
+        .transpose()?;
+    let mut items = Vec::with_capacity(sources.len());
+    for view in sources {
+        let view = XmlTemplate::capture(&view.bytes)?;
+        items.push(view.render(vec![("pane", pane.clone())], sheet_view_child_rank)?);
+    }
+    views.render_repeated("sheetView", &items, &[]).map(Some)
+}
+
+fn sheet_view_child_rank(name: &str) -> usize {
+    match name {
+        "pane" => 0,
+        "selection" => 1,
+        "pivotSelection" => 2,
+        "extLst" => 3,
+        _ => usize::MAX,
+    }
+}
+
+fn patched_hyperlinks(
+    template: &XmlTemplate,
+    package: &PreservedPackage,
+    sheet: &Sheet,
+    links: &HyperlinkPlan,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    if links.ids.is_empty() {
+        return Ok(None);
+    }
+    let needs_binding = links.relationships.iter().any(Relationship::is_hyperlink);
+    let (prefix, namespace) = match template.namespace_binding("/officeDocument/relationships") {
+        Some((prefix, namespace)) => (prefix.to_owned(), namespace.to_owned()),
+        None => workbook_relationship_namespace(package),
+    };
+    let declared = template.declares_namespace(&prefix, &namespace);
+    let root_attributes = if needs_binding && !declared {
+        vec![(format!("xmlns:{prefix}"), namespace)]
+    } else {
+        Vec::new()
+    };
+    let id_name = format!("{prefix}:id");
+    fragment(|writer| write_hyperlinks(writer, sheet, &links.ids, &id_name, &root_attributes))
+        .map(Some)
 }
 
 fn worksheet_child_rank(name: &str) -> usize {
@@ -1631,62 +1801,41 @@ fn write_sheet_data(writer: &mut Writer<Vec<u8>>, sheet: &Sheet, wb: &Workbook) 
     Ok(())
 }
 
-fn write_hyperlinks(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
+fn write_hyperlinks(
+    w: &mut Writer<Vec<u8>>,
+    sheet: &Sheet,
+    ids: &[Option<String>],
+    id_name: &str,
+    root_attributes: &[(String, String)],
+) -> io::Result<()> {
     if sheet.hyperlinks.is_empty() {
         return Ok(());
     }
-    w.create_element("hyperlinks").write_inner_content(|w| {
-        let mut external_index = 0;
-        for link in &sheet.hyperlinks {
-            let mut element = BytesStart::new("hyperlink");
-            let reference = link.range.to_a1();
-            element.push_attribute(("ref", reference.as_str()));
-            let relationship_id = link.external_target.as_ref().map(|_| {
-                external_index += 1;
-                format!("rIdHyperlink{external_index}")
-            });
-            if let Some(relationship_id) = &relationship_id {
-                element.push_attribute(("r:id", relationship_id.as_str()));
-            }
-            if let Some(location) = &link.location {
-                element.push_attribute(("location", location.as_str()));
-            }
-            if let Some(tooltip) = &link.tooltip {
-                element.push_attribute(("tooltip", tooltip.as_str()));
-            }
-            if let Some(display) = &link.display {
-                element.push_attribute(("display", display.as_str()));
-            }
-            w.write_event(Event::Empty(element))?;
+    let mut root = BytesStart::new("hyperlinks");
+    for (name, value) in root_attributes {
+        root.push_attribute((name.as_str(), value.as_str()));
+    }
+    w.write_event(Event::Start(root))?;
+    for (link, relationship_id) in sheet.hyperlinks.iter().zip(ids) {
+        let mut element = BytesStart::new("hyperlink");
+        let reference = link.range.to_a1();
+        element.push_attribute(("ref", reference.as_str()));
+        if let Some(relationship_id) = relationship_id {
+            element.push_attribute((id_name, relationship_id.as_str()));
         }
-        Ok(())
-    })?;
+        if let Some(location) = &link.location {
+            element.push_attribute(("location", location.as_str()));
+        }
+        if let Some(tooltip) = &link.tooltip {
+            element.push_attribute(("tooltip", tooltip.as_str()));
+        }
+        if let Some(display) = &link.display {
+            element.push_attribute(("display", display.as_str()));
+        }
+        w.write_event(Event::Empty(element))?;
+    }
+    w.write_event(Event::End(BytesEnd::new("hyperlinks")))?;
     Ok(())
-}
-
-fn worksheet_rels_xml(sheet: &Sheet) -> Result<Vec<u8>, ParseError> {
-    doc(|w| {
-        w.create_element("Relationships")
-            .with_attribute(("xmlns", NS_PKG_REL))
-            .write_inner_content(|w| {
-                let mut external_index = 0;
-                for link in &sheet.hyperlinks {
-                    let Some(target) = &link.external_target else {
-                        continue;
-                    };
-                    external_index += 1;
-                    let relationship_id = format!("rIdHyperlink{external_index}");
-                    w.create_element("Relationship")
-                        .with_attribute(("Id", relationship_id.as_str()))
-                        .with_attribute(("Type", REL_HYPERLINK))
-                        .with_attribute(("Target", target.as_str()))
-                        .with_attribute(("TargetMode", "External"))
-                        .write_empty()?;
-                }
-                Ok(())
-            })?;
-        Ok(())
-    })
 }
 
 fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
@@ -1696,25 +1845,27 @@ fn write_sheet_views(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
     w.create_element("sheetViews").write_inner_content(|w| {
         w.create_element("sheetView")
             .with_attribute(("workbookViewId", "0"))
-            .write_inner_content(|w| {
-                let mut element = BytesStart::new("pane");
-                let x_split = pane.cols.to_string();
-                let y_split = pane.rows.to_string();
-                if pane.cols > 0 {
-                    element.push_attribute(("xSplit", x_split.as_str()));
-                }
-                if pane.rows > 0 {
-                    element.push_attribute(("ySplit", y_split.as_str()));
-                }
-                let top_left = CellRef::new(pane.top_left.row, pane.top_left.col).to_a1();
-                element.push_attribute(("topLeftCell", top_left.as_str()));
-                element.push_attribute(("activePane", active_pane(pane.rows, pane.cols)));
-                element.push_attribute(("state", "frozen"));
-                w.write_event(Event::Empty(element))?;
-                Ok(())
-            })?;
+            .write_inner_content(|w| write_pane(w, pane))?;
         Ok(())
     })?;
+    Ok(())
+}
+
+fn write_pane(w: &mut Writer<Vec<u8>>, pane: xlsx_model::FreezePane) -> io::Result<()> {
+    let mut element = BytesStart::new("pane");
+    let x_split = pane.cols.to_string();
+    let y_split = pane.rows.to_string();
+    if pane.cols > 0 {
+        element.push_attribute(("xSplit", x_split.as_str()));
+    }
+    if pane.rows > 0 {
+        element.push_attribute(("ySplit", y_split.as_str()));
+    }
+    let top_left = CellRef::new(pane.top_left.row, pane.top_left.col).to_a1();
+    element.push_attribute(("topLeftCell", top_left.as_str()));
+    element.push_attribute(("activePane", active_pane(pane.rows, pane.cols)));
+    element.push_attribute(("state", "frozen"));
+    w.write_event(Event::Empty(element))?;
     Ok(())
 }
 
