@@ -1,4 +1,43 @@
 //! Display-list hit testing and selection geometry.
+//!
+//! Two directions, both reading the display list alone and both working in
+//! page-local coordinates: a point resolves to a document position, and a
+//! document range resolves to highlight rectangles.
+//!
+//! A point is resolved in a fixed order. A direct hit inside a text or glyph
+//! primitive's box wins first (its vertical band is padded by
+//! [`BAND_SLACK`] so a click just above or below the glyphs still lands). Next
+//! comes a direct hit on an image that carries a document position, where the
+//! caret parks at its start. Failing both, the nearest line by vertical-centre
+//! distance is chosen, then the nearest primitive on that line — inside a run
+//! the position interpolates between caret stops, outside it snaps to the
+//! closer edge.
+//!
+//! A run's vertical band is derived from its font size: the top sits one font
+//! size above the baseline and the bottom a quarter of one below. A glyph run
+//! additionally takes its horizontal extent from the real glyph geometry —
+//! leftmost `x` to the trailing glyph's `x + advance` — so mixed-font lines do
+//! not drift. Combining marks sit above the baseline, so the largest glyph `y`
+//! is the base baseline.
+//!
+//! Caret stops are grapheme boundaries spread across the run's width for text
+//! primitives and shaped cluster bounds for glyph runs. In an RTL run visual
+//! order is inverted against logical order, so the physical left and right
+//! edges map to the logical end and start respectively.
+//!
+//! Two primitives share a visual line when they agree on the enclosing table
+//! and cell, on the paragraph's line index, and then on paragraph id, block key
+//! or block id — whichever identity is present. With no identity at all,
+//! adjacency of document positions decides.
+//!
+//! Region scoping matters because a page carries three independent documents.
+//! [`hit_test_regions`] tests the page's header and footer bands first (simple
+//! vertical containment against the band box) and resolves inside the winning
+//! band, returning the region kind and its `rId`; the position then addresses
+//! that header/footer document, never the body. [`range_rects_in_region`] is
+//! the selection-geometry twin, and [`range_rects`] the body-only wrapper. The
+//! same header/footer part paints on every page that uses it, so a scoped range
+//! query emits one rect set per such page, each stamped with its own page index.
 
 use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive, TableCellRef};
 use serde::Serialize;
@@ -13,13 +52,15 @@ thread_local! {
     static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// vertical slack when matching a pointer to a span's band, mirrors the ±4px
-/// tolerance in the DOM HF fallback resolver
+/// Vertical slack (px) added on each side of a run's band when testing a
+/// pointer, so a click in the leading still hits the line.
 const BAND_SLACK: f64 = 4.0;
 
-/// width of the selection sliver drawn for a blank line (BLANK_LINE_SELECTION_WIDTH_PX)
+/// Width (px) of the selection sliver drawn for a blank line, which has no
+/// glyphs of its own to highlight.
 const BLANK_LINE_SELECTION_WIDTH: f64 = 4.0;
 
+/// Tolerance (px) within which two band centres count as the same line.
 const LINE_CENTER_EPSILON: f64 = 0.5;
 
 /// parse the px size out of a CSS font shorthand ("700 16px Calibri, ...")
@@ -67,6 +108,8 @@ fn doc_position_at_utf16(doc_start: i64, doc_end: i64, utf16_offset: i64, utf16_
     }
 }
 
+/// Caret stops spread evenly across a run's width, one per grapheme boundary.
+/// In an RTL run the visual index counts down the logical boundaries.
 fn text_caret_stops(
     text: &str,
     x: f64,
@@ -109,6 +152,8 @@ fn text_caret_stops(
         .collect()
 }
 
+/// Caret stops taken from shaped cluster bounds, so ligatures and reordered
+/// clusters land on real boundaries rather than an even split.
 fn glyph_caret_stops(
     text: &str,
     glyphs: &[crate::display_list::PlacedGlyph],
@@ -306,6 +351,8 @@ where
     best.map(|(_, position)| position)
 }
 
+/// Whether two runs belong to the same visual line, checked from strongest to
+/// weakest identity and ending at document adjacency.
 fn same_line_owner(left: &TextHit<'_>, right: &TextHit<'_>) -> bool {
     #[cfg(test)]
     LINE_OWNER_COMPARE_COUNT.with(|count| count.set(count.get() + 1));
@@ -592,6 +639,7 @@ impl VerticalDirection {
     }
 }
 
+/// Where a vertical caret move lands, plus the sticky x it should keep.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VerticalMove {
@@ -599,6 +647,15 @@ pub struct VerticalMove {
     pub goal_x: f64,
 }
 
+/// Moves the caret one visual line up or down, holding `goal_x` so a run of
+/// moves through short lines does not creep inwards.
+///
+/// Only the caret's page and its immediate neighbours are scanned, so a move
+/// can cross a page boundary without walking the whole document. Table cells
+/// are traversed cell-first: the next line in the same cell wins, lines in
+/// sibling cells of the same row are skipped over, and leaving the cell targets
+/// the nearest line of the adjoining row by `goal_x`. When no line lies in the
+/// requested direction the position is returned unchanged.
 pub fn vertical_move(
     dl: &DisplayList,
     position: i64,
@@ -628,18 +685,19 @@ pub fn vertical_move(
     })
 }
 
-/// Resolves a body position through direct, image, then nearest-line hits.
+/// Body-only point resolution, in the order described on the module.
+/// Region-aware callers use [`hit_test_regions`].
 pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i64> {
     let page = dl.pages.get(page_index)?;
     resolve_point(&page.primitives, x, y)
 }
 
-/// the shared point resolver over one primitive list (a page body or one
-/// HF region — both use page coordinates)
+/// The shared point resolver over one primitive list — a page body or a single
+/// header/footer band, both of which use page coordinates.
 fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
     let hits = text_hits(prims);
 
-    // 1. direct hit on a text primitive's box (paint order = DOM order)
+    // 1. direct hit on a text primitive's box, in paint order
     for h in &hits {
         if h.width <= 0.0 {
             continue;
@@ -689,11 +747,10 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
     position_for_hits(line.iter().copied(), x)
 }
 
-/// region-aware hit result: which part of the page owns the point, and the
-/// resolved position inside that part's doc. For `header`/`footer` the
-/// position refers to the HF doc identified by `rId`, NOT the
-/// body doc (the caller must route the selection to that HF editor, the way
-/// `usePagesPointer` scopes clicks to `.layout-page-header|footer`).
+/// Which part of the page owns a point, and the position inside that part's
+/// document. For `header` / `footer` the position addresses the header/footer
+/// document identified by `rId`, never the body document, so the caller must
+/// route the resulting selection to that editor.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionHit {
@@ -725,12 +782,13 @@ pub(crate) fn parse_region(region: &str) -> Result<HitRegion, String> {
     }
 }
 
-/// a point inside an HF band's box resolves within that band (`pos` may be
-/// None when the band has no positioned content — the region identification
-/// alone is what routes the click into HF editing); everything else falls
-/// through to the body resolver. Band membership is the vertical
-/// `[y, y+height]` test on the region's box, the display-list analogue of the
-/// painted `.layout-page-header` / `.layout-page-footer` hosts.
+/// Resolves a point against the page's header and footer bands before falling
+/// through to the body.
+///
+/// Band membership is the vertical `[y, y + height]` test on the region's box.
+/// A point inside a band always identifies that region even when `pos` is
+/// `None` — an empty band still owns the click, and the region alone is what
+/// routes editing into that header or footer.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
     let page = dl.pages.get(page_index)?;
 
@@ -852,6 +910,9 @@ pub fn range_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
     range_rects_in_region(dl, HitRegion::Body, None, from, to)
 }
 
+/// Caret box for a body-document position: the first primitive on the earliest
+/// page whose half-open range covers it, or that is an empty run sitting
+/// exactly at it.
 pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
     for (page_index, page) in dl.pages.iter().enumerate() {
         if let Some(hit) = page.primitives.iter().find_map(|primitive| {
@@ -922,22 +983,19 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
     None
 }
 
-/// highlight rectangles for a document range resolved inside a specific page region —
-/// the selection-geometry twin of [`hit_test_regions`]'s scoping.
+/// Highlight rectangles for a document range inside one page region — the
+/// selection-geometry twin of [`hit_test_regions`]'s scoping.
 ///
-/// For [`HitRegion::Body`] this is exactly [`range_rects`] (`r_id` is ignored —
-/// the body has one doc). For [`HitRegion::Header`] / [`HitRegion::Footer`]
-/// the `from`/`to` refer to the header/footer doc identified by
-/// `r_id`, so only bands whose `rId` matches are consulted — the display-list
-/// analogue of scoping selection to `.layout-page-header` /
-/// `.layout-page-footer` for the active HF part. The SAME HF doc is painted on
-/// every page carrying the part, so a match emits one rect-set per such page
-/// (each stamped with its own `page_index`); the caller renders the page it is
-/// editing, exactly as the DOM HF overlay picks the nearest painted host.
+/// [`HitRegion::Body`] behaves exactly like [`range_rects`] and ignores `r_id`,
+/// since the body is a single document. For [`HitRegion::Header`] and
+/// [`HitRegion::Footer`], `from` and `to` address the header/footer document
+/// named by `r_id`, and only bands whose `rId` matches contribute. Because that
+/// part paints on every page using it, a match yields one rect set per such
+/// page, each stamped with its own `page_index`.
 ///
-/// `r_id = None` matches any band of the region kind — reserved for callers that
-/// don't disambiguate variants; passing the active part's rId is preferred so a
-/// first-page vs default variant on another page never contributes stray rects.
+/// `r_id = None` matches any band of the kind. Passing the active part's `rId`
+/// is preferred, so a first-page variant on another page cannot contribute
+/// stray rectangles.
 pub fn range_rects_in_region(
     dl: &DisplayList,
     region: HitRegion,

@@ -7,7 +7,7 @@
 //! - [`FontStore`] — registry over raw font **bytes** (never font names) with
 //!   per-font metrics (`head`/`hhea`/`OS/2`), cmap lookup, advance widths, and
 //!   an ordered fallback-chain resolver.
-//! - [`shape`] / [`shape_with_direction`] — OpenType shaping via rustybuzz,
+//! - [`shape()`] / [`shape_with_direction`] — OpenType shaping via rustybuzz,
 //!   returning cluster-mapped glyphs with advances/offsets scaled to the
 //!   requested size.
 //! - [`break_opportunities`] — UAX-14 line-break opportunities via
@@ -20,7 +20,7 @@
 //!   space-stretch ([`line_is_justified`], [`stretch_spaces`]), the w:kern
 //!   threshold ([`kern_enabled`], [`kern_features`]), and the settings.xml
 //!   compat flags that feed them ([`CompatFlags`]). Snap-to-grid (w:docGrid)
-//!   remains a documented TODO there.
+//!   is documented there as a rule this crate does not apply.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.

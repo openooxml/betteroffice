@@ -21,7 +21,9 @@ import wasmInit, {
   range_rects_json,
   register_measure_font,
 } from './generated/layout/docx_layout.js';
-// Resolve optional exports dynamically when generated declarations omit them.
+// Namespace view of the same glue. Exports the generated .d.ts does not
+// declare are resolved by name through this, since a named import of an
+// undeclared export would not typecheck.
 import * as layoutGlue from './generated/layout/docx_layout.js';
 import { createWasmModuleState, type WasmAsyncInput } from './loadWasmAsset';
 
@@ -64,7 +66,20 @@ export function rangeRectsJson(displayList: string, from: number, to: number): s
   return range_rects_json(displayList, from, to);
 }
 
-// Optional session exports avoid repeated display-list serialization.
+// ---------------------------------------------------------------------------
+// session-handle query surface
+//
+// The JSON-arg queries above re-send the whole display list on every call and
+// Rust re-parses it each time, which dominates the cost of click and drag
+// paths. The session exports parse the list ONCE (`open_display_list` → a
+// handle) and answer many queries by handle, reusing the same hit and range
+// logic, so results are byte-identical and only the cost differs.
+//
+// These exports are OPTIONAL: the embedded wasm may not carry them. Every
+// wrapper below throws when its export is missing, so callers feature-detect
+// with `hasDisplayListSession()` / `hasDisplayListUpdate()` /
+// `hasRangeRectsRegion()` and fall back to the JSON-arg path.
+// ---------------------------------------------------------------------------
 
 type OpenDisplayListExport = (json: string) => number;
 type CloseDisplayListExport = (handle: number) => void;
@@ -117,13 +132,24 @@ export function hasDisplayListSession(): boolean {
   return glueExport<OpenDisplayListExport>('open_display_list') !== undefined;
 }
 
-/** Reports whether region-aware range rectangles are available. */
+/**
+ * True when the embedded layout wasm carries the region-aware range-rect
+ * exports (`range_rects_region_json` and its by-handle twin). Callers gate
+ * header/footer selection and caret geometry on this and otherwise return
+ * `[]`; probing avoids invoking — and so dropping the session handle over — an
+ * absent export.
+ */
 export function hasRangeRectsRegion(): boolean {
   state.ensure();
   return glueExport<RangeRectsRegionJsonExport>('range_rects_region_json') !== undefined;
 }
 
-/** Opens a reusable display-list handle. */
+/**
+ * Parse a display list once and return the handle the by-handle queries reuse.
+ * The caller owns it and must `closeDisplayList` it. Throws when the export is
+ * absent or the JSON is malformed; the query facade catches that and stays on
+ * the JSON-arg path.
+ */
 export function openDisplayList(displayList: string): number {
   state.ensure();
   const open = glueExport<OpenDisplayListExport>('open_display_list');
@@ -176,7 +202,11 @@ export function hitTestRegionsByHandle(
   return query(handle, pageIndex, x, y);
 }
 
-/** Resolve the closest caret position on the adjacent visual line. */
+/**
+ * Closest caret position on the adjacent visual line: `{"position","goalX"}`
+ * JSON, or `"null"` when there is no line in that direction. `goalX` is the
+ * page-local x the caret holds across successive moves.
+ */
 export function verticalMoveJson(
   displayList: string,
   position: number,
@@ -215,7 +245,12 @@ export function rangeRectsByHandle(handle: number, from: number, to: number): st
   return query(handle, from, to);
 }
 
-/** Returns region range rects or throws when the optional export is unavailable. */
+/**
+ * Region-aware highlight rects: `region` is `"body" | "header" | "footer"`,
+ * and `rId` scopes a header/footer to one part (empty string for body, or to
+ * match any). `from`/`to` are positions in THAT region's document. Throws when
+ * the export is absent, so the facade falls back to `[]`.
+ */
 export function rangeRectsRegionJson(
   displayList: string,
   region: string,
@@ -296,13 +331,23 @@ export function measureParagraphJson(input: string): string {
 
 type OutlineGlyphExport = (fontId: number, glyphId: number) => string;
 
-// Missing outline exports fall back to fillText.
+// Optional like the session exports: when the embedded wasm has no
+// `outline_glyph_json` this resolves to undefined, `outlineGlyphJson` throws,
+// and the canvas backend paints the run with `fillText` instead.
 function resolveOutlineGlyphExport(): OutlineGlyphExport | undefined {
   const fn = (layoutGlue as unknown as Record<string, unknown>).outline_glyph_json;
   return typeof fn === 'function' ? (fn as OutlineGlyphExport) : undefined;
 }
 
-/** Returns a glyph outline or throws when it is unavailable. */
+/**
+ * Glyph outline for `(fontId, glyphId)` as JSON:
+ * `{"upem":2048,"cmds":[{"t":"M",…},{"t":"L",…},{"t":"Q",…},{"t":"C",…},{"t":"Z"}]}`
+ * — commands in font units, y-up per the font convention. `fontId` is a
+ * measurement FontStore id from {@link registerMeasureFont}, `glyphId` a glyph
+ * index from shaping. Throws when the export is absent or the glyph cannot be
+ * extracted; the canvas backend catches that and paints the run via
+ * `fillText`, so text is never invisible.
+ */
 export function outlineGlyphJson(fontId: number, glyphId: number): string {
   state.ensure();
   const outlineExport = resolveOutlineGlyphExport();

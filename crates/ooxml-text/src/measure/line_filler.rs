@@ -1,4 +1,36 @@
-//! Greedy line filling over prepared character advances.
+//! Greedy line filling over the per-cluster advance tables built by
+//! [`super::prepare`].
+//!
+//! This module owns every wrap decision and all vertical arithmetic: where a
+//! line breaks, how tall its box is, how floats narrow or displace it, and
+//! which [`TypesetRowOut`] fields come out. The rules it enforces:
+//!
+//! - A word is taken whole — trailing space included — and lands on the line
+//!   it ends, its full advance counted in that line's `width`. A line accepts
+//!   an overshoot of up to [`WRAP_SLACK_PX`], so a sub-half-pixel rounding
+//!   artifact never forces a wrap that exact twip arithmetic would not make.
+//! - A word too wide for a whole line is chopped: the current line takes what
+//!   fits, then each following line takes the longest cluster prefix that
+//!   fits, with a forced minimum of one cluster so filling always terminates.
+//!   Cuts land on cluster boundaries, so no ligature, combining sequence or
+//!   surrogate pair is ever split.
+//! - Line metrics follow the largest font on the line: the first
+//!   font-bearing contribution claims it, and only a strictly larger size
+//!   displaces it. Ascent, descent and leading are per-contribution maxima,
+//!   so even a text run with no characters raises the line box. A line with
+//!   no font-bearing run at all falls back to a 0.8/0.2 em ascent/descent
+//!   split on a [`DEFAULT_SINGLE_LINE_RATIO`] basis.
+//! - An image taller than the ruled text height grows the line box. Alone on
+//!   the line it takes the text descent as a buffer above and below; flowing
+//!   with text it seats on the baseline — full height above, only the text
+//!   descent below. The reported `descent` stays text metrics either way.
+//! - Float geometry is probed per line at the running Y with a fixed
+//!   default-font-size estimate, never the line's real metrics, which are
+//!   unknown until the line closes. That running Y advances by each line's
+//!   *text* height, so image growth never shifts the next probe; float skips
+//!   do, since they move the line itself.
+//! - `totalHeight` is Σ (line height + `floatSkipBefore`) plus
+//!   `spacing.before` and `spacing.after`.
 
 use crate::font_store::FontId;
 
@@ -15,13 +47,16 @@ use crate::word_metrics as wm;
 
 use super::tabs;
 
-/// Half-pixel wrap tolerance.
+/// Half-pixel wrap tolerance: an overshoot this small must not force a wrap
+/// that exact twip arithmetic would never make.
 const WRAP_SLACK_PX: f32 = 0.5;
-/// Empty-paragraph minimum multiplier for auto and at-least spacing.
+/// Empty-paragraph line height floor, as a multiple of the font size; applies
+/// under the `auto` and `atLeast` rules only.
 const WORD_SINGLE_LINE_FLOOR: f32 = 1.15;
-/// Single-line fallback for lines without font-bearing runs.
+/// Single-line basis for a line carrying no font-bearing run.
 const DEFAULT_SINGLE_LINE_RATIO: f32 = 1.15;
 
+/// Everything the filler needs that is fixed for the whole paragraph.
 pub(super) struct FillParams<'a> {
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
@@ -47,6 +82,7 @@ pub(super) struct FillParams<'a> {
     pub authoritative_shaping: bool,
 }
 
+/// The line currently being filled. Reset wholesale by `start_new_line`.
 struct LineState {
     head_run: u32,
     head_char: u32,
@@ -70,6 +106,11 @@ struct LineState {
     contributions: Vec<LineContribution>,
 }
 
+/// One advance-bearing piece of the current line, recorded in logical order.
+/// `logical_order` is `run_index × 1_000_000 + position within the run`, so a
+/// single key orders the whole paragraph. `shaped_cluster` distinguishes text
+/// clusters (which reach `clusterAdvances`) from atomic runs such as tabs,
+/// fields and images (which do not).
 #[derive(Debug, Clone, Copy)]
 struct LineContribution {
     run_index: u32,
@@ -81,6 +122,8 @@ struct LineContribution {
     shaped_cluster: bool,
 }
 
+/// Fill state: the paragraph's finished lines, the line in progress, and the
+/// vertical position driving float probes.
 struct Filler<'a> {
     p: &'a FillParams<'a>,
     rule: wm::LineSpacingRule,
@@ -93,7 +136,9 @@ struct Filler<'a> {
     pending_float_skip: f32,
 }
 
-/// Skips below floats that leave insufficient line width.
+/// Hops the running Y past any float leaving less than
+/// [`floats::MIN_WRAP_SEGMENT_WIDTH`] of usable room. The skipped pixels are
+/// added to both the running Y and the pending `floatSkipBefore`.
 fn skip_obstructing_floats(
     p: &FillParams,
     line_height: f32,
@@ -118,12 +163,17 @@ fn skip_obstructing_floats(
     }
 }
 
-/// Returns the default-font probe height for floating zones.
+/// Probe height for zone intersection tests: the default font size in px,
+/// never the line's own metrics, which are unknown until the line closes.
 fn estimated_line_height(p: &FillParams) -> f32 {
     pt_to_px(p.default_font_size_pt)
 }
 
-/// Wraps prepared runs and totals paragraph height.
+/// Wraps the prepared runs into lines and totals the paragraph height.
+///
+/// The first line's float context is resolved before any content is placed:
+/// probe at the paragraph top, hop past obstructions, then take the margins
+/// at the Y actually reached.
 pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
     let rule = rule_from_spacing(p.spacing);
     let compat = to_flags(p.compat);
@@ -187,7 +237,9 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
     })
 }
 
-/// Measures an empty paragraph as one zero-width line.
+/// Measures an empty or whitespace-only paragraph as one zero-width line at
+/// the ruled height of `font` at `size_pt`, floored at
+/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under `auto`/`atLeast`.
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
@@ -234,6 +286,8 @@ pub(super) fn empty_paragraph_extent(
 }
 
 impl Filler<'_> {
+    /// Places every prepared run in order, then closes the last line. A
+    /// paragraph therefore always emits at least one line.
     fn run(&mut self) -> Result<(), MeasureError> {
         for (run_index, prun) in self.p.prepared.iter().enumerate() {
             let ri = run_index as u32;
@@ -264,7 +318,11 @@ impl Filler<'_> {
         self.finalize_line()
     }
 
-    /// Places an inline image and grows the line by its rendered footprint.
+    /// Places an inline image: its declared width joins the line advance and
+    /// its *column-fitted* height plus wrap distances competes for the line
+    /// box. An image wider than the whole line wraps off an empty line too,
+    /// emitting an empty row. Images carry no font, so line metrics are
+    /// untouched.
     fn fill_inline_image(&mut self, ri: u32, img: PreparedImage) -> Result<(), MeasureError> {
         if self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
             self.start_new_line(ri, 0)?;
@@ -285,7 +343,11 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Places an authored-size image on its own zero-advance line.
+    /// Gives a block or `topAndBottom` image its own line: finish any line
+    /// already carrying content, take the image's *declared* height plus wrap
+    /// distances as the whole box (no column fit), add no width, and open a
+    /// fresh line. When the image is the paragraph's last run that fresh line
+    /// closes empty.
     fn fill_own_line_image(&mut self, ri: u32, img: PreparedImage) -> Result<(), MeasureError> {
         if self.cur.width > 0.0 {
             self.start_new_line(ri, 0)?;
@@ -298,7 +360,8 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Places a premeasured field as one unbreakable unit.
+    /// Places a premeasured field as one unbreakable unit: it wraps whole to
+    /// the next line rather than splitting, but never off an empty line.
     fn fill_field_run(&mut self, ri: u32, f: PreparedField) -> Result<(), MeasureError> {
         self.update_max_font(f.font_size_pt, f.metrics_font, f.baseline_shift_px);
         if self.cur.width > 0.0 && self.cur.width + f.width > self.cur.available + WRAP_SLACK_PX {
@@ -312,7 +375,10 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Places a tab using content coordinates and following-run width.
+    /// Places a tab. Its width comes from the stop grid at the line's current
+    /// x in content-area coordinates — indent, first-line offset and any
+    /// float left margin all shift that x. A tab that wraps keeps its
+    /// pre-wrap width; it is not recomputed against the new line's x.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
         self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
@@ -358,7 +424,10 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Sums inline widths until the next tab or line break.
+    /// Sums inline widths until the next tab or line break — what `end` and
+    /// `center` stops anchor on. Every image kind contributes its declared
+    /// width here, floating and own-line images included, even though neither
+    /// adds width to the line advance itself.
     fn following_width_after(&self, tab_index: usize) -> f32 {
         let mut width = 0.0f32;
         for prun in &self.p.prepared[tab_index + 1..] {
@@ -376,6 +445,10 @@ impl Filler<'_> {
         width
     }
 
+    /// Fills a text run word by word, a word being the span up to the next
+    /// UAX-14 break opportunity and so including its trailing space. Words
+    /// wider than a whole line are chopped at cluster boundaries with a
+    /// forced minimum of one cluster per line.
     fn fill_text_run(&mut self, ri: u32, t: &PreparedText) -> Result<(), MeasureError> {
         // Empty runs still contribute line metrics.
         self.update_max_font(t.font_size_pt, t.metrics_font, t.baseline_shift_px);
@@ -450,7 +523,11 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Updates line metrics from font-bearing runs.
+    /// Folds one font-bearing contribution into the line's metrics: the first
+    /// claims the line and only a strictly larger size displaces it, while
+    /// ascent, descent and leading accumulate as maxima across every
+    /// contribution. Super/subscript baseline shifts move ascent and descent
+    /// in opposite directions and never go negative.
     fn update_max_font(&mut self, font_size_pt: f32, font: FontId, baseline_shift_px: f32) {
         if self.cur.max_font.is_none() || font_size_pt > self.cur.max_font_size_pt {
             self.cur.max_font_size_pt = font_size_pt;
@@ -470,6 +547,8 @@ impl Filler<'_> {
         }
     }
 
+    /// Records an unbreakable run (tab, field, image) as a single
+    /// contribution spanning one index unit.
     fn record_atomic(
         &mut self,
         run_index: u32,
@@ -489,6 +568,9 @@ impl Filler<'_> {
         });
     }
 
+    /// Records a span of shaped clusters, charging letter spacing to every
+    /// cluster but the last — so gaps are counted within the span, never
+    /// across its trailing edge into the next word.
     fn record_text_clusters(&mut self, run_index: u32, chars: &[CharAdv], spacing: f32) {
         for (index, cluster) in chars.iter().enumerate() {
             self.update_max_font(
@@ -515,7 +597,11 @@ impl Filler<'_> {
         }
     }
 
-    /// Finalizes typography, floating geometry, and advance metadata.
+    /// Closes the current line: resolve typography from its largest font,
+    /// apply the spacing rule, let any taller image grow the box, attach
+    /// float offsets, segments and skip, and push the row. Advances the
+    /// running Y by the *text* height only, so image growth never moves the
+    /// next line's float probe.
     fn finalize_line(&mut self) -> Result<(), MeasureError> {
         if self.lines.len() >= MAX_LINES {
             return Err(MeasureError::Unsupported(format!(
@@ -590,7 +676,12 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Splits one text run across at most two floating-zone strips.
+    /// Splits the just-closed line across the zone's strips. One strip — or a
+    /// line that fits the first strip within the wrap slack — yields a single
+    /// segment covering the whole line. A two-way split needs a line made of
+    /// exactly one text run; the cut is the longest cluster prefix fitting the
+    /// first strip. Anything else (multiple runs, a non-text run, a degenerate
+    /// cut) returns `None` and the line carries no segments.
     fn create_line_segments(
         &self,
         segment_zones: &[FloatSegmentIn],
@@ -652,7 +743,9 @@ impl Filler<'_> {
         ])
     }
 
-    /// Finalizes the current line and opens the next one.
+    /// Closes the current line and opens a fresh one at `(run, char_utf16)`,
+    /// hopped past and narrowed by whatever float zones sit at the new Y.
+    /// Font tracking resets, so the new line's metrics start from scratch.
     fn start_new_line(&mut self, run: u32, char_utf16: u32) -> Result<(), MeasureError> {
         self.finalize_line()?;
         let estimated = estimated_line_height(self.p);
@@ -692,6 +785,10 @@ impl Filler<'_> {
     }
 }
 
+/// Reorders a line's contributions visually and derives the three advance
+/// tables. Cluster and slice x offsets accumulate in visual order; run
+/// advances merge contributions that are adjacent *visually* and share a run
+/// index, so a run cut by a direction change appears once per visual piece.
 fn advance_metadata(
     contributions: &[LineContribution],
 ) -> (
@@ -772,7 +869,9 @@ fn span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
     }
 }
 
-/// Finds the longest character prefix within the width.
+/// Longest cluster prefix whose width stays within `max_width`, in clusters.
+/// The early exit assumes width grows monotonically, which holds for
+/// non-negative letter spacing; negative spacing scans the whole span.
 fn max_fitting(chars: &[CharAdv], letter_spacing: f32, max_width: f32) -> usize {
     let mut best = 0usize;
     let mut advance = 0.0f32;
@@ -800,7 +899,10 @@ fn to_flags(compat: &CompatIn) -> wm::CompatFlags {
     }
 }
 
-/// Maps spacing with exact, at-least, multiplier, then pixel precedence.
+/// Maps `w:spacing` onto a line rule, in precedence order: `exact`,
+/// `atLeast` (both needing a `line` value), then `lineUnit` `multiplier`,
+/// then `px`, else single spacing. A `line` with no recognized unit or rule
+/// is ignored, and values are clamped non-negative.
 fn rule_from_spacing(spacing: Option<&SpacingIn>) -> wm::LineSpacingRule {
     let single = wm::LineSpacingRule::Auto { line_240ths: 240 };
     let Some(sp) = spacing else {

@@ -1,4 +1,45 @@
-/** Synchronous display-list queries backed by Rust hit testing. */
+/**
+ * Synchronous query facade over one built DisplayList, backed by the Rust
+ * hit-testing module (`crates/docx-layout/src/hit.rs`).
+ *
+ * This is the canvas renderer's only source of pointer and selection geometry:
+ * every rect comes from the immutable display list, never from DOM rects. A
+ * facade is created per display-list build, since the list never mutates in
+ * place, and it holds no state a caller has to keep in sync.
+ *
+ * **Two sources.** A resident editing engine queries its own display list
+ * directly and takes no display-list JSON at all. Otherwise the shared layout
+ * wasm answers, and the facade prefers a SESSION HANDLE: the list is parsed
+ * into the Rust store once (`openDisplayList`) and every later query goes by
+ * handle, with no per-query re-serialization. When the session exports are
+ * absent it stringifies the list once and reuses that string for the JSON-arg
+ * exports. The two paths run the same hit and range logic, so results are
+ * byte-identical and only the cost differs.
+ *
+ * **Handle acquisition is lazy** — on the first query that needs one, or when
+ * a host calls `prime()` from idle time — so replacing the facade on every
+ * keystroke costs no serialization on the input path. A new facade also tries
+ * to ADOPT its predecessor's parsed list, shipping a page delta for the pages
+ * that changed instead of reopening the whole list; superseded generations
+ * chain their donor, so a deferred pickup still costs one delta. The donor's
+ * own later queries degrade to its JSON-arg path.
+ *
+ * **Handle release.** `dispose()` frees the handle immediately. A facade
+ * dropped without it — a `useMemo` replacement, say — is covered by a
+ * `FinalizationRegistry`, and the Rust store additionally caps live handles
+ * and evicts the oldest, so a missed finalize cannot grow memory without
+ * bound.
+ *
+ * **Failure.** A wasm TRAP poisons the whole instance: a guard held across the
+ * query leaks and every later call into it fails, so the engine is marked dead,
+ * all queries stop, and `onDisplayListQuerySourceFailure` subscribers are told
+ * to rebuild the session. An ordinary error just falls back — a bad handle is
+ * dropped and the query retried over JSON.
+ *
+ * Queries are synchronous and return `null`/`[]` until the lazily imported
+ * wasm module resolves. In practice it is already loaded by the time a facade
+ * exists, because building the display list went through the same module.
+ */
 
 import type { DisplayList, DisplayPrimitive } from './displayList';
 import { displayPageRevision } from './frameDelta';
@@ -10,7 +51,11 @@ import {
 } from './displayListImages';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from './rustDisplayList';
 
-/** Query surface implemented by the editing wasm over its resident list. */
+/**
+ * Query surface of an editing engine that already holds the display list.
+ * None of these take display-list JSON, so this source never opens a handle
+ * and never serializes anything.
+ */
 export interface ResidentDisplayListQueryEngine {
   displayHitTestRegionsJson(pageIndex: number, x: number, y: number): string;
   displayVerticalMoveJson(
@@ -32,9 +77,9 @@ export type DisplayListHitRegion = 'body' | 'header' | 'footer';
 
 /**
  * Region-aware hit result. For `header`/`footer` the position refers to the
- * HF doc identified by `rId`, NOT the body doc — the caller must
- * route the selection to that HF editor, exactly like the DOM path scopes
- * clicks to `.layout-page-header|footer`.
+ * header/footer document identified by `rId`, NOT the body document — the
+ * caller must route the selection to that editor. `pos` is null when the point
+ * is inside the region but resolves to no position.
  */
 export interface DisplayListRegionHit {
   region: DisplayListHitRegion;
@@ -42,6 +87,10 @@ export interface DisplayListRegionHit {
   pos: number | null;
 }
 
+/**
+ * Result of an up/down caret move. `goalX` is the page-local x to feed back
+ * into the next move so a run of them holds one column.
+ */
 export interface DisplayListVerticalMove {
   position: number;
   goalX: number;
@@ -138,7 +187,7 @@ export interface DisplayListQueries {
    * `from`/`to` are positions in THAT doc. The same HF doc paints on every page
    * carrying the part, so this returns one rect-set per such page (each tagged
    * with its `pageIndex`) — the caller picks the page it is editing. Returns
-   * `[]` until the region-aware exports are embedded (feature-detected).
+   * `[]` when the region-aware exports are absent, which is feature-detected.
    */
   hfRangeRects(
     region: 'header' | 'footer',

@@ -222,8 +222,8 @@ fn emits_glyph_runs_when_fonts_resolve() {
 
 #[test]
 fn falls_back_to_text_run_without_fonts() {
-    // fontChains present, but the store is empty ⇒ every run fails to shape and
-    // takes the v0 TextRunPrimitive path
+    // fontChains present, but the store is empty, so every run fails to shape
+    // and falls back to a TextRunPrimitive
     let empty = FontStore::new();
     let with_chains = build_input("Hello world", 60.0, None, false, Some(&[0]));
     let out_fallback = build_display_list_json_with_fonts(&with_chains, &empty).expect("builds");
@@ -460,8 +460,8 @@ fn glyph_run_extent_uses_real_trailing_advance() {
         );
     }
 
-    // expected extent = the shaped natural advance sum (what the DOM painter lays
-    // out); reshape the same run in an isolated store to learn it
+    // expected extent = the shaped natural advance sum; reshape the same run in
+    // an isolated store to learn it
     let mut probe = FontStore::new();
     let id = probe.register(LIBERATION.to_vec()).unwrap();
     let shaped = shape(&probe, id, text, 16.0, &[]).unwrap();
@@ -491,7 +491,7 @@ fn glyph_run_extent_uses_real_trailing_advance() {
     );
     assert!(
         (r.width - shaped_width).abs() < 0.5,
-        "range-rect width {} matches the shaped extent {} (F3: real trailing advance)",
+        "range-rect width {} matches the shaped extent {}, including trailing advance",
         r.width,
         shaped_width
     );

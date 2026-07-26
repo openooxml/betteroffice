@@ -83,8 +83,8 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
     }
     row_tops.push(acc);
 
-    // Use the shared grid resolution so "which cells cover row r" matches the
-    // measurer and painter. A cell starting in row `sr` with rowSpan covers
+    // Use the shared grid resolution so "which cells cover row r" agrees with
+    // measurement and paint. A cell starting in row `sr` with rowSpan covers
     // rows [sr, sr + rowSpan); a merged cell spills its line bottoms into the
     // rows below its restart row.
     let resolved = resolve_cell_grid(block);

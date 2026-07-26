@@ -1,9 +1,34 @@
-//! Floating-object exclusion geometry.
+//! Registry of the page-space exclusion zones anchored floats claim.
+//!
+//! Anchored images, floating tables and floating text boxes carve horizontal
+//! room out of the lines they overlap. Line breaking itself happens during
+//! measurement, upstream of this crate, so the measured lines arriving here
+//! already have float effects folded into their widths and offsets — no zone
+//! data crosses the input envelope. What pagination still needs is each
+//! float's claim in page coordinates, which callers register as a
+//! [`BlockedRegion`] and query per line through
+//! [`FloatRegionRegistry::resolve_free_span`].
+//!
+//! Coordinate spaces differ between input and output: a region's `rect` is in
+//! page coordinates, while [`FreeSpan`] is content-area relative, so a shift of
+//! `0.0` means the line starts at the left margin.
+//!
+//! A float participates in a line only when it is on the same page, its
+//! [`WrapSide`] is not `None`, and its clearance-padded box overlaps the line's
+//! vertical band. Each participating float then squeezes the writable interval
+//! from one side: `Left` or `Both` pulls the right edge back to the float's
+//! cleared left edge, `Right` or `Both` pushes the left edge past its cleared
+//! right edge. The resulting span is clamped at zero, so a line fully covered
+//! by floats reports no room rather than a negative width.
+//!
+//! Comparisons use NaN-propagating, signed-zero-aware minimum and maximum so
+//! the numbers reaching the canonical JSON match the host's semantics.
 
 use serde::{Deserialize, Serialize};
 
 /// A text segment beside a float narrower than this (px) is not worth
-/// wrapping into.
+/// wrapping into. Measurement applies the threshold; this registry reports raw
+/// spans and leaves the decision to its caller.
 pub const MIN_WRAP_SEGMENT_WIDTH: f64 = 24.0;
 
 /// NaN-propagating minimum that preserves negative zero.
@@ -66,6 +91,8 @@ pub enum WrapSide {
     None,
 }
 
+/// One float's claim on a page: its box, the wrap gap around it, and which
+/// side text may run down.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockedRegion {
@@ -78,6 +105,7 @@ pub struct BlockedRegion {
     pub wrap_side: WrapSide,
 }
 
+/// Room left for one line, in content-area coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FreeSpan {

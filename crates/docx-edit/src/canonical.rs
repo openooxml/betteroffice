@@ -1,4 +1,44 @@
-//! Deterministic `canonical-stream-v1` projection.
+//! Deterministic `canonical-stream-v1` projection: one story's semantic
+//! content rendered to bytes that any implementation can reproduce exactly.
+//!
+//! Byte format:
+//!
+//! 1. UTF-8 `canonical-stream-v1`, then LF (`0x0a`).
+//! 2. One compact JSON object per item, each followed by LF (the final item
+//!    included). Items are externally tagged:
+//!    `{"CharItem":{"ch":"x","marks":{…}}}`, `{"ParaMark":{"ppr":{…}}}`,
+//!    `{"Table":{"tblPr":{…},"grid":[…],"rows":[…]}}`,
+//!    `{"Embed":{"kind":"break","payload":{…}}}`, `{"OpaqueBlk":{"blob":…}}`.
+//! 3. Object keys at every depth are in Rust `str`/`BTreeMap` lexicographic
+//!    order; arrays keep their input order. JSON is compact and uses
+//!    `serde_json`'s escaping and number formatting.
+//! 4. `null` (including yrs `Any::Undefined`) is stripped from objects at every
+//!    depth. A null ARRAY slot survives, because removing it would shift the
+//!    positions after it; an opaque blob may itself be `null`, because that
+//!    field cannot be made absent.
+//!
+//! Text projects one [`CanonicalItem::CharItem`] per Unicode scalar (Rust
+//! `char`) — never per UTF-16 code unit and never coalesced into runs; a tab is
+//! an ordinary `"\t"` item. [`CanonicalItem::ParaMark`] excludes the pilcrow's
+//! `_kind` discriminator and its volatile `paraId`, so two documents that
+//! differ only in freshly minted paragraph ids project identical bytes. Every
+//! other atom — hard breaks, native `noteRef` anchors — is an
+//! [`CanonicalItem::Embed`] whose `_kind` becomes `kind` and whose remaining
+//! entries become `payload`.
+//!
+//! Comments project as presence and grouping, never identity: a char item
+//! fully covered by a comment's resolved anchors carries a sorted `commentIds`
+//! array of per-story ORDINALS. Ordinals rank the covering comments by their
+//! covered story units (UTF-16 units, every embed counting one) compared
+//! lexicographically, so volatile comment keys never reach the stream — the
+//! same rule as the excluded `paraId`. The field is omitted when empty, so an
+//! uncommented story projects exactly as if comments did not exist. Anchors
+//! that no longer resolve, resolve empty, or belong to another story are
+//! skipped.
+//!
+//! [`CanonicalItem::OpaqueBlk`] is part of the byte vocabulary, but the editing
+//! schema carries no opaque-block discriminator, so [`project_story`] never
+//! emits one.
 
 use std::collections::BTreeMap;
 
@@ -36,11 +76,13 @@ pub enum CanonicalItem {
         kind: String,
         payload: BTreeMap<String, Value>,
     },
-    /// Sealed block JSON.
+    /// Sealed block JSON, projected verbatim apart from the shared null strip.
     OpaqueBlk { blob: Value },
 }
 
-/// Projects one yrs story into canonical semantic units.
+/// Projects one yrs story into canonical semantic units, in story order.
+///
+/// Errors only when `story_id` is not a story of `doc`.
 pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalItem>, OpError> {
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, story_id)?;
@@ -154,7 +196,10 @@ fn exclude_cell_story_ids(rows: &mut Value) {
     }
 }
 
-/// Resolves comments to ordinal-ordered UTF-16 intervals.
+/// Resolves the comments anchored in `story_id` to ordinal-ordered interval
+/// lists: the index is the comment's per-story ordinal, the value its merged,
+/// sorted `[start, end)` UTF-16 story-unit intervals. Ordinals come from
+/// comparing covered story units lexicographically, never from comment keys.
 fn story_comment_groups<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<Vec<(u32, u32)>> {
     let Some(comments) = txn.get_map(crate::COMMENTS) else {
         return Vec::new();
@@ -227,7 +272,8 @@ fn covering_ordinals(groups: &[Vec<(u32, u32)>], unit: u32, width: u32) -> Vec<u
         .collect()
 }
 
-/// Serializes canonical items to the exact `canonical-stream-v1` bytes documented above.
+/// Serializes canonical items to the exact `canonical-stream-v1` bytes
+/// documented at the top of this module.
 pub fn to_canonical_bytes(items: &[CanonicalItem]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(VERSION.as_bytes());

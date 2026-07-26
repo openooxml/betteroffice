@@ -1,8 +1,18 @@
-//! Floating exclusion-zone geometry.
+//! Floating exclusion-zone geometry: which zones a line intersects, how much
+//! width they leave it, and where it must drop to when they leave too little.
+//!
+//! A line `[top, bottom)` misses a zone when `bottom <= topY` or
+//! `top >= bottomY`. Margins from several intersecting zones take the maximum
+//! per side rather than accumulating. A zone carrying non-empty `segments`
+//! replaces margins entirely for the lines it covers, and overlapping segment
+//! lists intersect strip by strip. A `fullWidthBlock` zone short-circuits to a
+//! single zero-width strip, leaving no usable room, which is what pushes an
+//! overlapping line below the band.
 
 use super::input::{FloatSegmentIn, FloatZoneIn};
 
-/// Minimum usable width beside a floating obstruction.
+/// Below this much room beside a float, a line drops past the obstruction
+/// instead of wrapping into the gap.
 pub(super) const MIN_WRAP_SEGMENT_WIDTH: f32 = 24.0;
 
 /// Zone-resolved context for one line probe.
@@ -69,7 +79,9 @@ pub(super) fn available_width(margins: &LineMargins, base_width: f32) -> f32 {
     }
 }
 
-/// Finds the next unobstructed Y with a bounded zone scan.
+/// First Y at or below `start_y` leaving at least `min_width` of room,
+/// stepping zone bottom by zone bottom. The scan is bounded by the zone
+/// count, so a pathological zone set cannot spin.
 pub(super) fn find_clear_line_y(
     start_y: f32,
     line_height: f32,

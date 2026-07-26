@@ -28,6 +28,34 @@
 )]
 
 //! DOCX pagination and display-list construction.
+//!
+//! Two stages, in order:
+//!
+//! 1. **Pagination** — [`compute_layout`] takes `{ measured, options }` and
+//!    walks the measured blocks into a [`types::Layout`]: pages of positioned
+//!    fragments, with spacing collapse, page and column splits, section
+//!    geometry, floats and per-page footnote reservations resolved. The
+//!    walk lives in [`place`], the cursor in [`page_flow`], and the per-feature
+//!    decisions in [`hooks`].
+//! 2. **Display compilation** — the `build_display_list*` family turns a
+//!    finished `Layout` plus the same measured input into a
+//!    [`display_list::DisplayList`]: renderer-agnostic paint primitives per
+//!    page, each carrying the document positions and block identity that
+//!    interaction needs. Compilation only ever reads a `Layout`; the paginator
+//!    never builds primitives itself.
+//!
+//! [`hit`] answers point and range queries over a finished display list, and
+//! [`session`] does the same by handle so an interactive path parses the list
+//! once instead of per event.
+//!
+//! An input engaging a feature the engine does not cover raises
+//! [`LayoutError::Unsupported`], which crosses the JSON boundary as the string
+//! `"UNSUPPORTED"` so the host can fall back rather than paint wrong geometry.
+//!
+//! This crate is the workspace's only `wasm_bindgen` site, so the `ooxml-text`
+//! measurement surface is re-exported here as well and the wasm-visible font
+//! registry lives in this file. Everything below the wrappers is pure and
+//! native-testable.
 
 pub mod canonical;
 pub mod hooks;
@@ -119,7 +147,9 @@ pub fn build_display_list(
     build_display_list_value_from_resident(pagination, layout, "{}")
 }
 
-/// Converts a JSON layout request into JSON layout output.
+/// `{ measured, options }` JSON in, `Layout` JSON out. An `Err` of
+/// `"UNSUPPORTED"` means the input needs a host fallback; any other `Err`
+/// describes a malformed envelope.
 pub fn layout_to_json(input: &str) -> Result<String, String> {
     let layout = compute_layout(input).map_err(|e| match e {
         LayoutError::Unsupported(_) => "UNSUPPORTED".to_string(),
@@ -148,7 +178,10 @@ pub fn layout_document_json(input: &str) -> Result<String, JsValue> {
     layout_to_json(input).map_err(|e| JsValue::from_str(&e))
 }
 
-/// Builds a display list using the module-global measurement fonts.
+/// Builds a display list from a `{ measured, options, layout }` JSON envelope,
+/// threading the module-global measurement fonts. With fonts registered, runs
+/// whose font chains resolve are shaped into glyph runs; with none registered
+/// every run stays a text primitive.
 pub fn build_display_list_value(input: &str) -> Result<display_list::DisplayList, String> {
     MEASURE_FONTS
         .with(|store| display_list::build_display_list_value_with_fonts(input, &store.borrow()))
@@ -359,7 +392,7 @@ pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String
 /// wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
 /// `region` is `"body" | "header" | "footer"`; `r_id` scopes a header/footer to
 /// one HF part (empty for body / match-any). The `from`/`to` refer to that
-/// region's doc. The legacy `range_rects_json` export stays body-only.
+/// region's doc. The plain `range_rects_json` export stays body-only.
 #[wasm_bindgen]
 pub fn range_rects_region_json(
     display_list: &str,
@@ -374,7 +407,7 @@ pub fn range_rects_region_json(
 
 /// wasm wrapper over [`hit::hit_test_regions_json`]: region-aware hit test —
 /// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` (or `"null"` for
-/// an out-of-range page). The legacy `hit_test_json` export stays body-only.
+/// an out-of-range page). The plain `hit_test_json` export stays body-only.
 #[wasm_bindgen]
 pub fn hit_test_regions_json(
     display_list: &str,

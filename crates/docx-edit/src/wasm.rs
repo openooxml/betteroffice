@@ -1,4 +1,40 @@
-//! wasm-bindgen session boundary over [`EditingDoc`].
+//! wasm-bindgen session boundary over [`EditingDoc`] — the only JS-visible
+//! surface of this crate, compiled behind `--features wasm`.
+//!
+//! Conventions every entry point below obeys, so its own docs need only state
+//! what is specific to it:
+//!
+//! - **Values cross as JSON strings or raw bytes.** Arguments named `*_json`
+//!   are JSON text; a method returning `Result<String, _>` returns JSON text.
+//!   Yrs updates and binary display frames cross as byte slices / `Vec<u8>`
+//!   (wasm-bindgen exposes the latter as a transferable `Uint8Array`).
+//! - **Errors cross as `Err(JsValue)` carrying a display string** and nothing
+//!   else — there is no error code or structured payload. Every entry point
+//!   taking JSON fails that way on malformed JSON or a wrong value type, and
+//!   every entry point addressing content fails that way on an unknown story,
+//!   an unknown paragraph, or an out-of-range offset. A failed call leaves the
+//!   document untouched: arguments are fully validated before any mutation,
+//!   and each op commits in a single yrs transaction.
+//! - **Content is addressed as `Loc { story, paraId, offset }`.** `offset`
+//!   counts UTF-16 units within ONE paragraph and lives in `[0, para_len]`,
+//!   where `para_len` excludes the paragraph's own pilcrow; `offset ==
+//!   para_len` addresses the paragraph mark. A paragraph id is resolved
+//!   story-scoped, so an id living in another story reads as "not found".
+//!   Story-global indices exist only transiently inside a call and are never
+//!   returned.
+//! - **A range is two Locs in one story** and is half-open, `[start, end)`.
+//!   Because pilcrows occupy a unit, a range whose ends sit in different
+//!   paragraphs spans the boundary marks.
+//! - **Suggesting mode is the optional `(author_name, author_date)` pair.**
+//!   Pass both to record the edit as a tracked change stamped with that author
+//!   and ISO date, or neither for a plain local edit; passing one alone is an
+//!   error. Ops without the pair are always plain and local.
+//! - **Receipts are JSON objects.** An op that can stamp a tracked change
+//!   reports `{"revisionId": string|null}` — null outside suggesting mode.
+//!   Ops with no receipt content return `()`.
+//!
+//! Story lengths, selection indices and every other unit count in this module
+//! are UTF-16 units in which each embed, pilcrows included, counts as one.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -173,7 +209,8 @@ fn apply_mark(doc: &EditingDoc, range: StoryRange, mark_json: &str) -> Result<()
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| js_err("mark JSON requires a string \"type\""))?;
-    // Formatting uses a plain local context.
+    // Formatting is never itself a tracked change, so the caret's suggest mode
+    // is irrelevant here.
     let ctx = EditCtx::local(String::new(), String::new());
     let simple = match kind {
         "bold" => Some(SimpleFormat::Bold),
@@ -1021,8 +1058,9 @@ impl EditSession {
 
 #[wasm_bindgen]
 impl EditSession {
-    /// Creates a replica. `client_id` must be a non-negative safe integer —
-    /// the host allocates it (yjs-style random 32-bit ids are fine).
+    /// Creates a replica. The host allocates `client_id` (a random 32-bit id
+    /// is fine) and must keep it unique across the replicas that will merge.
+    /// Errors unless it is a non-negative safe integer.
     #[wasm_bindgen(constructor)]
     pub fn new(client_id: f64) -> Result<EditSession, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -1046,57 +1084,73 @@ impl EditSession {
         })
     }
 
+    /// This replica's client id, as passed to the constructor.
     pub fn client_id(&self) -> f64 {
         self.engine.doc().client_id() as f64
     }
 
-    /// Register font bytes in this editing wasm's resident measurement store.
-    /// Returned ids are valid for measurement and display work in this module.
+    /// Registers raw sfnt bytes in this session's resident measurement store
+    /// and returns the font id that measurement and display inputs reference.
+    /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
         docx_layout::register_measure_font(bytes)
     }
 
-    /// Clear this editing wasm's resident measurement fonts.
+    /// Drops every registered measurement font (ids restart at zero) and
+    /// invalidates the retained paragraph measurement templates, so the next
+    /// edit must pass back through the full layout path.
     pub fn clear_measure_fonts(&self) {
         docx_layout::clear_measure_fonts();
         self.engine.clear_measurement_templates();
     }
 
-    /// Paragraph-measure compatibility export on the resident engine module.
+    /// Measurement input JSON in, `ParagraphExtent` JSON out. Also records the
+    /// paragraph's immutable width/font envelope under its stable block id, so
+    /// a later resident edit re-measures only the changed block. Errors with
+    /// the engine's message for input it cannot measure.
     pub fn measure_paragraph_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine.measure_paragraph_json(input).map_err(js_err)
     }
 
-    /// Paginates and retains measured input and layout.
+    /// `{ measured, options }` JSON in, `Layout` JSON out. Both the measured
+    /// input and the resulting layout are retained for the resident edit path.
+    /// Errors on unparseable input or on layout failure.
     pub fn layout_document_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_document_json(input)
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Region-layout input JSON in, the font families and sizes that input
+    /// needs as JSON out, so the host can register fonts before laying out.
     pub fn layout_font_requirements_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_font_requirements_json(input)
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// Paginate and compose section/page regions inside the resident engine.
+    /// Region-layout input JSON in, a paginated envelope with section and page
+    /// regions already composed as JSON out — ready for the display builder
+    /// with no host-side layout mutation. Retains the pass for resident edits.
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_document_with_regions_json(input)
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// Build display primitives against the same resident font store used by
-    /// this session's measurement path.
+    /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
+    /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .build_display_list_json(input)
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// Binary FrameDelta v1 display output. The returned `Vec<u8>` is exposed
-    /// by wasm-bindgen as a transferable-friendly `Uint8Array`.
+    /// Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
+    /// a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
+    /// frame the caller currently holds; pass `0` for the first frame. A
+    /// mismatch makes the engine emit a full frame instead of a delta. Errors
+    /// unless the epoch is a non-negative safe integer, and on build failure.
     pub fn build_display_list_frame(
         &self,
         input: &str,
@@ -1117,6 +1171,10 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// `{"frameEpoch", "caretRect": {…}|null}` for the session's own collapsed
+    /// body selection. `caretRect` is null whenever there is no selection, the
+    /// selection is not a collapsed body caret, or the retained layout has no
+    /// geometry for it. `frameEpoch` identifies the frame the rect belongs to.
     pub fn resident_caret_snapshot_json(&self) -> Result<String, JsValue> {
         let paragraph = {
             let selection = self.selection.borrow();
@@ -1154,9 +1212,17 @@ impl EditSession {
         serde_json::to_string(&snapshot).map_err(js_err)
     }
 
-    /// Apply one ordinary collapsed body-text insertion and return the
-    /// resulting FrameDelta. Selection, measurement inputs, pagination
-    /// checkpoints, and display state all remain resident in this session.
+    /// Applies one ordinary insertion at this session's collapsed selection
+    /// and returns the resulting binary `FrameDelta`. The inserted text
+    /// inherits the formatting at the caret; selection, measurement inputs,
+    /// pagination checkpoints and display state all stay resident, so nothing
+    /// but the frame crosses the boundary.
+    ///
+    /// Errors when `text` is empty or contains `\r`/`\n`, when
+    /// `expected_frame_epoch` is not a non-negative safe integer, when there is
+    /// no resident selection or it no longer resolves, when the selection is
+    /// not collapsed, or when the resident layout state cannot absorb an edit
+    /// in that paragraph. The caller must then run the full layout path.
     pub fn apply_input(&self, text: &str, expected_frame_epoch: f64) -> Result<Vec<u8>, JsValue> {
         const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
         if text.is_empty() || text.contains(['\r', '\n']) {
@@ -1217,8 +1283,10 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Instrumented twin of `apply_input`, used only by opt-in browser perf
-    /// traces. Keeping this separate leaves the production hot path timer-free.
+    /// Instrumented twin of [`EditSession::apply_input`]: identical arguments,
+    /// result and error contract, but it also records stage timings for
+    /// [`EditSession::apply_input_profile_json`]. Separate so the ordinary
+    /// input path pays no timer calls.
     pub fn apply_input_profiled(
         &self,
         text: &str,
@@ -1303,8 +1371,15 @@ impl EditSession {
         Ok(frame)
     }
 
-    /// Apply one ordinary collapsed character deletion (or adjacent paragraph
-    /// merge at a boundary) and return the resulting resident FrameDelta.
+    /// Deletes one character at this session's collapsed selection and returns
+    /// the resulting binary `FrameDelta`. `direction` is `"backward"` or
+    /// `"forward"`; a surrogate pair is removed whole. At a paragraph boundary
+    /// this merges with the neighbouring paragraph instead.
+    ///
+    /// Errors on an unknown `direction`, when `expected_frame_epoch` is not a
+    /// non-negative safe integer, under the same selection and readiness
+    /// conditions as [`EditSession::apply_input`], and when there is no
+    /// character to delete in that direction (document start or end).
     pub fn apply_delete(
         &self,
         direction: &str,
@@ -1327,8 +1402,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Instrumented twin of `apply_delete`, used only by opt-in browser perf
-    /// traces. Keeping this separate leaves the production hot path timer-free.
+    /// Instrumented twin of [`EditSession::apply_delete`]: identical arguments,
+    /// result and error contract, but it also records stage timings for
+    /// [`EditSession::apply_input_profile_json`].
     pub fn apply_delete_profiled(
         &self,
         direction: &str,
@@ -1373,12 +1449,19 @@ impl EditSession {
         Ok(frame)
     }
 
-    /// Last opt-in `apply_input_profiled` stage timings as a compact JSON object.
+    /// Stage timings of the last profiled apply, in milliseconds:
+    /// `{"selectionMs","editMs","lowerMs","measureMs","paginateMs",
+    /// "displayInputMs","displayBuildMs","displayFinalizeMs","displayMs",
+    /// "encodeMs"}`. `{}` before the first profiled call.
     pub fn apply_input_profile_json(&self) -> String {
         self.last_apply_profile_json.borrow().clone()
     }
 
-    /// Hit-test without re-serializing the resident display list through JS.
+    /// Region-aware hit test against the resident display list, so no
+    /// display-list JSON crosses the boundary. `x`/`y` are page-local px.
+    /// Returns `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}`, or
+    /// `"null"` for a page index outside the frame. A header/footer `pos`
+    /// refers to that header/footer's own document, not the body.
     pub fn display_hit_test_regions_json(
         &self,
         page_index: u32,
@@ -1390,6 +1473,12 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Nearest caret position on the adjacent visual line. `direction` is
+    /// `"up"` or `"down"`; `goal_x` is the page-local x the caret is trying to
+    /// hold across successive moves (a non-finite value falls back to the
+    /// caret's own x). Returns `{"position","goalX"}`, or `"null"` when there
+    /// is no line in that direction. Errors on an unknown `direction` and when
+    /// no display list is resident.
     pub fn display_vertical_move_json(
         &self,
         position: f64,
@@ -1401,14 +1490,23 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// Body range geometry without a display-list JSON round trip.
+    /// Highlight rectangles for a body document range against the resident
+    /// display list: a JSON array of `{pageIndex,x,y,width,height}` in
+    /// page-local px, one entry per page the range touches. Body positions
+    /// only. Errors when no display list is resident.
     pub fn display_range_rects_json(&self, from: f64, to: f64) -> Result<String, JsValue> {
         self.engine
             .display_range_rects_json(from as i64, to as i64)
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// Region-scoped range geometry without a display-list JSON round trip.
+    /// Same rectangles as [`EditSession::display_range_rects_json`], scoped to
+    /// a region. `region` is `"body"`, `"header"` or `"footer"`; `r_id` names
+    /// one header/footer part, and an empty string matches any. `from`/`to`
+    /// are positions in THAT region's document, and a header/footer part
+    /// paints on every page carrying it, so the result holds one rect set per
+    /// such page, each tagged with its `pageIndex`. Errors on an unknown
+    /// `region` and when no display list is resident.
     pub fn display_range_rects_region_json(
         &self,
         region: &str,
@@ -1421,28 +1519,47 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// Resolve one glyph outline from the session's resident font store.
+    /// One glyph outline from this session's resident font store:
+    /// `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
+    /// units, y-up. `font_id` comes from
+    /// [`EditSession::register_measure_font`] and `glyph_id` from shaping.
+    /// Errors when the glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
         docx_layout::outline_glyph_json(font_id, glyph_id)
     }
 
-    /// Hydrates this replica from an encoded yrs update (the bytes form of
-    /// `load` — typically another replica's `encode_state()` output).
+    /// Hydrates this replica from an encoded yrs v1 update, typically another
+    /// replica's [`EditSession::encode_state`] output. Identical to
+    /// [`EditSession::apply_update`]; the separate name marks the initial-load
+    /// call site. Errors on a malformed update.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
     }
 
-    /// Parses a DOCX, seeds its stories, and returns thin host metadata.
+    /// [`EditSession::open_docx`] with seeding always on.
     pub fn seed_from_docx(&self, bytes: &[u8]) -> Result<String, JsValue> {
         self.open_docx_inner(bytes, true)
     }
 
-    /// Parses a DOCX and optionally seeds its editable stories.
+    /// Parses a DOCX package, optionally seeds its editable stories into this
+    /// replica, and retains the source bytes for
+    /// [`EditSession::materialize_docx`].
+    ///
+    /// Returns `{"envelope","referencedFonts":[string, …]}`. The envelope is
+    /// the parsed package with the parts the host does not need stripped —
+    /// body content, header/footer and note content, numbering, media and
+    /// charts are emptied, section entries keep only their properties — so
+    /// styles, theme, settings, fonts and relationships still cross while the
+    /// bulk of the document stays in Rust. Errors on bytes that are not a
+    /// readable DOCX.
     pub fn open_docx(&self, bytes: &[u8], seed_stories: bool) -> Result<String, JsValue> {
         self.open_docx_inner(bytes, seed_stories)
     }
 
-    /// Materializes the retained canonical package for compatibility APIs.
+    /// Re-parses the DOCX bytes retained by the last
+    /// [`EditSession::open_docx`] and returns the COMPLETE package envelope as
+    /// JSON, or `None` when no DOCX has been opened. Unlike `open_docx` this
+    /// keeps every part; it reflects the source file, not later edits.
     pub fn materialize_docx(&self) -> Result<Option<String>, JsValue> {
         let source = self.docx_source.borrow();
         let Some(source) = source.as_ref() else {
@@ -1455,8 +1572,11 @@ impl EditSession {
 
     /// Seeds stories from JSON:
     /// `[{"storyId","paragraphs":[{"text","pStyle"?,"alignment"?}, …]}, …]`.
-    /// Paragraph text must not contain paragraph breaks. Returns
-    /// `{storyId: [paraId, …]}` in document order.
+    /// `pStyle` defaults to `"Normal"` and `alignment` to `"left"`; paragraph
+    /// text must not contain paragraph breaks. Receipt:
+    /// `{storyId: [paraId, …]}` with each story's paragraphs in document
+    /// order. Errors when a story entry has no `storyId`, no `paragraphs`
+    /// array, or an empty one, and when a story id already exists.
     pub fn load_json(&self, stories_json: &str) -> Result<String, JsValue> {
         let value: Value = serde_json::from_str(stories_json).map_err(js_err)?;
         let entries = value
@@ -1486,7 +1606,9 @@ impl EditSession {
             let seed_ctx = EditCtx::local(String::new(), String::new());
             for paragraph in &paragraphs[1..] {
                 let (text, p_style, alignment) = seed_paragraph(paragraph);
-                // The first split half keeps its ID and the second receives a new ID.
+                // Splitting at the final pilcrow appends: the first half keeps
+                // the original paraId, so the appended paragraph — whose
+                // properties this seeds — is the SECOND half.
                 let boundary = self.engine.doc().story_len(story_id).map_err(js_err)? - 1;
                 if !text.is_empty() {
                     self.engine
@@ -1535,15 +1657,21 @@ impl EditSession {
         serde_json::to_string(&Value::Object(receipt)).map_err(js_err)
     }
 
-    /// Full document state as one yrs v1 update (Yjs wire format).
+    /// The full document state as one yrs v1 update. Hand it to
+    /// [`EditSession::load`] on a fresh replica to reproduce this document.
     pub fn encode_state(&self) -> Vec<u8> {
         self.engine.doc().encode_state_as_update_v1()
     }
 
+    /// This replica's yrs v1 state vector — what a peer sends so
+    /// [`EditSession::encode_diff`] can compute the update it is missing.
     pub fn encode_state_vector(&self) -> Vec<u8> {
         self.engine.doc().encode_state_vector_v1()
     }
 
+    /// The yrs v1 update carrying everything this replica has that the peer
+    /// described by `remote_state_vector` does not. Errors on a malformed
+    /// state vector.
     pub fn encode_diff(&self, remote_state_vector: &[u8]) -> Result<Vec<u8>, JsValue> {
         self.engine
             .doc()
@@ -1551,11 +1679,19 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Applies a remote/incremental yrs v1 update.
+    /// Applies a remote or incremental yrs v1 update. It commits without a
+    /// local origin, so this replica's undo manager never claims it. Errors on
+    /// a malformed update.
     pub fn apply_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.engine.doc().apply_update_v1(update).map_err(js_err)
     }
 
+    /// [`EditSession::apply_update`] plus an inference about where the peer
+    /// that authored it is typing, for caret presence. Returns
+    /// `{"clientId","story","paraId","endOffset"}` for the end of that peer's
+    /// last text insertion, or `"null"` when the update carries work from more
+    /// than one client, ends in a non-text insertion, or inserts nothing.
+    /// Errors on a malformed update.
     pub fn apply_update_with_inference(&self, update: &[u8]) -> Result<String, JsValue> {
         let inference =
             apply_update_with_typing_inference(self.engine.doc(), update).map_err(js_err)?;
@@ -1580,10 +1716,12 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Subscribes `callback(update: Uint8Array)` to every committed
-    /// transaction (v1 encoding — feed it straight to `apply_update` on a
-    /// peer). One observer per session; a second call replaces the first.
-    /// The facade fans out to multiple JS listeners over this single hook.
+    /// Subscribes `callback(update: Uint8Array, isRemote: 0|1)` to every
+    /// committed transaction. `update` is v1-encoded — feed it straight to
+    /// [`EditSession::apply_update`] on a peer — and is copied out of wasm
+    /// memory, so JS may hold it across later edits. The second argument is
+    /// `1` when the transaction had no local origin. One observer per session;
+    /// a second call replaces the first, and a throwing callback is ignored.
     pub fn set_update_observer(&mut self, callback: &Function) -> Result<(), JsValue> {
         let callback = callback.clone();
         let subscription = self
@@ -1607,6 +1745,9 @@ impl EditSession {
         self.update_observer = None;
     }
 
+    /// Starts queueing committed transactions for
+    /// [`EditSession::drain_update_event`] instead of pushing them through a
+    /// callback. Idempotent while observation is running.
     pub fn start_update_event_observation(&mut self) -> Result<(), JsValue> {
         if self.update_event_observer.is_some() {
             return Ok(());
@@ -1631,6 +1772,10 @@ impl EditSession {
         Ok(())
     }
 
+    /// Pops the oldest queued transaction, in arrival order. Byte 0 is `1`
+    /// when the transaction had no local origin and `0` otherwise; the rest is
+    /// the v1 update. Empty when the queue is drained or observation never
+    /// started.
     pub fn drain_update_event(&self) -> Vec<u8> {
         self.update_event_observer
             .as_ref()
@@ -1638,15 +1783,18 @@ impl EditSession {
             .unwrap_or_default()
     }
 
+    /// Stops queueing and discards anything not yet drained.
     pub fn clear_update_event_observation(&mut self) {
         self.update_event_observer = None;
     }
 
     // -- local input state (undo + awareness selection) --
 
-    /// Starts local-origin undo tracking for one story. Hosts call this lazily
-    /// after import/seeding but before the first direct input operation, so the
-    /// initial document is not an undo step.
+    /// Starts local-origin undo tracking for one story, replacing any scope
+    /// already tracked (and its history). Call this after import or seeding but
+    /// before the first edit, so the initial document is not an undo step.
+    /// Re-tracking the same story is a no-op that preserves the history.
+    /// Errors on an unknown story.
     pub fn track_undo(&self, story: &str) -> Result<(), JsValue> {
         if self.undo_story.borrow().as_deref() == Some(story) {
             return Ok(());
@@ -1657,9 +1805,12 @@ impl EditSession {
         Ok(())
     }
 
-    /// Starts local undo tracking for a structural table transaction. Besides
-    /// the parent story (which owns the table embed), the stories root must be
-    /// in scope so undo/redo also removes/restores cell-story map entries.
+    /// Starts local undo tracking for a structural table edit in `story`.
+    /// Besides the parent story, which owns the table embed, this widens the
+    /// scope to the stories root so undo and redo also remove and restore the
+    /// cell stories the edit created or destroyed. Tracked separately from
+    /// [`EditSession::track_undo`] on the same story, so switching between
+    /// them starts a fresh history. Errors on an unknown story.
     pub fn track_table_undo(&self, story: &str) -> Result<(), JsValue> {
         let scope_key = format!("table:{story}");
         if self.undo_story.borrow().as_deref() == Some(scope_key.as_str()) {
@@ -1679,8 +1830,9 @@ impl EditSession {
         Ok(())
     }
 
-    /// Reverts the latest local-origin transaction. Remote/system mirror
-    /// transactions are excluded by `DocUndoManager`'s tracked-origin policy.
+    /// Reverts the latest local-origin transaction and reports whether
+    /// anything was reverted. Remote and system transactions are excluded by
+    /// the manager's tracked-origin policy; `false` before a story is tracked.
     pub fn undo(&self) -> bool {
         self.undo
             .borrow_mut()
@@ -1688,7 +1840,8 @@ impl EditSession {
             .is_some_and(DocUndoManager::undo)
     }
 
-    /// Reapplies the latest locally undone transaction.
+    /// Reapplies the latest locally undone transaction and reports whether
+    /// anything was reapplied.
     pub fn redo(&self) -> bool {
         self.undo
             .borrow_mut()
@@ -1696,6 +1849,7 @@ impl EditSession {
             .is_some_and(DocUndoManager::redo)
     }
 
+    /// Whether [`EditSession::undo`] would revert something.
     pub fn can_undo(&self) -> bool {
         self.undo
             .borrow()
@@ -1703,6 +1857,7 @@ impl EditSession {
             .is_some_and(DocUndoManager::can_undo)
     }
 
+    /// Whether [`EditSession::redo`] would reapply something.
     pub fn can_redo(&self) -> bool {
         self.undo
             .borrow()
@@ -1726,8 +1881,11 @@ impl EditSession {
             .map_or(0, |undo| undo.redo_depth() as u32)
     }
 
-    /// Stores this peer's anchor/head as sticky positions. `Assoc::After`
-    /// makes a collapsed caret advance with text inserted at the caret.
+    /// Stores this peer's anchor and head as sticky positions, replacing any
+    /// previous selection. Both endpoints must lie in `story`. The positions
+    /// live outside the yrs document, so they are never serialized as content
+    /// or carried in an update. `Assoc::After` makes a collapsed caret advance
+    /// with text inserted at it.
     #[allow(clippy::too_many_arguments)]
     pub fn set_selection(
         &self,
@@ -1756,7 +1914,10 @@ impl EditSession {
         Ok(())
     }
 
-    /// Encodes one paragraph location as a sticky position.
+    /// Encodes one Loc as opaque sticky-position bytes that keep pointing at
+    /// the same content as the story is edited. Publish them over an awareness
+    /// transport and resolve them with
+    /// [`EditSession::resolve_sticky_position`].
     pub fn encode_sticky_position(
         &self,
         story: &str,
@@ -1772,7 +1933,9 @@ impl EditSession {
         Ok(encode_sticky(&position))
     }
 
-    /// Resolves one encoded sticky position to a paragraph location.
+    /// Resolves sticky bytes from [`EditSession::encode_sticky_position`] back
+    /// to `{"story","paraId","offset"}`. Errors when the bytes are malformed
+    /// or the position no longer resolves in `story`.
     pub fn resolve_sticky_position(&self, story: &str, position: &[u8]) -> Result<String, JsValue> {
         let (index, _) = resolve_sticky_selection(self.engine.doc(), story, position, position)
             .map_err(js_err)?;
@@ -1785,8 +1948,9 @@ impl EditSession {
         .to_string())
     }
 
-    /// Resolves this peer's current sticky selection as two public Locs, or
-    /// `null` before the host establishes an initial selection.
+    /// This peer's current selection as `{"anchor":{"story","paraId","offset"},
+    /// "head":{…}}`, or `"null"` before [`EditSession::set_selection`] is
+    /// called. Errors when an endpoint no longer resolves.
     pub fn selection(&self) -> Result<String, JsValue> {
         let selection = self.selection.borrow();
         let Some(selection) = selection.as_ref() else {
@@ -1822,6 +1986,10 @@ impl EditSession {
         .to_string())
     }
 
+    /// This peer's selection in transportable form:
+    /// `{"story","anchor":[byte, …],"head":[byte, …]}` with sticky-encoded
+    /// endpoints, or `"null"` before a selection is set. A peer resolves it
+    /// with [`EditSession::resolve_encoded_selection`].
     pub fn encoded_selection(&self) -> Result<String, JsValue> {
         let selection = self.selection.borrow();
         let Some(selection) = selection.as_ref() else {
@@ -1835,6 +2003,9 @@ impl EditSession {
         .to_string())
     }
 
+    /// Resolves another peer's encoded selection against this replica's
+    /// current state: `{"anchor":{"story","paraId","offset"},"head":{…}}`.
+    /// Errors on malformed bytes or an endpoint that no longer resolves.
     pub fn resolve_encoded_selection(
         &self,
         story: &str,
@@ -1860,9 +2031,13 @@ impl EditSession {
         .to_string())
     }
 
-    /// Stores a rectangular anchor-cell → head-cell selection outside the yrs
-    /// document. `range_json` is a [`TableRange`]. The table embed is held by a
-    /// sticky index and the endpoints by stable cell-story identity.
+    /// Stores a rectangular anchor-cell to head-cell selection outside the yrs
+    /// document. `range_json` is a [`TableRange`]:
+    /// `{"anchor":{"story","tableIndex","row","column"},"head":{…}}`. The table
+    /// embed is held by a sticky index and each endpoint by its cell story's
+    /// stable identity, so the selection survives unrelated edits and follows
+    /// inserted or deleted rows and columns. Errors when the two endpoints are
+    /// not in the same table, or when either cell does not resolve.
     pub fn set_cell_selection(&self, range_json: &str) -> Result<(), JsValue> {
         let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
         if range.anchor.story != range.head.story
@@ -1909,8 +2084,9 @@ impl EditSession {
         Ok(())
     }
 
-    /// Resolves the current local cell selection, or `null` before the host
-    /// establishes one. Deleted endpoints clamp to a surviving nearby cell.
+    /// The current local cell selection as a [`TableRange`], or `"null"`
+    /// before one is set. An endpoint whose cell was deleted clamps to a
+    /// surviving nearby cell. Errors when the table itself no longer resolves.
     pub fn cell_selection(&self) -> Result<String, JsValue> {
         let selection = self.cell_selection.borrow();
         let Some(selection) = selection.as_ref() else {
@@ -1951,8 +2127,10 @@ impl EditSession {
         serde_json::to_string(&TableRange { anchor, head }).map_err(js_err)
     }
 
-    /// Adds a story with one paragraph. Receipt: `{"paraId"}` (the final
-    /// pilcrow's paragraph).
+    /// Adds a story holding one paragraph with `initial_text` (which must not
+    /// contain paragraph breaks), `p_style` and `alignment`. Receipt:
+    /// `{"paraId"}` — the paragraph ending at the story's pilcrow. Errors when
+    /// the story id already exists.
     pub fn create_story(
         &self,
         story_id: &str,
@@ -1968,14 +2146,31 @@ impl EditSession {
         Ok(json!({ "paraId": para_id }).to_string())
     }
 
-    /// Removes one complete story (used for unreachable table-cell stories).
+    /// Removes one complete story and its content. Errors on an unknown story.
     pub fn delete_story(&self, story_id: &str) -> Result<(), JsValue> {
         self.engine.doc().delete_story(story_id).map_err(js_err)
     }
 
-    // -- native table ops (cell-grid addressing; JSON receipts) --
+    // -- native table ops --
+    //
+    // Tables are addressed in the resolved rectangular grid, not by OOXML row
+    // and cell order: `TableLocator` is `{"story","tableIndex"}` with the
+    // zero-based ordinal of the table embed in its story, `CellLoc` adds
+    // `{"row","column"}`, and `TableRange` is `{"anchor":CellLoc,"head":
+    // CellLoc}` covering the rectangle they span. Each cell's content lives in
+    // its own story, so structural edits create and destroy stories.
+    //
+    // Every op below returns the same receipt:
+    // `{"table":TableLocator,"rows","columns","createdStoryIds":[string, …],
+    // "deletedStoryIds":[string, …],"newParaIds":[string, …],
+    // "deletedTable":bool,"revisionIds":[string, …]}` — `rows`/`columns` are
+    // the grid AFTER the op, the story lists let the host follow cell content
+    // in and out of existence, and `revisionIds` is non-empty only for the ops
+    // that accept a suggesting author. All of them additionally error on an
+    // unknown table or a cell outside the grid.
 
-    /// Inserts a rectangular structural table at a paragraph-keyed location.
+    /// Inserts a `rows` x `columns` table at `(story, para_id, offset)`,
+    /// creating one story per cell. Errors when either dimension is zero.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_table(
         &self,
@@ -1997,7 +2192,8 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Inserts a row above (`after = false`) or below (`after = true`) a cell.
+    /// Inserts a row above (`after = false`) or below (`after = true`) the
+    /// cell `at_json` names. `at_json` is a [`CellLoc`].
     pub fn insert_row(
         &self,
         at_json: &str,
@@ -2015,7 +2211,8 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Inserts a column left (`after = false`) or right (`after = true`) of a cell.
+    /// Inserts a column left (`after = false`) or right (`after = true`) of
+    /// the cell `at_json` ([`CellLoc`]) names. Always a plain local edit.
     pub fn insert_column(&self, at_json: &str, after: bool) -> Result<String, JsValue> {
         let at: CellLoc = serde_json::from_str(at_json).map_err(js_err)?;
         let receipt = self
@@ -2026,7 +2223,8 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Deletes every row covered by an explicit cell range.
+    /// Deletes every row the [`TableRange`] `range_json` covers. In suggesting
+    /// mode the rows are marked `trDel` instead of removed.
     pub fn delete_row(
         &self,
         range_json: &str,
@@ -2039,7 +2237,8 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Deletes every column covered by an explicit cell range.
+    /// Deletes every column the [`TableRange`] `range_json` covers, along with
+    /// the stories of the cells removed. Always a plain local edit.
     pub fn delete_column(&self, range_json: &str) -> Result<String, JsValue> {
         let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
         let receipt = self
@@ -2050,7 +2249,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Removes one complete table plus all of its reachable cell stories.
+    /// Removes the table `table_json` ([`TableLocator`]) names plus every one
+    /// of its reachable cell stories. Always a plain local edit; the receipt
+    /// has `deletedTable: true`.
     pub fn delete_table(&self, table_json: &str) -> Result<String, JsValue> {
         let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
         let receipt = self
@@ -2061,7 +2262,10 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Merges a rectangular cell range into its top-left cell.
+    /// Merges the rectangle the [`TableRange`] `range_json` covers into its
+    /// top-left cell, whose story survives; the other cells' stories are
+    /// deleted. Always a plain local edit. Errors when the range covers fewer
+    /// than two cells or has no top-left anchor cell.
     pub fn merge_cells(&self, range_json: &str) -> Result<String, JsValue> {
         let range: TableRange = serde_json::from_str(range_json).map_err(js_err)?;
         let receipt = self
@@ -2072,8 +2276,12 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Splits the cell covering `at` into the requested grid. Omitted
-    /// dimensions unmerge the cell into its existing covered slots.
+    /// Splits the cell `at_json` ([`CellLoc`]) covers into a `rows` x
+    /// `columns` grid; the original story stays in the top-left slot and every
+    /// other slot gets a fresh one-paragraph cell story. Omitting both
+    /// dimensions unmerges the cell into the slots it already covers, which
+    /// then requires a merged cell. Always a plain local edit. Errors on a
+    /// zero dimension or a grid smaller than the cell already covers.
     pub fn split_cell(
         &self,
         at_json: &str,
@@ -2089,7 +2297,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Sets/clears selected cells' background color (hex without or with `#`).
+    /// Sets every selected cell's background to `color` (hex, with or without
+    /// a leading `#`), or clears it when `color` is absent. `range_json` is a
+    /// [`TableRange`]. Always a plain local edit.
     pub fn set_cell_shading(
         &self,
         range_json: &str,
@@ -2104,7 +2314,10 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Merges a JSON cell-format patch into every selected cell's `tcPr`.
+    /// Merges the JSON object `patch_json` into every selected cell's `tcPr`;
+    /// a `null` value removes that key. `range_json` is a [`TableRange`].
+    /// Always a plain local edit. Errors when the patch touches `rowspan`,
+    /// `colspan`, `gridSpan` or `vMerge`, which only merge and split may set.
     pub fn set_cell_text_format(
         &self,
         range_json: &str,
@@ -2120,7 +2333,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Replaces the selected cells' complete border property object.
+    /// Replaces every selected cell's complete `tcPr.borders` object with the
+    /// JSON object `borders_json`. `range_json` is a [`TableRange`]. Always a
+    /// plain local edit.
     pub fn set_cell_borders(
         &self,
         range_json: &str,
@@ -2136,7 +2351,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Sets one grid-column width in twips.
+    /// Sets the grid width, in twips, of the column holding the cell `at_json`
+    /// ([`CellLoc`]) names. Always a plain local edit. Errors unless
+    /// `width_twips` is finite and positive.
     pub fn set_column_width(&self, at_json: &str, width_twips: f64) -> Result<String, JsValue> {
         let at: CellLoc = serde_json::from_str(at_json).map_err(js_err)?;
         let receipt = self
@@ -2147,7 +2364,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Sets the table-wide preferred width in twips.
+    /// Sets the preferred width, in twips, of the table `table_json`
+    /// ([`TableLocator`]) names. Always a plain local edit. Errors unless
+    /// `width_twips` is finite and positive.
     pub fn set_table_width(&self, table_json: &str, width_twips: f64) -> Result<String, JsValue> {
         let table: TableLocator = serde_json::from_str(table_json).map_err(js_err)?;
         let receipt = self
@@ -2158,8 +2377,12 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Inserts paragraph-break-free text at `(story, para_id, offset)`.
-    /// Receipt: `{"revisionId": string|null}` (non-null in suggesting mode).
+    /// Inserts `text` at `(story, para_id, offset)`. It must contain no
+    /// paragraph or line breaks, and it inherits the formatting at the
+    /// insertion point. Receipt: `{"revisionId": string|null}` — non-null in
+    /// suggesting mode, where the text is stamped `ins` and coalesces into an
+    /// adjacent insertion by the same author rather than opening a second
+    /// revision.
     pub fn insert_text(
         &self,
         story: &str,
@@ -2179,11 +2402,10 @@ impl EditSession {
         Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
     }
 
-    /// Deletes `[start, end)` given as two Locs in one story. A range whose
-    /// ends sit in different paragraphs spans the boundary pilcrows, so the
-    /// plain delete also merges (the pilcrow-as-character dividend).
-    /// Suggesting mode retains the content with a `del` revision instead.
-    /// Receipt: `{"revisionId": string|null}`.
+    /// Deletes `[start, end)`. Because a range crossing a paragraph boundary
+    /// includes the boundary pilcrow, a plain delete also merges those
+    /// paragraphs. Suggesting mode removes nothing and stamps the content
+    /// `del` instead. Receipt: `{"revisionId": string|null}`.
     #[allow(clippy::too_many_arguments)]
     pub fn delete_range(
         &self,
@@ -2206,9 +2428,10 @@ impl EditSession {
         Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
     }
 
-    /// Replaces `[start, end)` with text in one transaction. The inserted text
-    /// adopts the first replaced unit's formatting; in suggesting mode the
-    /// deletion and insertion share one revision id.
+    /// Replaces `[start, end)` with `text` in one transaction. The inserted
+    /// text adopts the first replaced unit's formatting; in suggesting mode
+    /// the deletion and the insertion share one revision id. Receipt:
+    /// `{"revisionId": string|null}`.
     #[allow(clippy::too_many_arguments)]
     pub fn replace_range(
         &self,
@@ -2233,8 +2456,11 @@ impl EditSession {
     }
 
     /// Splits a paragraph at `(story, para_id, offset)` by inserting one
-    /// pilcrow. The first half keeps the original paraId, the second is
-    /// re-minted. Receipt:
+    /// pilcrow. The FIRST half keeps the original paraId and the second is
+    /// re-minted. A split at the paragraph end leaves the empty second half
+    /// with only the inherited property subset; a mid-paragraph split keeps
+    /// its properties. Paragraph borders are cleared either way. Suggesting
+    /// mode stamps the new pilcrow `ins` and `pPrIns`. Receipt:
     /// `{"firstParaId","secondParaId","revisionId": string|null}`.
     pub fn split_paragraph(
         &self,
@@ -2260,8 +2486,11 @@ impl EditSession {
     }
 
     /// Merges `para_id` with the FOLLOWING paragraph by deleting (plain) or
-    /// `del`-marking (suggesting) its pilcrow. Errors on the story's final
-    /// paragraph. Receipt: `{"revisionId": string|null}`.
+    /// `del`- and `pPrDel`-marking (suggesting) its pilcrow. On a plain merge
+    /// the survivor adopts the deleted mark's properties and paraId, so the
+    /// earlier paragraph's identity wins. Receipt:
+    /// `{"revisionId": string|null}`. Errors on the story's final paragraph,
+    /// which has no following paragraph to merge with.
     pub fn merge_paragraphs(
         &self,
         story: &str,
@@ -2280,11 +2509,14 @@ impl EditSession {
         Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
     }
 
-    /// Applies one run mark over `[start, end)` (two Locs in one story). Simple
-    /// marks toggle; font/size/color set (see [`apply_mark`]). `mark_json`:
+    /// Applies one run mark over `[start, end)`. `mark_json`:
     /// `{"type":"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"} |
     /// {"type":"fontFamily"|"color","value":string} |
-    /// {"type":"fontSize","value":number}`.
+    /// {"type":"fontSize","value":number}`. The six boolean types TOGGLE —
+    /// they turn on unless the whole range already carries the mark — while
+    /// font family, size and color SET. Formatting is always a plain local
+    /// edit, never a tracked change, so there is no receipt. Errors on an
+    /// unknown `"type"` or a missing/mistyped `"value"`.
     #[allow(clippy::too_many_arguments)]
     pub fn toggle_mark(
         &self,
@@ -2305,8 +2537,26 @@ impl EditSession {
     }
 
     /// Applies a set-valued, tri-state inline formatting delta over
-    /// `[start, end)` in one transaction. Omitted fields are kept and `null`
-    /// fields are cleared.
+    /// `[start, end)` in one transaction. An omitted key keeps the current
+    /// value, `null` clears it, and any other value sets it. `delta_json`:
+    ///
+    /// ```json
+    /// {
+    ///   "bold": true, "italic": true,
+    ///   "underline": true | {"style"?: string, "color"?: string},
+    ///   "strike": true | {"double"?: boolean},
+    ///   "color": {"rgb": string} | {"themeColor": string},
+    ///   "highlight": string,
+    ///   "fontSize": 12,
+    ///   "fontFamily": {"ascii": string, "hAnsi"?: string},
+    ///   "other": {"anyAttr": value}
+    /// }
+    /// ```
+    ///
+    /// `false` clears `bold`, `italic`, `underline` and `strike`. `color`
+    /// takes exactly one of `rgb` or `themeColor`. `other` writes arbitrary
+    /// run attributes, with `null` removing one. Always a plain local edit, so
+    /// there is no receipt. Errors when a key carries a type not listed here.
     #[allow(clippy::too_many_arguments)]
     pub fn format_range(
         &self,
@@ -2328,8 +2578,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Sets or clears the protected hyperlink attribute over `[start, end)`.
-    /// `hyperlink_json` is an object (`{href, tooltip?, rId?}`) or `null`.
+    /// Sets or clears the hyperlink attribute over `[start, end)`.
+    /// `hyperlink_json` is `{"href", "tooltip"?, "rId"?}` or `null` to unlink.
+    /// The attribute is protected: ordinary formatting ops cannot write or
+    /// erase it, only this one. Errors when the JSON is neither an object nor
+    /// `null`.
     #[allow(clippy::too_many_arguments)]
     pub fn set_hyperlink(
         &self,
@@ -2358,8 +2611,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Clears every direct formatting attribute over `[start, end)`, while
-    /// retaining hyperlinks and tracked-change stamps.
+    /// Clears every direct run-formatting attribute over `[start, end)`.
+    /// Protected attributes — hyperlinks and tracked-change stamps — survive,
+    /// as do paragraph properties.
     #[allow(clippy::too_many_arguments)]
     pub fn clear_formatting(
         &self,
@@ -2379,9 +2633,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Applies a paragraph style id to every paragraph intersecting
-    /// `[start, end)`, writing `pStyle` without fabricating a resolved
-    /// paragraph or run formatting projection.
+    /// Writes `style_id` as the `pStyle` of every paragraph intersecting
+    /// `[start, end)`. Only that key changes: this boundary has no style
+    /// resolver, so it never fabricates the paragraph attributes or run marks
+    /// the style definition would imply. In suggesting mode the property
+    /// change is recorded as a `pPrChange` revision.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_paragraph_style(
         &self,
@@ -2410,7 +2666,19 @@ impl EditSession {
     }
 
     /// Applies a tri-state paragraph-property delta to every paragraph
-    /// intersecting `[start, end)` in one transaction.
+    /// intersecting `[start, end)` in one transaction. An omitted key keeps
+    /// the current value and `null` clears it. `attrs_json` recognises
+    /// `alignment`, `lineSpacing`, `lineSpacingRule`, `spaceBefore`,
+    /// `spaceAfter`, `indentLeft`, `indentRight`, `indentFirstLine`,
+    /// `hangingIndent`, `bidi`, `tabs`
+    /// (`[{"position":number,"alignment":string,"leader"?:string}, …]`) and
+    /// `defaultTextFormatting` (an object of run defaults). Any other key —
+    /// whether written at the top level or nested under `"other"` — is stored
+    /// as an opaque paragraph property. Spacing and indents are authored OOXML
+    /// units (twips, line-spacing units), never pixels. In suggesting mode a
+    /// change is recorded as a `pPrChange` revision. Errors when a recognised
+    /// key carries the wrong type, and when a key names schema-managed
+    /// identity such as `paraId`.
     #[allow(clippy::too_many_arguments)]
     pub fn set_paragraph_attrs(
         &self,
@@ -2435,7 +2703,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Inserts one native inline image embed at a paragraph-keyed location.
+    /// Inserts one inline image embed at `(story, para_id, offset)`.
+    /// `payload_json` is the image's authored payload object, stored as given.
+    /// The embed occupies one story unit. Receipt:
+    /// `{"revisionId": string|null}`. Errors when the payload is not an
+    /// object.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_image(
         &self,
@@ -2467,7 +2739,9 @@ impl EditSession {
         Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
     }
 
-    /// Sets the authored `value` on a stable-id content-control embed.
+    /// Sets the authored `value` (any JSON) on the content-control embed
+    /// carrying `embed_id`, searching every story. Errors when no embed has
+    /// that id.
     pub fn set_content_control_value(
         &self,
         embed_id: &str,
@@ -2482,9 +2756,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Sets the authored `value` on a content-control embed at a paragraph-keyed
-    /// position. This is the fallback for valid controls that have no authored
-    /// `w:id`/tag and therefore cannot be addressed by stable payload identity.
+    /// Sets the authored `value` on the content-control embed at
+    /// `(story, para_id, offset)` — the way to reach a control with no
+    /// authored `w:id` or tag, which
+    /// [`EditSession::set_content_control_value`] cannot address. Errors when
+    /// that position holds no embed.
     pub fn set_content_control_value_at(
         &self,
         story: &str,
@@ -2506,7 +2782,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Clears the authored `value` from a stable-id content-control embed.
+    /// Removes the authored `value` from the content-control embed carrying
+    /// `embed_id`, leaving the control itself in place. Errors when no embed
+    /// has that id.
     pub fn clear_content_control_value(&self, embed_id: &str) -> Result<(), JsValue> {
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
@@ -2516,8 +2794,12 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Commits image geometry fields to a stable-id image embed in one
-    /// transaction. `null` fields clear; `other` is flattened into the payload.
+    /// Writes geometry fields onto the image embed carrying `embed_id` in one
+    /// transaction. Every key of the `geometry_json` object becomes a payload
+    /// entry, with `null` clearing it; the entries of a nested `"other"`
+    /// object are flattened into the payload alongside them. Errors when
+    /// `geometry_json` or its `"other"` is not an object, and when no embed
+    /// has that id.
     pub fn set_image_geometry(&self, embed_id: &str, geometry_json: &str) -> Result<(), JsValue> {
         let value: Value = serde_json::from_str(geometry_json).map_err(js_err)?;
         let object = value
@@ -2544,7 +2826,8 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Inserts a native page-break embed at a Loc.
+    /// Inserts a page-break embed at `(story, para_id, offset)`, occupying one
+    /// story unit. Always a plain local edit.
     pub fn insert_page_break(
         &self,
         story: &str,
@@ -2560,7 +2843,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Inserts a native section-break embed at a Loc.
+    /// Inserts a section-break embed at `(story, para_id, offset)`.
+    /// `break_type` must be `"nextPage"`, `"continuous"`, `"oddPage"` or
+    /// `"evenPage"`; anything else errors. Always a plain local edit.
     pub fn insert_section_break(
         &self,
         story: &str,
@@ -2588,7 +2873,9 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Inserts a typed watermark embed at a Loc.
+    /// Inserts a watermark embed at `(story, para_id, offset)`, its payload
+    /// taken verbatim from the `watermark_json` object. Always a plain local
+    /// edit. Errors when the JSON is not an object.
     pub fn insert_watermark(
         &self,
         story: &str,
@@ -2610,8 +2897,11 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Sets one paragraph property (any JSON value) on `para_id`'s pilcrow.
-    /// `paraId` / the embed discriminator are reserved.
+    /// Sets one paragraph property to any JSON value on `para_id`'s pilcrow,
+    /// searching every story. Unlike
+    /// [`EditSession::set_paragraph_attrs`] this writes a single key and never
+    /// records a revision. Errors when the paragraph is unknown and when `key`
+    /// names schema-managed identity (`paraId` or the embed discriminator).
     pub fn set_paragraph_attr(
         &self,
         para_id: &str,
@@ -2625,9 +2915,13 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    /// Adds a sticky-anchored comment. `ranges_json`:
+    /// Adds a comment anchored to one or more ranges. `ranges_json`:
     /// `[{"story","startPara","startOffset","endPara","endOffset"}, …]`;
-    /// `body_json` is any JSON value. Receipt: `{"commentId"}`.
+    /// `body_json` is any JSON value, stored as given. The anchors are sticky,
+    /// so they follow the text they cover, and the comment lives outside the
+    /// story rather than as an attribute on it. Receipt: `{"commentId"}` — a
+    /// freshly minted id. Errors when `ranges_json` is not an array of
+    /// well-formed ranges, or is empty.
     pub fn add_comment(
         &self,
         ranges_json: &str,
@@ -2681,13 +2975,19 @@ impl EditSession {
     }
 
     /// Accepts tracked changes: pending insertions become plain content,
-    /// pending deletions are carried out; `pPrIns` marks clear (the split
-    /// stays), `pPrDel` marks join with the following paragraph (its pPr
-    /// survives). `target_json`: `{"revisionId": string}` for one coalesced
-    /// revision, or
-    /// `{"story","startPara","startOffset","endPara","endOffset"}` for a Loc
-    /// range. Receipt: `{"revisionIds": [string, …]}`. Never stamps a new
-    /// revision.
+    /// pending deletions are carried out; `pPrIns` marks clear so the split
+    /// stays, `pPrDel` marks join with the following paragraph, whose own
+    /// properties survive.
+    ///
+    /// `target_json` is either `{"revisionId": string}`, resolving that one
+    /// coalesced revision wherever it appears in any story, or
+    /// `{"story","startPara","startOffset","endPara","endOffset"}`, resolving
+    /// every tracked change overlapping that range regardless of revision id.
+    /// Receipt: `{"revisionIds": [string, …]}` — the ids actually resolved, in
+    /// resolution order and deduplicated. Resolving applies a revision rather
+    /// than authoring one, so it never stamps a new revision and ignores
+    /// suggesting mode. Errors on an empty range and on a `revisionId` that
+    /// matches nothing.
     pub fn accept_change(&self, target_json: &str) -> Result<String, JsValue> {
         let target = parse_change_target(self.engine.doc(), target_json)?;
         let ctx = EditCtx::local(String::new(), String::new());
@@ -2699,10 +2999,12 @@ impl EditSession {
         Ok(json!({ "revisionIds": receipt.revision_ids }).to_string())
     }
 
-    /// Rejects tracked changes — the inverse of [`EditSession::accept_change`]:
-    /// pending insertions roll back, pending deletions restore their text;
-    /// `pPrIns` marks join back with the following paragraph, `pPrDel` marks
-    /// clear (the split stays). Same target and receipt shapes.
+    /// Rejects tracked changes — the inverse of
+    /// [`EditSession::accept_change`]: pending insertions roll back, pending
+    /// deletions restore their text; `pPrIns` marks join back with the
+    /// following paragraph, `pPrDel` marks clear so the split stays, and a
+    /// `pPrChange` restores the paragraph's previous properties. Same target,
+    /// receipt and error contract.
     pub fn reject_change(&self, target_json: &str) -> Result<String, JsValue> {
         let target = parse_change_target(self.engine.doc(), target_json)?;
         let ctx = EditCtx::local(String::new(), String::new());
@@ -2714,12 +3016,26 @@ impl EditSession {
         Ok(json!({ "revisionIds": receipt.revision_ids }).to_string())
     }
 
-    /// Applies a batch of raw story mutations in one transaction. `ops_json`
-    /// is `[{ "op":"insert"|"delete"|"format"|"insertEmbed"|"setEmbedAttr"
-    /// |"setComment"|"removeComment", "index", … }, …]`. Each op's index, and
-    /// each `setComment` `[start, end)` range, is read against the story state
-    /// after all prior ops in the batch. Tracked-change stamps arrive inside
-    /// `attrs`; comments are keyed by comment id and anchored sticky.
+    /// Applies a batch of raw story mutations in ONE transaction. Unlike every
+    /// other op here these carry no user intent: indices are story-global
+    /// UTF-16 units, not Locs, and nothing is inferred or stamped on the
+    /// caller's behalf. `ops_json` is an array of:
+    ///
+    /// - `{"op":"insert","index","text"?,"attrs"?}`
+    /// - `{"op":"delete","index","len"}`
+    /// - `{"op":"format","index","len","attrs"?}`
+    /// - `{"op":"insertEmbed","index","kind"?,"payload"?,"attrs"?}`
+    /// - `{"op":"setEmbedAttr","index","key","value"?}`
+    /// - `{"op":"setComment","id","ranges":[[start,end], …],"author"?,"date"?,"body"?}`
+    /// - `{"op":"removeComment","id"}`
+    ///
+    /// Each op's `index`, and each `setComment` range, is read against the
+    /// story state AFTER every preceding op in the batch. `attrs` and
+    /// `payload` are JSON objects written verbatim, so tracked-change stamps
+    /// travel inside `attrs`; comments are keyed by the given id and anchored
+    /// sticky. Errors on an unknown `"op"`, a missing or negative `"index"`,
+    /// or a missing required field, and leaves the story untouched — parsing
+    /// completes before the transaction opens.
     pub fn apply_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
         let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
         let entries = value
@@ -2736,11 +3052,31 @@ impl EditSession {
             .map_err(js_err)
     }
 
-    // -- read queries (pure snapshots; JSON out) --
+    // -- read queries --
+    //
+    // Every query below is a pure snapshot of the document as it stands: it
+    // mutates nothing, commits no transaction, and its JSON is fully
+    // materialized before it returns.
 
-    /// Aggregated toolbar/a11y state over one paragraph-addressed story
-    /// range. Toggle marks are `true`, `false`, or `"mixed"`; value marks
-    /// are their uniform value or `null` when absent/mixed.
+    /// Aggregated toolbar and accessibility state over `[start, end)`:
+    ///
+    /// ```json
+    /// {
+    ///   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
+    ///   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+    ///   "paraId": string, "styleId": string|null, "alignment": string|null,
+    ///   "paragraphProperties": {…},
+    ///   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,
+    ///   "isSingleEmbed": bool, "embedKind": string|null, "isImage": bool,
+    ///   "inInsertion": bool, "inDeletion": bool
+    /// }
+    /// ```
+    ///
+    /// A toggle mark is `"mixed"` when the range disagrees about it; a value
+    /// mark is `null` when it is absent OR not uniform, so the two cases are
+    /// not distinguished. `isImage` is `embedKind == "image"`, and
+    /// `inInsertion`/`inDeletion` report whether the range sits inside a
+    /// pending tracked change.
     #[allow(clippy::too_many_arguments)]
     pub fn selection_context(
         &self,
@@ -2783,8 +3119,14 @@ impl EditSession {
         .to_string())
     }
 
-    /// Every tracked-change run/paragraph-mark revision across all stories,
-    /// in deterministic story/position order.
+    /// Every pending tracked change across all stories, in deterministic
+    /// story-then-position order:
+    /// `[{"revisionId","author","date","kind","story","preview",
+    /// "range":{"story","start":{"paraId","offset"},"end":{…}}}, …]`. `kind`
+    /// is one of `"insertion"`, `"deletion"`, `"pPrIns"`, `"pPrDel"`,
+    /// `"pPrChange"`, `"trIns"`, `"trDel"`, `"tableIns"` or `"tableDel"`.
+    /// `preview` holds the first few characters of the affected text, and is
+    /// empty for every structural kind, which covers no text.
     pub fn list_revisions(&self) -> Result<String, JsValue> {
         let revisions = self.engine.doc().list_revisions().map_err(js_err)?;
         let items: Vec<Value> = revisions
@@ -2825,7 +3167,8 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
-    /// Story ids currently in the document, sorted for determinism.
+    /// Every story id in the document, sorted so the order is stable across
+    /// replicas.
     pub fn story_ids(&self) -> Vec<String> {
         let txn = self.engine.doc().yrs_doc().transact();
         let Some(stories) = txn.get_map(STORIES) else {
@@ -2836,29 +3179,40 @@ impl EditSession {
         ids
     }
 
-    /// Story length in UTF-16 units (every embed, pilcrows included, = 1).
+    /// Story length in UTF-16 units, every embed (pilcrows included) counting
+    /// as one. Errors on an unknown story.
     pub fn story_len(&self, story: &str) -> Result<u32, JsValue> {
         self.engine.doc().story_len(story).map_err(js_err)
     }
 
-    /// The story's `canonical-stream-v1` FNV-1a checksum, as a decimal
-    /// string because u64 exceeds the JS safe-integer range.
+    /// The story's `canonical-stream-v1` FNV-1a checksum (see
+    /// [`crate::canonical`]) as a DECIMAL STRING, because a u64 exceeds the
+    /// JavaScript safe-integer range. Two stories with the same authored
+    /// content share a checksum even when their paragraph and comment ids
+    /// differ. Errors on an unknown story.
     pub fn story_checksum(&self, story: &str) -> Result<String, JsValue> {
         crate::story_checksum(self.engine.doc(), story)
             .map(|checksum| checksum.to_string())
             .map_err(js_err)
     }
 
-    /// Lowers a story for layout. Errors with an unsupported-embed message on
-    /// any non-native content. `env_json` carries theme colors, the default tab
-    /// stop and list numeric ids (see [`parse_render_env`]).
+    /// Lowers one story to a `LayoutBlock[]` JSON array — the block, run and
+    /// table vocabulary the layout engine consumes. `env_json` supplies the
+    /// document-level values lowering cannot read off the story:
+    /// `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
+    /// "pageContentHeight":number|null,"numericIds":{yrsId: number}}`, all
+    /// optional. Errors when the story does not end in a pilcrow, holds a
+    /// malformed table, references itself through a cell story, or contains an
+    /// embed lowering does not support.
     pub fn yrs_blocks_for_story(&self, story: &str, env_json: &str) -> Result<String, JsValue> {
         let env = parse_render_env(env_json)?;
         self.engine.lower_story_json(story, &env).map_err(js_err)
     }
 
-    /// `[{"paraId","text","properties"}]` in document order. `properties`
-    /// carries pStyle/alignment plus any op-set extras.
+    /// `[{"paraId","text","properties"}, …]` in document order. `text` is the
+    /// paragraph's plain text without its pilcrow; `properties` is the
+    /// pilcrow's authored property map (`pStyle`, `alignment` and whatever
+    /// else has been set on it). Errors on an unknown story.
     pub fn paragraphs(&self, story: &str) -> Result<String, JsValue> {
         let paragraphs = self.engine.doc().paragraphs(story).map_err(js_err)?;
         let items = paragraphs
@@ -2874,10 +3228,11 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
-    /// Compact paragraph-position projection in one story traversal:
-    /// `[{"paraId","length"}]`. Length counts UTF-16 text and inline embed
-    /// units before each paragraph's pilcrow. The JS input shim uses this
-    /// instead of crossing the wasm boundary once per paragraph.
+    /// Compact paragraph-position projection built in one story traversal:
+    /// `[{"paraId","length"}, …]` in document order, where `length` counts the
+    /// UTF-16 text and inline embed units before that paragraph's pilcrow —
+    /// exactly the `offset` domain of a Loc in it. One call replaces crossing
+    /// the boundary once per paragraph. Errors on an unknown story.
     pub fn paragraph_spans(&self, story: &str) -> Result<String, JsValue> {
         let mut items = Vec::new();
         let mut cursor = 0_u32;
@@ -2901,10 +3256,17 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
-    /// The raw formatted-segment view (the render bridge's input):
-    /// `[{"kind":"text","text",…} | {"kind":"pilcrow","paraId","properties",…}
-    /// | {"kind":"embed",…}]`, each with `"attributes"` (run marks plus
-    /// `ins`/`del` revision values).
+    /// The story as an ordered run of formatted segments — the same view
+    /// lowering reads:
+    ///
+    /// - `{"kind":"text","text","attributes"}`
+    /// - `{"kind":"pilcrow","paraId","properties","attributes"}`
+    /// - `{"kind":"embed","embedKind","payload","attributes"}`
+    ///
+    /// A text segment covers one maximal run of identically formatted
+    /// characters; each pilcrow and embed is its own segment worth one unit.
+    /// `attributes` holds the segment's run marks together with any `ins`/`del`
+    /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
         let items = segments
@@ -2935,15 +3297,19 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
-    /// `{"start","end"}` — the paragraph's story span; `end` is its pilcrow's
-    /// index, so `end - start` is the paragraph length (`offset` domain).
+    /// `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
+    /// `end` is the index of its own pilcrow, so `end - start` is the
+    /// paragraph length and the upper bound of a Loc `offset` in it. Errors
+    /// when the paragraph is not in `story`.
     pub fn locate_paragraph(&self, story: &str, para_id: &str) -> Result<String, JsValue> {
         let span = find_para_span(self.engine.doc(), story, para_id)?;
         Ok(json!({ "start": span.start, "end": span.pilcrow }).to_string())
     }
 
-    /// Current offsets of a comment's sticky anchors:
-    /// `[{"story","start","end"}]`. Errors when an anchor no longer resolves.
+    /// Where a comment's sticky anchors currently sit:
+    /// `[{"story","start","end"}, …]`, one entry per anchored range, in
+    /// story-global UTF-16 units. Errors on an unknown comment id and when an
+    /// anchor no longer resolves.
     pub fn resolve_comment(&self, comment_id: &str) -> Result<String, JsValue> {
         let anchors = self
             .engine

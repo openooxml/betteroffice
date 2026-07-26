@@ -1,4 +1,40 @@
-//! Paragraph measurement input.
+//! Serde input contract for [`super::measure_paragraph`].
+//!
+//! The envelope is camelCase JSON. Unknown fields are ignored, so a host can
+//! pass a richer block through unmapped; only the subset that affects
+//! measurement is captured. An unrecognized *run kind* likewise parses and is
+//! then refused as `UNSUPPORTED`, rather than failing the whole request at
+//! the parse step.
+//!
+//! ```json
+//! {
+//!   "block":      { "kind": "paragraph", "runs": [...], "attrs": {...} },
+//!   "maxWidth":   624.0,
+//!   "fontChains": { "calibri|0|0": [0, 2], "calibri|1|0": [1, 2] },
+//!   "defaults":   { "fontSize": 11, "fontFamily": "Calibri" },
+//!   "compat":     { "noLeading": false, "doNotExpandShiftReturn": false },
+//!   "floatingZones":    [{ "leftMargin": 120.0, "rightMargin": 0.0,
+//!                          "topY": 0.0, "bottomY": 96.0 }],
+//!   "paragraphYOffset": 36.5
+//! }
+//! ```
+//!
+//! `fontChains` keys are `"<family lowercased>|<bold 0|1>|<italic 0|1>"`;
+//! values are ordered fallback chains of ids from `FontStore::register`. The
+//! host must supply a chain for every `(family, bold, italic)` combination
+//! the block's text, tab and field runs use, plus the **regular** (`|0|0`)
+//! chain of any family that can reach the empty-paragraph path and of the
+//! resolved list-marker family when a paragraph shows a marker at zero
+//! hanging indent. A missing or empty chain is `UNSUPPORTED`; this crate
+//! never guesses a face.
+//!
+//! Units: `maxWidth`, indents, spacing before/after, image dimensions and all
+//! float geometry are CSS pixels; font sizes are points; tab stop positions
+//! are twips. Every file-derived number is range-checked before it reaches
+//! layout arithmetic — see the validators at the foot of this module.
+//!
+//! `floatingZones` and `paragraphYOffset` are optional; absent means no float
+//! context. See [`FloatZoneIn`] for their coordinate space.
 
 use std::collections::HashMap;
 
@@ -27,7 +63,10 @@ pub struct MeasureInput {
     /// Paragraph Y offset in the floating-zone coordinate space.
     #[serde(default)]
     pub paragraph_y_offset: Option<f32>,
-    /// Enables lossless advances and Word-oriented metrics.
+    /// Opt in to the exact-advance output — `runAdvances`, `clusterAdvances`
+    /// and `bidiSlices` on every line — and to Word-oriented small-caps
+    /// metrics. Off, the line fields stay absent and callers keep a stable
+    /// JSON shape.
     #[serde(default)]
     pub authoritative_shaping: bool,
 }
@@ -123,16 +162,17 @@ pub struct RunIn {
     pub complex_script: bool,
     #[serde(default)]
     pub language: Option<RunLanguageSlotsIn>,
-    /// Pixels added per UTF-16 inter-character gap.
+    /// Pixels added per gap between shaped clusters inside a word — never
+    /// across a word boundary, and not multiplied by `horizontalScale`.
     #[serde(default)]
     pub letter_spacing: Option<f32>,
     /// Uppercase before shaping (w:caps).
     #[serde(default)]
     pub all_caps: bool,
-    /// Lowercase chars shape as their uppercase glyph with advances scaled
-    /// by the synthesized-small-caps factor (0.7, the Blink/WebKit
-    /// multiplier — see `SMALL_CAPS_ADVANCE_SCALE` in `prepare.rs`).
-    /// `allCaps` wins when both are set.
+    /// w:smallCaps. Lowercase characters render as small capitals: a real
+    /// `smcp` glyph where the face has one, otherwise the uppercase glyph
+    /// with its advance scaled (see the small-caps constants in
+    /// `prepare.rs`). `allCaps` wins when both are set.
     #[serde(default)]
     pub small_caps: bool,
     /// Percent (100 = normal); multiplies glyph advances.
@@ -141,10 +181,10 @@ pub struct RunIn {
     /// Minimum font size in points at which pair kerning is enabled.
     #[serde(default)]
     pub kerning_min_pt: Option<f32>,
-    /// Accepted without measurement effect.
+    /// Shapes at 0.75 of the run's size, raised by 0.4em.
     #[serde(default)]
     pub superscript: bool,
-    /// See `superscript`.
+    /// Shapes at 0.75 of the run's size, lowered by 0.2em.
     #[serde(default)]
     pub subscript: bool,
     /// Hidden/view-suppressed runs retain logical positions but consume no
@@ -169,7 +209,8 @@ pub struct RunIn {
     /// image content frame used by paint.
     #[serde(default)]
     pub rotation_bounds: Option<RotationBoundsIn>,
-    /// Top wrap distance; own-line images default to six pixels.
+    /// Image wrap distances in px (`distT`/`distB`). Default 0 for inline
+    /// images, 6 for block and `topAndBottom` own-line images.
     #[serde(default)]
     pub dist_top: Option<f32>,
     #[serde(default)]
@@ -247,7 +288,9 @@ pub struct AttrsIn {
     /// The "trailing empty paragraph after a table" zero-height anchor.
     #[serde(default)]
     pub suppress_empty_paragraph_height: bool,
-    /// Precomputed marker text.
+    /// Precomputed marker text (`"1."`, `"•"`, …). A visible marker narrows
+    /// the first line by its footprint, but only when `indent.hanging` is
+    /// exactly zero.
     #[serde(default)]
     pub list_marker: Option<String>,
     #[serde(default)]
@@ -263,7 +306,9 @@ pub struct AttrsIn {
     /// §17.9.25 `w:suff`: `"tab"` (default) / `"space"` / `"nothing"`.
     #[serde(default)]
     pub list_marker_suffix: Option<String>,
-    /// Document default tab stop in twips; only marker width uses it.
+    /// §17.6.13 `w:defaultTabStop` in twips, default 720. Only the list
+    /// marker's width consumes it; tab-run widths always use the 720-twip
+    /// grid.
     #[serde(default)]
     pub default_tab_stop_twips: Option<f32>,
 }
@@ -306,7 +351,10 @@ impl SpacingIn {
     }
 }
 
-/// Paragraph tab stop with twip position and alignment mode.
+/// One paragraph tab stop. `val` is the alignment mode —
+/// `start`/`end`/`center`/`decimal`/`bar`/`clear`, anything else behaving
+/// like `start` — and `pos` its position in **twips** from the content-area
+/// left edge.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TabStopIn {
@@ -335,7 +383,9 @@ pub(super) fn validate_tabs(tabs: &[TabStopIn]) -> Result<(), MeasureError> {
     Ok(())
 }
 
-/// `ParagraphIndent` in px.
+/// Paragraph indents in px. `left`/`right` shrink every line; the first line
+/// is additionally offset by `firstLine − hanging`, so a hanging indent
+/// widens it back out past the body edge.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndentIn {
@@ -367,7 +417,14 @@ impl IndentIn {
     }
 }
 
-/// Floating exclusion zone in paragraph flow coordinates.
+/// One floating exclusion zone.
+///
+/// Every field is CSS pixels. `topY`/`bottomY` live in the float group's
+/// coordinate space — Y 0 is the top of the group's anchor block, the same
+/// space [`MeasureInput::paragraph_y_offset`] is measured in — so a line at
+/// paragraph-local `y` probes zones at `paragraphYOffset + y`. Wrap distances
+/// are already folded into the margins and the Y range by whoever extracted
+/// the zone; nothing is added here.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FloatZoneIn {
@@ -381,7 +438,9 @@ pub struct FloatZoneIn {
     /// half-open on both sides in practice: a line `[top, bottom)` misses
     /// the zone when `lineBottom <= topY` or `lineTop >= bottomY`.
     pub bottom_y: f32,
-    /// Usable strips for centered-float line splitting.
+    /// Usable strips for centered-float line splitting. When present and
+    /// non-empty they replace the zone's margins for intersecting lines and
+    /// drive the available width themselves.
     #[serde(default)]
     pub segments: Option<Vec<FloatSegmentIn>>,
     /// OOXML `topAndBottom` wrap: a full-width band — no text beside it, any

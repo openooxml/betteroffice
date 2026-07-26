@@ -2,7 +2,7 @@
 //!
 //! The layout engine consumes bidi at run granularity: it splits each
 //! paragraph into maximal same-level runs (logical order), shapes each run
-//! separately (see [`crate::shape`]), then reorders runs per line at line
+//! separately (see [`mod@crate::shape`]), then reorders runs per line at line
 //! layout time. This module produces those level runs.
 
 use unicode_bidi::{BidiInfo, Level};

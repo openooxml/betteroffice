@@ -1,4 +1,37 @@
-//! Read-only lowering from editing stories to layout blocks.
+//! Read-only lowering from the pilcrow-stream editing model to the layout
+//! engine's [`LayoutBlock`] vocabulary.
+//!
+//! One yrs story in, one flat block list out. The walk goes in UTF-16 units,
+//! every embed (pilcrows included) counting as one, and turns:
+//!
+//! - a run of identically formatted text into one paragraph run, cut further
+//!   at tabs and at comment-interval boundaries so each run carries a single
+//!   comment set;
+//! - a pilcrow into the end of a paragraph block, lowering its authored OOXML
+//!   properties (spacing, indents, borders, tabs, list numbering, section
+//!   properties) into the block's attributes;
+//! - a table embed into a table block whose cells recurse into their own
+//!   stories, and other embeds into image, break, field or shape runs.
+//!
+//! Nothing here mutates the document, and the whole lowering runs inside one
+//! read transaction, so the result is a consistent snapshot.
+//!
+//! Two things cross the walk rather than sitting on a single item. Section
+//! properties CASCADE: a section that overrides one margin emits a full
+//! margins record whose unset sides inherit from the previous section instead
+//! of resetting to the OOXML default. List counters advance per numbering id
+//! across the whole story, so a marker depends on every earlier list paragraph.
+//!
+//! Positions come out in two coordinate systems. Story offsets are the UTF-16
+//! indices above; the `pm_*` fields carry the paragraph-node positions that
+//! [`pm_position`] derives, in which every paragraph adds two positions for
+//! its own open and close. They usually track each other, and diverge where
+//! one story unit displays as several characters — a `noteRef` embed occupies
+//! one unit but shows a multi-digit number.
+//!
+//! Values the story cannot supply — theme colors, the default tab stop, the
+//! page content height, and the mapping from yrs ids to the numeric ids the
+//! layout contract uses — arrive in [`RenderEnv`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -24,13 +57,24 @@ mod shapes;
 
 const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 
-/// Preflattened values and ID mappings used during story lowering.
+/// Document-level values lowering cannot read off a story. Every field
+/// defaults, so an empty env lowers a story with built-in fallbacks.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
+    /// back to the default Office palette.
     pub theme_colors: BTreeMap<String, String>,
+    /// Interval between implicit tab stops, passed through to each paragraph.
+    /// `None` leaves the layout engine's own default in effect.
     pub default_tab_stop_twips: Option<f64>,
+    /// Usable page height in px. Images taller than this are scaled down to
+    /// fit; `None` or a non-positive value clamps nothing.
     pub page_content_height: Option<f64>,
+    /// Maps a yrs `{client}:{counter}` revision or comment id to the number
+    /// the layout contract carries. An unmapped id is hashed into the
+    /// safe-integer range instead, which is stable but not shared with a peer
+    /// that numbers the same document differently.
     pub numeric_ids: BTreeMap<String, f64>,
 }
 
@@ -41,21 +85,26 @@ impl RenderEnv {
     }
 }
 
-/// A malformed story or a model/bridge configuration mismatch.
+/// Why a story could not be lowered. Every variant means the input is wrong,
+/// not that lowering is incomplete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
+    /// The story or a comment anchor could not be read.
     Edit(EditError),
+    /// The document counts in code points rather than UTF-16 units, so every
+    /// offset in the block output would be wrong.
     WrongOffsetKind,
+    /// The story does not end in a pilcrow, so its last paragraph has no mark.
     UnterminatedStory(String),
-    UnsupportedEmbed {
-        story: String,
-        index: u32,
-    },
+    /// An embed kind lowering does not know how to render.
+    UnsupportedEmbed { story: String, index: u32 },
+    /// A table embed whose rows, grid or spans do not describe a rectangle.
     MalformedTable {
         story: String,
         index: u32,
         detail: String,
     },
+    /// A table cell refers back to a story already being lowered.
     RecursiveStory(String),
 }
 
@@ -93,12 +142,18 @@ impl From<EditError> for BridgeError {
     }
 }
 
-/// Maps UTF-16 story offsets to paragraph-node positions.
+/// Maps a UTF-16 story offset to its paragraph-node position.
+///
+/// A paragraph node occupies its content plus two positions, one for each of
+/// its boundaries, while a story counts one unit per pilcrow. Each pilcrow
+/// already crossed therefore contributes the one extra position the story
+/// index does not have, and the leading `+ 1` opens the first paragraph.
 pub const fn pm_position(story_index: u32, pilcrows_before: u32) -> u64 {
     story_index as u64 + 1 + pilcrows_before as u64
 }
 
-/// Lowers one story from an [`EditingDoc`] to the unchanged renderer vocabulary.
+/// Lowers one story to the layout engine's block vocabulary. Table cells
+/// recurse, so a body story yields the blocks of every cell it contains.
 pub fn yrs_doc_to_layout_blocks(
     doc: &EditingDoc,
     story_id: &str,
@@ -139,7 +194,8 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
-        // Section-break margins cascade per story.
+        // Sections are body-level, so the cascade is per story; cell and
+        // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
 
         for diff in story.diff(txn, YChange::identity) {
@@ -176,7 +232,8 @@ fn lower_story<T: ReadTxn>(
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     blocks.extend(paragraph_blocks);
-                    // Section properties emit a break after the paragraph.
+                    // A pilcrow carrying section properties ENDS its section,
+                    // so the break block follows its paragraph.
                     let values = pilcrow_values(&pilcrow, txn);
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
                     {
@@ -420,7 +477,8 @@ fn lower_story<T: ReadTxn>(
                         formatting: RunFormatting {
                             italic: Some(true),
                             font_family: Some("Cambria Math".to_owned()),
-                            // Sentinel for math fallback without logical order.
+                            // Sentinel consumed by `stamp_logical_order`: a
+                            // math fallback run gets no logical order.
                             logical_order: Some(u64::MAX),
                             ..RunFormatting::default()
                         },
@@ -520,7 +578,8 @@ fn lower_story<T: ReadTxn>(
     result
 }
 
-/// CamelCase alias for story lowering.
+/// CamelCase alias of [`yrs_doc_to_layout_blocks`] for callers spelling the
+/// entry point the way the boundary names it.
 #[allow(non_snake_case)]
 pub fn yrsDocToLayoutBlocks(
     doc: &EditingDoc,
@@ -1436,7 +1495,8 @@ fn lower_inline_sdt_values(
                     runs,
                 )
             }),
-            // Nested shapes and charts are omitted; other leaves occupy one position.
+            // A shape or chart nested in an inline SDT produces no run; every
+            // other leaf still occupies one position even without one.
             _ => 1,
         };
         content_size += child_size;
@@ -1576,27 +1636,37 @@ enum RawRunKind {
     },
 }
 
+/// One run before coalescing and before its position is made absolute.
 #[derive(Clone, Debug)]
 struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
+    /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
-    /// Offsets relative to the paragraph content start. Usually identical
-    /// to story offsets; a one-unit `noteRef` displays its possibly multi-digit id.
+    /// Rendered bounds relative to the paragraph's content start. Usually the
+    /// same width as the story bounds; they diverge where one story unit
+    /// displays as several characters, as a `noteRef` does when its id has
+    /// more than one digit.
     pm_start: u32,
     pm_end: u32,
     /// Checkbox chrome inherited from the nearest editable inline SDT.
     inline_sdt_widget: Option<Value>,
 }
 
+/// A shape or chart child that splits its paragraph, held with the position it
+/// occupied so the surrounding runs keep their original offsets.
 #[derive(Clone, Debug)]
 struct DrawingMarker {
-    /// Offset relative to the original paragraph content start.
     pm_offset: u32,
     block: LayoutBlock,
 }
 
+/// Resolves every comment anchored in `story_id` to sorted, story-global
+/// UTF-16 intervals with the numeric ids the layout contract carries. Anchors
+/// in other stories are skipped and an empty range contributes nothing; an
+/// anchor that no longer resolves is an error, because the run cuts derived
+/// from these intervals would silently misplace the comment.
 fn resolve_comment_intervals<T: ReadTxn>(
     txn: &T,
     story_id: &str,
@@ -1645,6 +1715,9 @@ fn resolve_comment_intervals<T: ReadTxn>(
     Ok(intervals)
 }
 
+/// Splits one formatted text chunk into runs. Cuts land at every comment
+/// interval boundary inside the chunk, so a run's comment set is uniform, and
+/// around each tab, which becomes a run of its own.
 fn push_text_chunks(
     runs: &mut Vec<RawRun>,
     text: &str,
@@ -1710,6 +1783,10 @@ fn push_text_chunks(
     }
 }
 
+/// Emits the blocks one paragraph contributes: normally a single paragraph
+/// block, but a paragraph holding shape or chart children breaks into the text
+/// segments around them, each carrying the same pilcrow properties. Empty
+/// segments are dropped, and every surviving run keeps its original position.
 #[allow(clippy::too_many_arguments)]
 fn flush_paragraph_parts<T: ReadTxn>(
     mut raw_runs: Vec<RawRun>,
@@ -1737,7 +1814,6 @@ fn flush_paragraph_parts<T: ReadTxn>(
         ))];
     }
 
-    // Direct shape and chart children split paragraphs without empty slices.
     let mut blocks = Vec::new();
     let mut segment_start = 0_u32;
     for drawing in drawings {
@@ -1845,13 +1921,18 @@ fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any
         .collect()
 }
 
-/// OOXML page geometry defaults in twips.
+/// OOXML page-geometry defaults in twips — US Letter, one-inch margins,
+/// half-inch column gap — used when a `sectPr` overrides only part of the
+/// geometry.
 const DEFAULT_PAGE_WIDTH_TWIPS: f64 = 12240.0;
 const DEFAULT_PAGE_HEIGHT_TWIPS: f64 = 15840.0;
 const DEFAULT_SECTION_MARGIN_TWIPS: f64 = 1440.0;
 const DEFAULT_COLUMN_GAP_TWIPS: f64 = 720.0;
 
-/// Running per-side margin cascade across section breaks.
+/// The running per-side margin cascade across section breaks, in twips. A
+/// section that overrides ANY margin emits a full margins record; its unset
+/// sides inherit from the prior section rather than resetting to the OOXML
+/// default.
 #[derive(Clone, Copy, Debug)]
 struct SectionMarginsTwips {
     top: f64,
@@ -1882,7 +1963,11 @@ fn section_break_type(value: &str) -> Option<SectionBreakType> {
     }
 }
 
-/// Lowers section properties to a layout break.
+/// Lowers a boundary pilcrow's `sectPr` sub-map and `sectionBreakType` to the
+/// [`SectionBreakBlock`] the layout engine consumes, or `None` when the
+/// pilcrow carries no section properties. Geometry converts twips to px; page
+/// size is emitted only when a dimension is overridden, margins follow the
+/// `cascade`, and columns only when the count exceeds one.
 fn section_break_block(
     values: &BTreeMap<String, Any>,
     cascade: &mut SectionMarginsTwips,
@@ -1973,6 +2058,9 @@ fn section_break_block(
     Some(block)
 }
 
+/// Merges neighbouring text runs that are adjacent in BOTH coordinate systems
+/// and agree on formatting and inline-SDT chrome. Only text merges, so tabs,
+/// images and fields always stay separate runs.
 fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
     let mut result: Vec<RawRun> = Vec::with_capacity(runs.len());
     for run in runs {
@@ -2047,6 +2135,8 @@ fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
     }
 }
 
+/// Numbers the runs of one paragraph in reading order. A run already carrying
+/// the [`u64::MAX`] sentinel is left without a logical order instead.
 fn stamp_logical_order(runs: &mut [Run]) {
     for (index, run) in runs.iter_mut().enumerate() {
         match run {
@@ -2061,9 +2151,13 @@ fn stamp_logical_order(runs: &mut [Run]) {
     }
 }
 
+/// List numbering carried across the whole story.
 #[derive(Default)]
 struct ListState {
+    /// Live counter stack per abstract numbering id, indexed by level.
     counters: BTreeMap<String, Vec<i64>>,
+    /// The `{numId}:{level}` pairs already numbered, so a `listStartOverride`
+    /// applies once rather than on every paragraph at that level.
     seen_num_ids: BTreeSet<String>,
 }
 
@@ -2176,6 +2270,11 @@ fn resolve_list_template(template: &str, counters: &[i64], formats: &[String]) -
     result
 }
 
+/// The rendered list marker for one paragraph, advancing `state`. Bullets and
+/// authored literal markers pass through; a marker containing `%` is a
+/// template resolved against the counter stack, and a paragraph with no marker
+/// at all gets the dotted counter path (`"1.2."`). Numbering a level resets
+/// every deeper level.
 fn compute_list_marker(values: &BTreeMap<String, Any>, state: &mut ListState) -> Option<String> {
     let marker = value_string(values.get("listMarker"));
     let Some(Any::Map(num_pr)) = values.get("numPr") else {
@@ -2393,7 +2492,9 @@ fn lower_font_size(attributes: Option<&Attrs>, result: &mut RunFormatting) {
         return;
     };
     match value {
-        // Scalar marks hold `w:sz`; object marks preserve independent `w:sz` and `w:szCs`.
+        // A scalar mark is the authored `w:sz`; the object form additionally
+        // preserves an independent `w:szCs`. Both stay in half-points until
+        // this conversion.
         Any::Number(half_points) => result.font_size = Some(*half_points / 2.0),
         Any::BigInt(half_points) => result.font_size = Some(*half_points as f64 / 2.0),
         Any::Map(map) => {
@@ -3048,6 +3149,10 @@ fn hex_byte(value: &str) -> Option<u8> {
     u8::from_str_radix(value, 16).ok()
 }
 
+/// The number the layout contract carries for a yrs `{client}:{counter}` id:
+/// the explicit [`RenderEnv::numeric_ids`] mapping when there is one,
+/// otherwise a hash of the id folded into the JavaScript safe-integer range.
+/// The fallback is stable within a document but cannot round-trip the string.
 fn numeric_id(id: &str, env: &RenderEnv) -> f64 {
     if let Some(value) = env.numeric_ids.get(id) {
         return *value;
@@ -3057,7 +3162,6 @@ fn numeric_id(id: &str, env: &RenderEnv) -> f64 {
     {
         return value;
     }
-    // Hash unmapped IDs into the safe-integer range.
     let hash = id.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
     });

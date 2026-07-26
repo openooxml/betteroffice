@@ -1,4 +1,20 @@
-//! Keep-with-next grouping and measurement.
+//! Keep-with-next grouping (`w:keepNext`, ECMA-376 §17.3.1.15).
+//!
+//! A run of consecutive keepNext paragraphs must share a page with the *start*
+//! of whatever follows it. [`analyze_keep_with_next`] walks the measured blocks
+//! once and returns each run keyed by its head, plus the interior members, so
+//! the placement walk can skip blocks a group already accounted for.
+//!
+//! [`measure_keep_with_next_group`] turns a group into the height the contract
+//! actually demands: every member paragraph in full (spacing before, measured
+//! height, spacing after) plus one witness slice of the follower — never the
+//! follower in full, since the binding is only to where it begins. The witness
+//! is a paragraph's first line, a table's first row, the whole height of an
+//! image or text box, and nothing at all for any other follower kind.
+//!
+//! Spacing is read through the shared paragraph-spacing helpers, which suppress
+//! style-inherited spacing on empty paragraphs, so a chain of blank paragraphs
+//! does not inflate the budget with spacing that never paints.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,7 +35,9 @@ pub struct KeepWithNextGroup {
     pub follower: Option<usize>,
 }
 
-/// Group lookup and ascending interior membership indexes.
+/// The two indexes placement needs: groups by head block, and every non-head
+/// member so the walk does not re-evaluate them. Both iterate in ascending
+/// block order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeepWithNextScan {
     /// Groups keyed by their leading block index.
@@ -102,7 +120,8 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
     }
 }
 
-/// Returns the group height plus its follower's first unbreakable slice.
+/// Vertical space (px) the group needs for its keepNext contract to hold on a
+/// single page: the members in full plus the follower's witness slice.
 pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[MeasuredBlock]) -> f64 {
     // follower's witness line first: zero when there is no follower, or when
     // it is not a laid-out paragraph

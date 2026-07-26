@@ -1,4 +1,60 @@
-//! Header/footer band composition.
+//! Header/footer band composition for the display list.
+//!
+//! A page gains `header` / `footer` regions only when the build envelope
+//! carries a `headersFooters` payload. Band content reuses the body paragraph
+//! and table emitters, so runs, decorations and PAGE/NUMPAGES fields behave the
+//! same as in the body — but the `docStart` / `docEnd` on those primitives
+//! address the header/footer document named by the region's `rId`, never the
+//! body document. Hit testing and selection must therefore scope by region.
+//!
+//! # Envelope
+//!
+//! The payload carries the section flags `titlePg` (`w:titlePg`) and
+//! `evenAndOddHeaders` (`w:evenAndOddHeaders`), each optionally narrowed to
+//! individual sections via `titlePageSections` / `evenAndOddSections`; optional
+//! `headerDistance` / `footerDistance` overrides (`w:pgMar` `w:header` /
+//! `w:footer`); an optional watermark; and one `variants` entry per part in
+//! play. A variant names its `rId`, `kind`, `type`, optional `sectionIndex`,
+//! its own `measured` blocks in the body schema, its heights, and optional
+//! per-page `fieldWidths`.
+//!
+//! # Variant selection
+//!
+//! A page's own `headerFooterRefs` wins when present: the relationship id for
+//! the selected type resolves the variant directly, and a `first` selection
+//! that names no relationship leaves the band blank. Otherwise, by 1-based page
+//! number:
+//!
+//! 1. the section's first page (`sectionPageIndex == 0`) under `titlePg`
+//!    selects `first`. An absent `first` variant means a deliberately blank
+//!    band; it must not fall through to `default`.
+//! 2. an even page number under `evenAndOddHeaders` selects `even` when that
+//!    variant exists;
+//! 3. otherwise `default`.
+//!
+//! Where several variants match a (kind, type, section), the last one wins.
+//!
+//! # Band geometry
+//!
+//! The distance resolves as the envelope override, then the page's
+//! `margins.header` / `margins.footer`, then [`DEFAULT_HF_DISTANCE_PX`]. Both
+//! kinds take the interactive height `max(flowHeight - min(0, visualTop), 24)`.
+//! A header band sits at `distance + visualTop` and flows content from
+//! `distance`. A footer band is bottom-anchored: it sits at
+//! `pageHeight - distance - bandHeight`, flows content from
+//! `pageHeight - distance - max(visualBottom - visualTop, 24) - visualTop`, and
+//! anchors floating tables against `pageHeight - distance - height`. Content
+//! starts at `margins.left` horizontally in both cases.
+//!
+//! # Stacking inside a band
+//!
+//! A band-local cursor starts at zero. A paragraph paints at
+//! `cursor + spacing.before` as a single unsplit fragment and advances the
+//! cursor by its measured total height, which already accounts for its own
+//! spacing. An inline table paints whole at the cursor and advances by its
+//! total height; a `w:tblpPr` floating table paints at its resolved anchor and
+//! does not advance. An image paints at the cursor and advances by its measured
+//! height. Every other block kind emits nothing and leaves the cursor alone.
 
 use serde::Deserialize;
 
@@ -13,9 +69,10 @@ use crate::display_list::{Crop, ImagePrimitive};
 /// Word's default header/footer distance: 0.5 inches at 96 DPI.
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
 
-/// Minimum interactive band height.
+/// Minimum interactive band height, so a near-empty band stays clickable.
 const MIN_BAND_HEIGHT_PX: f64 = 24.0;
 
+/// The optional `headersFooters` envelope field.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeadersFootersIn {
@@ -37,6 +94,9 @@ pub struct HeadersFootersIn {
     variants: Vec<HfVariantIn>,
 }
 
+/// One header/footer part, with the four heights the band geometry needs.
+/// `visualTop` and `visualBottom` describe the painted extent, which may sit
+/// outside the in-flow stack when content is negatively offset.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HfVariantIn {
@@ -255,9 +315,11 @@ fn stacked_height(measured: &[MeasuredBlockIn]) -> f64 {
         .sum()
 }
 
-/// resolve both regions for one page. `page_number` follows the layout's own
-/// 1-based `Page.number` (fallback index+1), the value the DOM painter feeds
-/// its per-page selection and PAGE fields.
+/// Resolves both bands for one page.
+///
+/// `page_number` is the layout's own 1-based `Page.number` (falling back to
+/// `page_index + 1`) and drives both variant selection and PAGE field text, so
+/// it restarts wherever a section restarts numbering.
 pub(crate) fn compose_page_regions<'a>(
     hf: &HeadersFootersIn,
     page: &PageIn,
@@ -314,7 +376,11 @@ fn field_width_map(v: &HfVariantIn) -> Option<FieldWidthMap> {
     )
 }
 
-/// Resolves floating-table offsets relative to the band flow origin.
+/// Resolves a `w:tblpPr` anchor into offsets from the band's flow origin.
+///
+/// `page` and `margin` anchors are expressed against the page or the body
+/// margin box, so both are rebased onto the band; any other anchor is already
+/// band-relative. The caller adds the returned offsets to the region origin.
 fn resolve_hf_floating_table_position(
     floating: &FloatingTablePositionIn,
     page: &PageIn,
@@ -338,7 +404,7 @@ fn resolve_hf_floating_table_position(
     (left, top)
 }
 
-/// Composes one resolved header or footer region.
+/// Builds one band: geometry first, then the block stack, per the module rules.
 #[allow(clippy::too_many_arguments)]
 fn compose_region(
     v: &HfVariantIn,

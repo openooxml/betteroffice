@@ -1,4 +1,29 @@
-//! DOCX table-grid geometry and width resolution.
+//! DOCX table-grid geometry and column-width resolution.
+//!
+//! [`resolve_cell_grid`] is the single source of truth for which grid column a
+//! cell occupies: measurement, painting and the row-break paginator all read it,
+//! so they cannot disagree. It is deliberately width-free — callers multiply a
+//! column index by their own (possibly scaled) widths.
+//!
+//! Column widths come from one of three algorithms, chosen by
+//! `w:tblLayout`/the block's width algorithm:
+//!
+//! - **fixed** — normalize the declared grid, then raise columns so the first
+//!   row's preferred cell widths fit, sharing a spanning cell's deficit evenly
+//!   across the columns it covers, and finally grow to any explicit table
+//!   width.
+//! - **autofit** — accumulate per-column minimum and maximum content widths
+//!   from every cell (`w:noWrap` pins the minimum to the maximum), target
+//!   `max(minTotal, min(contentWidth, explicitOrMaxTotal))`, and hand out the
+//!   room above the minimums in proportion to each column's flex
+//!   (`max - min`); with no flex anywhere the target is spread evenly.
+//! - otherwise — normalize the declared grid and uniformly scale it to an
+//!   explicit table width when the two differ by more than a pixel.
+//!
+//! A width pair resolves through the preferred-width element, then the flat
+//! value/type pair, then a raw pixel width. `pct` units are 50ths of a percent
+//! (ECMA-376 §17.18.111, so 5000 means 100%); `dxa`, `auto` and an absent type
+//! are twips at 96 DPI. Zero, negative and NaN widths never resolve.
 
 use std::collections::{HashMap, HashSet};
 
@@ -52,12 +77,13 @@ pub struct ResolvedGridCell {
     pub row_span: usize,
 }
 
-/// Resolve every cell's grid column index, accounting for `colSpan` and the
-/// columns occupied by vertically-merged (`rowSpan`) cells from earlier rows.
+/// Resolve every cell's grid column index.
 ///
-/// Single source of truth for table grid geometry — width-free on purpose:
-/// callers multiply `column_index` by their own (possibly scaled) column
-/// widths to get an x offset.
+/// A row starts at its `w:gridBefore` offset and skips any column a
+/// vertically-merged cell from an earlier row still occupies; each cell then
+/// claims `w:gridSpan` columns, or starts at its explicit grid position when
+/// one is given. Spans are truncated and clamped (columns to 16384 rows to
+/// 32768), so malformed input cannot blow up the grid.
 pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
     let mut occupied: HashMap<usize, HashSet<usize>> = HashMap::new();
     let mut out: Vec<ResolvedGridCell> = Vec::new();
@@ -103,7 +129,8 @@ pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
     out
 }
 
-/// Total grid columns, derived from the widest row's accumulated colSpans.
+/// Total grid columns: the furthest column any cell reaches, and every row's
+/// own end plus its `w:gridAfter` skip.
 pub fn count_table_columns(table_block: &TableBlock) -> usize {
     let resolved = resolve_cell_grid(table_block);
     let mut count = 1usize;
@@ -121,6 +148,8 @@ pub fn count_table_columns(table_block: &TableBlock) -> usize {
     count.min(16_384)
 }
 
+/// Resolves a width through the preferred element, then the flat value/type
+/// pair, then a raw pixel width.
 fn preferred_width_px(
     preferred: Option<&crate::types::PreferredWidth>,
     legacy_value: Option<f64>,
@@ -136,6 +165,8 @@ fn preferred_width_px(
         .or_else(|| legacy_px.filter(|value| *value > 0.0))
 }
 
+/// Raises a span's columns until they total `required`, sharing the shortfall
+/// evenly. Columns already wide enough are left alone.
 fn add_span_constraint(widths: &mut [f64], start: usize, span: usize, required: f64) {
     if !(required > 0.0) || start >= widths.len() {
         return;
@@ -152,6 +183,7 @@ fn add_span_constraint(widths: &mut [f64], start: usize, span: usize, required: 
     }
 }
 
+/// Grows every column equally up to `target`. Never shrinks.
 fn distribute_to_target(mut widths: Vec<f64>, target: f64) -> Vec<f64> {
     let current: f64 = widths.iter().sum();
     if target > current && !widths.is_empty() {
@@ -163,6 +195,7 @@ fn distribute_to_target(mut widths: Vec<f64>, target: f64) -> Vec<f64> {
     widths
 }
 
+/// Fixed layout: only the first row's cells constrain the grid.
 fn resolve_fixed_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -206,6 +239,8 @@ fn resolve_fixed_column_widths(
     })
 }
 
+/// Autofit layout: every cell contributes a minimum and a maximum, and the
+/// slack between them is what the target width is distributed across.
 fn resolve_autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -367,7 +402,8 @@ pub fn normalize_table_column_widths(
         .collect()
 }
 
-/// Resolves table column widths without measuring cell content.
+/// Resolves per-column pixel widths from the table's grid metadata and width
+/// budget, per the module's three algorithms. Measures no cell content.
 pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64) -> Vec<f64> {
     let mut column_widths: Vec<f64> = table_block.column_widths.clone().unwrap_or_default();
     let explicit_width_px = preferred_width_px(
@@ -420,7 +456,8 @@ pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64)
     column_widths
 }
 
-/// Resolves total table width from columns, explicit width, or content width.
+/// Total pixel width: the resolved columns, else the explicit table width,
+/// else the whole content-width budget.
 pub fn resolve_table_total_width_px(table_block: &TableBlock, content_width: f64) -> f64 {
     let column_widths = resolve_table_column_widths(table_block, content_width);
     let explicit_width_px = preferred_width_px(

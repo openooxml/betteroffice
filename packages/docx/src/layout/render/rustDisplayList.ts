@@ -1,11 +1,36 @@
-/** Serializes layout inputs through the Rust display-list builder. */
+/**
+ * JS seam to the Rust display-list builder.
+ *
+ * Marshals the `{ measured, options, layout }` envelope across the wasm
+ * boundary and hands back a DisplayList. Every paint and geometry decision
+ * happens in Rust; this module is serialization glue and nothing else, so a
+ * failure here is terminal — the types below carry no second engine to fall
+ * back to, only a typed {@link RustDisplayListSourceError} naming the stage
+ * that failed.
+ *
+ * Two transports exist. {@link buildRustDisplayList} sends the whole envelope
+ * and parses a DisplayList back. {@link buildRustDisplayFrame} prefers an
+ * engine that already retains pagination: it sends only the display-level
+ * extras and receives a binary FrameDelta, which is applied to the previous
+ * frame so unchanged pages keep object identity — the invariant the query
+ * facade's page-delta adoption depends on. An engine without
+ * `buildDisplayListFrame` takes the full-JSON path instead.
+ *
+ * The wasm module is loaded lazily on first build, so the inlined binary costs
+ * nothing until a display list is actually requested.
+ */
 
 import type { Layout } from '../pagination/types';
 import type { MeasuredBlock } from '../pagination/measuredBlock';
 import type { DisplayList } from './displayList';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from './frameDelta';
 
-/** Measured header/footer variant and band geometry. */
+/**
+ * One header/footer part in the `headersFooters` envelope field: the measured
+ * blocks of the header/footer document identified by `rId`, plus the band
+ * metrics the caller already computed. The builder passes the metrics through
+ * verbatim and re-derives none of them.
+ */
 export interface DisplayListHfVariant {
   rId: string;
   kind: 'header' | 'footer';
@@ -24,15 +49,15 @@ export interface DisplayListHfVariant {
    * line width is measured ONCE at the field's fallback text ("1"), so without
    * this the builder holds the same centered position on every page even though
    * "Page 2 of 3"/"Page 10 of 12" have different widths. Omitted ⇒ the fields
-   * ride the char-distributed fallback width (byte-identical to before).
+   * ride the char-distributed fallback width on every page.
    */
   fieldWidths?: DisplayListFieldWidths[];
 }
 
 /**
  * Per-page widths of one PAGE/NUMPAGES field run in an HF part. `pmStart` is the
- * field run's position in the HF doc (the key the Rust builder
- * matches). `fallbackWidth` is the width the measure baked into `line.width`
+ * field run's position in the header/footer document, and is the key the Rust
+ * builder matches on. `fallbackWidth` is the width the measure baked into `line.width`
  * (the field's fallback text); `perPage[i]` is the width of the field's resolved
  * text on layout page index `i` (PAGE → that page's number, NUMPAGES → total).
  */
@@ -56,7 +81,7 @@ export interface DisplayListHeadersFooters {
   /** Page-level Word watermark, painted behind body/header/footer content. */
   watermark?: DisplayListWatermark;
   variants: DisplayListHfVariant[];
-  /** Stable section identity. Undefined = document-global legacy envelope. */
+  /** Stable section identity. Undefined ⇒ the envelope covers the whole document. */
   sectionId?: string;
   /** Zero-based section index. */
   sectionIndex?: number;
@@ -152,7 +177,7 @@ export interface DisplayListCommentThread {
 
 /** The `{ measured, options, layout }` envelope the Rust builder consumes. */
 export interface DisplayListBuildInputs {
-  /** Serialization contract version. Undefined reads as legacy version 0. */
+  /** Serialization contract version. Undefined reads as version 0. */
   contractVersion?: number;
   measured: MeasuredBlock[];
   options: unknown;
@@ -164,26 +189,30 @@ export interface DisplayListBuildInputs {
    * → measurement `FontStore` ids — the SAME map the measurement input carries.
    * Present only under Rust measurement (the ids must belong to a populated
    * store); its presence against that store is what gates GlyphRun emission.
-   * Omitted ⇒ every text run takes the browser-measured `TextRunPrimitive` path
-   * (byte-identical to the pre-glyph build).
+   * Omitted ⇒ every text run is emitted as a browser-measured
+   * `TextRunPrimitive` rather than a shaped `GlyphRun`.
    */
   fontChains?: Record<string, number[]>;
   /** Page/section note regions. Undefined = no note emission. */
   noteAreas?: DisplayListNoteArea[];
   /** Resolved comments suppressed from active tint. Undefined = none known. */
   resolvedCommentIds?: number[];
-  /** Stable reviewer palette. Undefined = legacy hard-coded colors. */
+  /** Stable reviewer palette. Undefined ⇒ the builder's built-in colors. */
   commentAuthors?: DisplayListCommentAuthor[];
   /** Per-comment thread metadata for a11y announcements. Undefined = none. */
   commentThreads?: DisplayListCommentThread[];
 }
 
-/** Minimal engine surface, injectable so tests can fake the wasm module. */
+/**
+ * Minimal build surface, injectable so tests can fake the wasm module. Only
+ * `buildDisplayListJson` is required; the optional members are what an engine
+ * that retains its own pagination and display state additionally offers.
+ */
 export interface RustDisplayListEngine {
   buildDisplayListJson(input: string): string;
-  /** Resident editing engines expose binary deltas; the stateless layout wasm does not. */
+  /** Binary FrameDelta build; the stateless layout wasm does not offer it. */
   buildDisplayListFrame?(input: string, expectedFrameEpoch: number): Uint8Array;
-  /** One-owner ordinary input path; available on the resident editing engine. */
+  /** Applies one keystroke and returns its frame, without a layout round trip. */
   applyInput?(text: string, expectedFrameEpoch: number): Uint8Array;
   displayHitTestRegionsJson?(pageIndex: number, x: number, y: number): string;
   displayVerticalMoveJson?(
@@ -204,7 +233,10 @@ export type RustDisplayListSourceErrorStage = 'load' | 'build' | 'parse' | 'deco
 
 export interface RustDisplayFrameResult {
   displayList: DisplayList;
-  /** Null only on the compatibility JSON engine path. */
+  /**
+   * The retained frame to pass as `previous` on the next build. Null when the
+   * engine answered over full JSON, which retains nothing.
+   */
   frame: RetainedFrame | null;
   transport: 'frame-delta-v1' | 'json';
 }
@@ -225,7 +257,19 @@ export class RustDisplayListSourceError extends Error {
   }
 }
 
-/** Injectable display-list query surface with optional session handles. */
+/**
+ * Query surface over an already-built display list, injectable so tests can
+ * fake the wasm module.
+ *
+ * The required `*Json` members take the display-list JSON as an argument and
+ * the Rust side re-parses it per query, so callers should cache the string.
+ * The OPTIONAL session-handle members parse the list once (`openDisplayList` →
+ * a handle) and answer many queries by handle with no re-serialization,
+ * reusing the same hit and range logic so results are byte-identical. They are
+ * optional because the embedded wasm may not carry them; `hasDisplayListSession`
+ * and `hasRangeRectsRegion` report what is present, and
+ * `createDisplayListQueries` falls back to the `*Json` path when it is not.
+ */
 export interface RustDisplayListQueryEngine {
   /** region-aware hit test → `{"region","rId"?,"pos"}` or `"null"` JSON */
   hitTestRegionsJson(displayList: string, pageIndex: number, x: number, y: number): string;
@@ -238,7 +282,12 @@ export interface RustDisplayListQueryEngine {
   ): string;
   /** body document range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
-  /** Region-aware document range rectangles when supported. */
+  /**
+   * Region-aware document range → JSON array of rects. `region` is
+   * `'body' | 'header' | 'footer'`; `rId` scopes a header/footer to one part
+   * (empty for body, or to match any). Optional — the facade returns `[]`
+   * when it is absent.
+   */
   rangeRectsRegionJson?(
     displayList: string,
     region: string,
@@ -420,8 +469,9 @@ const measureFragmentCache = new WeakMap<object, string>();
 
 /**
  * Build a DisplayList for a computed layout through the Rust engine. Throws
- * when the wasm module fails to load or the builder rejects the input — the
- * caller is expected to fall back to the DOM painter.
+ * {@link RustDisplayListSourceError} tagged with the failing stage — `load`,
+ * `build` or `parse` — when the wasm module cannot be loaded, the builder
+ * rejects the input, or its output does not parse.
  */
 export async function buildRustDisplayList(
   inputs: DisplayListBuildInputs,
@@ -451,7 +501,17 @@ export async function buildRustDisplayList(
   }
 }
 
-/** Builds a display frame with JSON fallback when frame deltas are unavailable. */
+/**
+ * Build one display frame. An engine that retains pagination returns a binary
+ * FrameDelta, decoded and applied on top of `previous` so unchanged pages keep
+ * object identity; `previous` also supplies the frame epoch the engine checks
+ * before sending a delta rather than a full frame. An engine without
+ * `buildDisplayListFrame` takes the full-JSON path, and its result carries
+ * `frame: null` and `transport: 'json'`.
+ *
+ * Throws {@link RustDisplayListSourceError} tagged with the failing stage:
+ * `load`, `build`, `decode` or `apply`.
+ */
 export async function buildRustDisplayFrame(
   inputs: DisplayListBuildInputs,
   engine?: RustDisplayListEngine,

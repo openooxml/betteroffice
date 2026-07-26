@@ -1,12 +1,34 @@
-//! Tab-stop grids and width calculation.
+//! Tab-stop grid and tab-width math.
+//!
+//! The paragraph's declared stops are overlaid on an implicit 720-twip grid.
+//! A tab advances from the line's current x — in content-area coordinates, the
+//! same origin stop positions use — to the next stop past it, less whatever
+//! the stop's alignment reserves for the runs that follow.
+//!
+//! The rules enforced here:
+//!
+//! - The grid interval is **always** 720 twips. `w:defaultTabStop` never
+//!   reaches tab-width measurement; it feeds only the list-marker width.
+//! - `decimal` stops measure like `start` stops: measurement reserves the full
+//!   span, and a painter places the decimal point within it.
+//! - `bar` stops draw a vertical rule and consume no horizontal space.
+//! - Any `val` other than `clear`/`end`/`center`/`decimal`/`bar` behaves like
+//!   `start`.
+//! - A `clear` entry knocks out the grid line at that position as well as a
+//!   declared stop; stops left of the left indent are dropped; and a positive
+//!   left indent gains an implicit stop at the indent itself, so a tab on a
+//!   hanging first line lands on the body text edge.
+//! - When the resolved span shrinks below a pixel — following content wider
+//!   than an `end` stop's room — the tab gives up on the stop and takes plain
+//!   default-grid spacing instead.
 
 use super::input::TabStopIn;
 
-/// Default 0.5-inch tab interval.
+/// Default tab interval: 720 twips = 0.5in = 48px.
 pub(super) const DEFAULT_TAB_INTERVAL_TWIPS: f32 = 720.0;
-/// Maximum twip distance treated as one stop.
+/// Two positions closer than this count as the same stop.
 const STOP_COINCIDENCE_TWIPS: f32 = 20.0;
-/// Implicit grid span past the indent.
+/// The implicit grid is laid out to ten inches past the left indent.
 const GRID_CEILING_SPAN_TWIPS: f32 = 14_400.0;
 
 /// Converts 96-DPI pixels to twips.
@@ -43,7 +65,9 @@ fn same_stop_position(a: f32, b: f32) -> bool {
     (a - b).abs() < STOP_COINCIDENCE_TWIPS
 }
 
-/// Overlays declared stops on the implicit grid.
+/// The paragraph's effective stop list, in twips, sorted by position:
+/// declared stops overlaid on the implicit 720-twip grid, with `clear`
+/// entries knocked out and stops left of the indent dropped.
 fn compute_tab_stops(declared: &[TabStopIn], left_indent_twips: f32) -> Vec<(f32, StopKind)> {
     let mut kept: Vec<(f32, StopKind)> = Vec::new();
     let mut cleared_at: Vec<f32> = Vec::new();
@@ -93,14 +117,17 @@ fn compute_tab_stops(declared: &[TabStopIn], left_indent_twips: f32) -> Vec<(f32
     grid
 }
 
-/// Advances to the next default grid line.
+/// Distance from `from_x_px` to the next default-grid line, a full stride
+/// when already sitting exactly on one.
 fn default_grid_advance(from_x_px: f32) -> f32 {
     let stride_px = twips_to_px(DEFAULT_TAB_INTERVAL_TWIPS);
     let advance = stride_px - (from_x_px % stride_px);
     if advance <= 0.0 { stride_px } else { advance }
 }
 
-/// Calculates a tab advance in content-area coordinates.
+/// Advance a tab occupies starting from `current_x_px`, in content-area
+/// coordinates. `following_width_px` is the inline width of the runs after
+/// the tab, which `end` and `center` stops anchor on.
 pub(super) fn calculate_tab_width(
     current_x_px: f32,
     declared: &[TabStopIn],

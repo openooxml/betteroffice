@@ -1,4 +1,15 @@
-//! List-marker inline-width resolution.
+//! List-marker inline width: how much of the first line a visible marker
+//! consumes.
+//!
+//! The marker's face resolves in precedence order — numbering level, then the
+//! paragraph's first text run, then the paragraph default, then the document
+//! default — and always through that family's regular chain, since a marker
+//! is never bold or italic here. `w:suff` then fixes the footprint:
+//! `nothing` is the marker's own width, `space` adds one space glyph, and
+//! `tab` (the default) grows the marker out to the nearest stop past its end,
+//! taking whichever is closer of the first custom stop and the first
+//! `w:defaultTabStop` grid line. With no grid at all — a zero default stop
+//! and no custom stops — the marker takes a half-em gap instead.
 
 use crate::font_store::FontStore;
 
@@ -9,7 +20,8 @@ use super::{MeasureError, pt_to_px};
 /// ECMA-376 §17.6.13 default tab stop.
 const DEFAULT_TAB_STOP_TWIPS: f32 = 720.0;
 
-/// Returns the marker width in pixels for zero-hanging paragraphs.
+/// Marker footprint in pixels. Zero when the paragraph has no marker text or
+/// the marker is hidden; callers apply it only at zero hanging indent.
 pub(super) fn list_marker_inline_width(
     store: &FontStore,
     input: &MeasureInput,

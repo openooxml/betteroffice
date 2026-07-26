@@ -1,9 +1,11 @@
-//! Word-specific measurement rules.
+//! Word-specific measurement rules — the places where reproducing Word
+//! demands something a generic text engine would not do.
 //!
-//! ECMA-376 references are to Part 1 (WordprocessingML); element
-//! semantics are summarized in `reference/quick-ref/wordprocessingml.md`
-//! ("Spacing (w:spacing)" section for line-rule value semantics and the
-//! twips/240ths unit table).
+//! Each rule is a free function taking its inputs explicitly, including the
+//! compat flags, so nothing here reads global state. ECMA-376 references are
+//! to Part 1 (WordprocessingML); element semantics are summarized in
+//! `reference/quick-ref/wordprocessingml.md` ("Spacing (w:spacing)" section
+//! for line-rule value semantics and the twips/240ths unit table).
 //!
 //! # 1. Font-unit line height (single spacing) — [`single_line_box`]
 //!
@@ -58,18 +60,20 @@
 //! happens at line layout, after shaping: shaped cluster advances stay
 //! fixed, only space-cluster advances grow.
 //!
-//! # 4. Snap-to-grid — **TODO, not implemented**
+//! # 4. Snap-to-grid — not applied
 //!
-//! When a section defines a document grid (`w:docGrid`, §17.6.5), line
-//! pitch snaps each line's height up to the next grid multiple unless the
-//! paragraph/run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2).
-//! Required for CJK document fidelity; the layout input does not carry grid pitch.
+//! Where a section defines a document grid (`w:docGrid`, §17.6.5), Word snaps
+//! each line's height up to the next grid multiple unless the paragraph or
+//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2). Measurement
+//! here never snaps: the input carries no grid pitch, so a line's height is
+//! whatever rules 1 and 2 compute and nothing more. CJK documents relying on
+//! the grid measure slightly short as a result.
 //!
 //! # 5. Kerning threshold — [`kern_enabled`], [`kern_features`]
 //!
 //! Word applies pair kerning only when the run's `w:kern` half-point
 //! threshold (rPr, §17.3.2) is nonzero and the font size is at or above it.
-//! [`crate::shape`] applies default OpenType features (which include GPOS
+//! [`mod@crate::shape`] applies default OpenType features (which include GPOS
 //! pair kerning via the `kern` feature) unconditionally; callers gate it
 //! per run by passing [`kern_features`]`(kern_enabled(..))` as the feature
 //! list. rustybuzz honors `kern=0` for GPOS-carried kerning (proven against
@@ -78,14 +82,13 @@
 //!
 //! # 6. Compatibility flags from `settings.xml` — [`CompatFlags`]
 //!
-//! `w:compat` / `w:compatSetting` (§17.15.3) select metric eras. The flags
-//! consumed by rules 1 and 3 (`w:noLeading`, `w:doNotExpandShiftReturn`)
-//! are carried by [`CompatFlags`]; they arrive parsed from `settings.xml`
-//! on the host side and are threaded into every rule as inputs, not
-//! globals. Still to come as the rules that consume them land:
-//! `compatibilityMode` (12/14/15), `w:useWord97LineBreakRules` (legacy
-//! kinsoku line breaking, layered over [`crate::line_break`]), and
-//! `w:balanceSingleByteDoubleByteWidth`.
+//! `w:compat` / `w:compatSetting` (§17.15.3) select metric eras. The two
+//! flags rules 1 and 3 consume — `w:noLeading` and
+//! `w:doNotExpandShiftReturn` — are carried by [`CompatFlags`], parsed from
+//! `settings.xml` host-side and threaded in as inputs. No rule here reads
+//! `compatibilityMode` (12/14/15), `w:useWord97LineBreakRules` or
+//! `w:balanceSingleByteDoubleByteWidth`, so a document setting them measures
+//! as though they were off.
 
 use crate::font_store::FontMetrics;
 use crate::shape::ShapeFeature;
@@ -110,7 +113,8 @@ pub enum LineSpacingRule {
     AtLeast { px: f32 },
 }
 
-/// One line box in px. total height = ascent + descent + leading.
+/// One line box in px: total height = ascent + descent + leading. Leading
+/// always sits *below* the descent, so the baseline hugs the top of the box.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineBox {
     pub ascent: f32,

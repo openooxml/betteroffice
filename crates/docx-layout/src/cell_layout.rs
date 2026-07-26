@@ -66,7 +66,7 @@ pub fn layout_cell_content(
         }
     }
 
-    // The painter renders the final block's trailing space-after as paddingBottom.
+    // The final block's trailing space-after becomes the cell's bottom padding.
     CellContentLayout {
         line_tops,
         flat_bottoms,
@@ -128,7 +128,7 @@ mod tests {
                 SP + LINE + SP + LINE + SP + LINE,
             ]
         );
-        // content height includes the trailing after (painter paddingBottom)
+        // content height includes the trailing after-spacing
         assert_eq!(
             layout.content_height,
             SP + LINE + SP + LINE + SP + LINE + SP

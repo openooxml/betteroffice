@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # The JS/wasm session boundary (src/wasm.rs). Off by default so native builds
 # and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
-# `--features wasm` (driven by scripts/embed-edit-wasm.mjs).
+# `--features wasm` (driven by scripts/build-docx-wasm.ts).
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]

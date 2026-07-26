@@ -1,4 +1,31 @@
 //! Section geometry across section breaks.
+//!
+//! ECMA-376 §17.6.22: a section break's `w:type` says how the *next* section
+//! starts relative to this one, and an absent `w:type` means `nextPage`.
+//! [`handle_section_break`] is the entry point the placement walk uses; it
+//! drives the paginator directly:
+//!
+//! - `nextPage` applies the next section's page size and margins immediately,
+//!   then forces a page.
+//! - `evenPage` / `oddPage` do the same and then insert one blank page if the
+//!   forced break landed on the wrong parity.
+//! - `continuous` keeps the current sheet and defers the new geometry to the
+//!   next natural page break — unless the page size changes, which Word and
+//!   LibreOffice promote to a page break because two page sizes cannot share
+//!   one physical sheet. Sizes are compared after rounding.
+//!
+//! Column layout is applied for every break kind, defaulting to a single
+//! full-width column when the section declares none.
+//!
+//! The tracker half ([`SectionLayoutTracker`] and the `apply` / `promote` /
+//! `resolve_next_*` functions) models the same rules as a two-stage schedule:
+//! a break writes into `queued`, and a page or region boundary folds `queued`
+//! onto `in_force`. Every queued field is optional, and an omitted field
+//! inherits the in-force value at the boundary — that is how a `w:sectPr` that
+//! overrides only some geometry keeps the rest.
+//!
+//! Rounding uses ties-toward-`+∞` and NaN-propagating maximum so the values
+//! reaching the canonical JSON match the host's numeric semantics.
 #![allow(dead_code)]
 
 use crate::LayoutError;
@@ -13,7 +40,8 @@ const SINGLE_COLUMN: ColumnLayout = ColumnLayout {
     columns: None,
 };
 
-/// Margin fields scheduled by a section break.
+/// Margin fields scheduled by a section break. `None` means "not scheduled",
+/// so the in-force value carries forward at the boundary.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PartialPageMargins {
     pub top: Option<f64>,
@@ -42,7 +70,7 @@ pub struct QueuedGeometry {
     pub orientation: Option<String>,
 }
 
-/// In-force and queued section geometry.
+/// Geometry the current page uses, plus what the next boundary will adopt.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SectionLayoutTracker {
     pub in_force: SectionGeometry,
@@ -167,7 +195,13 @@ pub fn create_section_layout_tracker(
     }
 }
 
-/// Schedules section geometry and returns the required pagination action.
+/// Schedules a break's geometry and reports what the paginator must do now.
+///
+/// The tracker is never mutated in place, so a caller can discard the result.
+/// `nextPage` / `evenPage` / `oddPage` always break and queue their columns.
+/// A `continuous` break opens a new column region on the current page only
+/// when its column count or gap differs from the columns in force; a section
+/// declaring no columns resolves to a single full-width column.
 pub fn apply_section_break(
     block: &SectionBreakBlock,
     tracker: &SectionLayoutTracker,
@@ -296,7 +330,8 @@ pub fn resolve_next_columns(tracker: &SectionLayoutTracker) -> ColumnLayout {
 // One inch at 96 DPI.
 const DEFAULT_MARGIN_PX: f64 = 96.0;
 
-/// Resolves body and header/footer margins.
+/// Fills missing body margins with one inch and defaults the header/footer
+/// distances to the resolved top/bottom body margins.
 pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
     let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top);
     let right = requested.map_or(DEFAULT_MARGIN_PX, |m| m.right);
@@ -312,7 +347,11 @@ pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
     }
 }
 
-/// Applies a section break to the paginator.
+/// Drives the paginator through a section break, per the module rules.
+///
+/// `next_section_config` and `next_section_type` describe the section being
+/// entered, not the one ending; the block itself carries no geometry the
+/// paginator needs at this point.
 pub fn handle_section_break<P: SectionBreakPaginator>(
     _block: &SectionBreakBlock,
     paginator: &mut P,

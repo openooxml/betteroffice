@@ -1,4 +1,33 @@
-//! Placement of measured blocks into pages and columns.
+//! The placement walk: measured blocks in, pages of positioned fragments out.
+//!
+//! One pass over the measured list, a per-kind placer for each block, the
+//! paginator holding page and column state, and every look-ahead answered from
+//! the prescan plan rather than by re-scanning. Contextual spacing
+//! (`w:contextualSpacing`, ECMA-376 §17.3.1.9) is folded into adjacent
+//! same-style paragraphs before the walk starts, recursing through table cells.
+//!
+//! Each block is processed in a fixed order: record a checkpoint if placement
+//! stands at a pristine page start; force a page when the block carries
+//! `w:pageBreakBefore`; at the head of a keep-with-next group, force a page when
+//! the group would otherwise straddle the boundary; then dispatch to the placer.
+//! A section break reads the *next* section's configuration and break type,
+//! falling back to the current break's when the plan has no successor. Column
+//! balancing runs over the range up to the next section break, both at the start
+//! of the document and after each break that opens multi-column geometry.
+//!
+//! Unknown block and run kinds raise `Unsupported` rather than being silently
+//! dropped, and a measure whose kind disagrees with its block raises `Invalid`.
+//!
+//! Anchored images and floating text boxes overlay the page and never move the
+//! pen; inline images, shapes, charts and inline text boxes consume their
+//! measured bbox in flow. Paragraph placement is described on
+//! [`layout_paragraph`].
+//!
+//! Checkpoints are resume bookmarks at pristine page starts. They stay resident
+//! and never appear in a serialized `Layout`. [`layout_document_incremental`]
+//! restarts from the last checkpoint before the edit and stops as soon as
+//! page-start geometry and the measured suffix converge with the retained
+//! layout, so an edit late in a document does not re-place everything above it.
 
 use crate::LayoutError;
 use crate::hooks;
@@ -92,6 +121,13 @@ fn run_boundary_pm_pos(run: Option<&Run>, char_offset: usize, edge: Edge) -> Opt
     run.pm_start()
 }
 
+/// Document range covered by lines `[from_line, to_line)`.
+///
+/// The paragraph's own bounds win at its true first and last line, so a
+/// single-fragment paragraph keeps the range it declared; interior fragment
+/// edges come from the head and tail runs of their boundary lines. Any edge
+/// that stays unresolved falls back to the paragraph, and an end that would not
+/// exceed its start is nudged forward by one so the range is never empty.
 fn get_paragraph_fragment_pm_range(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -146,6 +182,8 @@ fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
     )
 }
 
+/// A text box floats when it declares float display, a floating wrap type, or
+/// `topAndBottom` wrapping.
 fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
     block.display_mode.as_deref() == Some("float")
         || is_floating_wrap_type(block.wrap_type.as_deref())
@@ -217,7 +255,7 @@ fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
     }
 }
 
-/// Converts measured blocks into positioned pages.
+/// Converts measured blocks into positioned pages, discarding checkpoints.
 pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
     Ok(layout_document_checkpointed(input)?.layout)
 }
@@ -445,6 +483,9 @@ struct PlacementOutcome {
     converged: Option<(LayoutCheckpoint, LayoutCheckpoint)>,
 }
 
+/// The block walk itself, per the module's ordering rules. Returns early once
+/// a checkpoint matches the retained layout, which is how incremental placement
+/// detects convergence.
 fn place(
     measured: &[MeasuredBlock],
     plan: &LayoutPlan,
@@ -741,7 +782,25 @@ fn build_resolved_lines(
     resolved
 }
 
-/// Places measured paragraph lines across pages and columns.
+/// Places a paragraph's measured lines, splitting into carried fragments
+/// whenever the page or column runs out of room.
+///
+/// Lines are fitted greedily, and a fragment always takes at least one line so
+/// an oversized line cannot stall the walk. A line's `floatSkipBefore` counts
+/// toward the fragment height, which is what makes following blocks flow below
+/// the float instead of over it. A paragraph with no measured lines still emits
+/// a zero-height fragment, because its spacing must still advance the pen.
+///
+/// Two rules can move lines before they are placed. `w:keepLines` advances to a
+/// fresh column when the whole paragraph fits a column but not the space left
+/// here. Widow and orphan control applies to paragraphs of at least four lines:
+/// a lone opening line moves the paragraph on when two lines would fit there,
+/// and a lone trailing line is avoided by pushing one more line down, provided
+/// the fragment keeps more than two.
+///
+/// Spacing before is charged to the first fragment only and spacing after to
+/// the last, and each fragment carries its own document range and resolved run
+/// slices.
 fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -935,9 +994,7 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
-/// Common DrawingML shapes consume their measured bbox in normal flow. The
-/// bridge currently emits the host path's in-flow shape contract; exotic anchor
-/// scenes remain eligible for the host fallback before they reach pagination.
+/// Places a DrawingML shape by consuming its measured bbox in normal flow.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;
@@ -977,6 +1034,13 @@ fn layout_chart(block: &ChartBlock, measure: &ChartExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
+/// Resolves a DrawingML anchor to a page-coordinate origin.
+///
+/// A simple position is taken verbatim. Otherwise each axis picks a band from
+/// its `relativeFrom` — page, margin box, an individual margin strip, or the
+/// current column horizontally and the flow region vertically — and then
+/// applies either an explicit offset or an alignment within that band. The
+/// `insideMargin` and `outsideMargin` bands swap sides with page parity.
 fn resolve_object_position(
     position: Option<&ImageRunPosition>,
     width: f64,
@@ -1053,7 +1117,8 @@ fn resolve_object_position(
     )
 }
 
-/// Places an anchored image without moving the flow position.
+/// Places an anchored image at its resolved anchor without moving the pen.
+/// `behindDoc` decides whether it paints under or over body content.
 fn layout_anchored_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Paginator) {
     let anchor = block.anchor.as_ref().expect("anchored image has anchor");
 

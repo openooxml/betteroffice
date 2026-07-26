@@ -1,4 +1,24 @@
-//! Terminal continuous-section column balancing.
+//! Column balancing for a document's final continuous multi-column section.
+//!
+//! Word leaves the last continuous section's columns ragged unless it can even
+//! them out. Balancing works by *shortening the region*: the content limit
+//! drops so each column fills to roughly the same depth instead of the first
+//! column running to the page bottom.
+//!
+//! The target is `ceil(total / columnCount)`, then snapped forward to the first
+//! legal break at or past it, so a column boundary never lands mid-line. Legal
+//! breaks are:
+//!
+//! - inside a paragraph, after a line that is neither the first nor within two
+//!   lines of the last, and only when the paragraph does not set `w:keepLines`;
+//! - at a paragraph's end, unless it sets `w:keepNext`;
+//! - after every table row, and after an image or text box.
+//!
+//! Balancing is abandoned — leaving the region at full height — when the
+//! section has no content, when the range holds any block kind other than those
+//! above (section breaks are simply skipped), when there is a single column,
+//! when the content cannot fit the region even across all columns, or when the
+//! snapped height is not actually shorter than the region.
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
@@ -11,11 +31,15 @@ pub trait ColumnBalancePaginator {
     fn set_content_limit(&mut self, value: f64);
 }
 
+/// Stacked height of the balanced range and the offsets a column may end at,
+/// both measured from the top of the range.
 struct SectionBalance {
     total_height: f64,
     legal_breaks: Vec<f64>,
 }
 
+/// Stacks the range and collects its legal breaks, or `None` when the range
+/// holds nothing to balance or a block kind balancing cannot reason about.
 fn get_balanced_section_height(
     measured: &[MeasuredBlock],
     start: usize,
@@ -89,6 +113,8 @@ fn get_balanced_section_height(
     }
 }
 
+/// Lowers the current region's content limit to the balanced depth, or leaves
+/// it alone when any of the module's bail-out conditions holds.
 fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator: &mut P,
     total_content_height: f64,
@@ -118,7 +144,8 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator.set_content_limit(column_region_top + balanced_height);
 }
 
-/// Balances a terminal continuous text section across columns.
+/// Balances the measured blocks in `start..end` across the current region's
+/// columns. Called with the range that follows the terminal continuous break.
 pub fn balance_terminal_continuous_text_columns<P: ColumnBalancePaginator>(
     measured: &[MeasuredBlock],
     paginator: &mut P,

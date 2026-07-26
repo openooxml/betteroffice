@@ -1,4 +1,26 @@
-//! Pagination and display-list data contracts.
+//! The data contracts pagination reads and writes.
+//!
+//! Three families live here. *Blocks* ([`LayoutBlock`]) describe document
+//! content; *extents* ([`BlockExtent`]) are the measurement results paired with
+//! them in a [`MeasuredBlock`]; *fragments* ([`Fragment`]) and [`Page`] are what
+//! placement produces. [`Input`] is the `{ measured, options }` envelope; the
+//! result is a [`Layout`].
+//!
+//! Serialization conventions hold across the whole module and are load-bearing
+//! for the JSON boundary: every field is camelCase, an absent `Option` is
+//! omitted rather than emitted as null, and unknown incoming fields are
+//! ignored so a producer may send more than pagination reads. An unrecognized
+//! `kind` tag on a block, run or extent deserializes to that union's
+//! `Unsupported` variant, which lets the engine refuse a document deliberately
+//! instead of failing to parse it.
+//!
+//! Fields pagination never inspects — revision markers, content-control
+//! payloads, chart models, DrawingML scene data — are typed as
+//! [`serde_json::Value`] so they survive a round trip untouched.
+//!
+//! Numeric fields are `f64` even where a count would do, because the values
+//! arrive from and return to a JavaScript host that has a single number type,
+//! and intermediate arithmetic must agree with it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,6 +30,7 @@ use std::collections::BTreeMap;
 // shared scalars
 // ---------------------------------------------------------------------------
 
+/// A block's identity, numeric or string, passed through to fragments verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockId {
@@ -22,6 +45,8 @@ pub struct Size {
     pub h: f64,
 }
 
+/// Body margins, plus the `w:header` / `w:footer` band distances. Only the two
+/// distances are optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageMargins {
     pub top: f64,
@@ -43,6 +68,7 @@ pub struct ColumnDefinition {
     pub space: Option<f64>,
 }
 
+/// `w:cols`. `count` is `f64` because column width divides by it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnLayout {
@@ -56,6 +82,7 @@ pub struct ColumnLayout {
     pub columns: Option<Vec<ColumnDefinition>>,
 }
 
+/// `w:type` on a section break: how the *next* section starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SectionBreakType {
@@ -370,8 +397,8 @@ pub struct FieldRun {
     #[serde(flatten)]
     pub fmt: RunFormatting,
     pub field_type: String,
-    /// raw Word field type token when `field_type` collapsed it to a painter
-    /// category — inert a11y identity, never evaluated
+    /// Raw Word field type token, kept when `field_type` collapsed it to a
+    /// coarse category. Inert identity for announcement; never evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     /// raw field instruction text carried INERT for a11y announcement only
@@ -385,6 +412,8 @@ pub struct FieldRun {
     pub pm_end: Option<f64>,
 }
 
+/// Inline content of a paragraph. An unknown `kind` becomes `Unsupported`, and
+/// a paragraph containing one cannot be placed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Run {
@@ -1033,6 +1062,8 @@ pub struct TextBoxBlock {
 }
 
 #[allow(clippy::large_enum_variant)]
+/// A document block. An unknown `kind` becomes `Unsupported`, which placement
+/// refuses rather than dropping the content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum LayoutBlock {
@@ -1127,6 +1158,10 @@ pub struct TypesetBidiSlice {
     pub logical_order: Option<u64>,
 }
 
+/// One measured line. `head_*` / `tail_*` bound the line's run and character
+/// range, `float_skip_before` is vertical room the line had to skip past a
+/// float, and `left_offset` / `right_offset` are the exclusions measurement
+/// already applied.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRow {
@@ -1217,6 +1252,8 @@ pub struct TextBoxExtent {
     pub inner_measures: Vec<ParagraphExtent>,
 }
 
+/// A block's measurement result. Break blocks measure to a bare placeholder
+/// because they occupy no space of their own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum BlockExtent {
@@ -1242,6 +1279,8 @@ pub enum BlockExtent {
     Unsupported,
 }
 
+/// A block paired with its measure. Placement requires the two kinds to agree;
+/// a mismatch is a contract violation, not a recoverable input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeasuredBlock {
     pub block: LayoutBlock,
@@ -1252,6 +1291,9 @@ pub struct MeasuredBlock {
 // layout options
 // ---------------------------------------------------------------------------
 
+/// Document-level pagination inputs. `footnote_reserved_heights` is keyed by
+/// decimal page number, and the paginator subtracts each entry from that page's
+/// content limit before body flow sees it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LayoutOptions {
@@ -1297,7 +1339,7 @@ pub struct SectionLayoutContract {
     pub note_settings: Option<Value>,
 }
 
-/// JSON layout input.
+/// The `{ measured, options }` envelope the engine paginates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
     pub measured: Vec<MeasuredBlock>,
@@ -1311,6 +1353,9 @@ pub struct Input {
 
 use crate::resolve_lines::ResolvedLine;
 
+/// One page's slice of a paragraph: the measured line window
+/// `[from_line, to_line)`, its own document range, and the run slices those
+/// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFragment {
@@ -1333,6 +1378,10 @@ pub struct ParagraphFragment {
     pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
+/// One page's slice of a table: rows `[row_start, row_end)`, plus
+/// `clip_top` / `clip_bottom` when the boundary cuts through a row that broke
+/// mid-content, and `header_row_count` when this fragment repeats the header
+/// band.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableFragment {
@@ -1441,6 +1490,7 @@ pub struct TextBoxFragment {
     pub z_index: Option<f64>,
 }
 
+/// A positioned piece of a block on one page. Break blocks produce none.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Fragment {
@@ -1501,6 +1551,9 @@ pub struct HeaderFooterRefs {
     pub footer_even: Option<String>,
 }
 
+/// One paginated page: its geometry, the fragments placed on it in paint order,
+/// and the section-derived metadata a renderer needs for page numbering, header
+/// and footer selection, borders and note areas.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
@@ -1554,6 +1607,7 @@ pub struct HeaderFooterLayout {
     pub fragments: Vec<Fragment>,
 }
 
+/// The paginator's complete result.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Layout {

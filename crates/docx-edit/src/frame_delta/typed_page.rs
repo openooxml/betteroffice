@@ -1,4 +1,35 @@
-//! Streaming typed-page serialization for frame deltas.
+//! Streaming typed-page serialization for the FrameDelta encoder.
+//!
+//! Three `serde::Serializer` implementations walk a typed [`DisplayPage`]
+//! directly, so a rebuilt page costs three allocation-free passes instead of
+//! materializing an intermediate value tree:
+//!
+//! - [`hash_page`] — the structural and visual fingerprints, in one pass;
+//! - [`collect_page_strings`] — string-table population, for upsert pages;
+//! - [`encode_page`] — the typed value stream, for upsert pages.
+//!
+//! The two fingerprints answer different questions, so each excludes what it
+//! must not notice. The structural one ignores the root `pageIndex`, since a
+//! page that only moved is still the same page. The visual one additionally
+//! ignores `docStart`, `docEnd`, `fragmentDocStart`, `fragmentDocEnd` and an
+//! `inlineSdtWidget`'s `pos`: those shift as text is edited elsewhere without
+//! changing a pixel, and a page whose visual fingerprint holds can ship a
+//! position patch rather than a full re-encode. Fingerprints are only ever
+//! compared against others from the same session.
+//!
+//! Emission rules the browser decoder depends on:
+//!
+//! - object field order is declaration order — the decoder materializes
+//!   fields one by one and does not care;
+//! - a duplicate key, which a named field colliding with a `serde(flatten)`
+//!   member produces, is compacted to its LAST write, because the decoder
+//!   rejects duplicate object keys outright;
+//! - an unsigned value that fits in `i64` emits `VALUE_I64`, so a number has
+//!   one canonical encoding;
+//! - a non-finite float emits `VALUE_NULL`, JSON having no spelling for it;
+//! - an array under `"glyphs"` whose entries all carry the expected numeric
+//!   fields emits the compact `VALUE_GLYPH_ARRAY` payload instead of a
+//!   generic array.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -14,7 +45,10 @@ use super::{
 };
 
 pub(super) struct PageHashes {
+    /// Changes whenever the page's content changes, ignoring only its index.
     pub fingerprint: u64,
+    /// Changes only when the page's appearance changes; equal fingerprints
+    /// mean a position patch suffices.
     pub visual_fingerprint: u64,
 }
 
@@ -84,7 +118,9 @@ fn unsupported<T>(what: &str) -> Result<T, SerError> {
     )))
 }
 
-/// Key classifications the exclusion / compaction rules depend on.
+/// The parent key a value sits under, where that changes how it is treated:
+/// glyph arrays compact, and an inline SDT widget's `pos` leaves the visual
+/// fingerprint. Array elements inherit their array's slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Slot {
     None,
@@ -100,6 +136,8 @@ fn classify(key: &str) -> Slot {
     }
 }
 
+/// Keys the visual fingerprint ignores: they move with edits elsewhere in the
+/// document without changing what the page looks like.
 fn is_position_key(key: &str) -> bool {
     matches!(
         key,
@@ -321,8 +359,8 @@ impl HashContainer<'_> {
             fp_on: self.fp_on,
             vfp_on: self.vfp_on,
             root: false,
-            // array elements inherit the array's slot (glyph objects sit
-            // under "glyphs"), matching the Value-walk's parent_key rule
+            // Array elements inherit the array's slot, so a glyph object
+            // still counts as sitting under "glyphs".
             slot: self.slot,
         })
     }
@@ -368,7 +406,7 @@ impl<'a> Serializer for HashSer<'a> {
         self.serialize_u64(value.into())
     }
     fn serialize_u64(mut self, value: u64) -> Result<(), SerError> {
-        // mirrors the old Value introspection: as_i64() first
+        // One canonical encoding per number: prefer VALUE_I64.
         if let Ok(signed) = i64::try_from(value) {
             self.write(&[VALUE_I64]);
             self.write(&signed.to_le_bytes());
@@ -382,7 +420,7 @@ impl<'a> Serializer for HashSer<'a> {
         self.serialize_f64(value.into())
     }
     fn serialize_f64(mut self, value: f64) -> Result<(), SerError> {
-        // serde_json::to_value maps non-finite floats to null
+        // JSON cannot spell a non-finite float; emit null.
         if value.is_finite() {
             self.write(&[VALUE_F64]);
             self.write(&value.to_bits().to_le_bytes());
@@ -899,7 +937,10 @@ struct EmitContainer<'a> {
     payload_at: usize,
     count: u32,
     key_buf: String,
-    /// Object entries used to compact duplicate flattened keys to the last write.
+    /// One `(key id, byte offset of that entry)` per object entry, so
+    /// [`EmitContainer::compact_duplicate_keys`] can splice out a superseded
+    /// key — which a named field colliding with a `serde(flatten)` member
+    /// produces.
     entries: Vec<(u32, usize)>,
 }
 
@@ -935,10 +976,12 @@ impl<'a> EmitContainer<'a> {
         Ok(())
     }
 
-    /// Drop every non-final occurrence of a repeated object key (last write
-    /// wins). Duplicate-free objects — the overwhelming majority — pay one
-    /// linear scan and nothing else; typed value payloads only carry relative
-    /// lengths, so splicing bytes out never invalidates inner containers.
+    /// Drops every non-final occurrence of a repeated object key, so the last
+    /// write wins — a correctness rule, not a size optimization, because the
+    /// decoder rejects duplicate keys outright. Duplicate-free objects, the
+    /// overwhelming majority, pay one linear scan and nothing else; container
+    /// payloads carry only relative lengths, so splicing bytes out can never
+    /// invalidate an inner container.
     fn compact_duplicate_keys(&mut self) {
         let has_duplicate = self.entries.iter().enumerate().any(|(index, (key, _))| {
             self.entries[index + 1..]
@@ -1039,7 +1082,7 @@ impl<'a> Serializer for EmitSer<'a> {
         self.serialize_u64(value.into())
     }
     fn serialize_u64(self, value: u64) -> Result<(), SerError> {
-        // mirrors the old Value introspection: as_i64() first
+        // One canonical encoding per number: prefer VALUE_I64.
         if let Ok(signed) = i64::try_from(value) {
             self.out.push(VALUE_I64);
             write_i64(self.out, signed);
@@ -1053,7 +1096,7 @@ impl<'a> Serializer for EmitSer<'a> {
         self.serialize_f64(value.into())
     }
     fn serialize_f64(self, value: f64) -> Result<(), SerError> {
-        // serde_json::to_value maps non-finite floats to null
+        // JSON cannot spell a non-finite float; emit null.
         if value.is_finite() {
             self.out.push(VALUE_F64);
             write_f64(self.out, value);
@@ -1263,9 +1306,10 @@ impl ser::SerializeStructVariant for EmitContainer<'_> {
 // compact glyph probe (shared by the strings and emit passes)
 // ---------------------------------------------------------------------------
 
-/// One glyph eligible for the fixed-field wire payload. Range checks beyond
-/// eligibility (id/cluster into u32) happen at emission, exactly like the
-/// `Value`-based encoder: an out-of-range id is a hard error, not a fallback.
+/// One glyph eligible for the fixed-field wire payload. Eligibility only
+/// checks that the expected fields are present and numeric; narrowing the id
+/// and cluster to `u32` happens at emission, where an out-of-range value is a
+/// hard error rather than a fall back to the generic array encoding.
 struct CompactGlyph {
     id: u64,
     x: f64,
@@ -1282,6 +1326,9 @@ fn probe_glyphs<T: Serialize + ?Sized>(value: &T) -> Option<Vec<CompactGlyph>> {
     value.serialize(GlyphSeqProbe).ok()
 }
 
+/// Emits `VALUE_GLYPH_ARRAY`: a byte length and count, then a fixed-width
+/// record per glyph. `logicalOrder` and `bidiLevel` are optional, so each
+/// record carries a flag byte saying which of them follow.
 fn emit_glyph_array(glyphs: &[CompactGlyph], out: &mut Vec<u8>) -> Result<(), SerError> {
     out.push(VALUE_GLYPH_ARRAY);
     let length_at = out.len();
@@ -1330,6 +1377,9 @@ fn emit_glyph_array(glyphs: &[CompactGlyph], out: &mut Vec<u8>) -> Result<(), Se
     Ok(())
 }
 
+/// Signals "not a compact glyph array" out of the probe. The error never
+/// reaches a caller: [`probe_glyphs`] turns it into `None`, which selects the
+/// generic array encoding.
 fn ineligible<T>() -> Result<T, SerError> {
     Err(SerError("glyph array is not compact-eligible".to_owned()))
 }
@@ -1343,7 +1393,7 @@ enum GlyphNum {
 }
 
 impl GlyphNum {
-    /// `Value::as_u64` equivalence.
+    /// The value as `u64`, refusing a float even when it is whole.
     fn as_u64(self) -> Option<u64> {
         match self {
             GlyphNum::Uint(value) => Some(value),
@@ -1352,7 +1402,7 @@ impl GlyphNum {
         }
     }
 
-    /// `Value::as_f64` equivalence.
+    /// The value as `f64`, widening either integer form.
     fn as_f64(self) -> Option<f64> {
         match self {
             GlyphNum::Uint(value) => Some(value as f64),

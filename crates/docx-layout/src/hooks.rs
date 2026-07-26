@@ -1,4 +1,10 @@
-//! Pagination feature hooks.
+//! Feature seams the placement walk calls for per-block pagination decisions.
+//!
+//! Break policy, keep-with-next, section breaks and column balancing delegate
+//! to their owning modules; table placement lives here because it is driven
+//! entirely by paginator state. Every entry point returns a `Result` so a
+//! feature the engine cannot paginate surfaces `LayoutError::Unsupported` to
+//! the caller rather than producing wrong geometry.
 
 use crate::LayoutError;
 use crate::page_flow::Paginator;
@@ -68,6 +74,8 @@ pub fn balance_terminal_continuous_text_columns(
     Ok(())
 }
 
+/// Length of the leading run of `w:tblHeader` rows, the band that repeats on
+/// continuation fragments. Header rows after a non-header row do not count.
 fn tally_header_rows(block: &TableBlock) -> usize {
     let mut count = 0usize;
     for row in &block.rows {
@@ -80,6 +88,7 @@ fn tally_header_rows(block: &TableBlock) -> usize {
     count
 }
 
+/// Vertical cost a continuation fragment pays to repeat the header band.
 fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64 {
     let mut height = 0.0f64;
     let mut i = 0usize;
@@ -90,7 +99,21 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
-/// Places table rows, splitting at the deepest whole-line boundary that fits.
+/// Places an in-flow table, emitting one fragment per page or column it spans.
+///
+/// The cursor is `(row_index, consumed)`, where `consumed` is how many pixels
+/// of `row_index` a previous fragment already placed. Rows go in order; a row
+/// that overruns the remaining space breaks at the deepest whole-line boundary
+/// that fits (Word's "allow row to break across pages"), which keeps the row's
+/// other columns on the page where they start and lets a tall vertically merged
+/// cell flow across the boundary. `w:cantSplit` rows (§17.4.6) never break
+/// unless they cannot fit a whole column even alone. A fresh fragment where not
+/// one line fits places the row's remainder with overflow instead of looping.
+///
+/// A continuation fragment repeats the leading header band, but only when the
+/// band plus the smallest legal body slice still fits the column; otherwise it
+/// pays no header overhead. Deferred spacing from the preceding block is
+/// consumed by the first fragment only.
 pub fn layout_table(
     block: &TableBlock,
     measure: &TableExtent,
@@ -294,6 +317,16 @@ pub fn layout_table(
     Ok(())
 }
 
+/// Places a `w:tblpPr` table as an overlay that normally leaves the pen alone.
+///
+/// A table taller than one column cannot float and falls back to
+/// [`layout_table`]. Otherwise `w:horzAnchor` / `w:vertAnchor` pick the
+/// page, margin or text band, an explicit `w:tblpX` / `w:tblpY` offsets from
+/// that band's start, and an alignment spec resolves against it — `inside` and
+/// `outside` flip with page parity. Only when the wrap gutters on both sides of
+/// the table fall below the minimum wrap segment (24px) does the pen advance
+/// past the table plus its `w:bottomFromText` distance, since no line could
+/// wrap beside it.
 pub fn layout_floating_table(
     block: &TableBlock,
     measure: &TableExtent,

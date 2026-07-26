@@ -1,4 +1,31 @@
-//! Page and column flow state.
+//! Page and column flow state: where the pen is, what room is left, and when
+//! to open the next column or page.
+//!
+//! [`Paginator`] owns the growing `pages` output and one [`FlowState`] per page
+//! created; the last state is the current one. No page exists until something
+//! asks for the current state, so an empty document produces no pages. Page
+//! numbers run `start_page_number + pages.len()`.
+//!
+//! Vertical room is `content_limit - pen_y`. `content_limit` is the content
+//! bottom already reduced by the page's footnote reservation, so reserved note
+//! space is simply invisible to body flow. [`Paginator::ensure_fits`] walks to
+//! the next column, then the next page, until the height fits; a fragment
+//! taller than a whole column is placed with overflow — after moving off a
+//! partly used column — rather than looping forever.
+//!
+//! Word collapses adjacent vertical spacing to the larger of the two instead of
+//! summing, so [`Paginator::add_fragment`] takes `max(space_before,
+//! deferred_spacing)` and leaves `space_after` deferred for the next fragment.
+//! The deferred value is read before fitting can advance the state, and a new
+//! page or column resets it to zero, which is what lets an explicit `w:before`
+//! still apply at the top of a page.
+//!
+//! Columns live in a *region* starting at `column_region_top`. A new page
+//! resets that to the content top; [`Paginator::update_columns`] sets it to the
+//! current pen and returns to column zero, so a continuous section break stacks
+//! its new column band below content already on the page. Page geometry a
+//! continuous break defers is held as pending and applied when the next page is
+//! created.
 
 use crate::LayoutError;
 use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
@@ -32,6 +59,7 @@ pub struct FlowState {
     pub deferred_spacing: f64,
 }
 
+/// Splits the content width evenly after subtracting the inter-column gaps.
 fn calculate_column_width(
     page_width: f64,
     left_margin: f64,
@@ -43,6 +71,7 @@ fn calculate_column_width(
     (content_width - total_gaps) / columns.count
 }
 
+/// The page/column cursor and the pages it has produced so far.
 pub struct Paginator {
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
@@ -174,6 +203,8 @@ impl Paginator {
         self.margins.left + column_index as f64 * (self.column_width + self.columns.gap)
     }
 
+    /// Opens the next page, promoting any deferred geometry first, and returns
+    /// its state index.
     fn create_new_page(&mut self) -> usize {
         // apply any geometry queued by a continuous section break before
         // computing the new page's size / margins
@@ -290,6 +321,8 @@ impl Paginator {
         self.available_height_of(idx) >= height
     }
 
+    /// Moves to the next column of the current region, or opens a new page once
+    /// the region's columns are spent.
     fn advance_column(&mut self, idx: usize) -> usize {
         if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
             let region_top = self.column_region_top;
@@ -327,7 +360,8 @@ impl Paginator {
         idx
     }
 
-    /// Places a fragment at the cursor and collapses adjacent spacing.
+    /// Places a fragment at the cursor, collapsing adjacent spacing, and
+    /// returns its resolved `(x, y)`.
     pub fn add_fragment(
         &mut self,
         mut fragment: Fragment,
@@ -379,6 +413,7 @@ impl Paginator {
         self.create_new_page()
     }
 
+    /// Moves to the next column, or the next page from the last column.
     pub fn force_column_break(&mut self) -> usize {
         let idx = self.get_current();
         self.advance_column(idx)

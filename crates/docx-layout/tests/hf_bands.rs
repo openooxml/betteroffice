@@ -141,7 +141,7 @@ fn hit_test_regions_resolves_bands_and_body() {
         .expect("footer band with content resolves a position");
     assert!((1..=15).contains(&pos), "footer pos out of HF span: {pos}");
 
-    // body click resolves like the legacy body-only hit test
+    // a body click resolves the same as the body-only hit test
     let hit = hit_test_regions(&dl, 0, 100.0, 150.0).unwrap();
     assert_eq!(hit.region, HitRegion::Body);
     assert_eq!(hit.r_id, None);

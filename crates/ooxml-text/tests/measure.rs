@@ -11,6 +11,16 @@
 //!   external leading = 16 × max(0, (1854+434+67)−(1854+434))/2048 = 0.5234375
 //!   single line = 16 × (1854+434)/2048 + leading = 17.875 + 0.5234375 = 18.3984375
 //!   External leading is included in the line height.
+//!
+//! Because the numbers are exact, expectations are written as literal
+//! arithmetic rather than tolerances, and wrap behaviour is pinned by feeding
+//! a width one pixel either side of a computed threshold. Tests run through
+//! [`measure_paragraph_json`], so they also pin the serialized field names and
+//! the omission of unset optional fields.
+//!
+//! The numbered sections run from the core wrap and spacing rules through
+//! tabs, fields, list markers, images, small caps, bidi, indents and float
+//! exclusion zones.
 
 use ooxml_text::{FontStore, measure_paragraph_json};
 use serde_json::{Value, json};

@@ -1,4 +1,25 @@
 //! Display-list contract, determinism, and interaction gates.
+//!
+//! Three kinds of test live here.
+//!
+//! **Contract** — the demo fixture must round-trip through the serde types
+//! without losing or renaming a field, and parse-then-serialize must be
+//! idempotent. A new output field that is not wired into the types shows up
+//! here first.
+//!
+//! **Determinism and snapshots** — every fixture is built twice and the two
+//! JSON strings must be byte-identical, then compared against a committed
+//! snapshot. Fixtures pinning only `{ measured, options }` have their golden
+//! canonical layout spliced in as the `layout` the builder consumes; fixtures
+//! that already carry one are used verbatim. A fixture the builder cannot
+//! handle is reported as a gap rather than a failure, so coverage can grow
+//! without the suite going red. Snapshots regenerate only under
+//! `DL_SNAPSHOT_UPDATE=1`, which keeps drift a deliberate act.
+//!
+//! **Behaviour** — the remaining tests pin individual emission rules against
+//! hand-computed geometry: hit testing and caret movement, table cell identity
+//! and vertical-merge continuations, indents and justification, tracked-change
+//! decorations, watermarks, floats, charts, shapes and text boxes.
 
 use docx_layout::display_list::{
     DecoKind, DecorationPrimitive, DisplayList, DocAttrs, MAX_ALT_TEXT_CHARS, Primitive,
@@ -1173,7 +1194,10 @@ fn image_alt_text_threads_and_caps() {
     );
 
     let empty = images.iter().find(|i| i.rel_id == "rId11").unwrap();
-    assert_eq!(empty.alt_text, None, "empty alt drops like the DOM painter");
+    assert_eq!(
+        empty.alt_text, None,
+        "an empty alt attribute resolves to None"
+    );
 }
 
 #[test]
@@ -1650,7 +1674,7 @@ fn hanging_list_first_line_body_sits_at_the_text_indent() {
     );
 
     // no marker: a plain hanging paragraph pulls the first line left by the hang
-    // (100 + 40 - 20 = 120), body lines still at 140 — unchanged v0 behavior
+    // (100 + 40 - 20 = 120), body lines still at 140
     let dl2 = build_dl(&with_marker(serde_json::Value::Null));
     let xs2: Vec<f64> = text_prims(&dl2.pages[0].primitives)
         .iter()
