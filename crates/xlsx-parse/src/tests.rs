@@ -732,6 +732,33 @@ fn preserved_shared_strings_pair_duplicate_values_in_order() {
     assert!(written.contains(&format!("{rich_item}<si><t>Dup</t></si>")));
 }
 
+/// `<sst/>` and `<styleSheet/>` are schema-valid; capture must treat a
+/// self-closing root as an empty template rather than a missing one.
+#[test]
+fn captures_self_closing_template_roots() {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts.push((
+        "xl/sharedStrings.xml".to_owned(),
+        br#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/styles.xml".to_owned(),
+        br#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#
+            .to_vec(),
+    ));
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert!(parsed.workbook.shared_strings.is_empty());
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.shared_strings = vec!["added".to_owned()];
+    let written =
+        shared_strings_text(&serialize_workbook_with_package(&workbook, &parsed.package).unwrap());
+    assert!(written.starts_with("<sst "));
+    assert!(written.contains(r#"<si><t xml:space="preserve">added</t></si>"#));
+    assert!(written.ends_with("</sst>"));
+}
+
 fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
     String::from_utf8(
         parts

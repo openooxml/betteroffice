@@ -315,6 +315,9 @@ impl XmlTemplate {
                         return Err(ParseError::DepthExceeded);
                     }
                 }
+                Event::Empty(element) if depth == 0 => {
+                    return Self::empty_root(data, &element, namespace, before, after);
+                }
                 Event::Empty(element) if depth == 1 => {
                     spans.push((
                         before,
@@ -369,6 +372,36 @@ impl XmlTemplate {
             root_prefix,
             root_namespace,
             namespaces,
+        })
+    }
+
+    /// A schema-valid self-closing root (`<sst/>`) becomes an empty template
+    /// whose expanded start and end tags bracket the insertion point.
+    fn empty_root(
+        data: &[u8],
+        element: &BytesStart<'_>,
+        namespace: Option<String>,
+        before: usize,
+        after: usize,
+    ) -> Result<Self, ParseError> {
+        let root_name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+        let mut writer = Writer::new(data[..before].to_vec());
+        writer
+            .write_event(Event::Start(element.clone()))
+            .map_err(xml_err)?;
+        let mut suffix = format!("</{root_name}>").into_bytes();
+        suffix.extend_from_slice(&data[after..]);
+        Ok(Self {
+            prefix: writer.into_inner(),
+            children: Vec::new(),
+            trailing: Vec::new(),
+            suffix,
+            root_prefix: root_name
+                .rsplit_once(':')
+                .map(|(prefix, _)| prefix.to_owned()),
+            root_name,
+            root_namespace: namespace,
+            namespaces: namespace_bindings(element)?,
         })
     }
 
