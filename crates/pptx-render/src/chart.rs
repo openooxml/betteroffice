@@ -9,9 +9,9 @@ use pptx_parse::ChartPlotGroup;
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
 
-/// Value labels one series may contribute, so a chart with thousands of
-/// categories cannot turn every one of them into a text op.
-const MAX_DATA_LABELS: usize = 512;
+/// Value labels one chart may contribute, shared across its series, so a
+/// chart with thousands of categories cannot turn every one into a text op.
+const MAX_DATA_LABELS: usize = 4_096;
 
 /// The graphic frame a chart is drawn into.
 pub(crate) struct ChartFrame<'a> {
@@ -75,8 +75,13 @@ struct ChartLabels {
 
 impl ChartLabels {
     fn new(space: &ChartSpace) -> Self {
+        let mut budget = MAX_DATA_LABELS;
         Self {
-            groups: space.plot_groups.iter().map(group_labels).collect(),
+            groups: space
+                .plot_groups
+                .iter()
+                .map(|group| group_labels(group, &mut budget))
+                .collect(),
         }
     }
 
@@ -86,7 +91,7 @@ impl ChartLabels {
     }
 }
 
-fn group_labels(group: &ChartPlotGroup) -> Vec<Vec<String>> {
+fn group_labels(group: &ChartPlotGroup, budget: &mut usize) -> Vec<Vec<String>> {
     group
         .series
         .iter()
@@ -94,12 +99,14 @@ fn group_labels(group: &ChartPlotGroup) -> Vec<Vec<String>> {
             if !group.show_data_labels {
                 return Vec::new();
             }
-            series
+            let labels = series
                 .values
                 .iter()
-                .take(MAX_DATA_LABELS)
+                .take(*budget)
                 .map(|value| format_number(*value))
-                .collect()
+                .collect::<Vec<_>>();
+            *budget -= labels.len();
+            labels
         })
         .collect()
 }
@@ -672,6 +679,23 @@ mod tests {
         for value in ["3", "1", "2"] {
             assert!(texts(&chart).contains(&value.to_owned()), "{value}");
         }
+    }
+
+    #[test]
+    fn the_label_budget_is_chart_wide_rather_than_per_series() {
+        let values = (0..3_000).map(|value| value as f64).collect::<Vec<_>>();
+        let mut group = group(
+            "line",
+            vec![
+                series("First", &values, "#112233"),
+                series("Second", &values, "#445566"),
+            ],
+        );
+        group.show_data_labels = true;
+        let space = space("line", vec![group]);
+        let labels = ChartLabels::new(&space);
+        assert_eq!(labels.get(0, 0).unwrap().len(), 3_000);
+        assert_eq!(labels.get(0, 1).unwrap().len(), MAX_DATA_LABELS - 3_000);
     }
 
     #[test]
