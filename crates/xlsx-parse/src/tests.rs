@@ -1521,10 +1521,11 @@ fn refuses_an_oversized_relationship_namespace() {
     );
 }
 
-/// A two-sheet package carrying a chart part, whose references name sheets
-/// this crate never rewrites.
+/// A two-sheet package whose first sheet anchors a chart through a drawing,
+/// wired the way Excel writes it: sheet rels -> drawing -> drawing rels ->
+/// chart part.
 fn charted_package() -> Vec<(String, Vec<u8>)> {
-    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    let mut parts = package(r#"<sheetData/><drawing r:id="rIdDrawing"/>"#, &[], false);
     parts[0] = (
         "xl/workbook.xml".to_owned(),
         br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
@@ -1533,16 +1534,28 @@ fn charted_package() -> Vec<(String, Vec<u8>)> {
         "xl/_rels/workbook.xml.rels".to_owned(),
         br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
     );
-    parts.push((
-        "xl/worksheets/sheet2.xml".to_owned(),
-        br#"<worksheet><sheetData/></worksheet>"#.to_vec(),
-    ));
-    parts.push((
-        "xl/charts/chart1.xml".to_owned(),
-        br#"<chartSpace><f>Data!$A$1:$A$2</f></chartSpace>"#.to_vec(),
-    ));
+    parts.extend([
+        (
+            "xl/worksheets/sheet2.xml".to_owned(),
+            br#"<worksheet><sheetData/></worksheet>"#.to_vec(),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/drawings/drawing1.xml".to_owned(), DRAWING.to_vec()),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/charts/chart1.xml".to_owned(), CHART.to_vec()),
+    ]);
     parts
 }
+
+const DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+
+const CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache></c:strRef></c:tx><c:spPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></c:spPr><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
 
 /// The facade above refuses these ops, but the serializer is reachable on its
 /// own, so the same refusal has to live at that boundary too.
@@ -1565,32 +1578,130 @@ fn refuses_to_strand_chart_references_at_the_serialization_boundary() {
         matches!(&reordered, ParseError::UnsupportedEdit(message) if message.contains("chart1.xml")),
         "{reordered:?}"
     );
-
-    let removed = crate::serialize_workbook_with_package_and_origins_after_edits(
-        &workbook,
-        &parsed.package,
-        &[Some(0), None],
-        &provenance,
-        true,
-    )
-    .unwrap_err();
-    assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
-
-    let mut renamed = workbook.clone();
-    renamed.sheets[0].name = "Renamed".to_owned();
-    let renamed = crate::serialize_workbook_with_package_and_origins_after_edits(
-        &renamed,
-        &parsed.package,
-        &[Some(0), Some(1)],
-        &provenance,
-        true,
-    )
-    .unwrap_err();
-    assert!(matches!(renamed, ParseError::UnsupportedEdit(_)));
 }
 
-/// The guard must not fire on the edits a charted workbook can still take:
-/// cell changes, and appending a sheet that moves none of the existing ones.
+/// Charts are modelled now: the anchor, its `editAs` mode and every `c:f` come
+/// through, and the shared parser reads the part with the workbook theme.
+#[test]
+fn reads_the_chart_anchor_and_every_reference() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let charts = &parsed.workbook.sheets[0].charts;
+    assert_eq!(charts.len(), 1);
+    assert!(parsed.workbook.sheets[1].charts.is_empty());
+    let chart = &charts[0];
+    assert_eq!(chart.part, "xl/charts/chart1.xml");
+    assert_eq!(chart.drawing, "xl/drawings/drawing1.xml");
+    assert_eq!(chart.anchor_index, 0);
+    assert_eq!(
+        chart.anchor,
+        xlsx_model::ChartAnchor::TwoCell {
+            from: xlsx_model::AnchorCell {
+                col: 2,
+                col_off: 12_700,
+                row: 4,
+                row_off: 0,
+            },
+            to: xlsx_model::AnchorCell {
+                col: 8,
+                col_off: 0,
+                row: 19,
+                row_off: 0,
+            },
+            edit_as: xlsx_model::AnchorEditAs::OneCell,
+        }
+    );
+    assert_eq!(
+        chart
+            .refs
+            .iter()
+            .map(|reference| (reference.kind, reference.formula.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (xlsx_model::ChartRefKind::SeriesName, "Data!$B$1"),
+            (xlsx_model::ChartRefKind::Categories, "Data!$A$2:$A$4"),
+            (xlsx_model::ChartRefKind::Values, "Data!$B$2:$B$4"),
+        ]
+    );
+
+    let mut theme = xlsx_model::styles::Theme::default();
+    theme.colors[5] = "#123456".to_owned();
+    let space = crate::chart_space(CHART, &theme).expect("chart parses");
+    assert_eq!(space.chart_type, "column");
+    assert_eq!(space.plot_groups[0].series[0].color, "#123456");
+    assert_eq!(
+        space.plot_groups[0].series[0].value_formula.as_deref(),
+        Some("Data!$B$2:$B$4")
+    );
+}
+
+/// Saving a charted workbook whose references moved patches the chart part in
+/// place, leaving every byte it does not own alone.
+#[test]
+fn patches_only_the_moved_chart_references() {
+    let source = charted_package();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+    workbook.sheets[0].charts[0].refs[2].formula = "Data!$B$2:$B$9".to_owned();
+
+    let saved = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        true,
+    )
+    .unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    let original = String::from_utf8(CHART.to_vec()).unwrap();
+    assert_eq!(
+        patched,
+        original.replace("Data!$B$2:$B$4", "Data!$B$2:$B$9"),
+        "only the moved reference may change"
+    );
+    assert_eq!(
+        part_bytes(&saved, "xl/drawings/drawing1.xml"),
+        DRAWING.to_vec()
+    );
+}
+
+/// A moved anchor is written back as `col`/`row` alone; offsets and the rest of
+/// the drawing stay as authored.
+#[test]
+fn patches_only_the_moved_anchor_indices() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+    let xlsx_model::ChartAnchor::TwoCell { from, to, edit_as } =
+        workbook.sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    workbook.sheets[0].charts[0].anchor = xlsx_model::ChartAnchor::TwoCell {
+        from: xlsx_model::AnchorCell { row: 7, ..from },
+        to: xlsx_model::AnchorCell { row: 22, ..to },
+        edit_as,
+    };
+
+    let saved = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        true,
+    )
+    .unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap();
+    let original = String::from_utf8(DRAWING.to_vec()).unwrap();
+    assert_eq!(
+        patched,
+        original
+            .replace("<xdr:row>4</xdr:row>", "<xdr:row>7</xdr:row>")
+            .replace("<xdr:row>19</xdr:row>", "<xdr:row>22</xdr:row>")
+    );
+}
+
+/// Nothing in the chart layer fires when the chart did not move.
 #[test]
 fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
     let source = charted_package();
@@ -1621,4 +1732,20 @@ fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
     )
     .unwrap();
     assert_eq!(parse_workbook(&added).unwrap().sheets.len(), 3);
+}
+
+/// The patcher addresses `c:f` by document order, so a part that no longer
+/// holds the same references is refused rather than rewritten into the wrong
+/// slots.
+#[test]
+fn refuses_to_patch_a_chart_part_that_no_longer_matches() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    refs.pop();
+    let error = crate::chart::patch_chart_refs(CHART, &refs).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("holds 3 references but the model carries 2")),
+        "{error:?}"
+    );
 }

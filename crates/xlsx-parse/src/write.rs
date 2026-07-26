@@ -10,7 +10,7 @@ use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use xlsx_model::addr::RowId;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
-use xlsx_model::{Cell, CellRef, CellValue, DateSystem, Sheet, Workbook};
+use xlsx_model::{Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, Workbook};
 
 use crate::ParseError;
 use crate::package::{
@@ -265,6 +265,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             parts.remove(&relationship_part_path(&calc_chain.path));
         }
     }
+    patch_chart_parts(wb, package, origins, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let empty_provenance = SharedStringCells::new();
@@ -390,6 +391,58 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     }
 
     Ok(parts.finish())
+}
+
+/// Writes moved chart references and anchors back into the parts that hold
+/// them. Each part is patched once, from its source bytes, so unmodelled chart
+/// markup survives byte for byte.
+fn patch_chart_parts(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    parts: &mut PartStore<'_>,
+) -> Result<(), ParseError> {
+    let mut chart_refs: BTreeMap<&str, &[ChartRef]> = BTreeMap::new();
+    let mut anchors: BTreeMap<&str, Vec<(usize, ChartAnchor)>> = BTreeMap::new();
+    for (sheet, origin) in wb.sheets.iter().zip(origins) {
+        let source = origin
+            .and_then(|origin| package.original_workbook.sheets.get(origin))
+            .map(|sheet| sheet.charts.as_slice())
+            .unwrap_or_default();
+        for chart in &sheet.charts {
+            let Some(original) = source.iter().find(|other| other.part == chart.part) else {
+                continue;
+            };
+            if original.refs != chart.refs {
+                chart_refs.insert(chart.part.as_str(), chart.refs.as_slice());
+            }
+            if original.anchor != chart.anchor {
+                anchors
+                    .entry(chart.drawing.as_str())
+                    .or_default()
+                    .push((chart.anchor_index, chart.anchor));
+            }
+        }
+    }
+    for (path, refs) in chart_refs {
+        let Some(source) = package.part_bytes(path) else {
+            continue;
+        };
+        parts.set(
+            path.to_owned(),
+            crate::chart::patch_chart_refs(source, refs)?,
+        )?;
+    }
+    for (path, moved) in anchors {
+        let Some(source) = package.part_bytes(path) else {
+            continue;
+        };
+        parts.set(
+            path.to_owned(),
+            crate::chart::patch_drawing_anchors(source, &moved)?,
+        )?;
+    }
+    Ok(())
 }
 
 /// Charts, pivot caches and their friends name sheets this crate never

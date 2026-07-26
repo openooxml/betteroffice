@@ -71,14 +71,16 @@ pub(crate) fn parse_workbook_indexed(
             .transpose()?
             .unwrap_or_default();
         let mut indices = SharedStringCells::new();
-        sheets.push(parse_worksheet(
+        let mut sheet = parse_worksheet(
             &entry.name,
             bytes,
             &shared_strings,
             &sheet_rels,
             &ambiguous,
             &mut indices,
-        )?);
+        )?;
+        sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
+        sheets.push(sheet);
         shared_string_cells.push(indices);
     }
 

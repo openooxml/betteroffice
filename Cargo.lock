@@ -267,6 +267,7 @@ dependencies = [
 name = "betteroffice-xlsx-parse"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "quick-xml",
 ]
