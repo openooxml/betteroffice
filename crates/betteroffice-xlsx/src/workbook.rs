@@ -25,6 +25,10 @@ use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate,
     SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
+use crate::sheet_json::{
+    MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART, MAX_CHARTS_PER_SHEET,
+    MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
+};
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
     MutationResult, NumberFormatKind, ProposalAcceptance, ProposalRequest, Result,
@@ -36,11 +40,6 @@ use crate::{RenderOptions, RenderedPng};
 const MAX_RANGE_CELLS: u64 = 100_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
-const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
-const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
-const MAX_CHARTS_PER_SHEET: usize = 4_096;
-const MAX_CHART_REFS_PER_CHART: usize = 16_384;
-const MAX_CHART_FIELD_BYTES: usize = 32_767;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
 /// Largest browser-safe collaboration client identifier.
@@ -1945,6 +1944,7 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
             )));
         }
         validate_hyperlinks(&sheet.hyperlinks)?;
+        validate_charts(&sheet.charts)?;
         validate_sheet_name(&sheet.name)?;
         if !names.insert(sheet.name.to_lowercase()) {
             return Err(Error::InvalidOperation(format!(

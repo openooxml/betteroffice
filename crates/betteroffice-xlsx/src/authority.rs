@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
+use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue,
@@ -52,11 +53,9 @@ const MAX_SAFE_CLOCK: u32 = i32::MAX as u32;
 const MAX_UPDATE_BLOCKS: usize = 1_000_000;
 const MAX_UPDATE_VALUES: usize = 1_000_000;
 const MAX_UPDATE_DELETE_RANGES: usize = 1_000_000;
-const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
-const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
-const MAX_CHARTS_PER_SHEET: usize = 4_096;
-const MAX_CHART_REFS_PER_CHART: usize = 16_384;
-const MAX_CHART_FIELD_BYTES: usize = 32_767;
+/// upper bound on one encoded cell format. the canonical form of any format a
+/// workbook can hold is three orders of magnitude smaller.
+const MAX_CELL_FORMAT_BYTES: usize = 64 * 1024;
 const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
@@ -2176,13 +2175,16 @@ fn materialize_cell_formats<T: ReadTxn>(
 ) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
     let mut catalog = BTreeMap::new();
     for (key, value) in map.iter(txn) {
-        let payload = value
-            .cast::<String>()
-            .map_err(|_| format!("cell format {key} is not a string"))?;
+        let Out::Any(Any::String(payload)) = value else {
+            return Err(format!("cell format {key} is not a string"));
+        };
+        if payload.len() > MAX_CELL_FORMAT_BYTES {
+            return Err(format!("cell format {key} exceeds its size limit"));
+        }
         let format = serde_json::from_str::<CellFormat>(&payload)
             .map_err(|error| format!("invalid cell format {key}: {error}"))?;
         let (expected, canonical) = cell_format_entry(&format)?;
-        if key != expected || payload != canonical {
+        if key != expected || *payload != canonical {
             return Err(format!("cell format {key} is not canonical"));
         }
         catalog.insert(key.to_string(), format);
@@ -2329,14 +2331,11 @@ fn materialize_sheet<T: ReadTxn>(
         _ => fallback_freeze_pane,
     };
     sheet.hyperlinks = match (version, sheet_map.get(txn, HYPERLINKS)) {
-        (HYPERLINK_SCHEMA_VERSION.., Some(value)) => {
-            let json = value
-                .cast::<String>()
-                .map_err(|_| "sheet hyperlinks are not a string".to_string())?;
-            let hyperlinks: Vec<Hyperlink> = serde_json::from_str(&json)
-                .map_err(|error| format!("sheet hyperlinks are invalid: {error}"))?;
-            validate_hyperlinks(&hyperlinks)?;
-            hyperlinks
+        (HYPERLINK_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => {
+            decode_hyperlinks(&json)?
+        }
+        (HYPERLINK_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet hyperlinks are not a string".to_string());
         }
         (HYPERLINK_SCHEMA_VERSION.., None) => {
             return Err("sheet is missing hyperlinks".to_string());
@@ -2344,15 +2343,8 @@ fn materialize_sheet<T: ReadTxn>(
         _ => fallback_hyperlinks.to_vec(),
     };
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
-        (SCHEMA_VERSION.., Some(value)) => {
-            let json = value
-                .cast::<String>()
-                .map_err(|_| "sheet charts are not a string".to_string())?;
-            let charts: Vec<SheetChart> = serde_json::from_str(&json)
-                .map_err(|error| format!("sheet charts are invalid: {error}"))?;
-            validate_charts(&charts)?;
-            charts
-        }
+        (SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
+        (SCHEMA_VERSION.., Some(_)) => return Err("sheet charts are not a string".to_string()),
         (SCHEMA_VERSION.., None) => return Err("sheet is missing charts".to_string()),
         _ => fallback_charts.to_vec(),
     };
@@ -2720,72 +2712,6 @@ fn freeze_pane_from_any(value: &Any) -> Result<Option<FreezePane>, String> {
         return Err("sheet freeze pane is out of bounds".to_string());
     }
     Ok(Some(pane))
-}
-
-fn validate_charts(charts: &[SheetChart]) -> Result<(), String> {
-    if charts.len() > MAX_CHARTS_PER_SHEET {
-        return Err("sheet has too many charts".to_string());
-    }
-    for chart in charts {
-        if chart.part.is_empty() || chart.drawing.is_empty() {
-            return Err("sheet chart does not name its part and drawing".to_string());
-        }
-        if chart.part.len() > MAX_CHART_FIELD_BYTES
-            || chart.drawing.len() > MAX_CHART_FIELD_BYTES
-            || chart.refs.len() > MAX_CHART_REFS_PER_CHART
-        {
-            return Err("sheet chart exceeds its size limit".to_string());
-        }
-        if chart
-            .refs
-            .iter()
-            .any(|reference| reference.formula.len() > MAX_CHART_FIELD_BYTES)
-        {
-            return Err("sheet chart reference exceeds its length limit".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<(), String> {
-    if hyperlinks.len() > MAX_HYPERLINKS_PER_SHEET {
-        return Err("sheet has too many hyperlinks".to_string());
-    }
-    for hyperlink in hyperlinks {
-        let range = hyperlink.range;
-        if range.start.row > range.end.row
-            || range.start.col > range.end.col
-            || range.end.row >= MAX_ROWS
-            || range.end.col >= MAX_COLS
-        {
-            return Err("sheet hyperlink range is out of bounds".to_string());
-        }
-        if hyperlink
-            .external_target
-            .as_deref()
-            .is_none_or(|value| value.is_empty())
-            && hyperlink
-                .location
-                .as_deref()
-                .is_none_or(|value| value.is_empty())
-        {
-            return Err("sheet hyperlink has no destination".to_string());
-        }
-        for value in [
-            &hyperlink.external_target,
-            &hyperlink.location,
-            &hyperlink.tooltip,
-            &hyperlink.display,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if value.len() > MAX_HYPERLINK_FIELD_BYTES {
-                return Err("sheet hyperlink field exceeds its length limit".to_string());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn merges_from_any(value: &Any) -> Result<Vec<CellRange>, String> {
@@ -3162,6 +3088,47 @@ mod tests {
             error,
             "unsupported schema version 7; supported versions are 3 through 6"
         );
+    }
+
+    #[test]
+    fn oversized_peer_chart_state_is_refused_and_leaves_the_authority_intact() {
+        const ELEMENT: &str = r#"{"part":"a","drawing":"b","anchorIndex":0,"anchor":{"kind":"absolute","pos":{"x":0,"y":0},"extent":{"cx":0,"cy":0}},"refs":[]}"#;
+        let model = rich_model();
+        for (client_id, count, expected) in [
+            (111, 10_000, "sheet has too many charts"),
+            (112, 80_000, "sheet chart state exceeds its size limit"),
+        ] {
+            let authority =
+                WorkbookAuthority::from_model_with_client_id(&model, client_id).unwrap();
+            let peer = Doc::with_client_id(client_id + 1);
+            hydrate_doc(&peer, &authority.encode_state_as_update_v1()).unwrap();
+            let before = peer.transact().state_vector();
+            let mut payload = String::with_capacity(count * (ELEMENT.len() + 1) + 2);
+            payload.push('[');
+            for index in 0..count {
+                if index > 0 {
+                    payload.push(',');
+                }
+                payload.push_str(ELEMENT);
+            }
+            payload.push(']');
+            {
+                let mut txn = peer.transact_mut_with("test:hostile-charts");
+                let sheets = txn.get_map(SHEETS).unwrap();
+                let sheet = sheets
+                    .get(&txn, "sheet:0")
+                    .and_then(|value| value.cast::<MapRef>().ok())
+                    .unwrap();
+                sheet.try_update(&mut txn, CHARTS, payload.as_str());
+            }
+            let update = peer.transact().encode_diff_v1(&before);
+            let Err(AuthorityError::InvalidState(error)) = authority.stage_updates_v1(&[&update])
+            else {
+                panic!("expected invalid state");
+            };
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(authority.strict_materialize().unwrap().0, model);
+        }
     }
 
     #[test]
