@@ -72,8 +72,15 @@ fn drawingml_namespace(main_namespace: &str) -> &'static str {
     }
 }
 
-/// serialize a workbook to opc parts in a fixed, deterministic order.
+/// serialize a workbook to opc parts in a fixed, deterministic order. a chart
+/// is refused: this writer emits no drawing, chart relationship or chart part,
+/// so it would drop one rather than write it.
 pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    if wb.sheets.iter().any(|sheet| !sheet.charts.is_empty()) {
+        return Err(ParseError::UnsupportedEdit(
+            "a chart can only be written back into the package it was read from".to_owned(),
+        ));
+    }
     let have_sst = !wb.shared_strings.is_empty();
     let have_styles = !wb.styles.is_empty();
     let mut parts = vec![

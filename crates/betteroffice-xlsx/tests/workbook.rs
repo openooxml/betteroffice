@@ -3215,6 +3215,31 @@ fn charted_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// The charted fixture with a second sheet the chart plots, so removing that
+/// sheet strands a reference a chart on another sheet owns.
+fn cross_sheet_charted_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let workbook = test_part_text(&parts, "xl/workbook.xml").replace(
+        "</sheets>",
+        r#"<sheet name="Source" sheetId="8" r:id="rIdSource"/></sheets>"#,
+    );
+    set_test_part(&mut parts, "xl/workbook.xml", workbook.into_bytes());
+    let rels = test_part_text(&parts, "xl/_rels/workbook.xml.rels").replace(
+        "</Relationships>",
+        r#"<Relationship Id="rIdSource" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+    );
+    set_test_part(&mut parts, "xl/_rels/workbook.xml.rels", rels.into_bytes());
+    parts.push((
+        "xl/worksheets/sheet2.xml".to_owned(),
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row></sheetData></worksheet>"#.to_vec(),
+    ));
+    let chart = String::from_utf8(CHART_PART.to_vec())
+        .unwrap()
+        .replace("Data!$B$2:$B$4", "Source!$A$1:$A$2");
+    set_test_part(&mut parts, "xl/charts/chart1.xml", chart.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn chart_formulas(workbook: &Workbook) -> Vec<String> {
     workbook.model().sheets[0].charts[0]
         .refs
@@ -4001,9 +4026,41 @@ fn refuses_chart_state_the_writer_could_not_express() {
             if message.contains("same part, drawing and anchor")),
         "{error:?}"
     );
+}
 
-    Workbook::from_model(charted_model(sample_chart()))
-        .expect("a chart the writer can express is accepted");
+/// Chart parts come out of the package a workbook was opened with, and this
+/// crate creates none. A chart-bearing model with no source would save as a
+/// workbook that lost every chart, so every door into one is closed.
+#[test]
+fn refuses_chart_state_with_no_source_package_to_preserve_it() {
+    for build in [
+        Workbook::from_model as fn(WorkbookModel) -> Result<Workbook, Error>,
+        |model| Workbook::from_model_collaborative(model, 7),
+    ] {
+        let Err(error) = build(charted_model(sample_chart())) else {
+            panic!("a chart with no source package must be refused");
+        };
+        assert!(
+            matches!(&error, Error::InvalidOperation(message)
+                if message.contains("only be preserved from a source package")),
+            "{error:?}"
+        );
+    }
+
+    let error = xlsx_parse::serialize_workbook(&charted_model(sample_chart())).unwrap_err();
+    assert!(format!("{error}").contains("written back into the package it was read from"));
+
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts.len(), 1);
 }
 
 /// An insertion that would push a marker a chart must move past the last row
@@ -4011,21 +4068,41 @@ fn refuses_chart_state_the_writer_could_not_express() {
 /// resizing, or collapse it outright.
 #[test]
 fn refuses_an_insertion_that_would_push_a_chart_anchor_off_the_grid() {
-    for edit_as in [AnchorEditAs::TwoCell, AnchorEditAs::OneCell] {
-        let mut chart = sample_chart();
-        chart.anchor = ChartAnchor::TwoCell {
+    for (mode, edit_as) in [
+        ("twoCell", AnchorEditAs::TwoCell),
+        ("oneCell", AnchorEditAs::OneCell),
+    ] {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(r#"editAs="oneCell""#, &format!(r#"editAs="{mode}""#))
+            .replace(
+                "<xdr:row>4</xdr:row>",
+                &format!("<xdr:row>{}</xdr:row>", MAX_ROWS - 6),
+            )
+            .replace(
+                "<xdr:row>19</xdr:row>",
+                &format!("<xdr:row>{}</xdr:row>", MAX_ROWS - 2),
+            );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        let anchored = ChartAnchor::TwoCell {
             from: AnchorCell {
+                col: 2,
+                col_off: 12_700,
                 row: MAX_ROWS - 6,
-                ..AnchorCell::default()
+                row_off: 0,
             },
             to: AnchorCell {
-                col: 4,
+                col: 8,
+                col_off: 0,
                 row: MAX_ROWS - 2,
-                ..AnchorCell::default()
+                row_off: 0,
             },
             edit_as,
         };
-        let mut workbook = Workbook::from_model(charted_model(chart)).unwrap();
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, anchored);
+
         let error = workbook
             .apply_ops(
                 vec![Op::InsertRows {
@@ -4039,22 +4116,11 @@ fn refuses_an_insertion_that_would_push_a_chart_anchor_off_the_grid() {
         assert!(
             matches!(&error, Error::InvalidOperation(message)
                 if message.contains("push a chart anchor past the sheet boundary")),
-            "{edit_as:?}: {error:?}"
+            "{mode}: {error:?}"
         );
         assert_eq!(
             workbook.model().sheets[0].charts[0].anchor,
-            ChartAnchor::TwoCell {
-                from: AnchorCell {
-                    row: MAX_ROWS - 6,
-                    ..AnchorCell::default()
-                },
-                to: AnchorCell {
-                    col: 4,
-                    row: MAX_ROWS - 2,
-                    ..AnchorCell::default()
-                },
-                edit_as,
-            },
+            anchored,
             "a refused insertion must leave the anchor alone"
         );
 
@@ -4076,52 +4142,40 @@ fn refuses_an_insertion_that_would_push_a_chart_anchor_off_the_grid() {
 /// it back, and neither direction may leave the model ahead of the authority.
 #[test]
 fn removing_a_charted_sheet_synchronises_and_undoes_cleanly() {
-    let mut data = Sheet::new("Data");
-    data.set_cell(
-        cell("A1"),
-        Cell {
-            value: CellValue::Number { value: 1.0 },
-            ..Cell::default()
-        },
-    );
-    let mut report = Sheet::new("Report");
-    let mut chart = sample_chart();
-    chart.refs[0].formula = "Data!$A$1:$A$2".to_owned();
-    report.charts.push(chart);
-    let mut model = WorkbookModel::default();
-    model.sheets.push(data);
-    model.sheets.push(report);
-
-    let mut workbook = Workbook::from_model(model).unwrap();
-    let formulas = |workbook: &Workbook| {
-        workbook.model().sheets.last().unwrap().charts[0].refs[0]
-            .formula
-            .clone()
-    };
-    assert_eq!(formulas(&workbook), "Data!$A$1:$A$2");
+    let mut workbook = Workbook::open(&cross_sheet_charted_fixture()).unwrap();
+    let plotted =
+        |workbook: &Workbook| workbook.model().sheets[0].charts[0].refs[2].formula.clone();
+    assert_eq!(plotted(&workbook), "Source!$A$1:$A$2");
 
     workbook
         .apply_ops(
-            vec![Op::RemoveSheet { index: 0 }],
+            vec![Op::RemoveSheet { index: 1 }],
             CalculationOptions::default(),
         )
         .unwrap();
-    assert_eq!(formulas(&workbook), "#REF!");
+    assert_eq!(plotted(&workbook), "#REF!");
+    assert_eq!(workbook.model().sheets.len(), 1);
 
     workbook.undo(CalculationOptions::default()).unwrap();
-    assert_eq!(formulas(&workbook), "Data!$A$1:$A$2");
+    assert_eq!(plotted(&workbook), "Source!$A$1:$A$2");
     assert_eq!(workbook.model().sheets.len(), 2);
 
     workbook.redo(CalculationOptions::default()).unwrap();
-    assert_eq!(formulas(&workbook), "#REF!");
+    assert_eq!(plotted(&workbook), "#REF!");
     assert_eq!(workbook.model().sheets.len(), 1);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].charts[0].refs[2].formula,
+        "#REF!"
+    );
 }
 
 /// `SetCharts` is the inverse a remap emits; it is not something a caller may
 /// submit, because it replaces state the engine derives.
 #[test]
 fn set_charts_is_rejected_as_an_internal_operation() {
-    let mut workbook = Workbook::from_model(charted_model(sample_chart())).unwrap();
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
     let Err(error) = workbook.apply_ops(
         vec![Op::SetCharts {
             sheet: SheetId(0),

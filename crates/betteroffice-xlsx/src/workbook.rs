@@ -228,6 +228,7 @@ impl Workbook {
         client_id: Option<u64>,
     ) -> Result<Self> {
         validate_model(&model)?;
+        validate_chart_source(&model, source_package.is_some())?;
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
@@ -354,6 +355,7 @@ impl Workbook {
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         validate_model(&staged.model)
+            .and_then(|()| validate_chart_source(&staged.model, self.source_package.is_some()))
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
     }
@@ -490,6 +492,7 @@ impl Workbook {
 
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model(&self.model)?;
+        validate_chart_source(&self.model, self.source_package.is_some())?;
         let parts = match &self.source_package {
             Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins_after_edits(
                 &self.model,
@@ -2267,6 +2270,19 @@ fn validate_range(range: CellRange) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A chart part is only ever preserved from the package it was read with;
+/// this crate cannot create one. A chart-bearing model with no source package
+/// would save as a workbook that lost every chart, so it is refused instead.
+fn validate_chart_source(model: &WorkbookModel, has_source_package: bool) -> Result<()> {
+    if has_source_package || model.sheets.iter().all(|sheet| sheet.charts.is_empty()) {
+        return Ok(());
+    }
+    Err(Error::InvalidOperation(
+        "charts can only be preserved from a source package, and this workbook has none"
+            .to_string(),
+    ))
 }
 
 fn validate_charts(charts: &[SheetChart]) -> Result<()> {
