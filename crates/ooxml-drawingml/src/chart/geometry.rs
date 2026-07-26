@@ -554,7 +554,7 @@ fn emit_family<S: PlotSink + ?Sized>(
     height: f64,
 ) {
     match family.chart_type {
-        "pie" | "doughnut" => emit_pie(ops, family, x, y, width, height),
+        "pie" | "doughnut" | "ofPie" => emit_pie(ops, family, x, y, width, height),
         "line" | "scatter" | "radar" => emit_line(ops, family, plot),
         "bar" => emit_bar(ops, family, plot, true),
         _ => emit_bar(ops, family, plot, false),
@@ -1035,12 +1035,13 @@ fn emit_legend<S: PlotSink + ?Sized>(
     } else {
         chart.series.iter().take(MAX_LEGEND_ENTRIES).collect()
     };
-    let pie_legend = chart.chart_type == "pie"
-        || chart.chart_type == "doughnut"
-        || chart
-            .plot_groups
-            .iter()
-            .any(|group| matches!(group.chart_type, Some("pie") | Some("doughnut")));
+    let pie_legend = matches!(chart.chart_type, "pie" | "doughnut" | "ofPie")
+        || chart.plot_groups.iter().any(|group| {
+            matches!(
+                group.chart_type,
+                Some("pie") | Some("doughnut") | Some("ofPie")
+            )
+        });
     let entries: Vec<(String, String)> = if pie_legend {
         series
             .as_slice()
@@ -1197,6 +1198,31 @@ mod tests {
                 .iter()
                 .all(|op| matches!(op, PlotOp::Path { commands, .. }
             if matches!(commands.last(), Some(GeometryPathCommand::Close))))
+        );
+    }
+
+    #[test]
+    fn an_of_pie_group_draws_wedges_and_a_per_slice_legend() {
+        let share = source(&[3.0, 1.0]);
+        let chart = PlotChart {
+            chart_type: "pie",
+            plot_groups: vec![PlotGroup {
+                chart_type: Some("ofPie"),
+                series: vec![series("Share", &share)],
+                ..PlotGroup::default()
+            }],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, PlotOp::Path { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, PlotOp::Text { text, .. } if text == "Q1"))
         );
     }
 
