@@ -30,7 +30,21 @@ Published to crates.io, Apache-2.0. Use the three facades unless you need a sing
 - [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone formula engine — lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376.
 - [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all three formats.
 
-The per-layer crates (`betteroffice-docx-parse`, `-docx-layout`, `-docx-edit`, `-xlsx-model`, `-xlsx-parse`, `-xlsx-ops`, `-xlsx-render`, `-xlsx-raster`, `-pptx-parse`, `-pptx-edit`, `-pptx-render`, `-ooxml-text`, `-drawingml`) are published for direct use.
+The per-layer crates are published for direct use when you need one stage of the pipeline rather than a whole format:
+
+- [betteroffice-docx-parse](https://crates.io/crates/betteroffice-docx-parse): WordprocessingML parsing and the typed DOCX model.
+- [betteroffice-docx-layout](https://crates.io/crates/betteroffice-docx-layout): DOCX pagination and display lists.
+- [betteroffice-docx-edit](https://crates.io/crates/betteroffice-docx-edit): the Yrs editing schema for DOCX.
+- [betteroffice-xlsx-model](https://crates.io/crates/betteroffice-xlsx-model): the workbook, sheet, and cell model, IO-free.
+- [betteroffice-xlsx-parse](https://crates.io/crates/betteroffice-xlsx-parse): streaming SpreadsheetML parse and serialize.
+- [betteroffice-xlsx-ops](https://crates.io/crates/betteroffice-xlsx-ops): the invertible op log behind undo, redo, and agent proposals.
+- [betteroffice-xlsx-render](https://crates.io/crates/betteroffice-xlsx-render): grid geometry and the target-agnostic display list.
+- [betteroffice-xlsx-raster](https://crates.io/crates/betteroffice-xlsx-raster): the tiny-skia backend that paints a display list to PNG.
+- [betteroffice-pptx-parse](https://crates.io/crates/betteroffice-pptx-parse): PresentationML parsing and part-preserving package writes.
+- [betteroffice-pptx-edit](https://crates.io/crates/betteroffice-pptx-edit): the Yrs deck model for PPTX.
+- [betteroffice-pptx-render](https://crates.io/crates/betteroffice-pptx-render): slide layout and the PPTX display-list compiler.
+- [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
+- [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all three formats.
 
 ## Collaboration
 

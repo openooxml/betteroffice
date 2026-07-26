@@ -3,13 +3,27 @@ import { ArrowRight, ArrowUpRight } from "lucide-react";
 import { Cmd } from "./components/Cmd";
 import { HeroField } from "./components/HeroField";
 import { FadeIn, Reveal } from "./components/motion";
+import {
+  CAPABILITIES,
+  COLLABORATION,
+  DEMO,
+  DOCS,
+  EDITORS,
+  FOUNDATION,
+  HERO,
+  INSTALL,
+  OPENOOXML,
+  PACKAGES,
+  PACKAGES_SECTION,
+  PEERS,
+  REPO,
+  SITE,
+  SUITE,
+} from "./content";
 
 export const metadata: Metadata = {
   alternates: { canonical: "/" },
 };
-
-const REPO = "https://github.com/openooxml/betteroffice";
-const DOCS = "https://docs.betteroffice.dev";
 
 const sec = "sec relative border-t border-line-soft px-8 py-18 max-[44rem]:px-5";
 const secLabel =
@@ -30,87 +44,15 @@ const cardLink =
 const demoLink =
   "ml-auto inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[0.6875rem] text-ink no-underline transition-colors hover:border-dim hover:text-fg";
 
-const EDITORS = [
-  {
-    name: "Documents",
-    format: "docx",
-    desc: "Word-faithful editing: fonts, theme colors, styles, tables, headers & footers, tracked changes.",
-    live: true,
-  },
-  {
-    name: "Spreadsheets",
-    format: "xlsx",
-    desc: "Calculation graph, grid rendering and number formats on the same shared core.",
-    live: true,
-  },
-  {
-    name: "Slides",
-    format: "pptx",
-    desc: "Slide model, masters and shape editing on the same shared core.",
-    live: true,
-  },
-];
 
-const PACKAGES = [
-  {
-    name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly.",
-  },
-  {
-    name: "@betteroffice/docx-react",
-    desc: "The full DOCX editor as a React component — toolbar, pages, comments, tracked changes.",
-  },
-  {
-    name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
-  },
-  {
-    name: "@betteroffice/xlsx-react",
-    desc: "The spreadsheet editor as a drop-in React component.",
-  },
-  {
-    name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine.",
-  },
-  {
-    name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component.",
-  },
-];
 
-const CAPABILITIES = [
-  {
-    name: "Own engines",
-    desc: "We build the OOXML engines ourselves, in Rust — from the file format up. No wrapper around someone else's suite.",
-  },
-  {
-    name: "Native OOXML editing",
-    desc: "Documents are edited in their own format. No lossy conversion on open, none on save.",
-  },
-  {
-    name: "Word-faithful output",
-    desc: "What you see is what Word shows — layout, pagination and styling match the original.",
-  },
-  {
-    name: "Real-time collaboration",
-    desc: "The document is a CRDT — concurrent edits merge in the engine, not on a server.",
-  },
-  {
-    name: "Agent-ready",
-    desc: "Runs headless too — parse, edit and render documents server-side or inside agent pipelines.",
-  },
-  {
-    name: "Apache 2.0",
-    desc: "Permissive license, developed in the open, self-hostable without exceptions.",
-  },
-];
 
 const JSON_LD = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   name: "BetterOffice",
-  url: "https://betteroffice.dev",
-  image: "https://betteroffice.dev/logo.svg",
+  url: SITE,
+  image: `${SITE}/logo.svg`,
   applicationCategory: "BusinessApplication",
   operatingSystem: "Web",
   description:
@@ -121,17 +63,13 @@ const JSON_LD = {
     priceCurrency: "USD",
   },
   license: "https://www.apache.org/licenses/LICENSE-2.0",
-  softwareHelp: "https://docs.betteroffice.dev",
+  softwareHelp: DOCS,
   creator: {
     "@type": "Organization",
     name: "OpenOOXML",
-    url: "https://openooxml.org",
+    url: OPENOOXML,
   },
-  sameAs: [
-    "https://github.com/openooxml/betteroffice",
-    "https://www.npmjs.com/org/betteroffice",
-    "https://openooxml.org",
-  ],
+  sameAs: [REPO, "https://www.npmjs.com/org/betteroffice", OPENOOXML],
 };
 
 export default function Home() {
@@ -146,20 +84,18 @@ export default function Home() {
         <HeroField />
         <FadeIn delay={0.08} className="relative z-1">
           <h1 className="mb-4 text-[clamp(2.5rem,8vw,3.75rem)] leading-[1.05] font-[650] tracking-[-0.035em]">
-            BetterOffice
+            {HERO.title}
           </h1>
         </FadeIn>
         <FadeIn delay={0.16} className="relative z-1">
           <p className="mb-10 max-w-[30rem] text-lg text-ink">
-            The open-source office suite. Word-faithful editing and
-            real-time collaboration on engines we build ourselves — running
-            entirely in your browser, by the OpenOOXML project.
+            {HERO.tagline}
           </p>
         </FadeIn>
         <FadeIn delay={0.24} className="relative z-1">
           <div className="flex flex-wrap gap-3">
             <a
-              href="https://demo.betteroffice.dev"
+              href={DEMO}
               className={`${btn} border-fg bg-fg text-bg hover:border-[#333333] hover:bg-[#333333]`}
             >
               Try the demo <ArrowRight size={14} strokeWidth={2} />
@@ -185,16 +121,12 @@ export default function Home() {
       <section className={sec} aria-labelledby="suite">
         <Reveal>
           <p className={secLabel}>
-            <span className="text-faint">01</span> Suite
+            <span className="text-faint">01</span> {SUITE.label}
           </p>
           <h2 id="suite" className={secH2}>
-            One suite, three editors
+            {SUITE.heading}
           </h2>
-          <p className={`${secP} mb-6`}>
-            BetterOffice packages the OpenOOXML engines as ready-to-use
-            editors. Documents, spreadsheets and slides are all live today on
-            the same foundation.
-          </p>
+          <p className={`${secP} mb-6`}>{SUITE.prose}</p>
         </Reveal>
         <Reveal delay={0.1}>
           <div className={grid}>
@@ -223,7 +155,7 @@ export default function Home() {
                     .{editor.format}
                   </span>
                   <a
-                    href={`https://demo.betteroffice.dev/${editor.format}`}
+                    href={`${DEMO}/${editor.format}`}
                     className={demoLink}
                   >
                     demo <ArrowUpRight size={11} strokeWidth={2} />
@@ -238,15 +170,12 @@ export default function Home() {
       <section className={sec} aria-labelledby="packages">
         <Reveal>
           <p className={secLabel}>
-            <span className="text-faint">02</span> Packages
+            <span className="text-faint">02</span> {PACKAGES_SECTION.label}
           </p>
           <h2 id="packages" className={secH2}>
-            Ships as components, not iframes
+            {PACKAGES_SECTION.heading}
           </h2>
-          <p className={`${secP} mb-6`}>
-            The editors install from npm and render inside your app — no
-            embeds, no external services, documents never leave the page.
-          </p>
+          <p className={`${secP} mb-6`}>{PACKAGES_SECTION.prose}</p>
         </Reveal>
         <Reveal delay={0.1}>
           <div className={`${grid} mb-6`}>
@@ -275,22 +204,22 @@ export default function Home() {
               </article>
             ))}
           </div>
-          <Cmd command="npm install @betteroffice/docx-react" />
+          <Cmd command={INSTALL} />
         </Reveal>
       </section>
 
       <section className={sec} aria-labelledby="foundation">
         <Reveal>
           <p className={secLabel}>
-            <span className="text-faint">03</span> Foundation
+            <span className="text-faint">03</span> {FOUNDATION.label}
           </p>
           <h2 id="foundation" className={secH2}>
-            Built on our own engines
+            {FOUNDATION.heading}
           </h2>
           <p className={secP}>
             BetterOffice is built by{" "}
             <a
-              href="https://openooxml.org"
+              href={OPENOOXML}
               target="_blank"
               rel="noopener"
               className={bodyLink}
@@ -319,41 +248,23 @@ export default function Home() {
       <section className={sec} aria-labelledby="collaboration">
         <Reveal>
           <p className={secLabel}>
-            <span className="text-faint">04</span> Collaboration
+            <span className="text-faint">04</span> {COLLABORATION.label}
           </p>
           <h2 id="collaboration" className={secH2}>
-            People and agents, one document
+            {COLLABORATION.heading}
           </h2>
-          <p className={`${secP} mb-6`}>
-            The document itself is a CRDT: every editor — every person, every
-            AI agent — is a peer on the same data structure, and concurrent
-            edits merge in the engine. Agents don&apos;t get a sidebar; they
-            get a cursor, with the same undo and the same tracked-changes
-            attribution as any co-author.
-          </p>
+          <p className={`${secP} mb-6`}>{COLLABORATION.prose}</p>
         </Reveal>
         <Reveal delay={0.1}>
           <ul className={`${grid} list-none`}>
-            <li className="bg-bg px-5 py-4.5">
-              <span className="mb-1 block font-mono text-xs text-fg">
-                People
-              </span>
-              <span className="text-[0.8125rem] text-ink">
-                Live co-editing over any WebSocket relay. Offline edits
-                converge on reconnect — merging is the data structure, not a
-                server feature.
-              </span>
-            </li>
-            <li className="bg-bg px-5 py-4.5">
-              <span className="mb-1 block font-mono text-xs text-fg">
-                Agents
-              </span>
-              <span className="text-[0.8125rem] text-ink">
-                An agent edits through the same operations as a person, and
-                human review is suggesting mode — accept or reject tracked
-                changes, not a diff dialog.
-              </span>
-            </li>
+            {PEERS.map((peer) => (
+              <li className="bg-bg px-5 py-4.5" key={peer.name}>
+                <span className="mb-1 block font-mono text-xs text-fg">
+                  {peer.name}
+                </span>
+                <span className="text-[0.8125rem] text-ink">{peer.desc}</span>
+              </li>
+            ))}
           </ul>
         </Reveal>
       </section>
