@@ -3732,3 +3732,62 @@ fn undo_and_redo_restore_shared_string_provenance() {
         "{redone}"
     );
 }
+
+/// Every op that rewrites `defined_names` is structural, and structural ops are
+/// refused while collaborative. Peers therefore cannot disagree about a name.
+#[test]
+fn collaborative_sessions_refuse_every_op_that_rewrites_defined_names() {
+    let bytes = defined_names_fixture();
+    let rewriting_ops = vec![
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+        Op::SetDefinedNames {
+            defined_names: Vec::new(),
+        },
+    ];
+
+    for op in rewriting_ops {
+        let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
+        let error = left
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::CollaborativeStructureOperation),
+            "{op:?} must be refused while collaborative, or peers diverge on defined names"
+        );
+    }
+
+    let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 202).unwrap();
+    left.edit_cell(SheetId(0), cell("A1"), "21", CalculationOptions::default())
+        .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(left.model().defined_names, right.model().defined_names);
+}
