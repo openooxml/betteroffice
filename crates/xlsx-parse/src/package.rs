@@ -612,11 +612,16 @@ impl XmlTemplate {
         Ok(output)
     }
 
-    /// Rewrites unqualified fragment element names into the root's prefix.
+    /// Puts a generated fragment in the root's namespace. One default-namespace
+    /// declaration beats repeating a caller-controlled prefix on every element,
+    /// which turns a long prefix into quadratic output.
     pub(crate) fn qualify_fragment(&self, fragment: &[u8]) -> Result<Vec<u8>, ParseError> {
         let Some(prefix) = &self.root_prefix else {
             return Ok(fragment.to_vec());
         };
+        if let Some(namespace) = self.root_namespace.as_deref().filter(is_bound_namespace) {
+            return bind_default_namespace(fragment, namespace);
+        }
         let mut reader = Reader::from_reader(fragment);
         let mut writer = Writer::new(Vec::new());
         loop {
@@ -774,6 +779,43 @@ fn namespace_bindings(
             Err(error) => Some(Err(xml_err(error))),
         })
         .collect()
+}
+
+/// `resolved_namespace` marks prefixes with no in-scope declaration, which
+/// happens whenever a captured fragment is re-read on its own.
+fn is_bound_namespace(namespace: &&str) -> bool {
+    !namespace.starts_with('\0')
+}
+
+fn bind_default_namespace(fragment: &[u8], namespace: &str) -> Result<Vec<u8>, ParseError> {
+    let mut reader = Reader::from_reader(fragment);
+    let mut writer = Writer::new(Vec::new());
+    let mut depth = 0_usize;
+    loop {
+        let event = match reader.read_event().map_err(xml_err)? {
+            Event::Start(mut element) => {
+                if depth == 0 {
+                    element.push_attribute(("xmlns", namespace));
+                }
+                depth += 1;
+                Event::Start(element.into_owned())
+            }
+            Event::Empty(mut element) => {
+                if depth == 0 {
+                    element.push_attribute(("xmlns", namespace));
+                }
+                Event::Empty(element.into_owned())
+            }
+            Event::End(element) => {
+                depth = depth.saturating_sub(1);
+                Event::End(element.into_owned())
+            }
+            Event::Eof => break,
+            event => event.into_owned(),
+        };
+        writer.write_event(event).map_err(xml_err)?;
+    }
+    Ok(writer.into_inner())
 }
 
 fn resolved_namespace(namespace: ResolveResult<'_>) -> Option<String> {

@@ -824,6 +824,48 @@ fn keeps_worksheet_bytes_across_a_rename() {
     );
 }
 
+/// A long root prefix used to be repeated on every generated element, turning
+/// a bounded input into quadratic output.
+#[test]
+fn binds_generated_fragments_once_instead_of_repeating_a_long_prefix() {
+    let prefix = "p".repeat(4096);
+    let main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[2] = (
+        "xl/worksheets/sheet1.xml".to_owned(),
+        format!(
+            r#"<{prefix}:worksheet xmlns:{prefix}="{main}"><{prefix}:sheetData/></{prefix}:worksheet>"#
+        )
+        .into_bytes(),
+    );
+
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    for row in 0..256 {
+        workbook.sheets[0].set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+    }
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let written = part_bytes(&saved, "xl/worksheets/sheet1.xml");
+
+    assert!(
+        written.len() < 32 * 1024,
+        "generated worksheet grew to {} bytes",
+        written.len()
+    );
+    assert_eq!(
+        parse_workbook(&saved).unwrap().sheets[0]
+            .iter_cells()
+            .count(),
+        256
+    );
+}
+
 const MCE_NAMESPACES: &str = concat!(
     r#" xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main""#,
     r#" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#,

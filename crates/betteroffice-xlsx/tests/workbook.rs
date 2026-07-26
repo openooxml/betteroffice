@@ -3210,19 +3210,23 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     let saved = workbook.save().unwrap();
     let parts = package_map(&saved);
     let workbook_xml = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
-    assert!(workbook_xml.contains("<s:sheets>"));
+    let strict_main = r#"xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main""#;
+    assert!(workbook_xml.contains(&format!("<sheets {strict_main}")));
     assert!(workbook_xml.contains("rel:id="));
     assert!(!workbook_xml.contains("r:id="));
-    assert!(workbook_xml.contains("<s:calcPr"));
+    assert!(workbook_xml.contains("<calcPr"));
     assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
     assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
     assert!(
-        worksheet.find("<mc:AlternateContent").unwrap() < worksheet.find("<s:sheetData").unwrap()
+        worksheet.find("<mc:AlternateContent").unwrap()
+            < worksheet
+                .find(&format!("<sheetData {strict_main}"))
+                .unwrap()
     );
-    assert!(worksheet.contains("<s:row"));
-    assert!(worksheet.contains("<s:c"));
-    assert!(!worksheet.contains("<sheetData"));
+    assert!(worksheet.contains("<row r=\"1\""));
+    assert!(worksheet.contains("<c r=\"A1\""));
+    assert!(!worksheet.contains("<s:sheetData"));
     let relationships = String::from_utf8(parts["xl/_rels/workbook.xml.rels"].clone()).unwrap();
     assert_eq!(
         relationships

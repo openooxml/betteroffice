@@ -210,7 +210,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         )
     });
 
-    let mut parts = PartStore::new(package.parts.clone());
+    let mut parts = PartStore::new(&package.parts);
     let retained_origins = sheets
         .iter()
         .filter_map(|sheet| sheet.origin)
@@ -268,19 +268,19 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
                 }
             }
         };
-        parts.set(plan.path.clone(), output.bytes);
+        parts.set(plan.path.clone(), output.bytes)?;
         if let Some(relationships) = output.relationships {
             let path = relationship_part_path(&plan.path);
             if relationships.is_empty() {
                 parts.remove(&path);
             } else {
-                parts.set(path, relationships_xml(&relationships)?);
+                parts.set(path, relationships_xml(&relationships)?)?;
             }
         }
     }
 
     let workbook = workbook_xml_with_template(wb, package, &sheets, edited)?;
-    parts.set("xl/workbook.xml".to_owned(), workbook);
+    parts.set("xl/workbook.xml".to_owned(), workbook)?;
     parts.set(
         "xl/_rels/workbook.xml.rels".to_owned(),
         merged_workbook_relationships(
@@ -291,11 +291,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             theme.as_ref(),
             edited,
         )?,
-    );
+    )?;
     parts.set(
         "_rels/.rels".to_owned(),
         merged_root_relationships(package)?,
-    );
+    )?;
     parts.set(
         "[Content_Types].xml".to_owned(),
         merged_content_types(
@@ -306,7 +306,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             theme.as_ref(),
             edited,
         )?,
-    );
+    )?;
 
     replace_shared_strings(
         &mut parts,
@@ -345,7 +345,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             parts.set(
                 planned.path.clone(),
                 theme_xml(&wb.styles, drawingml_namespace(main_namespace))?,
-            );
+            )?;
         }
         (Some(source), None) => parts.remove(&source.path),
         (None, None) => {}
@@ -668,7 +668,7 @@ fn replace_optional_part(
             {
                 parts.remove(&source.path);
             }
-            parts.set(planned.path.clone(), serialize()?);
+            parts.set(planned.path.clone(), serialize()?)?;
         }
         (Some(source), None) => parts.remove(&source.path),
         (None, None) => {}
@@ -699,7 +699,7 @@ fn replace_shared_strings(
                 Some(template) => shared_strings_xml_with_template(wb, package, template)?,
                 None => shared_strings_xml_with_namespace(wb, main_namespace)?,
             };
-            parts.set(planned.path.clone(), bytes);
+            parts.set(planned.path.clone(), bytes)?;
         }
         (Some(source), None) => parts.remove(&source.path),
         (None, None) => {}
@@ -707,46 +707,80 @@ fn replace_shared_strings(
     Ok(())
 }
 
-struct PartStore {
-    parts: Vec<Option<(String, Vec<u8>)>>,
-    positions: HashMap<String, usize>,
+/// Headroom over the source package for everything a save regenerates. A
+/// bounded input must not turn into an unbounded output.
+const GENERATED_BYTES_HEADROOM: usize = 64 * 1024 * 1024;
+
+enum Slot<'a> {
+    Source(&'a str, &'a [u8]),
+    Owned(String, Vec<u8>),
+    Removed,
 }
 
-impl PartStore {
-    fn new(parts: Vec<(String, Vec<u8>)>) -> Self {
-        let positions = parts
-            .iter()
-            .enumerate()
-            .map(|(index, (path, _))| (normalized_part_name(path), index))
-            .collect();
+/// Borrows the source package so a save holds one copy of the retained bytes,
+/// and refuses to generate unboundedly more than it started with.
+struct PartStore<'a> {
+    slots: Vec<Slot<'a>>,
+    positions: HashMap<String, usize>,
+    budget: usize,
+}
+
+impl<'a> PartStore<'a> {
+    fn new(parts: &'a [(String, Vec<u8>)]) -> Self {
+        let source_bytes = parts.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
         Self {
-            parts: parts.into_iter().map(Some).collect(),
-            positions,
+            slots: parts
+                .iter()
+                .map(|(path, bytes)| Slot::Source(path.as_str(), bytes.as_slice()))
+                .collect(),
+            positions: parts
+                .iter()
+                .enumerate()
+                .map(|(index, (path, _))| (normalized_part_name(path), index))
+                .collect(),
+            budget: source_bytes
+                .saturating_mul(2)
+                .saturating_add(GENERATED_BYTES_HEADROOM),
         }
     }
 
     fn remove(&mut self, path: &str) {
         if let Some(index) = self.positions.remove(&normalized_part_name(path)) {
-            self.parts[index] = None;
+            self.slots[index] = Slot::Removed;
         }
     }
 
-    fn set(&mut self, path: String, bytes: Vec<u8>) {
+    fn set(&mut self, path: String, bytes: Vec<u8>) -> Result<(), ParseError> {
+        self.budget = self.budget.checked_sub(bytes.len()).ok_or_else(|| {
+            ParseError::UnsupportedEdit("generated parts exceeded the save budget".to_owned())
+        })?;
         let normalized = normalized_part_name(&path);
-        if let Some(index) = self.positions.get(&normalized).copied() {
-            let authored_path = self.parts[index]
-                .as_ref()
-                .map(|(path, _)| path.clone())
-                .unwrap_or(path);
-            self.parts[index] = Some((authored_path, bytes));
-        } else {
-            self.positions.insert(normalized, self.parts.len());
-            self.parts.push(Some((path, bytes)));
+        match self.positions.get(&normalized).copied() {
+            Some(index) => {
+                let authored = match &self.slots[index] {
+                    Slot::Source(path, _) => (*path).to_owned(),
+                    Slot::Owned(path, _) => path.clone(),
+                    Slot::Removed => path,
+                };
+                self.slots[index] = Slot::Owned(authored, bytes);
+            }
+            None => {
+                self.positions.insert(normalized, self.slots.len());
+                self.slots.push(Slot::Owned(path, bytes));
+            }
         }
+        Ok(())
     }
 
     fn finish(self) -> Vec<(String, Vec<u8>)> {
-        self.parts.into_iter().flatten().collect()
+        self.slots
+            .into_iter()
+            .filter_map(|slot| match slot {
+                Slot::Source(path, bytes) => Some((path.to_owned(), bytes.to_vec())),
+                Slot::Owned(path, bytes) => Some((path, bytes)),
+                Slot::Removed => None,
+            })
+            .collect()
     }
 }
 
