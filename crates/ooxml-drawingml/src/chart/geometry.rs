@@ -25,6 +25,8 @@ pub const CHART_TITLE_FONT: PlotFont = PlotFont {
 
 /// Hard ceiling on the ops one chart may emit, whatever its data length.
 pub const MAX_PLOT_OPS: usize = 100_000;
+/// Hard ceiling on the data points one chart may index or scan for its range.
+pub const MAX_PLOT_DATA_SCAN: usize = 200_000;
 
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
@@ -267,11 +269,12 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     };
 
     if chart.plot_groups.is_empty() {
+        let series = series_views(&chart.series);
         emit_family(
             ops,
             PlotFamily {
                 chart_type: chart.chart_type,
-                series: &chart.series,
+                series: &series,
                 value_axis: chart.value_axis,
             },
             plot,
@@ -282,11 +285,12 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         );
     } else {
         for group in &chart.plot_groups {
+            let series = series_views(&group.series);
             emit_family(
                 ops,
                 PlotFamily {
                     chart_type: group.chart_type.unwrap_or(chart.chart_type),
-                    series: &group.series,
+                    series: &series,
                     value_axis: chart.value_axis,
                 },
                 plot,
@@ -348,7 +352,7 @@ pub fn chart_aria_label(chart: &PlotChart<'_>) -> String {
             .max()
             .unwrap_or(0)
     } else {
-        category_count(&chart.series)
+        chart.series.iter().map(series_length).max().unwrap_or(0)
     };
     format!("{title}, {kind}, {series_count} series, {category_count} categories")
 }
@@ -376,10 +380,87 @@ impl<S: PlotSink + ?Sized> Emitter<'_, S> {
 /// The slice of a chart one plot family draws: a combo chart emits one per
 /// plot group, all sharing the outer chart's value axis.
 #[derive(Clone, Copy)]
-struct PlotFamily<'a, 'b> {
+struct PlotFamily<'a> {
     chart_type: &'a str,
-    series: &'b [PlotSeries<'a>],
+    series: &'a [SeriesView<'a>],
     value_axis: Option<PlotAxisRange>,
+}
+
+/// A series plus a first-match index over its points, so a lookup costs a
+/// binary search instead of a rescan.
+struct SeriesView<'a> {
+    series: &'a PlotSeries<'a>,
+    /// Position of the first point without an index, which matches every query.
+    wildcard: Option<usize>,
+    /// `(point index, first position)`, sorted by point index.
+    indexed: Vec<(usize, usize)>,
+}
+
+fn series_views<'a>(series: &'a [PlotSeries<'a>]) -> Vec<SeriesView<'a>> {
+    series.iter().map(SeriesView::new).collect()
+}
+
+impl<'a> SeriesView<'a> {
+    fn new(series: &'a PlotSeries<'a>) -> Self {
+        let mut wildcard = None;
+        let scanned = series.points.len().min(MAX_PLOT_DATA_SCAN);
+        let mut indexed = Vec::with_capacity(scanned);
+        for (position, point) in series.points.iter().take(scanned).enumerate() {
+            match point.index {
+                Some(index) => indexed.push((index, position)),
+                None if wildcard.is_none() => wildcard = Some(position),
+                None => {}
+            }
+        }
+        indexed.sort_unstable();
+        indexed.dedup_by_key(|(index, _)| *index);
+        Self {
+            series,
+            wildcard,
+            indexed,
+        }
+    }
+
+    fn point(&self, index: usize) -> Option<&PlotPoint<'a>> {
+        let exact = self
+            .indexed
+            .binary_search_by_key(&index, |(key, _)| *key)
+            .ok()
+            .map(|slot| self.indexed[slot].1);
+        let position = match (self.wildcard, exact) {
+            (Some(wildcard), Some(exact)) => Some(wildcard.min(exact)),
+            (wildcard, exact) => wildcard.or(exact),
+        };
+        position.map(|position| &self.series.points[position])
+    }
+
+    fn value(&self, index: usize) -> f64 {
+        self.point(index)
+            .and_then(|point| point.value)
+            .or_else(|| self.series.values.get(index).copied())
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.0)
+    }
+
+    fn point_color(&self, point_index: usize, series_index: usize) -> String {
+        self.point(point_index)
+            .and_then(|point| point.color)
+            .map(hex)
+            .unwrap_or_else(|| series_color(Some(self.series), series_index))
+    }
+
+    fn marker_size(&self, index: usize) -> f64 {
+        self.point(index)
+            .and_then(|point| point.marker.as_ref())
+            .or(self.series.marker.as_ref())
+            .and_then(|marker| marker.size)
+            .unwrap_or(4.0)
+            .clamp(1.0, 24.0)
+    }
+
+    fn length(&self) -> usize {
+        series_length(self.series)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -392,7 +473,7 @@ struct PlotArea {
 
 fn emit_family<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
-    family: PlotFamily<'_, '_>,
+    family: PlotFamily<'_>,
     plot: PlotArea,
     x: f64,
     y: f64,
@@ -491,28 +572,6 @@ fn series_color(series: Option<&PlotSeries<'_>>, index: usize) -> String {
         .unwrap_or_else(|| CHART_SERIES_COLORS[index % CHART_SERIES_COLORS.len()].to_owned())
 }
 
-fn series_point<'a, 'p>(series: &'p PlotSeries<'a>, index: usize) -> Option<&'p PlotPoint<'a>> {
-    series
-        .points
-        .iter()
-        .find(|point| point.index.unwrap_or(index) == index)
-}
-
-fn series_value(series: &PlotSeries<'_>, index: usize) -> f64 {
-    series_point(series, index)
-        .and_then(|point| point.value)
-        .or_else(|| series.values.get(index).copied())
-        .filter(|value| value.is_finite())
-        .unwrap_or(0.0)
-}
-
-fn series_point_color(series: &PlotSeries<'_>, point_index: usize, series_index: usize) -> String {
-    series_point(series, point_index)
-        .and_then(|point| point.color)
-        .map(hex)
-        .unwrap_or_else(|| series_color(Some(series), series_index))
-}
-
 fn series_length(series: &PlotSeries<'_>) -> usize {
     series
         .categories
@@ -521,23 +580,31 @@ fn series_length(series: &PlotSeries<'_>) -> usize {
         .max(series.points.len())
 }
 
-fn category_count(series: &[PlotSeries<'_>]) -> usize {
-    series.iter().map(series_length).max().unwrap_or(0)
+fn category_count(series: &[SeriesView<'_>]) -> usize {
+    series.iter().map(SeriesView::length).max().unwrap_or(0)
 }
 
-fn category_label(series: &[PlotSeries<'_>], index: usize) -> String {
+fn category_label(series: &[SeriesView<'_>], index: usize) -> String {
     series
         .iter()
-        .find_map(|series| series.categories.get(index).cloned())
+        .find_map(|series| series.series.categories.get(index).cloned())
         .unwrap_or_else(|| (index + 1).to_string())
 }
 
-fn value_range(family: PlotFamily<'_, '_>) -> (f64, f64) {
+fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
     let mut min = 0.0;
     let mut max = 0.0;
+    let mut remaining = MAX_PLOT_DATA_SCAN;
     for series in family.series {
-        for index in 0..series.values.len().max(series.points.len()) {
-            let value = series_value(series, index);
+        let samples = series
+            .series
+            .values
+            .len()
+            .max(series.series.points.len())
+            .min(remaining);
+        remaining -= samples;
+        for index in 0..samples {
+            let value = series.value(index);
             if value.is_finite() {
                 min = f64::min(min, value);
                 max = f64::max(max, value);
@@ -562,18 +629,9 @@ fn value_y(plot: PlotArea, value: f64, min: f64, max: f64) -> f64 {
     plot.y + (max - value) / (max - min) * plot.h
 }
 
-fn marker_size(series: &PlotSeries<'_>, index: usize) -> f64 {
-    series_point(series, index)
-        .and_then(|point| point.marker.as_ref())
-        .or(series.marker.as_ref())
-        .and_then(|marker| marker.size)
-        .unwrap_or(4.0)
-        .clamp(1.0, 24.0)
-}
-
 fn emit_axes<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
-    family: PlotFamily<'_, '_>,
+    family: PlotFamily<'_>,
     plot: PlotArea,
 ) {
     let (min, max) = value_range(family);
@@ -613,7 +671,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
 
 fn emit_bar<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
-    family: PlotFamily<'_, '_>,
+    family: PlotFamily<'_>,
     plot: PlotArea,
     horizontal: bool,
 ) {
@@ -642,7 +700,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 CHART_LABEL_FONT,
             );
             for (ser_idx, series) in family.series.iter().enumerate() {
-                let value = series_value(series, cat_idx);
+                let value = series.value(cat_idx);
                 let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0);
                 let bar_w = ratio * plot.w;
                 let y = plot.y + row_h * cat_idx as f64 + row_h * 0.15 + bar_h * ser_idx as f64;
@@ -652,7 +710,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y,
                     bar_w,
                     bar_h,
-                    &series_point_color(series, cat_idx, ser_idx),
+                    &series.point_color(cat_idx, ser_idx),
                 );
             }
         }
@@ -673,7 +731,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 CHART_LABEL_FONT,
             );
             for (ser_idx, series) in family.series.iter().enumerate() {
-                let value = series_value(series, cat_idx);
+                let value = series.value(cat_idx);
                 let yv = value_y(plot, value.clamp(min, max), min, max);
                 let y0 = zero_y;
                 let x = plot.x + group_w * cat_idx as f64 + group_w * 0.15 + bar_w * ser_idx as f64;
@@ -683,7 +741,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     yv.min(y0),
                     bar_w,
                     (y0 - yv).abs().max(1.0),
-                    &series_point_color(series, cat_idx, ser_idx),
+                    &series.point_color(cat_idx, ser_idx),
                 );
             }
         }
@@ -692,7 +750,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
 
 fn emit_line<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
-    family: PlotFamily<'_, '_>,
+    family: PlotFamily<'_>,
     plot: PlotArea,
 ) {
     let cat_count = category_count(family.series);
@@ -718,20 +776,20 @@ fn emit_line<S: PlotSink + ?Sized>(
         );
     }
     for (ser_idx, series) in family.series.iter().enumerate() {
-        let color = series_color(Some(series), ser_idx);
+        let color = series_color(Some(series.series), ser_idx);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..cat_count {
             if ops.exhausted() {
                 return;
             }
-            let value = series_value(series, i);
+            let value = series.value(i);
             let x = plot.x + plot.w * i as f64 / denom;
             let y = value_y(plot, value.clamp(min, max), min, max);
             if let Some((prev_x, prev_y)) = prev {
                 push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
             }
-            let size = marker_size(series, i);
-            let point_color = series_point_color(series, i, ser_idx);
+            let size = series.marker_size(i);
+            let point_color = series.point_color(i, ser_idx);
             push_rect(
                 ops,
                 x - size / 2.0,
@@ -740,7 +798,7 @@ fn emit_line<S: PlotSink + ?Sized>(
                 size,
                 &point_color,
             );
-            if let Some(label) = series_point(series, i).and_then(|point| point.label) {
+            if let Some(label) = series.point(i).and_then(|point| point.label) {
                 push_text(ops, label, x + size, y - size, 48.0, CHART_LABEL_FONT);
             }
             prev = Some((x, y));
@@ -750,7 +808,7 @@ fn emit_line<S: PlotSink + ?Sized>(
 
 fn emit_pie<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
-    family: PlotFamily<'_, '_>,
+    family: PlotFamily<'_>,
     x: f64,
     y: f64,
     width: f64,
@@ -759,8 +817,14 @@ fn emit_pie<S: PlotSink + ?Sized>(
     let Some(series) = family.series.first() else {
         return;
     };
-    let values: Vec<(usize, f64)> = (0..series.values.len().max(series.points.len()))
-        .map(|index| (index, series_value(series, index)))
+    let scanned = series
+        .series
+        .values
+        .len()
+        .max(series.series.points.len())
+        .min(MAX_PLOT_DATA_SCAN);
+    let values: Vec<(usize, f64)> = (0..scanned)
+        .map(|index| (index, series.value(index)))
         .filter(|(_, value)| *value > 0.0 && value.is_finite())
         .take(ops.remaining)
         .collect();
@@ -785,7 +849,7 @@ fn emit_pie<S: PlotSink + ?Sized>(
             w: r * 2.0,
             h: r * 2.0,
             commands: pie_wedge_path(cx, cy, r, inner_r, angle, angle + sweep),
-            fill: series_point_color(series, *index, *index),
+            fill: series.point_color(*index, *index),
             stroke: Some(PlotStroke {
                 color: CHART_BACKGROUND_COLOR.to_owned(),
                 width: 1.0,
@@ -873,16 +937,18 @@ fn emit_legend<S: PlotSink + ?Sized>(
         series
             .as_slice()
             .first()
+            .map(|series| SeriesView::new(series))
             .map(|series| {
-                (0..series_length(series).min(MAX_LEGEND_ENTRIES))
+                (0..series.length().min(MAX_LEGEND_ENTRIES))
                     .map(|i| {
                         (
                             series
+                                .series
                                 .categories
                                 .get(i)
                                 .cloned()
                                 .unwrap_or_else(|| (i + 1).to_string()),
-                            series_point_color(series, i, i),
+                            series.point_color(i, i),
                         )
                     })
                     .collect()
@@ -959,10 +1025,10 @@ mod tests {
         }
     }
 
-    fn family<'a, 'b>(chart: &'b PlotChart<'a>) -> PlotFamily<'a, 'b> {
+    fn family<'a>(chart: &'a PlotChart<'a>, series: &'a [SeriesView<'a>]) -> PlotFamily<'a> {
         PlotFamily {
             chart_type: chart.chart_type,
-            series: &chart.series,
+            series,
             value_axis: chart.value_axis,
         }
     }
@@ -1037,7 +1103,8 @@ mod tests {
             series: vec![series("North", &north)],
             ..PlotChart::default()
         };
-        assert_eq!(value_range(family(&chart)), (-10.0, 10.0));
+        let views = series_views(&chart.series);
+        assert_eq!(value_range(family(&chart, &views)), (-10.0, 10.0));
     }
 
     #[test]
@@ -1050,8 +1117,9 @@ mod tests {
             marker: Some(PlotMarker { size: None }),
             ..PlotPoint::default()
         }];
-        assert_eq!(marker_size(&series, 0), 4.0);
-        assert_eq!(marker_size(&series, 1), 9.0);
+        let view = SeriesView::new(&series);
+        assert_eq!(view.marker_size(0), 4.0);
+        assert_eq!(view.marker_size(1), 9.0);
     }
 
     #[test]
@@ -1103,6 +1171,68 @@ mod tests {
         };
         let ops = plot_chart(&chart, rect());
         assert_eq!(ops.len(), MAX_PLOT_OPS);
+    }
+
+    #[test]
+    fn the_point_index_agrees_with_a_linear_first_match_scan() {
+        let data = source(&[1.0, 2.0, 3.0, 4.0]);
+        let cases: [Vec<Option<usize>>; 7] = [
+            vec![],
+            vec![Some(0), Some(1), Some(2)],
+            vec![Some(2), Some(0)],
+            vec![None, Some(0)],
+            vec![Some(1), None, Some(0)],
+            vec![Some(3), Some(3), None, None],
+            vec![Some(9), Some(1), Some(9)],
+        ];
+        for indexes in cases {
+            let mut series = series("S", &data);
+            series.points = indexes
+                .iter()
+                .enumerate()
+                .map(|(position, index)| PlotPoint {
+                    index: *index,
+                    value: Some(position as f64),
+                    ..PlotPoint::default()
+                })
+                .collect();
+            let view = SeriesView::new(&series);
+            for query in 0..12 {
+                let expected = series
+                    .points
+                    .iter()
+                    .find(|point| point.index.unwrap_or(query) == query);
+                assert_eq!(view.point(query), expected, "{indexes:?} at {query}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_per_category_resolves_without_rescanning_the_point_vector() {
+        let values: Vec<f64> = (0..20_000).map(|i| (i % 13) as f64).collect();
+        let dense = Source {
+            categories: Vec::new(),
+            values,
+        };
+        let mut series = series("Dense", &dense);
+        series.points = (0..20_000)
+            .map(|index| PlotPoint {
+                index: Some(index),
+                color: Some("#010203"),
+                ..PlotPoint::default()
+            })
+            .collect();
+        let chart = PlotChart {
+            chart_type: "line",
+            series: vec![series],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        assert!(ops.len() <= MAX_PLOT_OPS);
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#010203"))
+        );
     }
 
     #[test]
