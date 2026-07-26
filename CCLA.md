@@ -30,18 +30,22 @@ contract or otherwise, or (ii) ownership of fifty percent (50%) or
 more of the outstanding shares, or (iii) beneficial ownership of
 such entity.
 
+"Project" shall mean any software project owned or managed by Us,
+including BetterOffice and the other repositories of the OpenOOXML
+organization.
+
 "Contribution" shall mean any original work of authorship, including
 any modifications or additions to an existing work, that is
 intentionally submitted by You to Us for inclusion in, or
-documentation of, any of the products owned or managed by Us
-(the "Work"). For the purposes of this definition, "submitted"
-means any form of electronic, verbal, or written communication
-sent to Us or our representatives, including but not limited to
-communication on electronic mailing lists, source code control
-systems, and issue tracking systems that are managed by, or on
-behalf of, Us for the purpose of discussing and improving the
-Work, but excluding communication that is conspicuously marked or
-otherwise designated in writing by You as "Not a Contribution."
+documentation of, any Project (the "Work"). For the purposes of
+this definition, "submitted" means any form of electronic, verbal,
+or written communication sent to Us or our representatives,
+including but not limited to communication on electronic mailing
+lists, source code control systems, and issue tracking systems
+that are managed by, or on behalf of, Us for the purpose of
+discussing and improving the Work, but excluding communication
+that is conspicuously marked or otherwise designated in writing
+by You as "Not a Contribution."
 
 "Designated Employees" shall mean the employees and contractors
 identified by You, by GitHub username, as authorized to submit
@@ -134,4 +138,4 @@ By having an authorized representative sign this Agreement — as
 instructed by the project's CLA assistant, or in writing to the
 maintainers — and identifying You and Your initial Designated
 Employees, You accept and agree to these terms for Contributions
-submitted by Your Designated Employees to OpenOOXML projects.
+submitted by Your Designated Employees to the Projects.
