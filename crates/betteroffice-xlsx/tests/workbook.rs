@@ -3348,6 +3348,38 @@ fn chart_anchors_honour_their_edit_as_mode() {
     }
 }
 
+/// A cache beside a reference this crate cannot resolve keeps its pre-edit
+/// values through a structural edit, because the reference itself never
+/// changes. The edit is refused rather than saved as a chart whose cache and
+/// reference disagree.
+#[test]
+fn refuses_a_structural_edit_beside_a_cache_that_cannot_be_rebuilt() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let chart = String::from_utf8(CHART_PART.to_vec())
+        .unwrap()
+        .replace("Data!$B$2:$B$4", "SalesRange");
+    set_test_part(&mut parts, "xl/charts/chart1.xml", chart.into_bytes());
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message)
+            if message.contains("xl/charts/chart1.xml")),
+        "{error:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
 /// Renaming the plotted sheet rewrites the qualifier in every chart reference,
 /// and undo puts the old name back.
 #[test]

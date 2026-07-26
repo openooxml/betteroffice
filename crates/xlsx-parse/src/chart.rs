@@ -720,8 +720,9 @@ const CHART_CONTENT_TYPES: [&str; 2] = [
 ];
 
 /// A chart part in the package that the model does not fully cover: one no
-/// sheet claims, one that is not a classic `c:chartSpace`, or one carrying a
-/// reference form the remapper cannot rewrite. Structural edits are refused
+/// sheet claims, one that is not a classic `c:chartSpace`, one carrying a
+/// reference form the remapper cannot rewrite, or one whose cache sits beside
+/// a reference this crate cannot rebuild it from. Structural edits are refused
 /// while such a part is present, because moving cells would strand it.
 pub(crate) fn unmodelled_chart_part(
     parts: &[(String, Vec<u8>)],
@@ -741,11 +742,42 @@ pub(crate) fn unmodelled_chart_part(
         if !modelled.contains(normalize_part_path(path)) {
             return Ok(Some(path.clone()));
         }
-        if unsupported_reference_form(&parse_tree(bytes)?, 0) {
+        let root = parse_tree(bytes)?;
+        if unsupported_reference_form(&root, 0) || holds_an_unrebuildable_cache(&root)? {
             return Ok(Some(path.clone()));
         }
     }
     Ok(None)
+}
+
+/// Whether a cache sits beside a reference this crate could not rebuild it
+/// from. Such a reference survives a structural edit unchanged — a defined
+/// name resolves somewhere else afterwards, and the remapper never touches the
+/// literal formula — so the save would keep a cache holding pre-edit values.
+fn holds_an_unrebuildable_cache(root: &Element) -> Result<bool, ParseError> {
+    Ok(ref_sites(root)?.iter().any(|site| {
+        site.cache.as_ref().is_some_and(|cache| {
+            cache.local == "multiLvlStrCache" || !is_direct_one_dimensional_range(&site.formula)
+        })
+    }))
+}
+
+/// Whether a reference is the one form [`resolve_reference`] reads: a single
+/// contiguous one-dimensional area, optionally sheet-qualified. An empty
+/// reference and `#REF!` name nothing, which is the empty cache.
+fn is_direct_one_dimensional_range(formula: &str) -> bool {
+    let trimmed = formula.trim();
+    if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
+        return true;
+    }
+    let Some((_, area)) = split_qualifier(trimmed) else {
+        return false;
+    };
+    let Some((start, end)) = parse_area(area) else {
+        return false;
+    };
+    let (rows, cols) = (end.row - start.row + 1, end.col - start.col + 1);
+    (rows == 1 || cols == 1) && u64::from(rows) * u64::from(cols) <= u64::from(MAX_CACHE_POINTS)
 }
 
 fn normalize_part_path(path: &str) -> &str {

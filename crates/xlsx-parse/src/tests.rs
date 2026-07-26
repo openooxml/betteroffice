@@ -1992,6 +1992,58 @@ fn refuses_structural_edits_while_a_chart_part_is_not_covered() {
     }
 }
 
+/// A cache is only patchable when the reference beside it is one this crate
+/// can resolve. A defined name, a union, an external book and a two-
+/// dimensional area all survive a structural edit unchanged, so their caches
+/// would keep pre-edit values; the package is refused instead.
+#[test]
+fn refuses_a_cache_this_crate_could_not_rebuild() {
+    for (label, formula) in [
+        ("defined name", "SalesRange"),
+        ("union", "(Data!$B$2:$B$4,Data!$D$2:$D$4)"),
+        ("external book", "[1]Data!$B$2:$B$4"),
+        ("two dimensional", "Data!$A$2:$B$4"),
+        ("whole column", "Data!$B:$B"),
+    ] {
+        let mut parts = charted_package();
+        let chart = String::from_utf8(CHART.to_vec())
+            .unwrap()
+            .replace("Data!$B$2:$B$4", formula);
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert_eq!(
+            parsed.package.unpatchable_reference_part(),
+            Some("xl/charts/chart1.xml"),
+            "{label}"
+        );
+    }
+
+    let mut parts = charted_package();
+    let multi_level = String::from_utf8(CHART.to_vec())
+        .unwrap()
+        .replace("strCache>", "multiLvlStrCache>");
+    set_part(&mut parts, "xl/charts/chart1.xml", multi_level.as_bytes());
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(
+        parsed.package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml")
+    );
+}
+
+/// A reference with no cache beside it carries nothing that could go stale,
+/// so it does not have to be resolvable.
+#[test]
+fn accepts_a_reference_no_cache_depends_on() {
+    let mut parts = charted_package();
+    let chart = String::from_utf8(CHART.to_vec()).unwrap().replace(
+        r#"<c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val>"#,
+        r#"<c:val><c:numRef><c:f>SalesRange</c:f></c:numRef></c:val>"#,
+    );
+    set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.package.unpatchable_reference_part(), None);
+}
+
 /// OPC permits utf-8 and utf-16 alike. A utf-16 chart part must parse, and a
 /// rewrite must come back in the encoding it was authored in.
 #[test]
