@@ -1778,6 +1778,140 @@ fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
     assert_eq!(parse_workbook(&added).unwrap().sheets.len(), 3);
 }
 
+/// A drawing may bind the relationship namespace to any prefix; discovery
+/// resolves expanded names, so the chart is still found.
+#[test]
+fn discovers_a_chart_through_an_alternate_relationship_prefix() {
+    let mut parts = charted_package();
+    let drawing = String::from_utf8(DRAWING.to_vec())
+        .unwrap()
+        .replace("xmlns:r=", "xmlns:rel=")
+        .replace("r:id=", "rel:id=");
+    set_part(&mut parts, "xl/drawings/drawing1.xml", drawing.as_bytes());
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.sheets[0].charts.len(), 1);
+    assert_eq!(parsed.package.unpatchable_reference_part(), None);
+}
+
+/// A chartsheet carries a drawing too, and the charts it anchors move with the
+/// cells they name just like a worksheet's.
+#[test]
+fn discovers_the_charts_a_chartsheet_anchors() {
+    let parts = chartsheet_package();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(parsed.workbook.sheets[1].charts.len(), 1);
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].part,
+        "xl/charts/chart1.xml"
+    );
+    assert_eq!(parsed.package.unpatchable_reference_part(), None);
+}
+
+/// Every chart part the package holds must be one the model covers. A ChartEx
+/// part, a chart no sheet claims, an externally cached chart, a pivot chart and
+/// a chart carrying `sqref` extension references are all refused instead.
+#[test]
+fn refuses_structural_edits_while_a_chart_part_is_not_covered() {
+    let unreachable = {
+        let mut parts = charted_package();
+        parts.push((
+            "xl/charts/chart2.xml".to_owned(),
+            b"<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"/>"
+                .to_vec(),
+        ));
+        parts
+    };
+    let chart_ex = {
+        let mut parts = charted_package();
+        set_part(
+            &mut parts,
+            "xl/charts/chart1.xml",
+            br#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chartData><cx:data><cx:strDim><cx:f>Data!$A$2:$A$4</cx:f></cx:strDim></cx:data></cx:chartData></cx:chartSpace>"#,
+        );
+        parts
+    };
+    let filtered = {
+        let mut parts = charted_package();
+        let chart = String::from_utf8(CHART.to_vec()).unwrap().replace(
+            "<c:f>Data!$A$2:$A$4</c:f>",
+            r#"<c:f>Data!$A$2:$A$4</c:f><c:extLst><c:ext xmlns:c15="http://schemas.microsoft.com/office/drawing/2012/chart" uri="{02D57815-91ED-43cb-92C2-25804820EDAC}"><c15:fullRef><c15:sqref>Data!$A$2:$A$6</c15:sqref></c15:fullRef></c:ext></c:extLst>"#,
+        );
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        parts
+    };
+    let pivoted = {
+        let mut parts = charted_package();
+        let chart = String::from_utf8(CHART.to_vec()).unwrap().replace(
+            "<c:chart>",
+            "<c:pivotSource><c:name>[1]Data!PivotTable1</c:name></c:pivotSource><c:chart>",
+        );
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        parts
+    };
+    let external = {
+        let mut parts = charted_package();
+        let chart = String::from_utf8(CHART.to_vec()).unwrap().replace(
+            "</c:chartSpace>",
+            r#"<c:externalData r:id="rIdData"/></c:chartSpace>"#,
+        );
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        parts
+    };
+
+    for (label, parts) in [
+        ("unreachable", unreachable),
+        ("chartex", chart_ex),
+        ("filtered", filtered),
+        ("pivoted", pivoted),
+        ("external", external),
+    ] {
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let refused = parsed
+            .package
+            .unpatchable_reference_part()
+            .unwrap_or_else(|| panic!("{label} chart part must be refused"));
+        assert!(refused.starts_with("xl/charts/"), "{label}: {refused}");
+    }
+}
+
+fn set_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: &[u8]) {
+    let slot = parts
+        .iter_mut()
+        .find(|(name, _)| name == path)
+        .unwrap_or_else(|| panic!("{path} is not in the package"));
+    slot.1 = bytes.to_vec();
+}
+
+/// A package whose second sheet is a chartsheet anchoring the chart.
+fn chartsheet_package() -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Chart" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#.to_vec(),
+    );
+    parts.extend([
+        (
+            "xl/chartsheets/sheet1.xml".to_owned(),
+            br#"<chartsheet><drawing r:id="rIdDrawing"/></chartsheet>"#.to_vec(),
+        ),
+        (
+            "xl/chartsheets/_rels/sheet1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/drawings/drawing1.xml".to_owned(), DRAWING.to_vec()),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/charts/chart1.xml".to_owned(), CHART.to_vec()),
+    ]);
+    parts
+}
+
 /// Reordering, dropping and renaming sheets no longer trips the guard now that
 /// chart references are modelled.
 #[test]
@@ -1855,7 +1989,7 @@ fn hostile_chart_markup_is_refused_not_survived() {
 /// so a rewrite can never reshape the part.
 #[test]
 fn a_rewritten_reference_is_escaped_into_the_part() {
-    let source = br#"<c:chartSpace xmlns:c="c"><c:f>Data!$A$1</c:f></c:chartSpace>"#;
+    let source = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:f>Data!$A$1</c:f></c:chartSpace>"#;
     let patched = crate::chart::patch_chart_refs(
         source,
         &[xlsx_model::ChartRef {
@@ -1866,7 +2000,7 @@ fn a_rewritten_reference_is_escaped_into_the_part() {
     .unwrap();
     assert_eq!(
         String::from_utf8(patched).unwrap(),
-        r#"<c:chartSpace xmlns:c="c"><c:f>&apos;A&lt;B&amp;C&apos;!$A$1</c:f></c:chartSpace>"#
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:f>&apos;A&lt;B&amp;C&apos;!$A$1</c:f></c:chartSpace>"#
             .replace("&apos;", "'")
     );
 }

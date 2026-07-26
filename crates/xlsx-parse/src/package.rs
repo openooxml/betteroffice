@@ -28,6 +28,7 @@ pub struct PreservedPackage {
     pub(crate) calc_chains: Vec<PartReference>,
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
+    pub(crate) unmodelled_chart_part: Option<String>,
 }
 
 impl PreservedPackage {
@@ -129,12 +130,19 @@ impl PreservedPackage {
             .map(XmlTemplate::capture)
             .transpose()?;
 
+        let content_types = find_part(parts, "[Content_Types].xml")
+            .map(parse_content_types)
+            .transpose()?
+            .unwrap_or_default();
+        let unmodelled_chart_part = crate::chart::unmodelled_chart_part(
+            parts,
+            &part_content_types(&content_types),
+            workbook,
+        )?;
+
         Ok(Self {
             parts: parts.to_vec(),
-            content_types: find_part(parts, "[Content_Types].xml")
-                .map(parse_content_types)
-                .transpose()?
-                .unwrap_or_default(),
+            content_types,
             root_relationships: find_part(parts, "_rels/.rels")
                 .map(parse_relationships)
                 .transpose()?
@@ -152,6 +160,7 @@ impl PreservedPackage {
             calc_chains,
             stylesheet_template,
             original_workbook: workbook.clone(),
+            unmodelled_chart_part,
         })
     }
 
@@ -166,19 +175,24 @@ impl PreservedPackage {
     }
 
     /// A preserved part that names sheets or addresses this crate never
-    /// patches, so a rename, removal or axis edit would strand it. Charts are
-    /// no longer among them: their `c:f` references and `xdr:` anchors are
-    /// modelled and remapped. Pivot caches still are.
+    /// patches, so a rename, removal or axis edit would strand it. A classic
+    /// `c:chartSpace` reached from a worksheet or chartsheet drawing is
+    /// modelled and remapped, so it is not one of them; a pivot cache, a
+    /// ChartEx part, and any chart carrying a reference form the remapper does
+    /// not cover still are.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
         const REFERENCE_BEARING: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
-        self.parts.iter().find_map(|(path, _)| {
-            let normalized = path.trim_start_matches('/').to_ascii_lowercase();
-            REFERENCE_BEARING
-                .iter()
-                .any(|prefix| normalized.starts_with(prefix))
-                .then_some(path.as_str())
-        })
+        self.parts
+            .iter()
+            .find_map(|(path, _)| {
+                let normalized = path.trim_start_matches('/').to_ascii_lowercase();
+                REFERENCE_BEARING
+                    .iter()
+                    .any(|prefix| normalized.starts_with(prefix))
+                    .then_some(path.as_str())
+            })
+            .or(self.unmodelled_chart_part.as_deref())
     }
 
     /// The shared-string entries a source sheet's cells were authored against.
@@ -923,6 +937,26 @@ fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError>
         }
     }
     Ok(entries)
+}
+
+/// `(normalized part path, content type)` for every `Override`.
+fn part_content_types(entries: &[ContentTypeEntry]) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .filter(|entry| entry.element == "Override")
+        .filter_map(|entry| {
+            Some((
+                entry
+                    .attribute("PartName")?
+                    .trim_start_matches('/')
+                    .to_ascii_lowercase(),
+                entry
+                    .attribute("ContentType")
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        })
+        .collect()
 }
 
 struct SheetEntry {

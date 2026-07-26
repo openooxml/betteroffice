@@ -20,6 +20,24 @@ use crate::tree::{Element, parse_tree, splice};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
+/// relationship references inside a part (`r:id`).
+const NS_RELATIONSHIPS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+/// the `.rels` part vocabulary itself.
+const NS_PACKAGE_RELATIONSHIPS: &str =
+    "http://schemas.openxmlformats.org/package/2006/relationships";
+/// classic `c:chartSpace`.
+const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+/// `cx:chartSpace`, whose reference syntax and caches are their own vocabulary.
+const NS_CHART_EX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
+/// the worksheet drawing vocabulary that carries the anchors.
+const NS_SPREADSHEET_DRAWING: &str =
+    "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+
+/// relationship types followed out of a sheet or drawing part.
+const TYPE_DRAWING: &str = "drawing";
+const TYPE_CHART: &str = "chart";
+
 /// Parse a chart part into the shared model, resolving `a:schemeClr` through
 /// the workbook theme. `None` when the part carries no recognized plot.
 pub fn chart_space(part: &[u8], theme: &Theme) -> Option<ChartSpace> {
@@ -114,25 +132,15 @@ fn drawing_theme(theme: &Theme) -> DrawingTheme {
     drawing
 }
 
-/// The charts a worksheet anchors, followed from its drawing relationships.
-/// A chart whose part is missing is skipped rather than failing the parse.
+/// The charts a sheet anchors, followed from its drawing relationships. Both
+/// worksheets and chartsheets carry drawings, so both are walked. A chart whose
+/// part is missing is skipped rather than failing the parse.
 pub(crate) fn parse_sheet_charts(
     parts: &[(String, Vec<u8>)],
     sheet_path: &str,
 ) -> Result<Vec<SheetChart>, ParseError> {
-    let Some(rels) = find_part(parts, &relationship_part_path(sheet_path)) else {
-        return Ok(Vec::new());
-    };
-    let sheet_dir = directory_of(sheet_path);
     let mut charts = Vec::new();
-    for (_, _, target) in parse_relationships(rels)?
-        .iter()
-        .filter(|(_, kind, _)| type_is(kind, "drawing"))
-    {
-        let drawing_path = resolve_part_path(sheet_dir, target);
-        let Some(drawing_xml) = find_part(parts, &drawing_path) else {
-            continue;
-        };
+    for (drawing_path, drawing_xml) in sheet_drawings(parts, sheet_path)? {
         let drawing_rels = find_part(parts, &relationship_part_path(&drawing_path))
             .map(parse_relationships)
             .transpose()?
@@ -145,7 +153,7 @@ pub(crate) fn parse_sheet_charts(
             let Some(part) = anchor
                 .chart_rel
                 .as_deref()
-                .and_then(|id| chart_target(&drawing_rels, id))
+                .and_then(|id| relationship_target(&drawing_rels, id, TYPE_CHART))
                 .map(|target| resolve_part_path(&drawing_dir, target))
             else {
                 continue;
@@ -153,6 +161,10 @@ pub(crate) fn parse_sheet_charts(
             let Some(chart_xml) = find_part(parts, &part) else {
                 continue;
             };
+            let root = parse_tree(chart_xml)?;
+            if !root.is(NS_CHART, "chartSpace") {
+                continue;
+            }
             if charts.len() >= MAX_CHART_ANCHORS {
                 return Err(ParseError::TooManyCharts);
             }
@@ -161,11 +173,33 @@ pub(crate) fn parse_sheet_charts(
                 drawing: drawing_path.clone(),
                 anchor_index: index,
                 anchor: anchor.anchor,
-                refs: chart_refs(&parse_tree(chart_xml)?)?,
+                refs: chart_refs(&root)?,
             });
         }
     }
     Ok(charts)
+}
+
+/// Every drawing part a sheet relates to, with its bytes.
+fn sheet_drawings<'a>(
+    parts: &'a [(String, Vec<u8>)],
+    sheet_path: &str,
+) -> Result<Vec<(String, &'a [u8])>, ParseError> {
+    let Some(rels) = find_part(parts, &relationship_part_path(sheet_path)) else {
+        return Ok(Vec::new());
+    };
+    let sheet_dir = directory_of(sheet_path);
+    let mut drawings = Vec::new();
+    for (_, _, target) in parse_relationships(rels)?
+        .iter()
+        .filter(|(_, kind, _)| type_is(kind, TYPE_DRAWING))
+    {
+        let path = resolve_part_path(sheet_dir, target);
+        if let Some(bytes) = find_part(parts, &path) {
+            drawings.push((path, bytes));
+        }
+    }
+    Ok(drawings)
 }
 
 struct DrawingAnchor {
@@ -176,8 +210,11 @@ struct DrawingAnchor {
 /// Every `xdr:` anchor in a drawing part, in document order, so an index into
 /// this list keeps naming the same anchor across a save.
 fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
+    if !root.is(NS_SPREADSHEET_DRAWING, "wsDr") {
+        return Ok(Vec::new());
+    }
     let mut anchors = Vec::new();
-    for child in root.child_elements() {
+    for child in root.child_elements().filter(is_anchor) {
         let anchor = match child.local_name() {
             "twoCellAnchor" => ChartAnchor::TwoCell {
                 from: anchor_cell(child.child("from")),
@@ -191,11 +228,10 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
                 from: anchor_cell(child.child("from")),
                 extent: anchor_extent(child.child("ext")),
             },
-            "absoluteAnchor" => ChartAnchor::Absolute {
+            _ => ChartAnchor::Absolute {
                 pos: anchor_pos(child.child("pos")),
                 extent: anchor_extent(child.child("ext")),
             },
-            _ => continue,
         };
         if anchors.len() >= MAX_CHART_ANCHORS {
             return Err(ParseError::TooManyCharts);
@@ -208,13 +244,24 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
     Ok(anchors)
 }
 
-/// `c:chart/@r:id` under a graphic frame, searched depth-capped.
+fn is_anchor(element: &&Element) -> bool {
+    element.namespace() == Some(NS_SPREADSHEET_DRAWING)
+        && matches!(
+            element.local_name(),
+            "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor"
+        )
+}
+
+/// `c:chart/@r:id` under a graphic frame, searched depth-capped by expanded
+/// name so an alternate prefix still resolves.
 fn chart_relationship_id(element: &Element, depth: usize) -> Option<String> {
     if depth > MAX_DEPTH {
         return None;
     }
-    if element.local_name() == "chart" {
-        return element.attribute(Some("r"), "id").map(str::to_owned);
+    if element.is(NS_CHART, "chart") {
+        return element
+            .attribute_ns(NS_RELATIONSHIPS, "id")
+            .map(str::to_owned);
     }
     element
         .child_elements()
@@ -313,7 +360,7 @@ fn walk_refs(
         return Err(ParseError::DepthExceeded);
     }
     let kind = slot_kind(element.local_name()).unwrap_or(inherited);
-    if element.local_name() == "f" {
+    if element.is(NS_CHART, "f") {
         if out.len() >= MAX_CHART_REFS {
             return Err(ParseError::TooManyCharts);
         }
@@ -379,15 +426,7 @@ pub(crate) fn patch_drawing_anchors(
     anchors: &[(usize, ChartAnchor)],
 ) -> Result<Vec<u8>, ParseError> {
     let root = parse_tree(part)?;
-    let indexed = root
-        .child_elements()
-        .filter(|child| {
-            matches!(
-                child.local_name(),
-                "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor"
-            )
-        })
-        .collect::<Vec<_>>();
+    let indexed = root.child_elements().filter(is_anchor).collect::<Vec<_>>();
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     for (index, anchor) in anchors {
         let Some(element) = indexed.get(*index) else {
@@ -437,6 +476,85 @@ fn push_cell_edits(
     Ok(())
 }
 
+/// content types that carry workbook references in a chart vocabulary. the
+/// style and colour-style parts under `xl/charts/` carry none.
+const CHART_CONTENT_TYPES: [&str; 2] = [
+    "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+    "application/vnd.ms-office.chartex+xml",
+];
+
+/// A chart part in the package that the model does not fully cover: one no
+/// sheet claims, one that is not a classic `c:chartSpace`, or one carrying a
+/// reference form the remapper cannot rewrite. Structural edits are refused
+/// while such a part is present, because moving cells would strand it.
+pub(crate) fn unmodelled_chart_part(
+    parts: &[(String, Vec<u8>)],
+    content_types: &[(String, String)],
+    workbook: &xlsx_model::Workbook,
+) -> Result<Option<String>, ParseError> {
+    let modelled = workbook
+        .sheets
+        .iter()
+        .flat_map(|sheet| sheet.charts.iter())
+        .map(|chart| normalize_part_path(&chart.part))
+        .collect::<std::collections::HashSet<_>>();
+    for (path, bytes) in parts {
+        if !is_chart_part(path, content_types) {
+            continue;
+        }
+        if !modelled.contains(normalize_part_path(path)) {
+            return Ok(Some(path.clone()));
+        }
+        if unsupported_reference_form(&parse_tree(bytes)?, 0) {
+            return Ok(Some(path.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_part_path(path: &str) -> &str {
+    path.trim_start_matches('/')
+}
+
+/// Whether a part holds a chart, by its declared content type when the package
+/// declares one and by the conventional layout otherwise.
+fn is_chart_part(path: &str, content_types: &[(String, String)]) -> bool {
+    let normalized = normalize_part_path(path).to_ascii_lowercase();
+    if let Some((_, content_type)) = content_types
+        .iter()
+        .find(|(declared, _)| *declared == normalized)
+    {
+        return CHART_CONTENT_TYPES
+            .iter()
+            .any(|known| content_type.eq_ignore_ascii_case(known));
+    }
+    normalized.starts_with("xl/charts/chart")
+        && normalized.ends_with(".xml")
+        && !normalized.contains("/_rels/")
+}
+
+/// Whether a chart part carries a reference this crate cannot rewrite. Only a
+/// classic `c:chartSpace` whose references are all `c:f` is covered; ChartEx,
+/// pivot-sourced and externally-cached charts, and the `sqref` extension
+/// references filtered series carry, are not.
+fn unsupported_reference_form(element: &Element, depth: usize) -> bool {
+    if depth == 0 && !element.is(NS_CHART, "chartSpace") {
+        return true;
+    }
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let unsupported = element.namespace() == Some(NS_CHART_EX)
+        || element.local_name() == "sqref"
+        || element.is(NS_CHART, "pivotSource")
+        || element.is(NS_CHART, "externalData")
+        || (element.local_name() == "f" && element.namespace() != Some(NS_CHART));
+    unsupported
+        || element
+            .child_elements()
+            .any(|child| unsupported_reference_form(child, depth + 1))
+}
+
 pub(crate) fn relationship_part_path(path: &str) -> String {
     match path.rsplit_once('/') {
         Some((directory, file)) => format!("{directory}/_rels/{file}.rels"),
@@ -454,9 +572,13 @@ fn type_is(kind: &str, suffix: &str) -> bool {
     kind.rsplit('/').next() == Some(suffix)
 }
 
-fn chart_target<'a>(rels: &'a [(String, String, String)], id: &str) -> Option<&'a str> {
+fn relationship_target<'a>(
+    rels: &'a [(String, String, String)],
+    id: &str,
+    suffix: &str,
+) -> Option<&'a str> {
     rels.iter()
-        .find(|(rel_id, kind, _)| rel_id == id && type_is(kind, "chart"))
+        .find(|(rel_id, kind, _)| rel_id == id && type_is(kind, suffix))
         .map(|(_, _, target)| target.as_str())
 }
 
@@ -465,7 +587,7 @@ fn parse_relationships(data: &[u8]) -> Result<Vec<(String, String, String)>, Par
     let root = parse_tree(data)?;
     Ok(root
         .child_elements()
-        .filter(|child| child.local_name() == "Relationship")
+        .filter(|child| child.is(NS_PACKAGE_RELATIONSHIPS, "Relationship"))
         .filter(|child| {
             !child
                 .attribute_local("TargetMode")

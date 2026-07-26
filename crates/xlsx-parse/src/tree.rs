@@ -3,6 +3,7 @@
 //! rewrite splices into the source instead of reserializing it.
 
 use std::ops::Range;
+use std::rc::Rc;
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -15,10 +16,21 @@ pub(crate) enum Node {
     Text(String),
 }
 
+pub(crate) struct Attribute {
+    /// the attribute as authored, prefix included.
+    pub(crate) name: String,
+    /// the namespace its prefix was bound to; unprefixed attributes have none.
+    pub(crate) namespace: Option<Rc<str>>,
+    pub(crate) value: String,
+}
+
 pub(crate) struct Element {
     /// the tag as authored, prefix included.
     pub(crate) name: String,
-    pub(crate) attributes: Vec<(String, String)>,
+    /// the namespace the tag's prefix (or the default declaration) was bound
+    /// to, so a part is read by expanded name rather than by literal prefix.
+    pub(crate) namespace: Option<Rc<str>>,
+    pub(crate) attributes: Vec<Attribute>,
     pub(crate) children: Vec<Node>,
     /// byte span of the content between the start and end tags; empty for a
     /// self-closing tag, which [`Element::splice_target`] therefore refuses.
@@ -31,23 +43,47 @@ impl Element {
         self.name.rsplit(':').next().unwrap_or(&self.name)
     }
 
+    pub(crate) fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+
+    /// whether this is the expanded name `{namespace}local`.
+    pub(crate) fn is(&self, namespace: &str, local: &str) -> bool {
+        self.local_name() == local && self.namespace() == Some(namespace)
+    }
+
     /// the `prefix:name` attribute when `prefix` is given, else the bare
     /// `name`; both forms fall back to the other.
     pub(crate) fn attribute(&self, prefix: Option<&str>, name: &str) -> Option<&str> {
         let qualified = prefix.map(|prefix| format!("{prefix}:{name}"));
         self.attributes
             .iter()
-            .find(|(key, _)| Some(key.as_str()) == qualified.as_deref())
-            .or_else(|| self.attributes.iter().find(|(key, _)| key == name))
-            .map(|(_, value)| value.as_str())
+            .find(|attribute| Some(attribute.name.as_str()) == qualified.as_deref())
+            .or_else(|| {
+                self.attributes
+                    .iter()
+                    .find(|attribute| attribute.name == name)
+            })
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    /// the attribute with this expanded name, whatever prefix carries it.
+    pub(crate) fn attribute_ns(&self, namespace: &str, local: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|attribute| {
+                attribute.namespace.as_deref() == Some(namespace)
+                    && attribute.name.rsplit(':').next() == Some(local)
+            })
+            .map(|attribute| attribute.value.as_str())
     }
 
     /// the attribute whose local name matches, whatever its prefix.
     pub(crate) fn attribute_local(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|(key, _)| key.rsplit(':').next().unwrap_or(key) == name)
-            .map(|(_, value)| value.as_str())
+            .find(|attribute| attribute.name.rsplit(':').next().unwrap_or(&attribute.name) == name)
+            .map(|attribute| attribute.value.as_str())
     }
 
     pub(crate) fn child_elements(&self) -> impl Iterator<Item = &Element> {
@@ -89,6 +125,63 @@ struct Budget {
     text: usize,
 }
 
+/// the in-scope prefix bindings, as a stack that mirrors element nesting.
+#[derive(Default)]
+struct Namespaces {
+    /// `("", uri)` is the default declaration.
+    bindings: Vec<(String, Rc<str>)>,
+    scopes: Vec<usize>,
+}
+
+impl Namespaces {
+    fn open(&mut self, start: &BytesStart<'_>) -> Result<(), ParseError> {
+        self.scopes.push(self.bindings.len());
+        for attribute in start.attributes() {
+            let attribute = attribute.map_err(xml_err)?;
+            let Some(prefix) = declared_prefix(attribute.key.as_ref()) else {
+                continue;
+            };
+            let value = attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(xml_err)?;
+            self.bindings
+                .push((prefix.to_owned(), Rc::from(value.as_ref())));
+        }
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        if let Some(len) = self.scopes.pop() {
+            self.bindings.truncate(len);
+        }
+    }
+
+    fn resolve(&self, prefix: &str) -> Option<Rc<str>> {
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == prefix)
+            .map(|(_, uri)| uri.clone())
+            .filter(|uri| !uri.is_empty())
+    }
+}
+
+/// the prefix an `xmlns` attribute declares, `""` for the default one.
+fn declared_prefix(key: &[u8]) -> Option<&str> {
+    let key = std::str::from_utf8(key).ok()?;
+    if key == "xmlns" {
+        return Some("");
+    }
+    key.strip_prefix("xmlns:").filter(|rest| !rest.is_empty())
+}
+
+fn split_prefix(name: &str) -> (&str, &str) {
+    match name.split_once(':') {
+        Some((prefix, local)) if !prefix.is_empty() && !local.is_empty() => (prefix, local),
+        _ => ("", name),
+    }
+}
+
 /// parse a whole part into an element tree. rejects doctypes outright and caps
 /// depth, node count and total text so hostile markup cannot exhaust memory.
 pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
@@ -105,6 +198,7 @@ pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
         text: MAX_TREE_TEXT_BYTES,
     };
     let mut stack: Vec<Element> = Vec::new();
+    let mut namespaces = Namespaces::default();
     let mut root: Option<Element> = None;
     let mut buf = Vec::new();
     loop {
@@ -117,17 +211,21 @@ pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
                 if stack.len() >= MAX_DEPTH {
                     return Err(ParseError::DepthExceeded);
                 }
-                let element = open_element(&start, closed, false, &mut budget)?;
+                namespaces.open(&start)?;
+                let element = open_element(&start, closed, false, &mut budget, &namespaces)?;
                 stack.push(element);
             }
             Event::Empty(start) => {
-                let element = open_element(&start, closed, true, &mut budget)?;
-                place(element, &mut stack, &mut root)?;
+                namespaces.open(&start)?;
+                let element = open_element(&start, closed, true, &mut budget, &namespaces);
+                namespaces.close();
+                place(element?, &mut stack, &mut root)?;
             }
             Event::End(_) => {
                 let mut done = stack
                     .pop()
                     .ok_or_else(|| ParseError::Malformed("unbalanced end tag".into()))?;
+                namespaces.close();
                 done.content.end = opened.max(done.content.start);
                 place(done, &mut stack, &mut root)?;
             }
@@ -162,12 +260,14 @@ fn open_element(
     content_start: usize,
     self_closing: bool,
     budget: &mut Budget,
+    namespaces: &Namespaces,
 ) -> Result<Element, ParseError> {
     budget.nodes = budget
         .nodes
         .checked_sub(1)
         .ok_or(ParseError::TreeTooLarge)?;
-    let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+    let name = decode_name(start.name().as_ref())?;
+    let namespace = namespaces.resolve(split_prefix(&name).0);
     let mut attributes = Vec::new();
     for attribute in start.attributes() {
         let attribute = attribute.map_err(xml_err)?;
@@ -175,21 +275,35 @@ fn open_element(
             .nodes
             .checked_sub(1)
             .ok_or(ParseError::TreeTooLarge)?;
-        attributes.push((
-            String::from_utf8_lossy(attribute.key.as_ref()).into_owned(),
-            attribute
+        let name = decode_name(attribute.key.as_ref())?;
+        let prefix = split_prefix(&name).0;
+        attributes.push(Attribute {
+            namespace: (!prefix.is_empty())
+                .then(|| namespaces.resolve(prefix))
+                .flatten(),
+            name,
+            value: attribute
                 .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                 .map_err(xml_err)?
                 .into_owned(),
-        ));
+        });
     }
     Ok(Element {
         name,
+        namespace,
         attributes,
         children: Vec::new(),
         content: content_start..content_start,
         self_closing,
     })
+}
+
+/// an element or attribute name. an xml name is valid utf-8 by definition, so
+/// anything else is malformed rather than something to guess at.
+fn decode_name(raw: &[u8]) -> Result<String, ParseError> {
+    std::str::from_utf8(raw)
+        .map(str::to_owned)
+        .map_err(|_| ParseError::Malformed("element name is not valid utf-8".into()))
 }
 
 fn place(
