@@ -1064,6 +1064,88 @@ mod tests {
         assert!(!shows(None, Some(deleted())));
     }
 
+    #[test]
+    fn data_label_cascade_stays_scoped_to_group_series_and_point() {
+        let labels = Node::el(
+            "c:dLbls",
+            vec![
+                Node::val("c:showVal", "1"),
+                Node::el(
+                    "c:dLbl",
+                    vec![Node::val("c:idx", "1"), Node::val("c:delete", "1")],
+                ),
+            ],
+        );
+        let deleted = Node::el("c:dLbls", vec![Node::val("c:delete", "1")]);
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![Node::el(
+                        "c:barChart",
+                        vec![
+                            Node::val("c:barDir", "col"),
+                            Node::el("c:ser", vec![labels]),
+                            Node::el("c:ser", Vec::new()),
+                            Node::el("c:ser", vec![deleted]),
+                        ],
+                    )],
+                )],
+            )],
+        );
+
+        let group = &parse_chart_space(&space)
+            .expect("chart space parses")
+            .plot_groups[0];
+
+        assert!(group.data_labels.is_none());
+        let first = group.series[0].data_labels.as_ref().unwrap();
+        assert_eq!(first.show_value, Some(true));
+        let points = first.points.as_ref().unwrap();
+        assert_eq!(points[0].index, Some(1.0));
+        assert_eq!(points[0].labels.delete, Some(true));
+        assert!(group.series[1].data_labels.is_none());
+        assert_eq!(
+            group.series[2].data_labels.as_ref().unwrap().delete,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn group_data_labels_remain_defaults_for_an_unset_series() {
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![Node::el(
+                        "c:barChart",
+                        vec![
+                            Node::val("c:barDir", "col"),
+                            Node::el("c:ser", Vec::new()),
+                            Node::el(
+                                "c:dLbls",
+                                vec![Node::val("c:showVal", "1"), Node::val("c:showCatName", "0")],
+                            ),
+                        ],
+                    )],
+                )],
+            )],
+        );
+
+        let group = &parse_chart_space(&space)
+            .expect("chart space parses")
+            .plot_groups[0];
+
+        let labels = group.data_labels.as_ref().unwrap();
+        assert_eq!(labels.show_value, Some(true));
+        assert_eq!(labels.show_category_name, Some(false));
+        assert!(group.series[0].data_labels.is_none());
+    }
+
     /// A numeric cache of `values` wrapped in `wrapper`.
     fn num_cache(wrapper: &str, values: &[f64]) -> Node {
         Node::el(

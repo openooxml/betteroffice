@@ -1,6 +1,8 @@
 //! Format-neutral chart geometry: a chart plus a rectangle in, an ordered
 //! [`PlotOp`] stream out. Hosts translate the ops into their own primitives.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::GeometryPathCommand;
 
 use super::model::ChartSpace;
@@ -336,7 +338,7 @@ pub struct PlotPoint<'a> {
     pub label: Option<&'a str>,
     /// `c:explosion`, a percentage of the pie radius.
     pub explosion: Option<f64>,
-    /// This point's `c:dLbl`, already merged over its series switches.
+    /// This point's cascade-resolved `c:dLbl`.
     pub labels: Option<PlotDataLabels<'a>>,
 }
 
@@ -549,7 +551,7 @@ fn plot_series_from_model<'a>(
     series: &'a super::model::ChartSeries,
     group_labels: Option<&'a super::model::ChartDataLabels>,
 ) -> PlotSeries<'a> {
-    let labels = plot_labels_from_model(group_labels, series.data_labels.as_ref(), None);
+    let labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
     let mut points: Vec<PlotPoint<'a>> = series
         .points
         .iter()
@@ -567,18 +569,7 @@ fn plot_series_from_model<'a>(
             })
         })
         .collect();
-    if let Some(overrides) = series
-        .data_labels
-        .as_ref()
-        .and_then(|labels| labels.points.as_deref())
-    {
-        merge_point_labels(
-            &mut points,
-            overrides,
-            group_labels,
-            series.data_labels.as_ref(),
-        );
-    }
+    merge_point_labels(&mut points, group_labels, series.data_labels.as_ref());
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -594,18 +585,20 @@ fn plot_series_from_model<'a>(
     }
 }
 
-/// Resolves the three-level `c:dLbls` cascade.
+/// Resolves the four-level `c:dLbls` cascade.
 fn plot_labels_from_model<'a>(
-    group: Option<&'a super::model::ChartDataLabels>,
+    series_point: Option<&'a super::model::ChartDataLabels>,
     series: Option<&'a super::model::ChartDataLabels>,
-    point: Option<&'a super::model::ChartDataLabels>,
+    group_point: Option<&'a super::model::ChartDataLabels>,
+    group: Option<&'a super::model::ChartDataLabels>,
 ) -> Option<PlotDataLabels<'a>> {
-    point.or(series).or(group)?;
+    let levels = [series_point, series, group_point, group];
+    levels.iter().copied().flatten().next()?;
     let flag = |read: fn(&super::model::ChartDataLabels) -> Option<bool>| {
-        point
-            .and_then(read)
-            .or_else(|| series.and_then(read))
-            .or_else(|| group.and_then(read))
+        levels
+            .iter()
+            .copied()
+            .find_map(|labels| labels.and_then(read))
     };
     if flag(|labels| labels.delete) == Some(true) {
         return None;
@@ -613,11 +606,15 @@ fn plot_labels_from_model<'a>(
     let switch =
         |read: fn(&super::model::ChartDataLabels) -> Option<bool>| flag(read).unwrap_or(false);
     let text = |read: fn(&super::model::ChartDataLabels) -> Option<&str>| {
-        point
-            .and_then(read)
-            .or_else(|| series.and_then(read))
-            .or_else(|| group.and_then(read))
+        levels
+            .iter()
+            .copied()
+            .find_map(|labels| labels.and_then(read))
     };
+    let mut style = PlotTextStyle::default();
+    for labels in levels.iter().rev().flatten() {
+        style = plot_text_from_model(labels.text.as_ref()).over(style);
+    }
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
         show_category_name: switch(|labels| labels.show_category_name),
@@ -628,54 +625,100 @@ fn plot_labels_from_model<'a>(
         separator: text(|labels| labels.separator.as_deref()),
         position: text(|labels| labels.position.as_deref()),
         number_format: text(|labels| labels.number_format.as_deref()),
-        text: plot_text_from_model(
-            point
-                .and_then(|labels| labels.text.as_ref())
-                .or_else(|| series.and_then(|labels| labels.text.as_ref()))
-                .or_else(|| group.and_then(|labels| labels.text.as_ref())),
-        ),
+        text: style,
     })
 }
 
-/// Folds the per-point `c:dLbl` overrides into `points`, ahead of any
-/// wildcard so the geometry's first-match lookup finds the override.
+/// Folds cascade-resolved `c:dLbl` overrides into `points`.
 fn merge_point_labels<'a>(
     points: &mut Vec<PlotPoint<'a>>,
-    overrides: &'a [super::model::ChartPointLabel],
     group: Option<&'a super::model::ChartDataLabels>,
     series: Option<&'a super::model::ChartDataLabels>,
 ) {
+    let group_overrides = group
+        .and_then(|labels| labels.points.as_deref())
+        .unwrap_or_default();
+    let series_overrides = series
+        .and_then(|labels| labels.points.as_deref())
+        .unwrap_or_default();
+    let mut group_points = HashMap::new();
+    for over in group_overrides.iter().take(MAX_PLOT_DATA_LABELS) {
+        if let Some(index) = over.index.and_then(point_index) {
+            group_points.entry(index).or_insert(over);
+        }
+    }
+    let mut series_points = HashSet::new();
     let wildcard = points.iter().position(|point| point.index.is_none());
-    for over in overrides.iter().take(MAX_PLOT_DATA_LABELS) {
+    for over in series_overrides.iter().take(MAX_PLOT_DATA_LABELS) {
         let Some(index) = over.index.and_then(point_index) else {
             continue;
         };
-        let resolved = plot_labels_from_model(group, series, Some(&over.labels));
-        let label = resolved.and(over.text.as_deref());
-        let labels = Some(resolved.unwrap_or_default());
-        if let Some(slot) = points
-            .iter()
-            .position(|point| point.index == Some(index))
-            .filter(|slot| wildcard.is_none_or(|wildcard| *slot <= wildcard))
-        {
-            points[slot].label = label;
-            points[slot].labels = labels;
+        series_points.insert(index);
+        merge_point_label(
+            points,
+            wildcard,
+            index,
+            group_points.get(&index).copied(),
+            Some(over),
+            group,
+            series,
+        );
+    }
+    let mut merged_group_points = HashSet::new();
+    for over in group_overrides.iter().take(MAX_PLOT_DATA_LABELS) {
+        let Some(index) = over.index.and_then(point_index) else {
             continue;
-        }
-        let mut point = PlotPoint {
-            index: Some(index),
-            label,
-            labels,
-            ..PlotPoint::default()
         };
-        match wildcard {
-            Some(wildcard) => {
-                point.color = points[wildcard].color;
-                point.marker = points[wildcard].marker;
-                points.insert(wildcard, point);
-            }
-            None => points.push(point),
+        if !series_points.contains(&index) && merged_group_points.insert(index) {
+            merge_point_label(points, wildcard, index, Some(over), None, group, series);
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_point_label<'a>(
+    points: &mut Vec<PlotPoint<'a>>,
+    wildcard: Option<usize>,
+    index: usize,
+    group_point: Option<&'a super::model::ChartPointLabel>,
+    series_point: Option<&'a super::model::ChartPointLabel>,
+    group: Option<&'a super::model::ChartDataLabels>,
+    series: Option<&'a super::model::ChartDataLabels>,
+) {
+    let resolved = plot_labels_from_model(
+        series_point.map(|point| &point.labels),
+        series,
+        group_point.map(|point| &point.labels),
+        group,
+    );
+    let label = resolved.and_then(|_| {
+        series_point
+            .and_then(|point| point.text.as_deref())
+            .or_else(|| group_point.and_then(|point| point.text.as_deref()))
+    });
+    let labels = Some(resolved.unwrap_or_default());
+    if let Some(slot) = points
+        .iter()
+        .position(|point| point.index == Some(index))
+        .filter(|slot| wildcard.is_none_or(|wildcard| *slot <= wildcard))
+    {
+        points[slot].label = label;
+        points[slot].labels = labels;
+        return;
+    }
+    let mut point = PlotPoint {
+        index: Some(index),
+        label,
+        labels,
+        ..PlotPoint::default()
+    };
+    match wildcard {
+        Some(wildcard) => {
+            point.color = points[wildcard].color;
+            point.marker = points[wildcard].marker;
+            points.insert(wildcard, point);
+        }
+        None => points.push(point),
     }
 }
 
@@ -1722,9 +1765,7 @@ fn point_label(
     if let Some(text) = point.and_then(|point| point.label) {
         return Some(text.to_owned());
     }
-    let spec = point
-        .and_then(|point| point.labels)
-        .or(series.series.labels)?;
+    let spec = point_label_spec(series, index)?;
     if !spec.shows_anything() {
         return None;
     }
@@ -1759,6 +1800,13 @@ fn point_label(
     (!parts.is_empty()).then(|| parts.join(separator))
 }
 
+fn point_label_spec<'a>(series: &SeriesView<'a>, index: usize) -> Option<PlotDataLabels<'a>> {
+    series
+        .point(index)
+        .and_then(|point| point.labels)
+        .or(series.series.labels)
+}
+
 /// What `c:showPercent` divides by outside a pie: the category total across
 /// every series the family draws.
 fn category_total(family: PlotFamily<'_>, index: usize) -> f64 {
@@ -1779,11 +1827,7 @@ fn push_legend_key<S: PlotSink + ?Sized>(
     x: f64,
     baseline_y: f64,
 ) {
-    let shows = series
-        .point(index)
-        .and_then(|point| point.labels)
-        .or(series.series.labels)
-        .is_some_and(|labels| labels.show_legend_key);
+    let shows = point_label_spec(series, index).is_some_and(|labels| labels.show_legend_key);
     if shows {
         push_rect(
             ops,
@@ -1812,22 +1856,11 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
     };
-    let scope = series
-        .point(index)
-        .and_then(|point| point.labels)
-        .or(series.series.labels)
+    let scope = point_label_spec(series, index)
         .map(|labels| labels.text)
         .unwrap_or_default();
     push_legend_key(ops, series, series_index, index, x, baseline_y);
     push_text(ops, &text, x, baseline_y, width, &family.scoped(scope));
-}
-
-/// The `c:dLblPos` the family's first labelled series names.
-fn family_label_position<'a>(family: PlotFamily<'a>) -> Option<&'a str> {
-    family
-        .series
-        .iter()
-        .find_map(|series| series.series.labels.and_then(|labels| labels.position))
 }
 
 /// Where `c:dLblPos` puts a bar label, as a fraction of the bar's own span
@@ -1958,7 +1991,6 @@ fn emit_bar<S: PlotSink + ?Sized>(
     emit_axes(ops, family, plot);
     let scale = value_scale(family);
     let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
-    let label_position = family_label_position(family);
     let category_style = &family.category_text();
     let spans = &mut Vec::with_capacity(family.series.len());
     for cat_idx in 0..cat_count {
@@ -2001,7 +2033,9 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 let (x0, x1) = (scale.x(plot, start), scale.x(plot, end));
                 let y = plot.y + offset;
                 push_rect(ops, x0.min(x1), y, (x1 - x0).abs(), bands.bar, &color);
-                let (fraction, offset) = bar_label_anchor(label_position);
+                let (fraction, offset) = bar_label_anchor(
+                    point_label_spec(series, cat_idx).and_then(|labels| labels.position),
+                );
                 push_point_label(
                     ops,
                     family,
@@ -2024,7 +2058,9 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     (y0 - y1).abs().max(1.0),
                     &color,
                 );
-                let (fraction, offset) = bar_label_anchor(label_position);
+                let (fraction, offset) = bar_label_anchor(
+                    point_label_spec(series, cat_idx).and_then(|labels| labels.position),
+                );
                 push_point_label(
                     ops,
                     family,
@@ -2946,7 +2982,6 @@ fn emit_pie<S: PlotSink + ?Sized>(
             .rem_euclid(360.0)
             .to_radians();
     let vary = group.is_some_and(|group| group.vary_colors);
-    let label_position = family_label_position(family);
     let mut angle = start;
     for (index, value) in &values {
         let sweep = (*value / total) * std::f64::consts::TAU;
@@ -2976,7 +3011,9 @@ fn emit_pie<S: PlotSink + ?Sized>(
                 width: 1.0,
             }),
         });
-        let reach = r * pie_label_reach(label_position);
+        let reach = r * pie_label_reach(
+            point_label_spec(series, *index).and_then(|labels| labels.position),
+        );
         push_point_label(
             ops,
             family,
@@ -3219,7 +3256,9 @@ fn group_thousands(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chart::{ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries};
+    use crate::chart::{
+        ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries, ChartTextProperties,
+    };
 
     struct Source {
         categories: Vec<String>,
@@ -3259,6 +3298,37 @@ mod tests {
                     data_labels: series_labels,
                     ..ChartSeries::default()
                 }],
+                ..ChartPlotGroup::default()
+            }],
+            ..ChartSpace::default()
+        }
+    }
+
+    fn model_series(name: &str, values: &[f64]) -> ChartSeries {
+        ChartSeries {
+            name: Some(name.to_owned()),
+            categories: values
+                .iter()
+                .enumerate()
+                .map(|(index, _)| format!("Q{}", index + 1))
+                .collect(),
+            values: values.to_vec(),
+            color: "#4472C4".to_owned(),
+            ..ChartSeries::default()
+        }
+    }
+
+    fn model_space(
+        chart_type: &str,
+        group_labels: Option<ChartDataLabels>,
+        series: Vec<ChartSeries>,
+    ) -> ChartSpace {
+        ChartSpace {
+            chart_type: chart_type.to_owned(),
+            plot_groups: vec![ChartPlotGroup {
+                chart_type: Some(chart_type.to_owned()),
+                data_labels: group_labels,
+                series,
                 ..ChartPlotGroup::default()
             }],
             ..ChartSpace::default()
@@ -3548,6 +3618,42 @@ mod tests {
         };
         let ops = plot_chart(&chart, rect());
         assert_eq!(ops.len(), MAX_PLOT_OPS);
+    }
+
+    #[test]
+    fn the_label_budget_is_chart_wide_rather_than_per_series() {
+        let values = vec![1.0; MAX_PLOT_OPS / 2 + 1];
+        let wide = Source {
+            categories: Vec::new(),
+            values,
+        };
+        let labelled = |name, label| {
+            let mut labelled = series(name, &wide);
+            labelled.points = vec![PlotPoint {
+                label: Some(label),
+                ..PlotPoint::default()
+            }];
+            labelled
+        };
+        let chart = grouped(
+            "line",
+            PlotGroup {
+                chart_type: Some("line"),
+                series: vec![
+                    labelled("First", "first-label"),
+                    labelled("Second", "second-label"),
+                ],
+                markers: Some(false),
+                ..PlotGroup::default()
+            },
+        );
+
+        let ops = plot_chart(&chart, rect());
+
+        assert_eq!(ops.len(), MAX_PLOT_OPS);
+        let labels = texts(&ops);
+        assert!(labels.contains(&"first-label".to_owned()));
+        assert!(!labels.contains(&"second-label".to_owned()));
     }
 
     #[test]
@@ -4930,11 +5036,209 @@ mod tests {
             delete: Some(true),
             ..ChartDataLabels::default()
         };
-        assert!(plot_labels_from_model(Some(&group), Some(&series), None).is_none());
+        assert!(plot_labels_from_model(None, Some(&series), None, Some(&group)).is_none());
         let space = labelled_space("pie", Some(group), Some(series));
         let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
         assert!(!labels.contains(&"3".to_owned()));
         assert!(!labels.contains(&"1".to_owned()));
+    }
+
+    #[test]
+    fn group_point_fields_resolve_through_the_four_level_cascade() {
+        let group = ChartDataLabels {
+            show_percent: Some(true),
+            show_bubble_size: Some(true),
+            position: Some("outEnd".to_owned()),
+            text: Some(ChartTextProperties {
+                font: Some("Group".to_owned()),
+                color: Some("112233".to_owned()),
+                ..ChartTextProperties::default()
+            }),
+            ..ChartDataLabels::default()
+        };
+        let group_point = ChartDataLabels {
+            show_category_name: Some(true),
+            show_legend_key: Some(true),
+            separator: Some(" | ".to_owned()),
+            text: Some(ChartTextProperties {
+                italic: Some(true),
+                ..ChartTextProperties::default()
+            }),
+            ..ChartDataLabels::default()
+        };
+        let series = ChartDataLabels {
+            show_value: Some(false),
+            position: Some("inEnd".to_owned()),
+            text: Some(ChartTextProperties {
+                size_pt: Some(12.0),
+                bold: Some(false),
+                ..ChartTextProperties::default()
+            }),
+            ..ChartDataLabels::default()
+        };
+        let series_point = ChartDataLabels {
+            show_series_name: Some(true),
+            number_format: Some("0.0".to_owned()),
+            text: Some(ChartTextProperties {
+                color: Some("AABBCC".to_owned()),
+                ..ChartTextProperties::default()
+            }),
+            ..ChartDataLabels::default()
+        };
+
+        let labels = plot_labels_from_model(
+            Some(&series_point),
+            Some(&series),
+            Some(&group_point),
+            Some(&group),
+        )
+        .expect("labels resolve");
+
+        assert!(!labels.show_value);
+        assert!(labels.show_category_name);
+        assert!(labels.show_series_name);
+        assert!(labels.show_percent);
+        assert!(labels.show_legend_key);
+        assert!(labels.show_bubble_size);
+        assert_eq!(labels.separator, Some(" | "));
+        assert_eq!(labels.position, Some("inEnd"));
+        assert_eq!(labels.number_format, Some("0.0"));
+        assert_eq!(labels.text.font, Some("Group"));
+        assert_eq!(labels.text.size_pt, Some(12.0));
+        assert_eq!(labels.text.bold, Some(false));
+        assert_eq!(labels.text.italic, Some(true));
+        assert_eq!(labels.text.color, Some("AABBCC"));
+    }
+
+    #[test]
+    fn series_delete_overrides_group_label_defaults() {
+        let inherited = model_series("Inherited", &[41.0, 42.0]);
+        let mut deleted = model_series("Deleted", &[51.0]);
+        deleted.data_labels = Some(ChartDataLabels {
+            delete: Some(true),
+            ..ChartDataLabels::default()
+        });
+        let space = model_space(
+            "line",
+            Some(ChartDataLabels {
+                show_value: Some(true),
+                points: Some(vec![ChartPointLabel {
+                    index: Some(1.0),
+                    text: None,
+                    labels: ChartDataLabels {
+                        delete: Some(true),
+                        ..ChartDataLabels::default()
+                    },
+                }]),
+                ..ChartDataLabels::default()
+            }),
+            vec![inherited, deleted],
+        );
+        let chart = PlotChart::from(&space);
+        let views = series_views(&chart.plot_groups[0].series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let family = family(&chart, &views, &label);
+
+        assert_eq!(
+            point_label(family, &views[0], 0, 0.0).as_deref(),
+            Some("41")
+        );
+        assert!(point_label(family, &views[0], 1, 0.0).is_none());
+        assert!(point_label(family, &views[1], 0, 0.0).is_none());
+    }
+
+    #[test]
+    fn delete_is_inherited_until_a_lower_scope_overrides_it() {
+        let mut inherited = model_series("Inherited", &[11.0, 12.0]);
+        inherited.data_labels = Some(ChartDataLabels {
+            show_category_name: Some(false),
+            ..ChartDataLabels::default()
+        });
+        let mut point_restored = model_series("Point", &[21.0, 22.0]);
+        point_restored.data_labels = Some(ChartDataLabels {
+            delete: Some(true),
+            points: Some(vec![ChartPointLabel {
+                index: Some(1.0),
+                text: None,
+                labels: ChartDataLabels {
+                    delete: Some(false),
+                    ..ChartDataLabels::default()
+                },
+            }]),
+            ..ChartDataLabels::default()
+        });
+        let mut series_restored = model_series("Series", &[31.0, 32.0]);
+        series_restored.data_labels = Some(ChartDataLabels {
+            delete: Some(false),
+            ..ChartDataLabels::default()
+        });
+        let space = model_space(
+            "line",
+            Some(ChartDataLabels {
+                delete: Some(true),
+                show_value: Some(true),
+                ..ChartDataLabels::default()
+            }),
+            vec![inherited, point_restored, series_restored],
+        );
+        let chart = PlotChart::from(&space);
+        let views = series_views(&chart.plot_groups[0].series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let family = family(&chart, &views, &label);
+
+        assert!(point_label(family, &views[0], 0, 0.0).is_none());
+        assert!(point_label(family, &views[0], 1, 0.0).is_none());
+        assert!(point_label(family, &views[1], 0, 0.0).is_none());
+        assert_eq!(
+            point_label(family, &views[1], 1, 0.0).as_deref(),
+            Some("22")
+        );
+        assert_eq!(
+            point_label(family, &views[2], 0, 0.0).as_deref(),
+            Some("31")
+        );
+        assert_eq!(
+            point_label(family, &views[2], 1, 0.0).as_deref(),
+            Some("32")
+        );
+    }
+
+    #[test]
+    fn series_and_point_label_overrides_do_not_leak() {
+        let mut shown = model_series("Shown", &[11.0, 12.0]);
+        shown.data_labels = Some(ChartDataLabels {
+            show_value: Some(true),
+            points: Some(vec![ChartPointLabel {
+                index: Some(1.0),
+                text: None,
+                labels: ChartDataLabels {
+                    delete: Some(true),
+                    ..ChartDataLabels::default()
+                },
+            }]),
+            ..ChartDataLabels::default()
+        });
+        let inherited = model_series("Inherited", &[21.0, 22.0]);
+        let mut deleted = model_series("Deleted", &[31.0, 32.0]);
+        deleted.data_labels = Some(ChartDataLabels {
+            delete: Some(true),
+            ..ChartDataLabels::default()
+        });
+        let space = model_space("line", None, vec![shown, inherited, deleted]);
+        let chart = PlotChart::from(&space);
+        let views = series_views(&chart.plot_groups[0].series, &mut ScanBudget::new());
+        let label = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let family = family(&chart, &views, &label);
+
+        assert_eq!(
+            point_label(family, &views[0], 0, 0.0).as_deref(),
+            Some("11")
+        );
+        assert!(point_label(family, &views[0], 1, 0.0).is_none());
+        for view in &views[1..] {
+            assert!(point_label(family, view, 0, 0.0).is_none());
+            assert!(point_label(family, view, 1, 0.0).is_none());
+        }
     }
 
     #[test]
