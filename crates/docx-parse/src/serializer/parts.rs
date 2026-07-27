@@ -1,8 +1,4 @@
-//! Whole WordprocessingML story-part serializers.
-//!
-//! These functions deliberately retain the incumbent TypeScript byte layout:
-//! namespace order, XML-declaration/newline quirks, and the header/footer empty
-//! paragraph fallback are observable inputs to the S12 differential gate.
+//! WordprocessingML story-part serializers with stable byte ordering.
 
 use serde::{Deserialize, Serialize};
 
@@ -615,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_header_has_the_incumbent_newline_and_required_paragraph() {
+    fn empty_header_has_declaration_newline_and_required_paragraph() {
         let xml = serialize_header_footer_part(
             &HeaderFooter {
                 story_type: "header".to_owned(),
@@ -679,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn comments_and_companions_share_scoped_ids_and_preserve_incumbent_quirks() {
+    fn comments_and_companions_share_scoped_ids_and_pinned_bytes() {
         let comments = vec![
             comment(2.0, Some(1.0), " reply "),
             comment(1.0, None, "top"),

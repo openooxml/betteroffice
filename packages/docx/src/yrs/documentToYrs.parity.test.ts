@@ -9,7 +9,7 @@ import { documentToYrs } from './documentToYrs';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
-const LEGACY_SEED = resolve(import.meta.dir, '../../../../apps/demo/public/seeds/docx.bin');
+const EXISTING_ROOM_SEED = resolve(import.meta.dir, '../../../../apps/demo/public/seeds/docx.bin');
 
 function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
   expect(left.storyIds()).toEqual(right.storyIds());
@@ -18,65 +18,65 @@ function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
   }
 }
 
-describe('DOCX engine seeding parity', () => {
+describe('DOCX engine seeding', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-  it('matches the legacy TypeScript projection structurally', async () => {
+  it('produces equivalent story structure and state updates', async () => {
     const bytes = Uint8Array.from(readFileSync(FIXTURE));
     const parsed = await parseDocx(bytes.buffer);
-    const legacy = await createYrsSession({ clientId: 47001 });
+    const projected = await createYrsSession({ clientId: 47001 });
     const engine = await createYrsSession({ clientId: 47001 });
     try {
-      documentToYrs(legacy, parsed);
+      documentToYrs(projected, parsed);
       engine.seedFromDocx(bytes);
 
-      expectEquivalentStories(engine, legacy);
-      expect(engine.encodeStateVector()).toEqual(legacy.encodeStateVector());
+      expectEquivalentStories(engine, projected);
+      expect(engine.encodeStateVector()).toEqual(projected.encodeStateVector());
 
-      const legacyStatePeer = await createYrsSession({ clientId: 47002 });
+      const projectedStatePeer = await createYrsSession({ clientId: 47002 });
       const engineStatePeer = await createYrsSession({ clientId: 47003 });
       try {
-        legacyStatePeer.loadState(legacy.encodeState());
+        projectedStatePeer.loadState(projected.encodeState());
         engineStatePeer.loadState(engine.encodeState());
-        const firstParagraph = legacyStatePeer.paragraphs('body')[0];
-        legacyStatePeer.insertText(
+        const firstParagraph = projectedStatePeer.paragraphs('body')[0];
+        projectedStatePeer.insertText(
           { story: 'body', paraId: firstParagraph.paraId, offset: 1 },
           'legacy'
         );
         engineStatePeer.loadState(
-          legacyStatePeer.encodeStateAsUpdate(engineStatePeer.encodeStateVector())
+          projectedStatePeer.encodeStateAsUpdate(engineStatePeer.encodeStateVector())
         );
         const secondParagraph = engineStatePeer.paragraphs('body')[1];
         engineStatePeer.insertText(
           { story: 'body', paraId: secondParagraph.paraId, offset: 1 },
           'engine'
         );
-        legacyStatePeer.loadState(
-          engineStatePeer.encodeStateAsUpdate(legacyStatePeer.encodeStateVector())
+        projectedStatePeer.loadState(
+          engineStatePeer.encodeStateAsUpdate(projectedStatePeer.encodeStateVector())
         );
-        expectEquivalentStories(engineStatePeer, legacyStatePeer);
+        expectEquivalentStories(engineStatePeer, projectedStatePeer);
       } finally {
-        legacyStatePeer.destroy();
+        projectedStatePeer.destroy();
         engineStatePeer.destroy();
       }
     } finally {
-      legacy.destroy();
+      projected.destroy();
       engine.destroy();
     }
   });
 
-  it('matches the committed pre-change collaboration room structurally', async () => {
+  it('preserves committed room story structure and state vector', async () => {
     const bytes = Uint8Array.from(readFileSync(FIXTURE));
-    const legacy = await createYrsSession({ clientId: 47004 });
+    const existingRoom = await createYrsSession({ clientId: 47004 });
     const engine = await createYrsSession({ clientId: 1 });
     try {
-      legacy.loadState(Uint8Array.from(readFileSync(LEGACY_SEED)));
+      existingRoom.loadState(Uint8Array.from(readFileSync(EXISTING_ROOM_SEED)));
       engine.seedFromDocx(bytes);
 
-      expectEquivalentStories(engine, legacy);
-      expect(engine.encodeStateVector()).toEqual(legacy.encodeStateVector());
+      expectEquivalentStories(engine, existingRoom);
+      expect(engine.encodeStateVector()).toEqual(existingRoom.encodeStateVector());
     } finally {
-      legacy.destroy();
+      existingRoom.destroy();
       engine.destroy();
     }
   });
@@ -109,7 +109,7 @@ describe('DOCX engine seeding parity', () => {
       expect(materialized?.package.headers).toEqual(parsed.package.headers);
       expect(materialized?.package.footers).toEqual(parsed.package.footers);
 
-      existingRoom.loadState(Uint8Array.from(readFileSync(LEGACY_SEED)));
+      existingRoom.loadState(Uint8Array.from(readFileSync(EXISTING_ROOM_SEED)));
       engine.loadState(existingRoom.encodeState());
       expectEquivalentStories(engine, existingRoom);
     } finally {

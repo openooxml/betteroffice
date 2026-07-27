@@ -2,6 +2,7 @@
 
 mod authority;
 mod error;
+mod sheet_json;
 mod types;
 mod workbook;
 
@@ -18,8 +19,9 @@ pub use workbook::{
 
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColId, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetId, Workbook as WorkbookModel,
+    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
+    ChartAnchor, ChartRef, ChartRefKind, ColId, DateSystem, DefinedName, ErrorValue, FreezePane,
+    Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetId, Workbook as WorkbookModel,
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,

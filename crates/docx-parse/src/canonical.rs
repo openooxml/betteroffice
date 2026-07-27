@@ -1,4 +1,4 @@
-//! `docx-document-canonical-v1`, the byte contract shared with TypeScript.
+//! `docx-document-canonical-v1` byte contract.
 
 use std::collections::BTreeSet;
 
@@ -201,7 +201,7 @@ fn encode_number(value: f64, output: &mut Vec<u8>) -> Result<(), CanonicalError>
 }
 
 fn is_utc_iso_date(value: &str) -> bool {
-    // JavaScript Date#toISOString always has this exact ASCII shape.
+    // ISO timestamps use this exact ASCII shape.
     value.len() == 24
         && value.as_bytes()[4] == b'-'
         && value.as_bytes()[7] == b'-'

@@ -3,7 +3,7 @@
  * @public
  */
 
-import type { EditorTreeNode as PMNode } from '../types/editorTree';
+import type { EditorTreeNode } from '../types/editorTree';
 
 /**
  * Information about a heading found in the document.
@@ -13,18 +13,18 @@ export interface HeadingInfo {
   text: string;
   /** Outline level (0 = Heading 1, 1 = Heading 2, etc.) */
   level: number;
-  /** ProseMirror document position of the paragraph node */
+  /** Document position of the paragraph node */
   pmPos: number;
 }
 
 /**
- * Collect all headings from a ProseMirror document.
+ * Collect all headings from a document.
  *
  * Detection logic:
  * 1. Check `outlineLevel` attr (set by OOXML parsing or style resolution)
  * 2. Fallback to `styleId` matching /^[Hh]eading(\d)$/
  */
-export function collectHeadings(doc: PMNode): HeadingInfo[] {
+export function collectHeadings(doc: EditorTreeNode): HeadingInfo[] {
   const headings: HeadingInfo[] = [];
 
   doc.descendants((node, pos) => {

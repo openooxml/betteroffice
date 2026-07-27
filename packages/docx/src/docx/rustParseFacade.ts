@@ -31,7 +31,7 @@ export interface RustS9Result {
   rustCanonicalSha256?: string;
 }
 
-/** Production-capable S9 facade. Rehydrates maps, aliased buffers, and the public Document. */
+/** Rehydrates parser wire data into the public Document. */
 export function parseDocumentWithRust(
   data: ArrayBuffer,
   options: RustS9ParseOptions

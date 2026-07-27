@@ -1,4 +1,4 @@
-//! S4b accept/reject corpus: the 3-way ins/del/pPr resolve matrix
+//! Tracked-change accept and reject corpus.
 //! (`EditingDoc::accept_change` / `reject_change`), by revision id and by range.
 
 use std::collections::HashMap;
@@ -146,8 +146,7 @@ fn reject_ppr_ins_joins_back_and_the_second_mark_survives() {
         .unwrap();
     assert_eq!(body_texts(&doc), vec!["HelloWorld".to_owned()]);
     assert_eq!(change_count(&doc), 0);
-    // The inserted pilcrow is gone; the surviving mark is the re-minted second half's
-    // (the PM resolver's inherit-from-second join).
+    // The re-minted second-half pilcrow survives.
     assert_eq!(
         doc.paragraphs("body").unwrap()[0].para_id,
         split.second_para_id

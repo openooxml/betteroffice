@@ -1,6 +1,6 @@
 import type { YrsLoc, YrsSession } from '../../yrs';
 
-/** A yrs location projected into the PM-shaped position space used by the display list. */
+/** A yrs location projected into the position space used by the display list. */
 export interface YrsSidebarDisplayPoint {
   story: string;
   position: number;
@@ -76,7 +76,7 @@ function geometryRoots(session: YrsSession): Map<string, StoryGeometryRoot> {
         }
       }
     } catch {
-      // A malformed/unsupported story stays unmapped rather than reaching PM.
+      // A malformed/unsupported story stays unmapped rather than reaching the fallback.
     }
     childrenByStory.set(story, children);
   }
@@ -126,7 +126,7 @@ function tableNodeSize(
   return rowPmStart + 1 - pmStart;
 }
 
-/** Index one yrs story in the same PM-shaped token space used by the renderer. */
+/** Index one yrs story in the same token space used by the renderer. */
 function indexStory(
   session: YrsSession,
   story: string,
@@ -181,7 +181,7 @@ function indexStory(
         continue;
       }
 
-      // Inline atoms occupy one PM position inside their paragraph.
+      // Inline atoms occupy one position inside their paragraph.
       paragraphPmUnits += 1;
       atBlockBoundary = false;
     }
@@ -193,7 +193,7 @@ function indexStory(
 }
 
 /**
- * Build a lazy PM-free projection from live yrs stories to display positions.
+ * Build a lazy projection from live yrs stories to display positions.
  * The canonical yrs segment stream supplies paragraph/atom units; table-cell
  * and block-SDT stories are recursively sized so container tokens are included.
  */
@@ -212,8 +212,8 @@ export function createYrsSidebarProjection(session: YrsSession): YrsSidebarProje
       paragraphMaps.set(root, paragraphs);
       return paragraphs;
     } catch {
-      // Unsupported embeds take the normal layout path's PM fallback, but the
-      // gated sidebar read must not fall back to PM. Leave that story unplaced.
+      // Unsupported embeds take the normal layout path's fallback, but the
+      // gated sidebar read must not fall back to it. Leave that story unplaced.
       paragraphMaps.set(root, null);
       return null;
     }

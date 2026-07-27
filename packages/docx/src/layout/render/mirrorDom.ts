@@ -1,19 +1,4 @@
-// accessibility mirror: a geometry-faithful DOM tree generated from a
-// DisplayPage. it speaks the stable mirror DOM contract (data-doc-start/end,
-// data-block-id, data-comment-id, revision attrs, .layout-page-content,
-// .layout-run-text, .layout-table-cut-border) so selection mapping, comment
-// anchors, and the Playwright suite resolve against it under the canvas
-// renderer.
-//
-// it is also the accessible content of the canvas renderer (the design's
-// phase-1 gate): real text nodes in reading order, paragraph/table ARIA
-// semantics, tracked-change roles. the tree is invisible (opacity 0,
-// pointer-events none) but deliberately NOT aria-hidden — under a canvas
-// there is nothing else for a screen reader to read.
-//
-// security: every value here is file-derived. nodes are built exclusively via
-// createElement/setAttribute/textContent — never innerHTML (see the repo security guidelines
-// "Security — untrusted DOCX/HTML input").
+/** Builds an accessible display-list mirror with DOM APIs only. */
 
 import type {
   DocAttrs,
@@ -119,14 +104,14 @@ export interface BuildMirrorPageOptions {
  * header/footer regions mirror the painter's structural classes: each HfRegion
  * becomes a `.layout-page-header` / `.layout-page-footer` wrapper at the band's
  * page-local y, and all of the region's primitives (including their block
- * wrappers and doc-range attrs, which refer to the HF PM doc identified by
+ * wrappers and doc-range attrs, which refer to the HF doc identified by
  * `data-hf-rid`) stay scoped inside it — never under `.layout-page-content`.
  *
  * data-from-line/to-line ride on paragraph fragment primitives (body, HF, text
  * box) and land on the paragraph wrapper; data-vmerge-continuation comes from
  * the cell's `continuation` flag and lands on the ARIA cell. still not derivable
  * from the v0 display list and therefore not emitted: data-carried-from-prev/
- * to-next (display-list contract gap — see openspec/changes/rust-canvas-engine).
+ * to-next.
  */
 export function buildMirrorPage(
   page: DisplayPage,
@@ -532,12 +517,7 @@ function stampDocRangeFromDescendants(el: HTMLElement, fallbackPrims: BlockGroup
   if (start === Infinity && end === -Infinity) stampDocRange(el, fallbackPrims);
 }
 
-/**
- * Move a nested table below the geometrically owning outer cell. Batch F emits
- * the parent table id and per-cell clip rectangles, so the mirror can recover
- * hierarchy without changing visual coordinates. Legacy lists without clips
- * remain flat rather than guessing the wrong owner.
- */
+/** Nests tables using parent IDs and cell clips; incomplete metadata remains flat. */
 function nestTableBlocks(blocks: Map<number | string, BlockGroup>): void {
   const byTableId = new Map<string, BlockGroup>();
   for (const group of blocks.values()) {

@@ -22,7 +22,7 @@ pub fn serialize_numbering_xml(numbering: &NumberingDefinitions) -> String {
         write_numbering_instance(&mut writer, instance);
     }
     if numbering.abstract_nums.is_empty() && numbering.nums.is_empty() {
-        // The incumbent template emits an explicit empty root pair.
+        // Empty roots use explicit start and end tags.
         writer.text("");
     }
     writer.end_element();
@@ -91,7 +91,7 @@ fn write_abstract_numbering(writer: &mut XmlWriter, numbering: &AbstractNumberin
     for level in levels {
         write_level(writer, level);
     }
-    // The TypeScript template always emits a start/end pair here.
+    // Multilevel types use explicit start and end tags.
     if numbering
         .multi_level_type
         .as_deref()
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_incumbent_order_and_indentation_bytes() {
+    fn numbering_serialization_preserves_order_and_indentation_bytes() {
         let mut first = level(1.0, "lowerLetter", "%2)");
         first.start = Some(2.5);
         first.suffix = Some("space".to_owned());

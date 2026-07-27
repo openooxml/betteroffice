@@ -246,7 +246,7 @@ pub fn parse_run_properties(
         family.ascii_theme = attribute_nonempty(fonts, "asciiTheme");
         family.h_ansi_theme = attribute_nonempty(fonts, "hAnsiTheme");
         family.east_asia_theme = attribute_nonempty(fonts, "eastAsiaTheme");
-        // Incumbent spelling is deliberately lower-case `cstheme`.
+        // The attribute name is lower-case `cstheme`.
         family.cs_theme = attribute_nonempty(fonts, "cstheme");
         if let Some(reference) = family.ascii_theme.as_deref()
             && theme.is_some()
@@ -1379,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_full_style_property_bags_with_incumbent_defaults() {
+    fn parses_full_style_property_bags_with_expected_defaults() {
         let style = root(
             r#"<w:style><w:pPr><w:spacing w:before="120" w:beforeAutospacing="false"/><w:ind w:firstLine="20" w:hanging="30"/><w:numPr><w:ilvl w:val="2"/></w:numPr><w:rPr><w:b w:val="off"/><w:lang w:val="en-US"/></w:rPr></w:pPr><w:rPr><w:rFonts w:ascii="Arial" w:asciiTheme="minorHAnsi" w:cstheme="majorBidi"/><w:u w:val="double"/><w:color w:val="auto"/></w:rPr><w:tblPr><w:tblW w:w="5000" w:type="dxa"/><w:tblLook w:val="04A0" w:firstRow="off"/></w:tblPr><w:tcPr><w:vMerge/></w:tcPr></w:style>"#,
         );
@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_incumbent_empty_bags_created_by_undefined_assignments() {
+    fn preserves_empty_property_bags() {
         let conditional = root(
             r#"<w:tblStylePr><w:pPr><w:tabs/></w:pPr><w:rPr><w:shd/></w:rPr><w:tblPr><w:tblW/></w:tblPr><w:trPr><w:trHeight/></w:trPr><w:tcPr><w:tcBorders/></w:tcPr></w:tblStylePr>"#,
         );

@@ -1,9 +1,4 @@
-// renderer-agnostic display list: the single contract between layout output and
-// every rendering backend (web canvas, DOM mirror, native, PDF). Derived from a
-// computed Layout — never built inside the paginator — so any pagination engine
-// (TS or Rust) feeds any backend. All coordinates are page-local px, same unit
-// space as Layout. v0 carries shaped-by-browser text runs (string + CSS font);
-// phase 2 (docx-text) adds glyph-run primitives without breaking consumers.
+/** Renderer-agnostic display contract with page-local pixel coordinates. */
 
 import type { DrawingScene, ShapeTextBodyProperties } from '../drawing';
 
@@ -67,7 +62,7 @@ export interface NoteRegion {
   primitives?: DisplayPrimitive[];
   noteIds?: number[];
   /**
-   * Per-note backlink metadata (W17): the body-doc PM range of each note's
+   * Per-note backlink metadata (W17): the body-doc range of each note's
    * reference mark plus its formatted label, so the a11y mirror can wire
    * note ↔ reference associations (doc-noteref / doc-backlink). Parallel to
    * `noteIds`; undefined = legacy region without backlink data.
@@ -78,7 +73,7 @@ export interface NoteRegion {
 /** Backlink metadata for one note in a NoteRegion. */
 export interface NoteRegionNote {
   id?: number;
-  /** Body-doc PM range of the reference mark anchoring this note. */
+  /** Body-doc range of the reference mark anchoring this note. */
   anchorDocStart?: number;
   anchorDocEnd?: number;
   /** Formatted reference label (display number / custom mark). File-derived. */
@@ -86,7 +81,7 @@ export interface NoteRegionNote {
 }
 
 // header/footer band. Primitives are in page coordinates like body primitives;
-// doc positions inside refer to the HF ProseMirror doc identified by rId, NOT
+// doc positions inside refer to the HF doc identified by rId, NOT
 // the body doc — hit-testing and the mirror must scope by region (the painted
 // DOM analogue of .layout-page-header / .layout-page-footer).
 export interface HfRegion {
@@ -256,12 +251,12 @@ export interface DocAttrs {
   // pipeline's compound `block-N` keys). Group by blockKey ?? String(blockId)
   // — exactly one of the two is set whenever the primitive has block identity.
   blockKey?: string;
-  // Exact PM range of the paragraph fragment that owns this primitive. Run
+  // Exact document range of the paragraph fragment that owns this primitive. Run
   // ranges start inside the paragraph (normally pmStart+1), so the mirror
   // cannot reconstruct the painter wrapper's data-doc-start from docStart.
   fragmentDocStart?: number;
   fragmentDocEnd?: number;
-  // stable Word `w14:paraId` / PM `paraId` of the enclosing paragraph, when the
+  // stable Word `w14:paraId` of the enclosing paragraph, when the
   // source carries one. The a11y mirror stamps it as `data-para-id` on the
   // paragraph wrapper so `scrollToParaId`-style lookups resolve against the
   // mirror. Absent when the paragraph has no paraId (matches the DOM painter).
@@ -338,10 +333,7 @@ export interface DocAttrs {
   groupId?: string;
   /** Review presentation for comment-associated primitives. */
   comment?: DisplayCommentMetadata;
-  /**
-   * Scoped clip/group membership. Undefined = ungrouped. Kept as metadata
-   * until the canvas/mirror batch activates `ClipGroupPrimitive` in the union.
-   */
+  /** Scoped clip/group membership. Undefined = ungrouped. */
   clipGroup?: DisplayClipGroupMetadata;
   /** Enclosing table-fragment identity and accessibility semantics. */
   table?: DisplayTableMetadata;
@@ -353,7 +345,7 @@ export interface TextRunPrimitive extends DocAttrs {
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run
-  font: string; // CSS font shorthand (v0, browser-shaped); phase 2 adds fontId+glyphs
+  font: string;
   color: string;
   letterSpacing?: number;
   // extra advance (px) added after each U+0020 space cluster — the canvas
@@ -374,7 +366,7 @@ export interface TextRunPrimitive extends DocAttrs {
   smallCaps?: boolean;
   /** Hidden run shown in editing view as dimmed/dotted, matching the DOM painter. */
   hidden?: boolean;
-  /** CSS-like shadow effect ported from run formatting. */
+  /** CSS-like shadow effect from run formatting. */
   textShadow?: 'shadow' | 'emboss' | 'imprint';
   /** Outlined / hollow text. */
   textOutline?: boolean;
@@ -412,13 +404,7 @@ export interface PositionedGlyph {
   bidiLevel?: number;
 }
 
-// phase-2 text primitive: a run shaped by the Rust engine into font glyphs
-// rather than a browser-shaped CSS string (TextRunPrimitive). The canvas
-// backend paints each glyph as a Path2D outline fetched from the font bytes
-// (fontId → FontStore), scaled by `size`/upem; the a11y mirror renders `text`
-// as a real text node at the run's geometry. `color` is "#rrggbb"; `size` is
-// px. Coexists with TextRunPrimitive so v0 (browser-shaped) and phase-2
-// (glyph-shaped) runs can share one display list.
+/** Shaped glyph run with source text for accessibility. */
 export interface GlyphRunPrimitive extends DocAttrs {
   kind: 'glyphRun';
   fontId: number;
@@ -449,7 +435,7 @@ export interface GlyphRunPrimitive extends DocAttrs {
   smallCaps?: boolean;
   /** Hidden run shown in editing view as dimmed/dotted, matching the DOM painter. */
   hidden?: boolean;
-  /** CSS-like shadow effect ported from run formatting. */
+  /** CSS-like shadow effect from run formatting. */
   textShadow?: 'shadow' | 'emboss' | 'imprint';
   /** Outlined / hollow text. */
   textOutline?: boolean;
@@ -714,7 +700,7 @@ export interface DecorationPrimitive extends DocAttrs {
 
 /** Scoped opacity/transform/clip group. Empty/missing members are no-ops. */
 export interface ClipGroupPrimitive extends DocAttrs {
-  /** Primitive tag. Undefined until Batch F activates the union arm. */
+  /** Primitive tag. */
   kind?: 'clipGroup';
   clip?: { x?: number; y?: number; w?: number; h?: number };
   opacity?: number;

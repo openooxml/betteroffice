@@ -112,16 +112,7 @@ export interface Footnote {
    * and stays editable on round-trip.
    */
   content: BlockContent[];
-  /**
-   * Verbatim original XML of the entire `<w:footnote>` element, captured at
-   * parse time ONLY when the note body carries a block-level construct the
-   * model still can't represent — note-level bookmarks
-   * (`w:bookmarkStart`/`w:bookmarkEnd`) or `w:customXml`. Block-level `w:sdt`
-   * is NOT a trigger: it round-trips through the model as `BlockSdt`. When
-   * present the serializer re-emits these bytes instead of rebuilding from
-   * `content`, restoring pre-#646 fidelity for the unmodeled constructs.
-   * See `parseNoteBlockContent` / `serializeNote` for the gate (#646 F3).
-   */
+  /** Verbatim note XML for unmodeled bookmarks or custom XML. */
   verbatimXml?: string;
 }
 
@@ -140,6 +131,6 @@ export interface Endnote {
    * on `Footnote.content`.
    */
   content: BlockContent[];
-  /** Verbatim original XML — see `Footnote.verbatimXml` (#646 F3). */
+  /** Verbatim note XML for unmodeled blocks. */
   verbatimXml?: string;
 }

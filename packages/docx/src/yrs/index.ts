@@ -307,8 +307,8 @@ export interface YrsRevisionReceipt {
 }
 
 /**
- * Receipt of {@link YrsSession.splitParagraph}. Under the S1 split the FIRST
- * half keeps the original paraId and the SECOND half is re-minted; suggesting
+ * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
+ * original paraId and the second half is re-minted; suggesting
  * mode stamps a `pPrIns` revision on the first half.
  */
 export interface YrsSplitReceipt {
@@ -317,12 +317,7 @@ export interface YrsSplitReceipt {
   revisionId: string | null;
 }
 
-/**
- * One low-level story mirror operation for {@link YrsSession.applyRawOps}. The
- * coexistence bridge lowers a ProseMirror transaction to a list of these and
- * applies them in one yrs transaction. Indices are UTF-16 story units, each read
- * against the story state after all prior ops in the batch.
- */
+/** Low-level UTF-16 story operation for {@link YrsSession.applyRawOps}. */
 export type YrsRawOp =
   | { op: 'insert'; index: number; text: string; attrs?: Record<string, unknown> }
   | { op: 'delete'; index: number; len: number }
@@ -336,13 +331,7 @@ export type YrsRawOp =
     }
   | { op: 'setEmbedAttr'; index: number; key: string; value: unknown }
   | {
-      /**
-       * Upserts the side-map comment keyed by `id`, (re-)anchoring it to
-       * `ranges` — non-empty `[start, end)` story-unit spans in the batch's
-       * story (sticky `Assoc::After` starts / `Assoc::Before` ends). The
-       * coexistence bridge keys by the PM comment id so identity survives the
-       * mirror.
-       */
+      /** Upserts a side-map comment with sticky story-unit ranges. */
       op: 'setComment';
       id: string;
       ranges: ReadonlyArray<readonly [number, number]>;
@@ -489,7 +478,7 @@ export interface YrsSelectionContext {
   strike: YrsTriState;
   /** Uniform ASCII font family, or `null` when absent/mixed. */
   fontFamily: string | null;
-  /** Uniform font size in half-points (the PM/OOXML `w:sz` unit). */
+  /** Uniform font size in half-points (the OOXML `w:sz` unit). */
   fontSize: number | null;
   /** Uniform RGB hex or theme-color name, or `null` when absent/mixed. */
   color: string | null;
@@ -498,7 +487,7 @@ export interface YrsSelectionContext {
   styleId: string | null;
   alignment: string | null;
   /**
-   * Full authored pilcrow property bag. Known toolbar fields retain their PM
+   * Full authored pilcrow property bag. Known toolbar fields retain their
    * names (`indentLeft`, `spaceBefore`, `lineSpacing`, `numPr`, and so on);
    * paragraph style is stored as `pStyle`.
    */
@@ -577,8 +566,8 @@ export interface YrsCellLoc extends YrsTableLoc {
 }
 
 /**
- * Anchor-cell to head-cell rectangular selection, analogous to PM's
- * `CellSelection` but independent of ProseMirror positions.
+ * Anchor-cell to head-cell rectangular selection, addressed by grid
+ * coordinates rather than document positions.
  *
  * @public
  */
@@ -604,7 +593,7 @@ export interface YrsTableReceipt {
 }
 
 /**
- * OOXML/PM-shaped cell border value passed through to `tcPr.borders`.
+ * OOXML-shaped cell border value passed through to `tcPr.borders`.
  *
  * @public
  */
@@ -701,11 +690,7 @@ export interface YrsSession extends CollaborationReplica {
   openDocx(bytes: Uint8Array, seedStories: boolean): YrsDocxHost;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
-  /**
-   * Seeds stories from parsed content (S1 scaffold; the real
-   * `load(ParsedDocument)` lands with the ops track). Returns paraIds per
-   * story in document order.
-   */
+  /** Seeds stories and returns paragraph IDs in document order. */
   loadStories(stories: readonly YrsStorySeed[]): Record<string, string[]>;
   /** Full document state as one yrs v1 update (Yjs wire format). */
   encodeState(): Uint8Array;
@@ -756,8 +741,6 @@ export interface YrsSession extends CollaborationReplica {
   undoDepth(): number;
   redoDepth(): number;
 
-  // -- S1 ops --
-
   /** Adds a story with one paragraph; the receipt carries its paraId. */
   createStory(
     storyId: string,
@@ -786,7 +769,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets or clears the selected cells' background color. */
   setCellShading(range: YrsTableRange, color: string | null): YrsTableReceipt;
   /**
-   * Merges an OOXML/PM-shaped patch into selected cells' `tcPr`. JSON `null`
+   * Merges an OOXML-shaped patch into selected cells' `tcPr`. JSON `null`
    * clears a property; merge/split-owned span keys are rejected.
    */
   setCellTextFormat(
@@ -815,7 +798,10 @@ export interface YrsSession extends CollaborationReplica {
   splitParagraph(at: YrsLoc, suggesting?: YrsAuthor): YrsSplitReceipt;
   /** Merges `paraId` with the FOLLOWING paragraph. Errors on the final paragraph. */
   mergeParagraphs(story: string, paraId: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
-  /** Toggles one run mark across a range (PM toggleMark range semantics). */
+  /**
+   * Toggles one run mark across a range: removes it when every unit already
+   * carries it, otherwise adds it.
+   */
   toggleMark(range: YrsStoryRange, mark: YrsRunMark): void;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */
   formatRange(range: YrsStoryRange, delta: YrsInlineFormatDelta): void;
@@ -847,11 +833,7 @@ export interface YrsSession extends CollaborationReplica {
   insertSectionBreak(at: YrsLoc, type: 'nextPage' | 'continuous' | 'oddPage' | 'evenPage'): void;
   /** Inserts a typed watermark embed at a paragraph-keyed location. */
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
-  /**
-   * Applies a batch of raw story mirror ops in one transaction — the coexistence
-   * bridge's mirror-into-yrs path (a faithful mirror of lowered PM state, not a
-   * user-intent op). Not for direct app use.
-   */
+  /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;
@@ -863,7 +845,7 @@ export interface YrsSession extends CollaborationReplica {
     body: unknown
   ): YrsCommentReceipt;
   /**
-   * Accepts tracked changes (S4b): pending insertions become plain content,
+   * Accepts tracked changes: pending insertions become plain content,
    * pending deletions are carried out; a `pPrIns` paragraph mark clears (the
    * split stays), a `pPrDel` mark joins with the following paragraph (whose
    * pPr survives — Word's surviving-`w:p` rule). Resolving never stamps a new
@@ -889,18 +871,9 @@ export interface YrsSession extends CollaborationReplica {
   storyIds(): string[];
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
   storyLength(story: string): number;
-  /**
-   * The story's `canonical-stream-v1` FNV-1a checksum. The coexistence watchdog
-   * compares it against the PM projector's checksum after every mirrored edit.
-   */
+  /** Returns the story's canonical-stream checksum. */
   storyChecksum(story: string): bigint;
-  /**
-   * Lowers a story through the resident Rust bridge. Throws with an
-   * unsupported-embed message on any non-native content (opaque blobs) until
-   * that class is promoted to native.
-   * The return is the layout pipeline's `LayoutBlock[]` (kept as `unknown[]` to
-   * keep this facade decoupled from the layout types).
-   */
+  /** Lowers a story to layout blocks and rejects unsupported embeds. */
   yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
   /** Paragraph snapshots in document order. */
   paragraphs(story: string): YrsParagraph[];

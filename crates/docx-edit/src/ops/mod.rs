@@ -1,4 +1,4 @@
-//! The S1 mutating op surface (op-contract §1), split across `text` and `paragraph`.
+//! Mutating editing operations.
 
 pub mod embed;
 pub mod paragraph;
@@ -188,8 +188,7 @@ pub(crate) fn capture_pilcrow<T: ReadTxn>(map: &MapRef, txn: &T) -> (String, Vec
     (para_id, props)
 }
 
-/// Replaces a pilcrow's paraId and full property set with the donor's (op-contract R6: the
-/// surviving paragraph adopts the FIRST affected paragraph's pPr + paraId).
+/// Replaces a pilcrow's ID and properties with the donor's.
 pub(crate) fn adopt_pilcrow(
     txn: &mut TransactionMut<'_>,
     survivor: &MapRef,

@@ -4,7 +4,7 @@
  * Word / Pages / LibreOffice expect every comment in `comments.xml`
  * (including REPLY threads) to have matching `commentRangeStart` /
  * `commentRangeEnd` / `commentReference` markers in `document.xml`.
- * The PM document only stamps marks for the parent comment because
+ * The document only stamps marks for the parent comment because
  * replies don't have their own visible range — they share the parent
  * thread's text. So before serialization we walk the body content and
  * synthesize parallel range markers for every reply.

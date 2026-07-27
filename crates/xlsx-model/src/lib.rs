@@ -2,6 +2,7 @@
 //! calc engine reads through. pure data — no io, no xml, no dom.
 
 pub mod addr;
+pub mod chart;
 pub mod date;
 pub mod numfmt;
 pub mod styles;
@@ -9,6 +10,10 @@ pub mod value;
 pub mod workbook;
 
 pub use addr::{CellRange, CellRef, ColId, MAX_COLS, MAX_ROWS, RowId, SheetId};
+pub use chart::{
+    AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, ChartAnchor, ChartRef, ChartRefKind,
+    SheetChart,
+};
 pub use date::DateSystem;
 pub use styles::{
     Alignment, Border, BorderEdge, BorderStyle, CellFormat, Color, Fill, Font, FormatCode, HAlign,

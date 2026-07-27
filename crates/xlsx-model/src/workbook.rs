@@ -6,6 +6,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::addr::{CellRange, CellRef, ColId, RowId, SheetId};
+use crate::chart::SheetChart;
 use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
@@ -62,6 +63,7 @@ pub struct Sheet {
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
+    pub charts: Vec<SheetChart>,
 }
 
 impl Sheet {

@@ -19,49 +19,81 @@ use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, Pa
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
 pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseError> {
+    parse_workbook_indexed(parts).map(|parsed| parsed.workbook)
+}
+
+/// Source shared-string indices keyed by `(row, column)`.
+#[doc(hidden)]
+pub type SharedStringCells = BTreeMap<(u32, u32), usize>;
+
+pub(crate) struct IndexedWorkbook {
+    pub(crate) workbook: Workbook,
+    pub(crate) shared_string_cells: Vec<SharedStringCells>,
+}
+
+pub(crate) fn parse_workbook_indexed(
+    parts: &[(String, Vec<u8>)],
+) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
     let meta = parse_workbook_xml(wb_xml)?;
 
-    let rels = find_part(parts, "xl/_rels/workbook.xml.rels")
-        .map(parse_rels)
-        .transpose()?
-        .unwrap_or_default();
+    let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
+    let rels = wb_rels.map(parse_rels).transpose()?.unwrap_or_default();
 
-    let shared_strings = match find_part(parts, "xl/sharedStrings.xml") {
+    let shared_strings = match typed_part(parts, wb_rels, "sharedStrings", "xl/sharedStrings.xml")?
+    {
         Some(bytes) => parse_shared_strings(bytes)?,
         None => Vec::new(),
     };
-
-    let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
     let styles = parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
+    let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
     for (idx, entry) in meta.sheets.iter().enumerate() {
-        let path = worksheet_path(&rels, entry.rid.as_deref(), idx).ok_or_else(|| {
-            ParseError::Malformed(format!("no target for sheet {:?}", entry.name))
-        })?;
+        let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
+        if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
+            let mut sheet = Sheet::new(&entry.name);
+            if let Some(path) = relationship
+                .filter(|relationship| !relationship.external)
+                .map(|relationship| resolve_part_path("xl", &relationship.target))
+            {
+                sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
+            }
+            sheets.push(sheet);
+            shared_string_cells.push(SharedStringCells::new());
+            continue;
+        }
+        let path = worksheet_path(relationship, idx);
         let bytes = find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
         let sheet_rels = find_part(parts, &relationship_part_path(&path))
             .map(parse_rels)
             .transpose()?
             .unwrap_or_default();
-        sheets.push(parse_worksheet(
+        let mut indices = SharedStringCells::new();
+        let mut sheet = parse_worksheet(
             &entry.name,
             bytes,
             &shared_strings,
             &sheet_rels,
-        )?);
+            &mut indices,
+        )?;
+        sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
+        sheets.push(sheet);
+        shared_string_cells.push(indices);
     }
 
-    Ok(Workbook {
-        sheets,
-        date_system: meta.date_system,
-        defined_names: meta.defined_names,
-        shared_strings,
-        styles,
+    Ok(IndexedWorkbook {
+        workbook: Workbook {
+            sheets,
+            date_system: meta.date_system,
+            defined_names: meta.defined_names,
+            shared_strings,
+            styles,
+        },
+        shared_string_cells,
     })
 }
 
@@ -179,6 +211,15 @@ struct Relationship {
     external: bool,
 }
 
+impl Relationship {
+    fn is_worksheet(&self) -> bool {
+        self.kind
+            .as_deref()
+            .and_then(|kind| kind.rsplit('/').next())
+            .is_none_or(|kind| kind == "worksheet")
+    }
+}
+
 /// map relationship id -> relationship metadata from a `.rels` part.
 fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError> {
     let mut reader = reader(data);
@@ -212,17 +253,11 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError>
 
 /// pick the worksheet part path: the relationship target, else the
 /// conventional positional name.
-fn worksheet_path(
-    rels: &BTreeMap<String, Relationship>,
-    rid: Option<&str>,
-    idx: usize,
-) -> Option<String> {
-    if let Some(relationship) = rid.and_then(|r| rels.get(r))
-        && !relationship.external
-    {
-        return Some(resolve_part_path("xl", &relationship.target));
-    }
-    Some(format!("xl/worksheets/sheet{}.xml", idx + 1))
+fn worksheet_path(relationship: Option<&Relationship>, idx: usize) -> String {
+    relationship
+        .filter(|relationship| !relationship.external)
+        .map(|relationship| resolve_part_path("xl", &relationship.target))
+        .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", idx + 1))
 }
 
 fn relationship_part_path(path: &str) -> String {
@@ -232,7 +267,7 @@ fn relationship_part_path(path: &str) -> String {
     }
 }
 
-/// parse the shared string table, flattening rich runs to plain text.
+/// parse shared strings as plain model text while package capture retains runs.
 fn parse_shared_strings(data: &[u8]) -> Result<Vec<String>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
@@ -272,6 +307,7 @@ fn parse_worksheet(
     data: &[u8],
     shared: &[String],
     relationships: &BTreeMap<String, Relationship>,
+    shared_string_cells: &mut SharedStringCells,
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
@@ -363,7 +399,7 @@ fn parse_worksheet(
                 match name.local_name().as_ref() {
                     b"c" => {
                         if let Some(c) = cur.take() {
-                            finalize_cell(c, shared, &mut sheet)?;
+                            finalize_cell(c, shared, &mut sheet, shared_string_cells)?;
                         }
                         col_cursor += 1;
                     }
@@ -487,7 +523,12 @@ fn parse_col(e: &quick_xml::events::BytesStart, sheet: &mut Sheet) -> Result<(),
 
 /// turn accumulated cell state into a stored `Cell`, decoding the value per its
 /// `t` type. an empty non-styled, non-formula cell is dropped.
-fn finalize_cell(c: CellBuild, shared: &[String], sheet: &mut Sheet) -> Result<(), ParseError> {
+fn finalize_cell(
+    c: CellBuild,
+    shared: &[String],
+    sheet: &mut Sheet,
+    shared_string_cells: &mut SharedStringCells,
+) -> Result<(), ParseError> {
     let addr = match c.addr {
         Some(a) => a,
         None => return Ok(()),
@@ -498,6 +539,9 @@ fn finalize_cell(c: CellBuild, shared: &[String], sheet: &mut Sheet) -> Result<(
                 .value_text
                 .as_deref()
                 .and_then(|v| v.trim().parse::<usize>().ok());
+            if let Some(idx) = idx.filter(|idx| *idx < shared.len()) {
+                shared_string_cells.insert((addr.row, addr.col), idx);
+            }
             match idx.and_then(|i| shared.get(i)) {
                 Some(s) => CellValue::Text { value: s.clone() },
                 None => CellValue::Empty,

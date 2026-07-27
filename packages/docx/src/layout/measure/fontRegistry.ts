@@ -1,12 +1,10 @@
 /**
- * TextMeasureFontRegistry — host-side font-byte plumbing for the Rust text
- * engine (`crates/docx-text` FontStore).
+ * TextMeasureFontRegistry — host-side font-byte plumbing for
+ * `crates/ooxml-text`.
  *
  * Turns a Word font request (family + bold + italic) into an ordered chain of
- * font ids registered with the engine. The engine consumes font *bytes* and
- * ids, never font names (see `openspec/changes/rust-canvas-engine/design.md`,
- * "The one strategic constraint: font bytes"), so this registry is the only
- * place that knows where bytes come from.
+ * font ids registered with the engine. The engine consumes font bytes and
+ * ids, never font names, so this registry owns byte sourcing.
  *
  * Chain order (the documented contract — deterministic by construction: the
  * same document + the same injected provider produce the same chain on every

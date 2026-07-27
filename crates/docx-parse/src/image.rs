@@ -88,7 +88,7 @@ pub struct PositionAxis {
     pub alignment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pos_offset: Option<f64>,
-    // Pinned VML typo: that parser emits `offset`, not `posOffset`.
+    // Pinned VML typo: the VML parser emits `offset`, not `posOffset`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
 }
@@ -228,7 +228,7 @@ fn parse_anchor(
         .filter(|value| value.is_finite());
     let simple_pos_flag = container.attribute(None, "simplePos") == Some("1");
     let simple_pos = container.child_by_full_name("wp:simplePos");
-    // Incumbent direct-child lookup means nested graphicFrameLocks is ignored.
+    // Nested `graphicFrameLocks` elements are ignored.
     let locked = container
         .child_by_full_name("a:graphicFrameLocks")
         .is_some();
@@ -709,8 +709,7 @@ fn parse_wrap_element(
     wrap
 }
 
-/// Chart drawings intentionally ignore anchor-level distance fallbacks, matching
-/// the incumbent `parseWrapElement(wrap, behindDoc)` call site.
+/// Parses chart wrapping without anchor distance fallbacks.
 pub fn parse_wrap_element_without_distances(
     element: Option<&XmlElement>,
     behind_doc: bool,

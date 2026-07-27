@@ -1,25 +1,4 @@
-/**
- * Canvas-mode "brighten the focused sidebar range" overlay (G3).
- *
- * When a comment / tracked-change card in the sidebar is expanded, the editor
- * brightens that range in the document so the user sees what the card refers to.
- * On the DOM-painter path this is an injected `<style>` (DocxEditorShell) that
- * matches `.paged-editor__pages [data-comment-id]` / `.docx-insertion|deletion
- * [data-revision-id]`. On the experimental canvas renderer the painted content
- * is a bitmap and the painter DOM is parked (invisible), so that CSS matches
- * nothing and the brighten has no visual effect.
- *
- * This overlay draws the brighten directly over the visible canvas pages: the
- * expanded item's PM range (resolved in the parent via `findCommentRange` /
- * the tracked-change entry) is turned into page-local rects through the
- * display-list `range_rects` query and each rect is projected into
- * `overlayTarget` coordinates via the live per-page `<canvas>` rect — the exact
- * projection the other canvas overlays use, so the tint lands on the glyphs
- * regardless of centering, the sidebar shift, or zoom. Persistent while the card
- * stays expanded (no fade); non-interactive so it never steals the caret.
- *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
- */
+/** Brightens the expanded sidebar item's range over canvas pages. */
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -28,7 +7,7 @@ import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/lay
 /** Tint variant — mirrors the painter `<style>` colors. */
 export type CanvasBrightenVariant = 'comment' | 'insertion' | 'deletion';
 
-/** The expanded sidebar item's resolved body PM range + tint. */
+/** The expanded sidebar item's resolved body range + tint. */
 export interface CanvasBrightenRange {
   from: number;
   to: number;

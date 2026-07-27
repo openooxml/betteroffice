@@ -29,9 +29,7 @@ pub fn serialize_block_sdt(
         validate_raw_subtree(raw, "w", "sdtPr")?;
         raw.to_owned()
     } else {
-        // Pinned incumbent behavior: parsed block controls without captured
-        // properties emit no `w:sdtPr`. Programmatic controls normally carry
-        // synthesized raw XML already, but accept the explicit modeled form.
+        // Parsed controls without captured properties omit `w:sdtPr`.
         let synthesized = synthesize_sdt_properties(&sdt.properties);
         if sdt.properties.sdt_type == "richText"
             && sdt.properties.id.is_none()

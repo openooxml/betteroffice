@@ -8,7 +8,7 @@
  *
  * Drag move handling forks on `displayMode === 'float'` (or any of
  * square/tight/through wrap types): floating images get an EMU offset
- * update under wp:positionH/V; inline images get a PM `delete + insert`
+ * update under wp:positionH/V; inline images get a `delete + insert`
  * pair at the drop position.
  */
 

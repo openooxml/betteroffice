@@ -1,188 +1,120 @@
-//! Paragraph measurement pipeline — the Rust twin of the TS wrap engine
-//! (`packages/core/src/layout/measure/measureParagraph.ts`).
+//! Paragraph measurement: one `paragraph` block and a font set in, a
+//! `{ kind: "paragraph", lines, totalHeight }` extent out.
 //!
-//! Produces, per paragraph, the same `{ kind: "paragraph", lines:
-//! TypesetRow[], totalHeight }` shape the TS engine emits from canvas
-//! `measureText`, so a TS seam can swap measurement sources block by block.
-//! Anything this engine does not cover returns
-//! [`MeasureError::Unsupported`] (stringified as `"UNSUPPORTED: <reason>"`)
-//! and the host falls back to browser measurement for that block.
+//! [`measure_paragraph`] is pure and panic-free on untrusted input. Anything
+//! it will not measure comes back as a [`MeasureError`], never a panic, and
+//! [`MeasureError::Unsupported`] stringifies as `"UNSUPPORTED: <reason>"` —
+//! the signal for the host to measure that one block with the browser.
 //!
-//! # What still returns `UNSUPPORTED`
+//! # Line spans
 //!
-//! Every well-formed, measurable paragraph is now covered — all five run
-//! kinds (text, lineBreak, tab, field, image), including inline, floating,
-//! and block/`topAndBottom` own-line images. The remaining `UNSUPPORTED`
-//! returns are, by category, NOT measurable-content gaps:
+//! A [`TypesetRowOut`] addresses its text as `headRun..=tailRun` (inclusive
+//! run indices) and `headChar..tailChar` — `headChar` inclusive, `tailChar`
+//! exclusive. Character positions are **UTF-16 code-unit** offsets into the
+//! run's original string, the indexing the wire format uses. Rust text is
+//! UTF-8, so every emitted index is a sum of `char::len_utf16` and always
+//! lands on a `char` boundary: a split surrogate is unrepresentable.
+//! [`TypesetRowSegmentOut`] and the advance metadata index the same way.
 //!
-//! - **Security clamps / caps** on file-derived numbers and counts (font
-//!   size, letter spacing, horizontal scale, spacing, indents, image dims,
-//!   tab-stop / zone / segment / run / line counts, over-long run text) —
-//!   refusing degenerate input is the point (repo security guidelines: resource limits).
-//! - **Host-contract misses**: no/empty font chain for a `(family, bold,
-//!   italic)` key the block uses (the host must supply it), and the
-//!   `no font in chain covers U+…` backstop (deviation 5 — the font layer's
-//!   job; should never fire once coverage is guaranteed).
-//! - **Malformed runs**: a mandatory-break control character
-//!   (`\n \r \t \v \f \u{85} \u{2028} \u{2029}`) inside a `text` or `field`
-//!   run's string. A well-formed DOCX splits those into `lineBreak`/`tab`
-//!   runs, so this only guards attacker-crafted or corrupt input.
-//! - **Non-paragraph blocks** (`block.kind != "paragraph"`): structural —
-//!   tables, images-as-blocks, textboxes, and breaks are measured by other
-//!   code paths (`measureBlock`), never routed to `measure_paragraph`.
+//! # What is refused
 //!
-//! None of these is a measurable-paragraph feature left unimplemented.
+//! Four categories, all of them rules:
 //!
-//! # Contract mirrored from `measureParagraph.ts`
+//! - **Resource clamps** on file-derived numbers and counts — font size,
+//!   letter spacing, horizontal scale, spacing, indents, image dimensions,
+//!   tab-stop / zone / segment / run / line counts, over-long run text.
+//!   Degenerate values are refused rather than fed into layout arithmetic.
+//! - **Host-contract misses** — no chain, or an empty chain, registered for
+//!   a `(family, bold, italic)` key the block uses. Resolving a family to
+//!   font bytes is the host's job; measurement never guesses a face.
+//! - **Malformed runs** — a mandatory-break control character (`\n`, `\r`,
+//!   `\t`, `\v`, `\f`, `U+0085`, `U+2028`, `U+2029`) inside a `text` or
+//!   `field` run's string. A well-formed DOCX carries those as `lineBreak`
+//!   and `tab` runs, so this fires only on corrupt or hostile input. An
+//!   unrecognized `run.kind` is refused the same way.
+//! - **Non-paragraph blocks** — `block.kind != "paragraph"`. Tables, block
+//!   images, text boxes and breaks are measured by other code paths and are
+//!   never routed here.
 //!
-//! - `TypesetRow` spans: `headRun`/`tailRun` are inclusive run indices;
-//!   `headChar` is inclusive and `tailChar` exclusive, both **UTF-16
-//!   code-unit indices** into the run's JS string (`resolveLineSegments.ts`
-//!   consumes them with `String.prototype.slice`). Rust text is UTF-8, so
-//!   every emitted index is converted via `char::len_utf16` sums and always
-//!   lands on a `char` boundary — a split surrogate is unrepresentable.
-//! - Wrap tolerance `WRAP_SLACK_PX = 0.5`, greedy break at the last
-//!   opportunity that fits, TS's fill-then-hard-break behavior for overlong
-//!   unbreakable words (minimum one character per line).
-//! - Trailing whitespace at a wrap stays on the line it ends and its advance
-//!   is **included** in that line's `width` (TS measures whole words
-//!   including their trailing space and never subtracts it).
-//! - Line height rules mirror `calculateTypographyMetrics`: `exact` /
-//!   `atLeast` / `lineUnit: "multiplier" | "px"` / default single spacing,
-//!   with the empty-paragraph floor `WORD_SINGLE_LINE_FLOOR = 1.15` applied
-//!   for `auto`/`atLeast` rules.
-//! - `totalHeight` = sum of line heights **plus** `spacing.before` and
-//!   `spacing.after`, exactly like the TS return value.
+//! A character no font in the chain covers is *not* refused: it shapes as
+//! the chain's terminal font's `.notdef`, which is a real advance width.
 //!
-//! # Documented deviations from `measureParagraph.ts`
+//! # Measurement rules
 //!
-//! Each of these is deliberate; the differential harness (design test gate
-//! 2) is tolerance-based where they bite.
+//! - **Metrics come from font tables**: ascent and descent are
+//!   `size_px × usWinAscent/upem` and `size_px × usWinDescent/upem`, and the
+//!   single-line basis is their sum plus GDI external leading
+//!   ([`crate::word_metrics`]).
+//! - **Wrapping is greedy** with a half-pixel tolerance: a line takes the
+//!   last break opportunity that fits. Opportunities are UAX-14
+//!   ([`crate::line_break`]), so consecutive spaces collapse into a single
+//!   opportunity and a soft hyphen permits a break.
+//! - **An overlong unbreakable word** fills the room left on the current
+//!   line and then hard-breaks, at least one shaped cluster per line.
+//! - **Trailing whitespace stays** on the line it ends, and its advance is
+//!   included in that line's `width` — words are measured with their
+//!   trailing space and never trimmed.
+//! - **Widths come from shaping whole same-style subranges**, so kerning and
+//!   ligature advances straddling a hard-break cut are attributed to the
+//!   line before the cut.
+//! - **`allCaps` uppercases before shaping**, `smallCaps` shapes lowercase
+//!   as small capitals, and `horizontalScale` multiplies glyph advances:
+//!   measurement reflects what a painter draws. `letterSpacing` is added
+//!   once per gap between shaped clusters within a word — never between
+//!   words, and not scaled by `horizontalScale`.
+//! - **Line height** follows `spacing.lineRule` (`exact` / `atLeast` /
+//!   `auto`) and `lineUnit` (`multiplier` / `px`), defaulting to single
+//!   spacing. An empty paragraph floors at 1.15 × the font size under the
+//!   `auto` and `atLeast` rules.
+//! - **`totalHeight`** sums line heights and float skips, plus
+//!   `spacing.before` and `spacing.after`.
 //!
-//! 1. **Metrics come from font tables, not canvas ink.** TS fills
-//!    `TypesetRow.ascent/descent` with `actualBoundingBoxAscent/Descent` of
-//!    the sample string `"Hg"` and takes `singleLineRatio` from a hardcoded
-//!    per-family table (`fontResolver.ts`). Here both derive from the
-//!    resolved font's real `OS/2` values: ascent = `size_px ×
-//!    usWinAscent/upem`, descent = `size_px × usWinDescent/upem`, and the
-//!    single-line basis is their sum — the same formula the TS table was
-//!    hand-derived from, without the table's 4-decimal rounding.
-//! 2. **Break opportunities are UAX-14** (`crate::line_break`), not the TS
-//!    space/hyphen/tab scan — the divergence documented in `line_break.rs`
-//!    (CJK-correct, surrogate-safe). Consequences: consecutive spaces glom
-//!    into one opportunity, soft hyphens allow a break, and hard-break
-//!    prefixes cut at `char` boundaries where TS's UTF-16 binary search
-//!    could split a surrogate pair.
-//! 3. **`allCaps` uppercases before shaping**, **`smallCaps` shapes
-//!    lowercase as uppercase at the 0.7 browser-synthesis scale** (see
-//!    `SMALL_CAPS_ADVANCE_SCALE` in `prepare.rs` for the Chromium/WebKit vs
-//!    Gecko-0.8 vs Word-≈0.8 decision record), and **`horizontalScale`
-//!    multiplies glyph advances**; TS measurement ignores all three (they
-//!    are paint-time CSS in `renderParagraph/runs.ts`), so measured widths
-//!    there drift from what the painter draws. This engine measures what
-//!    will be painted. `letterSpacing` is added per inter-character gap
-//!    unscaled.
-//! 4. **Widths come from shaping the whole same-font subrange**; TS
-//!    re-measures every word / prefix as an isolated string. Kerning across
-//!    a hard-break cut (and ligature advances straddling a cut) is therefore
-//!    attributed to the pre-cut line here, where TS drops it.
-//! 5. **Uncovered characters are refused** (`UNSUPPORTED: no font in chain
-//!    covers U+…`) instead of silently falling back to a browser-chosen
-//!    font. This is a *backstop*: covering every character is the font
-//!    layer's job (the host builds the fallback chain), so once that layer
-//!    guarantees the chain always covers the block's text this refusal
-//!    should never fire in practice — it is kept only to fail loudly (fall
-//!    back to the browser) rather than mismeasure if a gap ever slips
-//!    through.
-//! 6. **File-derived numbers are clamped/validated** (font size, letter
-//!    spacing, horizontal scale, spacing, indents, run/text/line counts) per
-//!    the repo security rules; TS trusts them.
+//! # Tabs, fields, images, list markers
 //!
-//! `letterSpacing` keeps TS's quirk of counting UTF-16 code units: a word of
-//! `n` UTF-16 units gets `letterSpacing × (n − 1)` added, so a surrogate
-//! pair contributes one internal gap, and no gap is counted between words
-//! (TS measures words separately and sums).
+//! Tab widths resolve against the 720-twip grid overlaid with the
+//! paragraph's declared stops; `end` and `center` stops subtract the width
+//! of the runs that follow the tab. Field runs measure their `fallback`
+//! text (`"1"` when absent or empty) at the run's family, size, bold and
+//! italic, with no caps and no letter spacing.
 //!
-//! # Tab, field, image runs and list markers
+//! An inline image adds its declared width to the line advance and grows the
+//! line box by its column-fitted height plus wrap distances: alone on a line
+//! it takes a descent buffer above and below, flowing with text it seats on
+//! the baseline. A `topAndBottom` or block image takes its own line at its
+//! declared height plus wrap distances (default 6px, never column-fitted),
+//! adds no width, and opens a fresh line after it. An anchored floating
+//! image is positioned by the host, so it contributes neither width nor
+//! height — but its declared width still counts toward the following-runs
+//! width after a tab.
 //!
-//! Tab widths mirror the TS tab branch of `measureParagraph` exactly (see
-//! `tabs.rs` for the ported grid/width math and its two mirrored
-//! simplifications: measurement always uses the 720-twip default grid, and
-//! `decimal` stops measure like `start` stops). The following-runs width
-//! anchored on `end`/`center` stops sums this engine's shaped run widths, so
-//! the documented allCaps / horizontalScale divergences flow into it too —
-//! and it counts field fallbacks and image widths (floating images
-//! included), like TS `measureInlineWidthAfterTab`.
-//!
-//! Field runs measure at their `fallback` text (`"1"` when absent/empty)
-//! with the run's family/size/bold/italic — no letter spacing or caps,
-//! matching the style object the TS field branch builds.
-//!
-//! Inline images add their declared width to the line advance and grow the
-//! line box per TS `finalizeLine`: alone on a line → image height plus the
-//! descent buffer above AND below; flowing with text → seated on the
-//! baseline (text descent below only). The reserved height is the
-//! column-fitted rendered height (painter `max-width: 100%`). Anchored
-//! floating images are skipped (absolutely positioned).
-//!
-//! Block / `topAndBottom` images (`wrapType == "topAndBottom"` or
-//! `displayMode == "block"`) take their own line (ported from the non-inline
-//! branch of `measureParagraph`): the current line is finished first if it
-//! carries content, the image line's footprint is the DECLARED height plus
-//! wrap distances (default 6px, not column-fitted — the block painter draws
-//! at authored size), the image contributes no width to the line advance, and
-//! a fresh line opens after it (a trailing block image emits an empty
-//! following line, TS parity). No image run is UNSUPPORTED any more; a
-//! dimensionless image (missing width/height) is treated as zero-size rather
-//! than refused.
-//!
-//! A visible list marker on a zero-hanging paragraph narrows the first line
-//! by the ported `getListMarkerInlineWidth` footprint (`list_marker.rs`);
-//! the host must supply the marker family's regular chain (see `input.rs`).
+//! A visible list marker narrows the first line by its footprint, and only
+//! when the paragraph's hanging indent is exactly zero.
 //!
 //! # Float exclusion zones
 //!
-//! `floatingZones` + `paragraphYOffset` (see `input.rs` for units/origin)
-//! mirror the TS float path of `measureParagraph` exactly, via the geometry
-//! ports in `floats.rs`:
+//! `floatingZones` and `paragraphYOffset` place the paragraph in the float
+//! group's coordinate space. Intersecting zones are resolved per line at the
+//! running Y with a fixed probe height of `pt_to_px(defaults.fontSize)` —
+//! never the line's own fonts, which are unknown until the line closes. That
+//! running Y advances by each finalized line's *text* height, so image
+//! growth reaches `totalHeight` but not the next line's zone probe.
 //!
-//! - Per line, the intersecting zones are resolved at the line's cumulative
-//!   Y with a **default-font-size single-line estimate** as the probe height
-//!   (TS `ptToPx(DEFAULT_FONT_SIZE) × 1.0` — the estimate uses
-//!   `defaults.fontSize`, never the line's actual fonts), while cumulative Y
-//!   itself advances by each finalized line's *text* typography height —
-//!   image-grown line heights and `floatSkipBefore` gaps feed `totalHeight`
-//!   but the growth does NOT feed the next line's zone probe (TS
-//!   `finalizeLine` adds `typography.lineHeight`, not the image-grown one).
-//! - Lines beside a zone shrink by its margins and emit
-//!   `leftOffset`/`rightOffset` (omitted when zero, like TS). The tab
-//!   branch's content-x includes `leftOffset` exactly like TS
-//!   (`lineX = width + leftOffset`).
-//! - When the room beside a zone is under `MIN_WRAP_SEGMENT_WIDTH` (24px),
-//!   the line hops below the obstruction and the skipped px are emitted as
-//!   `floatSkipBefore` on that line (and added to `totalHeight`).
-//! - Segment-splitting (centered) zones emit `segments`, ported from TS
-//!   `createLineSegments`, including its bails: a multi-run or non-text line
-//!   that needs a two-way split emits no segments. The split point is found
-//!   at char granularity (never inside a surrogate pair) where TS's binary
-//!   search counts UTF-16 units — the hard-break deviation (2) applies.
+//! Lines beside a zone shrink by its margins and report `leftOffset` /
+//! `rightOffset`. When the room left is under `MIN_WRAP_SEGMENT_WIDTH`, the
+//! line hops below the obstruction and the skipped pixels are reported as
+//! `floatSkipBefore`. Zones that split a line into strips emit `segments`;
+//! a two-way split applies only to a single-text-run line, and any other
+//! line emits no segments at all.
 //!
-//! # RTL / bidi
+//! # Bidirectional text
 //!
-//! Text is split into UBA level runs (`crate::bidi`) before shaping — each
-//! shaped segment is a single directional run, and its resolved direction is
-//! passed to rustybuzz explicitly. Everything else stays LOGICAL
-//! order: line breaking, `headChar`/`tailChar` spans (the TS side slices
-//! run text logically in `resolveLineSegments` and lets the painter's
-//! `dir`-attributed spans reorder visually), and widths (a line's width is
-//! the logical sum of segment advances — direction-independent). The
-//! `w:bidi` paragraph flag and per-run `w:rtl` only force the UBA base
-//! direction (affecting neutrals), never the sums; TS measurement has no
-//! RTL-specific behavior to mirror at all. Hebrew is covered by the
-//! vendored fixture and pinned by test; Arabic flows through the same code
-//! path (rustybuzz applies joining) but is untested here — no Arabic
-//! fixture font is vendored yet. Add it to the differential corpus once a
-//! Noto Arabic fixture lands.
+//! Text is split into UBA level runs ([`crate::bidi`]) before shaping, so
+//! every shaped segment is a single directional run with an explicit
+//! direction. Everything else stays in logical order: break opportunities,
+//! `headChar`/`tailChar` spans, and widths — a line's width is the
+//! direction-independent sum of its segment advances. `w:bidi` on the
+//! paragraph and `w:rtl` on a run only force the UBA base direction, which
+//! changes how neutral characters segment, never the sums.
 
 mod floats;
 mod input;
@@ -201,11 +133,13 @@ use crate::font_store::{FontId, FontStore};
 /// Why measurement refused an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeasureError {
-    /// The input engages a feature this v1 does not cover — the host must
-    /// fall back to browser measurement for this block.
+    /// Outside what this engine measures: a resource clamp, a missing font
+    /// chain, a malformed run, or a non-paragraph block. Displays as
+    /// `"UNSUPPORTED: <reason>"`; the host measures the block with the
+    /// browser instead.
     Unsupported(String),
-    /// The input violates the measurement contract (malformed JSON, unknown
-    /// font ids, non-finite numbers).
+    /// The request itself is unusable — unparseable JSON, a font id absent
+    /// from the store, a shaping failure.
     Invalid(String),
 }
 
@@ -220,10 +154,10 @@ impl std::fmt::Display for MeasureError {
 
 impl std::error::Error for MeasureError {}
 
-/// One typeset line — serializes to the TS `TypesetRow` field names.
-/// `headChar`/`tailChar` are UTF-16 code-unit indices (see module docs).
-/// The four optional float fields are omitted when unset, mirroring TS
-/// `finalizeLine`'s conditional assignment (absent, never `null`/0).
+/// One typeset line. `headRun`/`tailRun` are inclusive run indices;
+/// `headChar` is inclusive and `tailChar` exclusive, both UTF-16 code-unit
+/// offsets (see module docs). Unset optional fields are omitted from the
+/// JSON rather than serialized as null or zero.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRowOut {
@@ -249,16 +183,21 @@ pub struct TypesetRowOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub float_skip_before: Option<f32>,
     /// Exact advances for run slices, emitted in visual paint order.
+    /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_advances: Option<Vec<TypesetRunAdvanceOut>>,
     /// Exact shaped cluster advances and visual x offsets.
+    /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster_advances: Option<Vec<TypesetClusterAdvanceOut>>,
     /// Bidi slices keep logical identity separate from visual paint order.
+    /// `Some` only under `authoritativeShaping`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi_slices: Option<Vec<TypesetBidiSliceOut>>,
 }
 
+/// Advance of one run's slice of a line. A run split by direction yields one
+/// entry per visual piece; `logical_order` recovers logical sequence.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRunAdvanceOut {
@@ -269,6 +208,8 @@ pub struct TypesetRunAdvanceOut {
     pub logical_order: u32,
 }
 
+/// One shaped cluster: its advance and its visual x from the line start.
+/// Clusters are indivisible, so a cluster may span several characters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetClusterAdvanceOut {
@@ -281,6 +222,9 @@ pub struct TypesetClusterAdvanceOut {
     pub logical_order: u32,
 }
 
+/// Every line contribution — text clusters and atomic runs alike — with both
+/// orderings, so a painter can lay out visually without losing logical
+/// identity. Odd `bidi_level` is RTL.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetBidiSliceOut {
@@ -293,9 +237,8 @@ pub struct TypesetBidiSliceOut {
     pub logical_order: u32,
 }
 
-/// One strip of a segment-split line — the TS `TypesetRowSegment` verbatim
-/// (`layout/pagination/types.ts`). Spans use the same run/UTF-16 indexing as
-/// [`TypesetRowOut`]; `leftOffset`/`availableWidth`/`width` are px.
+/// One strip of a line split by a segmenting float zone. Spans index exactly
+/// as [`TypesetRowOut`]; offsets and widths are pixels.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRowSegmentOut {
@@ -308,7 +251,7 @@ pub struct TypesetRowSegmentOut {
     pub width: f32,
 }
 
-/// Measured paragraph — serializes to the TS `ParagraphExtent` shape.
+/// Measured paragraph envelope.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphExtentOut {
@@ -318,17 +261,17 @@ pub struct ParagraphExtentOut {
     pub total_height: f32,
 }
 
-/// Security caps on file-derived counts (repo security guidelines: resource limits).
+/// Resource limits on file-derived counts. Exceeding any of them is
+/// `UNSUPPORTED`, so a hostile document costs a browser fallback rather than
+/// unbounded work.
 pub(crate) const MAX_RUNS: usize = 10_000;
 pub(crate) const MAX_RUN_TEXT_BYTES: usize = 1_000_000;
 pub(crate) const MAX_LINES: usize = 100_000;
 pub(crate) const MAX_TAB_STOPS: usize = 1_000;
 pub(crate) const MAX_FLOAT_ZONES: usize = 200;
-/// TS extraction emits at most 2 strips per zone (`centeredWrapSegments`);
-/// the cap only guards a hand-crafted envelope.
 pub(crate) const MAX_ZONE_SEGMENTS: usize = 100;
 
-/// points → CSS px (1pt = 96/72 px), the TS `ptToPx`.
+/// Converts points to CSS pixels (1pt = 96/72px).
 pub(crate) fn pt_to_px(pt: f32) -> f32 {
     pt * 96.0 / 72.0
 }
@@ -336,7 +279,12 @@ pub(crate) fn pt_to_px(pt: f32) -> f32 {
 /// Measure one paragraph block against `input.maxWidth`.
 ///
 /// Pure and panic-free on untrusted input; every validation failure or
-/// uncovered feature comes back as a [`MeasureError`], never a panic.
+/// refused feature comes back as a [`MeasureError`], never a panic.
+///
+/// A paragraph with no runs, or with a single whitespace-only text run,
+/// short-circuits to one zero-width line at the resolved line height, always
+/// measured with the regular (`|0|0`) face of the resolved family.
+/// `suppressEmptyParagraphHeight` makes that line zero-height instead.
 pub fn measure_paragraph(
     store: &FontStore,
     input: &MeasureInput,
@@ -375,7 +323,6 @@ pub fn measure_paragraph(
     let paragraph_y_offset = input.paragraph_y_offset.unwrap_or(0.0);
     input::validate_float_context(zones, paragraph_y_offset)?;
 
-    // ---- empty paragraph (mirrors the TS `runs.length === 0` branch) ----
     if runs.is_empty() {
         if attrs.is_some_and(|a| a.suppress_empty_paragraph_height) {
             return Ok(ParagraphExtentOut {
@@ -391,8 +338,7 @@ pub fn measure_paragraph(
         let family = attrs
             .and_then(|a| a.default_font_family.as_deref())
             .unwrap_or(&input.defaults.font_family);
-        // TS `calculateEmptyParagraphMetrics` measures the *regular* face
-        // (no bold/italic in the style it builds), hence the |0|0 chain.
+        // Empty paragraphs use the regular face.
         let font = regular_chain_head(store, input, family)?;
         return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &input.compat);
     }
@@ -414,9 +360,7 @@ pub fn measure_paragraph(
         return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &input.compat);
     }
 
-    // A visible list marker eats into the first line's width in TS only when
-    // `hanging == 0` (exact `=== 0` — `measureParagraph` zeroes
-    // `markerInlineWidth` for any other hanging, positive or negative).
+    // Visible markers consume width only at zero hanging.
     let marker_inline_width = match attrs {
         Some(a) if a.indent.as_ref().and_then(|i| i.hanging).unwrap_or(0.0) == 0.0 => {
             list_marker::list_marker_inline_width(store, input, a)?
@@ -426,10 +370,7 @@ pub fn measure_paragraph(
 
     let prepared = prepare::prepare_runs(store, input)?;
 
-    // Indent handling, mirroring `measureParagraph`: left/right shrink both
-    // edges; firstLineOffset = firstLine − hanging narrows (or widens) the
-    // first line only. Float zones adjust these base widths per line inside
-    // the filler (TS computes the same pre-float bases first).
+    // Left and right indents shrink both edges; first-line offset affects only the first line.
     let indent = attrs.and_then(|a| a.indent.as_ref());
     let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
     let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
@@ -455,9 +396,10 @@ pub fn measure_paragraph(
     })
 }
 
-/// JSON boundary mirroring `docx-layout`'s `layout_to_json` pattern: input
-/// JSON in, `ParagraphExtent` JSON out. `Err` strings starting with
-/// `"UNSUPPORTED"` mean the host must fall back to browser measurement.
+/// JSON boundary: a [`MeasureInput`] envelope in, a serialized
+/// [`ParagraphExtentOut`] out. An `Err` starting with `"UNSUPPORTED"` means
+/// the host must measure this block with the browser; one starting with
+/// `"invalid: "` means the envelope itself was unusable.
 pub fn measure_paragraph_json(store: &FontStore, input: &str) -> Result<String, String> {
     let parsed: MeasureInput =
         serde_json::from_str(input).map_err(|e| format!("invalid: parse: {e}"))?;
@@ -485,7 +427,7 @@ fn zero_row() -> TypesetRowOut {
     }
 }
 
-/// TS `isEmptyTextRun`: no text, or only whitespace (nbsp counts as space).
+/// Tests for empty or whitespace-only text, including nonbreaking spaces.
 fn is_whitespace_only(run: &RunIn) -> bool {
     match run.text.as_deref() {
         None => true,
@@ -493,8 +435,9 @@ fn is_whitespace_only(run: &RunIn) -> bool {
     }
 }
 
-/// First font of the family's regular (`|0|0`) chain — the face TS's
-/// empty-paragraph metrics use.
+/// Head of the regular (`|0|0`) chain for `family` — the metrics source for
+/// the empty-paragraph and list-marker paths, which never apply bold or
+/// italic.
 fn regular_chain_head(
     store: &FontStore,
     input: &MeasureInput,

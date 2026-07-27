@@ -1,13 +1,8 @@
-//! Small XML writer with TypeScript-compatible escaping and ordering.
-//!
-//! Element and attribute names are `&'static str` by construction: model data
-//! can only enter through [`XmlWriter::attribute`] and [`XmlWriter::text`],
-//! both of which escape it. This keeps attacker-derived strings out of markup
-//! positions while allowing serializer call sites to control byte ordering.
+//! XML writer with stable escaping and ordering.
 
 use std::fmt::Write as _;
 
-/// Match the incumbent TypeScript `escapeXml` replacement semantics exactly.
+/// Escapes XML in ampersand-first replacement order.
 pub fn escape_xml(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
@@ -23,11 +18,7 @@ pub fn escape_xml(value: &str) -> String {
     escaped
 }
 
-/// Match `String(Math.round(value))`, including negative ties and `-0`.
-///
-/// The caller supplies an `Option` because TypeScript's `intAttr` also maps
-/// `null`/`undefined` to zero. JSON cannot represent non-finite numbers; the
-/// explicit finite check keeps native callers compatible as well.
+/// Rounds ties toward positive infinity and maps invalid values to zero.
 pub fn int_attr(value: Option<f64>) -> String {
     let Some(value) = value.filter(|value| value.is_finite()) else {
         return "0".to_owned();
@@ -68,7 +59,7 @@ impl XmlWriter {
         }
     }
 
-    /// Append an XML declaration with the incumbent serializer's exact bytes.
+    /// Appends the canonical XML declaration.
     pub fn declaration(&mut self) -> &mut Self {
         self.close_start_tag();
         self.output
@@ -132,10 +123,7 @@ impl XmlWriter {
         self
     }
 
-    /// Close an attribute-less empty element as `<name />`.
-    ///
-    /// This odd spelling is retained only for the incumbent `w:col` case,
-    /// whose template includes a literal space even when it has no attributes.
+    /// Closes an attribute-less empty element as `<name />`.
     pub(crate) fn end_empty_element_with_space(&mut self) -> &mut Self {
         let _name = self
             .elements
@@ -189,7 +177,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escape_xml_matches_typescript_replacement_order() {
+    fn escape_xml_applies_ampersand_first_replacement_order() {
         assert_eq!(
             escape_xml("<&>\"' &amp;"),
             "&lt;&amp;&gt;&quot;&apos; &amp;amp;"
@@ -216,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn declaration_matches_incumbent_bytes() {
+    fn declaration_uses_pinned_bytes() {
         let mut writer = XmlWriter::new();
         writer.declaration().start_element("w:root").end_element();
         assert_eq!(
@@ -226,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_attributes_match_javascript_math_round() {
+    fn integer_attributes_round_ties_toward_positive_infinity() {
         assert_eq!(int_attr(None), "0");
         assert_eq!(int_attr(Some(f64::NAN)), "0");
         assert_eq!(int_attr(Some(f64::INFINITY)), "0");

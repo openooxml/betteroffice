@@ -130,7 +130,6 @@ pub fn parse_relationships(
     };
 
     for child in root.child_elements() {
-        // Preserve the incumbent's permissive qualified-name check exactly.
         if !child.name.ends_with("Relationship") && !child.name.contains(":Relationship") {
             continue;
         }
@@ -139,8 +138,6 @@ pub fn parse_relationships(
         let relationship_type = child.attribute(None, "Type").unwrap_or_default();
         let target = child.attribute(None, "Target").unwrap_or_default();
         if id.is_empty() || relationship_type.is_empty() || target.is_empty() {
-            // TypeScript warns and skips incomplete entries; warnings are host
-            // diagnostics and are intentionally not part of RelationshipMap.
             continue;
         }
         let target_mode = match child.attribute(None, "TargetMode") {
@@ -403,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_relationship_bytes_match_the_typescript_shape() {
+    fn canonical_relationship_bytes_preserve_map_order_and_target_mode() {
         let part = RelationshipPart::from_map("x.rels".to_owned(), parse(RELS).unwrap()).unwrap();
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(part.canonical_base64)
@@ -446,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn relationship_type_and_filter_helpers_match_the_incumbent() {
+    fn relationship_helpers_resolve_types_hyperlinks_and_missing_ids() {
         let mut map = parse(RELS).unwrap();
         map["rId1"].relationship_type = relationship_types::HYPERLINK.to_owned();
         assert_eq!(

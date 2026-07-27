@@ -1,11 +1,4 @@
-//! Read-query surface (op-contract §3): pure reads over a transaction snapshot.
-//!
-//! [`TextView::Vanilla`] is the agent's view (the `paraText.ts` vanilla contract): it EXCLUDES
-//! `ins`-attributed text (pending insertions are "not in the document yet"), INCLUDES
-//! `del`-attributed text (still there until accepted), and makes comment anchors, tabs, breaks,
-//! and every other atom invisible — no character substitution. [`TextView::Raw`] maps every
-//! story unit 1:1 (tab = `\t`, hard break = `\n`, other embeds = U+FFFC) so raw offsets equal
-//! story indices.
+//! Read queries over transaction snapshots.
 
 use std::collections::{HashMap, HashSet};
 
@@ -169,7 +162,7 @@ pub(crate) fn para_views<T: ReadTxn>(story: &TextRef, txn: &T, view: TextView) -
     views
 }
 
-/// One find-in-document hit (port of `FindInDocumentMatch`).
+/// One document-search match.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FindMatch {
     pub para_id: ParagraphId,
@@ -193,7 +186,7 @@ impl Default for FindOptions {
     }
 }
 
-/// Port of `SelectionInfo` in `queries.ts` — all fields use the Vanilla view.
+/// Selection details in the vanilla text view.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionInfo {
     pub para_id: ParagraphId,
@@ -266,7 +259,7 @@ pub struct PageParagraph {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PageContent {
     pub page_number: u32,
-    /// `[paraId] text` lines joined with `\n` (port of `getPageContent`).
+    /// Paragraph lines joined with newlines.
     pub text: String,
     pub paragraphs: Vec<PageParagraph>,
 }
@@ -288,9 +281,7 @@ pub(crate) fn revision_parts(value: &Any) -> Option<(String, String, String)> {
         Some(Any::String(value)) => Some(value.to_string()),
         _ => None,
     };
-    // Native revisions use cooperative string ids (`client:counter`), while
-    // coexistence seeds preserve imported OOXML `w:id` values as numbers.
-    // Both are valid revision identities for read/resolve queries.
+    // Imported OOXML revision IDs remain numeric.
     let id = match identity.get("id").or_else(|| identity.get("revisionId")) {
         Some(Any::String(value)) => value.to_string(),
         Some(Any::Number(value)) if value.is_finite() => value.to_string(),
@@ -345,8 +336,7 @@ impl EditingDoc {
         Err(OpError::UnknownPara(para_id.to_owned()))
     }
 
-    /// The view text between two Locs (paragraph boundaries contribute nothing, like
-    /// `getVanillaTextBetween`).
+    /// Returns view text without paragraph-boundary text.
     pub fn text_between(&self, range: &LocRange, view: TextView) -> OpResult<String> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &range.start.story)?;
@@ -366,10 +356,7 @@ impl EditingDoc {
         Ok(out)
     }
 
-    /// Resolves a search phrase to the ONE place it occurs (op-contract §3): zero occurrences →
-    /// [`OpError::SearchNotFound`]; more than one → [`OpError::AmbiguousSearch`] so an LLM
-    /// narrows instead of mistargeting. `within` scopes the search to one paragraph.
-    /// Case-sensitive (mutation precision), searching the given view but returning RAW offsets.
+    /// Resolves a unique case-sensitive search match to raw offsets.
     pub fn resolve_search(
         &self,
         story_id: &str,
@@ -418,9 +405,7 @@ impl EditingDoc {
         }
     }
 
-    /// Port of `findInDocument`: Vanilla view, case-insensitive by default, at most one match
-    /// per paragraph (paragraphs where the needle occurs more than once are SKIPPED — the agent
-    /// narrows), 40-character context windows, limit 20.
+    /// Finds unambiguous paragraph-local matches in the vanilla view.
     pub fn find_in_document(
         &self,
         story_id: &str,
@@ -474,8 +459,7 @@ impl EditingDoc {
         Ok(results)
     }
 
-    /// Port of `getSelectionInfo`: the paragraph containing the selection start, with vanilla
-    /// before/selected/after slices.
+    /// Returns vanilla-view slices around a selection.
     pub fn selection_info(&self, anchor: &Loc, head: &Loc) -> OpResult<SelectionInfo> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &anchor.story)?;
@@ -817,9 +801,7 @@ impl EditingDoc {
         }
     }
 
-    /// Port of `getPageContent`: the paragraphs on one 1-based page, deduped by paraId (a
-    /// paragraph split across a page boundary is reported once). Returns `None` for an
-    /// out-of-range page.
+    /// Returns deduplicated paragraphs for a 1-based page.
     pub fn page_content(
         &self,
         page_number: u32,

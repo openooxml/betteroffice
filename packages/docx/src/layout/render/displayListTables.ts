@@ -26,11 +26,11 @@
  * NOT the table's, so grouping by block id would split a table into one fragment
  * per cell. The adapter therefore supplies `tableKeyOf`, mapping an in-cell doc
  * position to a stable per-table key (in the React adapter: the enclosing table
- * node's PM `before` position, resolved against the live doc). Primitives whose
+ * node's `before` position, resolved against the live doc). Primitives whose
  * position doesn't resolve to a table are skipped.
  *
  * Column-boundary x's and the right edge are intentionally NOT computed here:
- * they come from the PM doc's `columnWidths` (twips) anchored at `originX`,
+ * they come from the doc's `columnWidths` (twips) anchored at `originX`,
  * which is exact and robust to horizontally-merged cells (colspan suppresses
  * the interior border line the display list would otherwise expose).
  *
@@ -38,13 +38,12 @@
  * region-aware `hfRangeRects` / `hfCaretRects` queries (see
  * `CanvasHfSelectionOverlay`), but HF *table* resize handles remain a documented
  * gap: this walker takes `page.primitives` (body), and the overlay's
- * `tableKeyOf` / commit path resolves against the body PM doc. Closing it needs
+ * `tableKeyOf` / commit path resolves against the body doc. Closing it needs
  * (1) an optional region parameter here to walk `page.header|footer.primitives`,
  * (2) a `tableKeyOf` bound to the active HF EditorView, and (3) the same
  * nearest-viewport page pick the HF caret uses (the part paints on every page).
  * HF tables are rare, so this is deferred.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { DisplayList, DisplayPage, DisplayPrimitive, TableCellRef } from './displayList';
@@ -118,7 +117,7 @@ export interface DisplayListTableInsertHoverInput {
   /** Display-list page size for `pageIndex`. */
   pageSize: { width: number; height: number };
   tableKeyOf: TableKeyResolver;
-  /** Resolve a table grid cell to its PM cell-start position. */
+  /** Resolve a table grid cell to its cell-start position. */
   cellPmPosOf: (tableKey: string, row: number, col: number) => number | null;
   region?: DisplayListTableRegion;
   edgeProximity?: number;
@@ -656,7 +655,7 @@ function cellBoundsFallback(
  * Full selected-cell boxes for canvas overlays.
  *
  * The DOM painter highlights `.layout-table-cell` elements directly; in canvas
- * mode those cells are parked, so adapters pass the live PM CellSelection as
+ * mode those cells are parked, so adapters pass the live cell selection as
  * grid coordinates and this helper resolves visible page-local boxes from the
  * display-list table geometry. Border lines provide exact grid edges when
  * present; borderless fragments fall back to the selected cell's content bbox

@@ -1,12 +1,4 @@
-//! GlyphRun emission gates: with a populated measurement `FontStore` the
-//! display-list builder shapes text runs into `GlyphRunPrimitive`s (real glyph
-//! ids + pen positions from the same bytes that measured); with no resolvable
-//! fonts it falls back to `TextRunPrimitive`, byte-identical to the pre-shaping
-//! path. Also covers font-fallback splitting, justification stretch in the
-//! glyph x, hit-testing / range-rects over GlyphRuns, and determinism.
-//!
-//! Fixture: the same vendored Liberation Sans Regular (SIL OFL 1.1) the
-//! ooxml-text suites use.
+//! Glyph-run shaping, fallback, geometry, and determinism tests.
 
 use docx_layout::display_list::{
     DisplayList, GlyphRunPrimitive, Primitive, build_display_list_json,
@@ -29,8 +21,8 @@ fn store_with_liberation() -> FontStore {
 /// Build a one-paragraph, one-line display-list input. `chain` is the
 /// `fontChains` value for `"liberation sans|0|0"` (None ⇒ no fontChains at all,
 /// the browser-measured shape). `trailing_break` appends a `<w:br>` run so a
-/// last line still justifies. Text runs are 1 PM position per char starting at
-/// pm 1.
+/// last line still justifies. Text runs are 1 document position per char
+/// starting at position 1.
 fn build_input(
     text: &str,
     line_width: f64,
@@ -189,8 +181,6 @@ fn emits_glyph_runs_when_fonts_resolve() {
     let input = build_input("Hello world", 60.0, None, false, Some(&[0]));
     let json = build_display_list_json_with_fonts(&input, &store).expect("builds");
 
-    // wire shape: camelCase keys + the `glyphRun` kind tag the canvas agent's
-    // TS type expects
     assert!(json.contains(r#""kind":"glyphRun""#), "kind tag: {json}");
     assert!(json.contains(r#""fontId":0"#), "camelCase fontId: {json}");
     assert!(
@@ -232,8 +222,8 @@ fn emits_glyph_runs_when_fonts_resolve() {
 
 #[test]
 fn falls_back_to_text_run_without_fonts() {
-    // fontChains present, but the store is empty ⇒ every run fails to shape and
-    // takes the v0 TextRunPrimitive path
+    // fontChains present, but the store is empty, so every run fails to shape
+    // and falls back to a TextRunPrimitive
     let empty = FontStore::new();
     let with_chains = build_input("Hello world", 60.0, None, false, Some(&[0]));
     let out_fallback = build_display_list_json_with_fonts(&with_chains, &empty).expect("builds");
@@ -246,11 +236,10 @@ fn falls_back_to_text_run_without_fonts() {
         "TextRunPrimitive emitted"
     );
 
-    // byte-identical to the pre-GlyphRun path (no fontChains at all)
     let no_chains = build_input("Hello world", 60.0, None, false, None);
-    let out_today = build_display_list_json(&no_chains).expect("builds");
+    let out_without_chains = build_display_list_json(&no_chains).expect("builds");
     assert_eq!(
-        out_fallback, out_today,
+        out_fallback, out_without_chains,
         "fallback must be byte-identical to the browser-measured path"
     );
 }
@@ -450,10 +439,7 @@ fn hit_test_and_range_rects_resolve_over_glyph_runs() {
 
 #[test]
 fn glyph_run_extent_uses_real_trailing_advance() {
-    // F3: the run's right edge is the trailing glyph's `x + advance` (the real
-    // shaped extent), NOT the old uniform estimate `span * n/(n-1)` that drifted
-    // ~3px on mixed-font lines. Pin both the per-glyph advance contract and the
-    // range-rect width the hit geometry derives from it.
+    // The trailing glyph's advance determines the run's right edge.
     let store = store_with_liberation();
     let text = "Hello world"; // 11 chars ⇒ doc span [1, 12)
     let input = build_input(text, 80.0, None, false, Some(&[0]));
@@ -474,8 +460,8 @@ fn glyph_run_extent_uses_real_trailing_advance() {
         );
     }
 
-    // expected extent = the shaped natural advance sum (what the DOM painter lays
-    // out); reshape the same run in an isolated store to learn it
+    // expected extent = the shaped natural advance sum; reshape the same run in
+    // an isolated store to learn it
     let mut probe = FontStore::new();
     let id = probe.register(LIBERATION.to_vec()).unwrap();
     let shaped = shape(&probe, id, text, 16.0, &[]).unwrap();
@@ -505,7 +491,7 @@ fn glyph_run_extent_uses_real_trailing_advance() {
     );
     assert!(
         (r.width - shaped_width).abs() < 0.5,
-        "range-rect width {} matches the shaped extent {} (F3: real trailing advance)",
+        "range-rect width {} matches the shaped extent {}, including trailing advance",
         r.width,
         shaped_width
     );
@@ -551,10 +537,7 @@ fn wasm_entry_threads_measure_fonts() {
     docx_layout::clear_measure_fonts();
 }
 
-/// The glyph run carries the resolved CSS face for the canvas fillText safety
-/// net — the same shorthand the browser-measured TextRunPrimitive would use —
-/// so a glyph-outline failure degrades to the measured family/weight/style
-/// instead of generic sans-serif.
+/// Glyph runs retain the resolved CSS font for outline fallback.
 #[test]
 fn glyph_runs_carry_the_resolved_fallback_font() {
     let store = store_with_liberation();

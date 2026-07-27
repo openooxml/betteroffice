@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::formatting::{FontFamily, ParagraphFormatting, TextFormatting};
 use crate::scalars::{ColorValue, parse_color_value};
-use crate::settings::incumbent_utf8_text_boundary;
+use crate::settings::is_valid_utf8_xml_text;
 use crate::tabs::TabStop;
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
@@ -120,7 +120,7 @@ pub fn parse_numbering(
     let Some(xml) = xml else {
         return Ok(NumberingMap::default());
     };
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(NumberingMap::default());
     }
     let document = parse_xml(xml, part, budget)?;
@@ -548,8 +548,7 @@ pub fn compute_list_rendering(
         return None;
     }
     let ilvl = ilvl.unwrap_or(0.0);
-    // The incumbent loop is only intended for the schema's 0..8 levels. Guard
-    // hostile caller-supplied values before converting them into loop bounds.
+    // Numbering levels are restricted to the schema range 0..=8.
     if ilvl.fract() != 0.0 || !(0.0..=8.0).contains(&ilvl) {
         return None;
     }

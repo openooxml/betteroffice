@@ -1,6 +1,6 @@
 /**
  * Pure selection types. Plain data only — no DOM, no framework — so the model
- * is golden-testable and mirrorable in Rust. The chrome layer interprets the
+ * is golden-testable. The chrome layer interprets the
  * declarative {@link SelectionAction}s the reducer emits.
  */
 

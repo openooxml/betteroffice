@@ -1,4 +1,4 @@
-//! Deterministic state shared by recursive S11 content serializers.
+//! Deterministic recursive serializer state.
 
 use crate::paragraph::HexIdAllocator;
 use crate::xml::ParseError;
@@ -28,9 +28,7 @@ impl SerializerContext {
         self.ids.allocate()
     }
 
-    /// Fixed serializer clock reserved for timestamp-bearing part writers.
-    /// S12 comments preserve authored dates, but exposing the injected value
-    /// here prevents S13 package metadata from consulting wall-clock time.
+    /// Injected clock for timestamp-bearing part writers.
     pub fn now(&self) -> &str {
         &self.now
     }
@@ -52,9 +50,7 @@ impl SerializerContext {
         let _ = self.rendered_page_breaks.pop();
     }
 
-    /// A nested run may be the first run for several enclosing paragraphs
-    /// (for example a textbox). The incumbent string injection emits one
-    /// marker for each such paragraph, so consume every active marker here.
+    /// Consumes every active rendered-page-break marker.
     pub(crate) fn take_rendered_page_breaks(&mut self) -> usize {
         let mut count = 0;
         for pending in &mut self.rendered_page_breaks {

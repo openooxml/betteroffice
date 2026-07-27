@@ -2,7 +2,7 @@
  * Canvas-mode image selection + resize/drag overlay.
  *
  * This component sources the selected image's rect from the display list's
- * `ImagePrimitive` (found by the selection's PM
+ * `ImagePrimitive` (found by the selection's document
  * position) and projects it onto the visible canvas pages through the live
  * per-page `<canvas>` rect — the same conversion `CanvasSelectionOverlay` uses
  * for the caret. It then portals the border + handles + drag affordance onto
@@ -15,7 +15,6 @@
  * nothing off the canvas path (the parent only mounts it once
  * `overlayTarget` + `displayListQueries` resolve, i.e. while the canvas paints).
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
@@ -57,9 +56,9 @@ const HANDLES: ReadonlyArray<{ pos: ImageResizeHandle; x: number; y: number }> =
 ];
 
 export interface CanvasImageSelectionOverlayProps {
-  /** PM position of the selected image, or null when no image is selected. */
+  /** Document position of the selected image, or null when no image is selected. */
   pmPos: number | null;
-  /** Whether the (hidden body) ProseMirror is focused — gates the overlay. */
+  /** Whether the (hidden body) input is focused — gates the overlay. */
   isFocused: boolean;
   readOnly?: boolean;
   /** Portal target — `editorContentRef.current`, the positioned canvas ancestor. */

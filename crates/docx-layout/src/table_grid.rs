@@ -1,20 +1,29 @@
-//! Port of `packages/core/src/layout/pagination/tableWidthUtils.ts`.
+//! DOCX table-grid geometry and column-width resolution.
 //!
-//! Helpers for resolving DOCX table-width metadata into pixel widths.
-//! `resolve_cell_grid` is the single source of truth for table grid geometry —
-//! the measurer, the painter, and the row-break paginator all consume it so
-//! they agree on which column a cell lives in.
+//! [`resolve_cell_grid`] is the single source of truth for which grid column a
+//! cell occupies: measurement, painting and the row-break paginator all read it,
+//! so they cannot disagree. It is deliberately width-free — callers multiply a
+//! column index by their own (possibly scaled) widths.
 //!
-//! Exported fns (1:1 with the TS module):
-//! - `resolve_table_width_px` ← `resolveTableWidthPx(value, widthType, parentWidth)`
-//! - `resolve_cell_grid` ← `resolveCellGrid(tableBlock)`
-//! - `count_table_columns` ← `countTableColumns(tableBlock)`
-//! - `normalize_table_column_widths` ← `normalizeTableColumnWidths(columnWidths, colCount, targetWidth)`
-//! - `resolve_table_column_widths` ← `resolveTableColumnWidths(tableBlock, contentWidth)`
-//! - `resolve_table_total_width_px` ← `resolveTableTotalWidthPx(tableBlock, contentWidth)`
+//! Column widths come from one of three algorithms, chosen by
+//! `w:tblLayout`/the block's width algorithm:
 //!
-//! Consumes the spine's `TableBlock` (`types.rs`) directly, same as the TS
-//! module consumes `pagination/types.ts`.
+//! - **fixed** — normalize the declared grid, then raise columns so the first
+//!   row's preferred cell widths fit, sharing a spanning cell's deficit evenly
+//!   across the columns it covers, and finally grow to any explicit table
+//!   width.
+//! - **autofit** — accumulate per-column minimum and maximum content widths
+//!   from every cell (`w:noWrap` pins the minimum to the maximum), target
+//!   `max(minTotal, min(contentWidth, explicitOrMaxTotal))`, and hand out the
+//!   room above the minimums in proportion to each column's flex
+//!   (`max - min`); with no flex anywhere the target is spread evenly.
+//! - otherwise — normalize the declared grid and uniformly scale it to an
+//!   explicit table width when the two differ by more than a pixel.
+//!
+//! A width pair resolves through the preferred-width element, then the flat
+//! value/type pair, then a raw pixel width. `pct` units are 50ths of a percent
+//! (ECMA-376 §17.18.111, so 5000 means 100%); `dxa`, `auto` and an absent type
+//! are twips at 96 DPI. Zero, negative and NaN widths never resolve.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,13 +31,12 @@ use serde::Serialize;
 
 use crate::types::TableBlock;
 
-/// Twips per inch (1 inch = 1440 twips). Mirrors `utils/units.ts`.
+/// Twips per inch.
 const TWIPS_PER_INCH: f64 = 1440.0;
 /// Pixels per inch at the standard 96 DPI assumption.
 const PIXELS_PER_INCH: f64 = 96.0;
 
-/// Convert twips to pixels (at 96 DPI) — same operation order as the TS
-/// `twipsToPixels` for bit-identical f64 results.
+/// Converts twips to pixels at 96 DPI without reassociating arithmetic.
 fn twips_to_pixels(twips: f64) -> f64 {
     (twips / TWIPS_PER_INCH) * PIXELS_PER_INCH
 }
@@ -46,7 +54,6 @@ pub fn resolve_table_width_px(
     parent_width: f64,
 ) -> Option<f64> {
     let value = value?;
-    // TS `!value || value <= 0` — rejects 0, NaN, and negatives.
     if !(value > 0.0) {
         return None;
     }
@@ -70,19 +77,20 @@ pub struct ResolvedGridCell {
     pub row_span: usize,
 }
 
-/// Resolve every cell's grid column index, accounting for `colSpan` and the
-/// columns occupied by vertically-merged (`rowSpan`) cells from earlier rows.
+/// Resolve every cell's grid column index.
 ///
-/// Single source of truth for table grid geometry — width-free on purpose:
-/// callers multiply `column_index` by their own (possibly scaled) column
-/// widths to get an x offset.
+/// A row starts at its `w:gridBefore` offset and skips any column a
+/// vertically-merged cell from an earlier row still occupies; each cell then
+/// claims `w:gridSpan` columns, or starts at its explicit grid position when
+/// one is given. Spans are truncated and clamped (columns to 16384 rows to
+/// 32768), so malformed input cannot blow up the grid.
 pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
     let mut occupied: HashMap<usize, HashSet<usize>> = HashMap::new();
     let mut out: Vec<ResolvedGridCell> = Vec::new();
     for row_index in 0..table_block.rows.len() {
         let cells = &table_block.rows[row_index].cells;
         // Rows only ever seed sets for LATER rows, so taking ownership of this
-        // row's set is safe (mirrors the TS `occupied.get(rowIndex) ?? new Set()`).
+        // row's set is safe.
         let occ = occupied.remove(&row_index).unwrap_or_default();
         let mut column_index = table_block.rows[row_index]
             .grid_before
@@ -121,7 +129,8 @@ pub fn resolve_cell_grid(table_block: &TableBlock) -> Vec<ResolvedGridCell> {
     out
 }
 
-/// Total grid columns, derived from the widest row's accumulated colSpans.
+/// Total grid columns: the furthest column any cell reaches, and every row's
+/// own end plus its `w:gridAfter` skip.
 pub fn count_table_columns(table_block: &TableBlock) -> usize {
     let resolved = resolve_cell_grid(table_block);
     let mut count = 1usize;
@@ -139,6 +148,8 @@ pub fn count_table_columns(table_block: &TableBlock) -> usize {
     count.min(16_384)
 }
 
+/// Resolves a width through the preferred element, then the flat value/type
+/// pair, then a raw pixel width.
 fn preferred_width_px(
     preferred: Option<&crate::types::PreferredWidth>,
     legacy_value: Option<f64>,
@@ -154,6 +165,8 @@ fn preferred_width_px(
         .or_else(|| legacy_px.filter(|value| *value > 0.0))
 }
 
+/// Raises a span's columns until they total `required`, sharing the shortfall
+/// evenly. Columns already wide enough are left alone.
 fn add_span_constraint(widths: &mut [f64], start: usize, span: usize, required: f64) {
     if !(required > 0.0) || start >= widths.len() {
         return;
@@ -170,6 +183,7 @@ fn add_span_constraint(widths: &mut [f64], start: usize, span: usize, required: 
     }
 }
 
+/// Grows every column equally up to `target`. Never shrinks.
 fn distribute_to_target(mut widths: Vec<f64>, target: f64) -> Vec<f64> {
     let current: f64 = widths.iter().sum();
     if target > current && !widths.is_empty() {
@@ -181,6 +195,7 @@ fn distribute_to_target(mut widths: Vec<f64>, target: f64) -> Vec<f64> {
     widths
 }
 
+/// Fixed layout: only the first row's cells constrain the grid.
 fn resolve_fixed_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -224,6 +239,8 @@ fn resolve_fixed_column_widths(
     })
 }
 
+/// Autofit layout: every cell contributes a minimum and a maximum, and the
+/// slack between them is what the target width is distributed across.
 fn resolve_autofit_column_widths(
     table_block: &TableBlock,
     content_width: f64,
@@ -385,9 +402,8 @@ pub fn normalize_table_column_widths(
         .collect()
 }
 
-/// Resolve a table's per-column pixel widths from its grid metadata and width
-/// budget — the width half of `measureTableBlock`, with NO cell-content
-/// measurement.
+/// Resolves per-column pixel widths from the table's grid metadata and width
+/// budget, per the module's three algorithms. Measures no cell content.
 pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64) -> Vec<f64> {
     let mut column_widths: Vec<f64> = table_block.column_widths.clone().unwrap_or_default();
     let explicit_width_px = preferred_width_px(
@@ -426,7 +442,6 @@ pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64)
         column_widths = normalize_table_column_widths(&column_widths, col_count, target_width);
     }
 
-    // TS `columnWidths.length > 0 && explicitWidthPx` — truthiness check.
     if !column_widths.is_empty()
         && let Some(explicit) = explicit_width_px
         && js_truthy(explicit)
@@ -441,9 +456,8 @@ pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64)
     column_widths
 }
 
-/// Total pixel width of a table — sum of its resolved column widths, falling
-/// back to the explicit table width or the content-width budget. Mirrors the
-/// `totalWidth` that `measureTableBlock` produces.
+/// Total pixel width: the resolved columns, else the explicit table width,
+/// else the whole content-width budget.
 pub fn resolve_table_total_width_px(table_block: &TableBlock, content_width: f64) -> f64 {
     let column_widths = resolve_table_column_widths(table_block, content_width);
     let explicit_width_px = preferred_width_px(
@@ -453,7 +467,6 @@ pub fn resolve_table_total_width_px(table_block: &TableBlock, content_width: f64
         content_width,
         None,
     );
-    // TS `reduce(...) || explicitWidthPx || contentWidth` — truthiness chain.
     let total = column_widths.iter().fold(0.0, |w, &cw| w + cw);
     if js_truthy(total) {
         return total;
@@ -466,11 +479,6 @@ pub fn resolve_table_total_width_px(table_block: &TableBlock, content_width: f64
     content_width
 }
 
-// Ported from packages/core/src/layout/pagination/__tests__/tableWidthUtils.test.ts
-// plus the `resolveTableTotalWidthPx` cases from
-// packages/core/src/layout/flow/__tests__/floatingTable.test.ts — every case
-// preserved. `resolve_cell_grid` expectations are verified against the TS
-// implementation (bun run of resolveCellGrid on the same input).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,8 +496,6 @@ mod tests {
         json!({ "id": 0, "blocks": [] })
     }
 
-    /// One-row table with `n` span-1 cells and the given column widths
-    /// (mirrors the floatingTable.test.ts `table()` helper).
     fn table_with_column_widths(column_widths: Vec<f64>) -> TableBlock {
         let cells: Vec<serde_json::Value> = column_widths.iter().map(|_| plain_cell()).collect();
         serde_json::from_value(json!({
@@ -600,8 +606,6 @@ mod tests {
 
     #[test]
     fn resolves_grid_positions_for_vertically_merged_cells() {
-        // 3-row, 2-col table; col 0 is a rowSpan=3 merged cell (the
-        // integration/table-row-break.test.ts geometry). TS-verified output.
         let block: TableBlock = serde_json::from_value(json!({
             "id": 0,
             "rows": [

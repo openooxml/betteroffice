@@ -1,4 +1,4 @@
-//! Complete S2 package/leaf projection used by the differential corpus gate.
+//! S2 package and leaf projection.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::scalars::{
     ColorValue, RunScalarProperties, ShadingProperties, parse_color_value,
     parse_run_scalar_properties, parse_shading_properties,
 };
-use crate::settings::incumbent_utf8_text_boundary;
+use crate::settings::is_valid_utf8_xml_text;
 use crate::settings::{DocumentSettings, parse_settings};
 use crate::tabs::{TabStop, parse_tab_stops};
 use crate::theme::{Theme, parse_theme};
@@ -114,7 +114,7 @@ pub fn project_xml_part(
     path: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Option<S2XmlPart>, ParseError> {
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(None);
     }
     let document = parse_xml(xml, path, budget)?;

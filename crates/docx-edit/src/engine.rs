@@ -1,11 +1,4 @@
-//! Resident editor-engine state shared by the wasm facade and native tests.
-//!
-//! [`EngineSession`] is the migration owner described by
-//! `openspec/changes/engine-unification/00-DESIGN.md`: it owns the live
-//! [`EditingDoc`] and render-derived state.  The initial migration unit keeps
-//! the legacy `LayoutBlock[]` JSON boundary as a parity/debug export, but the
-//! lowered Rust values stay resident and are reused for repeated reads of the
-//! same document/render generation.
+//! Resident editor-engine state.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -46,10 +39,8 @@ struct LoweredStory {
     doc_epoch: u64,
     env: RenderEnv,
     blocks: Vec<LayoutBlock>,
-    /// Legacy `LayoutBlock[]` JSON, built lazily on the first
-    /// [`EngineSession::lower_story_json`] read. The resident hot path never
-    /// serializes it.
-    parity_json: Option<String>,
+    /// Lazily serialized layout blocks.
+    serialized_blocks: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -327,7 +318,7 @@ struct DisplayState {
     rebuilt_display_pages: u64,
 }
 
-/// Observability snapshot for parity tests and the opt-in profiler.
+/// Engine observability snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineStats {
     pub doc_epoch: u64,
@@ -602,7 +593,7 @@ impl EngineSession {
         }
     }
 
-    /// Internal editing surface used by the compatibility wasm facade.
+    /// Internal editing surface for the wasm facade.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn doc(&self) -> &EditingDoc {
         &self.doc
@@ -612,9 +603,7 @@ impl EngineSession {
         self.doc_epoch.get()
     }
 
-    /// Resident lowering path. The returned slice is retained behind the
-    /// engine session; callers that still need ownership use
-    /// [`Self::lower_story_json`] during migration.
+    /// Runs a callback with resident lowered blocks.
     pub fn with_lowered_story<T>(
         &self,
         story: &str,
@@ -639,7 +628,7 @@ impl EngineSession {
                     doc_epoch: epoch,
                     env: env.clone(),
                     blocks,
-                    parity_json: None,
+                    serialized_blocks: None,
                 },
             );
         } else {
@@ -655,9 +644,7 @@ impl EngineSession {
         Ok(read(&cached.blocks))
     }
 
-    /// Compatibility/parity export for the pre-engine host. Production can
-    /// stop consuming this once layout and display state move into the
-    /// session; keeping it byte-identical makes the migration gate explicit.
+    /// Serializes resident lowered blocks.
     pub fn lower_story_json(&self, story: &str, env: &RenderEnv) -> Result<String, BridgeError> {
         self.with_lowered_story(story, env, |_| ())?;
         let mut render = self.render.borrow_mut();
@@ -666,7 +653,7 @@ impl EngineSession {
             .get_mut(story)
             .expect("resident story exists after lowering");
         Ok(lowered
-            .parity_json
+            .serialized_blocks
             .get_or_insert_with(|| {
                 serde_json::to_string(&lowered.blocks)
                     .expect("LayoutBlock serialization is infallible after lowering")
@@ -773,9 +760,7 @@ impl EngineSession {
         })
     }
 
-    /// Parse, paginate, and retain the measured/options input and resulting
-    /// Layout. The JSON result is the migration oracle until the binary frame
-    /// cutover consumes the retained typed values directly.
+    /// Parses, paginates, and retains measured input and layout.
     pub fn layout_document_json(&self, input_json: &str) -> Result<String, String> {
         let input: LayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
@@ -1701,19 +1686,17 @@ impl EngineSession {
         Ok((bytes, profile))
     }
 
-    /// Build and retain the typed display list. The JSON result remains the
-    /// byte-for-byte production bridge until FrameDelta becomes the only
-    /// browser render input.
+    /// Builds and retains the typed display list.
     pub fn build_display_list_json(&self, input_json: &str) -> Result<String, String> {
         let list = docx_layout::build_display_list_value(input_json)?;
-        let parity_json =
+        let display_json =
             serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))?;
         let mut display = self.display.borrow_mut();
         display.list = Some(list);
         display.resident_input = None;
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
-        Ok(parity_json)
+        Ok(display_json)
     }
 
     /// Build the retained display list and return a binary FrameDelta v1.
@@ -1981,13 +1964,13 @@ mod tests {
         let env = RenderEnv::default();
 
         let first = engine.lower_story_json("body", &env).unwrap();
-        let oracle = serde_json::to_string(
+        let expected = serde_json::to_string(
             &crate::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap(),
         )
         .unwrap();
         assert_eq!(
-            first, oracle,
-            "resident output must match the legacy oracle"
+            first, expected,
+            "resident output must match the uncached lowering"
         );
         let second = engine.lower_story_json("body", &env).unwrap();
         assert_eq!(first, second);
@@ -2054,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn pagination_input_and_layout_are_retained_with_parity_json() {
+    fn pagination_input_and_layout_are_retained_with_json() {
         let engine = EngineSession::new(13);
         let input = r#"{
             "measured": [],
@@ -2064,8 +2047,8 @@ mod tests {
             }
         }"#;
         let resident = engine.layout_document_json(input).unwrap();
-        let oracle = docx_layout::layout_to_json(input).unwrap();
-        assert_eq!(resident, oracle);
+        let expected = docx_layout::layout_to_json(input).unwrap();
+        assert_eq!(resident, expected);
         assert_eq!(engine.stats().layout_epoch, 1);
         assert_eq!(engine.stats().retained_measured_blocks, 0);
         assert_eq!(engine.stats().retained_pages, 1);
@@ -2479,9 +2462,7 @@ mod tests {
         );
     }
 
-    /// Perf probe, not a correctness test. Compares the resident region fast
-    /// path against the pre-existing full-pass-per-keystroke behavior on a
-    /// paragraph-heavy document.
+    /// Compares resident and full region passes on a paragraph-heavy document.
     /// Run: `cargo test -p betteroffice-docx-edit --release --lib -- --ignored perf_probe --nocapture`
     #[test]
     #[ignore = "perf probe; run explicitly with --ignored --nocapture"]
@@ -2565,7 +2546,7 @@ mod tests {
                     crate::FormatPolicy::Inherit,
                 )
                 .unwrap();
-            // the pre-fast-path region branch: full pass + serialized envelope
+            // Full region pass with serialized envelope.
             engine.layout_document_with_regions_json(&request).unwrap();
             let merged = engine.resident_region_display_extras().unwrap();
             engine.build_display_list_frame(&merged, epoch).unwrap();
@@ -2773,7 +2754,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_pagination_reuses_converged_suffix_with_position_parity() {
+    fn resident_pagination_reuses_converged_suffix_at_same_positions() {
         let engine = EngineSession::new(14);
         engine
             .layout_document_json(&paragraph_pagination_input("x", false))
@@ -2896,7 +2877,7 @@ mod tests {
     }
 
     #[test]
-    fn display_list_is_retained_with_parity_json() {
+    fn display_list_is_retained_with_json() {
         let engine = EngineSession::new(17);
         let pagination_input = r#"{
             "measured": [],
@@ -2918,8 +2899,8 @@ mod tests {
         .to_string();
 
         let resident = engine.build_display_list_json(&display_input).unwrap();
-        let oracle = docx_layout::display_list::build_display_list_json(&display_input).unwrap();
-        assert_eq!(resident, oracle);
+        let expected = docx_layout::display_list::build_display_list_json(&display_input).unwrap();
+        assert_eq!(resident, expected);
         assert_eq!(engine.stats().frame_epoch, 1);
         assert_eq!(engine.stats().retained_display_pages, 1);
         assert_eq!(engine.stats().retained_display_primitives, 0);

@@ -1,10 +1,4 @@
-//! Integration tests against a vendored OFL font fixture.
-//!
-//! Fixture: Liberation Sans Regular 2.1.5 (SIL OFL 1.1, see
-//! `tests/fonts/LICENSE-OFL.txt`), the metric-compatible Arial stand-in from
-//! the bundled font set in design.md. Expected values below were
-//! hand-computed from the raw sfnt tables (head/hhea/OS\/2/cmap/hmtx) with an
-//! independent parser, not read back through the crate under test.
+//! Integration tests against Liberation Sans Regular 2.1.5 (SIL OFL 1.1).
 
 use ooxml_text::{
     BaseDirection, BreakOpportunity, CompatFlags, FontStore, LineBox, LineSpacingRule,
@@ -192,7 +186,7 @@ fn break_opportunities_for_mixed_latin_cjk_space_text() {
         .collect();
     assert!(allowed.contains(&4), "break before 'bar': {allowed:?}");
     assert!(allowed.contains(&8), "break before 漢: {allowed:?}");
-    // the fix over TS findWordBreaks: ideographs break between every pair
+    // Ideographs break between every pair.
     assert!(
         allowed.contains(&11),
         "break between 漢 and 字: {allowed:?}"
@@ -226,8 +220,7 @@ fn newline_is_a_mandatory_break() {
     );
 }
 
-// surrogate-safety regression: every opportunity must be a char boundary even
-// through supplementary-plane text (the class of bug the UTF-16 TS scan had)
+// Every opportunity is a character boundary through supplementary-plane text.
 #[test]
 fn break_opportunities_are_char_boundaries_in_supplementary_plane_text() {
     let text = "a\u{1F600}\u{20BB7}b \u{1F3B4}c";

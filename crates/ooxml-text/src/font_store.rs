@@ -1,24 +1,4 @@
 //! Font registry over raw font bytes.
-//!
-//! Parsing crate choice: **skrifa** (over `ttf-parser`). Rationale:
-//!
-//! - skrifa is the Google Fonts "oxidize" parser built for exactly this
-//!   consumer profile — metrics + cmap + (later) glyph outlines for a
-//!   renderer. Its outline API (`OutlineGlyph` → path pen) is what the
-//!   canvas-engine glyph pipeline (`Path2D` outlines per design.md) will call
-//!   next, so metrics and rasterization come from one parser by construction.
-//! - First-class variable-font (`LocationRef`) and COLR support, which the
-//!   display-list renderer needs for variable and color fonts.
-//! - Actively developed and fuzzed as the shaping/metrics backend of the
-//!   fontations stack (parley/vello); font bytes here are attacker-controlled
-//!   (embedded DOCX fonts), so a hardened, panic-free parser is a requirement,
-//!   not a nicety.
-//!
-//! Trade-off acknowledged: rustybuzz (used in [`crate::shape`]) embeds
-//! `ttf-parser` internally, so both parsers end up in the dependency tree.
-//! That duplication is confined to shaping; every metric this crate reports
-//! comes from skrifa, so measurement can never disagree with the future
-//! outline path over which parser read the table.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -211,8 +191,7 @@ struct FontEntry {
 
 /// Registry of fonts, keyed by [`FontId`], parsed from raw bytes.
 ///
-/// The store owns the byte buffers; shaping and (later) outline extraction
-/// borrow them via [`FontStore::font_bytes`].
+/// The store owns the byte buffers borrowed by shaping and outline extraction.
 #[derive(Default)]
 pub struct FontStore {
     fonts: Vec<FontEntry>,
@@ -363,13 +342,7 @@ impl FontStore {
         Ok(self.glyph_id(id, ch)?.is_some())
     }
 
-    /// Fallback-chain resolution: the first font in `chain` whose cmap covers
-    /// `ch` wins; `None` if no font in the chain covers it (the host then
-    /// degrades that run to its browser-measured path per design.md).
-    ///
-    /// Unknown ids in the chain are skipped rather than failing the whole
-    /// resolution: a chain is host-assembled config, and one stale entry must
-    /// not take down measurement for a run another font can cover.
+    /// Resolves the first covering font, skipping unknown IDs.
     pub fn resolve(&self, chain: &[FontId], ch: char) -> Option<FontId> {
         chain
             .iter()

@@ -1,8 +1,4 @@
-//! Bug-compatible subset of `@openooxml/drawingml` used by DOCX drawings.
-//!
-//! Despite its name, the incumbent `findByFullName` helper only searches
-//! direct children. This module deliberately retains that behavior, together
-//! with JavaScript `parseInt` prefix parsing and explicit null arrow fields.
+//! DOCX DrawingML parsing with direct-child lookup and integer-prefix parsing.
 
 use std::collections::HashMap;
 
@@ -759,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn transforms_and_gradients_keep_javascript_integer_prefixes() {
+    fn transforms_and_gradients_accept_integer_prefixes() {
         let transform = root(
             "<a:xfrm rot=\"2700000junk\" flipH=\"1\"><a:off x=\"10\" y=\"20\"/><a:ext cx=\"1828800\" cy=\"914400\"/></a:xfrm>",
         );

@@ -1,5 +1,3 @@
-// Ported from openooxml/docx, which did not gate on clippy style lints;
-// burning these down is tracked follow-up work, not a merge blocker.
 #![allow(
     clippy::cloned_ref_to_slice_refs,
     clippy::collapsible_if,
@@ -33,18 +31,15 @@
 
 //! The collaborative editing schema used by every DOCX editing slice.
 //!
-//! The load-bearing rule is that a Word *story* is one continuous [`yrs::TextRef`]. A story is
-//! the body flow, one header/footer part, one table cell, one footnote, and so on. [`StoryId`] is
-//! deliberately opaque so later slices can use package relationship IDs or structural cell IDs
-//! without changing this crate.
+//! The load-bearing rule is that a Word story is one continuous [`yrs::TextRef`].
 //!
 //! OOXML maps to yrs as follows:
 //!
 //! - a story's ordered `w:p` stream -> one Y.Text stored under its ID in the `stories` Y.Map;
 //! - each `w:p` boundary -> one countable Y.Text embed whose nested Y.Map carries `paraId`,
-//!   `pStyle`, `alignment`, and future `pPrIns` / `pPrDel` / `pPrChange` values;
+//!   `pStyle`, `alignment`, and paragraph-change values;
 //! - adjacent `w:r` properties -> Y.Text formatting attributes (`bold`, `italic`, `fontFamily`,
-//!   `fontSize`, `color`, plus opaque attributes added by later slices);
+//!   `fontSize`, `color`, plus opaque attributes);
 //! - `w:ins` / `w:del` -> `ins` / `del` Y.Text formatting attributes. A suggested deletion is
 //!   retained text with a `del` attribute, never a CRDT deletion;
 //! - `w:commentRangeStart` / `w:commentRangeEnd` -> encoded [`StickyIndex`] pairs in the side
@@ -106,11 +101,6 @@ pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use seed::seed_from_docx;
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH};
 
-// The JS boundary for this crate (a wasm-bindgen session API over
-// [`EditingDoc`]), compiled only for wasm-pack builds (`--features wasm`).
-// COORDINATION: keep this cfg-mod HERE, next to the imports — the
-// render-bridge track appends `pub mod bridge;` as the FINAL line of this
-// file, and the two declarations must never collide in a merge.
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
@@ -390,11 +380,7 @@ impl EditingDoc {
         Ok(para_id)
     }
 
-    /// Removes one complete story from the document's story map.
-    ///
-    /// The coexistence table mirror uses this when a PM table/cell disappears;
-    /// leaving an unreachable cell story behind would make the per-story
-    /// canonical watchdog correctly report a divergent document.
+    /// Removes one complete story from the document map.
     pub fn delete_story(&self, story_id: &str) -> EditResult<()> {
         let mut txn = self.doc.transact_mut_with(self.client_id);
         let stories = txn

@@ -1,18 +1,4 @@
-//! Header/footer band gates, replaying the fixtures exported by
-//! `scripts/export-hf-fixtures.ts` (tests/fixtures/hf/):
-//! 1. per-page rId mapping — default / first-page (titlePg) / even-odd rules
-//!    must match the executed TS rules (getHeaderForPage / getFooterForPage);
-//! 2. band geometry — HfRegion y/height must equal the values harvested from
-//!    the REAL DOM painter (renderPage under happy-dom) on identical input;
-//! 3. determinism snapshots — byte-identical run-over-run, pinned by
-//!    committed `<name>.displaylist.json` files. Regenerate deliberately:
-//!    DL_SNAPSHOT_UPDATE=1 cargo test -p docx-layout
-//! 4. region-aware hit-testing — a point inside a band resolves within that
-//!    band's HF PM doc and identifies the region + rId.
-//!
-//! An envelope WITHOUT the headersFooters payload emits no header/footer
-//! keys at all — pinned here and, transitively, by the untouched body
-//! display-list snapshots in display_list.rs.
+//! Header/footer fixture and interaction gates.
 
 use docx_layout::display_list::{DisplayList, HfKind, build_display_list_json};
 use docx_layout::hit::{HitRegion, hit_test, hit_test_regions, range_rects, range_rects_in_region};
@@ -26,9 +12,8 @@ fn fixture_path(name: &str, suffix: &str) -> std::path::PathBuf {
 }
 
 fn read(name: &str, suffix: &str) -> String {
-    std::fs::read_to_string(fixture_path(name, suffix)).unwrap_or_else(|_| {
-        panic!("missing {name}.{suffix}.json; run `bun scripts/export-hf-fixtures.ts`")
-    })
+    std::fs::read_to_string(fixture_path(name, suffix))
+        .unwrap_or_else(|_| panic!("missing {name}.{suffix}.json"))
 }
 
 fn build(name: &str) -> DisplayList {
@@ -41,7 +26,7 @@ fn approx(a: f64, b: f64) {
 }
 
 #[test]
-fn hf_regions_match_executed_ts_mapping_and_geometry() {
+fn hf_regions_follow_variant_mapping_and_band_geometry() {
     for name in SCENARIOS {
         let dl = build(name);
         let expect: serde_json::Value = serde_json::from_str(&read(name, "expect")).unwrap();
@@ -137,7 +122,7 @@ fn hf_payload_absent_emits_no_regions() {
 #[test]
 fn hit_test_regions_resolves_bands_and_body() {
     // hf-default-both: header band y 48..72, footer band y 984..1008,
-    // margins.left 96; header paragraph pm span [1,15]
+    // margins.left 96; header paragraph doc span [1,15]
     let dl = build("hf-default-both");
 
     let hit = hit_test_regions(&dl, 0, 120.0, 60.0).unwrap();
@@ -156,7 +141,7 @@ fn hit_test_regions_resolves_bands_and_body() {
         .expect("footer band with content resolves a position");
     assert!((1..=15).contains(&pos), "footer pos out of HF span: {pos}");
 
-    // body click resolves like the legacy body-only hit test
+    // a body click resolves the same as the body-only hit test
     let hit = hit_test_regions(&dl, 0, 100.0, 150.0).unwrap();
     assert_eq!(hit.region, HitRegion::Body);
     assert_eq!(hit.r_id, None);
@@ -176,7 +161,7 @@ fn hit_test_regions_resolves_bands_and_body() {
 #[test]
 fn range_rects_resolve_inside_hf_bands_scoped_by_rid() {
     // hf-default-both: header band y 48..72, footer band y 984..1008, header +
-    // footer paragraphs both span pm [1,15]. A range in the HEADER doc must
+    // footer paragraphs both span [1,15]. A range in the HEADER doc must
     // yield rects inside the header band only (not the footer, not the body).
     let dl = build("hf-default-both");
 

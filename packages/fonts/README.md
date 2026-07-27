@@ -44,7 +44,7 @@ The same bytes are consumed by two sides at once:
 - the **browser**, via `registerBundledFontFace()` (`FontFace` API), so DOM text measurement uses these exact bytes;
 - the **Rust/WASM `FontStore`**, via `loadBundledFontBytes()`, which parses raw sfnt.
 
-Byte-identity across both consumers is a hard requirement of the differential measurement harness (see `openspec/changes/rust-canvas-engine/design.md`, "The one strategic constraint: font bytes").
+Byte-identity across both consumers is a hard requirement: the two measurement paths must be handed the same font bytes, or their results diverge.
 
 ## Lazy loading
 

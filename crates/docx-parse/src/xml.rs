@@ -5,10 +5,10 @@ use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use thiserror::Error;
 
-/// Incumbent block/inline container limit from `parseLimits.ts`.
+/// Maximum block and inline nesting depth.
 pub const MAX_NESTING_DEPTH: usize = 64;
 
-/// OOXML namespaces mirrored from `xmlParser.ts` for later parser slices.
+/// OOXML namespace URIs.
 pub mod namespaces {
     pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     pub const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -29,7 +29,7 @@ pub mod namespaces {
     pub const PR: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 }
 
-/// Conservative defaults for the S1 XML/relationship foundation.
+/// Conservative defaults for the XML/relationship foundation.
 #[derive(Clone, Debug)]
 pub struct ParseLimits {
     pub max_xml_bytes: usize,
@@ -451,13 +451,10 @@ impl XmlElement {
         output
     }
 
-    /// Match xml-js/js2xml's incumbent non-compact serialization used by
-    /// public raw inline XML fields. Its attribute encoder only protects the
-    /// surrounding double quote; decoded ampersands, angle brackets, and
-    /// apostrophes are emitted verbatim, even when that makes invalid XML.
-    pub fn to_incumbent_xml(&self) -> String {
+    /// Serializes raw inline XML, escaping only double quotes in attributes.
+    pub fn to_raw_inline_xml(&self) -> String {
         let mut output = String::new();
-        self.write_incumbent_xml(&mut output);
+        self.write_raw_inline_xml(&mut output);
         output
     }
 
@@ -493,7 +490,7 @@ impl XmlElement {
         output.push('>');
     }
 
-    fn write_incumbent_xml(&self, output: &mut String) {
+    fn write_raw_inline_xml(&self, output: &mut String) {
         output.push('<');
         output.push_str(&self.name);
         for (name, value) in &self.attributes {
@@ -516,7 +513,7 @@ impl XmlElement {
         output.push('>');
         for child in &self.children {
             match child {
-                XmlNode::Element(element) => element.write_incumbent_xml(output),
+                XmlNode::Element(element) => element.write_raw_inline_xml(output),
                 XmlNode::Text(text) => escape_text(text, output),
                 XmlNode::CData(text) => {
                     output.push_str("<![CDATA[");
@@ -754,9 +751,7 @@ fn append_text_node(
         if let XmlNode::Text(text) = &node
             && let Some(XmlNode::Text(previous)) = parent.children.last_mut()
         {
-            // quick-xml surfaces entity references as separate events. A DOM
-            // text node does not retain those lexical boundaries, so match
-            // the incumbent parser by coalescing adjacent decoded text.
+            // Adjacent decoded text forms one DOM text node.
             previous.push_str(text);
             return Ok(());
         }
@@ -786,9 +781,7 @@ fn malformed(reader: &Reader<&[u8]>, part: &str, error: impl ToString) -> ParseE
 }
 
 fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    // The incumbent parser repairs literal stray ampersands. Keep that narrow
-    // compatibility only for UTF-8/ASCII input; declared entities are left for
-    // the resolver-free parser to reject.
+    // Stray ampersands are repaired only in UTF-8 or ASCII input.
     let mut output: Option<Vec<u8>> = None;
     let mut index = 0;
     while index < xml.len() {
@@ -916,10 +909,10 @@ mod tests {
     }
 
     #[test]
-    fn incumbent_raw_xml_pins_xml_js_attribute_escaping_quirk() {
+    fn raw_inline_xml_only_escapes_attribute_quotes() {
         let doc = parse(r#"<x a="x&apos;y&gt;z&quot;q&lt;l&amp;m"/>"#).unwrap();
         assert_eq!(
-            doc.root().unwrap().to_incumbent_xml(),
+            doc.root().unwrap().to_raw_inline_xml(),
             r#"<x a="x'y>z&quot;q<l&m"/>"#
         );
         assert_eq!(
@@ -929,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_incumbent_color_helper_shape() {
+    fn parses_color_value_theme_and_tint() {
         let doc = parse("<w:color w:val=\"112233\" w:themeColor=\"accent1\" w:themeTint=\"80\"/>")
             .unwrap();
         assert_eq!(

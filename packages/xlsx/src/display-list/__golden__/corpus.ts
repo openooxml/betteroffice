@@ -4,9 +4,7 @@
  * Each scenario pairs a synthetic display list with a viewport state and the
  * visible-cell range the pure math derives from it. The committed
  * `golden/<name>.json` files freeze the CURRENT output verbatim — they do not
- * judge correctness, only pin it so the display-list + viewport seam can prove
- * byte-identical output across refactors and the eventual Rust port. See
- * README.md.
+ * judge correctness, only pin byte-identical output across refactors.
  */
 
 import type { DisplayList } from '../types';

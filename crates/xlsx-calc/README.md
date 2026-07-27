@@ -150,8 +150,8 @@ with `~` escaping a literal `*`, `?`, or `~`.
 
 - **Text positions** are counted in Unicode scalar values; Excel counts UTF-16
   code units. This differs only for astral (supplementary-plane) characters.
-- **`SEARCH` / VLOOKUP / MATCH / VLOOKUP exact mode** do not implement
-  wildcards yet.
+- **`SEARCH`, and `VLOOKUP` / `HLOOKUP` / `MATCH` in exact mode**, do not
+  implement wildcards yet.
 - **`TEXT`** implements only the five format codes listed above; the full
   §18.8.31 number-format interpreter is a separate PR.
 - **1904 date system** is not yet wired (see Date & time).
@@ -160,3 +160,5 @@ with `~` escaping a literal `*`, `?`, or `~`.
   the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
+
+Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

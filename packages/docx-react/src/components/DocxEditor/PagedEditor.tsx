@@ -246,7 +246,7 @@ export interface PagedEditorProps {
   onHyperlinkPopupClose?: () => void;
   /** Callback when user right-clicks on the pages (for context menu).
    *  When the right-click target resolves to an image node, `image` carries
-   *  the image's PM doc position, current wrap type, current cssFloat (lets
+   *  the image's document position, current wrap type, current cssFloat (lets
    *  the menu disambiguate Square Left vs Square Right), and — for inline
    *  images only — the rendered EMU offset of the image relative to the
    *  page content origin. The host promotes that offset into the new
@@ -366,9 +366,9 @@ export interface PagedEditorRef {
   yrsLocToDisplayPosition(loc: YrsLoc): number | null;
   /** Publish a yrs selection/mutation through the direct-input refresh path. */
   syncYrsInputState(docChanged: boolean): boolean;
-  /** Apply a body-toolbar command through yrs. Never falls back to PM. */
+  /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
-  /** Apply a non-toolbar body command through yrs. Never falls back to PM. */
+  /** Apply a non-toolbar body command through yrs. */
   applyYrsCommand(command: YrsEditorCommand): boolean;
   /** Get current layout. */
   getLayout(): Layout | null;
@@ -796,8 +796,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           const selectionChanged = lastPublishedBodySelectionKeyRef.current !== selectionKey;
           lastPublishedBodySelectionKeyRef.current = selectionKey;
           // Publish body selection before the asynchronous layout/sidebar
-          // projection. The deleted PM follower used to provide this ordering;
-          // React state now consumes the authoritative yrs positions directly.
+          // projection. React state consumes the authoritative yrs positions
+          // directly.
           if (!docChanged && selectionChanged) {
             onSelectionChangeRef.current?.(selection.anchor, selection.head);
           }
@@ -1052,7 +1052,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             if (command.type === 'insertPageBreak') {
               // The native renderer consumes page breaks at block boundaries.
               // Split a non-empty prefix first so the facade insert lands
-              // between paragraph pilcrows without writing through PM.
+              // between paragraph pilcrows.
               const breakAt =
                 at.offset > 0
                   ? {
@@ -1211,9 +1211,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       ]
     );
 
-    // Paragraph flash (G2): scrollToParaId's flash is drawn as an overlay over
-    // display-list geometry. The scroll API bumps the nonce to (re)start; the
-    // overlay clears itself after the flash and calls back to drop the request.
     const [canvasFlashRequest, setCanvasFlashRequest] =
       useState<CanvasParagraphFlashRequest | null>(null);
     const requestCanvasParagraphFlash = useCallback(
@@ -1325,7 +1322,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
 
     /**
-     * Handle focus on container - redirect to hidden PM.
+     * Handle focus on container - redirect to hidden input.
      */
     const handleContainerFocus = useCallback(
       (e: React.FocusEvent) => {
@@ -1336,7 +1333,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           return;
         // Don't steal focus from the hyperlink popup's text/URL inputs —
         // the focus event bubbles up here and would bounce focus back to
-        // the body PM, making the inputs impossible to edit.
+        // the body input, making the inputs impossible to edit.
         if (target.closest('.oox-hyperlink-popup')) return;
         focusBodyInput();
         setIsFocused(true);
@@ -1397,7 +1394,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (yrsInputRef.current?.isFocused()) return;
         const target = e.target as HTMLElement | null;
         // Don't hijack keystrokes typed into the hyperlink popup's inputs —
-        // refocusing the body PM here would steal focus mid-type and route
+        // refocusing the body input here would steal focus mid-type and route
         // keys (e.g. space) into the document instead of the input.
         if (target?.closest('.oox-hyperlink-popup')) return;
         // Ensure the input surface is focused if the user types.
@@ -1408,8 +1405,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
         // PageUp/PageDown - let container handle scrolling
         if (['PageUp', 'PageDown'].includes(e.key) && !e.metaKey && !e.ctrlKey) {
-          // Let PM handle the cursor movement first
-          // If PM doesn't handle it (at bounds), the container will scroll
+          // Let the editor handle the cursor movement first
+          // If it doesn't handle it (at bounds), the container will scroll
         }
 
         // Cmd/Ctrl+Home - scroll to top and move cursor to start
@@ -1679,9 +1676,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           onCaretInterrupt={handleLocalCaretInterrupt}
         />
 
-        {/* Non-rendering orchestration host. Visible pages are canvas-only;
-            this empty ref remains while legacy interaction signatures are
-            collapsed in later retirement phases. */}
         <div ref={viewportLayoutRef} style={{ display: 'contents' }}>
           <div
             ref={pagesContainerRef}
@@ -1774,8 +1768,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             />
           )}
 
-          {/* Canvas-path scrollToParaId flash (G2) — painter is parked, so the
-              flash is drawn over the paragraph's display-list geometry. */}
           {canvasOverlayTarget && displayListQueries && (
             <CanvasParagraphFlashOverlay
               request={canvasFlashRequest}

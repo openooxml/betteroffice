@@ -1,59 +1,37 @@
-//! Registry of float exclusion zones — Rust port of the pagination-side
-//! floating-object geometry.
+//! Registry of the page-space exclusion zones anchored floats claim.
 //!
-//! TS source: `packages/core/src/layout/pagination/floatingObjects.ts`
+//! Anchored images, floating tables and floating text boxes carve horizontal
+//! room out of the lines they overlap. Line breaking itself happens during
+//! measurement, upstream of this crate, so the measured lines arriving here
+//! already have float effects folded into their widths and offsets — no zone
+//! data crosses the input envelope. What pagination still needs is each
+//! float's claim in page coordinates, which callers register as a
+//! [`BlockedRegion`] and query per line through
+//! [`FloatRegionRegistry::resolve_free_span`].
 //!
-//! Exported symbols (1:1 with the TS module):
-//! - `MIN_WRAP_SEGMENT_WIDTH` (const)
-//! - `BlockedRegion`, `Rect`, `Clearance`, `WrapSide` (parameter shapes)
-//! - `FreeSpan`
-//! - `FloatRegionRegistry` with `set_layout_context`, `clear`,
-//!   `register_floating_object`, `resolve_free_span`, `zones_for_page`
-//! - `create_float_region_registry`
+//! Coordinate spaces differ between input and output: a region's `rect` is in
+//! page coordinates, while [`FreeSpan`] is content-area relative, so a shift of
+//! `0.0` means the line starts at the left margin.
 //!
-//! Anchored (floating) images carve horizontal space out of the lines they
-//! overlap; paragraph layout asks this registry, per line, how much width
-//! remains and where the line starts.
+//! A float participates in a line only when it is on the same page, its
+//! [`WrapSide`] is not `None`, and its clearance-padded box overlaps the line's
+//! vertical band. Each participating float then squeezes the writable interval
+//! from one side: `Left` or `Both` pulls the right edge back to the float's
+//! cleared left edge, `Right` or `Both` pushes the left edge past its cleared
+//! right edge. The resulting span is clamped at zero, so a line fully covered
+//! by floats reports no room rather than a negative width.
 //!
-//! INTEGRATION
-//! ===========
-//! Measurement happens host-side before the JSON seam: the measure
-//! pipeline pre-scans the block list, extracts `FloatingImageZone`s
-//! (`{ leftMargin, rightMargin, topY, bottomY, segments?, fullWidthBlock? }`,
-//! content-area coordinates relative to the anchor block) from anchored
-//! images, floating tables, and floating text boxes, groups co-located floats
-//! (paragraph-relative zones merge when Y ranges overlap AND anchors are
-//! within 4 blocks; margin/page-relative zones group by identical `topY`;
-//! page-pinned full-width bands re-anchor to block 0), and threads the active
-//! zones plus cumulative Y into each `measureBlock` call. Consequently the
-//! measured-block input JSON arrives with float effects ALREADY BAKED INTO
-//! THE LINE MEASURES — per-line widths/offsets reflect the exclusion zones;
-//! no `FloatingImageZone` data crosses the seam.
-//!
-//! What this module needs at pagination time is the page-space claim of each
-//! float: `BlockedRegion { id, pageNumber, rect, clearance, wrapSide }`. The
-//! integrator registers those from anchored-object placement inside the place
-//! loop (rect in page coordinates, clearance = the wp:effectExtent-style wrap
-//! distances, wrapSide from the wrap mode) and calls `resolve_free_span` per
-//! line / `zones_for_page` when composing a page. `mod` is declared but not
-//! yet wired into the spine (`lib.rs` / `place.rs`); the integrator swaps
-//! these into place-loop hooks later.
-//!
-//! Numeric fidelity: all math is f64 with JS `Math.min`/`Math.max` semantics
-//! (NaN-propagating, -0-aware) and the exact TS iteration order.
-//!
-//! Note on tests: the TS module has no dedicated unit-test file (repo tests
-//! only re-import `MIN_WRAP_SEGMENT_WIDTH` through `floatingZones.ts`), so
-//! the `#[cfg(test)]` suite below mirrors the TS implementation semantics
-//! branch by branch instead of porting an existing spec.
+//! Comparisons use NaN-propagating, signed-zero-aware minimum and maximum so
+//! the numbers reaching the canonical JSON match the host's semantics.
 
 use serde::{Deserialize, Serialize};
 
 /// A text segment beside a float narrower than this (px) is not worth
-/// wrapping into.
+/// wrapping into. Measurement applies the threshold; this registry reports raw
+/// spans and leaves the decision to its caller.
 pub const MIN_WRAP_SEGMENT_WIDTH: f64 = 24.0;
 
-/// JS `Math.min`: NaN-propagating, and `Math.min(0, -0) === -0`.
+/// NaN-propagating minimum that preserves negative zero.
 fn js_min(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
@@ -68,7 +46,7 @@ fn js_min(a: f64, b: f64) -> f64 {
     }
 }
 
-/// JS `Math.max`: NaN-propagating, and `Math.max(-0, 0) === 0`.
+/// NaN-propagating maximum that prefers positive zero.
 fn js_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         f64::NAN
@@ -113,6 +91,8 @@ pub enum WrapSide {
     None,
 }
 
+/// One float's claim on a page: its box, the wrap gap around it, and which
+/// side text may run down.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockedRegion {
@@ -125,6 +105,7 @@ pub struct BlockedRegion {
     pub wrap_side: WrapSide,
 }
 
+/// Room left for one line, in content-area coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FreeSpan {
@@ -285,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn min_wrap_segment_width_matches_ts() {
+    fn min_wrap_segment_width_is_24_pixels() {
         assert_eq!(MIN_WRAP_SEGMENT_WIDTH, 24.0);
     }
 
@@ -589,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_region_deserializes_from_ts_camel_case_json() {
+    fn blocked_region_deserializes_from_camel_case_json() {
         let json = r#"{
             "id": "img1",
             "pageNumber": 1,

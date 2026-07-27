@@ -5,14 +5,15 @@ use std::sync::{Arc, Mutex, Weak};
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
-    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, Fill, HAlign,
-    Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetId, VAlign, Workbook as WorkbookModel,
+    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
+    HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId, VAlign,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
     NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
-    cell_state_for_input_no_eval,
+    cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
     DisplayList, GhostEdit, GridGeometry, Viewport, build_display_list_with_ghosts, display_text,
@@ -23,6 +24,10 @@ use xlsx_render::{build_display_list, scaled, viewport_for_range, viewport_for_u
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate,
     SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+};
+use crate::sheet_json::{
+    MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
+    MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, Error, HistoryState,
@@ -35,8 +40,6 @@ use crate::{RenderOptions, RenderedPng};
 const MAX_RANGE_CELLS: u64 = 100_000;
 const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
-const MAX_HYPERLINKS_PER_SHEET: usize = 65_536;
-const MAX_HYPERLINK_FIELD_BYTES: usize = 32_767;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
 /// Largest browser-safe collaboration client identifier.
@@ -79,11 +82,73 @@ enum WorkbookMode {
     Collaborative { structure: WorkbookStructure },
 }
 
+/// Package identity the model does not carry: per current sheet, the source
+/// sheet it came from and the shared-string entry each of its cells was
+/// authored against.
+#[derive(Clone, Default)]
+struct PreservedSheetState {
+    origins: Vec<Option<usize>>,
+    shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+}
+
+impl PreservedSheetState {
+    fn insert(&mut self, index: usize) {
+        let index = index.min(self.origins.len());
+        self.origins.insert(index, None);
+        self.shared_string_cells
+            .insert(index, xlsx_parse::SharedStringCells::new());
+    }
+
+    fn remove(&mut self, index: usize) {
+        if index < self.origins.len() {
+            self.origins.remove(index);
+            self.shared_string_cells.remove(index);
+        }
+    }
+
+    /// Carries each cell's shared-string provenance to the address the op moves
+    /// it to; a cell inside a deleted span loses it with the cell.
+    fn shift(&mut self, sheet: SheetId, op: &Op) {
+        let Some(cells) = self.shared_string_cells.get_mut(sheet.0 as usize) else {
+            return;
+        };
+        *cells = cells
+            .iter()
+            .filter_map(|(&(row, col), &index)| {
+                let moved = xlsx_ops::remap_ref(CellRef::new(row, col), op)?;
+                Some(((moved.row, moved.col), index))
+            })
+            .collect();
+    }
+
+    /// Drops shared-string provenance after identity-less replay.
+    fn forget_shared_strings(&mut self) {
+        for cells in &mut self.shared_string_cells {
+            cells.clear();
+        }
+    }
+}
+
+/// Undo-issued identity token: the preserved sheet state on both sides of one
+/// committed transaction. Only replaying history restores a sheet's package
+/// identity; a fresh add never inherits one.
+#[derive(Clone)]
+struct PreservedStateHistory {
+    before: PreservedSheetState,
+    after: PreservedSheetState,
+}
+
 pub struct Workbook {
     authority: WorkbookAuthority,
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
+    source_package: Option<xlsx_parse::PreservedPackage>,
+    preserved: PreservedSheetState,
+    preserved_undo: Vec<PreservedStateHistory>,
+    preserved_redo: Vec<PreservedStateHistory>,
+    edited_since_open: bool,
+    moved_references_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
@@ -102,6 +167,12 @@ impl Workbook {
     }
 
     /// Opens a replica. `client_id` must be unique among connected peers.
+    ///
+    /// The source package is local state and base compatibility covers only the
+    /// modeled workbook, so peers whose cells and charts agree but whose macros
+    /// or custom XML differ are accepted as the same base and save different
+    /// documents. Distributing whole-package identity needs a further authority
+    /// schema version.
     pub fn open_collaborative(bytes: &[u8], client_id: u64) -> Result<Self> {
         Self::open_internal(bytes, true, Some(client_id))
     }
@@ -114,8 +185,13 @@ impl Workbook {
                 return Err(Error::DuplicatePart(name.clone()));
             }
         }
-        let model = xlsx_parse::parse_workbook(&parts)?;
-        Self::from_parts(model, build_graph, client_id)
+        let parsed = xlsx_parse::parse_workbook_with_package(&parts)?;
+        Self::from_parts(
+            parsed.workbook,
+            Some(parsed.package),
+            build_graph,
+            client_id,
+        )
     }
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
@@ -136,16 +212,22 @@ impl Workbook {
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
-        Self::from_parts(model, true, None)
+        Self::from_parts(model, None, true, None)
     }
 
     /// Creates a replica from a model with a peer-unique client ID.
     pub fn from_model_collaborative(model: WorkbookModel, client_id: u64) -> Result<Self> {
-        Self::from_parts(model, true, Some(client_id))
+        Self::from_parts(model, None, true, Some(client_id))
     }
 
-    fn from_parts(model: WorkbookModel, build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+    fn from_parts(
+        model: WorkbookModel,
+        source_package: Option<xlsx_parse::PreservedPackage>,
+        build_graph: bool,
+        client_id: Option<u64>,
+    ) -> Result<Self> {
         validate_model(&model)?;
+        validate_chart_source(&model, source_package.is_some())?;
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
@@ -167,11 +249,31 @@ impl Workbook {
             },
             None => WorkbookMode::Standalone,
         };
+        let preserved = match &source_package {
+            Some(package) => PreservedSheetState {
+                origins: (0..model.sheets.len())
+                    .map(|index| (index < package.source_sheet_count()).then_some(index))
+                    .collect(),
+                shared_string_cells: (0..model.sheets.len())
+                    .map(|index| package.source_shared_string_cells(index))
+                    .collect(),
+            },
+            None => PreservedSheetState {
+                origins: vec![None; model.sheets.len()],
+                shared_string_cells: vec![Default::default(); model.sheets.len()],
+            },
+        };
         Ok(Self {
             authority,
             mode,
             pending_remote_updates: Vec::new(),
             model,
+            source_package,
+            preserved,
+            preserved_undo: Vec::new(),
+            preserved_redo: Vec::new(),
+            edited_since_open: false,
+            moved_references_since_open: false,
             active_sheet: SheetId(0),
             undo: UndoStack::new(),
             graph,
@@ -252,6 +354,7 @@ impl Workbook {
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         validate_model(&staged.model)
+            .and_then(|()| validate_chart_source(&staged.model, self.source_package.is_some()))
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
     }
@@ -336,8 +439,12 @@ impl Workbook {
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
         self.undo.clear();
+        self.preserved_undo.clear();
+        self.preserved_redo.clear();
+        self.preserved.forget_shared_strings();
         self.authority.clear_history();
         self.proposals.clear();
+        self.edited_since_open = true;
         self.emit_update(UpdateEvent {
             update,
             origin: UpdateOrigin::Remote,
@@ -384,7 +491,20 @@ impl Workbook {
 
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model(&self.model)?;
-        let parts = xlsx_parse::serialize_workbook(&self.model)?;
+        validate_chart_source(&self.model, self.source_package.is_some())?;
+        let parts = match &self.source_package {
+            Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins_after_edits(
+                &self.model,
+                package,
+                &self.preserved.origins,
+                &self.preserved.shared_string_cells,
+                xlsx_parse::SaveEdits {
+                    changed: self.edited_since_open,
+                    moved_references: self.moved_references_since_open,
+                },
+            )?,
+            None => xlsx_parse::serialize_workbook(&self.model)?,
+        };
         ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
     }
 
@@ -726,7 +846,7 @@ impl Workbook {
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
-        self.sheet(sheet)?;
+        self.ensure_worksheet_sheet(sheet)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
@@ -790,6 +910,10 @@ impl Workbook {
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
         for op in &ops {
+            if let Some(sheet) = worksheet_edit_target(op) {
+                self.ensure_worksheet_sheet(sheet)?;
+            }
+            self.ensure_references_stay_valid(op)?;
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
             xlsx_ops::apply(&mut preview, op)?;
@@ -856,13 +980,20 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
-        let Some(ops) = self.undo.undo(&mut self.model)? else {
+        let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
         let update = self
             .authority
             .apply_ops(&ops, SyncOrigin::Undo)
             .map_err(authority_error)?;
+        self.undo.undo(&mut self.model)?;
+        if let Some(history) = self.preserved_undo.pop() {
+            self.preserved = history.before.clone();
+            self.preserved_redo.push(history);
+        } else {
+            self.apply_preserved_state_ops(&ops);
+        }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
@@ -888,13 +1019,20 @@ impl Workbook {
             return self.apply_collaborative_history(history, options);
         }
         let active_name = self.active_sheet_name();
-        let Some(ops) = self.undo.redo(&mut self.model)? else {
+        let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
         let update = self
             .authority
             .apply_ops(&ops, SyncOrigin::Redo)
             .map_err(authority_error)?;
+        self.undo.redo(&mut self.model)?;
+        if let Some(history) = self.preserved_redo.pop() {
+            self.preserved = history.after.clone();
+            self.preserved_undo.push(history);
+        } else {
+            self.apply_preserved_state_ops(&ops);
+        }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
             self.proposals.clear();
@@ -932,7 +1070,9 @@ impl Workbook {
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
         self.model = history.model;
+        self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
+        self.preserved.forget_shared_strings();
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);
@@ -1231,13 +1371,13 @@ impl Workbook {
     }
 
     fn validate_target(&self, sheet: SheetId, cell: CellRef) -> Result<()> {
-        self.sheet(sheet)?;
+        self.ensure_worksheet_sheet(sheet)?;
         self.validate_cell(cell)
     }
 
     fn validate_bounded_range(&self, sheet: SheetId, range: CellRange) -> Result<(u64, u64)> {
         validate_range(range)?;
-        self.sheet(sheet)?;
+        self.ensure_worksheet_sheet(sheet)?;
         let rows = u64::from(range.end.row - range.start.row + 1);
         let columns = u64::from(range.end.col - range.start.col + 1);
         if rows * columns > MAX_RANGE_CELLS {
@@ -1271,7 +1411,58 @@ impl Workbook {
         validate_cell_ref(cell)
     }
 
+    /// Charts, pivot tables and external links reference sheets by name and
+    /// address, and neither this crate nor the model can rewrite them. Refuse
+    /// the ops that would strand those references rather than write a workbook
+    /// whose parts disagree.
+    fn ensure_references_stay_valid(&self, op: &Op) -> Result<()> {
+        if !matches!(
+            op,
+            Op::RenameSheet { .. }
+                | Op::RemoveSheet { .. }
+                | Op::InsertRows { .. }
+                | Op::DeleteRows { .. }
+                | Op::InsertCols { .. }
+                | Op::DeleteCols { .. }
+        ) {
+            return Ok(());
+        }
+        let Some(part) = self
+            .source_package
+            .as_ref()
+            .and_then(xlsx_parse::PreservedPackage::unpatchable_reference_part)
+        else {
+            return Ok(());
+        };
+        Err(Error::InvalidOperation(format!(
+            "{part} references sheets this edit would move, and it cannot be rewritten"
+        )))
+    }
+
+    /// Rejects edits aimed at a preserved chartsheet or dialogsheet.
+    fn ensure_worksheet_sheet(&self, sheet: SheetId) -> Result<()> {
+        self.sheet(sheet)?;
+        let origin = self
+            .preserved
+            .origins
+            .get(sheet.0 as usize)
+            .copied()
+            .flatten();
+        if origin.is_some_and(|origin| {
+            self.source_package
+                .as_ref()
+                .is_some_and(|package| !package.source_sheet_is_worksheet(origin))
+        }) {
+            return Err(Error::InvalidOperation(format!(
+                "sheet {} is not an editable worksheet",
+                sheet.0
+            )));
+        }
+        Ok(())
+    }
+
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
+        let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
@@ -1285,12 +1476,12 @@ impl Workbook {
                 origin: UpdateOrigin::Local,
             });
         } else {
-            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
             let update = self
                 .authority
                 .apply_ops(ops, SyncOrigin::User)
                 .map_err(authority_error)?;
+            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
+            self.undo.commit(&mut self.model, &transaction)?;
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -1298,10 +1489,20 @@ impl Workbook {
                 });
             }
         }
+        self.apply_preserved_state_ops(ops);
+        if let Some(before) = preserved_before {
+            self.preserved_undo.push(PreservedStateHistory {
+                before,
+                after: self.preserved.clone(),
+            });
+            self.preserved_redo.clear();
+        }
+        self.edited_since_open = true;
         Ok(())
     }
 
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
+        let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
@@ -1328,6 +1529,15 @@ impl Workbook {
                 });
             }
         }
+        self.apply_preserved_state_ops(ops);
+        if let Some(before) = preserved_before {
+            self.preserved_undo.push(PreservedStateHistory {
+                before,
+                after: self.preserved.clone(),
+            });
+            self.preserved_redo.clear();
+        }
+        self.edited_since_open = true;
         Ok(())
     }
 
@@ -1364,6 +1574,7 @@ impl Workbook {
     }
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
+        self.edited_since_open = true;
         let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
         self.graph = Some(graph);
         let result = calculation_result(&result);
@@ -1413,6 +1624,21 @@ impl Workbook {
         self.model
             .sheet(self.active_sheet)
             .map(|sheet| sheet.name.clone())
+    }
+
+    fn apply_preserved_state_ops(&mut self, ops: &[Op]) {
+        self.moved_references_since_open |= ops.iter().any(moves_cell_references);
+        for op in ops {
+            match *op {
+                Op::AddSheet { index, .. } => self.preserved.insert(index),
+                Op::RemoveSheet { index } => self.preserved.remove(index),
+                Op::InsertRows { sheet, .. }
+                | Op::DeleteRows { sheet, .. }
+                | Op::InsertCols { sheet, .. }
+                | Op::DeleteCols { sheet, .. } => self.preserved.shift(sheet, op),
+                _ => {}
+            }
+        }
     }
 
     fn restore_active_sheet(&mut self, previous_name: Option<&str>) {
@@ -1728,6 +1954,7 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
             )));
         }
         validate_hyperlinks(&sheet.hyperlinks)?;
+        validate_charts(&sheet.charts)?;
         validate_sheet_name(&sheet.name)?;
         if !names.insert(sheet.name.to_lowercase()) {
             return Err(Error::InvalidOperation(format!(
@@ -1793,6 +2020,31 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
+    match op {
+        Op::SetCell { sheet, .. }
+        | Op::InsertRows { sheet, .. }
+        | Op::DeleteRows { sheet, .. }
+        | Op::InsertCols { sheet, .. }
+        | Op::DeleteCols { sheet, .. }
+        | Op::SetColWidth { sheet, .. }
+        | Op::SetRowHeight { sheet, .. }
+        | Op::SetFreezePane { sheet, .. }
+        | Op::SetHyperlinks { sheet, .. }
+        | Op::SetCharts { sheet, .. }
+        | Op::MergeCells { sheet, .. }
+        | Op::UnmergeCells { sheet, .. }
+        | Op::PatchRangeStyle { sheet, .. }
+        | Op::SetRangeNumberFormat { sheet, .. }
+        | Op::ApplyRangeFormat { sheet, .. } => Some(*sheet),
+        Op::AddSheet { .. }
+        | Op::RemoveSheet { .. }
+        | Op::RenameSheet { .. }
+        | Op::RestoreSheet { .. }
+        | Op::SetDefinedNames { .. } => None,
+    }
 }
 
 fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
@@ -1896,7 +2148,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RenameSheet { sheet, .. } => {
             require_sheet(model, *sheet)?;
         }
-        Op::RestoreSheet { .. } => {
+        Op::RestoreSheet { .. } | Op::SetDefinedNames { .. } | Op::SetCharts { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
@@ -1932,6 +2184,7 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                     "row insertion would discard content at the sheet boundary".to_string(),
                 ));
             }
+            refuse_off_grid_chart_anchors(sheet, op, "row")?;
         }
         Op::InsertCols {
             sheet, at, count, ..
@@ -1958,10 +2211,26 @@ fn validate_insert_capacity(model: &WorkbookModel, op: &Op) -> Result<()> {
                     "column insertion would discard content at the sheet boundary".to_string(),
                 ));
             }
+            refuse_off_grid_chart_anchors(sheet, op, "column")?;
         }
         _ => {}
     }
     Ok(())
+}
+
+/// An insertion that would push a marker a chart must move off the grid is
+/// refused: clamping it would resize an object whose `editAs` forbids resizing.
+fn refuse_off_grid_chart_anchors(sheet: &Sheet, op: &Op, axis: &str) -> Result<()> {
+    if sheet
+        .charts
+        .iter()
+        .all(|chart| insertion_keeps_chart_anchor_on_grid(chart.anchor, op))
+    {
+        return Ok(());
+    }
+    Err(Error::InvalidOperation(format!(
+        "{axis} insertion would push a chart anchor past the sheet boundary"
+    )))
 }
 
 fn require_sheet(model: &WorkbookModel, sheet: SheetId) -> Result<&Sheet> {
@@ -2000,6 +2269,113 @@ fn validate_range(range: CellRange) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// A chart part is only ever preserved from the package it was read with;
+/// this crate cannot create one. A chart-bearing model with no source package
+/// would save as a workbook that lost every chart, so it is refused instead.
+fn validate_chart_source(model: &WorkbookModel, has_source_package: bool) -> Result<()> {
+    if has_source_package || model.sheets.iter().all(|sheet| sheet.charts.is_empty()) {
+        return Ok(());
+    }
+    Err(Error::InvalidOperation(
+        "charts can only be preserved from a source package, and this workbook has none"
+            .to_string(),
+    ))
+}
+
+fn validate_charts(charts: &[SheetChart]) -> Result<()> {
+    if charts.len() > MAX_CHARTS_PER_SHEET {
+        return Err(Error::InvalidOperation(
+            "sheet contains too many charts".to_string(),
+        ));
+    }
+    let mut identities = HashSet::with_capacity(charts.len());
+    for chart in charts {
+        if chart.part.is_empty() || chart.drawing.is_empty() {
+            return Err(Error::InvalidOperation(
+                "chart must name its part and drawing".to_string(),
+            ));
+        }
+        if chart.part.len() > MAX_CHART_FIELD_BYTES
+            || chart.drawing.len() > MAX_CHART_FIELD_BYTES
+            || chart.refs.len() > MAX_CHART_REFS_PER_CHART
+        {
+            return Err(Error::InvalidOperation(
+                "chart exceeds the supported size".to_string(),
+            ));
+        }
+        for path in [&chart.part, &chart.drawing] {
+            if !is_package_part_path(path) {
+                return Err(Error::InvalidOperation(format!(
+                    "chart names {path}, which is not a package part path"
+                )));
+            }
+        }
+        if chart.anchor_index >= MAX_CHART_ANCHORS_PER_DRAWING {
+            return Err(Error::InvalidOperation(
+                "chart anchor index is out of range".to_string(),
+            ));
+        }
+        if !identities.insert((&chart.part, &chart.drawing, chart.anchor_index)) {
+            return Err(Error::InvalidOperation(
+                "two charts claim the same part, drawing and anchor".to_string(),
+            ));
+        }
+        validate_chart_anchor(chart.anchor)?;
+        for reference in &chart.refs {
+            if reference.formula.len() > MAX_CHART_FIELD_BYTES {
+                return Err(Error::InvalidOperation(
+                    "chart reference exceeds the supported length".to_string(),
+                ));
+            }
+            if !is_writable_xml_text(&reference.formula) {
+                return Err(Error::InvalidOperation(
+                    "chart reference contains a character xml cannot carry".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Both corners of an anchor must land on the grid; an off-grid one would be
+/// written back as an address no consumer can read.
+fn validate_chart_anchor(anchor: ChartAnchor) -> Result<()> {
+    let cells = match anchor {
+        ChartAnchor::TwoCell { from, to, .. } => vec![from, to],
+        ChartAnchor::OneCell { from, .. } => vec![from],
+        ChartAnchor::Absolute { .. } => Vec::new(),
+    };
+    for cell in cells {
+        if cell.row >= MAX_ROWS || cell.col >= MAX_COLS {
+            return Err(Error::InvalidOperation(
+                "chart anchor is off the sheet grid".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A relative, traversal-free package path, so a peer cannot name a part
+/// outside the package or one whose name the writer cannot round-trip.
+fn is_package_part_path(path: &str) -> bool {
+    !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+        && path.chars().all(|character| {
+            !character.is_control() && character != '"' && character != '<' && character != '>'
+        })
+}
+
+/// Whether every character is one xml 1.0 can carry in element content.
+fn is_writable_xml_text(value: &str) -> bool {
+    value.chars().all(|character| {
+        matches!(character, '\t' | '\n' | '\r')
+            || (character >= ' ' && character != '\u{fffe}' && character != '\u{ffff}')
+    })
 }
 
 fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {
@@ -2347,6 +2723,17 @@ fn validate_axis(axis: &str, at: u32, count: u32, limit: u32) -> Result<()> {
     Ok(())
 }
 
+/// Whether an op moves the cells preserved parts name by address.
+fn moves_cell_references(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::InsertRows { .. }
+            | Op::DeleteRows { .. }
+            | Op::InsertCols { .. }
+            | Op::DeleteCols { .. }
+    )
+}
+
 fn invalidates_proposals(op: &Op) -> bool {
     matches!(
         op,
@@ -2355,6 +2742,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
             | Op::SetHyperlinks { .. }
+            | Op::SetCharts { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }

@@ -1,6 +1,5 @@
 /**
- * Pure viewport types. No DOM — this is the compute seam the a11y grid, the
- * canvas painter, and a future Rust port all read from.
+ * Pure viewport types shared by the accessibility grid and canvas painter.
  */
 
 /**

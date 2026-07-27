@@ -99,7 +99,7 @@ export class XlsxDocument {
     setActiveSheet(index: number): void;
     setRangeNumberFormatJson(args: string): string;
     /**
-     * serialized `SheetInfo`: sheet names, active index, content extent.
+     * serialized `SheetInfo`: stable IDs, names, active index, content extent.
      */
     sheetInfoJson(): string;
     /**
