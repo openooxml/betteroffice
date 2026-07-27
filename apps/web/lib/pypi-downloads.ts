@@ -12,20 +12,26 @@ interface RecentDownloads {
   data?: { last_month?: number };
 }
 
+const NOT_PUBLISHED = Symbol("not published");
+
 /**
- * Sum last-month downloads, tolerating per-package failures: an unpublished or
- * freshly published distribution 404s until pypistats has data for it.
- * `resolved` counts the packages that produced a value.
+ * Sum last-month downloads. `resolved` counts packages that produced a value
+ * and `missing` counts those pypistats has no record of, which is distinct
+ * from a failed request: a package with no stats yet has genuinely had no
+ * downloads, whereas a rate-limited or failing API tells us nothing.
  */
 export async function monthlyDownloads(
   packageNames: string[],
   fetchImpl: typeof fetch = fetch,
-): Promise<{ downloads: number; resolved: number }> {
-  const fetchCount = async (packageName: string): Promise<number> => {
+): Promise<{ downloads: number; resolved: number; missing: number }> {
+  const fetchCount = async (
+    packageName: string,
+  ): Promise<number | typeof NOT_PUBLISHED> => {
     const response = await fetchImpl(
       `${PYPISTATS_API}/${encodeURIComponent(packageName)}/recent`,
       { headers: { "User-Agent": USER_AGENT } },
     );
+    if (response.status === 404) return NOT_PUBLISHED;
     if (!response.ok) {
       throw new Error(
         `pypistats request failed for ${packageName}: ${response.status}`,
@@ -43,21 +49,27 @@ export async function monthlyDownloads(
 
   let downloads = 0;
   let resolved = 0;
+  let missing = 0;
   for (const result of results) {
-    if (result.status === "fulfilled") {
+    if (result.status !== "fulfilled") continue;
+    if (result.value === NOT_PUBLISHED) {
+      missing += 1;
+    } else {
       downloads += result.value;
       resolved += 1;
     }
   }
-  return { downloads, resolved };
+  return { downloads, resolved, missing };
 }
 
+/** `null` only when the API told us nothing; a package with no stats is 0. */
 export async function monthlyDownloadsTotal(
   fetchImpl: typeof fetch = fetch,
 ): Promise<number | null> {
-  const { downloads, resolved } = await monthlyDownloads(
+  const { downloads, resolved, missing } = await monthlyDownloads(
     PYPI_PACKAGES,
     fetchImpl,
   );
-  return resolved === 0 ? null : downloads;
+  if (resolved > 0) return downloads;
+  return missing === PYPI_PACKAGES.length ? 0 : null;
 }
