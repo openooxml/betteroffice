@@ -15,7 +15,7 @@ function payload(downloads: number, cacheSeconds: number): Response {
       schemaVersion: 1,
       label: "npm downloads",
       message: `${downloads.toLocaleString("en-US")}/month`,
-      color: "brightgreen",
+      color: "red",
     },
     { headers: { "Cache-Control": `public, max-age=${cacheSeconds}, s-maxage=${cacheSeconds}` } },
   );
