@@ -139,7 +139,6 @@ jobs:
           - os: ubuntu-latest
             target: x86_64
             manylinux: "2014"
-            sdist: true
           - os: ubuntu-latest
             target: aarch64
             manylinux: "2014"
@@ -162,10 +161,23 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           working-directory: bindings/python
-          sccache: "true"
+
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: bindings/python/dist
+
+  sdist:
+    name: Source distribution
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
 
       - uses: PyO3/maturin-action@v1
-        if: matrix.sdist
         with:
           command: sdist
           args: --out dist
@@ -173,12 +185,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          name: wheel-sdist
           path: bindings/python/dist
 
   python-publish:
     name: Publish to PyPI
-    needs: python-build
+    needs: [python-build, sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
