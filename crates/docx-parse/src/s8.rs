@@ -300,8 +300,7 @@ pub(crate) fn parse_comment_part(
         theme,
         styles,
         doc_defaults,
-        // Incumbent comment parsing deliberately does not resolve numbering
-        // even though other story owners do.
+        // Comment stories do not resolve numbering.
         numbering: None,
         media,
         charts,

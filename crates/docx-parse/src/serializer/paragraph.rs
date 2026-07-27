@@ -484,8 +484,7 @@ fn serialize_tracked_change(
     if let Some(date) = change.info.date.as_deref().and_then(nonempty_trimmed) {
         writer.attribute("w:date", date);
     }
-    // The incumbent always spells tracked wrappers with separate start/end
-    // tags, even when filtering leaves their content empty.
+    // Tracked wrappers use explicit start and end tags.
     writer.text("");
     for item in &change.content {
         match item {
@@ -843,7 +842,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_tracked_wrappers_keep_typescript_explicit_end_tags() {
+    fn empty_tracked_wrappers_use_explicit_end_tags() {
         let change = TrackedInline {
             node_type: "deletion".to_owned(),
             info: TrackedChangeInfo {

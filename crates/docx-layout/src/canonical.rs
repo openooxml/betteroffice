@@ -1,16 +1,9 @@
-//! Deterministic canonicalizer for a `Layout` tree — port of
-//! `packages/core/src/layout/pagination/__golden__/serializeLayout.ts`.
-//!
-//! Produces the exact byte sequence the TS canonicalizer produces: sorted
-//! keys, derived fields (`resolvedLines`, `checkpoints`) omitted, every
-//! number rounded with ECMAScript `Math.round(n * 1000) / 1000` semantics and
-//! printed with ECMAScript `Number::toString` formatting, pretty-printed like
-//! `JSON.stringify(value, null, 2)`, trailing newline included.
+//! Canonical layout serialization with ECMAScript number and JSON formatting.
 
 use crate::types::Layout;
 use serde_json::Value;
 
-/// TS `GOLDEN_PRECISION` — decimal places kept for every number.
+/// Decimal places retained for every number.
 const GOLDEN_FACTOR: f64 = 1000.0; // 10 ** 3
 
 /// Keys excluded from the canonical form (derived-redundant data).
@@ -25,7 +18,7 @@ fn js_math_round(x: f64) -> f64 {
     if x - floor >= 0.5 { floor + 1.0 } else { floor }
 }
 
-/// TS `roundNumber` — round to golden precision, collapsing -0 to 0.
+/// Rounds to golden precision and collapses negative zero.
 fn round_number(n: f64) -> f64 {
     if !n.is_finite() {
         return n;
@@ -141,7 +134,7 @@ fn push_indent(out: &mut String, depth: usize) {
     }
 }
 
-/// TS `serializeLayout` — canonical golden string (trailing newline included).
+/// Returns the canonical layout string with a trailing newline.
 pub fn serialize_layout(layout: &Layout) -> String {
     let value = serde_json::to_value(layout).expect("Layout serializes to JSON");
     let mut out = String::new();

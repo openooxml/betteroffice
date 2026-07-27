@@ -1,27 +1,4 @@
-/**
- * Canvas-mode header/footer caret + selection overlay.
- *
- * The body caret/selection on the canvas path is drawn by `CanvasSelectionOverlay`
- * from the display list's body geometry. Header/footer editing needs the same
- * treatment without consulting the visible renderer's page nodes.
- *
- * This component sources HF caret/selection geometry from the region-aware
- * display-list queries instead — `hfCaretRects` / `hfRangeRects`, scoped to the
- * active HF part's `rId` and region (header|footer). Because the SAME HF doc
- * paints on every page carrying the part, those queries return one candidate per
- * page; this picks the page nearest the viewport center (mirroring the DOM path's
- * `getHfDomSnapshot`) and projects that page's rects onto the visible canvas via
- * the shared `projectPageLocalRect`, exactly like the body overlay. It portals
- * into `overlayTarget` (`editorContentRef`, which shares the `.canvas-pages`
- * host's top-left).
- *
- * Renders nothing off the canvas path (mounted only when `overlayTarget` +
- * `displayListQueries` are present) and nothing until the region-aware wasm
- * exports are embedded (the queries return `[]` — a documented gap that closes
- * on the integrator re-embed).
- *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
- */
+/** Draws header/footer selection geometry over canvas pages. */
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -37,7 +14,7 @@ export interface CanvasHfSelectionOverlayProps {
   region: 'header' | 'footer';
   /** Relationship id of the active HF part (the display-list variant's `rId`). */
   rId: string;
-  /** Current HF ProseMirror selection (positions in the HF doc), or null. */
+  /** Current HF selection (positions in the HF doc), or null. */
   selection: { from: number; to: number } | null;
   /** Portal target — `editorContentRef.current` (shares the canvas host's top-left). */
   overlayTarget: HTMLElement;

@@ -40,8 +40,7 @@ pub fn parse_document_body(
     parse_document_body_impl(document, parser, true)
 }
 
-/// S9 reconstructs section content as shared host-side slices, so it does not
-/// need a second cloned copy of every body block in the transport model.
+/// Parses a body without cloning blocks into section content.
 pub(crate) fn parse_document_body_compact(
     document: &XmlElement,
     parser: &mut StoryParser<'_, '_>,
@@ -215,8 +214,7 @@ pub fn extract_template_variables(text: &str) -> Vec<String> {
             variables.push(candidate.to_owned());
             cursor = end.saturating_add(1);
         } else {
-            // The incumbent regex can restart at the second brace in
-            // `{{name}}`, producing the inner `{name}` match.
+            // A failed match restarts at the second brace.
             cursor = start;
         }
     }
@@ -241,8 +239,7 @@ pub fn extract_all_template_variables(content: &[BlockContent]) -> Vec<String> {
                     }
                 }
             }
-            // Pinned incumbent boundary: block SDTs are not traversed by the
-            // documentParser utility.
+            // Block SDTs are not traversed.
             BlockContent::BlockSdt(_) => {}
         }
     }
@@ -355,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_text_and_empty_query_pin_the_shallow_incumbent_grammar() {
+    fn paragraph_text_and_empty_query_use_shallow_run_grammar() {
         let body = parse(
             r#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:t> a </w:t><w:tab/><w:br/></w:r></w:p><w:p/></w:body></w:document>"#,
         );

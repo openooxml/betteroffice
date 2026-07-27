@@ -1,6 +1,10 @@
 node_modules/
 dist/
 target/
+.venv/
+__pycache__/
+.pytest_cache/
+*.so
 .next/
 .source/
 .open-next/
@@ -9,10 +13,14 @@ target/
 .env*
 *.tsbuildinfo
 packages/xlsx/src/wasm/generated/*.wasm
+packages/xlsx/src/wasm/generated/*.js
 packages/pptx/src/wasm/generated/*.wasm
+packages/pptx/src/wasm/generated/*.js
 next-env.d.ts
 cloudflare-env.d.ts
 .DS_Store
 packages/docx/src/wasm/generated/**/*.wasm
+packages/docx/src/wasm/generated/**/*.js
 apps/redact-worker/src/wasm/generated/*.wasm
+apps/redact-worker/src/wasm/generated/*.js
 screenshots/

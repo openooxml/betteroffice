@@ -65,7 +65,7 @@ pub(crate) fn collect_text(
 
 /// resolve a bare entity name (`amp`, `#65`, `#x41`) to its text; anything
 /// needing a dtd is rejected.
-fn resolve_entity(name: &str) -> Result<String, ParseError> {
+pub(crate) fn resolve_entity(name: &str) -> Result<String, ParseError> {
     let raw = format!("&{name};");
     quick_xml::escape::unescape(&raw)
         .map(|c| c.into_owned())

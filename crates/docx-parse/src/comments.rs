@@ -65,8 +65,7 @@ pub fn parse_comments(
     let mut palette_by_author = IndexMap::<String, usize>::new();
     let mut last_para_ids = Vec::new();
 
-    // Incumbent quirk: the 100k cap applies to all direct children before
-    // filtering for w:comment, so leading unknown nodes consume the cap.
+    // The 100,000-child cap applies before comment filtering.
     for child in root.child_elements().take(100_000) {
         if child.local_name() != "comment" {
             continue;
@@ -255,9 +254,7 @@ fn truncate_utf16_scalars(value: &str, max_units: usize) -> String {
         .collect()
 }
 
-/// Remove body-story comment anchors whose id does not resolve to a parsed
-/// comment. This deliberately follows only the incumbent block recursion
-/// (paragraphs, table cells, block SDTs), not shape/textbox JSON payloads.
+/// Removes unresolved anchors from paragraphs, table cells, and block SDTs.
 pub fn remove_orphan_comment_ranges(blocks: &mut [BlockContent], comment_ids: &[f64]) {
     let ids: HashSet<u64> = comment_ids.iter().map(|id| number_key(*id)).collect();
     prune_blocks(blocks, &ids);

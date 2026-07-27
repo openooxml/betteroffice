@@ -689,8 +689,7 @@ fn visit_new_images(
                     }
                 }
             }
-            // Pinned incumbent behavior: newly inserted images inside a block
-            // SDT do not take the full-repack fast path yet.
+            // New images inside block SDTs remain on the selective-patch path.
             BlockContent::BlockSdt(_) => {}
         }
     }
@@ -756,9 +755,7 @@ fn register_image_extensions(package: &mut Package, extensions: &HashSet<String>
         return;
     };
     let mut changed = false;
-    // TypeScript preserves discovery order through Set. Sorting here would
-    // perturb canonical child order, so recover package discovery order from
-    // newly appended image parts.
+    // Preserve package discovery order for newly appended image parts.
     let mut ordered = Vec::new();
     for (path, _) in &package.parts {
         let Some(extension) = path
@@ -1194,9 +1191,7 @@ pub fn build_patched_document_xml(
     Some(patched)
 }
 
-/// Update core properties using the caller's fixed clock. The scan is linear
-/// and intentionally mirrors the incumbent's narrow direct-child text update:
-/// malformed/nested content is not consumed across a later opening tag.
+/// Updates direct-child core-property text using a fixed clock.
 pub fn update_core_properties(
     core_xml: &str,
     update_modified_date: bool,

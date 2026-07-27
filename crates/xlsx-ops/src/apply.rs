@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workbook};
+use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook};
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_formulas, remap_hyperlink_locations, remap_hyperlink_range, rename_hyperlink_location,
-    rename_sheet_references,
+    remap_charts, remap_defined_names, remap_formulas, remap_hyperlink_locations,
+    remap_hyperlink_range, rename_chart_refs, rename_defined_names, rename_hyperlink_location,
+    rename_sheet_references, strand_chart_refs,
 };
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
@@ -24,6 +25,9 @@ pub enum OpError {
     SheetNotFound(SheetId),
     SheetIndexOutOfRange(usize),
     FormulaNotRewritable { sheet: SheetId, cell: CellRef },
+    DefinedNameNotRewritable { name: String },
+    ChartRefNotRewritable { part: String },
+    ChartAnchorNotMovable { part: String },
     InvalidStyle(String),
 }
 
@@ -38,6 +42,15 @@ impl fmt::Display for OpError {
                 sheet.0,
                 cell.to_a1()
             ),
+            OpError::DefinedNameNotRewritable { name } => {
+                write!(f, "defined name {name} cannot be safely rewritten")
+            }
+            OpError::ChartRefNotRewritable { part } => {
+                write!(f, "chart reference in {part} cannot be safely rewritten")
+            }
+            OpError::ChartAnchorNotMovable { part } => {
+                write!(f, "the anchor of {part} would leave the sheet grid")
+            }
             OpError::InvalidStyle(message) => f.write_str(message),
         }
     }
@@ -107,6 +120,14 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::SetHyperlinks {
                 sheet: *sheet,
                 hyperlinks: old,
+            }]))
+        }
+        Op::SetCharts { sheet, charts } => {
+            let sheet_ref = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut sheet_ref.charts, charts.clone());
+            Ok(InvertedOp(vec![Op::SetCharts {
+                sheet: *sheet,
+                charts: old,
             }]))
         }
         Op::MergeCells { sheet, range } => {
@@ -185,6 +206,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         Op::AddSheet { index, name } => {
             let idx = (*index).min(wb.sheets.len());
             wb.sheets.insert(idx, Sheet::new(name.clone()));
+            shift_defined_name_scopes(wb, idx);
             Ok(InvertedOp(vec![Op::RemoveSheet { index: idx }]))
         }
         Op::RemoveSheet { index } => remove_sheet(wb, *index),
@@ -196,6 +218,8 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 .clone();
             let formulas = rename_sheet_references(wb, &old, name)?;
             let hyperlinks = rename_hyperlink_locations(wb, &old, name);
+            let defined_names = rename_defined_names(wb, &old, name);
+            let charts = rename_chart_refs(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
@@ -203,6 +227,8 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 formulas,
             }];
             inverse.extend(hyperlinks);
+            inverse.extend(defined_names);
+            inverse.extend(charts);
             Ok(InvertedOp(inverse))
         }
         Op::RestoreSheet {
@@ -226,21 +252,50 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                     .unwrap_or_default();
                 old_formulas.push((*formula_sheet, *cell, state));
             }
+            let defined_names = rename_defined_names(wb, &old_name, name);
+            let charts = rename_chart_refs(wb, &old_name, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             for (formula_sheet, cell, state) in formulas {
                 sheet_mut(wb, *formula_sheet)?.set_cell(*cell, state.clone().into());
             }
-            Ok(InvertedOp(vec![Op::RestoreSheet {
+            let mut inverse = vec![Op::RestoreSheet {
                 sheet: *sheet,
                 name: old_name,
                 formulas: old_formulas,
+            }];
+            inverse.extend(defined_names);
+            inverse.extend(charts);
+            Ok(InvertedOp(inverse))
+        }
+        Op::SetDefinedNames { defined_names } => {
+            let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());
+            Ok(InvertedOp(vec![Op::SetDefinedNames {
+                defined_names: previous,
             }]))
         }
-        Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
-        Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
-        Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
-        Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
+        Op::InsertRows { sheet, at, count } => {
+            apply_atomically(wb, |next| insert_rows(next, *sheet, *at, *count, op))
+        }
+        Op::DeleteRows { sheet, at, count } => {
+            apply_atomically(wb, |next| delete_rows(next, *sheet, *at, *count, op))
+        }
+        Op::InsertCols { sheet, at, count } => {
+            apply_atomically(wb, |next| insert_cols(next, *sheet, *at, *count, op))
+        }
+        Op::DeleteCols { sheet, at, count } => {
+            apply_atomically(wb, |next| delete_cols(next, *sheet, *at, *count, op))
+        }
     }
+}
+
+fn apply_atomically(
+    wb: &mut Workbook,
+    apply: impl FnOnce(&mut Workbook) -> Result<InvertedOp, OpError>,
+) -> Result<InvertedOp, OpError> {
+    let mut next = wb.clone();
+    let inverse = apply(&mut next)?;
+    *wb = next;
+    Ok(inverse)
 }
 
 fn apply_range_formats(
@@ -371,7 +426,10 @@ fn insert_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op)?;
+    let chart_restores = remap_charts(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -393,6 +451,8 @@ fn insert_rows(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
+    inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -404,7 +464,10 @@ fn delete_rows(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op)?;
+    let chart_restores = remap_charts(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -436,6 +499,8 @@ fn delete_rows(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
+    inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -447,7 +512,10 @@ fn insert_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op)?;
+    let chart_restores = remap_charts(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -469,6 +537,8 @@ fn insert_cols(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
+    inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -480,7 +550,10 @@ fn delete_cols(
     count: u32,
     op: &Op,
 ) -> Result<InvertedOp, OpError> {
+    wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
     let restores = remap_formulas(wb, op)?;
+    let defined_name_restore = remap_defined_names(wb, op)?;
+    let chart_restores = remap_charts(wb, op)?;
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
@@ -512,6 +585,8 @@ fn delete_cols(
         hyperlinks: old_hyperlinks,
     });
     inv.extend(restores);
+    inv.extend(defined_name_restore);
+    inv.extend(chart_restores);
     inv.extend(hyperlink_restores);
     Ok(InvertedOp(inv))
 }
@@ -671,7 +746,17 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
     if index >= wb.sheets.len() {
         return Err(OpError::SheetIndexOutOfRange(index));
     }
+    let order_before = wb
+        .sheets
+        .iter()
+        .map(|sheet| sheet.name.clone())
+        .collect::<Vec<_>>();
     let removed = wb.sheets.remove(index);
+    let previous_defined_names = drop_defined_name_scopes(wb, index);
+    let chart_restores = strand_chart_refs(wb, &removed.name, &order_before)
+        .into_iter()
+        .map(|restore| rebase_chart_restore(restore, index))
+        .collect::<Vec<_>>();
     let sheet = SheetId(index as u32);
     let mut inv = vec![Op::AddSheet {
         index,
@@ -716,7 +801,58 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             hyperlinks: removed.hyperlinks,
         });
     }
+    if !removed.charts.is_empty() {
+        inv.push(Op::SetCharts {
+            sheet,
+            charts: removed.charts,
+        });
+    }
+    if let Some(defined_names) = previous_defined_names {
+        inv.push(Op::SetDefinedNames { defined_names });
+    }
+    inv.extend(chart_restores);
     Ok(InvertedOp(inv))
+}
+
+/// Rebases chart restores after sheet insertion.
+fn rebase_chart_restore(restore: Op, removed_index: usize) -> Op {
+    match restore {
+        Op::SetCharts {
+            sheet: SheetId(at),
+            charts,
+        } if at as usize >= removed_index => Op::SetCharts {
+            sheet: SheetId(at + 1),
+            charts,
+        },
+        other => other,
+    }
+}
+
+/// Widens sheet scopes at or after an inserted sheet.
+fn shift_defined_name_scopes(wb: &mut Workbook, index: usize) {
+    for defined in &mut wb.defined_names {
+        if let Some(sheet) = defined.local_sheet
+            && sheet.0 as usize >= index
+        {
+            defined.local_sheet = Some(SheetId(sheet.0 + 1));
+        }
+    }
+}
+
+/// Drops names scoped to a removed sheet and narrows the scopes above it,
+/// returning the prior list when it changed.
+fn drop_defined_name_scopes(wb: &mut Workbook, index: usize) -> Option<Vec<DefinedName>> {
+    let previous = wb.defined_names.clone();
+    wb.defined_names
+        .retain(|defined| defined.local_sheet.map(|sheet| sheet.0 as usize) != Some(index));
+    for defined in &mut wb.defined_names {
+        if let Some(sheet) = defined.local_sheet
+            && sheet.0 as usize > index
+        {
+            defined.local_sheet = Some(SheetId(sheet.0 - 1));
+        }
+    }
+    (previous != wb.defined_names).then_some(previous)
 }
 
 fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {
@@ -1288,6 +1424,96 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, OpError::FormulaNotRewritable { .. }));
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn structural_edits_capture_defined_name_rewrites_for_undo() {
+        let mut wb = wb_one_sheet();
+        wb.defined_names.push(DefinedName {
+            name: "Input".into(),
+            formula: "Sheet1!$A$2".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        let inverse = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(wb.defined_names[0].formula, "Sheet1!$A$3");
+        assert!(
+            inverse
+                .0
+                .iter()
+                .any(|op| matches!(op, Op::SetDefinedNames { .. }))
+        );
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn structural_edits_refuse_workbook_names_with_unqualified_references() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        wb.defined_names.push(DefinedName {
+            name: "Input".into(),
+            formula: "$A$2".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        let error = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
+        assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn refused_defined_name_rewrites_leave_the_workbook_unchanged() {
+        let mut wb = wb_one_sheet();
+        wb.sheets[0].set_cell(
+            r("B1"),
+            Cell {
+                formula: Some("A2".into()),
+                ..Cell::default()
+            },
+        );
+        wb.defined_names.push(DefinedName {
+            name: "Dynamic".into(),
+            formula: "OFFSET($A$1,0,0,COUNTA($A:$A),1)".into(),
+            local_sheet: Some(SheetId(0)),
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        let error = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
         assert_eq!(wb, before);
     }
 }

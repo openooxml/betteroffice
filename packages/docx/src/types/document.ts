@@ -79,7 +79,13 @@ export type {
   DrawingSceneNode,
   DrawingScene,
 } from './content/shape';
-export type { ChartGrouping, ChartPoint, ChartPlotGroup } from './content/chart';
+export type {
+  ChartDataLabels,
+  ChartGrouping,
+  ChartPoint,
+  ChartPointLabel,
+  ChartPlotGroup,
+} from './content/chart';
 export type { CommentAuthor, CommentAnchorRange } from './content/comment';
 export type { NoteKind, NoteSeparatorReference } from './content/headerFooter';
 export type { PageNumberingProperties } from './content/section';

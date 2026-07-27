@@ -47,6 +47,17 @@ impl UndoStack {
         Ok(())
     }
 
+    /// the ops the next `undo` would apply, so a caller that must clear a
+    /// fallible gate before the workbook changes can check them first.
+    pub fn next_undo(&self) -> Option<&[Op]> {
+        self.undo.last().map(Vec::as_slice)
+    }
+
+    /// the ops the next `redo` would apply.
+    pub fn next_redo(&self) -> Option<&[Op]> {
+        self.redo.last().map(Vec::as_slice)
+    }
+
     /// reverse the most recent transaction, returning the ops applied.
     pub fn undo(&mut self, wb: &mut Workbook) -> Result<Option<Vec<Op>>, OpError> {
         let Some(ops) = self.undo.last().cloned() else {

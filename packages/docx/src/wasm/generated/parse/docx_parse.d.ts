@@ -7,42 +7,42 @@
 export function parse_docx_relationships(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S2 entry retained for ABI compatibility.
+ * Parses an S2 package projection.
  */
 export function parse_docx_s2(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S3 entry retained for ABI compatibility.
+ * Parses an S3 package projection.
  */
 export function parse_docx_s3(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S4 entry retained for ABI compatibility.
+ * Parses an S4 package projection.
  */
 export function parse_docx_s4(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S5 entry retained for ABI compatibility.
+ * Parses an S5 package projection.
  */
 export function parse_docx_s5(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S6 entry retained for ABI compatibility.
+ * Parses an S6 package projection.
  */
 export function parse_docx_s6(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S7 entry retained for ABI compatibility.
+ * Parses an S7 package projection.
  */
 export function parse_docx_s7(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S8 entry retained for ABI compatibility.
+ * Parses an S8 package projection.
  */
 export function parse_docx_s8(data: Uint8Array): string;
 
 /**
- * S9 production read facade: one safe package pass to the full Document wire.
+ * Parses the full document wire in one package pass.
  */
 export function parse_docx_s9(data: Uint8Array, options_json: string): string;
 
@@ -59,17 +59,17 @@ export function rezip_docx(entries: any): Uint8Array;
 export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
 
 /**
- * Legacy staged Rust S10 serializer entry retained for ABI compatibility.
+ * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
 
 /**
- * Legacy staged Rust S11 serializer entry retained for ABI compatibility.
+ * Serializes an S11 request.
  */
 export function serialize_docx_s11(request_json: string): string;
 
 /**
- * Legacy staged Rust S12 serializer entry retained for ABI compatibility.
+ * Serializes an S12 request.
  */
 export function serialize_docx_s12(request_json: string): string;
 
@@ -79,7 +79,7 @@ export function serialize_docx_s12(request_json: string): string;
 export function unzip_docx(data: Uint8Array): any;
 
 /**
- * S13 production-capable package writer: typed model + original package -> DOCX.
+ * Writes a DOCX from a typed model and original package.
  */
 export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
 

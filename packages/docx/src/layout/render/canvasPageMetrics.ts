@@ -1,12 +1,4 @@
-/**
- * Layout constants + vertical page math for the experimental canvas pages
- * hosts (React `CanvasPagesView` / Vue `CanvasPagesView.vue`): a flex column
- * of one <canvas> per page. Shared by the views themselves and by the
- * display-list consumers that need scroll-container Y coordinates (sidebar
- * anchor positions) so the two can never drift.
- *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
- */
+/** Shared vertical geometry for canvas page hosts. */
 
 import type { DisplayListQueries } from './displayListQueries';
 

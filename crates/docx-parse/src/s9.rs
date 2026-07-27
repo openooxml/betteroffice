@@ -20,7 +20,7 @@ use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
 use crate::relationships::{Relationship, RelationshipMap, parse_relationships};
 use crate::s8::{find_part, parse_comment_part, parse_note_part, partition_notes};
-use crate::settings::{DocumentSettings, incumbent_utf8_text_boundary, parse_settings};
+use crate::settings::{DocumentSettings, is_valid_utf8_xml_text, parse_settings};
 use crate::smart_art::create_smart_art_context;
 use crate::styles::{StyleDefinitions, StyleMap, parse_style_definitions};
 use crate::theme::{Theme, apply_theme_font_lang, parse_theme};
@@ -441,7 +441,7 @@ pub fn parse_docx_s9_wire(
         })
         .collect();
     let font_table_relationships_xml = find_part(&parts, "word/_rels/fontTable.xml.rels")
-        .filter(|(_, xml)| incumbent_utf8_text_boundary(xml))
+        .filter(|(_, xml)| is_valid_utf8_xml_text(xml))
         .map(|(_, xml)| String::from_utf8_lossy(xml).into_owned());
 
     Ok(S9WireEnvelope {

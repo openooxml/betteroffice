@@ -55,8 +55,7 @@ pub enum Watermark {
     },
 }
 
-/// Parse the incumbent bounded `k:v;k:v` style lookup. Later declarations
-/// overwrite without moving the key's insertion position.
+/// Parses bounded style declarations with stable first-insertion order.
 pub fn parse_style_attr(style: Option<&str>) -> VmlStyle {
     let mut output = VmlStyle::new();
     let Some(style) = style else { return output };
@@ -814,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn watermark_claiming_and_sanitization_match_typescript() {
+    fn text_watermark_is_claimed_and_sanitized() {
         let header = root(
             r##"<w:hdr xmlns:w="w" xmlns:v="v"><v:shape id="PowerPlusWaterMarkObject1" type="#_x0000_t136" style="rotation:315" fillcolor="C0C0C0"><v:fill opacity=".5"/><v:textpath string="CONFIDENTIAL" style="font-family:'Calibri'"/></v:shape></w:hdr>"##,
         );

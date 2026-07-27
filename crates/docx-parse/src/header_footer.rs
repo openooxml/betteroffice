@@ -62,10 +62,7 @@ pub fn normalize_header_footer_type(value: Option<&str>) -> &'static str {
     }
 }
 
-/// Resolve document relationship ids to package parts and parse every owned
-/// header/footer in document-relationship insertion order. Each story uses its
-/// own relationship part when present; the incumbent document relationships
-/// are the compatibility fallback when that part is absent.
+/// Parses headers and footers in relationship order with document fallbacks.
 #[allow(clippy::too_many_arguments)]
 pub fn parse_related_header_footers(
     parts: &[(String, Vec<u8>)],
@@ -154,8 +151,7 @@ fn find_part_case_insensitive<'a>(
         .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
 }
 
-/// Select the effective type with the incumbent precedence: an enabled first
-/// page wins over an enabled even page, then the default story is used.
+/// Selects first, then even, then default page stories.
 pub fn select_for_page<'a>(
     stories: &'a IndexMap<String, HeaderFooter>,
     page_number: usize,

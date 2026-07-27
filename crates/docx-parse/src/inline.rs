@@ -1,9 +1,8 @@
-//! Runs and inline structures with incumbent-compatible field and hyperlink behavior.
+//! Runs, fields, hyperlinks, and inline structures.
 //!
 //! Field instructions are parsed as inert metadata only. This module has no
 //! resolver for DDE, INCLUDE*, OLE, macros, files, processes, or networks.
-//! Drawing-owned children retain their source position as stable opaque atoms
-//! until the S4 drawing contract is merged.
+//! Drawing-owned children retain their source position as stable opaque atoms.
 
 use serde::{Deserialize, Serialize};
 
@@ -285,7 +284,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
     for child in element.child_elements() {
         match child.local_name() {
             "t" => output.push(RunContent::Text {
-                text: incumbent_text_content(child),
+                text: text_node_content(child),
                 preserve_space: (child.attribute(Some("xml"), "space") == Some("preserve"))
                     .then_some(true),
             }),
@@ -305,7 +304,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
             "endnoteReference" => output.push(parse_note_reference(child, true)),
             "fldChar" => output.push(parse_field_char(child)),
             "instrText" => output.push(RunContent::InstrText {
-                text: incumbent_text_content(child),
+                text: text_node_content(child),
             }),
             "commentReference" => output.push(RunContent::CommentReference {
                 id: child.parse_numeric_attribute(Some("w"), "id", 1.0),
@@ -447,17 +446,17 @@ fn contains_drawing_owned_content(element: &XmlElement) -> bool {
     })
 }
 
-fn incumbent_text_content(element: &XmlElement) -> String {
+fn text_node_content(element: &XmlElement) -> String {
     let mut output = String::new();
-    append_incumbent_text(element, &mut output);
+    append_text_node_content(element, &mut output);
     output
 }
 
-fn append_incumbent_text(element: &XmlElement, output: &mut String) {
+fn append_text_node_content(element: &XmlElement, output: &mut String) {
     for child in &element.children {
         match child {
             XmlNode::Text(text) => output.push_str(text),
-            XmlNode::Element(child) => append_incumbent_text(child, output),
+            XmlNode::Element(child) => append_text_node_content(child, output),
             XmlNode::CData(_) => {}
         }
     }
@@ -711,7 +710,7 @@ pub fn parse_field_type(instruction: &str) -> String {
         .unwrap_or_else(|| "UNKNOWN".to_owned())
 }
 
-/// Bounded linear equivalent of the incumbent field-instruction regex.
+/// Parses field instructions with bounded linear scanning.
 pub fn parse_field_instruction(instruction: &str) -> ParsedFieldInstruction {
     let field_type = parse_field_type(instruction);
     let trimmed = instruction.trim();
@@ -1247,7 +1246,7 @@ pub enum MathType {
 }
 
 fn parse_hyperlink_math(element: &XmlElement) -> MathEquation {
-    let text = incumbent_text_content(element);
+    let text = text_node_content(element);
     MathEquation {
         node_type: MathType::MathEquation,
         display: if element.local_name() == "oMathPara" {
@@ -1256,7 +1255,7 @@ fn parse_hyperlink_math(element: &XmlElement) -> MathEquation {
             "inline"
         }
         .to_owned(),
-        omml_xml: element.to_incumbent_xml(),
+        omml_xml: element.to_raw_inline_xml(),
         plain_text: (!text.is_empty()).then_some(text),
     }
 }
@@ -1421,7 +1420,7 @@ pub fn parse_sdt_properties(
         repeating_section: None,
         repeating_section_item: None,
         data_binding: None,
-        raw_properties_xml: sdt_pr.map(XmlElement::to_incumbent_xml),
+        raw_properties_xml: sdt_pr.map(XmlElement::to_raw_inline_xml),
         raw_end_properties_xml: sdt_end_pr.map(XmlElement::to_xml),
     };
     let Some(sdt_pr) = sdt_pr else {
@@ -1544,8 +1543,7 @@ fn parse_sdt_control_type(element: Option<&XmlElement>) -> &'static str {
             return mapped;
         }
     }
-    // Pinned incumbent quirk: unknown markers fall back to richText even
-    // though the public type documentation describes an `unknown` variant.
+    // Unknown markers fall back to `richText`.
     "richText"
 }
 
@@ -1711,8 +1709,7 @@ fn parse_hyperlink_inline_sdt(
     part: &str,
     budget: &ParseBudget<'_>,
 ) -> Result<InlineSdt, ParseError> {
-    // Pinned incumbent quirk: hyperlinkParser omits the theme when parsing the
-    // SDT's own run properties, even though it passes the theme to child runs.
+    // SDT run properties omit the theme.
     let properties = parse_sdt_properties(element.child("w", "sdtPr"), None, None);
     let mut content = Vec::new();
     if let Some(container) = element.child("w", "sdtContent") {
@@ -1764,7 +1761,7 @@ enum FieldMode {
     Result,
 }
 
-/// Parse the S5-owned inline grammar at a paragraph/container boundary.
+/// Parse the inline grammar at a paragraph/container boundary.
 pub fn parse_inline_container(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
@@ -2066,7 +2063,7 @@ fn parse_paragraph_math(element: &XmlElement) -> MathEquation {
             "inline"
         }
         .to_owned(),
-        omml_xml: element.to_incumbent_xml(),
+        omml_xml: element.to_raw_inline_xml(),
         plain_text: (!text.is_empty()).then_some(text),
     }
 }
@@ -2111,8 +2108,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .iter()
             .map(|content| match content {
                 RunContent::Text { text, .. } | RunContent::InstrText { text } => {
-                    // TypeScript String#length counts UTF-16 code units. Preserve
-                    // that incumbent offset behavior for astral characters.
+                    // Text offsets count UTF-16 code units.
                     text.encode_utf16().count()
                 }
                 RunContent::Tab
@@ -2224,8 +2220,7 @@ mod tests {
         assert_eq!(parsed.switches[0].value.as_deref(), Some("MMMM d"));
         assert_eq!(parsed.switches[1].value.as_deref(), Some("MERGEFORMAT"));
 
-        // `\s*` followed by the unquoted `\S*` branch consumes the next
-        // switch token as a value. This surprising incumbent behavior is pinned.
+        // An unquoted switch consumes the next switch token as its value.
         let loose = parse_field_instruction(r#"PAGE \h \* MERGEFORMAT"#);
         assert_eq!(loose.switches.len(), 1);
         assert_eq!(loose.switches[0].value.as_deref(), Some(r#"\*"#));

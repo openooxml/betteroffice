@@ -17,6 +17,8 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      publishing: ${{ steps.pending.outputs.publishing }}
     permissions:
       contents: write
       pull-requests: write
@@ -123,3 +125,93 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run deploy.yml --ref main
+
+  python-build:
+    name: Python wheel (${{ matrix.os }} ${{ matrix.target }})
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2014"
+            sdist: true
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: "2014"
+          - os: macos-latest
+            target: aarch64
+            manylinux: auto
+          - os: macos-latest
+            target: x86_64
+            manylinux: auto
+          - os: windows-latest
+            target: x64
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: bindings/python
+          sccache: "true"
+
+      - uses: PyO3/maturin-action@v1
+        if: matrix.sdist
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: bindings/python
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: bindings/python/dist
+
+  python-publish:
+    name: Publish to PyPI
+    needs: python-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write # OIDC Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Detect PyPI token
+        id: pypi-token
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish with API token
+        if: steps.pypi-token.outputs.enabled == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
+          skip-existing: true
+
+      - name: Publish via Trusted Publishing
+        if: steps.pypi-token.outputs.enabled != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true

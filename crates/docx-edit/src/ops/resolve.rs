@@ -1,28 +1,35 @@
-//! Tracked-change RESOLVE ops: `accept_change`, `reject_change` (S4b).
+//! Tracked-change resolution: `accept_change` and `reject_change`.
 //!
-//! The op-contract 3-way matrix, mirroring the PM resolver
-//! (`packages/core/src/prosemirror/commands/comments.ts` `resolveById`):
+//! Each stamp class resolves two ways:
 //!
-//! - **accept:** `ins` text → drop the stamp (text stays); `del` text → physical removal;
-//!   `pPrIns` → clear the marker (the split stays); `pPrDel` → remove the pilcrow (join).
-//! - **reject:** `ins` text → physical removal; `del` text → drop the stamp (text stays);
-//!   `pPrIns` → remove the pilcrow (join back); `pPrDel` → clear the marker (the split stays).
+//! | stamp    | accept                           | reject                           |
+//! |----------|----------------------------------|----------------------------------|
+//! | `ins`    | drop the stamp, text stays       | remove the text                  |
+//! | `del`    | remove the text                  | drop the stamp, text stays       |
+//! | `pPrIns` | clear the marker, split stays    | remove the pilcrow, paragraphs join |
+//! | `pPrDel` | remove the pilcrow, paragraphs join | clear the marker, split stays |
 //!
-//! Removing a boundary pilcrow joins two paragraphs; the FOLLOWING paragraph's pilcrow
-//! survives, so the merged paragraph keeps the SECOND paragraph's pPr + paraId — exactly the
-//! PM resolver's `inheritFromSecond` join and the OOXML rule (the surviving `w:p` owns the
-//! properties). This deliberately differs from the plain-delete R6 donor rule, which models
-//! a USER deletion, not a revision resolution. A story's FINAL pilcrow is never removed
-//! (Word keeps the last paragraph mark): a join that would remove it clears the markers
-//! instead — the PM resolver's last-paragraph edge case.
+//! A unit carrying BOTH `ins` and `del` — one author suggesting over another's
+//! suggestion — is removed either way: the remove class wins over the keep
+//! class on the same content.
 //!
-//! Resolving is APPLYING a revision, not authoring one: no new revision is ever stamped and
-//! the context's suggesting mode is ignored (the PM twin sets `SUGGESTION_BYPASS_META`).
+//! Removing a boundary pilcrow joins two paragraphs, and it is the FOLLOWING
+//! paragraph's mark that survives, so the merged paragraph keeps the SECOND
+//! paragraph's properties and paraId. That is the OOXML rule — the surviving
+//! `w:p` owns the properties — and it deliberately differs from a plain
+//! delete, which models a user removing a paragraph mark rather than a
+//! revision being applied. A story's FINAL pilcrow is never removed, because a
+//! document always keeps its last paragraph mark; a join that would remove it
+//! clears the markers instead.
 //!
-//! Structural table-row revisions (`trIns`/`trDel`) live in each structural
-//! row's `trPr` bag. They are resolved in the same transaction as story-unit
-//! revisions; physical row removal also removes unreachable cell stories.
-//! `pPrChange`/`rPrChange` property-revision payloads remain a separate path.
+//! Resolving APPLIES a revision, it does not author one: no new revision is
+//! ever stamped and the context's suggesting mode is ignored.
+//!
+//! Structural table-row revisions (`trIns`/`trDel`) live in each row's `trPr`
+//! bag and resolve in the same transaction as story-unit revisions; removing a
+//! row also removes the cell stories it made unreachable. Paragraph-property
+//! revisions (`pPrChange`) resolve alongside them: accepting drops the record,
+//! rejecting restores the properties it captured.
 
 use std::sync::Arc;
 
@@ -38,8 +45,7 @@ use crate::{
     StoryRange, check_range, story_ref,
 };
 
-/// What a resolve op targets: an explicit story range (the PM range commands) or one
-/// coalesced revision id across every story (the PM by-id commands).
+/// What a resolve op targets.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChangeTarget {
     /// Resolve every tracked change overlapping the range (no id filtering).
@@ -107,6 +113,10 @@ fn property_map<'a>(
     }
 }
 
+/// Rewinds a pilcrow to the `previousFormatting` a `pPrChange` captured:
+/// properties the change introduced are removed, then the previous values are
+/// written back. Introducing `numPr` also clears the derived list attributes.
+/// Schema-managed keys are never touched.
 fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, change: &Any) {
     let previous = property_map(change, "previousFormatting");
     let current = property_map(change, "currentFormatting");
@@ -148,6 +158,9 @@ fn restore_paragraph_properties(txn: &mut TransactionMut<'_>, map: &MapRef, chan
     }
 }
 
+/// Resolves the `pPrChange` records on one pilcrow. Matching records are
+/// consumed — rejecting restores their captured properties, accepting only
+/// drops them — and non-matching records stay for a later resolve.
 fn resolve_paragraph_property_changes(
     txn: &mut TransactionMut<'_>,
     map: &MapRef,
@@ -261,9 +274,8 @@ fn resolve_story(
             ChunkKind::Text(_) | ChunkKind::Embed(_) => {
                 let ins = active_stamp(chunk.attrs.get(INS).cloned(), filter);
                 let del = active_stamp(chunk.attrs.get(DEL).cloned(), filter);
-                // A unit carrying BOTH stamps (concurrent suggest-over-suggest, case E) is
-                // physically removed in either mode — matching the PM range resolver, where
-                // the "remove" mark class wins over the "keep" class on the same text.
+                // A unit carrying BOTH stamps is removed in either mode: the
+                // remove class wins over the keep class on the same content.
                 let remove = match mode {
                     ResolveMode::Accept => del.is_some(),
                     ResolveMode::Reject => ins.is_some(),
@@ -295,16 +307,21 @@ fn resolve_story(
 }
 
 impl EditingDoc {
-    /// Accepts tracked changes (op-contract §1 "Resolve", S4b): pending insertions become
-    /// plain content, pending deletions are carried out. See the module docs for the full
-    /// 3-way matrix and join semantics. The receipt lists the resolved revision ids; a
-    /// range target also echoes the surviving range.
+    /// Accepts the targeted changes: pending insertions become plain content
+    /// and pending deletions are carried out. See the module docs for the full
+    /// matrix and the join rule.
+    ///
+    /// The receipt's `revision_ids` lists the ids resolved, deduplicated and
+    /// in resolution order; a range target also echoes the surviving range.
+    /// A [`ChangeTarget::Range`] errors when empty, a
+    /// [`ChangeTarget::Revision`] when the id matches nothing.
     pub fn accept_change(&self, ctx: &EditCtx, target: &ChangeTarget) -> OpResult<Receipt> {
         self.resolve_change(ctx, target, ResolveMode::Accept)
     }
 
-    /// Rejects tracked changes — the inverse of [`EditingDoc::accept_change`]: pending
-    /// insertions are rolled back, pending deletions are restored to plain content.
+    /// Rejects the targeted changes — the inverse of
+    /// [`EditingDoc::accept_change`]: pending insertions are rolled back and
+    /// pending deletions restored to plain content. Same receipt and errors.
     pub fn reject_change(&self, ctx: &EditCtx, target: &ChangeTarget) -> OpResult<Receipt> {
         self.resolve_change(ctx, target, ResolveMode::Reject)
     }

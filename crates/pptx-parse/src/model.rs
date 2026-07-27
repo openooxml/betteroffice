@@ -108,11 +108,12 @@ pub struct ThemePart {
     pub theme: Theme,
 }
 
-/// A `ppt/charts/chartN.xml` part, already resolved against the deck theme.
+/// A chart part resolved against one referenced presentation theme.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartPart {
     pub part_path: String,
+    pub theme_part_path: Option<String>,
     pub chart: ChartSpace,
 }
 

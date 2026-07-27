@@ -7,11 +7,15 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Server-side raster backend (tiny-skia) for the display list. Never part of the wasm build."
+readme = "README.md"
+keywords = ["xlsx", "spreadsheet", "raster", "rendering", "png"]
+categories = ["rendering", "graphics"]
 
 [lib]
 name = "xlsx_raster"
 
 [dependencies]
-tiny-skia = "0.11"
+tiny-skia = "0.12"
+png = "0.18"
 rustybuzz = "0.20"
 xlsx-render.workspace = true

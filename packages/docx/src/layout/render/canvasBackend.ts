@@ -32,12 +32,7 @@ export type ImageResolver = (
 
 export interface DrawPageOptions {
   resolveImage?: ImageResolver;
-  /**
-   * Glyph-outline cache for `glyphRun` primitives (phase-2 shaped text). When
-   * absent, or when an outline cannot be resolved, the run is painted with
-   * `fillText` so text is never invisible. Owned by the host and reused across
-   * pages/renders.
-   */
+  /** Glyph cache; unresolved outlines fall back to `fillText`. */
   glyphCache?: GlyphCache;
 }
 
@@ -190,17 +185,7 @@ export async function rasterizeDisplayListPages(
   return canvases;
 }
 
-/**
- * Replays one DisplayPage onto a 2D context, honoring primitive paint order.
- * Header/footer bands replay after the body, mirroring the DOM painter's
- * append order in renderPage (content, then header, then footer); their
- * primitives are already in page coordinates so they go through the same
- * replay path. Async only because image sources may resolve lazily; each
- * image is awaited in sequence so later primitives still paint above it.
- * Every primitive sets the full context state it depends on, so no
- * save/restore per primitive is needed (images use save/restore for their
- * rotation transform only).
- */
+/** Replays a page in primitive order, including body and header/footer bands. */
 export async function drawDisplayPage(
   ctx: CanvasRenderingContext2D,
   page: DisplayPage,
@@ -396,18 +381,7 @@ function warnGlyphFallbackOnce(error: unknown): void {
   );
 }
 
-/**
- * Paints a glyph run as Path2D outlines. Each glyph: translate to its pen
- * origin + baseline, scale by `size`/upem with a NEGATIVE y so the font's
- * y-up outline flips into canvas y-down, then fill the cached path. Empty
- * (whitespace) glyphs carry a null path and are skipped. `fillStyle` is set
- * once per run.
- *
- * Safety net: with no cache, or if any glyph outline fails to resolve (missing
- * wasm export pre-integration, or a bad glyph), the whole run is repainted via
- * `fillText` so text is never invisible. Outlines are resolved up front so a
- * mid-run failure never leaves a half-painted run.
- */
+/** Paints cached glyph outlines, falling back to `fillText` for unresolved runs. */
 function drawGlyphRun(
   ctx: CanvasRenderingContext2D,
   run: GlyphRunPrimitive,

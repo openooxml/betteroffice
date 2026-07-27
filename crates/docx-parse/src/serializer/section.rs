@@ -1,4 +1,4 @@
-//! S10 `w:sectPr` serializer with schema and incumbent byte ordering.
+//! `w:sectPr` serializer with stable schema ordering.
 
 use crate::notes::NoteProperties;
 use crate::section::{DocumentGrid, PageBorders, SectionProperties, StoryReference};
@@ -339,8 +339,7 @@ fn write_columns(writer: &mut XmlWriter, properties: &SectionProperties) {
     }
     let columns = properties.columns.as_deref().unwrap_or_default();
     if columns.is_empty() {
-        // The incumbent template spells w:cols as an explicit start/end pair,
-        // even when it only contains attributes.
+        // Empty columns use explicit start and end tags.
         writer.text("");
     }
     for column in columns {

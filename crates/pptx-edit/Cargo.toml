@@ -7,6 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
 description = "Collaborative yrs-backed editing core for PPTX decks."
+readme = "README.md"
 keywords = ["pptx", "powerpoint", "ooxml", "collaboration"]
 categories = ["text-processing", "data-structures"]
 

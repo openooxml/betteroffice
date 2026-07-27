@@ -1,13 +1,4 @@
-//! Embed ops: stable-id/position attribute updates and exact-position inserts — the typed write
-//! surface for map-backed embeds (images, inline/block content controls,
-//! block-level breaks).
-//!
-//! These are user-intent ops (undo-tracked under the ctx origin), unlike the
-//! raw [`crate::RawOp::SetEmbedAttr`] / [`crate::RawOp::InsertEmbed`] mirror
-//! primitives which faithfully replay bridge-lowered PM state. The payload
-//! vocabulary is the same one the coexistence bridge authors (PM attr names,
-//! `dropNulls`-style absent-as-default), so a value written here reads back
-//! identically through `story_segments` and the render bridge.
+//! Map-backed embed operations.
 
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef};
@@ -61,7 +52,7 @@ fn embed_has_id<T: ReadTxn>(map: &MapRef, txn: &T, embed_id: &str) -> bool {
 }
 
 /// Finds one map-backed embed by its stable authored payload identity. New yrs
-/// inserts use `embedId`; `id` (SDTs) and `rId` (images) keep mirrored PM
+/// inserts use `embedId`; `id` (SDTs) and `rId` (images) keep mirrored
 /// embeds addressable without rewriting their payload vocabulary.
 fn embed_map_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<MapRef> {
     let stories = txn

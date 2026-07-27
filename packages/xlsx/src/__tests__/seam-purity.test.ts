@@ -1,11 +1,4 @@
-/**
- * Guards the purity of the headless compute seam: the module closure reachable
- * from `src/headless.ts` must not import react, vue, the Canvas2D backend, the
- * wasm loader, or any DOM code. Keeping this graph plain-data is what lets the
- * seam be golden-tested and, later, crossed by a Rust/WASM implementation. If
- * this test fails, an impure import crept in — move the offending dependency to
- * a DOM-free home instead.
- */
+/** Guards the headless compute seam against UI, canvas, wasm, and DOM dependencies. */
 
 import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';

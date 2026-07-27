@@ -37,7 +37,7 @@ import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 
 /**
- * Body of the editor: the paged ProseMirror host, its sidebar overlay
+ * Body of the editor: the paged editor host, its sidebar overlay
  * (UnifiedSidebar + comment margin markers), the floating "Add comment"
  * button anchored to a non-empty selection, and the inline header/footer
  * editor that appears when a user double-clicks an H/F slot.
@@ -189,7 +189,7 @@ export function DocxEditorPagedArea({
   resolvedIdsForRender: Set<number>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   onTotalPagesChange: (totalPages: number) => void;
-  /** Layout of each pass, surfaced for the experimental canvas renderer. */
+  /** Receives each computed layout. */
   onLayoutComputed?: (layout: Layout | null) => void;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
@@ -403,9 +403,6 @@ export function DocxEditorPagedArea({
         author={author}
         measurementFontProvider={measurementFontProvider}
         rustFontChainsProviderRef={rustFontChainsProviderRef}
-        // Click routing through `onHfPagesMouseDown` was retired; usePagesPointer
-        // now routes every HF gesture (click, drag, dblclick, image, hyperlink,
-        // context menu) through the active-surface helper directly.
         zoom={zoom}
         readOnly={readOnly}
         onYrsContentChange={onYrsContentChange}
@@ -470,11 +467,11 @@ export function DocxEditorPagedArea({
             <div
               style={{ pointerEvents: 'auto' }}
               // In default mode the sidebar lives inside `.paged-editor`, whose
-              // mousedown handling keeps the hidden PM focused when its chrome is
+              // mousedown handling keeps the hidden input focused when its chrome is
               // clicked. Portalled out for canvas mode it loses that, so a bare
-              // click on a card would blur the PM and move the caret. Re-assert
+              // click on a card would blur the input and move the caret. Re-assert
               // it here in the capture phase (before the card's own
-              // stopPropagation): preventDefault keeps the PM's selection for
+              // stopPropagation): preventDefault keeps the input's selection for
               // non-interactive clicks, while inputs/buttons still focus.
               onMouseDownCapture={(e) => {
                 const target = e.target as HTMLElement;

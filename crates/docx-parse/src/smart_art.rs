@@ -1,4 +1,4 @@
-//! SmartArt cached-scene parsing and the incumbent basic-layout fallback.
+//! SmartArt cached-scene parsing and basic-layout fallback.
 
 use std::collections::HashMap;
 
@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_process_fallback_matches_incumbent_layout() {
+    fn basic_process_fallback_builds_two_chevrons() {
         let mut context = SmartArtContext::default();
         context.parts.insert(
             "word/diagrams/data1.xml".to_owned(),

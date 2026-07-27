@@ -1,0 +1,56 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "betteroffice-xlsx"
+dynamic = ["version"]
+description = "Read, recalculate, render, and write XLSX workbooks. Rust engine, no Excel and no LibreOffice."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = [
+  "LICENSE",
+  "NOTICE",
+  "THIRD-PARTY-NOTICES.md",
+  "licenses/Carlito-OFL.txt",
+]
+requires-python = ">=3.9"
+authors = [{ name = "OpenOOXML" }]
+keywords = [
+  "xlsx",
+  "excel",
+  "spreadsheet",
+  "ooxml",
+  "formula",
+  "recalculate",
+  "render",
+  "openpyxl-alternative",
+  "rust",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Topic :: Office/Business :: Financial :: Spreadsheet",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://betteroffice.dev"
+Documentation = "https://docs.betteroffice.dev"
+Source = "https://github.com/openooxml/betteroffice"
+Issues = "https://github.com/openooxml/betteroffice/issues"
+
+[tool.maturin]
+module-name = "betteroffice_xlsx._betteroffice_xlsx"
+python-source = "python"
+features = ["pyo3/extension-module"]
+strip = true
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -11,7 +11,6 @@
  * entering commented / tracked-change / list content. Edge-triggered on the
  * selection context, so plain typing and uniform caret movement stay silent.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 export interface A11ySelectionContext {

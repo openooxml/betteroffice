@@ -1,12 +1,14 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, DefinedName,
-    DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
-    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, NumberFormatKind,
-    NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, StylePatch,
-    UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    AnchorCell, AnchorEditAs, CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState,
+    CellValue, ChartAnchor, ChartRef, ChartRefKind, DefinedName, DrawCmd, Error, FreezePane,
+    GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, UpdateOrigin,
+    Viewport, Workbook, WorkbookModel,
 };
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use yrs::Update as YrsUpdate;
@@ -51,6 +53,283 @@ fn sample_parts() -> Vec<(String, Vec<u8>)> {
 
 fn sample_xlsx() -> Vec<u8> {
     ooxml_opc::rezip_parts(&sample_parts()).unwrap()
+}
+
+fn preservation_fixture_parts() -> Vec<(String, Vec<u8>)> {
+    let mut model = WorkbookModel::default();
+    model.shared_strings.push("original".to_owned());
+    model.styles.cell_xfs.push(Default::default());
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Text {
+                value: "original".to_owned(),
+            },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B2"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Data" sheetId="7" r:id="rId1"/></sheets><definedNames><definedName name="NamedCell">Data!$A$1</definedName></definedNames><calcPr calcId="191029"/></workbook>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetPr><tabColor rgb="FF4472C4"/></sheetPr><dimension ref="A1:B2"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="B2"><v>1</v></c></row></sheetData><autoFilter ref="A1:B2"/><conditionalFormatting sqref="B2"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>0</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="whole" sqref="B2"><formula1>0</formula1></dataValidation></dataValidations><hyperlinks><hyperlink ref="B2" r:id="rIdHyperlink"/></hyperlinks><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup orientation="landscape"/><drawing r:id="rIdDrawing"/><legacyDrawing r:id="rIdVml"/><tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/sharedStrings.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si><r><rPr><b/></rPr><t>orig</t></r><r><rPr><i/></rPr><t>inal</t></r><phoneticPr fontId="1"/></si><extLst><ext uri="{A68B0E0A-4E93-46C8-A4A4-57E4A6A3B123}"/></extLst></sst>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/><Relationship Id="rIdVml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/><Relationship Id="rIdHyperlink" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid" TargetMode="External"/></Relationships>"#.to_vec(),
+    ));
+    parts.extend([
+        (
+            "xl/drawings/drawing1.xml".to_owned(),
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:row>2</xdr:row></xdr:to><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#.to_vec(),
+        ),
+        (
+            "xl/tables/table1.xml".to_owned(),
+            br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Table1" displayName="Table1" ref="A1:B2"><autoFilter ref="A1:B2"/><tableColumns count="2"><tableColumn id="1" name="Name"/><tableColumn id="2" name="Value"/></tableColumns></table>"#.to_vec(),
+        ),
+        (
+            "xl/comments1.xml".to_owned(),
+            br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>BetterOffice</author></authors><commentList><comment ref="B2" authorId="0"><text><t>keep me</t></text></comment></commentList></comments>"#.to_vec(),
+        ),
+        (
+            "xl/drawings/vmlDrawing1.vml".to_owned(),
+            br#"<xml xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="_x0000_s1025"/></xml>"#.to_vec(),
+        ),
+        (
+            "xl/calcChain.xml".to_owned(),
+            br#"<calcChain xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><c r="B2" i="1"/></calcChain>"#.to_vec(),
+        ),
+        (
+            "xl/externalLinks/externalLink1.xml".to_owned(),
+            br#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook/></externalLink>"#.to_vec(),
+        ),
+        (
+            "docProps/core.xml".to_owned(),
+            br#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"><cp:revision>9</cp:revision></cp:coreProperties>"#.to_vec(),
+        ),
+        (
+            "customXml/item1.xml".to_owned(),
+            br#"<custom fidelity="byte-identical">payload</custom>"#.to_vec(),
+        ),
+    ]);
+
+    let workbook_rels = test_part_text(&parts, "xl/_rels/workbook.xml.rels")
+        .replace(
+            "</Relationships>",
+            r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/calcChain" Target="calcChain.xml"/><Relationship Id="rId12" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink1.xml"/></Relationships>"#,
+        );
+    set_test_part(
+        &mut parts,
+        "xl/_rels/workbook.xml.rels",
+        workbook_rels.into_bytes(),
+    );
+    let root_rels = test_part_text(&parts, "_rels/.rels").replace(
+        "</Relationships>",
+        r#"<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#,
+    );
+    set_test_part(&mut parts, "_rels/.rels", root_rels.into_bytes());
+    let content_types = test_part_text(&parts, "[Content_Types].xml")
+        .replacen(
+            "<Override",
+            r#"<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/><Override"#,
+            1,
+        )
+        .replace(
+            "</Types>",
+            r#"<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/><Override PartName="/xl/comments1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml"/><Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/><Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#,
+        );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        content_types.into_bytes(),
+    );
+    let styles = test_part_text(&parts, "xl/styles.xml").replace(
+        "</styleSheet>",
+        r#"<dxfs count="1"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></dxf></dxfs><tableStyles count="0" defaultTableStyle="TableStyleMedium2"/></styleSheet>"#,
+    );
+    set_test_part(&mut parts, "xl/styles.xml", styles.into_bytes());
+    parts
+}
+
+fn preservation_fixture() -> Vec<u8> {
+    ooxml_opc::rezip_parts(&preservation_fixture_parts()).unwrap()
+}
+
+fn non_worksheet_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Chart"));
+    model.sheets.push(Sheet::new("Dialog"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    rename_test_part(
+        &mut parts,
+        "xl/worksheets/sheet2.xml",
+        "xl/chartsheets/sheet1.xml",
+    );
+    rename_test_part(
+        &mut parts,
+        "xl/worksheets/sheet3.xml",
+        "xl/dialogsheets/sheet1.xml",
+    );
+    set_test_part(
+        &mut parts,
+        "xl/chartsheets/sheet1.xml",
+        br#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/dialogsheets/sheet1.xml",
+        br#"<dialogsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"/></sheetViews></dialogsheet>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/_rels/workbook.xml.rels",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet" Target="dialogsheets/sheet1.xml"/></Relationships>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/chartsheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"/><Override PartName="/xl/dialogsheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.dialogsheet+xml"/></Types>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn strict_prefixed_fixture() -> Vec<u8> {
+    let strict_main = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+    let strict_rel = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.ms-excel.worksheet+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{strict_rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/workbook.xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><s:workbook xmlns:s="{strict_main}" xmlns:rel="{strict_rel}"><s:sheets><s:sheet name="Data" sheetId="1" rel:id="rId1"/></s:sheets><s:definedNames><s:definedName name="StrictName">Data!$A$1</s:definedName></s:definedNames></s:workbook>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{strict_rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><s:worksheet xmlns:s="{strict_main}" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:fixture-extension" mc:Ignorable="x"><x:sheetData marker="keep"/><mc:AlternateContent><mc:Choice Requires="s"><s:sheetPr/></mc:Choice><mc:Fallback><s:sheetPr/></mc:Fallback></mc:AlternateContent><s:sheetData><s:row r="1"><s:c r="A1"><s:v>1</s:v></s:c></s:row></s:sheetData></s:worksheet>"#
+            )
+            .into_bytes(),
+        ),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn defined_names_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Middle"));
+    model.sheets.push(Sheet::new("Tail"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Middle" sheetId="2" r:id="rId2"/><sheet name="Tail" sheetId="3" r:id="rId3"/></sheets><definedNames><definedName name="GlobalData">Data!$A$1</definedName><definedName name="AmbiguousData">Data</definedName><definedName name="GlobalMiddle">Middle!$A$1</definedName><definedName name="LocalData" localSheetId="0">Data!$A$1</definedName><definedName name="LocalMiddle" localSheetId="1">Middle!$A$1</definedName><definedName name="LocalTail" localSheetId="2">Tail!$A$1</definedName><definedName name="Unrelated">42</definedName></definedNames></workbook>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Two `<si>` entries reading `Total`, one plain and one bold, with a cell on
+/// each. Text alone cannot tell them apart, so only the recorded index keeps
+/// each cell on its own run formatting.
+fn ambiguous_shared_string_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel {
+        shared_strings: vec!["Total".to_owned(), "Total".to_owned()],
+        ..WorkbookModel::default()
+    };
+    let mut sheet = Sheet::new("Data");
+    for address in ["B2", "D2"] {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Text {
+                    value: "Total".to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.push(sheet);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/sharedStrings.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2"><si><t>Total</t></si><si><r><rPr><b/></rPr><t>Total</t></r></si></sst>"#.to_vec(),
+    );
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="2"><c r="B2" t="s"><v>0</v></c><c r="D2" t="s"><v>1</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn saved_sheet_text(workbook: &Workbook) -> String {
+    String::from_utf8(package_map(&workbook.save().unwrap())["xl/worksheets/sheet1.xml"].clone())
+        .unwrap()
+}
+
+fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
+    parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
+}
+
+fn rename_test_part(parts: &mut [(String, Vec<u8>)], from: &str, to: &str) {
+    parts.iter_mut().find(|(name, _)| name == from).unwrap().0 = to.to_owned();
+}
+
+fn test_part_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
+    String::from_utf8(
+        parts
+            .iter()
+            .find(|(name, _)| name == path)
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap()
+}
+
+fn package_map(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    ooxml_opc::unzip_parts(bytes).unwrap().into_iter().collect()
 }
 
 fn overlapping_merge_parts() -> Vec<(String, Vec<u8>)> {
@@ -162,6 +441,84 @@ fn defined_names_survive_the_facade_and_drive_incremental_recalculation() {
         reopened.model().defined_names,
         workbook.model().defined_names
     );
+}
+
+#[test]
+fn structural_edits_rewrite_defined_names_through_save_and_undo() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook.model().defined_names.clone();
+
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let global = workbook
+        .model()
+        .defined_names
+        .iter()
+        .find(|defined| defined.name == "GlobalData")
+        .unwrap();
+    let local = workbook
+        .model()
+        .defined_names
+        .iter()
+        .find(|defined| defined.name == "LocalData")
+        .unwrap();
+    assert_eq!(global.formula, "Data!$B$3");
+    assert_eq!(local.formula, "Data!$B$3");
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
+#[test]
+fn structural_edits_refuse_ambiguous_workbook_name_bindings() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Other"));
+    model.defined_names.push(DefinedName {
+        name: "Input".into(),
+        formula: "$A$1".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be safely rewritten"));
+    assert_eq!(workbook.model(), &before);
 }
 
 #[test]
@@ -2717,4 +3074,1297 @@ fn collaboration_decoding_validates_malformed_and_oversized_payloads() {
     ));
     let max_client = Workbook::open_collaborative(&bytes, MAX_COLLABORATION_CLIENT_ID).unwrap();
     assert_eq!(max_client.client_id(), MAX_COLLABORATION_CLIENT_ID);
+}
+
+#[test]
+fn save_preserves_unmodeled_package_parts_and_sheet_fragments() {
+    let original = preservation_fixture();
+    let before_order = ooxml_opc::unzip_parts(&original)
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after_order = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    let after = package_map(&saved);
+
+    assert_eq!(
+        after_order,
+        before_order
+            .into_iter()
+            .filter(|path| path != "xl/calcChain.xml")
+            .collect::<Vec<_>>()
+    );
+    for path in before.keys() {
+        if path != "xl/calcChain.xml" {
+            assert!(after.contains_key(path), "missing {path}");
+        }
+    }
+    let owned = [
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+        "xl/sharedStrings.xml",
+        "xl/styles.xml",
+        "xl/theme/theme1.xml",
+        "xl/worksheets/sheet1.xml",
+    ];
+    for (path, bytes) in &before {
+        if path != "xl/calcChain.xml" && !owned.contains(&path.as_str()) {
+            assert_eq!(&after[path], bytes, "changed {path}");
+        }
+    }
+
+    let workbook_xml = String::from_utf8(after["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains(r#"<definedName name="NamedCell">Data!$A$1</definedName>"#));
+    assert!(!after.contains_key("xl/calcChain.xml"));
+    assert!(workbook_xml.contains(r#"fullCalcOnLoad="1""#));
+    assert_eq!(
+        after["xl/sharedStrings.xml"],
+        before["xl/sharedStrings.xml"]
+    );
+    let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    let fragments = [
+        "<sheetViews>",
+        "<autoFilter",
+        "<conditionalFormatting",
+        "<dataValidations",
+        "<hyperlinks>",
+        "<pageSetup",
+        "<drawing",
+        "<legacyDrawing",
+        "<tableParts",
+    ];
+    let positions = fragments
+        .iter()
+        .map(|fragment| worksheet.find(fragment).unwrap())
+        .collect::<Vec<_>>();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(worksheet.contains(r#"state="frozen""#));
+
+    let content_types = String::from_utf8(after["[Content_Types].xml"].clone()).unwrap();
+    for part in [
+        "/xl/drawings/drawing1.xml",
+        "/xl/tables/table1.xml",
+        "/xl/comments1.xml",
+        "/xl/externalLinks/externalLink1.xml",
+        "/docProps/core.xml",
+    ] {
+        assert!(
+            content_types.contains(part),
+            "missing content type for {part}"
+        );
+    }
+    assert!(!content_types.contains("/xl/calcChain.xml"));
+    let workbook_rels = String::from_utf8(after["xl/_rels/workbook.xml.rels"].clone()).unwrap();
+    assert!(!workbook_rels.contains(r#"Id="rId9""#));
+    assert!(workbook_rels.contains(r#"Id="rId12""#));
+    let styles = String::from_utf8(after["xl/styles.xml"].clone()).unwrap();
+    assert!(styles.contains("<dxfs"));
+    assert!(styles.contains("<tableStyles"));
+
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("A1"))
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "original".to_owned()
+        }
+    );
+    assert_eq!(
+        reopened
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("B2"))
+            .unwrap()
+            .value,
+        CellValue::Text {
+            value: "edited".to_owned()
+        }
+    );
+}
+
+#[test]
+fn preserved_package_save_reaches_a_part_fixed_point() {
+    let original = preservation_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "fixed",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let first = workbook.save().unwrap();
+    let second = Workbook::open(&first).unwrap().save().unwrap();
+    assert_eq!(
+        ooxml_opc::unzip_parts(&first).unwrap(),
+        ooxml_opc::unzip_parts(&second).unwrap()
+    );
+}
+
+#[test]
+fn collaborative_materialization_retains_source_package() {
+    let original = preservation_fixture();
+    let before = package_map(&original);
+    let mut left = Workbook::open_collaborative(&original, 1201).unwrap();
+    let mut right = Workbook::open_collaborative(&original, 1202).unwrap();
+    left.edit_cell(
+        SheetId(0),
+        cell("B2"),
+        "remote",
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    let after = package_map(&right.save().unwrap());
+
+    for path in [
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        "xl/drawings/drawing1.xml",
+        "xl/tables/table1.xml",
+        "xl/comments1.xml",
+        "xl/drawings/vmlDrawing1.vml",
+        "xl/externalLinks/externalLink1.xml",
+        "docProps/core.xml",
+        "customXml/item1.xml",
+    ] {
+        assert_eq!(after[path], before[path], "changed {path}");
+    }
+    assert!(!after.contains_key("xl/calcChain.xml"));
+}
+
+const CHART_DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+
+const CHART_PART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:dLbls><c:f>Data!$C$2:$C$4</c:f></c:dLbls></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+
+/// The preservation fixture already anchors a drawing on `Data`; give that
+/// drawing a chart so the whole sheet -> drawing -> chart chain is real.
+fn charted_fixture() -> Vec<u8> {
+    let mut parts = preservation_fixture_parts();
+    set_test_part(
+        &mut parts,
+        "xl/drawings/drawing1.xml",
+        CHART_DRAWING.to_vec(),
+    );
+    parts.extend([
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/charts/chart1.xml".to_owned(), CHART_PART.to_vec()),
+    ]);
+    let content_types = test_part_text(&parts, "[Content_Types].xml").replace(
+        "</Types>",
+        r#"<Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#,
+    );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        content_types.into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// The charted fixture with a second sheet the chart plots, so removing that
+/// sheet strands a reference a chart on another sheet owns.
+fn cross_sheet_charted_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let workbook = test_part_text(&parts, "xl/workbook.xml").replace(
+        "</sheets>",
+        r#"<sheet name="Source" sheetId="8" r:id="rIdSource"/></sheets>"#,
+    );
+    set_test_part(&mut parts, "xl/workbook.xml", workbook.into_bytes());
+    let rels = test_part_text(&parts, "xl/_rels/workbook.xml.rels").replace(
+        "</Relationships>",
+        r#"<Relationship Id="rIdSource" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+    );
+    set_test_part(&mut parts, "xl/_rels/workbook.xml.rels", rels.into_bytes());
+    parts.push((
+        "xl/worksheets/sheet2.xml".to_owned(),
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2</v></c></row></sheetData></worksheet>"#.to_vec(),
+    ));
+    let chart = String::from_utf8(CHART_PART.to_vec())
+        .unwrap()
+        .replace("Data!$B$2:$B$4", "Source!$A$1:$A$2");
+    set_test_part(&mut parts, "xl/charts/chart1.xml", chart.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn chart_formulas(workbook: &Workbook) -> Vec<String> {
+    workbook.model().sheets[0].charts[0]
+        .refs
+        .iter()
+        .map(|reference| reference.formula.clone())
+        .collect()
+}
+
+/// A row insert above the plotted range moves every chart reference with the
+/// cells, moves the anchor per its `editAs` mode, and writes both back into
+/// their parts without disturbing the cached values around them.
+#[test]
+fn chart_references_and_anchor_follow_a_row_insert() {
+    let original = charted_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    assert_eq!(
+        chart_formulas(&workbook),
+        [
+            "Data!$B$1",
+            "Data!$A$2:$A$4",
+            "Data!$B$2:$B$4",
+            "Data!$C$2:$C$4"
+        ]
+    );
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        chart_formulas(&workbook),
+        [
+            "Data!$B$1",
+            "Data!$A$4:$A$6",
+            "Data!$B$4:$B$6",
+            "Data!$C$4:$C$6"
+        ]
+    );
+
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let patched = String::from_utf8(parts["xl/charts/chart1.xml"].clone()).unwrap();
+    let source = String::from_utf8(CHART_PART.to_vec()).unwrap();
+    assert_eq!(
+        patched,
+        source
+            .replace("Data!$A$2:$A$4", "Data!$A$4:$A$6")
+            .replace("Data!$B$2:$B$4", "Data!$B$4:$B$6")
+            .replace("Data!$C$2:$C$4", "Data!$C$4:$C$6")
+            .replace(
+                r#"<c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat>"#,
+                r#"<c:strCache><c:ptCount val="3"/></c:strCache></c:strRef></c:cat>"#,
+            )
+            .replace(
+                r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache>"#,
+                r#"<c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache>"#,
+            ),
+        "the moved references carry their caches, and nothing else changes"
+    );
+
+    let drawing = String::from_utf8(parts["xl/drawings/drawing1.xml"].clone()).unwrap();
+    let expected_drawing = String::from_utf8(CHART_DRAWING.to_vec())
+        .unwrap()
+        .replace("<xdr:row>4</xdr:row>", "<xdr:row>6</xdr:row>")
+        .replace("<xdr:row>19</xdr:row>", "<xdr:row>21</xdr:row>");
+    assert_eq!(drawing, expected_drawing, "oneCell moves without resizing");
+
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        chart_formulas(&reopened),
+        [
+            "Data!$B$1",
+            "Data!$A$4:$A$6",
+            "Data!$B$4:$B$6",
+            "Data!$C$4:$C$6"
+        ]
+    );
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor_index, 0);
+}
+
+/// `editAs` decides what a grid edit does to a chart: `twoCell` moves and
+/// resizes, `oneCell` moves without resizing, `absolute` does neither. An
+/// insert inside the anchored span is what tells the first two apart.
+#[test]
+fn chart_anchors_honour_their_edit_as_mode() {
+    // (editAs, insert row, expected from row, expected to row)
+    for (mode, at, from_row, to_row) in [
+        ("twoCell", 1, 6, 21),
+        ("oneCell", 1, 6, 21),
+        ("absolute", 1, 4, 19),
+        ("twoCell", 10, 4, 21),
+        ("oneCell", 10, 4, 19),
+        ("absolute", 10, 4, 19),
+    ] {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(r#"editAs="oneCell""#, &format!(r#"editAs="{mode}""#));
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at,
+                    count: 2,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = package_map(&workbook.save().unwrap());
+        let patched = String::from_utf8(saved["xl/drawings/drawing1.xml"].clone()).unwrap();
+        assert!(
+            patched.contains(&format!(
+                "<xdr:row>{from_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>"
+            )),
+            "{mode} at row {at} put its top corner on the wrong row: {patched}"
+        );
+        assert!(
+            patched.contains(&format!(
+                "<xdr:row>{to_row}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"
+            )),
+            "{mode} at row {at} put its bottom corner on the wrong row: {patched}"
+        );
+    }
+}
+
+/// A cache beside a reference this crate cannot resolve keeps its pre-edit
+/// values through a structural edit, because the reference itself never
+/// changes. The edit is refused rather than saved as a chart whose cache and
+/// reference disagree.
+#[test]
+fn refuses_a_structural_edit_beside_a_cache_that_cannot_be_rebuilt() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let chart = String::from_utf8(CHART_PART.to_vec())
+        .unwrap()
+        .replace("Data!$B$2:$B$4", "SalesRange");
+    set_test_part(&mut parts, "xl/charts/chart1.xml", chart.into_bytes());
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message)
+            if message.contains("xl/charts/chart1.xml")),
+        "{error:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+/// Renaming the plotted sheet rewrites the qualifier in every chart reference,
+/// and undo puts the old name back.
+#[test]
+fn sheet_rename_rewrites_chart_references() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Sales Data".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        chart_formulas(&workbook),
+        [
+            "'Sales Data'!$B$1",
+            "'Sales Data'!$A$2:$A$4",
+            "'Sales Data'!$B$2:$B$4",
+            "'Sales Data'!$C$2:$C$4"
+        ]
+    );
+    let saved = package_map(&workbook.save().unwrap());
+    let patched = String::from_utf8(saved["xl/charts/chart1.xml"].clone()).unwrap();
+    assert!(
+        patched.contains("<c:f>'Sales Data'!$B$1</c:f>"),
+        "renamed qualifier missing: {patched}"
+    );
+    assert!(!patched.contains("Data!$B$1"), "old qualifier left behind");
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        chart_formulas(&workbook),
+        [
+            "Data!$B$1",
+            "Data!$A$2:$A$4",
+            "Data!$B$2:$B$4",
+            "Data!$C$2:$C$4"
+        ]
+    );
+}
+
+/// Deleting every plotted row collapses the reference the way a cell formula
+/// would, rather than leaving it on addresses that no longer exist.
+#[test]
+fn deleted_rows_collapse_chart_references_to_ref_errors() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 3,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        chart_formulas(&workbook),
+        ["Data!$B$1", "#REF!", "#REF!", "#REF!"]
+    );
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
+#[test]
+fn refuses_structural_ops_that_would_strand_pivot_references() {
+    let mut parts = ooxml_opc::unzip_parts(&preservation_fixture()).unwrap();
+    parts.push((
+        "xl/pivotcache/pivotCacheDefinition1.xml".to_owned(),
+        br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Data" ref="A1:B2"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RemoveSheet { index: 0 },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+    ] {
+        let mut workbook = Workbook::open(&original).unwrap();
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message)
+                if message.contains("pivotCacheDefinition1.xml")),
+            "{op:?} was allowed: {error:?}"
+        );
+    }
+
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
+#[test]
+fn refuses_structural_ops_that_would_strand_unclaimed_chart_parts() {
+    let mut parts = ooxml_opc::unzip_parts(&preservation_fixture()).unwrap();
+    parts.push((
+        "xl/charts/chart1.xml".to_owned(),
+        br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#.to_vec(),
+    ));
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RemoveSheet { index: 0 },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+    ] {
+        let mut workbook = Workbook::open(&original).unwrap();
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains("chart1.xml")),
+            "{op:?} was allowed: {error:?}"
+        );
+    }
+
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
+#[test]
+fn non_worksheet_sheets_stay_typed_and_byte_identical() {
+    let original = non_worksheet_fixture();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    assert_eq!(workbook.sheet_count(), 3);
+    assert!(workbook.model().sheets[1].used_range().is_none());
+    assert!(matches!(
+        workbook.edit_cell(
+            SheetId(1),
+            cell("A1"),
+            "blocked",
+            CalculationOptions::default()
+        ),
+        Err(Error::InvalidOperation(_))
+    ));
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after = package_map(&saved);
+    assert_eq!(
+        after["xl/chartsheets/sheet1.xml"],
+        before["xl/chartsheets/sheet1.xml"]
+    );
+    assert_eq!(
+        after["xl/dialogsheets/sheet1.xml"],
+        before["xl/dialogsheets/sheet1.xml"]
+    );
+    let relationships = String::from_utf8(after["xl/_rels/workbook.xml.rels"].clone()).unwrap();
+    assert!(relationships.contains("/chartsheet\""));
+    assert!(relationships.contains("/dialogsheet\""));
+    assert_eq!(relationships.matches("/worksheet\"").count(), 1);
+    let content_types = String::from_utf8(after["[Content_Types].xml"].clone()).unwrap();
+    assert!(content_types.contains("spreadsheetml.chartsheet+xml"));
+    assert!(content_types.contains("spreadsheetml.dialogsheet+xml"));
+    assert!(
+        !String::from_utf8(after["xl/chartsheets/sheet1.xml"].clone())
+            .unwrap()
+            .contains("sheetData")
+    );
+    Workbook::open(&saved).unwrap();
+}
+
+#[test]
+fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
+    let original = strict_prefixed_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
+        .unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Added".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let workbook_xml = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
+    let strict_main = r#"xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main""#;
+    let strict_rel = "http://purl.oclc.org/ooxml/officeDocument/relationships";
+    assert!(workbook_xml.contains(&format!(r#"<sheets xmlns:r="{strict_rel}" {strict_main}"#)));
+    assert!(workbook_xml.contains(r#"<sheet name="Data" sheetId="1" rel:id="rId1"/>"#));
+    assert!(workbook_xml.contains(r#"r:id="rId2""#));
+    assert!(workbook_xml.contains("<calcPr"));
+    assert!(workbook_xml.contains("<s:definedName name=\"StrictName\">Data!$A$1</s:definedName>"));
+    let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
+    assert!(
+        worksheet.find("<mc:AlternateContent").unwrap()
+            < worksheet
+                .find(&format!("<sheetData {strict_main}"))
+                .unwrap()
+    );
+    assert!(worksheet.contains("<row r=\"1\""));
+    assert!(worksheet.contains("<c r=\"A1\""));
+    assert!(!worksheet.contains("<s:sheetData"));
+    let relationships = String::from_utf8(parts["xl/_rels/workbook.xml.rels"].clone()).unwrap();
+    assert_eq!(
+        relationships
+            .matches("http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet")
+            .count(),
+        2
+    );
+    assert!(!relationships.contains("schemas.openxmlformats.org/officeDocument"));
+    let added = String::from_utf8(parts["xl/worksheets/sheet2.xml"].clone()).unwrap();
+    assert!(added.contains("xmlns=\"http://purl.oclc.org/ooxml/spreadsheetml/main\""));
+    let content_types = String::from_utf8(parts["[Content_Types].xml"].clone()).unwrap();
+    assert!(content_types.contains(r#"PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.ms-excel.worksheet+xml""#));
+    assert_eq!(Workbook::open(&saved).unwrap().sheet_count(), 2);
+}
+
+#[test]
+fn no_edit_round_trip_keeps_calculation_chain_and_source_parts() {
+    let original = preservation_fixture();
+    let before = ooxml_opc::unzip_parts(&original).unwrap();
+    let saved = Workbook::open(&original).unwrap().save().unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(after, before);
+    assert!(package_map(&saved).contains_key("xl/calcChain.xml"));
+}
+
+#[test]
+fn defined_names_follow_renames_and_drop_ambiguous_references() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Renamed Sheet".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = package_map(&workbook.save().unwrap());
+    let workbook_xml = String::from_utf8(saved["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains("&apos;Renamed Sheet&apos;!$A$1"));
+    assert!(!workbook_xml.contains(r#"name="AmbiguousData""#));
+    assert!(workbook_xml.contains(r#"name="Unrelated">42</definedName>"#));
+}
+
+#[test]
+fn renaming_a_function_named_sheet_keeps_its_defined_names() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("SUM"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="SUM" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="Qualified">SUM(SUM!$A$1:$A$10)</definedName><definedName name="Unqualified">SUM($A$1:$A$10)</definedName></definedNames></workbook>"#.to_vec(),
+    );
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Renamed".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let workbook_xml = String::from_utf8(package_map(&saved)["xl/workbook.xml"].clone()).unwrap();
+    assert!(workbook_xml.contains(r#"name="Qualified">SUM(Renamed!$A$1:$A$10)</definedName>"#));
+    assert!(workbook_xml.contains(r#"name="Unqualified">SUM($A$1:$A$10)</definedName>"#));
+    Workbook::open(&saved).unwrap();
+}
+
+#[test]
+fn scoped_defined_names_remap_indices_and_drop_deleted_scopes() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 0,
+                name: "Fresh".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let parts = package_map(&saved);
+    let workbook_xml = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
+    assert!(!workbook_xml.contains(r#"name="LocalMiddle""#));
+    assert!(workbook_xml.contains(r#"name="LocalData" localSheetId="1""#));
+    assert!(workbook_xml.contains(r#"name="LocalTail" localSheetId="2""#));
+    Workbook::open(&saved).unwrap();
+}
+
+#[test]
+fn undo_restores_defined_names_dropped_by_a_sheet_removal() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook.model().defined_names.clone();
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(
+        !workbook
+            .model()
+            .defined_names
+            .iter()
+            .any(|defined| defined.name == "LocalMiddle")
+    );
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
+/// v1 leaves preserved sheet fragments at their original geometry after an
+/// axis edit; the file must still open, even though the ranges have drifted.
+#[test]
+fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
+    let original = preservation_fixture();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after = package_map(&saved);
+    let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(worksheet.contains(r#"<autoFilter ref="A1:B2""#));
+    assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
+    assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
+    assert_eq!(
+        after["xl/drawings/drawing1.xml"],
+        before["xl/drawings/drawing1.xml"]
+    );
+    Workbook::open(&saved).unwrap();
+}
+
+#[test]
+fn remove_then_add_is_fresh_while_undo_restores_exact_sheet_identity() {
+    let original = preservation_fixture();
+    let mut replaced = Workbook::open(&original).unwrap();
+    replaced
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Keep".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    replaced
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 0 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    replaced
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 0,
+                name: "Data".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let replaced_parts = package_map(&replaced.save().unwrap());
+    assert!(!replaced_parts.contains_key("xl/worksheets/sheet1.xml"));
+    for (path, bytes) in &replaced_parts {
+        if path.starts_with("xl/worksheets/") && path.ends_with(".xml") {
+            assert!(
+                !String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .contains("<autoFilter")
+            );
+        }
+    }
+
+    let mut restored = Workbook::open(&original).unwrap();
+    restored
+        .apply_ops(
+            vec![Op::AddSheet {
+                index: 1,
+                name: "Keep".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    restored
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 0 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    restored.undo(CalculationOptions::default()).unwrap();
+    let restored_parts = package_map(&restored.save().unwrap());
+    assert!(
+        String::from_utf8(restored_parts["xl/worksheets/sheet1.xml"].clone())
+            .unwrap()
+            .contains("<autoFilter")
+    );
+}
+
+/// Provenance is recorded against the address a cell was read from, so a row
+/// or column edit that moves the cell has to move it too.
+#[test]
+fn shared_string_provenance_follows_cells_through_row_and_column_edits() {
+    let mut workbook = Workbook::open(&ambiguous_shared_string_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let inserted = saved_sheet_text(&workbook);
+    assert!(
+        inserted.contains(r#"<c r="C4" t="s"><v>0</v></c>"#),
+        "{inserted}"
+    );
+    assert!(
+        inserted.contains(r#"<c r="E4" t="s"><v>1</v></c>"#),
+        "the bold entry collapsed onto the plain one: {inserted}"
+    );
+
+    workbook
+        .apply_ops(
+            vec![
+                Op::DeleteRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::DeleteCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let deleted = saved_sheet_text(&workbook);
+    assert!(
+        deleted.contains(r#"<c r="B2" t="s"><v>0</v></c>"#),
+        "{deleted}"
+    );
+    assert!(
+        deleted.contains(r#"<c r="D2" t="s"><v>1</v></c>"#),
+        "the bold entry collapsed onto the plain one: {deleted}"
+    );
+}
+
+/// Deleting the column a cell sits in drops its provenance with the cell; the
+/// surviving cell keeps its own.
+#[test]
+fn deleting_a_column_leaves_the_surviving_cell_on_its_own_entry() {
+    let mut workbook = Workbook::open(&ambiguous_shared_string_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let saved = saved_sheet_text(&workbook);
+    assert!(
+        saved.contains(r#"<c r="C2" t="s"><v>1</v></c>"#),
+        "the bold entry was lost when the plain one was deleted: {saved}"
+    );
+    assert!(!saved.contains(r#"<v>0</v>"#), "{saved}");
+}
+
+#[test]
+fn undo_and_redo_restore_shared_string_provenance() {
+    let mut workbook = Workbook::open(&ambiguous_shared_string_fixture()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let deleted = saved_sheet_text(&workbook);
+    assert!(
+        deleted.contains(r#"<c r="D1" t="s"><v>1</v></c>"#),
+        "{deleted}"
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let undone = saved_sheet_text(&workbook);
+    assert!(
+        undone.contains(r#"<c r="B2" t="s"><v>0</v></c>"#),
+        "{undone}"
+    );
+    assert!(
+        undone.contains(r#"<c r="D2" t="s"><v>1</v></c>"#),
+        "{undone}"
+    );
+
+    workbook.redo(CalculationOptions::default()).unwrap();
+    let redone = saved_sheet_text(&workbook);
+    assert!(
+        redone.contains(r#"<c r="D1" t="s"><v>1</v></c>"#),
+        "{redone}"
+    );
+}
+
+fn charted_model(chart: SheetChart) -> WorkbookModel {
+    let mut sheet = Sheet::new("Data");
+    sheet.charts.push(chart);
+    let mut model = WorkbookModel::default();
+    model.sheets.push(sheet);
+    model
+}
+
+fn sample_chart() -> SheetChart {
+    SheetChart {
+        part: "xl/charts/chart1.xml".to_owned(),
+        drawing: "xl/drawings/drawing1.xml".to_owned(),
+        anchor_index: 0,
+        anchor: ChartAnchor::TwoCell {
+            from: AnchorCell::default(),
+            to: AnchorCell {
+                col: 4,
+                row: 8,
+                ..AnchorCell::default()
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        },
+        refs: vec![ChartRef {
+            kind: ChartRefKind::Values,
+            formula: "Data!$A$1:$A$2".to_owned(),
+        }],
+    }
+}
+
+/// Chart state a peer controls reaches the writer, so an off-grid anchor, a
+/// character xml cannot carry, a smuggled part path and two charts claiming one
+/// anchor are all refused before anything is written.
+#[test]
+fn refuses_chart_state_the_writer_could_not_express() {
+    let off_grid = {
+        let mut chart = sample_chart();
+        chart.anchor = ChartAnchor::TwoCell {
+            from: AnchorCell::default(),
+            to: AnchorCell {
+                col: 4,
+                row: MAX_ROWS,
+                ..AnchorCell::default()
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        };
+        (chart, "off the sheet grid")
+    };
+    let illegal_character = {
+        let mut chart = sample_chart();
+        chart.refs[0].formula = "Data!$A$1\u{7}".to_owned();
+        (chart, "xml cannot carry")
+    };
+    let traversal = {
+        let mut chart = sample_chart();
+        chart.part = "../../etc/passwd".to_owned();
+        (chart, "not a package part path")
+    };
+    let absolute = {
+        let mut chart = sample_chart();
+        chart.drawing = "/xl/drawings/drawing1.xml".to_owned();
+        (chart, "not a package part path")
+    };
+    for (chart, reason) in [off_grid, illegal_character, traversal, absolute] {
+        let Err(error) = Workbook::from_model(charted_model(chart)) else {
+            panic!("{reason} must be refused");
+        };
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains(reason)),
+            "{reason}: {error:?}"
+        );
+    }
+
+    let mut model = charted_model(sample_chart());
+    model.sheets[0].charts.push(sample_chart());
+    let Err(error) = Workbook::from_model(model) else {
+        panic!("two charts on one anchor must be refused");
+    };
+    assert!(
+        matches!(&error, Error::InvalidOperation(message)
+            if message.contains("same part, drawing and anchor")),
+        "{error:?}"
+    );
+}
+
+/// Chart parts come out of the package a workbook was opened with, and this
+/// crate creates none. A chart-bearing model with no source would save as a
+/// workbook that lost every chart, so every door into one is closed.
+#[test]
+fn refuses_chart_state_with_no_source_package_to_preserve_it() {
+    for build in [
+        Workbook::from_model as fn(WorkbookModel) -> Result<Workbook, Error>,
+        |model| Workbook::from_model_collaborative(model, 7),
+    ] {
+        let Err(error) = build(charted_model(sample_chart())) else {
+            panic!("a chart with no source package must be refused");
+        };
+        assert!(
+            matches!(&error, Error::InvalidOperation(message)
+                if message.contains("only be preserved from a source package")),
+            "{error:?}"
+        );
+    }
+
+    let error = xlsx_parse::serialize_workbook(&charted_model(sample_chart())).unwrap_err();
+    assert!(format!("{error}").contains("written back into the package it was read from"));
+
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts.len(), 1);
+}
+
+/// An insertion that would push a marker a chart must move past the last row
+/// is refused. Clamping it would shrink an object whose `editAs` forbids
+/// resizing, or collapse it outright.
+#[test]
+fn refuses_an_insertion_that_would_push_a_chart_anchor_off_the_grid() {
+    for (mode, edit_as) in [
+        ("twoCell", AnchorEditAs::TwoCell),
+        ("oneCell", AnchorEditAs::OneCell),
+    ] {
+        let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+        let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+            .unwrap()
+            .replace(r#"editAs="oneCell""#, &format!(r#"editAs="{mode}""#))
+            .replace(
+                "<xdr:row>4</xdr:row>",
+                &format!("<xdr:row>{}</xdr:row>", MAX_ROWS - 6),
+            )
+            .replace(
+                "<xdr:row>19</xdr:row>",
+                &format!("<xdr:row>{}</xdr:row>", MAX_ROWS - 2),
+            );
+        set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+        let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        let anchored = ChartAnchor::TwoCell {
+            from: AnchorCell {
+                col: 2,
+                col_off: 12_700,
+                row: MAX_ROWS - 6,
+                row_off: 0,
+            },
+            to: AnchorCell {
+                col: 8,
+                col_off: 0,
+                row: MAX_ROWS - 2,
+                row_off: 0,
+            },
+            edit_as,
+        };
+        assert_eq!(workbook.model().sheets[0].charts[0].anchor, anchored);
+
+        let error = workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 4,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message)
+                if message.contains("push a chart anchor past the sheet boundary")),
+            "{mode}: {error:?}"
+        );
+        assert_eq!(
+            workbook.model().sheets[0].charts[0].anchor,
+            anchored,
+            "a refused insertion must leave the anchor alone"
+        );
+
+        workbook
+            .apply_ops(
+                vec![Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                }],
+                CalculationOptions::default(),
+            )
+            .expect("an insertion every marker survives is accepted");
+    }
+}
+
+/// Removing a charted sheet strands the references that named it, so the
+/// remaining sheets' chart state must reach the shared document. Undo must put
+/// it back, and neither direction may leave the model ahead of the authority.
+#[test]
+fn removing_a_charted_sheet_synchronises_and_undoes_cleanly() {
+    let mut workbook = Workbook::open(&cross_sheet_charted_fixture()).unwrap();
+    let plotted =
+        |workbook: &Workbook| workbook.model().sheets[0].charts[0].refs[2].formula.clone();
+    assert_eq!(plotted(&workbook), "Source!$A$1:$A$2");
+
+    workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(plotted(&workbook), "#REF!");
+    assert_eq!(workbook.model().sheets.len(), 1);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(plotted(&workbook), "Source!$A$1:$A$2");
+    assert_eq!(workbook.model().sheets.len(), 2);
+
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(plotted(&workbook), "#REF!");
+    assert_eq!(workbook.model().sheets.len(), 1);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].charts[0].refs[2].formula,
+        "#REF!"
+    );
+}
+
+/// `SetCharts` is the inverse a remap emits; it is not something a caller may
+/// submit, because it replaces state the engine derives.
+#[test]
+fn set_charts_is_rejected_as_an_internal_operation() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let Err(error) = workbook.apply_ops(
+        vec![Op::SetCharts {
+            sheet: SheetId(0),
+            charts: Vec::new(),
+        }],
+        CalculationOptions::default(),
+    ) else {
+        panic!("SetCharts must be refused");
+    };
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("internal")),
+        "{error:?}"
+    );
+}
+
+/// Every op that rewrites `defined_names` is structural, and structural ops are
+/// refused while collaborative. Peers therefore cannot disagree about a name.
+#[test]
+fn collaborative_sessions_refuse_every_op_that_rewrites_defined_names() {
+    let bytes = defined_names_fixture();
+    let rewriting_ops = vec![
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+        Op::SetDefinedNames {
+            defined_names: Vec::new(),
+        },
+    ];
+
+    for op in rewriting_ops {
+        let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
+        let error = left
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::CollaborativeStructureOperation),
+            "{op:?} must be refused while collaborative, or peers diverge on defined names"
+        );
+    }
+
+    let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 202).unwrap();
+    left.edit_cell(SheetId(0), cell("A1"), "21", CalculationOptions::default())
+        .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(left.model().defined_names, right.model().defined_names);
 }

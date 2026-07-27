@@ -2,12 +2,11 @@
  * Comment / tracked-change anchor derivation over the display list, shared
  * by both adapters' sidebar plumbing on the canvas-renderer path.
  *
- * `visitAnchorKeys` walks the PM doc and reports every comment /
+ * `visitAnchorKeys` walks the document and reports every comment /
  * tracked-change anchor as `(key, pos)` — shared between each adapter's
  * layout-math derivation (DOM painter path) and the display-list derivation
  * here, so both register identical keys in identical order.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { YrsRevisionInfo, YrsSession } from '../../yrs';
@@ -30,20 +29,20 @@ export interface AnchorEditorView {
 }
 
 /**
- * Walk the PM doc and report every comment / tracked-change anchor as
+ * Walk the document and report every comment / tracked-change anchor as
  * `(key, pos)`. `register` is called once per occurrence; callers dedupe.
  */
 export function visitAnchorKeys(
   pmView: AnchorEditorView,
   register: (key: string, pos: number) => void
 ): void {
-  const { doc: pmDoc, schema } = pmView.state;
+  const { doc, schema } = pmView.state;
   const commentType = schema.marks.comment;
   const insertionType = schema.marks.insertion;
   const deletionType = schema.marks.deletion;
   if (!commentType && !insertionType && !deletionType) return;
 
-  pmDoc.descendants((node, pos) => {
+  doc.descendants((node, pos) => {
     // Structural tracked-change attrs on non-text nodes (whole-table insert,
     // row insert/delete, cell insert, paragraph-break tracked, etc). Without
     // these, an empty inserted table has no anchor — the sidebar's
@@ -100,8 +99,7 @@ export function visitAnchorKeys(
 }
 
 /**
- * Display-list variant of the adapters' layout-based anchor derivation for
- * the experimental canvas renderer: anchor Ys come from Rust `range_rects`
+ * Display-list anchor derivation: anchor Ys come from Rust `range_rects`
  * queries over the display list (page-local px) plus the canvas page stack
  * math, instead of layout-fragment scans in the DOM viewport's coordinate
  * space. Returns `.canvas-pages`-host Y offsets keyed by
@@ -146,7 +144,7 @@ function rectForYrsPoint(
 /**
  * yrs-authoritative sidebar anchors. Comment coverage comes from sticky yrs
  * side-map positions and tracked-change anchors come from `listRevisions()`;
- * neither path reads an EditorView or ProseMirror document.
+ * neither path reads an `AnchorEditorView` or its document.
  */
 export function computeAnchorPositionsFromYrs(
   session: YrsSession,

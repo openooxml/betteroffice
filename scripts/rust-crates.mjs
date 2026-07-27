@@ -6,6 +6,8 @@ export const WORKSPACE_MANIFEST = 'Cargo.toml';
 
 export const RUST_CRATES = [
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
+  { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
+  { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
   { name: 'betteroffice-xlsx-model', dependency: 'xlsx-model' },
   { name: 'betteroffice-xlsx-parse', dependency: 'xlsx-parse' },
   { name: 'betteroffice-xlsx-calc', dependency: 'xlsx-calc' },
@@ -13,8 +15,6 @@ export const RUST_CRATES = [
   { name: 'betteroffice-xlsx-ops', dependency: 'xlsx-ops' },
   { name: 'betteroffice-xlsx-raster', dependency: 'xlsx-raster' },
   { name: 'betteroffice-xlsx', dependency: 'betteroffice-xlsx' },
-  { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
-  { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
   { name: 'betteroffice-docx-parse', dependency: 'docx-parse' },
   { name: 'betteroffice-docx-layout', dependency: 'docx-layout' },
   { name: 'betteroffice-docx-edit', dependency: 'docx-edit' },

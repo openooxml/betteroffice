@@ -1,7 +1,7 @@
 /**
  * Public DOCX parser facade.
  *
- * Rust S9 owns ZIP/XML parsing. TypeScript only normalizes host inputs,
+ * Rust owns ZIP/XML parsing. TypeScript only normalizes host inputs,
  * rehydrates the public `Document`, reports progress, and registers fonts.
  * @packageDocumentation
  * @public

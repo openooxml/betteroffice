@@ -172,8 +172,8 @@ export function useDocumentLoader({
 
   // React to documentBuffer / document prop changes.
   useEffect(() => {
-    // External-content mode: the caller (e.g. ySyncPlugin) populates PM
-    // directly — skip the load.
+    // External-content mode: the caller populates the document directly —
+    // skip the load.
     if (externalContent) return;
 
     if (!documentBuffer) {

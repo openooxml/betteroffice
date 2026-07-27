@@ -1,11 +1,25 @@
-//! Display-list gates:
-//! 1. contract round-trip — the committed TS demo fixture survives the serde
-//!    types with no field loss and serializes idempotently (byte-stable).
-//! 2. determinism snapshots — the paragraph golden scenarios build to
-//!    byte-identical JSON run-over-run, pinned by committed snapshot files.
-//!    Regenerate deliberately: DL_SNAPSHOT_UPDATE=1 cargo test -p docx-layout
-//! 3. hit-testing — point -> PM position and range -> rects behave like the
-//!    painted-DOM resolvers on the same scenarios.
+//! Display-list contract, determinism, and interaction gates.
+//!
+//! Three kinds of test live here.
+//!
+//! **Contract** — the demo fixture must round-trip through the serde types
+//! without losing or renaming a field, and parse-then-serialize must be
+//! idempotent. A new output field that is not wired into the types shows up
+//! here first.
+//!
+//! **Determinism and snapshots** — every fixture is built twice and the two
+//! JSON strings must be byte-identical, then compared against a committed
+//! snapshot. Fixtures pinning only `{ measured, options }` have their golden
+//! canonical layout spliced in as the `layout` the builder consumes; fixtures
+//! that already carry one are used verbatim. A fixture the builder cannot
+//! handle is reported as a gap rather than a failure, so coverage can grow
+//! without the suite going red. Snapshots regenerate only under
+//! `DL_SNAPSHOT_UPDATE=1`, which keeps drift a deliberate act.
+//!
+//! **Behaviour** — the remaining tests pin individual emission rules against
+//! hand-computed geometry: hit testing and caret movement, table cell identity
+//! and vertical-merge continuations, indents and justification, tracked-change
+//! decorations, watermarks, floats, charts, shapes and text boxes.
 
 use docx_layout::display_list::{
     DecoKind, DecorationPrimitive, DisplayList, DocAttrs, MAX_ALT_TEXT_CHARS, Primitive,
@@ -71,9 +85,8 @@ fn paragraph_scenarios_snapshot_and_determinism() {
     let update = std::env::var("DL_SNAPSHOT_UPDATE").as_deref() == Ok("1");
 
     for name in SCENARIOS {
-        let input = std::fs::read_to_string(fixture_path(name, "input")).unwrap_or_else(|_| {
-            panic!("missing input fixture for {name}; run scripts/export-displaylist-fixtures.ts")
-        });
+        let input = std::fs::read_to_string(fixture_path(name, "input"))
+            .unwrap_or_else(|_| panic!("missing input fixture for {name}"));
 
         // determinism gate: two runs are byte-identical
         let a = build_display_list_json(&input).expect("builds");
@@ -105,25 +118,14 @@ fn paragraph_scenarios_snapshot_and_determinism() {
     }
 }
 
-/// Determinism gate over the WHOLE golden corpus, not just the two paragraph
-/// scenarios in `SCENARIOS`. Every fixture the display-list builder currently
-/// accepts must build byte-identically run-over-run AND match its committed
-/// `<name>.displaylist.json` snapshot. This is the standing replacement for the
-/// mirror-vs-painter watchdog: once the DOM painter is retired there is no
-/// second renderer to diff against, so display-list drift must be caught here.
-///
-/// Scenarios the builder does not yet accept (composing the golden layout still
-/// hits a not-yet-ported path) are REPORTED, never failed, so the gate widens
-/// automatically as the builder gains coverage — add nothing here when a new
-/// primitive lands, just regenerate:
-///   DL_SNAPSHOT_UPDATE=1 cargo test -p docx-layout --test display_list
+/// Verifies deterministic snapshots across the full golden corpus.
 #[test]
 fn golden_corpus_display_list_determinism_and_snapshot() {
     let update = std::env::var("DL_SNAPSHOT_UPDATE").as_deref() == Ok("1");
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
 
     let mut names: Vec<String> = std::fs::read_dir(&fixtures)
-        .expect("fixtures dir exists — run `bun scripts/export-golden-fixtures.ts`")
+        .expect("fixtures dir exists")
         .filter_map(|e| {
             let n = e.ok()?.file_name().into_string().ok()?;
             n.strip_suffix(".input.json").map(str::to_string)
@@ -206,16 +208,16 @@ fn snapshot(name: &str) -> DisplayList {
 }
 
 // single-page-multi-paragraph: three one-line paragraphs at y 96/120/144,
-// x 96, widths 120/130/120, pm spans [1,16] [18,34] [36,51]
+// x 96, widths 120/130/120, doc spans [1,16] [18,34] [36,51]
 #[test]
-fn hit_test_resolves_clicks_like_the_dom_resolver() {
+fn hit_test_resolves_clicks_to_nearest_text_position() {
     let dl = build("single-page-multi-paragraph");
     assert_eq!(dl.pages.len(), 1);
 
     // click at the very start of the first line lands on its first position
     assert_eq!(hit_test(&dl, 0, 96.0, 110.0), Some(1));
 
-    // click inside the first line resolves proportionally within its pm span
+    // click inside the first line resolves proportionally within its doc span
     let mid = hit_test(&dl, 0, 156.0, 110.0).unwrap();
     assert!((1..=16).contains(&mid), "mid-line hit out of span: {mid}");
     assert!(mid > 1, "mid-line hit should advance past the run start");
@@ -239,7 +241,7 @@ fn hit_test_reaches_content_on_later_pages() {
     let dl = build("multi-page-paragraph-overflow");
     assert_eq!(dl.pages.len(), 2);
 
-    // page 2's first paragraph is block 8 (pm 121..133), painted at y 96
+    // page 2's first paragraph is block 8 (positions 121..133), painted at y 96
     let pos = hit_test(&dl, 1, 100.0, 150.0).unwrap();
     assert!(pos >= 121, "page-2 hit resolved into page-1 content: {pos}");
 }
@@ -531,7 +533,7 @@ fn caret_rect_preserves_inline_image_edges() {
 #[test]
 fn range_rects_span_pages() {
     let dl = build("multi-page-paragraph-overflow");
-    // blocks 0..9 at pm i*15+1..i*15+13; select across the page break
+    // blocks 0..9 at positions i*15+1..i*15+13; select across the page break
     let rects = range_rects(&dl, 1, 148);
     let pages: std::collections::BTreeSet<usize> = rects.iter().map(|r| r.page_index).collect();
     assert_eq!(pages.into_iter().collect::<Vec<_>>(), vec![0, 1]);
@@ -958,10 +960,7 @@ fn vmerge_continuation_slice_is_flagged_and_unselectable() {
     );
 }
 
-/// #188 — a floating image anchored INSIDE a table cell paints on the cell's
-/// float layer: an Image primitive at its cell-content-relative geometry,
-/// carrying the cell grid ref, with behind-doc floats under the cell text and
-/// front floats over it (matching renderCellContent's layer order).
+/// Cell floats preserve cell-relative geometry and paint order.
 #[test]
 fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
     let input = serde_json::json!({
@@ -1195,7 +1194,10 @@ fn image_alt_text_threads_and_caps() {
     );
 
     let empty = images.iter().find(|i| i.rel_id == "rId11").unwrap();
-    assert_eq!(empty.alt_text, None, "empty alt drops like the DOM painter");
+    assert_eq!(
+        empty.alt_text, None,
+        "an empty alt attribute resolves to None"
+    );
 }
 
 #[test]
@@ -1280,11 +1282,6 @@ fn picture_watermark_emits_decorative_washout_image_primitive() {
     assert_eq!(img.alt_text, None);
 }
 
-/// tracked-change runs paint like the DOM painter (renderParagraph/runs.ts):
-/// an insertion gets a green wash behind the glyphs plus a green *dashed*
-/// underline, a deletion gets a red wash plus a strike (the red text itself
-/// comes from run_color). Guards the canvas revision styling that the display
-/// list forgot for insertions.
 #[test]
 fn tracked_change_runs_emit_revision_washes_and_rules() {
     let input = serde_json::json!({
@@ -1600,9 +1597,7 @@ fn structural_revisions_emit_pinned_primitives() {
 }
 
 // ---------------------------------------------------------------------------
-// watchdog-finding geometry (F1/F4/F5/F6): hand-computed origins pinning each
-// fix against the DOM painter's placement. Numbers are derived in the comments
-// so a regression names the exact term that drifted.
+// Hand-computed geometry origins.
 // ---------------------------------------------------------------------------
 
 fn build_dl(input: &str) -> DisplayList {
@@ -1627,11 +1622,6 @@ fn text_prims(prims: &[Primitive]) -> Vec<(String, f64, f64, f64, Option<f64>)> 
         .collect()
 }
 
-/// F4: a hanging-indent list paragraph's marker fills the hang, so BOTH the
-/// first line and the body lines start their body text at the text indent
-/// (max(indent_left, hanging)) — NOT `indent_left - hanging` like a plain
-/// hanging paragraph. Mirrors renderParagraph.ts's marker inline-block of
-/// min-width = hanging.
 #[test]
 fn hanging_list_first_line_body_sits_at_the_text_indent() {
     // indent_left 40, hanging 20, frag.x 100 → body text at 100 + 40 = 140 on
@@ -1684,7 +1674,7 @@ fn hanging_list_first_line_body_sits_at_the_text_indent() {
     );
 
     // no marker: a plain hanging paragraph pulls the first line left by the hang
-    // (100 + 40 - 20 = 120), body lines still at 140 — unchanged v0 behavior
+    // (100 + 40 - 20 = 120), body lines still at 140
     let dl2 = build_dl(&with_marker(serde_json::Value::Null));
     let xs2: Vec<f64> = text_prims(&dl2.pages[0].primitives)
         .iter()
@@ -1702,7 +1692,7 @@ fn hanging_list_first_line_body_sits_at_the_text_indent() {
     );
 }
 
-/// F6: `jc=both` stretches expandable spaces to fill the usable width. A
+/// `jc=both` stretches expandable spaces to fill the usable width. A
 /// non-last line reaches the right margin and carries the per-space add as
 /// `wordSpacing`; the paragraph's closing line stays at natural width.
 #[test]
@@ -1760,8 +1750,6 @@ fn justified_lines_stretch_to_the_usable_width() {
     assert_eq!(*l1_ws, None, "the last line is not justified");
 }
 
-/// F6b: a paragraph whose final run is a `<w:br>` justifies its closing line
-/// too (renderParagraph/line.ts `paragraphEndsWithLineBreak`).
 #[test]
 fn soft_return_justifies_the_final_line() {
     let input = serde_json::json!({
@@ -1797,7 +1785,7 @@ fn soft_return_justifies_the_final_line() {
     assert_eq!(t[0].4, Some(280.0), "soft-return line carries wordSpacing");
 }
 
-/// F1 + F5: a table cell insets its content by the box-sizing left-border width
+/// A table cell insets its content by the box-sizing left-border width
 /// (leftmost column only) and offsets it vertically per w:vAlign. Constructed
 /// so the two effects are isolable: the left cell has a 1px left border and
 /// bottom vAlign, the right cell has neither.
@@ -1838,7 +1826,7 @@ fn table_cell_content_insets_border_and_honors_valign() {
     let sig = t.iter().find(|x| x.0 == "sig").expect("sig cell text");
     let date = t.iter().find(|x| x.0 == "date").expect("date cell text");
 
-    // left cell: cx 50 + left-border 1 + padLeft 7 = 58 (F1). vAlign bottom:
+    // left cell: cx 50 + left-border 1 + padLeft 7 = 58. vAlign bottom:
     // avail = 60 - 1 - 1 = 58, content 20 → offset 38; content top =
     // 50 + padTop 1 + 38 = 89; baseline = 89 + half-leading 2 + ascent 12 = 103.
     assert!(
@@ -1866,14 +1854,7 @@ fn table_cell_content_insets_border_and_honors_valign() {
     );
 }
 
-/// F5 (demo residual): cell paragraphs stack with Word's max-collapse spacing
-/// (the gap above a paragraph is `max(prev.after, this.before)`), exactly like
-/// the DOM painter's renderCellContent. The demo's signature/date table carries
-/// NO w:vAlign — its "bottom-aligned" look is purely the 320-twip after-spacing
-/// on the second paragraph. Summing bare line heights (the old path) dropped
-/// every inter-paragraph gap and painted the last line one after-spacing block
-/// too high. Three single-line paragraphs, no vAlign/borders, isolate the two
-/// collapse directions.
+/// Cell paragraphs use max-collapsed inter-paragraph spacing.
 #[test]
 fn cell_paragraphs_stack_with_collapsed_spacing() {
     // a: after 10; b: before 25 (wins over prev after 10) + after 30; c: before
@@ -1938,7 +1919,7 @@ fn cell_paragraphs_stack_with_collapsed_spacing() {
     );
     // c: gap max(after 30, before 5) = 30 → top 45 + 20 + 30 = 95 → baseline
     // 51 + 95 + 14 = 160 (after wins). The old line-height-only stack put it at
-    // 51 + 40 + 14 = 105, one after-spacing block too high (the F5 residual).
+    // 51 + 40 + 14 = 105, one after-spacing block too high.
     assert!(
         (base("c") - 160.0).abs() < 0.01,
         "c baseline {} (want 160)",
@@ -1946,7 +1927,7 @@ fn cell_paragraphs_stack_with_collapsed_spacing() {
     );
 }
 
-/// F2: a centered footer line that carries a PAGE field re-centers per page from
+/// A centered footer line carrying a PAGE field re-centers per page from
 /// the supplied per-page field widths, instead of holding the once-measured
 /// (fallback "1") position on every page. Covers both a per-digit glyph-width
 /// change (page 8 → 9) and a char-count jump (page 9 → 10), and pins that the
@@ -2398,7 +2379,6 @@ fn floating_image_run_emits_at_resolved_float_position() {
         "front float paints after body text"
     );
 
-    // a behind-doc float paints BEFORE the body text (renderPage phase 3)
     let dl_behind: DisplayList =
         serde_json::from_str(&build_display_list_json(&make("behind")).unwrap()).unwrap();
     let bp = &dl_behind.pages[0].primitives;

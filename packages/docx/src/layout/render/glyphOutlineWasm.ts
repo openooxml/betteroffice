@@ -12,7 +12,6 @@
  * rasterize as `.notdef`. Keeping the import dynamic also keeps the ~800KB
  * inlined wasm out of the default bundle (see `layout/wasm/index.ts`).
  *
- * @experimental part of the rust-canvas-engine glyph pipeline; shape may evolve.
  */
 
 import type { GlyphOutlineProvider } from './glyphCache';

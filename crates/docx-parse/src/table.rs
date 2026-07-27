@@ -1,9 +1,4 @@
-//! Document-story table models and incumbent-compatible property leaves.
-//!
-//! The similarly named helpers in `formatting` intentionally parse table
-//! properties inside style definitions. Document tables take a
-//! separate path with different malformed/default handling; S7 covers it
-//! here.
+//! Document-story table models and property parsing.
 
 use serde::{Deserialize, Serialize};
 

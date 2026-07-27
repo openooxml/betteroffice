@@ -1,8 +1,7 @@
 # Golden display-list corpus
 
 The safety net for the display-list + viewport seam. It pins the current output
-of the viewport math and the synthetic display-list factories so refactors — and
-the eventual Rust/WASM port — can prove **byte-identical** output.
+of the viewport math and the synthetic display-list factories across refactors.
 
 The goldens capture **current** behavior verbatim. They are not a statement that
 the output is _correct_ — only that it must not change unintentionally.

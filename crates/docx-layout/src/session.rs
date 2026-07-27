@@ -10,7 +10,7 @@
 //! logic the JSON-arg exports call, so results are byte-identical — this is pure
 //! perf. [`close_display_list`] drops a handle.
 //!
-//! Lifecycle / memory: the caller (the TS `createDisplayListQueries` facade)
+//! Lifecycle / memory: the `createDisplayListQueries` facade
 //! opens one handle per display-list build and closes it on dispose/replacement,
 //! so at most one handle is live per editor at steady state. As a backstop
 //! against a leaked handle (a facade that forgot to close, or a JS

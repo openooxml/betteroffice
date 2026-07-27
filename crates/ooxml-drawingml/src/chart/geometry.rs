@@ -549,7 +549,7 @@ fn plot_series_from_model<'a>(
     series: &'a super::model::ChartSeries,
     group_labels: Option<&'a super::model::ChartDataLabels>,
 ) -> PlotSeries<'a> {
-    let labels = plot_labels_from_model(group_labels, series.data_labels.as_ref());
+    let labels = plot_labels_from_model(group_labels, series.data_labels.as_ref(), None);
     let mut points: Vec<PlotPoint<'a>> = series
         .points
         .iter()
@@ -572,7 +572,12 @@ fn plot_series_from_model<'a>(
         .as_ref()
         .and_then(|labels| labels.points.as_deref())
     {
-        merge_point_labels(&mut points, overrides, labels);
+        merge_point_labels(
+            &mut points,
+            overrides,
+            group_labels,
+            series.data_labels.as_ref(),
+        );
     }
     PlotSeries {
         name: series.name.as_deref(),
@@ -589,24 +594,29 @@ fn plot_series_from_model<'a>(
     }
 }
 
-/// Merges a `c:dLbls` over the one its plot group declares. A `c:delete` at
-/// either scope, and an absent element at both, leave a series unlabelled.
+/// Resolves the three-level `c:dLbls` cascade.
 fn plot_labels_from_model<'a>(
     group: Option<&'a super::model::ChartDataLabels>,
     series: Option<&'a super::model::ChartDataLabels>,
+    point: Option<&'a super::model::ChartDataLabels>,
 ) -> Option<PlotDataLabels<'a>> {
-    let inherited = if series.is_some() { series } else { group };
-    if inherited?.delete == Some(true) {
+    point.or(series).or(group)?;
+    let flag = |read: fn(&super::model::ChartDataLabels) -> Option<bool>| {
+        point
+            .and_then(read)
+            .or_else(|| series.and_then(read))
+            .or_else(|| group.and_then(read))
+    };
+    if flag(|labels| labels.delete) == Some(true) {
         return None;
     }
-    let switch = |read: fn(&super::model::ChartDataLabels) -> Option<bool>| {
-        series
-            .and_then(read)
-            .or_else(|| group.and_then(read))
-            .unwrap_or(false)
-    };
+    let switch =
+        |read: fn(&super::model::ChartDataLabels) -> Option<bool>| flag(read).unwrap_or(false);
     let text = |read: fn(&super::model::ChartDataLabels) -> Option<&str>| {
-        series.and_then(read).or_else(|| group.and_then(read))
+        point
+            .and_then(read)
+            .or_else(|| series.and_then(read))
+            .or_else(|| group.and_then(read))
     };
     Some(PlotDataLabels {
         show_value: switch(|labels| labels.show_value),
@@ -619,8 +629,9 @@ fn plot_labels_from_model<'a>(
         position: text(|labels| labels.position.as_deref()),
         number_format: text(|labels| labels.number_format.as_deref()),
         text: plot_text_from_model(
-            series
+            point
                 .and_then(|labels| labels.text.as_ref())
+                .or_else(|| series.and_then(|labels| labels.text.as_ref()))
                 .or_else(|| group.and_then(|labels| labels.text.as_ref())),
         ),
     })
@@ -631,26 +642,29 @@ fn plot_labels_from_model<'a>(
 fn merge_point_labels<'a>(
     points: &mut Vec<PlotPoint<'a>>,
     overrides: &'a [super::model::ChartPointLabel],
-    series: Option<PlotDataLabels<'a>>,
+    group: Option<&'a super::model::ChartDataLabels>,
+    series: Option<&'a super::model::ChartDataLabels>,
 ) {
     let wildcard = points.iter().position(|point| point.index.is_none());
     for over in overrides.iter().take(MAX_PLOT_DATA_LABELS) {
         let Some(index) = over.index.and_then(point_index) else {
             continue;
         };
-        let labels = plot_labels_from_model(None, Some(&over.labels)).or(series);
+        let resolved = plot_labels_from_model(group, series, Some(&over.labels));
+        let label = resolved.and(over.text.as_deref());
+        let labels = Some(resolved.unwrap_or_default());
         if let Some(slot) = points
             .iter()
             .position(|point| point.index == Some(index))
             .filter(|slot| wildcard.is_none_or(|wildcard| *slot <= wildcard))
         {
-            points[slot].label = over.text.as_deref();
+            points[slot].label = label;
             points[slot].labels = labels;
             continue;
         }
         let mut point = PlotPoint {
             index: Some(index),
-            label: over.text.as_deref(),
+            label,
             labels,
             ..PlotPoint::default()
         };
@@ -3205,6 +3219,7 @@ fn group_thousands(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chart::{ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries};
 
     struct Source {
         categories: Vec<String>,
@@ -3224,6 +3239,29 @@ mod tests {
             categories: &source.categories,
             values: &source.values,
             ..PlotSeries::default()
+        }
+    }
+
+    fn labelled_space(
+        chart_type: &str,
+        group_labels: Option<ChartDataLabels>,
+        series_labels: Option<ChartDataLabels>,
+    ) -> ChartSpace {
+        ChartSpace {
+            chart_type: chart_type.to_owned(),
+            plot_groups: vec![ChartPlotGroup {
+                chart_type: Some(chart_type.to_owned()),
+                data_labels: group_labels,
+                series: vec![ChartSeries {
+                    categories: vec!["Q1".to_owned(), "Q2".to_owned()],
+                    values: vec![3.0, 1.0],
+                    color: "#4472C4".to_owned(),
+                    data_labels: series_labels,
+                    ..ChartSeries::default()
+                }],
+                ..ChartPlotGroup::default()
+            }],
+            ..ChartSpace::default()
         }
     }
 
@@ -4807,49 +4845,96 @@ mod tests {
     }
 
     #[test]
-    fn a_point_override_replaces_only_its_own_label() {
-        let space = ChartSpace {
-            chart_type: "column".to_owned(),
-            plot_groups: vec![crate::chart::ChartPlotGroup {
-                chart_type: Some("column".to_owned()),
-                data_labels: Some(crate::chart::ChartDataLabels {
-                    show_value: Some(true),
-                    ..crate::chart::ChartDataLabels::default()
-                }),
-                series: vec![crate::chart::ChartSeries {
-                    categories: vec!["Q1".to_owned(), "Q2".to_owned()],
-                    values: vec![3.0, 1.0],
-                    color: "#4472C4".to_owned(),
-                    data_labels: Some(crate::chart::ChartDataLabels {
-                        points: Some(vec![crate::chart::ChartPointLabel {
-                            index: Some(1.0),
-                            text: Some("pinned".to_owned()),
-                            labels: crate::chart::ChartDataLabels::default(),
-                        }]),
-                        ..crate::chart::ChartDataLabels::default()
-                    }),
-                    ..crate::chart::ChartSeries::default()
-                }],
-                ..crate::chart::ChartPlotGroup::default()
-            }],
-            ..ChartSpace::default()
-        };
-        let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
+    fn a_point_text_inherits_series_switches() {
+        let space = labelled_space(
+            "column",
+            None,
+            Some(ChartDataLabels {
+                show_value: Some(true),
+                show_legend_key: Some(true),
+                points: Some(vec![ChartPointLabel {
+                    index: Some(1.0),
+                    text: Some("pinned".to_owned()),
+                    labels: ChartDataLabels::default(),
+                }]),
+                ..ChartDataLabels::default()
+            }),
+        );
+        let chart = PlotChart::from(&space);
+        let point = &chart.plot_groups[0].series[0].points[0];
+        let inherited = point.labels.expect("point labels");
+        assert!(inherited.show_value);
+        assert!(inherited.show_legend_key);
+        let labels = texts(&plot_chart(&chart, rect()));
         assert!(labels.contains(&"pinned".to_owned()));
         assert!(labels.contains(&"3".to_owned()));
     }
 
     #[test]
-    fn a_deleted_dlbls_leaves_the_series_unlabelled() {
-        let space = |delete: bool| crate::chart::ChartDataLabels {
-            delete: Some(delete),
+    fn a_point_override_keeps_unset_series_switches() {
+        let space = labelled_space(
+            "column",
+            None,
+            Some(ChartDataLabels {
+                show_value: Some(true),
+                show_category_name: Some(true),
+                points: Some(vec![ChartPointLabel {
+                    index: Some(1.0),
+                    text: None,
+                    labels: ChartDataLabels {
+                        show_value: Some(false),
+                        ..ChartDataLabels::default()
+                    },
+                }]),
+                ..ChartDataLabels::default()
+            }),
+        );
+        let chart = PlotChart::from(&space);
+        let labels = chart.plot_groups[0].series[0].points[0]
+            .labels
+            .expect("point labels");
+        assert!(!labels.show_value);
+        assert!(labels.show_category_name);
+    }
+
+    #[test]
+    fn a_point_delete_suppresses_its_inherited_series_label() {
+        let space = labelled_space(
+            "pie",
+            None,
+            Some(ChartDataLabels {
+                show_value: Some(true),
+                points: Some(vec![ChartPointLabel {
+                    index: Some(1.0),
+                    text: None,
+                    labels: ChartDataLabels {
+                        delete: Some(true),
+                        ..ChartDataLabels::default()
+                    },
+                }]),
+                ..ChartDataLabels::default()
+            }),
+        );
+        let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
+        assert!(labels.contains(&"3".to_owned()));
+        assert!(!labels.contains(&"1".to_owned()));
+    }
+
+    #[test]
+    fn a_series_delete_suppresses_group_labels() {
+        let group = ChartDataLabels {
             show_value: Some(true),
-            ..crate::chart::ChartDataLabels::default()
+            ..ChartDataLabels::default()
         };
-        assert!(plot_labels_from_model(None, Some(&space(true))).is_none());
-        assert!(plot_labels_from_model(Some(&space(true)), None).is_none());
-        assert!(plot_labels_from_model(Some(&space(true)), Some(&space(false))).is_some());
-        assert!(plot_labels_from_model(None, None).is_none());
+        let series = ChartDataLabels {
+            delete: Some(true),
+            ..ChartDataLabels::default()
+        };
+        assert!(plot_labels_from_model(Some(&group), Some(&series), None).is_none());
+        let space = labelled_space("pie", Some(group), Some(series));
+        let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
+        assert!(!labels.contains(&"3".to_owned()));
+        assert!(!labels.contains(&"1".to_owned()));
     }
 
     #[test]

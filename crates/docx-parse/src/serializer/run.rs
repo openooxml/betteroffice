@@ -31,7 +31,7 @@ const VALID_HIGHLIGHT_COLORS: &[&str] = &[
     "yellow",
 ];
 
-/// Serialize the incumbent `w:rPr` subset in its exact child order.
+/// Serializes the supported `w:rPr` subset in schema order.
 pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String {
     let Some(formatting) = formatting else {
         return String::new();
@@ -173,8 +173,7 @@ pub(crate) fn serialize_deleted_run(
         return Ok(xml);
     }
     Ok(xml
-        // Match the incumbent `/\<w:t\b/` replacement without corrupting
-        // sibling names such as `<w:tab/>`.
+        // Only `w:t` elements become `w:delText`.
         .replace("<w:t>", "<w:delText>")
         .replace("<w:t ", "<w:delText ")
         .replace("<w:t/", "<w:delText/")
@@ -337,7 +336,7 @@ fn serialize_run_content(
     Ok(writer.finish())
 }
 
-/// Serialize one image as incumbent-compatible WordprocessingDrawing XML.
+/// Serializes one image as WordprocessingDrawing XML.
 pub fn serialize_drawing_content(
     image: &Image,
     context: &mut SerializerContext,
@@ -1098,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn run_bytes_match_typescript_and_escape_all_model_strings() {
+    fn run_bytes_preserve_order_and_escape_all_model_strings() {
         let run = Run {
             node_type: RunType::Run,
             formatting: Some(TextFormatting {

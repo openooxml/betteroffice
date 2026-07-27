@@ -114,3 +114,46 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2.0.20
         with:
           command: check bans licenses advisories sources
+
+  python:
+    name: Python gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/python
+
+      - name: Build and install the extension
+        working-directory: bindings/python
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pip install -e .
+
+      - name: Test
+        working-directory: bindings/python
+        run: pytest -q
+
+      - name: Check every wheel target compiles
+        working-directory: bindings/python
+        run: |
+          for target in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
+            x86_64-pc-windows-msvc
+          do
+            echo "::group::$target"
+            cargo check --target "$target"
+            echo "::endgroup::"
+          done

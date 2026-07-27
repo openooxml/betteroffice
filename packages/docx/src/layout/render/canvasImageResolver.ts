@@ -10,7 +10,6 @@
  * network fetch (the no-zero-click-external-fetch security contract). Decode
  * results are cached per source so repaints reuse the same HTMLImageElement.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { ImageResolver } from './canvasBackend';

@@ -31,7 +31,7 @@ import { resolveCaretPaintColor } from './paintedCaret';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
-// independently so hidden ProseMirror focus and IME state survive initial
+// independently so hidden input focus and IME state survive initial
 // loading and renderer errors.
 export function CanvasPagedArea({
   renderer,
@@ -116,12 +116,7 @@ function nextPageWindow(
   return { start, end };
 }
 
-// experimental canvas replay of a display list: one <canvas> per page, sized
-// for devicePixelRatio and painted by the core backend, with the a11y mirror
-// mounted 1:1 under each page canvas. dumb glue — every layout and style
-// decision already happened upstream in the display list. the white page
-// background is document content (word-faithful), not themed ui chrome, hence
-// the inline color.
+/** Replays display-list pages to canvas with accessibility mirrors. */
 export function CanvasPagesView({
   displayList,
   frame,

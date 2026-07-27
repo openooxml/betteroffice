@@ -51,14 +51,7 @@ function finishPrint(w: Window, images: HTMLImageElement[] = []): void {
   setTimeout(runPrint, 2000);
 }
 
-/**
- * Print from the experimental canvas renderer: raster each visible page canvas
- * to a PNG and print one image per sheet. Fully painter-independent, so print
- * keeps working once the DOM painter is retired. Built through the hardened
- * `openPrintWindow` (no `document.write`) with every node created via DOM APIs;
- * the PNG data URLs are machine-generated base64 assigned as `img.src`
- * properties, never interpolated into markup.
- */
+/** Prints display-list pages as PNG images without interpolating data into markup. */
 function printDisplayListPages(
   displayList: DisplayList,
   resolveImage: ImageResolver,

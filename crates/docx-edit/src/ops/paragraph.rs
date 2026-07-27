@@ -1,5 +1,25 @@
-//! Paragraph ops: `split_paragraph`, `merge_paragraphs`, `set_paragraph_attrs` (+ wrappers),
-//! `apply_paragraph_style` (op-contract §1 "Paragraph"), and the R5 paraId re-uniquing pass.
+//! Paragraph structure and properties: split, merge, attribute deltas, tab
+//! stops, indent steps, style application, and paraId maintenance.
+//!
+//! A paragraph is not a container here. Its text is a plain run of story
+//! units, and its identity and properties live on the pilcrow embed that
+//! TERMINATES it — so splitting a paragraph is inserting one pilcrow, merging
+//! two is removing one, and every property op writes to a pilcrow's map.
+//!
+//! Two consequences follow. First, splitting has to decide which half keeps
+//! the original paraId: the new pilcrow takes it and terminates the FIRST
+//! half, while the original pilcrow — now ending the second half — is
+//! re-minted. Second, merging has to decide whose properties survive; a plain
+//! merge lets the deleted mark's properties and paraId win, so the earlier
+//! paragraph's identity carries over. Tracked-change resolution uses the
+//! opposite rule, for the reasons its own module docs give.
+//!
+//! Style resolution stays outside the CRDT. Ops that apply a style take a
+//! host-supplied [`ResolvedStyleProjection`] rather than reading `styles.xml`,
+//! and reject an unknown style before touching the document.
+//!
+//! Spacing, indent and tab values are authored OOXML units — twips and
+//! line-spacing units — never pixels.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -18,8 +38,9 @@ use crate::{
     Position, StoryRange, check_position, insertion_attrs, next_pilcrow, revision_value, story_ref,
 };
 
-/// The paragraph attrs a style definition controls. Applying a style resets every one of these
-/// to the style's value or clears it (port of `paragraphAttrsFromResolvedStyle`).
+/// The paragraph attributes a style definition owns. Applying a style resets
+/// every one of them to the style's value, or clears it when the style has
+/// none — an attribute here is never left over from the previous style.
 pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 15] = [
     "alignment",
     "spaceBefore",
@@ -38,8 +59,9 @@ pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 15] = [
     "defaultTextFormatting",
 ];
 
-/// The 7 style-controlled marks swept before a style's run formats are applied (port of
-/// `makeApplyStyle`'s `styleControlledMarks`).
+/// The run marks swept from a paragraph's text before the new style's own run
+/// formatting is written, so direct formatting from the old style cannot
+/// survive the switch.
 pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
     "bold",
     "italic",
@@ -50,8 +72,9 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
     "strike",
 ];
 
-/// The pPr subset an empty second half inherits on split (port of `INHERITED_PARA_ATTRS`;
-/// `styleId` is `pStyle` in the story vocabulary).
+/// The only paragraph properties an EMPTY second half inherits on split —
+/// pressing Enter at the end of a paragraph starts a clean one that keeps the
+/// style and vertical rhythm but nothing else.
 const INHERITED_PARA_ATTRS: [&str; 7] = [
     "defaultTextFormatting",
     "pStyle",
@@ -62,8 +85,8 @@ const INHERITED_PARA_ATTRS: [&str; 7] = [
     "contextualSpacing",
 ];
 
-/// The `defaultTextFormatting` keys that cross a split (port of `styleCarryDtf` — the
-/// font/size/color subset; bold/italic/underline etc. deliberately do not carry).
+/// The `defaultTextFormatting` keys that cross a split: font, size and color
+/// only. Bold, italic, underline and the rest deliberately do not carry.
 const STYLE_CARRY_DTF_KEYS: [&str; 4] = ["fontFamily", "fontSize", "fontSizeCs", "color"];
 
 const BORDERS: &str = "borders";
@@ -71,7 +94,7 @@ const TABS: &str = "tabs";
 const INDENT_LEFT: &str = "indentLeft";
 const DEFAULT_TEXT_FORMATTING: &str = "defaultTextFormatting";
 
-/// Default indent step in twips (0.5 inch), matching the PM commands.
+/// Default half-inch indent step in twips.
 pub const INDENT_STEP_TWIPS: f64 = 720.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,10 +105,12 @@ pub enum MergeDirection {
     Backward,
 }
 
-/// Which paragraphs an op targets (op-contract "paras: One|Range").
+/// Which paragraphs an op targets. Every variant is resolved and validated
+/// before any mutation, so an unknown id never leaves a partial edit.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParaSelector {
     One(ParagraphId),
+    /// Resolved in the order given; an unknown id in the list is an error.
     Many(Vec<ParagraphId>),
     /// Every paragraph whose content or mark intersects the range.
     Range(StoryRange),
@@ -113,8 +138,9 @@ impl TabStop {
     }
 }
 
-/// Tri-state paragraph attribute delta (op-contract §1 "Paragraph"). Spacing and indent values
-/// are authored OOXML units (twips / line-spacing units), never pixels.
+/// A tri-state paragraph-property delta: [`Patch::Keep`] leaves the current
+/// value, [`Patch::Clear`] removes the property, [`Patch::Set`] writes it.
+/// Spacing and indent values are authored OOXML units, never pixels.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParaAttrDelta {
     pub alignment: Patch<String>,
@@ -130,24 +156,25 @@ pub struct ParaAttrDelta {
     pub tabs: Patch<Vec<TabStop>>,
     /// The paragraph-mark run defaults (`defaultTextFormatting`), as an opaque attr map.
     pub default_text_formatting: Patch<BTreeMap<String, Any>>,
-    /// The +30 opaque paragraph properties; `None` clears the key.
+    /// Every paragraph property without a typed field above, written as given;
+    /// `None` clears the key. Schema-managed identity keys are rejected.
     pub other: BTreeMap<String, Option<Any>>,
 }
 
-/// A host-resolved paragraph style, injected because style resolution (styles.xml cascade) stays
-/// outside the CRDT until S5.
-///
-/// `paragraph_attrs` is the `paragraphAttrsFromResolvedStyle` projection: values for the
-/// [`STYLE_CONTROLLED_PARA_ATTRS`] keys (a missing or `Any::Null` entry clears the attr), plus
-/// any list attrs when the style defines numbering. `run_marks` is the style's run formatting
-/// lowered to story attr values (`bold`, `fontSize`, ...), applied after sweeping the
-/// [`STYLE_CONTROLLED_MARKS`].
+/// A style definition already resolved by the host, injected because the
+/// `styles.xml` cascade lives outside the CRDT.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResolvedStyleProjection {
     pub style_id: String,
-    /// Host-verified existence. `false` → [`OpError::UnknownStyle`] before any mutation.
+    /// Host-verified existence. `false` yields [`OpError::UnknownStyle`]
+    /// before any mutation.
     pub known: bool,
+    /// Values for the [`STYLE_CONTROLLED_PARA_ATTRS`] keys — a missing or null
+    /// entry clears that attribute — plus any list attributes when the style
+    /// defines numbering.
     pub paragraph_attrs: BTreeMap<String, Any>,
+    /// The style's run formatting as story attribute values (`bold`,
+    /// `fontSize`, …), applied after the [`STYLE_CONTROLLED_MARKS`] sweep.
     pub run_marks: BTreeMap<String, Any>,
 }
 
@@ -242,8 +269,10 @@ fn set_or_remove(txn: &mut TransactionMut<'_>, map: &MapRef, key: &str, value: O
     }
 }
 
-/// Writes a style's paragraph-attr projection: the 15 style-controlled attrs are reset to the
-/// projection's value (or cleared), extra projection keys (list attrs) applied as-is.
+/// Writes a style's paragraph-attribute projection: each
+/// [`STYLE_CONTROLLED_PARA_ATTRS`] key is reset to the projection's value or
+/// cleared when it has none, and any extra key (list attributes) is applied as
+/// given. Errors on a schema-managed identity key.
 fn apply_paragraph_attr_projection(
     txn: &mut TransactionMut<'_>,
     map: &MapRef,
@@ -282,19 +311,27 @@ fn style_carry_dtf(value: &Any) -> Option<Any> {
 }
 
 impl EditingDoc {
-    /// Splits a paragraph by inserting exactly ONE pilcrow embed (op-contract §1).
+    /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
-    /// The new pilcrow terminates the FIRST half with the source paragraph's full pPr and its
-    /// ORIGINAL paraId; the original pilcrow is re-minted with a fresh paraId and becomes the
-    /// second half's mark. Second-half inheritance ports `applyPostSplitInheritance`:
+    /// The new pilcrow terminates the FIRST half, carrying the source
+    /// paragraph's full properties and its ORIGINAL paraId; the original
+    /// pilcrow is re-minted with a fresh paraId and becomes the second half's
+    /// mark. What the second half then keeps depends on where the split fell:
     ///
-    /// - mid-paragraph split: the second half keeps its pPr, borders ALWAYS cleared;
-    /// - split at the paragraph end (empty second half): the second half keeps only the
-    ///   `INHERITED_PARA_ATTRS` subset, with `defaultTextFormatting` reduced to font/size/color;
-    /// - split at the end WITH a host-injected `w:next` style: the second half switches to that
-    ///   style's projection instead (borders cleared either way).
+    /// - mid-paragraph: it keeps its own properties;
+    /// - at the paragraph end, so the second half is empty: only
+    ///   the `INHERITED_PARA_ATTRS` subset survives, with
+    ///   `defaultTextFormatting` reduced to the font/size/color carry keys;
+    /// - at the end WITH a `next_style`: it switches to that style's
+    ///   projection outright instead.
     ///
-    /// Suggesting mode stamps the inserted pilcrow with `ins` and `pPrIns`.
+    /// Paragraph borders are cleared in every case, because Word never
+    /// propagates `w:pBdr` across a split. Suggesting mode stamps the inserted
+    /// pilcrow `ins` and `pPrIns`, reusing an adjacent revision by the same
+    /// author when there is one.
+    ///
+    /// Errors when `next_style` is not known, before any mutation, and when
+    /// `at` does not address a position inside a story.
     pub fn split_paragraph(
         &self,
         ctx: &EditCtx,
@@ -353,8 +390,8 @@ impl EditingDoc {
         orig_map.insert(&mut txn, PARA_ID, second_para_id.as_str());
         if second_half_empty {
             if let Some(next) = next_style {
-                // `w:next` switch (port of applyNextParagraphStyle): fresh attrs + the next
-                // style's projection; borders cleared.
+                // A `w:next` switch starts from nothing: drop the source
+                // properties before writing the projection.
                 for (key, _) in &props {
                     orig_map.remove(&mut txn, key);
                 }
@@ -388,9 +425,18 @@ impl EditingDoc {
         })
     }
 
-    /// Merges the paragraph with its neighbor by deleting the boundary pilcrow; the survivor
-    /// adopts the deleted mark's pPr + paraId (the earlier paragraph's identity wins — R6).
-    /// Suggesting mode retains the mark with `del` + `pPrDel` instead.
+    /// Merges the paragraph with its neighbour by deleting the boundary
+    /// pilcrow. The survivor adopts the deleted mark's properties and paraId,
+    /// so the EARLIER paragraph's identity wins.
+    ///
+    /// Suggesting mode normally retains the mark, stamping it `del` and
+    /// `pPrDel`. The exception is backspacing over this same author's still
+    /// pending split: that retracts the suggestion, physically removing the
+    /// pilcrow rather than authoring a second, contradictory revision.
+    ///
+    /// The receipt's range is the caret position after the merge. Errors when
+    /// the paragraph is unknown, when merging forward from a story's last
+    /// paragraph, and when merging backward from its first.
     pub fn merge_paragraphs(
         &self,
         ctx: &EditCtx,
@@ -470,8 +516,12 @@ impl EditingDoc {
         })
     }
 
-    /// Applies a tri-state paragraph attribute delta to the selected paragraphs in one
-    /// transaction.
+    /// Applies a tri-state paragraph attribute delta to the selected
+    /// paragraphs in one transaction. In suggesting mode a `pPrChange` record
+    /// capturing the before and after property maps is appended to every
+    /// paragraph the delta actually changed, and the receipt carries its
+    /// revision id; a delta that changes nothing stamps nothing. Errors when
+    /// the delta names a schema-managed identity key, before any mutation.
     pub fn set_paragraph_attrs(
         &self,
         ctx: &EditCtx,
@@ -524,7 +574,8 @@ impl EditingDoc {
         })
     }
 
-    /// Adds (or replaces, by position) a tab stop on the selected paragraphs.
+    /// Adds a tab stop to the selected paragraphs, replacing any existing stop
+    /// at the same position. Stops stay sorted by position.
     pub fn add_tab_stop(
         &self,
         ctx: &EditCtx,
@@ -549,7 +600,8 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Removes the tab stop at `pos` (twips) from the selected paragraphs.
+    /// Removes the tab stop at `pos` twips from the selected paragraphs,
+    /// dropping the `tabs` attribute entirely once none are left.
     pub fn remove_tab_stop(
         &self,
         ctx: &EditCtx,
@@ -572,8 +624,8 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Increases `indentLeft` by `step` twips (default 720 — half an inch, the PM command
-    /// default).
+    /// Increases `indentLeft` by `step` twips, defaulting to
+    /// [`INDENT_STEP_TWIPS`].
     pub fn increase_indent(
         &self,
         ctx: &EditCtx,
@@ -592,8 +644,9 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Decreases `indentLeft` by `step` twips (default 720), clamping at zero — a zero indent
-    /// clears the attr (PM parity).
+    /// Decreases `indentLeft` by `step` twips, defaulting to
+    /// [`INDENT_STEP_TWIPS`] and clamping at zero. Reaching zero removes the
+    /// attribute rather than storing it.
     pub fn decrease_indent(
         &self,
         ctx: &EditCtx,
@@ -641,10 +694,14 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// Applies a host-resolved paragraph style (compound; port of `makeApplyStyle`): sets the
-    /// styleId, resets every style-controlled paragraph attr, sweeps the 7 style-controlled
-    /// marks from the paragraph text, and applies the new style's run formats — all in ONE
-    /// transaction. An unknown style errors before any mutation.
+    /// Applies a host-resolved paragraph style in ONE transaction: writes the
+    /// style id, resets every [`STYLE_CONTROLLED_PARA_ATTRS`] entry to the
+    /// projection's value or clears it, sweeps the [`STYLE_CONTROLLED_MARKS`]
+    /// from the paragraph's text, and writes the style's run formats over it.
+    ///
+    /// Errors before any mutation when the style is not known, and when the
+    /// projection's run marks include a protected attribute such as a
+    /// hyperlink or a tracked-change stamp.
     pub fn apply_paragraph_style(
         &self,
         ctx: &EditCtx,
@@ -685,8 +742,10 @@ impl EditingDoc {
         Ok(Receipt::default())
     }
 
-    /// R5 maintenance: re-mints duplicate paraIds (first occurrence keeps its id), under
-    /// `Origin::System` so the pass never enters undo history. Returns `(old, new)` pairs.
+    /// Restores paraId uniqueness after a merge of divergent replicas: every
+    /// duplicate is re-minted, with the first occurrence in document order
+    /// keeping its id. Runs under a system origin so the pass never enters
+    /// undo history. Returns the `(old, new)` pairs.
     pub fn dedupe_para_ids(&self, now_iso: &str) -> OpResult<Vec<(ParagraphId, ParagraphId)>> {
         let ctx = EditCtx::system(now_iso);
         let mut renames = Vec::new();
@@ -810,6 +869,9 @@ fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, An
         .collect()
 }
 
+/// Appends one `paragraphPropertyChange` record to the pilcrow's `pPrChange`
+/// array, holding the revision info plus the complete property maps from
+/// before and after — what rejection needs to rewind the paragraph.
 fn append_paragraph_property_change(
     txn: &mut TransactionMut<'_>,
     map: &MapRef,

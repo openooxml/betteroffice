@@ -18,7 +18,7 @@ import type { PagedEditorRef } from '../PagedEditor';
  * ResizeObserver covers container-size changes (sidebar toggle,
  * loading→ready transition) but doesn't fire on pure window resize when
  * the container is already at its max-width. The zoom effect handles
- * zoom changes that move page edges without changing PM selection — the
+ * zoom changes that move page edges without changing the selection — the
  * PagedEditor's `onSelectionChange` no longer fires on mere overlay
  * redraws after the state-identity dedup in #268.
  *

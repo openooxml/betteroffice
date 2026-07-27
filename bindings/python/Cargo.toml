@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "betteroffice-xlsx-python"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+homepage = "https://betteroffice.dev"
+repository = "https://github.com/openooxml/betteroffice"
+description = "Python bindings for the BetterOffice XLSX engine."
+publish = false
+
+[lib]
+name = "_betteroffice_xlsx"
+crate-type = ["cdylib"]
+
+[dependencies]
+betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx" }
+pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
+
+[profile.release]
+opt-level = 3
+lto = true

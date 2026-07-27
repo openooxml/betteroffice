@@ -154,7 +154,7 @@ function withoutPlaceholder(props: SdtProperties, nextRaw: string): SdtPropertie
 
 /**
  * Compute the new properties + display blocks for applying a typed value, without
- * touching a document. Shared by the headless setter and the editor (PM) path.
+ * touching a document. Shared by the headless setter and the editor path.
  * Throws {@link ContentControlValueError} on a type/value mismatch.
  */
 export function applyContentControlValue(

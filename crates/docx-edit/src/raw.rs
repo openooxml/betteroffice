@@ -1,18 +1,4 @@
-//! Raw story-mutation primitives for the coexistence bridge.
-//!
-//! The Route-B coexistence harness mirrors ProseMirror state into yrs by lowering
-//! each PM transaction to a list of low-level story operations applied in ONE yrs
-//! transaction (op-contract R1). Unlike the typed op surface (`insert_text`,
-//! `split_paragraph`, …) which encodes user-intent semantics (format inheritance,
-//! tracked-change 3-way splits, pPr survival), these primitives are a faithful
-//! mirror: they write exactly the units and attributes the bridge computed from
-//! PM, so the yrs shadow matches PM byte-for-byte under the canonical invariant.
-//! Tracked-change attributes (`ins`/`del`) arrive already lowered inside `attrs`
-//! when the PM run carried an insertion/deletion mark; the primitives never stamp
-//! their own.
-//!
-//! Addressing is story-global UTF-16 indices, transient to the batch: each op's
-//! index is interpreted against the story state AFTER all prior ops in the batch.
+//! Raw story mutations using UTF-16 story indices.
 
 use std::sync::Arc;
 
@@ -28,8 +14,7 @@ use crate::{COMMENTS, EditCtx, EditingDoc, KIND_KEY, anchor_value, out_len, stor
 /// One low-level story mutation. Indices are UTF-16 story units (every embed = 1).
 #[derive(Clone, Debug, PartialEq)]
 pub enum RawOp {
-    /// Insert `text` at `index`, each character carrying `attrs` (a faithful mirror
-    /// of the PM run's lowered formatting; no ins/del is added automatically).
+    /// Inserts text with explicit attributes.
     Insert {
         index: u32,
         text: String,
@@ -48,15 +33,9 @@ pub enum RawOp {
         payload: Vec<(String, Any)>,
         attrs: Attrs,
     },
-    /// Set one key on the map-backed embed currently at `index` (e.g. a pilcrow's
-    /// paragraph property from a PM `AttrStep`). Errors if no embed sits there.
+    /// Sets one key on the map-backed embed at the index.
     SetEmbedAttr { index: u32, key: String, value: Any },
-    /// Upsert the side-map comment keyed by `id`, (re-)anchoring it to `ranges` —
-    /// non-empty `[start, end)` UTF-16 story-unit spans in the batch's story, read
-    /// (like every raw index) against the story state after all prior ops. Starts
-    /// anchor with [`Assoc::After`], ends with [`Assoc::Before`], mirroring
-    /// [`EditingDoc::add_comment`]. The coexistence bridge keys by the PM comment
-    /// id so identity survives the mirror (and the render bridge's `numeric_id`).
+    /// Upserts a side-map comment with sticky UTF-16 ranges.
     SetComment {
         id: String,
         ranges: Vec<(u32, u32)>,
@@ -90,11 +69,7 @@ fn embed_at<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<M
 }
 
 impl EditingDoc {
-    /// Applies a batch of raw story ops in ONE yrs transaction under `ctx`'s origin.
-    ///
-    /// The coexistence bridge is the sole caller; ops are pre-validated by the
-    /// translator against its position map, but bounds are re-checked here so a
-    /// bridge bug fails loudly (typed error) rather than corrupting the CRDT.
+    /// Applies raw story operations in one transaction.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
         let mut txn = self.transact_for(ctx);
         apply_raw_ops_to_story(&mut txn, story_id, ops)
