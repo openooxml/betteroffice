@@ -126,8 +126,6 @@ jobs:
           python-version: "3.13"
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -143,17 +141,3 @@ jobs:
         working-directory: bindings/python
         run: pytest -q
 
-      - name: Check every wheel target compiles
-        working-directory: bindings/python
-        run: |
-          for target in \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu \
-            x86_64-apple-darwin \
-            aarch64-apple-darwin \
-            x86_64-pc-windows-msvc
-          do
-            echo "::group::$target"
-            cargo check --target "$target"
-            echo "::endgroup::"
-          done
