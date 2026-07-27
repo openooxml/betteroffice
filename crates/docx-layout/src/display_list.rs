@@ -11,10 +11,16 @@
 //!
 //! # Paint order
 //!
-//! Within a page: background and page borders, watermark, behind-document
-//! floating images, the layout's fragments in order, front floating images, and
-//! finally the header/footer bands ([`crate::hf_bands`]) and note areas. Inside
-//! a fragment the order is shading, borders, then line content.
+//! A page's `primitives` are emitted back to front: watermark, behind-document
+//! floating images, the layout's fragments in order, in-front floating images,
+//! then column separators. Inside a fragment the order is shading, borders,
+//! then line content.
+//!
+//! `background`, `page_borders`, `header`, `footer` and `note_areas` are
+//! separate fields rather than entries in that stream, so the consumer places
+//! them. Page borders are not one layer: each carries a `z_order` of `back` or
+//! `front` taken from `w:pgBorders/@zOrder` (anything but `back` is `front`),
+//! so a border may sit behind page content or over it.
 //!
 //! # Text
 //!
