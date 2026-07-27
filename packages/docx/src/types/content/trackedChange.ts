@@ -28,9 +28,9 @@ export interface TrackedChangeInfo {
 }
 
 /**
- * Tracked-change attribute triple as it appears on PM node attrs
+ * Tracked-change attribute triple as it appears on node attrs
  * (`paragraph.pPrIns`, `tableRow.trIns`, etc). Mirrors `TrackedChangeInfo`
- * but with a `null` date (PM attr defaults) and a `revisionId` name that
+ * but with a `null` date (attr defaults) and a `revisionId` name that
  * matches OOXML's `w:id` more idiomatically on the editor side.
  *
  * Round-trip pairs with `TrackedChangeInfo` via
@@ -44,7 +44,7 @@ export interface RevisionInfo {
 
 /**
  * Tracked-cell marker — the OOXML `<w:cellIns>` / `<w:cellDel>` /
- * `<w:cellMerge>` shape attached to a `TableCell` PM node and surfaced
+ * `<w:cellMerge>` shape attached to a `TableCell` node and surfaced
  * to the layout model and painter for visual rendering.
  *
  * `kind` matches the OOXML element name (ins / del / merge).

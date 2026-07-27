@@ -1161,7 +1161,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_font_chain_uses_the_reference_synthetic_extent() {
+    fn missing_font_chain_uses_synthetic_extent() {
         crate::clear_measure_fonts();
         let mut block: LayoutBlock = serde_json::from_value(json!({
             "kind": "paragraph",

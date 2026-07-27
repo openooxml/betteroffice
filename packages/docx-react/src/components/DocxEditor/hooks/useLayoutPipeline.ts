@@ -73,14 +73,7 @@ export interface UseLayoutPipelineOptions {
    * pipeline once the engine/fonts settle.
    */
   deferLayoutPass: (blocks?: LayoutBlock[]) => boolean;
-  /**
-   * True when the experimental canvas renderer is painting (the DOM painter is
-   * parked in a 0×0 stage). Gates the painter-DOM–coupled steps of the paint
-   * pass off: the `RenderedDomContext` is re-backed by the a11y mirror and the
-   * HF sidebar-anchor scan runs against the mirror — both owned by PagedEditor's
-   * canvas effect. Default (false) leaves the painter path byte-for-byte
-   * unchanged.
-   */
+  /** Queries available while the canvas renderer is active. */
   displayListQueries?: DisplayListQueries | null;
   interactionPageHostRef?: React.RefObject<HTMLDivElement | null>;
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -92,7 +85,7 @@ export interface UseLayoutPipelineOptions {
   syncCoordinator: LayoutSelectionGate;
   getScrollContainer: () => HTMLDivElement | null;
   onTotalPagesChange?: (totalPages: number) => void;
-  /** Layout of each pass (null on reset) — experimental canvas renderer plumbing. */
+  /** Receives each computed layout and resets with null. */
   onLayoutComputed?: (layout: Layout | null) => void;
   onAnchorPositionsChange?: (positions: Map<string, number>) => void;
 }
@@ -332,9 +325,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         }
       };
 
-      // The wasm engine paginates synchronously in native code — every pass
-      // is a full relayout (the Rust kernel keeps no resume checkpoints; the
-      // TS incremental/off-thread kernels died with TS pagination).
+      // Every pagination pass performs a full relayout.
       try {
         applyComputation(computeLayout(computeInputs));
       } catch (error) {

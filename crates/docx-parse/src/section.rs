@@ -227,8 +227,6 @@ pub fn parse_section_properties(element: Option<&XmlElement>) -> SectionProperti
         distance: numeric(line, "distance"),
         restart: enum_attribute(line, "restart", &["continuous", "newPage", "newSection"]),
     });
-    // Pinned incumbent omission: sectionParser.ts currently leaves pgNumType
-    // out of the parsed body contract even though the public type exposes it.
     value.page_numbering = None;
     value.page_borders = parse_page_borders(element.child("w", "pgBorders"));
     value.background = parse_background(element.child("w", "background"));

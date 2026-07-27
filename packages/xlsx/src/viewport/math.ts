@@ -1,8 +1,7 @@
 /**
  * Pure viewport math: visible-range computation against cumulative track
  * offsets, and scroll clamping. No DOM, no side effects — every function is a
- * deterministic transform of plain numbers so it is golden-testable and can be
- * mirrored in Rust.
+ * deterministic transform of plain numbers so it is golden-testable.
  */
 
 import type { TrackOffsets, ViewportState, VisibleRange, VisibleCells } from './types';

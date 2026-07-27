@@ -11,14 +11,14 @@ export class EditSession {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Accepts tracked changes (S4b): pending insertions become plain content,
+     * Accepts tracked changes: pending insertions become plain content,
      * pending deletions are carried out; `pPrIns` marks clear (the split
      * stays), `pPrDel` marks join with the following paragraph (its pPr
      * survives). `target_json`: `{"revisionId": string}` for one coalesced
-     * revision (any story) or
+     * revision, or
      * `{"story","startPara","startOffset","endPara","endOffset"}` for a Loc
-     * range. Receipt: `{"revisionIds": [string, …]}` — the revision ids
-     * resolved. Resolving never stamps a new revision.
+     * range. Receipt: `{"revisionIds": [string, …]}`. Never stamps a new
+     * revision.
      */
     accept_change(target_json: string): string;
     /**
@@ -60,20 +60,17 @@ export class EditSession {
     apply_local_update(update: Uint8Array): void;
     /**
      * Applies a paragraph style id to every paragraph intersecting
-     * `[start, end)`. With no host style resolver at this boundary, this is
-     * the PM fallback path: write `pStyle` without fabricating a resolved
-     * paragraph/run formatting projection.
+     * `[start, end)`, writing `pStyle` without fabricating a resolved
+     * paragraph or run formatting projection.
      */
     apply_paragraph_style(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, style_id: string, author_name?: string | null, author_date?: string | null): void;
     /**
-     * Applies a batch of raw story mutations in ONE transaction — the
-     * coexistence bridge's mirror-into-yrs path (not a user-intent op). `ops_json`
+     * Applies a batch of raw story mutations in one transaction. `ops_json`
      * is `[{ "op":"insert"|"delete"|"format"|"insertEmbed"|"setEmbedAttr"
-     * |"setComment"|"removeComment", "index", … }, …]`; each op's index (and each
-     * `setComment` `[start, end)` range) is read against the story state after all
-     * prior ops in the batch. Attributes/payloads are faithful mirrors of the
-     * bridge's lowered PM state (tracked-change stamps arrive inside `attrs`;
-     * comments are keyed by the PM comment id and anchored sticky, side-map only).
+     * |"setComment"|"removeComment", "index", … }, …]`. Each op's index, and
+     * each `setComment` `[start, end)` range, is read against the story state
+     * after all prior ops in the batch. Tracked-change stamps arrive inside
+     * `attrs`; comments are keyed by comment id and anchored sticky.
      */
     apply_raw_ops(story: string, ops_json: string): void;
     /**
@@ -211,8 +208,7 @@ export class EditSession {
      */
     insert_watermark(story: string, para_id: string, offset: number, watermark_json: string): void;
     /**
-     * Paginate and retain the measured input and Layout. The full JSON return
-     * remains the migration parity bridge until binary frames consume it.
+     * Paginates and retains measured input and layout.
      */
     layout_document_json(input: string): string;
     /**
@@ -231,12 +227,10 @@ export class EditSession {
      */
     load(update: Uint8Array): void;
     /**
-     * Seeds stories from JSON (the json form of `load`):
+     * Seeds stories from JSON:
      * `[{"storyId","paragraphs":[{"text","pStyle"?,"alignment"?}, …]}, …]`.
      * Paragraph text must not contain paragraph breaks. Returns
-     * `{storyId: [paraId, …]}` in document order. This is an S1 seeding
-     * scaffold composed from public ops; the real `load(ParsedDocument)`
-     * belongs to the ops track.
+     * `{storyId: [paraId, …]}` in document order.
      */
     load_json(stories_json: string): string;
     /**
@@ -414,16 +408,15 @@ export class EditSession {
     split_cell(at_json: string, rows?: number | null, columns?: number | null): string;
     /**
      * Splits a paragraph at `(story, para_id, offset)` by inserting one
-     * pilcrow. Under the S1 split the FIRST half keeps the original paraId and
-     * the SECOND half is re-minted. Receipt:
+     * pilcrow. The first half keeps the original paraId, the second is
+     * re-minted. Receipt:
      * `{"firstParaId","secondParaId","revisionId": string|null}`.
      */
     split_paragraph(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
     start_update_event_observation(): void;
     /**
-     * The story's `canonical-stream-v1` FNV-1a checksum as a decimal string
-     * (u64 exceeds JS safe-integer range). The coexistence watchdog compares
-     * this against the PM projector's checksum after every mirrored edit.
+     * The story's `canonical-stream-v1` FNV-1a checksum, as a decimal
+     * string because u64 exceeds the JS safe-integer range.
      */
     story_checksum(story: string): string;
     /**
@@ -471,11 +464,9 @@ export class EditSession {
      */
     undo_depth(): number;
     /**
-     * Lowers a story through the resident Rust bridge. Errors with an
-     * unsupported-embed message on any non-native content until that class is
-     * promoted to native.
-     * `env_json` carries theme colors, the default tab stop, and list numeric
-     * ids (see [`parse_render_env`]).
+     * Lowers a story for layout. Errors with an unsupported-embed message on
+     * any non-native content. `env_json` carries theme colors, the default tab
+     * stop and list numeric ids (see [`parse_render_env`]).
      */
     yrs_blocks_for_story(story: string, env_json: string): string;
 }
@@ -531,10 +522,9 @@ export function install_panic_hook(): void;
 export function layout_document_json(input: string): string;
 
 /**
- * wasm wrapper over [`ooxml_text::measure_paragraph_json`]: measurement
- * input JSON in, `ParagraphExtent` JSON out. An `Err` whose message starts
- * with `"UNSUPPORTED"` means the caller must fall back to browser
- * measurement for that block.
+ * Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
+ * out. An `Err` whose message starts with `"UNSUPPORTED"` means the caller
+ * must fall back to browser measurement for that block.
  */
 export function measure_paragraph_json(input: string): string;
 
@@ -563,42 +553,42 @@ export function outline_glyph_json(font_id: number, glyph_id: number): string;
 export function parse_docx_relationships(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S2 entry retained for ABI compatibility.
+ * Parses an S2 package projection.
  */
 export function parse_docx_s2(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S3 entry retained for ABI compatibility.
+ * Parses an S3 package projection.
  */
 export function parse_docx_s3(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S4 entry retained for ABI compatibility.
+ * Parses an S4 package projection.
  */
 export function parse_docx_s4(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S5 entry retained for ABI compatibility.
+ * Parses an S5 package projection.
  */
 export function parse_docx_s5(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S6 entry retained for ABI compatibility.
+ * Parses an S6 package projection.
  */
 export function parse_docx_s6(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S7 entry retained for ABI compatibility.
+ * Parses an S7 package projection.
  */
 export function parse_docx_s7(data: Uint8Array): string;
 
 /**
- * Legacy staged Rust S8 entry retained for ABI compatibility.
+ * Parses an S8 package projection.
  */
 export function parse_docx_s8(data: Uint8Array): string;
 
 /**
- * S9 production read facade: one safe package pass to the full Document wire.
+ * Parses the full document wire in one package pass.
  */
 export function parse_docx_s9(data: Uint8Array, options_json: string): string;
 
@@ -653,17 +643,17 @@ export function rezip_docx(entries: any): Uint8Array;
 export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
 
 /**
- * Legacy staged Rust S10 serializer entry retained for ABI compatibility.
+ * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
 
 /**
- * Legacy staged Rust S11 serializer entry retained for ABI compatibility.
+ * Serializes an S11 request.
  */
 export function serialize_docx_s11(request_json: string): string;
 
 /**
- * Legacy staged Rust S12 serializer entry retained for ABI compatibility.
+ * Serializes an S12 request.
  */
 export function serialize_docx_s12(request_json: string): string;
 
@@ -685,7 +675,7 @@ export function vertical_move_by_handle(handle: number, position: number, direct
 export function vertical_move_json(display_list: string, position: number, direction: string, goal_x: number): string;
 
 /**
- * S13 production-capable package writer: typed model + original package -> DOCX.
+ * Writes a DOCX from a typed model and original package.
  */
 export function write_docx_s13_wasm(request_json: string, original_docx: Uint8Array): Uint8Array;
 

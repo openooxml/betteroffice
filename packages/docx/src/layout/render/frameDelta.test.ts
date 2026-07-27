@@ -12,13 +12,10 @@ const FONT = resolve(
   '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
 
-// End-to-end wire check: frames produced by the Rust encoder must decode
-// through the strict browser decoder and reproduce, byte-for-value, the same
-// display list the JSON parity bridge serializes for the same envelope.
 describe('FrameDelta wire round-trip', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-  it('decodes wasm-encoded full and delta frames to the JSON parity list', () => {
+  it('decodes wasm-encoded full and delta frames to the equivalent JSON list', () => {
     const session = createEditSession(11);
     const { paraId } = JSON.parse(session.create_story('body', 'Hello frame', 'Normal', 'left'));
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
@@ -48,17 +45,17 @@ describe('FrameDelta wire round-trip', () => {
     };
 
     const first = envelopeFor();
-    const parity = JSON.parse(session.build_display_list_json(first)) as DisplayList;
+    const jsonList = JSON.parse(session.build_display_list_json(first)) as DisplayList;
     const fullFrame = session.build_display_list_frame(first, 0);
     const retained = applyFrameDelta(null, decodeFrameDelta(fullFrame));
-    expect(retained.displayList).toEqual(parity);
+    expect(retained.displayList).toEqual(jsonList);
 
     session.insert_text('body', paraId, 5, ' typed', undefined, undefined);
     const second = envelopeFor();
-    const nextParity = JSON.parse(session.build_display_list_json(second)) as DisplayList;
+    const nextJsonList = JSON.parse(session.build_display_list_json(second)) as DisplayList;
     const deltaFrame = session.build_display_list_frame(second, retained.frameEpoch);
     const next = applyFrameDelta(retained, decodeFrameDelta(deltaFrame));
-    expect(next.displayList).toEqual(nextParity);
+    expect(next.displayList).toEqual(nextJsonList);
     const pageText = next.displayList.pages[0].primitives
       .map((primitive) => ('text' in primitive ? (primitive.text ?? '') : ''))
       .join('');

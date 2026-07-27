@@ -16,7 +16,7 @@ export const DEFAULT_COMPATIBILITY_FLAGS: CompatibilityFlags = {
   balanceSingleByteDoubleByteWidth: false,
 };
 
-/** Public model contract rehydrated by the Rust S9 facade. */
+/** Public model contract rehydrated by the Rust parser. */
 export interface DocumentSettings {
   defaultTabStop: number;
   defaultTableStyle?: string;

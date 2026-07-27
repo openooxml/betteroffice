@@ -1,24 +1,33 @@
-//! The placement walk — port of `layoutDocument`/`place` and the per-kind
-//! placers in `packages/core/src/layout/pagination/index.ts`.
+//! The placement walk: measured blocks in, pages of positioned fragments out.
 //!
-//! One pass over the measured blocks, a per-kind placer for each, the
-//! paginator holding page/column state, and all look-ahead answered from the
-//! prescan plan. Paragraph placement (including spacing collapse, float line
-//! offsets, page/column splits, per-fragment PM ranges and resolved lines) is
-//! fully ported; the features listed in `hooks.rs` are stubbed there and make
-//! the engine return `Unsupported`.
+//! One pass over the measured list, a per-kind placer for each block, the
+//! paginator holding page and column state, and every look-ahead answered from
+//! the prescan plan rather than by re-scanning. Contextual spacing
+//! (`w:contextualSpacing`, ECMA-376 §17.3.1.9) is folded into adjacent
+//! same-style paragraphs before the walk starts, recursing through table cells.
 //!
-//! Checkpoint capture (`controls.checkpoints` in the TS walk) is not ported:
-//! checkpoints are derived resume bookmarks, excluded from golden
-//! serialization, and only consumed by incremental pagination which stays on
-//! the TS side for now. They influence no fragment or page output.
+//! Each block is processed in a fixed order: record a checkpoint if placement
+//! stands at a pristine page start; force a page when the block carries
+//! `w:pageBreakBefore`; at the head of a keep-with-next group, force a page when
+//! the group would otherwise straddle the boundary; then dispatch to the placer.
+//! A section break reads the *next* section's configuration and break type,
+//! falling back to the current break's when the plan has no successor. Column
+//! balancing runs over the range up to the next section break, both at the start
+//! of the document and after each break that opens multi-column geometry.
 //!
-//! Also ported here, because the spine depends on them:
-//! - `getParagraphFragmentPmRange` from `paragraphFragmentRange.ts`,
-//! - `isFloatingTextBoxBlock` from `textBoxFlow.ts` (+ `docx/wrapTypes.ts`).
+//! Unknown block and run kinds raise `Unsupported` rather than being silently
+//! dropped, and a measure whose kind disagrees with its block raises `Invalid`.
 //!
-//! `resolvePageMargins` lives in `section_breaks.rs` and the spacing helpers
-//! in `paragraph_spacing.rs`, mirroring the TS module layout.
+//! Anchored images and floating text boxes overlay the page and never move the
+//! pen; inline images, shapes, charts and inline text boxes consume their
+//! measured bbox in flow. Paragraph placement is described on
+//! [`layout_paragraph`].
+//!
+//! Checkpoints are resume bookmarks at pristine page starts. They stay resident
+//! and never appear in a serialized `Layout`. [`layout_document_incremental`]
+//! restarts from the last checkpoint before the edit and stops as soon as
+//! page-start geometry and the measured suffix converge with the retained
+//! layout, so an edit late in a document does not re-place everything above it.
 
 use crate::LayoutError;
 use crate::hooks;
@@ -86,17 +95,12 @@ impl ConvergenceInput<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// spine helpers ported from sibling TS modules
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, PartialEq)]
 enum Edge {
     Start,
     End,
 }
 
-/// `runBoundaryPmPos` (paragraphFragmentRange.ts).
 fn run_boundary_pm_pos(run: Option<&Run>, char_offset: usize, edge: Edge) -> Option<f64> {
     let run = run?;
 
@@ -117,7 +121,13 @@ fn run_boundary_pm_pos(run: Option<&Run>, char_offset: usize, edge: Edge) -> Opt
     run.pm_start()
 }
 
-/// `getParagraphFragmentPmRange` (paragraphFragmentRange.ts).
+/// Document range covered by lines `[from_line, to_line)`.
+///
+/// The paragraph's own bounds win at its true first and last line, so a
+/// single-fragment paragraph keeps the range it declared; interior fragment
+/// edges come from the head and tail runs of their boundary lines. Any edge
+/// that stays unresolved falls back to the paragraph, and an end that would not
+/// exceed its start is nudged forward by one so the range is never empty.
 fn get_paragraph_fragment_pm_range(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -165,7 +175,6 @@ fn get_paragraph_fragment_pm_range(
     (pm_start, pm_end)
 }
 
-/// `isFloatingWrapType` (docx/wrapTypes.ts).
 fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
     matches!(
         wrap_type,
@@ -173,19 +182,15 @@ fn is_floating_wrap_type(wrap_type: Option<&str>) -> bool {
     )
 }
 
-/// `isFloatingTextBoxBlock` (textBoxFlow.ts).
+/// A text box floats when it declares float display, a floating wrap type, or
+/// `topAndBottom` wrapping.
 fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
     block.display_mode.as_deref() == Some("float")
         || is_floating_wrap_type(block.wrap_type.as_deref())
         || block.wrap_type.as_deref() == Some("topAndBottom")
 }
 
-// ---------------------------------------------------------------------------
-// contextual spacing (index.ts applyContextualSpacing)
-// ---------------------------------------------------------------------------
-
-/// Suppress spacing between two adjacent same-style contextual paragraphs
-/// (OOXML §17.3.1.9). Mutates in place, exactly like the TS.
+/// Suppresses spacing between adjacent same-style contextual paragraphs.
 fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     let (LayoutBlock::Paragraph(c), LayoutBlock::Paragraph(n)) = (curr, next) else {
         return;
@@ -216,7 +221,7 @@ fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     }
 }
 
-/// `applyContextualSpacing` over a plain block list (table-cell recursion).
+/// Applies contextual spacing recursively through table cells.
 fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
@@ -233,8 +238,7 @@ fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     }
 }
 
-/// `applyContextualSpacing` over the measured list (TS mutates the shared
-/// block references; here the blocks live inside `MeasuredBlock`).
+/// Applies contextual spacing across measured blocks.
 fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
     for i in 0..measured.len().saturating_sub(1) {
         let (head, tail) = measured.split_at_mut(i + 1);
@@ -251,12 +255,7 @@ fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// entry point (index.ts layoutDocument)
-// ---------------------------------------------------------------------------
-
-/// `layoutDocument` — convert measured blocks into pages with positioned
-/// fragments, or `Unsupported` when a not-yet-ported feature is engaged.
+/// Converts measured blocks into positioned pages, discarding checkpoints.
 pub fn layout_document(input: &mut Input) -> Result<Layout, LayoutError> {
     Ok(layout_document_checkpointed(input)?.layout)
 }
@@ -478,16 +477,15 @@ pub fn layout_document_incremental(
     })
 }
 
-// ---------------------------------------------------------------------------
-// placement walk (index.ts place)
-// ---------------------------------------------------------------------------
-
 struct PlacementOutcome {
     checkpoints: Vec<LayoutCheckpoint>,
     placed_blocks: usize,
     converged: Option<(LayoutCheckpoint, LayoutCheckpoint)>,
 }
 
+/// The block walk itself, per the module's ordering rules. Returns early once
+/// a checkpoint matches the retained layout, which is how incremental placement
+/// detects convergence.
 fn place(
     measured: &[MeasuredBlock],
     plan: &LayoutPlan,
@@ -724,7 +722,7 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
     serde_json::to_string(id).expect("block ids always serialize")
 }
 
-/// Retained suffix pages keep their geometry but absolute PM positions move
+/// Retained suffix pages keep their geometry but absolute document positions move
 /// after an earlier edit. Refresh paragraph fragment ranges and resolved run
 /// slices from the new measured arena before the display list consumes them.
 fn refresh_reused_paragraph_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
@@ -765,8 +763,7 @@ fn refresh_reused_paragraph_pages(pages: &mut [crate::types::Page], measured: &[
 // per-kind placers
 // ---------------------------------------------------------------------------
 
-/// `buildResolvedLines` — materialize resolved run segments for the
-/// fragment's lines `[from_line, to_line)`.
+/// Materializes resolved run segments for a fragment line range.
 fn build_resolved_lines(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -785,8 +782,25 @@ fn build_resolved_lines(
     resolved
 }
 
-/// `layoutParagraph` — place a paragraph's measured lines, splitting into
-/// carried fragments whenever the page or column runs out of room.
+/// Places a paragraph's measured lines, splitting into carried fragments
+/// whenever the page or column runs out of room.
+///
+/// Lines are fitted greedily, and a fragment always takes at least one line so
+/// an oversized line cannot stall the walk. A line's `floatSkipBefore` counts
+/// toward the fragment height, which is what makes following blocks flow below
+/// the float instead of over it. A paragraph with no measured lines still emits
+/// a zero-height fragment, because its spacing must still advance the pen.
+///
+/// Two rules can move lines before they are placed. `w:keepLines` advances to a
+/// fresh column when the whole paragraph fits a column but not the space left
+/// here. Widow and orphan control applies to paragraphs of at least four lines:
+/// a lone opening line moves the paragraph on when two lines would fit there,
+/// and a lone trailing line is avoided by pushing one more line down, provided
+/// the fragment keeps more than two.
+///
+/// Spacing before is charged to the first fragment only and spacing after to
+/// the last, and each fragment carries its own document range and resolved run
+/// slices.
 fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
@@ -854,8 +868,7 @@ fn layout_paragraph(
         let deferred_spacing = paginator.state(state_idx).deferred_spacing;
         let column_index = paginator.state(state_idx).column_index;
 
-        // reserve the space addFragment will consume before this fragment's
-        // first line so the greedy fit budgets against what actually remains
+        // Reserve leading space before fitting the first fragment.
         let reserved_before = if current_line_index == 0 {
             space_before.max(deferred_spacing)
         } else {
@@ -951,8 +964,7 @@ fn layout_paragraph(
     Ok(())
 }
 
-/// `layoutImage` — inline images consume flow height; anchored ones route to
-/// the anchored placer and float over the page instead.
+/// Places inline images in flow and anchored images over the page.
 fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Paginator) {
     if block
         .anchor
@@ -982,9 +994,7 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
-/// Common DrawingML shapes consume their measured bbox in normal flow. The
-/// bridge currently emits the PM path's in-flow shape contract; exotic anchor
-/// scenes remain eligible for the PM fallback before they reach pagination.
+/// Places a DrawingML shape by consuming its measured bbox in normal flow.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;
@@ -1024,6 +1034,13 @@ fn layout_chart(block: &ChartBlock, measure: &ChartExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
+/// Resolves a DrawingML anchor to a page-coordinate origin.
+///
+/// A simple position is taken verbatim. Otherwise each axis picks a band from
+/// its `relativeFrom` — page, margin box, an individual margin strip, or the
+/// current column horizontally and the flow region vertically — and then
+/// applies either an explicit offset or an alignment within that band. The
+/// `insideMargin` and `outsideMargin` bands swap sides with page parity.
 fn resolve_object_position(
     position: Option<&ImageRunPosition>,
     width: f64,
@@ -1100,8 +1117,8 @@ fn resolve_object_position(
     )
 }
 
-/// `layoutAnchoredImage` — absolute placement at the anchor's offsets;
-/// behindDoc picks the z-order. Never moves the pen.
+/// Places an anchored image at its resolved anchor without moving the pen.
+/// `behindDoc` decides whether it paints under or over body content.
 fn layout_anchored_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Paginator) {
     let anchor = block.anchor.as_ref().expect("anchored image has anchor");
 
@@ -1167,8 +1184,7 @@ fn layout_anchored_image(block: &ImageBlock, measure: &ImageExtent, paginator: &
     paginator.push_fragment_direct(fragment);
 }
 
-/// `layoutTextBox` — floating text boxes overlay the page at the current pen
-/// without consuming height; inline ones flow like any other block.
+/// Places floating text boxes as overlays and inline text boxes in flow.
 fn layout_text_box(block: &TextBoxBlock, measure: &TextBoxExtent, paginator: &mut Paginator) {
     if is_floating_text_box_block(block) {
         let (x, y) = resolve_object_position(

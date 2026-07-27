@@ -733,6 +733,155 @@ fn preserved_shared_strings_pair_duplicate_values_in_order() {
     assert!(written.contains(&format!("{rich_item}<si><t>Dup</t></si>")));
 }
 
+#[test]
+fn new_duplicate_shared_strings_do_not_claim_authored_rich_items() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.insert(0, "Dup".to_owned());
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "Dup".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(strings.contains(&format!(
+        r#"<si><t xml:space="preserve">Dup</t></si>{bold}{italic}"#
+    )));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>1</v></c>"#));
+    assert!(sheet.contains(r#"<c r="B1" t="s"><v>2</v></c>"#));
+    assert!(sheet.contains(r#"<c r="C1" t="s"><v>0</v></c>"#));
+}
+
+#[test]
+fn new_duplicates_do_not_consume_previously_unique_rich_items() {
+    let rich = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="1" uniqueCount="1">{rich}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.insert(0, "Dup".to_owned());
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("B1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "Dup".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(strings.contains(&format!(
+        r#"<si><t xml:space="preserve">Dup</t></si>{rich}"#
+    )));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>1</v></c>"#));
+    assert!(sheet.contains(r#"<c r="B1" t="s"><v>0</v></c>"#));
+}
+
+#[test]
+fn new_duplicate_cells_without_table_entries_use_inline_text() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Text {
+                value: "Dup".into(),
+            },
+            ..Cell::default()
+        },
+    );
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(strings.contains(&format!("{bold}{italic}")));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>0</v></c>"#));
+    assert!(sheet.contains(r#"<c r="B1" t="s"><v>1</v></c>"#));
+    assert!(
+        sheet.contains(r#"<c r="C1" t="inlineStr"><is><t xml:space="preserve">Dup</t></is></c>"#)
+    );
+}
+
+#[test]
+fn duplicate_removal_keeps_the_entry_still_used_by_a_cell() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.pop();
+
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let strings = shared_strings_text(&saved);
+    let sheet = String::from_utf8(part_bytes(&saved, "xl/worksheets/sheet1.xml")).unwrap();
+
+    assert!(!strings.contains("<b/>"));
+    assert!(strings.contains(italic));
+    assert!(sheet.contains(r#"<c r="A1" t="s"><v>0</v></c>"#));
+}
+
+#[test]
+fn ambiguous_duplicate_removal_is_refused() {
+    let bold = r#"<si><r><rPr><b/></rPr><t>Dup</t></r></si>"#;
+    let italic = r#"<si><r><rPr><i/></rPr><t>Dup</t></r></si>"#;
+    let sst = format!(r#"<sst count="2" uniqueCount="1">{bold}{italic}</sst>"#);
+    let mut parts = package(
+        r#"<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row></sheetData>"#,
+        &[],
+        false,
+    );
+    parts.push(("xl/sharedStrings.xml".to_owned(), sst.into_bytes()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook;
+    workbook.shared_strings.pop();
+
+    let error = serialize_workbook_with_package(&workbook, &parsed.package).unwrap_err();
+
+    assert!(matches!(error, ParseError::UnsupportedEdit(_)));
+}
+
 /// Two worksheets sharing one workbook, so an edit to the second can be
 /// checked against the first.
 fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8>)> {
@@ -1558,7 +1707,6 @@ const DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.or
 
 const CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache></c:strRef></c:tx><c:spPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></c:spPr><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
 
-/// A package whose pivot cache still names sheets this crate never rewrites.
 fn pivoted_package() -> Vec<(String, Vec<u8>)> {
     let mut parts = package(r#"<sheetData/>"#, &[], false);
     parts[0] = (
@@ -1580,8 +1728,27 @@ fn pivoted_package() -> Vec<(String, Vec<u8>)> {
     parts
 }
 
-/// Pivot caches are still unmodelled, so the serializer keeps refusing the
-/// saves that would strand them.
+fn unclaimed_chart_package() -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+    );
+    parts.push((
+        "xl/worksheets/sheet2.xml".to_owned(),
+        br#"<worksheet><sheetData/></worksheet>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/charts/chart1.xml".to_owned(),
+        br#"<chartSpace><f>Data!$A$1:$A$2</f></chartSpace>"#.to_vec(),
+    ));
+    parts
+}
+
 #[test]
 fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     let parsed = parse_workbook_with_package(&pivoted_package()).unwrap();
@@ -1651,6 +1818,58 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
         matches!(&axis_edit, ParseError::UnsupportedEdit(message) if message.contains("pivotCacheDefinition1.xml")),
         "{axis_edit:?}"
     );
+}
+
+#[test]
+fn refuses_to_strand_unclaimed_chart_references_at_the_serialization_boundary() {
+    let parsed = parse_workbook_with_package(&unclaimed_chart_package()).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+    let provenance = vec![SharedStringCells::new(); 2];
+
+    let reordered = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(1), Some(0)],
+        &provenance,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&reordered, ParseError::UnsupportedEdit(message) if message.contains("chart1.xml")),
+        "{reordered:?}"
+    );
+
+    let removed = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+        &provenance,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
+
+    let mut renamed = workbook.clone();
+    renamed.sheets[0].name = "Renamed".to_owned();
+    let renamed = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &renamed,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &provenance,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(renamed, ParseError::UnsupportedEdit(_)));
 }
 
 /// Charts are modelled now: the anchor, its `editAs` mode and every `c:f` come
@@ -2043,7 +2262,6 @@ fn patches_only_the_moved_anchor_indices() {
     );
 }
 
-/// Nothing in the chart layer fires when the chart did not move.
 #[test]
 fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
     let source = charted_package();
@@ -2072,6 +2290,44 @@ fn keeps_saving_ordinary_edits_to_a_charted_workbook() {
         &workbook,
         &parsed.package,
         &[Some(0), None, Some(1)],
+        &vec![SharedStringCells::new(); 3],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(parse_workbook(&added).unwrap().sheets.len(), 3);
+}
+
+#[test]
+fn keeps_saving_ordinary_edits_with_an_unclaimed_chart_part() {
+    let source = unclaimed_chart_package();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+
+    let edited = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        part_bytes(&edited, "xl/charts/chart1.xml"),
+        part_bytes(&source, "xl/charts/chart1.xml")
+    );
+
+    workbook.sheets.push(xlsx_model::Sheet::new("Added"));
+    let added = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1), None],
         &vec![SharedStringCells::new(); 3],
         SaveEdits {
             changed: true,

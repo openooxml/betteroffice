@@ -8,6 +8,7 @@
     "predeploy": "bun run build:wasm",
     "deploy": "wrangler deploy",
     "dev": "bun run build:wasm && wrangler dev",
+    "pretest": "bun run build:wasm",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

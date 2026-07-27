@@ -1,4 +1,4 @@
-//! Op-corpus: one test per S1 op-contract behavior cluster, asserting Word semantics.
+//! Editing-operation behavior corpus.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -651,7 +651,7 @@ fn suggesting_merge_retains_the_mark_with_ppr_del() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn toggle_format_uses_pm_range_semantics() {
+fn toggle_format_sets_partial_ranges_and_clears_full_ranges() {
     let (doc, _) = doc_with("abcd");
     // Partially bold → toggle bolds the whole range.
     doc.format_range(
@@ -766,7 +766,7 @@ fn format_range_lowers_the_word_value_shapes() {
     assert!(!active(&attrs, "highlight"));
     assert!(active(&attrs, "fontSize"), "Keep left fontSize untouched");
 
-    // Unmapped hex highlight passes through raw (PM parity — serialized as w:shd).
+    // Unmapped highlight hex values pass through unchanged.
     assert_eq!(highlight_color_name("#123456"), "#123456");
     assert_eq!(highlight_color_name("00ffff"), "cyan");
 }
@@ -835,7 +835,7 @@ fn indent_wrappers_default_to_720_and_clamp_to_zero() {
             .get("indentLeft"),
         Some(&Any::Number(720.0))
     );
-    // Reaching zero CLEARS the attr (PM parity), and decreasing further stays clear.
+    // Reaching zero clears the attribute.
     doc.decrease_indent(&ctx(), &selector, None).unwrap();
     assert_eq!(
         doc.paragraphs("body").unwrap()[0]

@@ -1,7 +1,7 @@
 # OpenOOXML Individual Contributor License Agreement
 
 Thank you for your interest in contributing to software projects
-maintained by the OpenOOXML project and its maintainers ("Us"). This Agreement clarifies the
+maintained by Elia Hilse, the OpenOOXML project and its maintainers ("Us"). This Agreement clarifies the
 intellectual property license granted with Contributions from any
 person or entity. This license is for Your protection as a
 Contributor as well as the protection of Us and recipients of
@@ -20,18 +20,22 @@ Contributions.
 authorized by the copyright owner that is making this Agreement
 with Us.
 
+"Project" shall mean any software project owned or managed by Us,
+including BetterOffice and the other repositories of the OpenOOXML
+organization.
+
 "Contribution" shall mean any original work of authorship, including
 any modifications or additions to an existing work, that is
 intentionally submitted by You to Us for inclusion in, or
-documentation of, any of the products owned or managed by Us
-(the "Work"). For the purposes of this definition, "submitted"
-means any form of electronic, verbal, or written communication
-sent to Us or our representatives, including but not limited to
-communication on electronic mailing lists, source code control
-systems, and issue tracking systems that are managed by, or on
-behalf of, Us for the purpose of discussing and improving the
-Work, but excluding communication that is conspicuously marked or
-otherwise designated in writing by You as "Not a Contribution."
+documentation of, any Project (the "Work"). For the purposes of
+this definition, "submitted" means any form of electronic, verbal,
+or written communication sent to Us or our representatives,
+including but not limited to communication on electronic mailing
+lists, source code control systems, and issue tracking systems
+that are managed by, or on behalf of, Us for the purpose of
+discussing and improving the Work, but excluding communication
+that is conspicuously marked or otherwise designated in writing
+by You as "Not a Contribution."
 
 ## 2. Grant of Copyright License
 
@@ -111,4 +115,4 @@ personally aware, and conspicuously marking the work as
 
 By signing this Agreement on a pull request as instructed by the
 project's CLA assistant, You accept and agree to these terms for
-Your present and future Contributions to OpenOOXML projects.
+Your present and future Contributions to the Projects.

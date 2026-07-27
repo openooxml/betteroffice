@@ -1,7 +1,7 @@
 //! spreadsheetml -> `xlsx_model::Workbook`. streaming; nothing is sized from a
 //! file-supplied `count`/`dimension`, cells and shared strings are capped.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
@@ -22,10 +22,7 @@ pub fn parse_workbook(parts: &[(String, Vec<u8>)]) -> Result<Workbook, ParseErro
     parse_workbook_indexed(parts).map(|parsed| parsed.workbook)
 }
 
-/// Per sheet, the shared-string index each cell was authored against, keyed by
-/// `(row, column)`, for the entries whose text alone cannot identify them.
-/// Structural edits move the cells, so the caller owning them must move these
-/// keys with them.
+/// Source shared-string indices keyed by `(row, column)`.
 #[doc(hidden)]
 pub type SharedStringCells = BTreeMap<(u32, u32), usize>;
 
@@ -49,8 +46,6 @@ pub(crate) fn parse_workbook_indexed(
         Some(bytes) => parse_shared_strings(bytes)?,
         None => Vec::new(),
     };
-    let ambiguous = ambiguous_shared_strings(&shared_strings);
-
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
     let styles = parse_stylesheet(styles_bytes, theme_bytes)?;
@@ -83,7 +78,6 @@ pub(crate) fn parse_workbook_indexed(
             bytes,
             &shared_strings,
             &sheet_rels,
-            &ambiguous,
             &mut indices,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
@@ -101,20 +95,6 @@ pub(crate) fn parse_workbook_indexed(
         },
         shared_string_cells,
     })
-}
-
-/// Indices whose `<si>` text is shared with another entry. Only these need
-/// their identity remembered; every other index is recoverable from its text.
-fn ambiguous_shared_strings(shared: &[String]) -> HashSet<usize> {
-    let mut seen: HashMap<&str, usize> = HashMap::with_capacity(shared.len());
-    let mut ambiguous = HashSet::new();
-    for (index, value) in shared.iter().enumerate() {
-        if let Some(first) = seen.insert(value.as_str(), index) {
-            ambiguous.insert(first);
-            ambiguous.insert(index);
-        }
-    }
-    ambiguous
 }
 
 /// resolve an optional part by relationship type suffix, falling back to
@@ -327,7 +307,6 @@ fn parse_worksheet(
     data: &[u8],
     shared: &[String],
     relationships: &BTreeMap<String, Relationship>,
-    ambiguous: &HashSet<usize>,
     shared_string_cells: &mut SharedStringCells,
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
@@ -420,7 +399,7 @@ fn parse_worksheet(
                 match name.local_name().as_ref() {
                     b"c" => {
                         if let Some(c) = cur.take() {
-                            finalize_cell(c, shared, &mut sheet, ambiguous, shared_string_cells)?;
+                            finalize_cell(c, shared, &mut sheet, shared_string_cells)?;
                         }
                         col_cursor += 1;
                     }
@@ -548,7 +527,6 @@ fn finalize_cell(
     c: CellBuild,
     shared: &[String],
     sheet: &mut Sheet,
-    ambiguous: &HashSet<usize>,
     shared_string_cells: &mut SharedStringCells,
 ) -> Result<(), ParseError> {
     let addr = match c.addr {
@@ -561,7 +539,7 @@ fn finalize_cell(
                 .value_text
                 .as_deref()
                 .and_then(|v| v.trim().parse::<usize>().ok());
-            if let Some(idx) = idx.filter(|idx| ambiguous.contains(idx)) {
+            if let Some(idx) = idx.filter(|idx| *idx < shared.len()) {
                 shared_string_cells.insert((addr.row, addr.col), idx);
             }
             match idx.and_then(|i| shared.get(i)) {

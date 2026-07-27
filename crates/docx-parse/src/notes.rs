@@ -26,9 +26,7 @@ impl Note {
     }
 }
 
-/// Parse a complete `w:footnotes` or `w:endnotes` story part. Modeled note
-/// content always enters `StoryParser::parse_blocks`; the leaf only owns note
-/// identity, special-note classification, and the incumbent verbatim gate.
+/// Parses a complete footnote or endnote story part.
 pub fn parse_notes(
     root: &XmlElement,
     footnotes: bool,
@@ -44,7 +42,7 @@ pub fn parse_notes(
         parser.budget.charge_note(parser.part)?;
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
         let content = parser.parse_blocks(element, 0, false)?;
-        let verbatim_xml = has_unmodeled_direct_block(element).then(|| element.to_incumbent_xml());
+        let verbatim_xml = has_unmodeled_direct_block(element).then(|| element.to_raw_inline_xml());
         notes.push(Note {
             story_type: note_name.to_owned(),
             id: element
@@ -295,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn verbatim_gate_is_shallow_and_uses_incumbent_xml_serialization() {
+    fn verbatim_gate_is_shallow_and_preserves_raw_attribute_text() {
         let notes = parse_story(
             r#"<w:endnotes xmlns:w="w"><w:endnote w:id="1" label="a&amp;b"><w:p/><w:bookmarkStart w:id="2"/></w:endnote><w:endnote w:id="2"><w:sdt><w:sdtContent><w:customXml><w:p/></w:customXml></w:sdtContent></w:sdt></w:endnote></w:endnotes>"#,
             false,

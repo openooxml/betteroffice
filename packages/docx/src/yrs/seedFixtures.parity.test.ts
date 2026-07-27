@@ -13,7 +13,7 @@ import { yrsToDocument } from './yrsToDocument';
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE_ROOT = resolve(import.meta.dir, '__fixtures__/seed-parity');
 
-/** Node kinds each fixture must contain once parsed, so no fixture reaches parity vacuously. */
+/** Required parsed node kinds by fixture. */
 const REQUIRED_NODES: Record<string, string[]> = {
   'bookmarks-fields': ['bookmarkStart', 'bookmarkEnd', 'simpleField', 'complexField', 'instrText'],
   comments: ['commentRangeStart', 'commentRangeEnd', 'commentReference'],
@@ -185,15 +185,12 @@ const fixtures = readdirSync(FIXTURE_ROOT, { withFileTypes: true })
   .map((entry) => entry.name)
   .sort();
 
-// Compared by seeded story content and by the save projection. Seeded op counts are
-// deliberately not compared: yrs emits a nondeterministic number of formatting markers for
-// some attribute sets, so the state vector varies run to run on both seeding paths even
-// though the seeded content is identical.
-describe('DOCX seeder parity across document features', () => {
+// Yrs formatting marker counts make seeded state vectors nondeterministic.
+describe('DOCX seeding across document features', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
   for (const name of fixtures) {
-    it(`seeds ${name} identically to the TypeScript projection`, async () => {
+    it(`preserves ${name} stories, comments, and save output`, async () => {
       const bytes = buildFixtureDocx(name);
       const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
 
@@ -203,20 +200,20 @@ describe('DOCX seeder parity across document features', () => {
         expect(check(parsed), `${name} package check ${index}`).toBe(true);
       }
 
-      const legacy = await createYrsSession({ clientId: 48001 });
+      const projected = await createYrsSession({ clientId: 48001 });
       const engine = await createYrsSession({ clientId: 48001 });
       try {
-        documentToYrs(legacy, parsed);
+        documentToYrs(projected, parsed);
         engine.seedFromDocx(bytes);
 
-        expectEquivalentStories(engine, legacy);
+        expectEquivalentStories(engine, projected);
         for (const comment of parsed.package.document.comments ?? []) {
           const id = String(comment.id);
-          expect(engine.resolveComment(id)).toEqual(legacy.resolveComment(id));
+          expect(engine.resolveComment(id)).toEqual(projected.resolveComment(id));
         }
-        expect(yrsToDocument(engine, parsed)).toEqual(yrsToDocument(legacy, parsed));
+        expect(yrsToDocument(engine, parsed)).toEqual(yrsToDocument(projected, parsed));
       } finally {
-        legacy.destroy();
+        projected.destroy();
         engine.destroy();
       }
     });

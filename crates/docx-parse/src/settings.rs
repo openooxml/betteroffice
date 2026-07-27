@@ -104,14 +104,14 @@ pub fn parse_settings(
     let Some(xml) = xml.filter(|value| !value.is_empty()) else {
         return Ok(DocumentSettings::default());
     };
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(DocumentSettings::default());
     }
     let document = parse_xml(xml, part, budget)?;
     Ok(parse_settings_element(document.root()))
 }
 
-pub(crate) fn incumbent_utf8_text_boundary(xml: &[u8]) -> bool {
+pub(crate) fn is_valid_utf8_xml_text(xml: &[u8]) -> bool {
     !xml.contains(&0) && std::str::from_utf8(xml).is_ok()
 }
 

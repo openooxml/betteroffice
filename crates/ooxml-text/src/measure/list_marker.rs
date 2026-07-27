@@ -1,25 +1,15 @@
-//! List-marker inline-width resolution — a port of
-//! `packages/core/src/layout/measure/listMarkerWidth.ts`
-//! (`getListMarkerInlineWidth` + `resolveListMarkerFont`).
+//! List-marker inline width: how much of the first line a visible marker
+//! consumes.
 //!
-//! The painter renders the marker as an inline-block at the start of the
-//! first body line; the measurer subtracts the same footprint from the first
-//! line's available width. This module mirrors the TS rules:
-//!
-//! - No marker / hidden marker → 0. (The caller additionally zeroes the
-//!   width whenever `indent.hanging != 0`, mirroring the exact `=== 0` guard
-//!   in `measureParagraph` — hanging-marker paragraphs indent instead.)
-//! - Marker font per §17.9.6: numbering-level rPr (`listMarkerFont*`), else
-//!   the first body text run's font, else paragraph/document defaults. The
-//!   TS style carries no bold/italic → the family's regular chain.
-//! - `w:suff` (§17.9.25): `nothing` → natural width; `space` → natural + one
-//!   space glyph; `tab` (default) → grow to the closest stop past the
-//!   marker, where custom `attrs.tabs` stops (non-`clear`/`bar`) and the
-//!   `defaultTabStopTwips` grid (anchored at 0, NOT at `w:ind`) compete and
-//!   the closest wins. `>=` on the custom-stop filter is intentional (a stop
-//!   exactly at the marker's right edge is valid).
-//! - No grid at all (`defaultTabStopTwips` explicitly 0, no custom stops) →
-//!   natural width + half an em.
+//! The marker's face resolves in precedence order — numbering level, then the
+//! paragraph's first text run, then the paragraph default, then the document
+//! default — and always through that family's regular chain, since a marker
+//! is never bold or italic here. `w:suff` then fixes the footprint:
+//! `nothing` is the marker's own width, `space` adds one space glyph, and
+//! `tab` (the default) grows the marker out to the nearest stop past its end,
+//! taking whichever is closer of the first custom stop and the first
+//! `w:defaultTabStop` grid line. With no grid at all — a zero default stop
+//! and no custom stops — the marker takes a half-em gap instead.
 
 use crate::font_store::FontStore;
 
@@ -27,17 +17,16 @@ use super::input::{AttrsIn, MeasureInput};
 use super::tabs::twips_to_px;
 use super::{MeasureError, pt_to_px};
 
-/// TS `DEFAULT_TAB_STOP_TWIPS` (settingsParser): §17.6.13 default.
+/// ECMA-376 §17.6.13 default tab stop.
 const DEFAULT_TAB_STOP_TWIPS: f32 = 720.0;
 
-/// The marker's inline-block width in px, or 0 when nothing is rendered.
-/// Caller guarantees `hanging == 0` (the only path where TS consumes this).
+/// Marker footprint in pixels. Zero when the paragraph has no marker text or
+/// the marker is hidden; callers apply it only at zero hanging indent.
 pub(super) fn list_marker_inline_width(
     store: &FontStore,
     input: &MeasureInput,
     attrs: &AttrsIn,
 ) -> Result<f32, MeasureError> {
-    // TS `!attrs?.listMarker` — empty string is falsy too.
     let marker = match attrs.list_marker.as_deref() {
         Some(m) if !m.is_empty() => m,
         _ => return Ok(0.0),
@@ -46,8 +35,7 @@ pub(super) fn list_marker_inline_width(
         return Ok(0.0);
     }
 
-    // resolveListMarkerFont: level rPr → first text run → paragraph →
-    // document defaults.
+    // Font precedence: level, first text run, paragraph, document.
     let first_text_run = input.block.runs.iter().find(|r| r.kind == "text");
     let family = attrs
         .list_marker_font_family

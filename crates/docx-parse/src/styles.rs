@@ -1,4 +1,4 @@
-//! `styles.xml` definitions and incumbent-compatible `basedOn` cascade resolution.
+//! Style definitions and insertion-ordered `basedOn` resolution.
 
 use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::formatting::{
     parse_run_properties, parse_table_cell_properties, parse_table_properties,
     parse_table_row_properties,
 };
-use crate::settings::incumbent_utf8_text_boundary;
+use crate::settings::is_valid_utf8_xml_text;
 use crate::theme::Theme;
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
@@ -112,7 +112,7 @@ pub fn parse_styles(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<StyleMap, ParseError> {
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(StyleMap::new());
     }
     let document = parse_xml(xml, part, budget)?;
@@ -125,7 +125,7 @@ pub fn parse_style_definitions(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<StyleDefinitions, ParseError> {
-    if !incumbent_utf8_text_boundary(xml) {
+    if !is_valid_utf8_xml_text(xml) {
         return Ok(StyleDefinitions::default());
     }
     let document = parse_xml(xml, part, budget)?;
@@ -167,9 +167,7 @@ fn parse_style_map(
         }
     }
 
-    // Deliberately resolve against the live map in insertion order. Earlier
-    // entries are already resolved when later entries recurse through them.
-    // This order dependence is observable incumbent behavior, including cycles.
+    // Resolution uses the live map in insertion order, including cycles.
     let ids: Vec<_> = styles.keys().cloned().collect();
     for style_id in ids {
         let Some(style) = styles.get(&style_id).cloned() else {
@@ -451,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn cyclic_based_on_chains_terminate_with_incumbent_live_map_semantics() {
+    fn cyclic_based_on_chains_terminate_and_merge_both_styles() {
         let definitions = parse(
             r#"<w:styles><w:style w:styleId="A"><w:basedOn w:val="B"/><w:pPr><w:jc w:val="left"/></w:pPr></w:style><w:style w:styleId="B"><w:basedOn w:val="A"/><w:pPr><w:spacing w:before="120"/></w:pPr></w:style></w:styles>"#,
         );

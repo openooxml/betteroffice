@@ -1,4 +1,4 @@
-//! S11 versioned content-serializer wire and parse-back gate.
+//! S11 content-serializer wire.
 
 use serde::{Deserialize, Serialize};
 

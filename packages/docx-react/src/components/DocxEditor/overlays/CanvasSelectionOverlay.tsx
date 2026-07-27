@@ -16,7 +16,6 @@
  * (in place of its inline overlay) once `overlayTarget` resolves, which
  * `useCanvasOverlayTarget` returns non-null only while the canvas paints.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import { useLayoutEffect, useState } from 'react';
@@ -36,7 +35,7 @@ export interface CanvasSelectionOverlayProps {
   selectionRects: SelectionRect[];
   /** Caret position in page-local px + pageIndex, or null for a range. */
   caretPosition: CaretPosition | null;
-  /** Whether the (hidden body) ProseMirror is focused — drives the blink. */
+  /** Whether the (hidden body) input is focused — drives the blink. */
   isFocused: boolean;
   /** Hide the caret / selection in read-only mode. */
   readOnly?: boolean;

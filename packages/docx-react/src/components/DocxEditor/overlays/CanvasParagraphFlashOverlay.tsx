@@ -1,26 +1,4 @@
-/**
- * Canvas-mode transient paragraph flash (G2).
- *
- * `DocxEditorRef.scrollToParaId({ highlight })` flashes the target paragraph so
- * the user's eye lands on it after the jump. This overlay draws the flash
- * directly over the visible canvas pages:
- * the paragraph's PM range is resolved to page-local rects through the
- * display-list `range_rects` query (falling back to `anchorRect` for an empty
- * paragraph) and each rect is projected into `overlayTarget` coordinates via the
- * live per-page `<canvas>` rect — the exact projection `CanvasFindHighlightOverlay`
- * / `CanvasSelectionOverlay` use, so the flash lands on the glyphs regardless of
- * the page column's centering, the sidebar-open shift, or zoom. The projection
- * is scroll-invariant (canvas + overlay share `editorContentRef`), so the flash
- * is correct even though it is requested right as the scroll settles.
- *
- * Driven imperatively: the scroll API bumps `request.nonce` to (re)start a
- * flash; the overlay reuses the same `docx-paragraph-flash-fade` keyframe as the
- * painter path (via `--docx-paragraph-flash-color` / `-duration`) and clears
- * itself after `durationMs`, calling `onDone(nonce)` so the parent can drop the
- * request. Non-interactive (`pointer-events: none`) so it never steals the caret.
- *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
- */
+/** Flashes a paragraph range over visible canvas pages. */
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -30,7 +8,7 @@ import {
   DEFAULT_PARAGRAPH_FLASH_DURATION_MS,
 } from '@betteroffice/docx/utils';
 
-/** One flash request, addressed by the paragraph's live body PM range. */
+/** One flash request, addressed by the paragraph's live body range. */
 export interface CanvasParagraphFlashRequest {
   /** Paragraph node start position (inclusive). */
   from: number;

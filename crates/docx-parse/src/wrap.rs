@@ -20,7 +20,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn matches_the_typescript_taxonomy() {
+    fn classifies_floating_and_nonwrapping_types() {
         for value in ["square", "tight", "through"] {
             assert!(is_floating_wrap_type(Some(value)));
             assert!(wraps_around_text(Some(value)));

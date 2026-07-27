@@ -1,4 +1,4 @@
-//! Shared scalar property decoders used by borders and the later style/run slices.
+//! Shared scalar property decoders used by borders and the style/run parsers.
 
 use serde::{Deserialize, Serialize};
 

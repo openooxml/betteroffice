@@ -5,6 +5,32 @@
 //! Everything downstream (the line filler) works on the per-character
 //! advance tables built here, so all UTF-8 ↔ UTF-16 and shaped-cluster ↔
 //! character conversion happens in exactly one place.
+//!
+//! The decisions this module owns:
+//!
+//! - **Which face each character gets.** The run's `w:rFonts` slots are
+//!   applied per character — complex script, East Asian, ASCII, high ANSI —
+//!   with combining marks inheriting the previous character's slot. The
+//!   complex slot also swaps in `w:bCs`, `w:iCs`, `w:szCs` and the `w:lang`
+//!   bidi tag. One OOXML run can therefore legitimately span Latin, East
+//!   Asian and complex faces without splitting its source positions.
+//! - **What is shaped in place of what.** `w:caps` uppercases before shaping,
+//!   honouring the Turkish and Azerbaijani dotted-I rules, and may expand one
+//!   character into several (ß → SS). `w:smallCaps` prefers a real `smcp`
+//!   substitution and otherwise synthesizes uppercase at a scaled advance.
+//!   `w:w` multiplies every advance and `w:kern` gates pair kerning.
+//! - **Where shaping segments.** A segment continues while font, advance
+//!   scale, UBA level, size, baseline shift, language and feature list all
+//!   hold, so kerning and ligatures survive inside it. Splitting at a level
+//!   boundary keeps every segment a single directional run, which is what
+//!   lets the resolved direction be passed to the shaper explicitly.
+//! - **Where lines may break.** UAX-14 opportunities over the original text,
+//!   translated to cluster indices. The trivial end-of-text opportunity is
+//!   dropped; interior mandatory breaks cannot occur, because control
+//!   characters are refused up front.
+//! - **How images flow.** An anchored floating image is skipped, a
+//!   `topAndBottom` or block image takes its own line, everything else is
+//!   inline. A dimensionless image is zero-size, never a refusal.
 
 use crate::font_store::{FontId, FontStore};
 use crate::line_break::break_opportunities;
@@ -42,18 +68,16 @@ pub(super) struct PreparedText {
     /// excluding the trivial end-of-text one.
     pub breaks: Vec<usize>,
     pub letter_spacing: f32,
-    /// Points, for line-metrics bookkeeping (`updateMaxFont`).
+    /// Points used for line-metric bookkeeping.
     pub font_size_pt: f32,
-    /// Font whose tables drive this run's contribution to line metrics —
-    /// the head of its fallback chain, like TS's `getFontMetrics` on the
-    /// primary family.
+    /// Font whose tables drive this run's line metrics.
     pub metrics_font: FontId,
     pub baseline_shift_px: f32,
 }
 
-/// A tab run: width is resolved against the tab-stop grid at fill time
-/// (depends on the line's current x), but its font already contributes to
-/// line metrics like TS's `updateMaxFont(runToFontStyle(run))`.
+/// Tab run prepared for grid placement and line metrics. Its width is not
+/// known until fill time — it depends on the line's current x — but its font
+/// already contributes to line metrics.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PreparedTab {
     /// Points, for line-metrics bookkeeping.
@@ -63,9 +87,8 @@ pub(super) struct PreparedTab {
     pub bidi_level: u8,
 }
 
-/// A field run, measured at its cached display (fallback) text with the
-/// run's formatting — the live value is swapped in at paint time (TS field
-/// branch of `measureParagraph`).
+/// Field run measured from its cached display text; the live value is
+/// substituted at paint time.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PreparedField {
     pub width: f32,
@@ -77,11 +100,10 @@ pub(super) struct PreparedField {
     pub bidi_level: u8,
 }
 
-/// An image footprint. For an inline image the width joins the line advance
-/// and the (column-fitted) height plus wrap distances grows the line box in
-/// `finalize_line`; for a block / `topAndBottom` (own-line) image the height
-/// plus wrap distances is the whole line box (no column fit) and the width is
-/// only consulted by `measureInlineWidthAfterTab` (TS parity).
+/// Image footprint. Inline placement fits `height` to the column and adds
+/// `width` to the line advance; own-line placement takes `height` as
+/// authored and adds no width. `dist_top`/`dist_bottom` join the footprint
+/// either way.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PreparedImage {
     pub width: f32,
@@ -98,17 +120,11 @@ pub(super) enum PreparedRun {
     Tab(PreparedTab),
     Field(PreparedField),
     InlineImage(PreparedImage),
-    /// A block / `topAndBottom` image (`wrapType === 'topAndBottom'` or
-    /// `displayMode === 'block'`): it takes its own line, its declared height
-    /// plus wrap distances IS the line box (no `max-width` column fit — TS
-    /// assigns `maxImageHeightPx` directly), and it contributes no width to
-    /// the line advance. Its declared width still counts toward
-    /// `measureInlineWidthAfterTab` like every other image run.
+    /// Authored-size image occupying its own line.
     OwnLineImage(PreparedImage),
-    /// A truly floating image (anchored + float/wrap mode): absolutely
-    /// positioned, so it only advances the tail span — except its declared
-    /// width still counts toward `measureInlineWidthAfterTab` (TS sums
-    /// `next.width || 0` for *any* image run after a tab).
+    /// Anchored floating image: the host positions it, so it contributes no
+    /// width and no line growth — but its declared width still counts toward
+    /// the following-runs width after a tab.
     SkippedImage {
         width: f32,
         bidi_level: u8,
@@ -119,25 +135,17 @@ pub(super) enum PreparedRun {
     },
 }
 
-/// Advance scale for synthesized small caps (w:smallCaps): lowercase
-/// characters shape as their uppercase glyph with advances scaled by this
-/// factor.
-///
-/// The painter styles smallCaps runs with CSS `font-variant: small-caps`
-/// (`layout/paint/renderParagraph/runs.ts`); with no `smcp` feature in the
-/// font, browsers synthesize scaled-down uppercase. The factor is
-/// **0.7** — Chromium's and WebKit's synthesized-small-caps font size
-/// multiplier — chosen because this engine measures what the painter
-/// paints and the paint targets are Blink/WebKit first. Known divergences,
-/// pinned by test: Gecko synthesizes at 0.8, Word renders small caps at
-/// roughly 0.8 of the full size, and the TS measurer ignores smallCaps
-/// entirely (it measures the original lowercase glyphs at full size).
-const LEGACY_SMALL_CAPS_ADVANCE_SCALE: f32 = 0.7;
+/// Advance scale for a synthesized small cap — an uppercase glyph standing in
+/// for a lowercase character because the face carries no `smcp` substitution.
+/// The browser value is Blink and WebKit's synthesis multiplier; the Word
+/// value is what Word renders small caps at, and applies under
+/// `authoritativeShaping`.
+const BROWSER_SMALL_CAPS_ADVANCE_SCALE: f32 = 0.7;
 const WORD_SMALL_CAPS_ADVANCE_SCALE: f32 = 0.8;
 
 /// Characters that UAX-14 treats as mandatory breaks (plus tab, which DOCX
 /// represents as a `TabRun`). Their appearance inside a text run means the
-/// block needs the reference engine.
+/// block needs the host fallback.
 fn is_disallowed_control(c: char) -> bool {
     matches!(
         c,
@@ -190,6 +198,9 @@ fn base_direction(run_rtl: bool, input: &MeasureInput) -> crate::bidi::BaseDirec
     }
 }
 
+/// Rejects a chain naming an id the store does not hold. Unlike a missing
+/// chain this is [`MeasureError::Invalid`] — the host contradicted itself
+/// rather than merely omitting something.
 pub(super) fn validate_chain(store: &FontStore, chain: &[FontId]) -> Result<(), MeasureError> {
     for &id in chain {
         store.metrics(id).map_err(|_| {
@@ -199,6 +210,10 @@ pub(super) fn validate_chain(store: &FontStore, chain: &[FontId]) -> Result<(), 
     Ok(())
 }
 
+/// Prepares every run of the block, preserving run indices one-to-one so the
+/// filler's spans address the input directly. Bidi levels are resolved across
+/// the whole paragraph first, since a run's neutrals depend on its neighbours.
+/// An unrecognized `kind` is refused.
 pub(super) fn prepare_runs(
     store: &FontStore,
     input: &MeasureInput,
@@ -243,6 +258,10 @@ pub(super) fn prepare_runs(
     Ok(prepared)
 }
 
+/// Per-character UBA levels for every run, resolved over the paragraph's
+/// concatenated text so neutrals see their real context. Non-text runs stand
+/// in as one object-replacement character each. A run carrying `w:rtl`
+/// re-resolves on its own text under an RTL base instead.
 fn paragraph_run_levels(input: &MeasureInput) -> Vec<Vec<u8>> {
     let mut combined = String::new();
     let mut spans = Vec::with_capacity(input.block.runs.len());
@@ -285,9 +304,7 @@ fn paragraph_run_levels(input: &MeasureInput) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Resolve a tab run's font for line metrics, mirroring the TS tab branch
-/// (`runToFontStyle` → `updateMaxFont`): family/size default straight to the
-/// document defaults, bold/italic pick the chain.
+/// Resolves a tab run's font for line metrics.
 fn prepare_tab_run(
     store: &FontStore,
     input: &MeasureInput,
@@ -328,26 +345,19 @@ fn validate_image_dist(v: f32, name: &str) -> Result<f32, MeasureError> {
     }
 }
 
-/// Mirror of the TS image branch order in `measureParagraph`:
-/// 1. anchored + floating (`position` set and `displayMode == "float"` or a
-///    text-wrapping wrap type) → skipped (absolutely positioned);
-/// 2. `topAndBottom` / block display → own-line image (its own line, height =
-///    declared height + wrap distances, TS default 6px; no width advance);
-/// 3. everything else measures inline.
-///
-/// Missing dimensions are never a bail: a dimensionless image is treated as
-/// zero-size (`run.width || 0` / `run.height || 0`), matching TS's use of the
-/// required-by-type `run.width`/`run.height` when they resolve to 0 — a
-/// zero-size image contributes no width and no line growth but stays
-/// representable.
+/// Classifies an image run, in order: anchored and floating (`position` set
+/// plus a float display mode or a text-wrapping wrap type) → skipped;
+/// `topAndBottom` or block display → own-line; everything else → inline.
+/// Rotation bounds, where present, replace the declared width and height as
+/// the layout footprint. Missing dimensions mean zero size, never a refusal.
 fn prepare_image_run(run: &RunIn, bidi_level: u8) -> Result<PreparedRun, MeasureError> {
     let wrap = run.wrap_type.as_deref();
     let display = run.display_mode.as_deref();
-    // TS `wrapsAroundText`: square / tight / through.
+    // Square, tight, and through wrapping are floating.
     let is_floating =
         display == Some("float") || matches!(wrap, Some("square" | "tight" | "through"));
     if run.position.is_some() && is_floating {
-        // TS sums `next.width || 0` after tabs — validate when present, else 0.
+        // Missing floating-image widths count as zero after tabs.
         let width = validate_image_dim(
             run.rotation_bounds
                 .as_ref()
@@ -359,8 +369,7 @@ fn prepare_image_run(run: &RunIn, bidi_level: u8) -> Result<PreparedRun, Measure
         return Ok(PreparedRun::SkippedImage { width, bidi_level });
     }
 
-    // Block / topAndBottom own-line image. TS defaults its wrap distances to
-    // 6px (`run.distTop ?? 6`), unlike the inline path's 0px default.
+    // Own-line wrap distances default to six pixels.
     if wrap == Some("topAndBottom") || display == Some("block") {
         return Ok(PreparedRun::OwnLineImage(PreparedImage {
             width: validate_image_dim(
@@ -408,10 +417,9 @@ fn prepare_image_run(run: &RunIn, bidi_level: u8) -> Result<PreparedRun, Measure
     }))
 }
 
-/// Mirror of the TS field branch (`measureParagraph`): measure
-/// `fallback || "1"` with the run's family/size/bold/italic. The TS field
-/// style carries neither `letterSpacing` nor caps flags, so neither applies
-/// here.
+/// Measures a field at `fallback` (`"1"` when absent or empty) with the run's
+/// family, size, bold and italic. Caps flags and letter spacing do not apply
+/// to fields; super/subscript scaling does.
 fn prepare_field_run(
     store: &FontStore,
     input: &MeasureInput,
@@ -427,7 +435,7 @@ fn prepare_field_run(
         .unwrap_or(&input.defaults.font_family);
     let chain = input.chain_for(family, run.bold, run.italic)?;
     validate_chain(store, &chain)?;
-    // TS `run.fallback || '1'`: absent and empty both measure as "1"
+    // Missing and empty field fallbacks measure as `"1"`.
     let fallback = match run.fallback.as_deref() {
         Some(t) if !t.is_empty() => t,
         _ => "1",
@@ -448,6 +456,8 @@ fn prepare_field_run(
     })
 }
 
+/// Size and baseline shift for `w:vertAlign`: both scripts shape at 0.75 of
+/// the run's size, superscript raised 0.4em and subscript lowered 0.2em.
 fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     let base_px = pt_to_px(base_size_pt);
     if run.superscript {
@@ -459,22 +469,17 @@ fn script_metrics(base_size_pt: f32, run: &RunIn) -> (f32, f32) {
     }
 }
 
-/// Width of `text` shaped plain — no caps, no letter spacing, no horizontal
-/// scale — through `chain`: the Rust analogue of the TS canvas
-/// `measureTextWidth(text, style)` calls whose style carries only
-/// family/size/bold/italic (field fallbacks, list markers). Bidi-aware:
-/// segments split at UBA level-run boundaries under `base`.
-/// Resolve `ch` to the first covering font in `chain`; if no font covers it,
-/// substitute the chain's terminal font. The host (`TextMeasureFontRegistry`)
-/// guarantees every chain ends in an always-available broad-coverage
-/// last-resort face, so a truly-uncovered char shapes as that face's `.notdef`
-/// box glyph — a real advance width — instead of routing the whole block to
-/// browser measurement. Returns `None` only for an empty chain, which
-/// `validate_chain` rejects upstream.
+/// First font in `chain` covering `ch`, or the chain's terminal font when
+/// nothing covers it. A truly uncovered character therefore shapes as that
+/// face's `.notdef` — a real advance width — instead of refusing the block.
+/// `None` only for an empty chain, which `validate_chain` rejects upstream.
 fn resolve_with_fallback(store: &FontStore, chain: &[FontId], ch: char) -> Option<FontId> {
     store.resolve(chain, ch).or_else(|| chain.last().copied())
 }
 
+/// Width of `text` shaped plainly through `chain` — no caps, letter spacing
+/// or horizontal scale — for field fallbacks and list markers. Segments split
+/// at font and UBA level boundaries under `base`.
 pub(super) fn measure_plain_text(
     store: &FontStore,
     chain: &[FontId],
@@ -523,6 +528,10 @@ pub(super) fn measure_plain_text(
     Ok(width)
 }
 
+/// Builds a text run's cluster advance table: validate and clamp the run's
+/// numbers, plan every character's face and casing, shape the resulting
+/// same-style subranges, fold glyph advances back onto original characters,
+/// and record the UAX-14 break opportunities.
 fn prepare_text_run(
     store: &FontStore,
     input: &MeasureInput,
@@ -709,7 +718,7 @@ fn prepare_text_run(
                 if input.authoritative_shaping {
                     WORD_SMALL_CAPS_ADVANCE_SCALE
                 } else {
-                    LEGACY_SMALL_CAPS_ADVANCE_SCALE
+                    BROWSER_SMALL_CAPS_ADVANCE_SCALE
                 },
             )
         } else {
@@ -796,15 +805,7 @@ fn prepare_text_run(
     }
     let utf16_total = utf16_offset;
 
-    // Shape maximal same-font/style/language single-level subranges so
-    // kerning/ligatures inside a subrange survive (TS's substring-
-    // measurement rationale), then fold glyph advances back onto original
-    // characters via the shaped-byte → original-char map. rustybuzz clusters
-    // are byte offsets into the text handed to `shape`. Splitting at a
-    // small-caps scale boundary mirrors browser synthesis (separate font
-    // run, no kerning across it); splitting at a UBA level boundary keeps
-    // every shaped segment a single directional run so the resolved UBA
-    // direction can be passed to rustybuzz explicitly.
+    // Same-style directional ranges preserve kerning and ligatures.
     let mut chars: Vec<CharAdv> = Vec::new();
     let mut seg_start = 0;
     while seg_start < plan.len() {

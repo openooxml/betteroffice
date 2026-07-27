@@ -5,14 +5,13 @@
  * rect to place its resize handles, and on the canvas path the painted DOM
  * image (`.layout-run-image`) is parked/hidden — its rect is unusable. The
  * display list carries every inline image as an `ImagePrimitive` stamped with
- * `docStart` (= the image atom's PM position, the same value the DOM path reads
+ * `docStart` (= the image atom's document position, the same value the DOM path reads
  * from `data-doc-start`), so the primitive found here is the geometry source
  * that replaces `imageInfo.element.getBoundingClientRect()`.
  *
  * Body primitives only: header/footer image primitives carry doc positions in a
- * different PM doc (the HF editor), so a body image pmPos must never match one.
+ * different doc (the HF editor), so a body image pmPos must never match one.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import type { DisplayList, DisplayPage, ImagePrimitive } from './displayList';
@@ -25,7 +24,7 @@ export interface LocatedImagePrimitive {
   primitive: ImagePrimitive;
   /** page the primitive paints on (page-local px are relative to this page) */
   pageIndex: number;
-  /** PM-document region containing the image. Undefined reads as body. */
+  /** Document region containing the image. Undefined reads as body. */
   region?: DisplayListImageRegion;
   /** Header/footer relationship id when `region` is not body. */
   rId?: string;
@@ -50,8 +49,8 @@ function imagesForRegion(
 
 /**
  * First body image primitive whose `docStart` equals `pos`, or null. `pos` is
- * the image node's PM position (a NodeSelection's `from`, or the left edge of a
- * one-atom TextSelection).
+ * the image node's document position (a node selection's `from`, or the left
+ * edge of a one-atom text selection).
  */
 export function findImagePrimitiveByDocPos(
   list: DisplayList,

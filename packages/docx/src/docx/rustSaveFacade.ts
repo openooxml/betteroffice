@@ -1,4 +1,4 @@
-/** Typed TypeScript boundary for the S13 Rust package writer. */
+/** Typed TypeScript boundary for the Rust package writer. */
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
 import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
@@ -74,7 +74,7 @@ export async function writeDocumentWithRust(
   return { buffer, determinism: fixed };
 }
 
-/** Preserve the incumbent save contract: newly bound model nodes receive their rIds in-place. */
+/** Applies saved relationship IDs to bound model nodes. */
 function applyRustSaveMutations(
   document: Document,
   originalBuffer: ArrayBuffer,

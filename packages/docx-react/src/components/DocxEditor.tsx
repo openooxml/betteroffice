@@ -255,7 +255,7 @@ export interface DocxEditorProps {
    * of internal state, and emits every change through `onCommentsChange`.
    *
    * Use this with collaboration backends (Yjs, Liveblocks, Automerge, …) so
-   * comment threads sync across peers — the PM document only carries the
+   * comment threads sync across peers — the document only carries the
    * range markers; thread metadata lives outside the doc and needs its own
    * sync channel.
    *
@@ -1256,12 +1256,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     editorContentRef
   );
 
-  // Canvas-mode brighten for the expanded sidebar card (G3). On the DOM-painter
-  // path DocxEditorShell injects a `<style>` matching the parked (invisible)
-  // painter; on canvas we resolve the focused comment/tracked-change to its body
-  // display range and draw a tinted overlay over its display-list geometry instead.
-  // aligned. HF-scoped items (`hfRid`) are not body-`range_rects`-resolvable, so
-  // they fall through (no canvas brighten) — a noted follow-up.
+  // Header/footer items have no body range rectangles.
   const canvasBrightenRange = useMemo<CanvasBrightenRange | null>(() => {
     if (!canvasRenderer.queries || !expandedSidebarItem) return null;
     if (expandedSidebarItem.startsWith('comment-')) {
@@ -2022,7 +2017,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       />
       {/* Canvas-mode find-match highlights, portaled onto the visible canvas
         pages. On the DOM-painter path the target stays null (rendered nothing)
-        and the current match shows as an ordinary PM selection as before. */}
+        and the current match shows as an ordinary selection as before. */}
       {canvasFindOverlayTarget && canvasRenderer.queries ? (
         <CanvasFindHighlightOverlay
           matches={canvasFindMatches}
@@ -2034,9 +2029,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           zoom={state.zoom}
         />
       ) : null}
-      {/* Canvas-mode brighten for the expanded sidebar card (G3). On the
-        DOM-painter path the target stays null and DocxEditorShell's injected
-        <style> handles the brighten as before. */}
       {canvasFindOverlayTarget && canvasRenderer.queries ? (
         <CanvasSidebarBrightenOverlay
           range={canvasBrightenRange}

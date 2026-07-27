@@ -80,9 +80,7 @@ struct OpenField {
     mode: FieldMode,
 }
 
-/// One dispatcher owns every recursive story boundary. S7 plugs typed table
-/// parsing into the `Table` arm without introducing a paragraph/table callback
-/// cycle.
+/// Dispatches every recursive story boundary.
 pub struct StoryParser<'a, 'limits> {
     pub relationships: Option<&'a RelationshipMap>,
     pub theme: Option<&'a Theme>,
@@ -584,7 +582,7 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
                 "inline"
             }
             .to_owned(),
-            omml_xml: element.to_incumbent_xml(),
+            omml_xml: element.to_raw_inline_xml(),
             plain_text: {
                 let mut text = String::new();
                 append_text(element, &mut text);
@@ -671,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_block_sdts_empty_paragraphs_math_and_the_s7_table_boundary() {
+    fn preserves_block_sdts_empty_paragraphs_math_and_nested_tables() {
         let blocks = parse(
             r#"<w:body xmlns:w="w" xmlns:m="m">
               <w:p/>

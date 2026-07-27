@@ -1,11 +1,4 @@
-/**
- * yrs -> OOXML Document save projection.
- *
- * The yrs coexistence model stores each editable container as a flat story:
- * text carries inline formatting attributes, pilcrows carry paragraph
- * properties, and structural/inline atoms are map embeds. This module reads
- * that representation directly and rebuilds the serializer-facing Document.
- */
+/** yrs-to-OOXML save projection. */
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
@@ -290,7 +283,7 @@ function formattingAttrs(attributes: Attrs): Attrs {
   return result;
 }
 
-/** Mirrors fromProseDoc/marks.ts without manufacturing PM Mark objects. */
+/** Converts attributes without manufacturing mark objects. */
 function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const formatting: TextFormatting = {};
 
@@ -540,7 +533,7 @@ function fieldFromPayload(payload: Attrs, attributes: Attrs): SimpleField | Comp
         return stored;
       }
     } catch {
-      // Malformed editor cache: rebuild the same minimal inert field as PM save.
+      // Malformed editor cache: rebuild the same minimal inert field as the save path.
     }
   }
 
@@ -945,7 +938,7 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
   };
 
   for (const item of items) {
-    // A note reference is handled before tracked/link marks by fromProseDoc.
+    // A note reference is handled before tracked/link marks.
     if (item.kind === 'embed' && item.embedKind === 'noteRef') {
       flushRun();
       flushHyperlink();
@@ -1072,9 +1065,9 @@ function restoreOriginalRuns(
   }
 
   return boundaries.map((boundary, index) => {
-    // fromProseDoc restores the original segmentation/property-change cache,
-    // but non-empty runs keep formatting reconstructed from their live marks.
-    // Only empty runs have no PM node and therefore take cached formatting.
+    // restoreOriginalRuns restores the original segmentation/property-change
+    // cache, but non-empty runs keep formatting reconstructed from their live
+    // marks. Only empty runs have no node and therefore take cached formatting.
     const formatting =
       boundary.text.length === 0
         ? boundary.formatting

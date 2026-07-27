@@ -1,15 +1,4 @@
-//! Aggregated READ-state queries for host UI surfaces (toolbar, a11y live
-//! region, tracked-changes sidebar): pure snapshots, no mutation.
-//!
-//! [`EditingDoc::selection_context`] is the yrs twin of the PM
-//! `selectionTracker` plugin's `SelectionContext`: it folds the story's
-//! formatted segments over a range into tri-state toggle marks
-//! (all-on / all-off / mixed), uniform-or-null value marks, the paragraph
-//! properties at the range start, and structural flags (multi-paragraph,
-//! table membership, single-embed). [`EditingDoc::list_revisions`] is the
-//! doc-wide enumeration behind the sidebar's tracked-changes list — one
-//! entry per coalesced `ins`/`del` run or paragraph-mark revision, across
-//! every story, with a short raw-text preview.
+//! Aggregated read-state queries for host UI surfaces.
 
 use std::collections::HashSet;
 
@@ -75,11 +64,10 @@ impl ValueAgg {
     }
 }
 
-/// The aggregated selection state over one story range — the yrs source for
-/// what the PM `selectionTracker` derives from marks today.
+/// Aggregated selection state over one story range.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionContextInfo {
-    // -- tri-state toggle marks (PM toggleMark presence semantics) --
+    // Tri-state inline marks.
     pub bold: TriState,
     pub italic: TriState,
     pub underline: TriState,
@@ -87,13 +75,12 @@ pub struct SelectionContextInfo {
     // -- uniform-or-null value marks --
     /// The uniform `fontFamily.ascii`, or `None` when mixed/absent.
     pub font_family: Option<String>,
-    /// The uniform font size in half-points (the PM `TextFormatting.fontSize`
-    /// contract and stored `size` attr), or `None` when mixed/absent.
+    /// Uniform font size in half-points, or `None` when mixed or absent.
     pub font_size: Option<f64>,
     /// The uniform text color: the `rgb` hex when set, else the theme color
     /// name; `None` when mixed/absent.
     pub color: Option<String>,
-    // -- paragraph state at the range start (PM `$from.parent` semantics) --
+    // Paragraph state at the range start.
     pub para_id: ParagraphId,
     /// The paragraph's `pStyle`, extracted from `paragraph_properties`.
     pub style_id: Option<String>,
@@ -177,15 +164,7 @@ fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
 }
 
 impl EditingDoc {
-    /// Aggregates the read state over `[range.start, range.end)` — the yrs
-    /// replacement for the PM selection tracker's mark walk.
-    ///
-    /// A caret (empty range) reads the text unit BEFORE it within the same
-    /// paragraph, falling back to the unit after it at a paragraph start —
-    /// PM `$from.marks()` semantics. Mark aggregation looks at TEXT units
-    /// only (embeds neither veto nor satisfy a toggle, matching PM
-    /// `toggleMark`); paragraph state comes from the paragraph containing
-    /// the range start.
+    /// Aggregates text-unit marks and start-paragraph state over a story range.
     pub fn selection_context(&self, range: &StoryRange) -> OpResult<SelectionContextInfo> {
         if range.end < range.start {
             return Err(OpError::InvalidRange {
@@ -301,8 +280,7 @@ impl EditingDoc {
             map_field(font_size.uniform(), "size"),
             map_field(font_size.uniform(), "sizeCs"),
         ) {
-            // Keep the PM selection-state contract: `fontSize` is the raw
-            // half-point `w:sz` value. The toolbar converts it to points.
+            // Font size remains in half-points.
             (Some(Any::Number(half_points)), _) => Some(half_points),
             (_, Some(Any::Number(half_points_cs))) => Some(half_points_cs),
             _ => None,

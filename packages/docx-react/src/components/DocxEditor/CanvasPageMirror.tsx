@@ -7,7 +7,7 @@
  * accessible content of the canvas. Rebuilt whenever the page's display list
  * changes — the same trigger that re-rasters the canvas.
  *
- * Focus never lands here: the hidden ProseMirror remains the editing surface.
+ * Focus never lands here: the hidden input remains the editing surface.
  */
 
 import { useEffect, useRef } from 'react';

@@ -1,39 +1,45 @@
-//! Column balancing for a terminal continuous multi-column text section.
+//! Column balancing for a document's final continuous multi-column section.
 //!
-//! 1:1 port of `packages/core/src/layout/pagination/columnBalancing.ts`.
-//! Exported fns (TS → Rust):
-//! - `balanceTerminalContinuousTextColumns` → [`balance_terminal_continuous_text_columns`]
+//! Word leaves the last continuous section's columns ragged unless it can even
+//! them out. Balancing works by *shortening the region*: the content limit
+//! drops so each column fills to roughly the same depth instead of the first
+//! column running to the page bottom.
 //!
-//! Consumes the spine types (`types.rs`) and the shared `paragraph_spacing`
-//! helpers (the TS module imports `getSpacingBefore`/`getSpacingAfter` from
-//! `paragraphSpacing.ts`). [`ColumnBalancePaginator`] mirrors exactly the
-//! slice of `pageFlow.ts` `Paginator` this module touches (`columns`,
-//! `getCurrentState().penY` / `.contentLimit`, and the `contentLimit`
-//! write-back); the spine's paginator implements it in `page_flow.rs`.
+//! The target is `ceil(total / columnCount)`, then snapped forward to the first
+//! legal break at or past it, so a column boundary never lands mid-line. Legal
+//! breaks are:
+//!
+//! - inside a paragraph, after a line that is neither the first nor within two
+//!   lines of the last, and only when the paragraph does not set `w:keepLines`;
+//! - at a paragraph's end, unless it sets `w:keepNext`;
+//! - after every table row, and after an image or text box.
+//!
+//! Balancing is abandoned — leaving the region at full height — when the
+//! section has no content, when the range holds any block kind other than those
+//! above (section breaks are simply skipped), when there is a single column,
+//! when the content cannot fit the region even across all columns, or when the
+//! snapped height is not actually shorter than the region.
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
 
-/// The slice of `pageFlow.ts` `Paginator` that column balancing touches.
-/// `getCurrentState` lazily creates page 1 in TS, hence the `&mut` reads.
+/// Page-flow operations required by column balancing.
 pub trait ColumnBalancePaginator {
-    /// Mirrors `Paginator.columns` (getter, returns a copy).
     fn columns(&self) -> ColumnLayout;
-    /// Mirrors `Paginator.getCurrentState().penY`.
     fn pen_y(&mut self) -> f64;
-    /// Mirrors `Paginator.getCurrentState().contentLimit`.
     fn content_limit(&mut self) -> f64;
-    /// Mirrors the TS `state.contentLimit = ...` write-back on the current state.
     fn set_content_limit(&mut self, value: f64);
 }
 
-// TS `getBalancedTextSectionHeight`: total height of a paragraph/sectionBreak
-// only range, or None when any other block kind appears or no text exists.
+/// Stacked height of the balanced range and the offsets a column may end at,
+/// both measured from the top of the range.
 struct SectionBalance {
     total_height: f64,
     legal_breaks: Vec<f64>,
 }
 
+/// Stacks the range and collects its legal breaks, or `None` when the range
+/// holds nothing to balance or a block kind balancing cannot reason about.
 fn get_balanced_section_height(
     measured: &[MeasuredBlock],
     start: usize,
@@ -107,10 +113,8 @@ fn get_balanced_section_height(
     }
 }
 
-// TS `balanceCurrentColumnRegion`.
-// parity: the balanced height is ceil(total / count) with no line-boundary
-// snapping, so the shortened region limit can cut a line mid-height —
-// documented TS behavior/bug, ported as-is.
+/// Lowers the current region's content limit to the balanced depth, or leaves
+/// it alone when any of the module's bail-out conditions holds.
 fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator: &mut P,
     total_content_height: f64,
@@ -140,8 +144,8 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
     paginator.set_content_limit(column_region_top + balanced_height);
 }
 
-/// TS `balanceTerminalContinuousTextColumns({ measured, paginator, start, end })`
-/// — the destructured object parameter is flattened into plain arguments.
+/// Balances the measured blocks in `start..end` across the current region's
+/// columns. Called with the range that follows the terminal continuous break.
 pub fn balance_terminal_continuous_text_columns<P: ColumnBalancePaginator>(
     measured: &[MeasuredBlock],
     paginator: &mut P,
@@ -260,9 +264,6 @@ mod tests {
         }
     }
 
-    // Module-level port of "balances a terminal continuous multi-column text
-    // section that fits on the current page"
-    // (packages/core/src/layout/pagination/__tests__/continuous-section-geometry.test.ts):
     // page 500x500 / margins 50, intro paragraph of 80 above the region, then
     // a 6-line x 20 paragraph balanced over two columns → the region limit
     // drops from 450 to 130 + ceil(120 / 2) = 190 (3 lines per column).
@@ -379,8 +380,6 @@ mod tests {
         assert!(paginator.set_calls.is_empty());
     }
 
-    // a paragraph block whose measure is NOT a paragraph falls through both
-    // guards in the TS loop and returns null — mirror that exactly
     #[test]
     fn paragraph_block_with_non_paragraph_measure_disables_balancing() {
         let measured = vec![MeasuredBlock {
@@ -430,8 +429,6 @@ mod tests {
 
     #[test]
     fn start_end_slice_only_considers_the_terminal_section() {
-        // block 0 is a non-text image-like block, but the balanced range
-        // starts at 1 (mirrors index.ts calling with start = breakIndex + 1)
         let measured = vec![other_block(), text_paragraph("tail", 4, 20.0)];
         let mut paginator = MockPaginator::new(2.0, 100.0, 400.0);
         balance_terminal_continuous_text_columns(&measured, &mut paginator, 1, measured.len());

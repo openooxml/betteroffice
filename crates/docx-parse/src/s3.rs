@@ -1,4 +1,4 @@
-//! Complete S3 styles/numbering package projection used by the differential corpus gate.
+//! S3 styles and numbering projection.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};

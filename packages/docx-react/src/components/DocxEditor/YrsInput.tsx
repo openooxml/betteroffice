@@ -1,12 +1,4 @@
-/**
- * Monaco-style textarea input surface for the experimental yrs core.
- *
- * The textarea owns browser text/IME events but never owns document text.
- * Outside composition it is reset after every event; during composition it
- * temporarily holds the browser's composing string and commits exactly once
- * on compositionend. The document selection itself is the session's pair of
- * Rust-backed sticky positions.
- */
+/** Text and IME input surface backed by sticky session positions. */
 
 import React, {
   forwardRef,
@@ -938,8 +930,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           setSelection(nearby);
           return true;
         }
-        // Match ProseMirror tables' terminal-Tab behavior when the document
-        // has no trailing paragraph: append a row and enter its first cell.
+        // Terminal-Tab behavior when the document has no trailing paragraph:
+        // append a row and enter its first cell.
         session.insertRow(focused, 'below');
         row = lastRow + 1;
         column = 0;

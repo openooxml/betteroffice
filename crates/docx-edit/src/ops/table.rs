@@ -479,7 +479,7 @@ fn checked_rect(data: &TableData, range: &TableRange) -> OpResult<Rect> {
         left: anchor_column.min(head_column),
         right: anchor_column.max(head_column) + 1,
     };
-    // A PM CellSelection expands across a merged cell rather than selecting a
+    // A cell selection expands across a merged cell rather than selecting a
     // fraction of it. Repeat until every intersecting span is fully enclosed.
     loop {
         let before = (rect.top, rect.bottom, rect.left, rect.right);
@@ -1693,9 +1693,9 @@ impl EditingDoc {
                 .insert("borders".to_owned(), to_any_map(borders.clone()));
         }
 
-        // Keep shared edges symmetric, matching the PM border commands. A
-        // supplied top/bottom/left/right value is mirrored onto every cell
-        // touching that edge, including cells just outside the selection.
+        // Keep shared edges symmetric. A supplied top/bottom/left/right value
+        // is mirrored onto every cell touching that edge, including cells just
+        // outside the selection.
         for anchor in &selected {
             for (side, value) in borders {
                 let (facing, slots): (&str, Vec<(usize, usize)>) = match side.as_str() {

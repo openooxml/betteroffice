@@ -121,8 +121,7 @@ impl PreservedSheetState {
             .collect();
     }
 
-    /// Drops every cell's provenance, so each falls back to the shared-string
-    /// entry its text alone selects.
+    /// Drops shared-string provenance after identity-less replay.
     fn forget_shared_strings(&mut self) {
         for cells in &mut self.shared_string_cells {
             cells.clear();

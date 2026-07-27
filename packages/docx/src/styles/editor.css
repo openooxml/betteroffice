@@ -781,8 +781,8 @@
  * HEADER / FOOTER EDITING
  *
  * These styles are needed when editing headers/footers inline (Google Docs style).
- * They must be in dist/styles.css since the runtime CSS import in
- * HiddenProseMirror.tsx is stripped by tsup (injectStyle: false).
+ * They must be in dist/styles.css since runtime CSS imports in components are
+ * stripped by tsup (injectStyle: false).
  * ============================================================================ */
 
 /* Page content area — show text cursor when hovering over editable content */
@@ -860,14 +860,6 @@
   padding: 4px 0;
 }
 
-/*
- * Phase 5 of HF editing unification (openspec/changes/unify-hf-editing/):
- * the inline overlay no longer mounts a PM EditorView, so the entire
- * `.hf-editor-pm` rule block (font-strut zeroing, table-layout overrides,
- * `top: 0.4em` shim, line-height resets) is gone. Painter + persistent
- * hidden PM are the only HF rendering paths now.
- */
-
 /* Dim body content when editing header/footer */
 .paged-editor--hf-editing .layout-page-content {
   opacity: 0.4;
@@ -894,12 +886,6 @@
   border-top: 1px dotted var(--doc-primary);
   cursor: text;
 }
-
-/*
- * HF editing unification phase 2 (openspec/changes/unify-hf-editing/):
- * removed; the painter is now the sole visible HF renderer in both modes
- * and the inline overlay's PM container moves off-screen instead.
- */
 
 /* Remove hover effect on header/footer when in editing mode */
 .paged-editor--hf-editing .layout-page-header:hover,
@@ -943,10 +929,10 @@
 }
 
 /* =============================================================================
- * ProseMirror decoration forwarding overlay
+ * Decoration forwarding overlay
  *
- * Generic surface for decorations published via PM plugins' `props.decorations`
- * (the layout-painter doesn't render them itself — see `DecorationLayer.tsx`).
+ * Generic surface for decorations published by plugins (the layout-painter
+ * doesn't render them itself).
  * Children are absolutely-positioned inside this container; pointer-events
  * are off by default so editing isn't blocked. Plugins that need hover/click
  * on a decoration (e.g. cursor name labels) opt in via inline styles.
@@ -961,8 +947,8 @@
   z-index: 11;
 }
 
-/* Default styles for y-prosemirror remote cursor decorations. Consumers can
- * override by providing their own `.ProseMirror-yjs-cursor` rules. */
+/* Default styles for remote cursor decorations. Consumers can override by
+ * providing their own `.ProseMirror-yjs-cursor` rules. */
 .ProseMirror-yjs-cursor {
   position: relative;
   margin-left: -1px;
@@ -986,9 +972,6 @@
   user-select: none;
   pointer-events: none;
 }
-
-/* Tracked-revision styles live in core (prosemirror/editor.css), shared
-   by React + Vue adapters. Do not duplicate here. */
 
 /* Interactive trigger for typed controls (checkbox/dropdown/date). The box is
    pointer-events:none; the trigger re-enables them so it is clickable. Sits at

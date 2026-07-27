@@ -8,9 +8,11 @@ export async function GET(_req: Request, { params }: RouteContext<'/llms.mdx/doc
   const page = source.getPage(slug?.slice(0, -1));
   if (!page) notFound();
 
-  return new Response(await getLLMText(page), {
+  const body = await getLLMText(page);
+  return new Response(body, {
     headers: {
-      'Content-Type': 'text/markdown',
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'x-markdown-tokens': String(Math.ceil(body.length / 4)),
     },
   });
 }

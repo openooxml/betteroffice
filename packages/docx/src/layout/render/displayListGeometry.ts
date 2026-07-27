@@ -1,10 +1,4 @@
-/**
- * Renderer-neutral geometry helpers for display-list primitives.
- *
- * These helpers are shared by canvas replay, interaction queries, the a11y
- * mirror, and the temporary painter/display-list differential harness. They
- * must not depend on DOM layout: every returned rectangle is page-local px.
- */
+/** Renderer-neutral page-local geometry for display-list primitives. */
 
 import type {
   DisplayPrimitive,

@@ -49,7 +49,7 @@ export interface RepackOptions {
   modifiedBy?: string;
 }
 
-/** Repack a public Document through the live Rust S13 writer. */
+/** Repack a public Document through the Rust package writer. */
 export async function repackDocx(doc: Document, options: RepackOptions = {}): Promise<ArrayBuffer> {
   if (!doc.originalBuffer) {
     throw new Error(

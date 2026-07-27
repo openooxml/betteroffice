@@ -1,4 +1,4 @@
-//! S10 versioned serializer differential wire and canonical XML-event stream.
+//! S10 serializer wire and canonical XML-event stream.
 
 use std::collections::BTreeMap;
 
@@ -23,10 +23,7 @@ use super::watermark::serialize_watermark;
 
 const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// Fixed nondeterminism injected by every serializer differential.
-///
-/// S10 families do not allocate IDs or timestamps, but freezing the boundary
-/// here prevents S11-S13 from adding ambient randomness or wall-clock reads.
+/// Injected serializer seed and clock.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SerializerDeterminism {
@@ -36,8 +33,7 @@ pub struct SerializerDeterminism {
 
 impl SerializerDeterminism {
     pub fn validate(&self) -> Result<(), ParseError> {
-        // Construct the actual allocator so this remains the same validation
-        // and algorithm used by parse and future content serializers.
+        // Validate the seed with the canonical allocator.
         let _ids = HexIdAllocator::from_sha256(&self.seed)?;
         if self.now.len() != 24
             || !self.now.ends_with('Z')

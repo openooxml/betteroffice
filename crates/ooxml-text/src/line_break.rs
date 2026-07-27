@@ -1,21 +1,4 @@
-//! UAX-14 line-break opportunities via the `unicode-linebreak` crate.
-//!
-//! Deliberate divergence from the TS `findWordBreaks` this replaces: that
-//! implementation scans UTF-16 code units for spaces/hyphens, which has two
-//! known gaps this module fixes by construction:
-//!
-//! 1. **CJK**: ideographs (UAX-14 class ID) allow a break between every pair
-//!    of characters; a code-unit scan for spaces treats an unspaced CJK run
-//!    as one unbreakable "word", overflowing the line. Here each
-//!    inter-ideograph boundary is reported as an opportunity.
-//! 2. **Surrogate safety**: indexing by UTF-16 code unit can propose a break
-//!    inside a surrogate pair (emoji, supplementary-plane CJK). Opportunities
-//!    here are byte indices into a `&str` and therefore always at `char`
-//!    boundaries — a split surrogate is unrepresentable.
-//!
-//! Word-specific *no-break* refinements (e.g. `w:kinsoku` overrides,
-//! non-breaking hyphens `w:noBreakHyphen`, `w:suppressAutoHyphens`) layer on
-//! top of these raw UAX-14 opportunities — see [`crate::word_metrics`].
+//! UAX-14 line breaks with kinsoku filtering and Unicode scalar boundaries.
 
 use unicode_linebreak::BreakOpportunity as Uax14Opportunity;
 

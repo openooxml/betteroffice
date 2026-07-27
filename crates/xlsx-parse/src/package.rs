@@ -174,12 +174,7 @@ impl PreservedPackage {
         self.sheets.len()
     }
 
-    /// A preserved part that names sheets or addresses this crate never
-    /// patches, so a rename, removal or axis edit would strand it. A classic
-    /// `c:chartSpace` reached from a worksheet or chartsheet drawing is
-    /// modelled and remapped, so it is not one of them; a pivot cache, a
-    /// ChartEx part, and any chart carrying a reference form the remapper does
-    /// not cover still are.
+    /// Returns a preserved part whose references cannot be patched.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
         const REFERENCE_BEARING: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
@@ -286,16 +281,12 @@ impl ContentTypeEntry {
     }
 }
 
-/// A content type OPC resolved for a part, and whether an `Override` named it
-/// rather than a `Default` for its extension.
 pub(crate) struct ResolvedContentType<'a> {
     pub(crate) value: &'a str,
     pub(crate) overridden: bool,
 }
 
-/// The type OPC actually resolves for a part: its exact `Override`, else the
-/// `Default` for its extension. Chartsheets, charts and macro-enabled
-/// workbooks are all commonly typed by extension alone.
+/// Resolves a part's effective content type.
 pub(crate) fn effective_content_type<'a>(
     entries: &'a [ContentTypeEntry],
     path: &str,
@@ -992,8 +983,6 @@ fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError>
     Ok(entries)
 }
 
-/// The type OPC resolves for every part the package holds, so a lookup covers
-/// `Default` mappings as well as `Override` ones.
 fn part_content_types(
     entries: &[ContentTypeEntry],
     parts: &[(String, Vec<u8>)],
@@ -1011,7 +1000,6 @@ fn part_content_types(
         .collect()
 }
 
-/// One part's resolved content type, owned so the chart walk can hold it.
 pub(crate) struct PartContentType {
     pub(crate) path: String,
     pub(crate) content_type: String,

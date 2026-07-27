@@ -1,4 +1,4 @@
-//! S12 versioned whole-part serializer wire and parse-back gate.
+//! S12 whole-part serializer wire.
 
 use serde::{Deserialize, Serialize};
 

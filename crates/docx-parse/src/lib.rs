@@ -1,5 +1,3 @@
-// Ported from openooxml/docx, which did not gate on clippy style lints;
-// burning these down is tracked follow-up work, not a merge blocker.
 #![allow(
     clippy::cloned_ref_to_slice_refs,
     clippy::collapsible_if,
@@ -27,11 +25,7 @@
     clippy::unnecessary_sort_by
 )]
 
-//! Safe DOCX parsing foundation.
-//!
-//! S0 freezes the cross-language canonical contract in [`canonical`]. S1 adds
-//! bounded XML and relationship parsing on top of `ooxml-opc`'s existing
-//! ZIP/OPC trust boundary.
+//! Safe DOCX parsing and serialization.
 
 pub mod block;
 pub mod borders;
@@ -223,7 +217,7 @@ pub fn parse_relationships_xml(xml: &[u8], part_path: &str) -> Result<String, Js
     serde_json::to_string(&part).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S2 entry retained for ABI compatibility.
+/// Parses an S2 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s2(data: &[u8]) -> Result<String, JsValue> {
@@ -231,7 +225,7 @@ pub fn parse_docx_s2(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S3 entry retained for ABI compatibility.
+/// Parses an S3 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s3(data: &[u8]) -> Result<String, JsValue> {
@@ -239,7 +233,7 @@ pub fn parse_docx_s3(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S4 entry retained for ABI compatibility.
+/// Parses an S4 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s4(data: &[u8]) -> Result<String, JsValue> {
@@ -247,7 +241,7 @@ pub fn parse_docx_s4(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S5 entry retained for ABI compatibility.
+/// Parses an S5 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s5(data: &[u8]) -> Result<String, JsValue> {
@@ -255,7 +249,7 @@ pub fn parse_docx_s5(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S6 entry retained for ABI compatibility.
+/// Parses an S6 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s6(data: &[u8]) -> Result<String, JsValue> {
@@ -263,7 +257,7 @@ pub fn parse_docx_s6(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S7 entry retained for ABI compatibility.
+/// Parses an S7 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s7(data: &[u8]) -> Result<String, JsValue> {
@@ -271,7 +265,7 @@ pub fn parse_docx_s7(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S8 entry retained for ABI compatibility.
+/// Parses an S8 package projection.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s8(data: &[u8]) -> Result<String, JsValue> {
@@ -279,7 +273,7 @@ pub fn parse_docx_s8(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// S9 production read facade: one safe package pass to the full Document wire.
+/// Parses the full document wire in one package pass.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn parse_docx_s9(data: &[u8], options_json: &str) -> Result<String, JsValue> {
@@ -292,7 +286,7 @@ pub fn parse_docx_s9(data: &[u8], options_json: &str) -> Result<String, JsValue>
     serde_json::to_string(&envelope).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S10 serializer entry retained for ABI compatibility.
+/// Serializes an S10 request.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s10(request_json: &str) -> Result<String, JsValue> {
@@ -302,7 +296,7 @@ pub fn serialize_docx_s10(request_json: &str) -> Result<String, JsValue> {
     serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S11 serializer entry retained for ABI compatibility.
+/// Serializes an S11 request.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s11(request_json: &str) -> Result<String, JsValue> {
@@ -312,7 +306,7 @@ pub fn serialize_docx_s11(request_json: &str) -> Result<String, JsValue> {
     serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
 }
 
-/// Legacy staged Rust S12 serializer entry retained for ABI compatibility.
+/// Serializes an S12 request.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
@@ -322,7 +316,7 @@ pub fn serialize_docx_s12(request_json: &str) -> Result<String, JsValue> {
     serde_json::to_string(&response).map_err(|error| js_error(error.to_string()))
 }
 
-/// S13 production-capable package writer: typed model + original package -> DOCX.
+/// Writes a DOCX from a typed model and original package.
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {

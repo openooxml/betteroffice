@@ -11,7 +11,7 @@
  * `useTableResizeState` dispatches. Per table fragment:
  *  - `deriveDisplayListTableFragments` gives the fragment's page-local origin,
  *    bottom, and per-row content bands;
- *  - its `docStartSample` resolves against the PM doc to the enclosing table
+ *  - its `docStartSample` resolves against the doc to the enclosing table
  *    node → `pmStart` + the twips `columnWidths`;
  *  - column boundaries = `originX` + cumulative column widths (exact + robust to
  *    colspan, unlike counting interior border lines); row boundaries sit in the
@@ -20,12 +20,11 @@
  * Handles reuse the painter's class names so the shared hover / dragging CSS
  * (transparent → blue) applies with no new tokens. Body tables only — HF table
  * resize handles remain a documented canvas gap (their doc positions live in a
- * separate PM doc, so `deriveDisplayListTableFragments` + the commit path would
+ * separate doc, so `deriveDisplayListTableFragments` + the commit path would
  * need to bind to the active header/footer story and its region geometry; see the note
  * in `displayListTables.ts`). The HF *caret + selection* on canvas are covered
  * by `CanvasHfSelectionOverlay`.
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import React, { useLayoutEffect, useMemo, useState } from 'react';

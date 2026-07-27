@@ -174,9 +174,6 @@ pub fn serialize_table_cell(
                 append_generated(&mut writer, &serialize_table(table, context)?);
                 emitted = true;
             }
-            // Pinned incumbent quirk: tableSerializer's cell dispatcher only
-            // recognizes paragraph/table even though the shared story model
-            // also permits a block SDT here.
             BlockContent::BlockSdt(_) => {}
         }
     }

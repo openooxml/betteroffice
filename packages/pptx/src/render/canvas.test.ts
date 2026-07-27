@@ -3,7 +3,7 @@ import type { SlideDisplayList } from '../types';
 import { paintSlide } from './canvas';
 
 describe('PPTX canvas replay', () => {
-  test('paints shape geometry and positioned text in Rust order', async () => {
+  test('paints shape geometry and positioned text in display-list order', async () => {
     const calls: string[] = [];
     const ctx = new Proxy(
       {

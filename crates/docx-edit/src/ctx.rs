@@ -1,17 +1,8 @@
-//! The per-op edit context (op-contract R3).
-//!
-//! Every mutating op takes an [`EditCtx`] instead of per-op author/suggesting parameters. The
-//! context carries durable authorship (`author` + `now_iso`, host-supplied so native, WASM, and
-//! agent peers share one clock policy) and the yrs transaction origin used for undo tracking and
-//! authority policy. `Origin::System` edits (for example paraId re-uniquing) are excluded from
-//! undo because the undo manager tracks only the local origin.
+//! Edit authorship, origin, and suggesting context.
 
 use crate::Author;
 
-/// Who is making this edit, for yrs transaction-origin purposes.
-///
-/// Only [`EditOrigin::Local`] transactions are tracked by the undo manager; agent, remote, and
-/// system edits never enter the local undo stack (op-contract "Undo" section).
+/// Transaction origin used by undo tracking.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EditOrigin {
     /// The local human user. Tracked by undo.
@@ -24,15 +15,11 @@ pub enum EditOrigin {
     System,
 }
 
-/// Marker for suggesting (tracked-changes) mode.
-///
-/// S1 stamps `ins`/`del`/`pPrIns`/`pPrDel` revisions directly; `rPrChange` payloads arrive in S4,
-/// which is why this struct is currently empty but kept as a struct (not a bool) so S4 can add
-/// fields without changing every op signature.
+/// Marker for suggesting mode.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SuggestCtx {}
 
-/// Context shared by every mutating op (op-contract R3).
+/// Context shared by every mutating operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditCtx {
     /// Durable display author stamped into revision values.

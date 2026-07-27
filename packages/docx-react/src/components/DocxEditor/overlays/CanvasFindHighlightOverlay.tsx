@@ -17,7 +17,6 @@
  * Renders nothing on the default DOM-painter path: it is only mounted once the
  * canvas overlay target resolves (canvas active).
  *
- * @experimental part of the rust-canvas-engine change; shape may evolve.
  */
 
 import { useLayoutEffect, useState } from 'react';

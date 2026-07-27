@@ -162,7 +162,7 @@ export function getEmbeddedFontFaces(
  * buffer, or the parts cannot be resolved. The zip pass goes through the
  * hardened `unzipDocx` container facade.
  *
- * Used by the experimental Rust measurement source, which needs the byte
+ * Used by measurement, which needs the byte
  * form of every embedded face for the wasm FontStore.
  *
  * @public

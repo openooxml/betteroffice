@@ -21,9 +21,9 @@ import { emuToPixels } from '../../utils/units';
  */
 export interface InlineSdtWidget {
   kind: 'checkbox';
-  /** Stable per-document id derived from the ProseMirror node position. */
+  /** Stable per-document id derived from the node position. */
   groupId: string;
-  /** ProseMirror position of the inline SDT node. */
+  /** Document position of the inline SDT node. */
   pos: number;
   /** Word tag value (`w:tag`). */
   tag?: string;
@@ -36,7 +36,7 @@ export interface InlineSdtWidget {
 /**
  * One run's visible slice on a laid-out line: the run to render/measure plus
  * its on-line text. For a boundary text run this is a shallow copy sliced to
- * the line's head/tail char (PM positions shifted to match); tabs, images,
+ * the line's head/tail char (document positions shifted to match); tabs, images,
  * line breaks, and fields pass through whole with an empty `text`. `text` is
  * the run's textual contribution to the line (empty for non-text runs), so
  * joining a line's segment texts reconstructs the line's visible characters.
@@ -219,9 +219,9 @@ export type TextRun = RunFormatting & {
   text: string;
   /** Hyperlink information if this run is a link. */
   hyperlink?: HyperlinkInfo;
-  /** PM doc offset where the run's text begins. */
+  /** Document offset where the run's text begins. */
   pmStart?: number;
-  /** PM doc offset one past the run's final character. */
+  /** Document offset one past the run's final character. */
   pmEnd?: number;
   /** Inline content-control widget metadata when this run is the visible glyph. */
   inlineSdtWidget?: InlineSdtWidget;
@@ -503,13 +503,13 @@ export type ParagraphBlock = {
   sdtGroups?: SdtGroup[];
   kind: 'paragraph';
   id: BlockId;
-  /** Stable Word `w14:paraId` / PM `paraId`, when available. */
+  /** Stable Word `w14:paraId`, when available. */
   paraId?: string;
   runs: Run[];
   attrs?: ParagraphAttrs;
-  /** ProseMirror start position for this block. */
+  /** Document start position for this block. */
   pmStart?: number;
-  /** ProseMirror end position for this block. */
+  /** Document end position for this block. */
   pmEnd?: number;
 };
 
@@ -802,7 +802,7 @@ export type ShapeBlock = {
   decorative?: boolean;
   title?: string;
   description?: string;
-  /** PM/doc positions for selection mapping. */
+  /** Document positions for selection mapping. */
   docStart?: number;
   docEnd?: number;
   pmStart?: number;
@@ -921,9 +921,9 @@ export type TextBoxBlock = {
   margins?: { top: number; bottom: number; left: number; right: number };
   /** Paragraph blocks inside the text box */
   content: ParagraphBlock[];
-  /** Display mode copied from the ProseMirror text box node */
+  /** Display mode copied from the text box node */
   displayMode?: 'inline' | 'float' | 'block';
-  /** CSS float direction copied from the ProseMirror text box node */
+  /** CSS float direction copied from the text box node */
   cssFloat?: 'left' | 'right' | 'none';
   /** OOXML wrap type for anchored text boxes */
   wrapType?: string;
@@ -948,7 +948,7 @@ export type TextBoxBlock = {
  * pagination; each child carries its group(s) so the painter draws the boundary.
  */
 export interface SdtGroup {
-  id: string; // stable per-document id (derived from the PM node position)
+  id: string; // stable per-document id (derived from the node position)
   sdtType: string; // control type (richText, dropDownList, ...)
   tag?: string; // w:tag
   alias?: string; // w:alias
@@ -956,9 +956,9 @@ export interface SdtGroup {
   checked?: boolean; // live checkbox glyph state
   bound?: boolean; // data-bound (w:dataBinding): suppress the editable widget
   repeatingItem?: boolean; // w15:repeatingSectionItem: show add/remove affordances
-  /** Authored numeric `w:id`; undefined = address by `id`/PM position. */
+  /** Authored numeric `w:id`; undefined = address by `id`/position. */
   controlId?: number;
-  /** Stable PM position for untagged controls. */
+  /** Stable document position for untagged controls. */
   pos?: number;
   /** Typed overlay state. Undefined = derive from content. */
   controlState?: import('../../types/content/sdt').SdtControlState;
@@ -1199,7 +1199,7 @@ export type BlockExtent =
 
 /**
  * Fields every fragment carries: which block it came from, where it sits on
- * its page, and the PM span it maps to.
+ * its page, and the document span it maps to.
  */
 export type FragmentBase = {
   /** Block ID this fragment belongs to. */
@@ -1210,9 +1210,9 @@ export type FragmentBase = {
   y: number;
   /** Width of the fragment. */
   width: number;
-  /** ProseMirror start position (for click mapping). */
+  /** Document start position (for click mapping). */
   pmStart?: number;
-  /** ProseMirror end position (for click mapping). */
+  /** Document end position (for click mapping). */
   pmEnd?: number;
 };
 
@@ -1295,7 +1295,7 @@ export type ShapeFragment = FragmentBase & {
   kind: 'shape';
   /** Height of the shape bbox. */
   height: number;
-  /** PM/doc positions for display-list consumers that use docStart/docEnd names. */
+  /** Document positions for display-list consumers that use docStart/docEnd names. */
   docStart?: number;
   docEnd?: number;
   /** True when positioned outside normal flow. */
@@ -1618,8 +1618,8 @@ export type HitTestResult = {
 };
 
 /**
- * A location expressed in block/run/character terms, with the matching PM
- * position when known.
+ * A location expressed in block/run/character terms, with the matching
+ * document position when known.
  */
 export type DocumentPosition = {
   /** Block index. */
@@ -1628,20 +1628,9 @@ export type DocumentPosition = {
   runIndex?: number;
   /** Character offset within the run. */
   charOffset?: number;
-  /** ProseMirror position. */
+  /** Document position. */
   pmPos?: number;
 };
-
-// =============================================================================
-// relocated from the deleted DOM painter (RETIREMENT G1)
-// =============================================================================
-//
-// DOM-free geometry + render-model types/helpers that a RETAINED consumer
-// (`editor/computeLayout.ts`, the Rust `paginationSource` seam host) depends on.
-// They were previously defined under the DOM painter directory, deleted when
-// the canvas renderer became the sole renderer; they live here in the kept
-// wasm-contract types module. See
-// openspec/changes/rust-canvas-engine/RETIREMENT.md.
 
 /**
  * Page geometry needed to translate OOXML `relativeFrom` anchors into painter

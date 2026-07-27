@@ -12,8 +12,8 @@
  *   file, scaled, optionally "washed out" (lightened).
  *
  * We model the watermark as a dedicated field on the owning `HeaderFooter`
- * rather than as editable run content, so it stays out of the ProseMirror text
- * flow while still round-tripping through parse → render → serialize.
+ * rather than as editable run content, so it stays out of the text flow while
+ * still round-tripping through parse → render → serialize.
  */
 
 /**

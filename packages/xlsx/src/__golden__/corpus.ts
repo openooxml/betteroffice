@@ -3,8 +3,7 @@
  *
  * Same contract as the display-list corpus: each scenario builds a serializable
  * snapshot that the committed `golden/<name>.json` freezes verbatim. The goldens
- * pin CURRENT output so refactors and the eventual Rust port prove byte-
- * identical results — they judge stability, not correctness. Reuses the
+ * pin current output across refactors — they judge stability, not correctness. Reuses the
  * display-list canonicalizer so number rounding and key ordering match.
  */
 

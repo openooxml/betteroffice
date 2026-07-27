@@ -1,17 +1,26 @@
-//! Serde twins of the pagination type vocabulary.
+//! The data contracts pagination reads and writes.
 //!
-//! Ports `packages/core/src/layout/pagination/types.ts` (plus `measuredBlock.ts`
-//! and `LayoutOptions`) field-for-field. Every name round-trips the TS
-//! camelCase JSON exactly (`serde(rename_all = "camelCase")`), optional TS
-//! fields are `Option<T>` and are omitted from output when `None` — matching
-//! how `JSON.stringify` drops `undefined`. Unknown `kind` tags degrade to an
-//! `Unsupported` variant so the engine can refuse gracefully instead of
-//! failing to parse; unknown extra fields are ignored on input, mirroring the
-//! TS structural contract.
+//! Three families live here. *Blocks* ([`LayoutBlock`]) describe document
+//! content; *extents* ([`BlockExtent`]) are the measurement results paired with
+//! them in a [`MeasuredBlock`]; *fragments* ([`Fragment`]) and [`Page`] are what
+//! placement produces. [`Input`] is the `{ measured, options }` envelope; the
+//! result is a [`Layout`].
 //!
-//! Types referenced from outside `types.ts` (`InlineSdtWidget`, `RevisionInfo`,
-//! `CellMarker`) pass through as raw `serde_json::Value` — pagination never
-//! reads them, and passthrough preserves them verbatim.
+//! Serialization conventions hold across the whole module and are load-bearing
+//! for the JSON boundary: every field is camelCase, an absent `Option` is
+//! omitted rather than emitted as null, and unknown incoming fields are
+//! ignored so a producer may send more than pagination reads. An unrecognized
+//! `kind` tag on a block, run or extent deserializes to that union's
+//! `Unsupported` variant, which lets the engine refuse a document deliberately
+//! instead of failing to parse it.
+//!
+//! Fields pagination never inspects — revision markers, content-control
+//! payloads, chart models, DrawingML scene data — are typed as
+//! [`serde_json::Value`] so they survive a round trip untouched.
+//!
+//! Numeric fields are `f64` even where a count would do, because the values
+//! arrive from and return to a JavaScript host that has a single number type,
+//! and intermediate arithmetic must agree with it.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,7 +30,7 @@ use std::collections::BTreeMap;
 // shared scalars
 // ---------------------------------------------------------------------------
 
-/// TS `BlockId = string | number` — passed through verbatim to fragments.
+/// A block's identity, numeric or string, passed through to fragments verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockId {
@@ -36,7 +45,8 @@ pub struct Size {
     pub h: f64,
 }
 
-/// TS `PageMargins` — `header`/`footer` are the only optional keys.
+/// Body margins, plus the `w:header` / `w:footer` band distances. Only the two
+/// distances are optional.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PageMargins {
     pub top: f64,
@@ -58,7 +68,7 @@ pub struct ColumnDefinition {
     pub space: Option<f64>,
 }
 
-/// TS `ColumnLayout` (w:cols). `count` stays `f64` so arithmetic matches TS.
+/// `w:cols`. `count` is `f64` because column width divides by it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnLayout {
@@ -72,7 +82,7 @@ pub struct ColumnLayout {
     pub columns: Option<Vec<ColumnDefinition>>,
 }
 
-/// TS `SectionBreakBlock['type']` / `LayoutOptions['bodyBreakType']`.
+/// `w:type` on a section break: how the *next* section starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SectionBreakType {
@@ -86,7 +96,6 @@ pub enum SectionBreakType {
 // runs
 // ---------------------------------------------------------------------------
 
-/// TS `underline?: boolean | { style?, color? }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UnderlineSpec {
@@ -99,7 +108,6 @@ pub enum UnderlineSpec {
     },
 }
 
-/// TS `HyperlinkInfo`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HyperlinkInfo {
@@ -116,7 +124,6 @@ pub struct HyperlinkInfo {
     pub doc_location: Option<String>,
 }
 
-/// TS `RunFontSlots`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontSlots {
@@ -140,7 +147,6 @@ pub struct RunFontSlots {
     pub hint: Option<String>,
 }
 
-/// TS `RunLanguageSlots`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLanguageSlots {
@@ -152,9 +158,6 @@ pub struct RunLanguageSlots {
     pub bidi: Option<String>,
 }
 
-/// TS `RunFormatting` — character formatting shared by text/tab/field runs.
-/// Pagination itself reads none of these; they ride along so resolved-line
-/// run slices round-trip like the TS engine's.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunFormatting {
@@ -244,7 +247,6 @@ pub struct RunFormatting {
     pub bidi_level: Option<u8>,
 }
 
-/// TS `TextRun`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextRun {
@@ -259,7 +261,6 @@ pub struct TextRun {
     pub inline_sdt_widget: Option<Value>,
 }
 
-/// TS `TabRun`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TabRun {
@@ -275,7 +276,6 @@ pub struct TabRun {
     pub leader_glyphs: Option<Value>,
 }
 
-/// One axis of TS `ImageRunPosition`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AxisPosition {
@@ -287,7 +287,6 @@ pub struct AxisPosition {
     pub relative_to: Option<String>,
 }
 
-/// TS `ImageRunPosition`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRunPosition {
@@ -305,7 +304,6 @@ pub struct ImageRunPosition {
     pub behind_doc: Option<bool>,
 }
 
-/// TS `ImageRun` (no shared `RunFormatting`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRun {
@@ -384,7 +382,6 @@ pub struct ImageRun {
     pub pm_end: Option<f64>,
 }
 
-/// TS `LineBreakRun`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineBreakRun {
@@ -394,15 +391,14 @@ pub struct LineBreakRun {
     pub pm_end: Option<f64>,
 }
 
-/// TS `FieldRun`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldRun {
     #[serde(flatten)]
     pub fmt: RunFormatting,
     pub field_type: String,
-    /// raw Word field type token when `field_type` collapsed it to a painter
-    /// category — inert a11y identity, never evaluated
+    /// Raw Word field type token, kept when `field_type` collapsed it to a
+    /// coarse category. Inert identity for announcement; never evaluated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     /// raw field instruction text carried INERT for a11y announcement only
@@ -416,8 +412,8 @@ pub struct FieldRun {
     pub pm_end: Option<f64>,
 }
 
-/// TS `Run` union. Unknown kinds degrade to `Unsupported` (the engine refuses
-/// the document rather than mangling it).
+/// Inline content of a paragraph. An unknown `kind` becomes `Unsupported`, and
+/// a paragraph containing one cannot be placed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Run {
@@ -436,7 +432,7 @@ pub enum Run {
 }
 
 impl Run {
-    /// PM start offset, regardless of run flavor.
+    /// Document start offset, regardless of run flavor.
     pub fn pm_start(&self) -> Option<f64> {
         match self {
             Run::Text(r) => r.pm_start,
@@ -448,7 +444,7 @@ impl Run {
         }
     }
 
-    /// PM end offset, regardless of run flavor.
+    /// Document end offset, regardless of run flavor.
     pub fn pm_end(&self) -> Option<f64> {
         match self {
             Run::Text(r) => r.pm_end,
@@ -465,7 +461,6 @@ impl Run {
 // paragraph attributes
 // ---------------------------------------------------------------------------
 
-/// TS `ParagraphSpacing`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSpacing {
@@ -481,7 +476,6 @@ pub struct ParagraphSpacing {
     pub line_rule: Option<String>,
 }
 
-/// TS `ParagraphAttrs['spacingExplicit']`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpacingExplicit {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -490,7 +484,6 @@ pub struct SpacingExplicit {
     pub after: Option<bool>,
 }
 
-/// TS `ParagraphIndent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphIndent {
@@ -504,7 +497,6 @@ pub struct ParagraphIndent {
     pub hanging: Option<f64>,
 }
 
-/// TS `TabStop`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabStop {
     pub val: String,
@@ -513,7 +505,6 @@ pub struct TabStop {
     pub leader: Option<String>,
 }
 
-/// TS `BorderStyle` (one paragraph border edge).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BorderStyle {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,7 +517,6 @@ pub struct BorderStyle {
     pub space: Option<f64>,
 }
 
-/// TS `ParagraphBorders`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParagraphBorders {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -543,7 +533,6 @@ pub struct ParagraphBorders {
     pub bar: Option<BorderStyle>,
 }
 
-/// TS `ListNumPr`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListNumPr {
@@ -553,7 +542,6 @@ pub struct ListNumPr {
     pub ilvl: Option<f64>,
 }
 
-/// TS `ParagraphAttrs`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
@@ -613,7 +601,6 @@ pub struct ParagraphAttrs {
     pub p_pr_del: Option<Value>,
 }
 
-/// TS `SdtGroup`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SdtGroup {
@@ -645,7 +632,6 @@ pub struct SdtGroup {
 // flow blocks
 // ---------------------------------------------------------------------------
 
-/// TS `ParagraphBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphBlock {
@@ -663,7 +649,6 @@ pub struct ParagraphBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `CellBorderSpec`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellBorderSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -674,7 +659,6 @@ pub struct CellBorderSpec {
     pub style: Option<String>,
 }
 
-/// TS `CellBorders`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CellBorders {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -687,7 +671,6 @@ pub struct CellBorders {
     pub left: Option<CellBorderSpec>,
 }
 
-/// TS `TableCell['padding']` / `TextBoxBlock['margins']` box.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxEdges {
     pub top: f64,
@@ -705,7 +688,6 @@ pub struct PreferredWidth {
     pub r#type: Option<String>,
 }
 
-/// TS `TableCell`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCell {
@@ -743,7 +725,6 @@ pub struct TableCell {
     pub tracked_marker: Option<Value>,
 }
 
-/// TS `TableRow`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableRow {
@@ -771,7 +752,6 @@ pub struct TableRow {
     pub tracked_del: Option<Value>,
 }
 
-/// TS `FloatingTablePosition` (w:tblpPr, px).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FloatingTablePosition {
@@ -797,7 +777,6 @@ pub struct FloatingTablePosition {
     pub left_from_text: Option<f64>,
 }
 
-/// TS `TableBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableBlock {
@@ -837,7 +816,6 @@ pub struct TableBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `ImageBlock['anchor']`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnchor {
@@ -865,7 +843,6 @@ pub struct ImageAnchor {
     pub wrap_polygon: Option<Vec<Value>>,
 }
 
-/// TS `ImageBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageBlock {
@@ -909,8 +886,7 @@ pub struct ImageBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `ShapeBlock`. Complex DrawingML paint/scene payloads pass through as
-/// JSON; pagination only needs the bbox and placement metadata.
+/// Complex DrawingML payloads remain opaque to pagination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeBlock {
@@ -968,7 +944,6 @@ pub struct ShapeBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `ChartBlock`; the normalized chart model is renderer-owned JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartBlock {
@@ -998,7 +973,6 @@ pub struct ChartBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `SectionBreakBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionBreakBlock {
@@ -1017,7 +991,6 @@ pub struct SectionBreakBlock {
     pub columns: Option<ColumnLayout>,
 }
 
-/// TS `PageBreakBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageBreakBlock {
@@ -1030,7 +1003,6 @@ pub struct PageBreakBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `ColumnBreakBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnBreakBlock {
@@ -1043,7 +1015,6 @@ pub struct ColumnBreakBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `TextBoxBlock`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxBlock {
@@ -1090,11 +1061,9 @@ pub struct TextBoxBlock {
     pub pm_end: Option<f64>,
 }
 
-/// TS `LayoutBlock` union. Unknown kinds parse to `Unsupported` so the
-/// engine can return the fallback signal instead of a parse error.
-// paragraph attrs make the variant big, but blocks are deserialized once and
-// walked — not a hot allocation path; boxing would only obscure the TS mirror
 #[allow(clippy::large_enum_variant)]
+/// A document block. An unknown `kind` becomes `Unsupported`, which placement
+/// refuses rather than dropping the content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum LayoutBlock {
@@ -1124,7 +1093,6 @@ pub enum LayoutBlock {
 // extents (measurement results)
 // ---------------------------------------------------------------------------
 
-/// TS `TypesetRowSegment`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRowSegment {
@@ -1137,7 +1105,6 @@ pub struct TypesetRowSegment {
     pub width: f64,
 }
 
-/// TS `TypesetRunAdvance`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRunAdvance {
@@ -1153,7 +1120,6 @@ pub struct TypesetRunAdvance {
     pub logical_order: Option<u64>,
 }
 
-/// TS `TypesetClusterAdvance`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetClusterAdvance {
@@ -1173,7 +1139,6 @@ pub struct TypesetClusterAdvance {
     pub logical_order: Option<u64>,
 }
 
-/// TS `TypesetBidiSlice`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetBidiSlice {
@@ -1193,7 +1158,10 @@ pub struct TypesetBidiSlice {
     pub logical_order: Option<u64>,
 }
 
-/// TS `TypesetRow` — one measured paragraph line.
+/// One measured line. `head_*` / `tail_*` bound the line's run and character
+/// range, `float_skip_before` is vertical room the line had to skip past a
+/// float, and `left_offset` / `right_offset` are the exclusions measurement
+/// already applied.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRow {
@@ -1221,7 +1189,6 @@ pub struct TypesetRow {
     pub bidi_slices: Option<Vec<TypesetBidiSlice>>,
 }
 
-/// TS `ParagraphExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphExtent {
@@ -1229,14 +1196,12 @@ pub struct ParagraphExtent {
     pub total_height: f64,
 }
 
-/// TS `ImageExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageExtent {
     pub width: f64,
     pub height: f64,
 }
 
-/// TS `ShapeExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeExtent {
@@ -1246,14 +1211,12 @@ pub struct ShapeExtent {
     pub inner_measures: Option<Vec<ParagraphExtent>>,
 }
 
-/// TS `ChartExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChartExtent {
     pub width: f64,
     pub height: f64,
 }
 
-/// TS `TableCellExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCellExtent {
@@ -1266,14 +1229,12 @@ pub struct TableCellExtent {
     pub row_span: Option<f64>,
 }
 
-/// TS `TableRowExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableRowExtent {
     pub cells: Vec<TableCellExtent>,
     pub height: f64,
 }
 
-/// TS `TableExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableExtent {
@@ -1283,7 +1244,6 @@ pub struct TableExtent {
     pub total_height: f64,
 }
 
-/// TS `TextBoxExtent`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxExtent {
@@ -1292,7 +1252,8 @@ pub struct TextBoxExtent {
     pub inner_measures: Vec<ParagraphExtent>,
 }
 
-/// TS `BlockExtent` union (break placeholders carry no fields).
+/// A block's measurement result. Break blocks measure to a bare placeholder
+/// because they occupy no space of their own.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum BlockExtent {
@@ -1318,7 +1279,8 @@ pub enum BlockExtent {
     Unsupported,
 }
 
-/// TS `MeasuredBlock` (measuredBlock.ts) — a block paired with its measure.
+/// A block paired with its measure. Placement requires the two kinds to agree;
+/// a mismatch is a contract violation, not a recoverable input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeasuredBlock {
     pub block: LayoutBlock,
@@ -1329,9 +1291,9 @@ pub struct MeasuredBlock {
 // layout options
 // ---------------------------------------------------------------------------
 
-/// TS `LayoutOptions`. `footnoteReservedHeights` is a `Map` in TS; the JSON
-/// boundary carries it as an object keyed by decimal page number (see
-/// `scripts/export-golden-fixtures.ts`).
+/// Document-level pagination inputs. `footnote_reserved_heights` is keyed by
+/// decimal page number, and the paginator subtracts each entry from that page's
+/// content limit before body flow sees it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LayoutOptions {
@@ -1354,8 +1316,6 @@ pub struct LayoutOptions {
     pub sections: Option<Vec<SectionLayoutContract>>,
 }
 
-/// Additive TS `LayoutOptions.sections[]` contract. The spine ignores it until
-/// Batch D consumes per-section state; serde still preserves the typed seam.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionLayoutContract {
@@ -1379,8 +1339,7 @@ pub struct SectionLayoutContract {
     pub note_settings: Option<Value>,
 }
 
-/// The `{ measured, options }` JSON envelope the engine consumes — the same
-/// pair `layoutDocument(measured, options)` takes in TS.
+/// The `{ measured, options }` envelope the engine paginates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Input {
     pub measured: Vec<MeasuredBlock>,
@@ -1394,7 +1353,9 @@ pub struct Input {
 
 use crate::resolve_lines::ResolvedLine;
 
-/// TS `ParagraphFragment`.
+/// One page's slice of a paragraph: the measured line window
+/// `[from_line, to_line)`, its own document range, and the run slices those
+/// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphFragment {
@@ -1417,7 +1378,10 @@ pub struct ParagraphFragment {
     pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
-/// TS `TableFragment`.
+/// One page's slice of a table: rows `[row_start, row_end)`, plus
+/// `clip_top` / `clip_bottom` when the boundary cuts through a row that broke
+/// mid-content, and `header_row_count` when this fragment repeats the header
+/// band.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableFragment {
@@ -1446,7 +1410,6 @@ pub struct TableFragment {
     pub clip_bottom: Option<f64>,
 }
 
-/// TS `ImageFragment`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageFragment {
@@ -1465,7 +1428,6 @@ pub struct ImageFragment {
     pub z_index: Option<f64>,
 }
 
-/// TS `ShapeFragment`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeFragment {
@@ -1488,7 +1450,6 @@ pub struct ShapeFragment {
     pub z_index: Option<f64>,
 }
 
-/// TS `ChartFragment`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartFragment {
@@ -1511,7 +1472,6 @@ pub struct ChartFragment {
     pub z_index: Option<f64>,
 }
 
-/// TS `TextBoxFragment`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextBoxFragment {
@@ -1530,7 +1490,7 @@ pub struct TextBoxFragment {
     pub z_index: Option<f64>,
 }
 
-/// TS `Fragment` union.
+/// A positioned piece of a block on one page. Break blocks produce none.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Fragment {
@@ -1543,8 +1503,7 @@ pub enum Fragment {
 }
 
 impl Fragment {
-    /// Position the fragment (the paginator writes `x`/`y` on placement,
-    /// mirroring `addFragment`'s mutation of the TS object).
+    /// Sets the placement coordinates.
     pub fn set_xy(&mut self, x: f64, y: f64) {
         match self {
             Fragment::Paragraph(f) => {
@@ -1575,8 +1534,6 @@ impl Fragment {
     }
 }
 
-/// TS `Page['headerFooterRefs']`. Never set by the spine; ships for the
-/// header/footer port.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaderFooterRefs {
@@ -1594,7 +1551,9 @@ pub struct HeaderFooterRefs {
     pub footer_even: Option<String>,
 }
 
-/// TS `Page`.
+/// One paginated page: its geometry, the fragments placed on it in paint order,
+/// and the section-derived metadata a renderer needs for page numbering, header
+/// and footer selection, borders and note areas.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
@@ -1642,17 +1601,13 @@ pub struct Page {
     pub note_areas: Option<Vec<NoteAreaContract>>,
 }
 
-/// TS `HeaderFooterLayout`. Never emitted by the spine; ships for the
-/// header/footer port.
 #[derive(Debug, Clone, Serialize)]
 pub struct HeaderFooterLayout {
     pub height: f64,
     pub fragments: Vec<Fragment>,
 }
 
-/// TS `Layout` — the paginator's complete result. `checkpoints` (derived
-/// resume bookmarks, omitted from golden serialization in TS) are not
-/// produced by this port; they affect no layout output.
+/// The paginator's complete result.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Layout {
@@ -1669,12 +1624,9 @@ pub struct Layout {
 }
 
 // ---------------------------------------------------------------------------
-// additive Word-parity contracts
+// additive contracts
 // ---------------------------------------------------------------------------
 
-/// Optional page metadata added by the versioned TS `Page` contract. Kept
-/// separate from the actively-produced spine `Page` until Batch D populates it,
-/// so unchanged layout output remains byte-identical.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageContractMetadata {
@@ -1702,22 +1654,18 @@ pub struct PageContractMetadata {
     pub note_areas: Option<Vec<NoteAreaContract>>,
 }
 
-/// Additive TS `PageMargins` metadata.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PageMarginsContractMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gutter: Option<f64>,
 }
 
-/// Additive TS `ColumnLayout` metadata.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ColumnLayoutContractMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<ColumnDefinition>>,
 }
 
-/// Additive TS `SectionBreakBlock` metadata. Kept separate to avoid changing
-/// active placement constructors before Batch D consumes these fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionBreakContractMetadata {
@@ -1739,7 +1687,6 @@ pub struct SectionBreakContractMetadata {
     pub note_settings: Option<Value>,
 }
 
-/// TS `NoteLayoutItem` / display-list note item shared payload.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteLayoutItemContract {
@@ -1763,7 +1710,6 @@ pub struct NoteLayoutItemContract {
     pub custom_mark_follows: Option<bool>,
 }
 
-/// TS `NoteAreaContract` / `DisplayListNoteArea` serde twin.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteAreaContract {
@@ -1787,8 +1733,6 @@ pub struct NoteAreaContract {
     pub notes: Option<Vec<NoteLayoutItemContract>>,
 }
 
-/// TS display output `NoteRegion` (primitive arrays remain opaque until the
-/// display-list producer owns the active primitive enum arm).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayNoteRegionContract {
@@ -1826,7 +1770,7 @@ pub struct DisplayCommentMetadata {
     pub selected: Option<bool>,
 }
 
-/// Scoped clip/group metadata. Batch F activates the group primitive arm.
+/// Scoped clip/group metadata.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayClipGroupMetadata {
@@ -1838,8 +1782,6 @@ pub struct DisplayClipGroupMetadata {
     pub opacity: Option<f64>,
 }
 
-/// Standalone TS `ClipGroupPrimitive` contract. Batch F activates it in the
-/// live primitive union and producer after updating replay/mirror switches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayClipGroupPrimitiveContract {
@@ -1857,7 +1799,6 @@ pub struct DisplayClipGroupPrimitiveContract {
     pub attrs: DisplayPrimitiveMetadata,
 }
 
-/// New additive members of TS `DocAttrs`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayPrimitiveMetadata {
@@ -1891,7 +1832,6 @@ pub struct DisplayPrimitiveMetadata {
     pub clip_group: Option<DisplayClipGroupMetadata>,
 }
 
-/// Additive TS `DisplayList`/`DisplayPage` metadata.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayListContractMetadata {
@@ -1908,7 +1848,6 @@ pub struct DisplayPageContractMetadata {
     pub note_areas: Option<Vec<NoteAreaContract>>,
 }
 
-/// New members on `PositionedGlyph`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionedGlyphContractMetadata {
@@ -1918,14 +1857,12 @@ pub struct PositionedGlyphContractMetadata {
     pub bidi_level: Option<u8>,
 }
 
-/// New members on `TextRunPrimitive`/`GlyphRunPrimitive`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayTextContractMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_glyphs: Option<LeaderGlyphContract>,
-    /// Modern w14 text effects payload (glow/shadow/reflection/textFill/
-    /// textOutline), mirrored from `TextModernEffects` in displayList.ts.
+    /// Modern w14 text effects payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modern_effects: Option<Value>,
     /// GlyphRun only: resolved CSS font shorthand for the fillText safety net
@@ -1934,14 +1871,12 @@ pub struct DisplayTextContractMetadata {
     pub fallback_font: Option<String>,
 }
 
-/// New members on `RectPrimitive`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DisplayRectContractMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opacity: Option<f64>,
 }
 
-/// New members on `LinePrimitive`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayLineContractMetadata {
@@ -1963,7 +1898,6 @@ pub struct DisplayLineContractMetadata {
     pub table: Option<Value>,
 }
 
-/// New members on `ImagePrimitive`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayImageContractMetadata {
@@ -1979,7 +1913,6 @@ pub struct DisplayImageContractMetadata {
     pub border: Option<Value>,
 }
 
-/// New members on `ShapePrimitive`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayShapeContractMetadata {
@@ -1993,7 +1926,6 @@ pub struct DisplayShapeContractMetadata {
     pub effect_extent: Option<Value>,
 }
 
-/// New members on `DecorationPrimitive`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayDecorationContractMetadata {
@@ -2003,7 +1935,6 @@ pub struct DisplayDecorationContractMetadata {
     pub style: Option<String>,
 }
 
-/// TS `LeaderGlyphPrimitive` / `leaderGlyphs` metadata.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeaderGlyphContract {
@@ -2033,7 +1964,6 @@ pub struct LeaderGlyphContract {
     pub rtl: Option<bool>,
 }
 
-/// TS `DecorationPrimitive.highlightSlice`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HighlightSliceContract {
@@ -2049,7 +1979,6 @@ pub struct HighlightSliceContract {
     pub includes_trailing_whitespace: Option<bool>,
 }
 
-/// TS display-list build-envelope additions.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayListBuildContractMetadata {
@@ -2079,7 +2008,6 @@ pub struct DisplayWatermarkContractMetadata {
     pub decorative: Option<bool>,
 }
 
-/// TS `DisplayListCommentAuthor`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayCommentAuthorContract {
@@ -2094,7 +2022,7 @@ pub struct DisplayCommentAuthorContract {
 }
 
 #[cfg(test)]
-mod parity_contract_tests {
+mod contract_tests {
     use super::*;
     use serde_json::json;
 

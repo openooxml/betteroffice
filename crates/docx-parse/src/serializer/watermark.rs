@@ -280,7 +280,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_watermark_matches_incumbent_geometry_and_order() {
+    fn text_watermark_has_pinned_geometry_and_order() {
         let watermark = Watermark::Text {
             text: "DRAFT".to_owned(),
             font: "Calibri".to_owned(),
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn text_size_counts_javascript_utf16_units_after_trim() {
+    fn text_size_counts_utf16_units_after_unicode_trim() {
         let watermark = Watermark::Text {
             text: "\u{FEFF}😀😀😀😀😀\u{3000}".to_owned(),
             font: "Calibri".to_owned(),

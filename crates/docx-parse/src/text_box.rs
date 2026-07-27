@@ -29,7 +29,7 @@ pub struct TextBox {
     pub fill: Option<ShapeFill>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outline: Option<ShapeOutline>,
-    /// S4 intentionally leaves story nodes to the owning block parser.
+    /// Story nodes owned by the block parser.
     pub content: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margins: Option<ImagePadding>,
@@ -74,8 +74,7 @@ pub struct TextBoxBodyProperties {
     pub preset_text_warp: Option<String>,
 }
 
-/// Ordered text-box block references consumed later by the single recursive
-/// story dispatcher. This replaces the TS paragraph/table callback cycle.
+/// Ordered text-box block references for the recursive story dispatcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextBoxBlockElement<'a> {
     Paragraph(&'a XmlElement),

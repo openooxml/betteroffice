@@ -1,10 +1,4 @@
-//! Text ops: `insert_text`, `delete_range`, `replace_range`, `replace_range_rich`,
-//! `insert_hard_break`, `insert_tab` (op-contract §1 "Text").
-//!
-//! Story vocabulary (render-bridge spec): a tab is the `\t` character (one UTF-16 unit); a hard
-//! break is a one-unit embed carrying `_kind: "break"`. Inserted text may never contain a
-//! paragraph or line break — paragraph structure changes only through `split_paragraph` /
-//! `merge_paragraphs`, line breaks only through `insert_hard_break`.
+//! Text editing operations.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -41,12 +35,7 @@ pub struct RichRun {
     pub attrs: BTreeMap<String, Any>,
 }
 
-/// Resolves the formatting attributes a plain insertion should carry (PM typing semantics).
-///
-/// `Inherit` copies the formatting of the unit before `at` (or after it at a paragraph start).
-/// Tracked-change stamps are never inherited. A hyperlink is inherited only when the units on
-/// BOTH sides carry the same hyperlink value — the `inclusive: false` PM boundary rule, so typing
-/// at a link edge does not extend the link.
+/// Resolves inherited, explicit, or plain insertion attributes.
 fn policy_attrs(chunks: &[Chunk], at: u32, policy: &FormatPolicy) -> Vec<(String, Any)> {
     match policy {
         FormatPolicy::Plain => Vec::new(),
@@ -111,13 +100,7 @@ pub(crate) struct DeleteOutcome {
     pub removed: u32,
 }
 
-/// Suggesting-mode delete: the op-contract 3-way split.
-///
-/// - plain retained content → `del` revision on the retained range;
-/// - the author's OWN pending insertions → real CRDT removal (they were never "in" the document);
-/// - pilcrows → retained with a `del` stamp AND a `pPrDel` paragraph-mark revision (the story's
-///   final pilcrow is never marked — Word cannot delete the final paragraph mark);
-/// - content already carrying a `del` stamp is left untouched (no double-stamping).
+/// Stamps retained content, removes owned insertions, and protects the final pilcrow.
 pub(crate) fn suggest_delete(
     txn: &mut TransactionMut<'_>,
     story: &TextRef,
@@ -237,8 +220,7 @@ pub(crate) fn plain_delete(
 }
 
 impl EditingDoc {
-    /// Inserts break-free text with explicit tracked-change stamps and a [`FormatPolicy`]
-    /// (op-contract R2: never a bare insert).
+    /// Inserts break-free text with explicit stamps and formatting policy.
     pub fn insert_text(
         &self,
         ctx: &EditCtx,
@@ -279,8 +261,7 @@ impl EditingDoc {
         })
     }
 
-    /// Deletes a range (op-contract §1). Plain mode removes it with the R6 pPr-survival rule;
-    /// suggesting mode performs the 3-way split documented on [`suggest_delete`].
+    /// Deletes a range while preserving surviving paragraph properties.
     pub fn delete_range(&self, ctx: &EditCtx, range: StoryRange) -> OpResult<Receipt> {
         let len = crate::format::range_len(&range)?;
         if len == 0 {

@@ -269,7 +269,8 @@ impl Presentation {
             .layout_slide(self.session.package(), &snapshot, slide_index)?)
     }
 
-    /// Serializes the byte-preserved source package.
+    /// Re-zips the retained parts. Part bytes survive unchanged; the container
+    /// is rebuilt, so the output is not byte-identical to the source.
     pub fn save(&self) -> Result<Vec<u8>> {
         Ok(pptx_parse::write_pptx(self.session.package())?)
     }

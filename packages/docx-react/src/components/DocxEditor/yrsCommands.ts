@@ -638,14 +638,7 @@ function normalizedPatch(patch: Readonly<Record<string, unknown>>): Record<strin
   );
 }
 
-/**
- * Translate projected image attrs into the typed facade geometry payload.
- *
- * The typed EMU fields are the authored command contract. `other` carries the
- * coexistence payload vocabulary used by today's render projection until that
- * bridge is retired; this keeps the canvas and the faithful PM follower on the
- * same geometry without dispatching a PM transaction.
- */
+/** Translates projected image attributes into typed geometry. */
 export function yrsImageGeometryForProjectedNode(
   node: YrsProjectedEmbedNode,
   patch: Readonly<Record<string, unknown>>

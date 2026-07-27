@@ -44,7 +44,7 @@ impl BorderSide {
     }
 }
 
-/// Serialize one border element with incumbent attribute ordering.
+/// Serializes one border element in schema order.
 pub fn serialize_border(border: Option<&BorderSpec>, side: BorderSide) -> String {
     let Some(border) = border else {
         return String::new();
@@ -140,8 +140,7 @@ pub fn serialize_conditional_format_style(style: Option<&ConditionalFormatStyle>
     writer.finish()
 }
 
-/// Serialize the required `w:tblGrid`, inferring widths exactly like the
-/// incumbent serializer when explicit column widths are absent.
+/// Serializes `w:tblGrid`, inferring omitted column widths.
 pub fn serialize_table_grid(table: &Table) -> String {
     let column_widths = infer_table_grid_widths(table);
     if column_widths.is_empty() {
@@ -302,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn border_bytes_match_typescript_and_escape_attacker_values() {
+    fn border_bytes_preserve_order_and_escape_attacker_values() {
         let border = BorderSpec {
             style: "single\" onmouseover=\"x<&".to_owned(),
             size: Some(7.6),
@@ -331,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn conditional_format_uses_incumbent_bit_order_and_omits_zero() {
+    fn conditional_format_uses_schema_bit_order_and_omits_zero() {
         assert_eq!(
             serialize_conditional_format_style(Some(&ConditionalFormatStyle::default())),
             ""

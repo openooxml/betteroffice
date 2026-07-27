@@ -6,7 +6,8 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "Bounded PresentationML parsing and byte-preserving PPTX package serialization."
+description = "Bounded PresentationML parsing and part-preserving PPTX package serialization."
+readme = "README.md"
 keywords = ["pptx", "powerpoint", "ooxml", "presentationml"]
 categories = ["parser-implementations", "encoding"]
 

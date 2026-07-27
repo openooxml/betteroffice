@@ -444,6 +444,84 @@ fn defined_names_survive_the_facade_and_drive_incremental_recalculation() {
 }
 
 #[test]
+fn structural_edits_rewrite_defined_names_through_save_and_undo() {
+    let original = defined_names_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook.model().defined_names.clone();
+
+    workbook
+        .apply_ops(
+            vec![
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 2,
+                },
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let global = workbook
+        .model()
+        .defined_names
+        .iter()
+        .find(|defined| defined.name == "GlobalData")
+        .unwrap();
+    let local = workbook
+        .model()
+        .defined_names
+        .iter()
+        .find(|defined| defined.name == "LocalData")
+        .unwrap();
+    assert_eq!(global.formula, "Data!$B$3");
+    assert_eq!(local.formula, "Data!$B$3");
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
+#[test]
+fn structural_edits_refuse_ambiguous_workbook_name_bindings() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Other"));
+    model.defined_names.push(DefinedName {
+        name: "Input".into(),
+        formula: "$A$1".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be safely rewritten"));
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
 fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
     let mut sheet = Sheet::new("Data");
     sheet.freeze_pane = Some(FreezePane::new(1, 1, cell("D5")));
@@ -3470,8 +3548,6 @@ fn deleted_rows_collapse_chart_references_to_ref_errors() {
     Workbook::open(&workbook.save().unwrap()).unwrap();
 }
 
-/// Pivot caches are still unmodelled, so a workbook carrying one keeps
-/// refusing the ops that would strand it.
 #[test]
 fn refuses_structural_ops_that_would_strand_pivot_references() {
     let mut parts = ooxml_opc::unzip_parts(&preservation_fixture()).unwrap();
@@ -3500,6 +3576,49 @@ fn refuses_structural_ops_that_would_strand_pivot_references() {
         assert!(
             matches!(&error, Error::InvalidOperation(message)
                 if message.contains("pivotCacheDefinition1.xml")),
+            "{op:?} was allowed: {error:?}"
+        );
+    }
+
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
+#[test]
+fn refuses_structural_ops_that_would_strand_unclaimed_chart_parts() {
+    let mut parts = ooxml_opc::unzip_parts(&preservation_fixture()).unwrap();
+    parts.push((
+        "xl/charts/chart1.xml".to_owned(),
+        br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#.to_vec(),
+    ));
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RemoveSheet { index: 0 },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+    ] {
+        let mut workbook = Workbook::open(&original).unwrap();
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains("chart1.xml")),
             "{op:?} was allowed: {error:?}"
         );
     }
@@ -4189,4 +4308,63 @@ fn set_charts_is_rejected_as_an_internal_operation() {
         matches!(&error, Error::InvalidOperation(message) if message.contains("internal")),
         "{error:?}"
     );
+}
+
+/// Every op that rewrites `defined_names` is structural, and structural ops are
+/// refused while collaborative. Peers therefore cannot disagree about a name.
+#[test]
+fn collaborative_sessions_refuse_every_op_that_rewrites_defined_names() {
+    let bytes = defined_names_fixture();
+    let rewriting_ops = vec![
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 2,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+        Op::SetDefinedNames {
+            defined_names: Vec::new(),
+        },
+    ];
+
+    for op in rewriting_ops {
+        let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
+        let error = left
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::CollaborativeStructureOperation),
+            "{op:?} must be refused while collaborative, or peers diverge on defined names"
+        );
+    }
+
+    let mut left = Workbook::open_collaborative(&bytes, 101).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 202).unwrap();
+    left.edit_cell(SheetId(0), cell("A1"), "21", CalculationOptions::default())
+        .unwrap();
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(left.model().defined_names, right.model().defined_names);
 }
