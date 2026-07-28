@@ -219,3 +219,37 @@ fn unknown_glyph_font_is_an_error() {
         "unknown FontId for this FontStore"
     );
 }
+
+/// `leaderGlyphs.font` carries a bare family name, not a CSS shorthand: the
+/// producer assigns it from the same value it puts in `fontFamily`.
+#[test]
+fn a_tab_leader_paints_from_a_bare_family_name() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let list = list(
+        200.0,
+        40.0,
+        vec![json!({
+            "kind": "text",
+            "text": "Chapter",
+            "x": 8,
+            "baselineY": 26,
+            "width": 60,
+            "font": "400 16px Carlito, sans-serif",
+            "color": "#000000",
+            "leaderGlyphs": {
+                "glyph": "\u{00b7}",
+                "count": 12,
+                "advance": 4,
+                "font": "Carlito",
+                "size": 16,
+                "color": "#000000"
+            }
+        })],
+    );
+    let png = render_png(&list, 0, &resources).expect("a bare leader family must render");
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+}

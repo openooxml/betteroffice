@@ -250,12 +250,10 @@ fn paint_leader(
         .map(number_f32)
         .transpose()?
         .unwrap_or(number_f32(&run.baseline_y)?);
-    let mut spec = leader
-        .font
-        .as_deref()
-        .map(parse_font)
-        .transpose()?
-        .unwrap_or_else(|| run_spec.clone());
+    let mut spec = run_spec.clone();
+    if let Some(family) = leader.font.as_deref() {
+        spec.family = family.to_string();
+    }
     if let Some(size) = &leader.size {
         spec.size = number_f32(size)?;
         if spec.size <= 0.0 {
