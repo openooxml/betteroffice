@@ -4,12 +4,16 @@ use std::fs;
 use std::path::PathBuf;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyOSError, PyTypeError};
+use pyo3::exceptions::{
+    PyException, PyIndexError, PyKeyError, PyOSError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyInt};
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, CellValue, Error as CoreError, RenderOptions, SheetId,
+    CalculationOptions, CellAddress, CellInput, CellRange, CellRef, CellValue, Error as CoreError,
+    HorizontalAlignment, MutationResult, NumberFormatMutation, Proposal, ProposalEditInput,
+    ProposalRequest, RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment,
     Workbook as CoreWorkbook,
 };
 
@@ -160,6 +164,150 @@ impl PyCalculation {
         format!(
             "Calculation(changed={}, cycles={}, limited={})",
             self.changed, self.cycles, self.limited
+        )
+    }
+}
+
+/// What a mutating call changed.
+#[pyclass(module = "betteroffice_xlsx", name = "Mutation", frozen)]
+pub struct PyMutation {
+    #[pyo3(get)]
+    applied: bool,
+    #[pyo3(get)]
+    changed: Vec<String>,
+    #[pyo3(get)]
+    cycles: Vec<String>,
+    #[pyo3(get)]
+    limited: Vec<String>,
+}
+
+impl PyMutation {
+    fn from_core(workbook: &CoreWorkbook, result: &MutationResult) -> Self {
+        let names = |cells: &[CellAddress]| -> Vec<String> {
+            cells
+                .iter()
+                .map(|at| workbook.format_address(*at))
+                .collect()
+        };
+        Self {
+            applied: result.applied,
+            changed: names(&result.changed),
+            cycles: names(&result.cycle_cells),
+            limited: names(&result.limited_cells),
+        }
+    }
+}
+
+#[pymethods]
+impl PyMutation {
+    fn __bool__(&self) -> bool {
+        self.applied
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Mutation(applied={}, changed={})",
+            if self.applied { "True" } else { "False" },
+            self.changed.len()
+        )
+    }
+}
+
+#[pyclass(module = "betteroffice_xlsx", name = "History", frozen)]
+pub struct PyHistory {
+    #[pyo3(get)]
+    can_undo: bool,
+    #[pyo3(get)]
+    can_redo: bool,
+    #[pyo3(get)]
+    undo_depth: usize,
+    #[pyo3(get)]
+    redo_depth: usize,
+}
+
+#[pymethods]
+impl PyHistory {
+    fn __repr__(&self) -> String {
+        format!(
+            "History(undo_depth={}, redo_depth={})",
+            self.undo_depth, self.redo_depth
+        )
+    }
+}
+
+/// A staged edit set awaiting a human decision.
+#[pyclass(module = "betteroffice_xlsx", name = "Proposal", frozen)]
+pub struct PyProposal {
+    #[pyo3(get)]
+    id: String,
+    #[pyo3(get)]
+    agent_id: String,
+    #[pyo3(get)]
+    note: Option<String>,
+    #[pyo3(get)]
+    edits: Vec<PyProposedEdit>,
+}
+
+impl PyProposal {
+    fn from_core(proposal: &Proposal) -> Self {
+        Self {
+            id: proposal.id.clone(),
+            agent_id: proposal.agent_id.clone(),
+            note: proposal.note.clone(),
+            edits: proposal
+                .edits
+                .iter()
+                .map(|edit| PyProposedEdit {
+                    sheet: edit.sheet as usize,
+                    address: CellRef::new(edit.row, edit.col).to_a1(),
+                    input: edit.input.clone(),
+                    before: edit.old_text.clone(),
+                    after: edit.new_text.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyProposal {
+    fn __repr__(&self) -> String {
+        format!(
+            "Proposal(id={:?}, agent_id={:?}, edits={})",
+            self.id,
+            self.agent_id,
+            self.edits.len()
+        )
+    }
+}
+
+/// One cell inside a proposal, with the text a reviewer would compare.
+#[pyclass(
+    module = "betteroffice_xlsx",
+    name = "ProposedEdit",
+    frozen,
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyProposedEdit {
+    #[pyo3(get)]
+    sheet: usize,
+    #[pyo3(get)]
+    address: String,
+    #[pyo3(get)]
+    input: String,
+    #[pyo3(get)]
+    before: String,
+    #[pyo3(get)]
+    after: String,
+}
+
+#[pymethods]
+impl PyProposedEdit {
+    fn __repr__(&self) -> String {
+        format!(
+            "ProposedEdit({} {:?} -> {:?})",
+            self.address, self.before, self.after
         )
     }
 }
@@ -321,13 +469,14 @@ impl PyWorkbook {
         address: &str,
         value: &str,
         now_serial: Option<f64>,
-    ) -> PyResult<bool> {
+    ) -> PyResult<PyMutation> {
         let sheet = self.resolve_sheet(sheet)?;
         let cell = parse_cell(address)?;
-        self.inner
+        let result = self
+            .inner
             .edit_cell(sheet, cell, value, CalculationOptions { now_serial })
-            .map(|result| result.applied)
-            .map_err(map_error)
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
     }
 
     #[pyo3(signature = (sheet, *, scale = 1.0, range = None, max_width = None, max_height = None))]
@@ -379,6 +528,343 @@ impl PyWorkbook {
         })
     }
 
+    /// Open a replica that can exchange Yrs updates. Every replica needs its
+    /// own `client_id`; Yrs cannot detect a duplicate once both have authored.
+    #[staticmethod]
+    #[pyo3(signature = (data, *, client_id, recalculate = false, now_serial = None))]
+    fn open_collaborative(
+        py: Python<'_>,
+        data: &[u8],
+        client_id: u64,
+        recalculate: bool,
+        now_serial: Option<f64>,
+    ) -> PyResult<Self> {
+        let data = data.to_vec();
+        py.detach(|| {
+            if recalculate {
+                CoreWorkbook::open_collaborative_recalculated(
+                    &data,
+                    client_id,
+                    CalculationOptions { now_serial },
+                )
+            } else {
+                CoreWorkbook::open_collaborative(&data, client_id)
+            }
+        })
+        .map(|inner| Self { inner })
+        .map_err(map_error)
+    }
+
+    #[getter]
+    fn client_id(&self) -> u64 {
+        self.inner.client_id()
+    }
+
+    #[getter]
+    fn is_collaborative(&self) -> bool {
+        self.inner.is_collaborative()
+    }
+
+    /// This replica's state vector, to hand a peer so it can compute a diff.
+    fn state_vector<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.inner.encode_state_vector_v1())
+    }
+
+    /// The whole document as one update, for a peer joining from nothing.
+    fn state_as_update<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.inner.encode_state_as_update_v1())
+    }
+
+    /// The update carrying everything the peer's state vector is missing.
+    fn diff<'py>(&self, py: Python<'py>, state_vector: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+        let update = self.inner.encode_diff_v1(state_vector).map_err(map_error)?;
+        Ok(PyBytes::new(py, &update))
+    }
+
+    #[pyo3(signature = (update, *, now_serial = None))]
+    fn apply_update(
+        &mut self,
+        py: Python<'_>,
+        update: &[u8],
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let update = update.to_vec();
+        let result = py
+            .detach(|| {
+                self.inner
+                    .apply_update_v1(&update, CalculationOptions { now_serial })
+            })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    #[getter]
+    fn can_undo(&self) -> bool {
+        self.inner.can_undo()
+    }
+
+    #[getter]
+    fn can_redo(&self) -> bool {
+        self.inner.can_redo()
+    }
+
+    fn history(&self) -> PyHistory {
+        let state = self.inner.history_state();
+        PyHistory {
+            can_undo: state.can_undo,
+            can_redo: state.can_redo,
+            undo_depth: state.undo_depth,
+            redo_depth: state.redo_depth,
+        }
+    }
+
+    #[pyo3(signature = (*, now_serial = None))]
+    fn undo(&mut self, now_serial: Option<f64>) -> PyResult<PyMutation> {
+        let result = self
+            .inner
+            .undo(CalculationOptions { now_serial })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    #[pyo3(signature = (*, now_serial = None))]
+    fn redo(&mut self, now_serial: Option<f64>) -> PyResult<PyMutation> {
+        let result = self
+            .inner
+            .redo(CalculationOptions { now_serial })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    /// Write many cells as one undo step.
+    #[pyo3(signature = (sheet, edits, *, now_serial = None))]
+    fn set_many(
+        &mut self,
+        sheet: &Bound<'_, PyAny>,
+        edits: Vec<(String, String)>,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let inputs = edits
+            .into_iter()
+            .map(|(address, input)| parse_cell(&address).map(|cell| CellInput { cell, input }))
+            .collect::<PyResult<Vec<_>>>()?;
+        let result = self
+            .inner
+            .edit_cells(sheet, &inputs, CalculationOptions { now_serial })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    /// Stage edits for a human to accept or reject instead of applying them.
+    #[pyo3(signature = (agent_id, edits, *, note = None, now_serial = None))]
+    fn propose(
+        &mut self,
+        agent_id: String,
+        edits: Vec<(Bound<'_, PyAny>, String, String)>,
+        note: Option<String>,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyProposal> {
+        let edits = edits
+            .into_iter()
+            .map(|(sheet, address, input)| {
+                Ok(ProposalEditInput {
+                    sheet: self.resolve_sheet(&sheet)?,
+                    cell: parse_cell(&address)?,
+                    input,
+                    number_format: None,
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        let proposal = self
+            .inner
+            .propose(
+                ProposalRequest {
+                    agent_id,
+                    note,
+                    edits,
+                },
+                CalculationOptions { now_serial },
+            )
+            .map_err(map_error)?;
+        Ok(PyProposal::from_core(&proposal))
+    }
+
+    fn proposals(&self) -> Vec<PyProposal> {
+        self.inner
+            .proposals()
+            .iter()
+            .map(PyProposal::from_core)
+            .collect()
+    }
+
+    #[pyo3(signature = (proposal_id, *, force = false, now_serial = None))]
+    fn accept_proposal(
+        &mut self,
+        proposal_id: &str,
+        force: bool,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let acceptance = self
+            .inner
+            .accept_proposal(proposal_id, force, CalculationOptions { now_serial })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &acceptance.mutation))
+    }
+
+    fn reject_proposal(&mut self, proposal_id: &str) -> bool {
+        self.inner.reject_proposal(proposal_id)
+    }
+
+    #[getter]
+    fn active_sheet(&self) -> usize {
+        self.inner.active_sheet().0 as usize
+    }
+
+    fn set_active_sheet(&mut self, sheet: &Bound<'_, PyAny>) -> PyResult<()> {
+        let sheet = self.resolve_sheet(sheet)?;
+        self.inner.set_active_sheet(sheet).map_err(map_error)
+    }
+
+    fn merged_ranges(&self, sheet: &Bound<'_, PyAny>, range: &str) -> PyResult<Vec<String>> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let range = parse_range(range)?;
+        Ok(self
+            .inner
+            .merged_ranges(sheet, range)
+            .map_err(map_error)?
+            .into_iter()
+            .map(|found| found.to_a1())
+            .collect())
+    }
+
+    fn last_calculation(&self) -> PyCalculation {
+        let result = self.inner.last_calculation();
+        PyCalculation {
+            changed: result.changed.len(),
+            cycles: result.cycle_cells.len(),
+            limited: result.limited_cells.len(),
+        }
+    }
+
+    /// Set a number format over a range. `format` is one of automatic, text,
+    /// number, percent, scientific, currency, date, time, or a custom pattern.
+    #[pyo3(signature = (sheet, range, format, *, now_serial = None))]
+    fn set_number_format(
+        &mut self,
+        sheet: &Bound<'_, PyAny>,
+        range: &str,
+        format: &str,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let range = parse_range(range)?;
+        let format = match format.to_ascii_lowercase().as_str() {
+            "automatic" => NumberFormatMutation::Automatic,
+            "text" => NumberFormatMutation::PlainText,
+            "number" => NumberFormatMutation::Number,
+            "percent" => NumberFormatMutation::Percent,
+            "scientific" => NumberFormatMutation::Scientific,
+            "currency" => NumberFormatMutation::Currency,
+            "date" => NumberFormatMutation::Date,
+            "time" => NumberFormatMutation::Time,
+            other => NumberFormatMutation::Custom {
+                pattern: other.to_string(),
+            },
+        };
+        let result = self
+            .inner
+            .set_range_number_format(sheet, range, format, CalculationOptions { now_serial })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
+    /// Patch styling over a range. Every argument is optional; omitted ones are
+    /// left as they are.
+    #[pyo3(signature = (
+        sheet, range, *,
+        bold = None, italic = None, strikethrough = None,
+        font_family = None, font_size = None,
+        text_color = None, fill_color = None,
+        horizontal_alignment = None, vertical_alignment = None, text_wrapping = None,
+        now_serial = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_style(
+        &mut self,
+        sheet: &Bound<'_, PyAny>,
+        range: &str,
+        bold: Option<bool>,
+        italic: Option<bool>,
+        strikethrough: Option<bool>,
+        font_family: Option<String>,
+        font_size: Option<f64>,
+        text_color: Option<String>,
+        fill_color: Option<String>,
+        horizontal_alignment: Option<String>,
+        vertical_alignment: Option<String>,
+        text_wrapping: Option<String>,
+        now_serial: Option<f64>,
+    ) -> PyResult<PyMutation> {
+        let sheet = self.resolve_sheet(sheet)?;
+        let range = parse_range(range)?;
+
+        let horizontal = horizontal_alignment
+            .as_deref()
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "left" => Ok(HorizontalAlignment::Left),
+                "center" => Ok(HorizontalAlignment::Center),
+                "right" => Ok(HorizontalAlignment::Right),
+                other => Err(PyValueError::new_err(format!(
+                    "horizontal_alignment must be left, center, or right, not {other:?}"
+                ))),
+            })
+            .transpose()?;
+        let vertical = vertical_alignment
+            .as_deref()
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "top" => Ok(VerticalAlignment::Top),
+                "middle" => Ok(VerticalAlignment::Middle),
+                "bottom" => Ok(VerticalAlignment::Bottom),
+                other => Err(PyValueError::new_err(format!(
+                    "vertical_alignment must be top, middle, or bottom, not {other:?}"
+                ))),
+            })
+            .transpose()?;
+        let wrapping = text_wrapping
+            .as_deref()
+            .map(|value| match value.to_ascii_lowercase().as_str() {
+                "overflow" => Ok(TextWrapping::Overflow),
+                "wrap" => Ok(TextWrapping::Wrap),
+                "clip" => Ok(TextWrapping::Clip),
+                other => Err(PyValueError::new_err(format!(
+                    "text_wrapping must be overflow, wrap, or clip, not {other:?}"
+                ))),
+            })
+            .transpose()?;
+
+        let patch = StylePatch {
+            bold,
+            italic,
+            strikethrough,
+            font_family,
+            font_size,
+            text_color,
+            fill_color,
+            border: None,
+            horizontal_alignment: horizontal,
+            vertical_alignment: vertical,
+            text_wrapping: wrapping,
+            clear: Vec::new(),
+        };
+        let result = self
+            .inner
+            .patch_range_style(sheet, range, patch, CalculationOptions { now_serial })
+            .map_err(map_error)?;
+        Ok(PyMutation::from_core(&self.inner, &result))
+    }
+
     fn __len__(&self) -> usize {
         self.inner.sheet_count()
     }
@@ -396,6 +882,10 @@ fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyCellError>()?;
     module.add_class::<PyPng>()?;
     module.add_class::<PyCalculation>()?;
+    module.add_class::<PyMutation>()?;
+    module.add_class::<PyHistory>()?;
+    module.add_class::<PyProposal>()?;
+    module.add_class::<PyProposedEdit>()?;
     module.add("XlsxError", py.get_type::<XlsxError>())?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;

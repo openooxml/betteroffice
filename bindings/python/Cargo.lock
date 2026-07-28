@@ -52,6 +52,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-drawingml"
+version = "0.0.4"
+dependencies = [
+ "indexmap",
+ "serde",
+]
+
+[[package]]
 name = "betteroffice-opc"
 version = "0.0.4"
 dependencies = [
@@ -65,6 +73,7 @@ dependencies = [
 name = "betteroffice-xlsx"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -105,6 +114,7 @@ dependencies = [
 name = "betteroffice-xlsx-parse"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "quick-xml",
 ]
@@ -131,6 +141,7 @@ dependencies = [
 name = "betteroffice-xlsx-render"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "serde",
 ]
@@ -373,6 +384,8 @@ checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

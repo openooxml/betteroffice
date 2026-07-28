@@ -69,8 +69,8 @@ def test_writing_a_formula_evaluates_it(sample_bytes):
 
 def test_set_reports_whether_anything_changed(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
-    assert wb.set("Budget", "B3", "1000") is True
-    assert wb.set("Budget", "B3", "1000") is False
+    assert wb.set("Budget", "B3", "1000").applied is True
+    assert wb.set("Budget", "B3", "1000").applied is False
 
 
 def test_value_types(sample_bytes):
@@ -351,3 +351,126 @@ def test_error_hierarchy_rolls_up_to_xlsx_error():
 
 def test_version_is_exposed():
     assert bo.__version__.count(".") == 2
+
+
+def test_replicas_converge(sample_bytes):
+    left = bo.Workbook.open_collaborative(sample_bytes, client_id=101)
+    right = bo.Workbook.open_collaborative(sample_bytes, client_id=202)
+    assert left.is_collaborative and right.is_collaborative
+    assert (left.client_id, right.client_id) == (101, 202)
+
+    left["Budget"]["B3"] = 1000
+    assert right.apply_update(left.diff(right.state_vector()))
+    assert right.value("Budget", "D3") == pytest.approx(left.value("Budget", "D3"))
+
+    right["Budget"]["C3"] = 500
+    left.apply_update(right.diff(left.state_vector()))
+    assert left.value("Budget", "C3") == pytest.approx(500.0)
+
+
+def test_a_fresh_replica_catches_up_from_one_update(sample_bytes):
+    source = bo.Workbook.open_collaborative(sample_bytes, client_id=101)
+    source["Budget"]["B3"] = 1000
+
+    joiner = bo.Workbook.open_collaborative(sample_bytes, client_id=303)
+    joiner.apply_update(source.state_as_update())
+    assert joiner.value("Budget", "B3") == pytest.approx(1000.0)
+
+
+def test_undo_covers_local_edits_but_not_remote_ones(sample_bytes):
+    left = bo.Workbook.open_collaborative(sample_bytes, client_id=101)
+    right = bo.Workbook.open_collaborative(sample_bytes, client_id=202)
+    original = left.value("Budget", "B3")
+
+    left["Budget"]["B3"] = 1000
+    right["Budget"]["C3"] = 500
+    left.apply_update(right.diff(left.state_vector()))
+
+    left.undo()
+    assert left.value("Budget", "B3") == pytest.approx(original)
+    assert left.value("Budget", "C3") == pytest.approx(500.0)
+
+
+def test_undo_redo_round_trip(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    original = wb.value("Budget", "B3")
+    wb["Budget"]["B3"] = 1000
+
+    assert wb.can_undo and not wb.can_redo
+    assert wb.history().undo_depth == 1
+
+    wb.undo()
+    assert wb.value("Budget", "B3") == pytest.approx(original)
+    assert wb.can_redo
+
+    wb.redo()
+    assert wb.value("Budget", "B3") == pytest.approx(1000.0)
+
+
+def test_set_many_is_one_undo_step(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    assert wb.set_many("Budget", {"H1": 10, "H2": 20, "H3": "=H1+H2"})
+    assert wb.value("Budget", "H3") == pytest.approx(30.0)
+
+    wb.undo()
+    assert wb.value("Budget", "H1") is None
+    assert wb.value("Budget", "H3") is None
+
+
+def test_mutation_lists_recalculated_dependents(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    mutation = wb.set("Budget", "B3", "1000")
+    assert mutation.applied and bool(mutation)
+    assert "D3" in [name.split("!")[-1] for name in mutation.changed]
+
+
+def test_a_proposal_does_not_apply_until_accepted(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    proposal = wb.propose(
+        "copilot", [("Budget", "H1", "=SUM(B3:B10)")], note="add a total"
+    )
+
+    assert proposal.agent_id == "copilot"
+    assert proposal.note == "add a total"
+    assert [edit.address for edit in proposal.edits] == ["H1"]
+    assert proposal.edits[0].after
+    assert len(wb.proposals()) == 1
+    assert wb.value("Budget", "H1") is None
+
+    wb.accept_proposal(proposal.id)
+    assert wb.value("Budget", "H1") is not None
+    assert wb.proposals() == []
+
+
+def test_a_rejected_proposal_leaves_the_sheet_alone(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    proposal = wb.propose("copilot", [("Budget", "H2", 999)])
+
+    assert wb.reject_proposal(proposal.id) is True
+    assert wb.proposals() == []
+    assert wb.value("Budget", "H2") is None
+    assert wb.reject_proposal(proposal.id) is False
+
+
+def test_sheet_metadata(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    assert wb.active_sheet == 0
+    wb.set_active_sheet("Summary")
+    assert wb.active_sheet == 1
+    assert wb.merged_ranges("Budget", "A1:H30") == ["A1:D1"]
+
+    wb["Budget"]["B3"] = 1000
+    assert wb.last_calculation().changed >= 1
+
+
+def test_formatting(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    assert wb.set_number_format("Budget", "B3:B10", "#,##0.00")
+    assert wb.set_style("Budget", "A1:D1", bold=True, fill_color="#eeeeee")
+    assert bo.Workbook.open(wb.save()).sheet_names == wb.sheet_names
+
+
+def test_formatting_rejects_an_unknown_alignment(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    with pytest.raises(ValueError, match="left, center, or right"):
+        wb.set_style("Budget", "A1:D1", horizontal_alignment="sideways")
