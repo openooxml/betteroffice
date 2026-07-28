@@ -193,6 +193,7 @@ impl Workbook {
         Self::from_parts(
             parsed.workbook,
             Some(parsed.package),
+            parsed.active_sheet,
             build_graph,
             client_id,
         )
@@ -216,22 +217,28 @@ impl Workbook {
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
-        Self::from_parts(model, None, true, None)
+        Self::from_parts(model, None, SheetId(0), true, None)
     }
 
     /// Creates a replica from a model with a peer-unique client ID.
     pub fn from_model_collaborative(model: WorkbookModel, client_id: u64) -> Result<Self> {
-        Self::from_parts(model, None, true, Some(client_id))
+        Self::from_parts(model, None, SheetId(0), true, Some(client_id))
     }
 
     fn from_parts(
         model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
+        active_sheet: SheetId,
         build_graph: bool,
         client_id: Option<u64>,
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
+        let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
+            active_sheet
+        } else {
+            SheetId(0)
+        };
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
@@ -278,7 +285,7 @@ impl Workbook {
             preserved_redo: Vec::new(),
             edited_since_open: false,
             moved_references_since_open: false,
-            active_sheet: SheetId(0),
+            active_sheet,
             undo: UndoStack::new(),
             graph,
             proposals: ProposalSet::new(),
@@ -497,17 +504,22 @@ impl Workbook {
         validate_model(&self.model)?;
         validate_chart_source(&self.model, self.source_package.is_some())?;
         let parts = match &self.source_package {
-            Some(package) => xlsx_parse::serialize_workbook_with_package_and_origins_after_edits(
-                &self.model,
-                package,
-                &self.preserved.origins,
-                &self.preserved.shared_string_cells,
-                xlsx_parse::SaveEdits {
-                    changed: self.edited_since_open,
-                    moved_references: self.moved_references_since_open,
-                },
-            )?,
-            None => xlsx_parse::serialize_workbook(&self.model)?,
+            Some(package) => {
+                xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+                    &self.model,
+                    package,
+                    &self.preserved.origins,
+                    &self.preserved.shared_string_cells,
+                    xlsx_parse::SaveEdits {
+                        changed: self.edited_since_open,
+                        moved_references: self.moved_references_since_open,
+                    },
+                    self.active_sheet,
+                )?
+            }
+            None => {
+                xlsx_parse::serialize_workbook_with_active_sheet(&self.model, self.active_sheet)?
+            }
         };
         ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
     }

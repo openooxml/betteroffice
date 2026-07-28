@@ -13,14 +13,17 @@ pub use chart::chart_space;
 pub use package::PreservedPackage;
 pub use read::{SharedStringCells, parse_workbook};
 pub use write::{
-    SaveEdits, serialize_workbook, serialize_workbook_with_package_and_origins_after_edits,
+    SaveEdits, serialize_workbook, serialize_workbook_with_active_sheet,
+    serialize_workbook_with_package_and_origins_after_edits,
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
 };
 
-use xlsx_model::Workbook;
+use xlsx_model::{SheetId, Workbook};
 
 /// Parsed workbook with its source package.
 pub struct ParsedWorkbook {
     pub workbook: Workbook,
+    pub active_sheet: SheetId,
     pub package: PreservedPackage,
 }
 
@@ -29,9 +32,15 @@ pub fn parse_workbook_with_package(
     parts: &[(String, Vec<u8>)],
 ) -> Result<ParsedWorkbook, ParseError> {
     let parsed = read::parse_workbook_indexed(parts)?;
-    let package = PreservedPackage::capture(parts, &parsed.workbook, &parsed.shared_string_cells)?;
+    let package = PreservedPackage::capture(
+        parts,
+        &parsed.workbook,
+        parsed.active_sheet,
+        &parsed.shared_string_cells,
+    )?;
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,
+        active_sheet: parsed.active_sheet,
         package,
     })
 }

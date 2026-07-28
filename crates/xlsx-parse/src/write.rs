@@ -6,11 +6,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
 
-use quick_xml::Writer;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::{Reader, Writer};
 use xlsx_model::addr::RowId;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
-use xlsx_model::{Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, Workbook};
+use xlsx_model::{
+    Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetId, Workbook,
+};
 
 use crate::ParseError;
 use crate::package::{
@@ -76,6 +78,14 @@ fn drawingml_namespace(main_namespace: &str) -> &'static str {
 /// is refused: this writer emits no drawing, chart relationship or chart part,
 /// so it would drop one rather than write it.
 pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    serialize_workbook_with_active_sheet(wb, SheetId(0))
+}
+
+#[doc(hidden)]
+pub fn serialize_workbook_with_active_sheet(
+    wb: &Workbook,
+    active_sheet: SheetId,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if wb.sheets.iter().any(|sheet| !sheet.charts.is_empty()) {
         return Err(ParseError::UnsupportedEdit(
             "a chart can only be written back into the package it was read from".to_owned(),
@@ -89,7 +99,10 @@ pub fn serialize_workbook(wb: &Workbook) -> Result<Vec<(String, Vec<u8>)>, Parse
             content_types(wb, have_sst, have_styles)?,
         ),
         ("_rels/.rels".to_string(), root_rels()?),
-        ("xl/workbook.xml".to_string(), workbook_xml(wb)?),
+        (
+            "xl/workbook.xml".to_string(),
+            workbook_xml(wb, active_sheet)?,
+        ),
         (
             "xl/_rels/workbook.xml.rels".to_string(),
             workbook_rels(wb, have_sst, have_styles)?,
@@ -193,6 +206,25 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     shared_string_cells: &[SharedStringCells],
     edits: SaveEdits,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+        wb,
+        package,
+        origins,
+        shared_string_cells,
+        edits,
+        package.active_sheet,
+    )
+}
+
+#[doc(hidden)]
+pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
+    edits: SaveEdits,
+    active_sheet: SheetId,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
@@ -205,6 +237,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
             .iter()
             .enumerate()
             .all(|(index, origin)| *origin == Some(index))
+        && active_sheet == package.active_sheet
     {
         return Ok(package.parts.clone());
     }
@@ -362,7 +395,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
         }
     }
 
-    let workbook = workbook_xml_with_template(wb, package, &sheets, edited)?;
+    let workbook = workbook_xml_with_template(wb, package, &sheets, edited, active_sheet)?;
     parts.set("xl/workbook.xml".to_owned(), workbook)?;
     parts.set(
         "xl/_rels/workbook.xml.rels".to_owned(),
@@ -1589,7 +1622,7 @@ fn root_rels() -> Result<Vec<u8>, ParseError> {
     })
 }
 
-fn workbook_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
+fn workbook_xml(wb: &Workbook, active_sheet: SheetId) -> Result<Vec<u8>, ParseError> {
     doc(|w| {
         w.create_element("workbook")
             .with_attribute(("xmlns", NS_MAIN))
@@ -1599,6 +1632,15 @@ fn workbook_xml(wb: &Workbook) -> Result<Vec<u8>, ParseError> {
                     w.create_element("workbookPr")
                         .with_attribute(("date1904", "1"))
                         .write_empty()?;
+                }
+                if active_sheet.0 != 0 {
+                    let active_tab = active_sheet.0.to_string();
+                    w.create_element("bookViews").write_inner_content(|w| {
+                        w.create_element("workbookView")
+                            .with_attribute(("activeTab", active_tab.as_str()))
+                            .write_empty()?;
+                        Ok(())
+                    })?;
                 }
                 w.create_element("sheets").write_inner_content(|w| {
                     for (i, sheet) in wb.sheets.iter().enumerate() {
@@ -1656,6 +1698,7 @@ fn workbook_xml_with_template(
     package: &PreservedPackage,
     sheets: &[PlannedSheet],
     edited: bool,
+    active_sheet: SheetId,
 ) -> Result<Vec<u8>, ParseError> {
     let workbook_pr =
         if package.workbook_pr_attributes.is_some() || wb.date_system == DateSystem::V1904 {
@@ -1726,6 +1769,18 @@ fn workbook_xml_with_template(
         ("sheets", sheets_fragment),
         ("calcPr", calc_pr),
     ];
+    if active_sheet != package.active_sheet {
+        replacements.push((
+            "bookViews",
+            render_book_views(
+                package
+                    .workbook_template
+                    .child("bookViews")
+                    .map(|child| child.bytes.as_slice()),
+                active_sheet,
+            )?,
+        ));
+    }
     if let Some(child) = package.workbook_template.child("definedNames") {
         replacements.push((
             "definedNames",
@@ -1735,6 +1790,106 @@ fn workbook_xml_with_template(
     package
         .workbook_template
         .render(replacements, workbook_child_rank)
+}
+
+fn render_book_views(
+    source: Option<&[u8]>,
+    active_sheet: SheetId,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let Some(source) = source else {
+        return Ok(Some(fragment(|writer| {
+            let active_tab = active_sheet.0.to_string();
+            writer
+                .create_element("bookViews")
+                .write_inner_content(|writer| {
+                    writer
+                        .create_element("workbookView")
+                        .with_attribute(("activeTab", active_tab.as_str()))
+                        .write_empty()?;
+                    Ok(())
+                })?;
+            Ok(())
+        })?));
+    };
+
+    let mut reader = Reader::from_reader(source);
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event().map_err(xml_err)? {
+            Event::Start(element) if element.name().local_name().as_ref() == b"workbookView" => {
+                let after = reader.buffer_position() as usize;
+                return replace_workbook_view(source, before, after, &element, active_sheet, false)
+                    .map(Some);
+            }
+            Event::Empty(element) if element.name().local_name().as_ref() == b"workbookView" => {
+                let after = reader.buffer_position() as usize;
+                return replace_workbook_view(source, before, after, &element, active_sheet, true)
+                    .map(Some);
+            }
+            Event::Eof => {
+                let view = workbook_view_fragment(active_sheet)?;
+                return XmlTemplate::capture(source)?
+                    .render(vec![("workbookView", Some(view))], book_views_child_rank)
+                    .map(Some);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn replace_workbook_view(
+    source: &[u8],
+    before: usize,
+    after: usize,
+    element: &BytesStart<'_>,
+    active_sheet: SheetId,
+    empty: bool,
+) -> Result<Vec<u8>, ParseError> {
+    let mut attributes = attributes_from_fragment(&source[before..after])?;
+    set_attribute(
+        &mut attributes,
+        "activeTab",
+        "activeTab",
+        active_sheet.0.to_string(),
+    );
+    let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+    let mut replacement = BytesStart::new(name);
+    for attribute in &attributes {
+        replacement.push_attribute((attribute.name.as_str(), attribute.value.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    if empty {
+        writer
+            .write_event(Event::Empty(replacement))
+            .map_err(xml_err)?;
+    } else {
+        writer
+            .write_event(Event::Start(replacement))
+            .map_err(xml_err)?;
+    }
+    let mut output = source[..before].to_vec();
+    output.extend_from_slice(&writer.into_inner());
+    output.extend_from_slice(&source[after..]);
+    Ok(output)
+}
+
+fn workbook_view_fragment(active_sheet: SheetId) -> Result<Vec<u8>, ParseError> {
+    fragment(|writer| {
+        let active_tab = active_sheet.0.to_string();
+        writer
+            .create_element("workbookView")
+            .with_attribute(("activeTab", active_tab.as_str()))
+            .write_empty()?;
+        Ok(())
+    })
+}
+
+fn book_views_child_rank(name: &str) -> usize {
+    if name == "workbookView" {
+        0
+    } else {
+        usize::MAX
+    }
 }
 
 /// Patches retained `definedName` elements from the model, which the sheet ops
