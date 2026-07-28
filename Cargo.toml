@@ -22,6 +22,7 @@ ooxml-text = { package = "betteroffice-ooxml-text", path = "crates/ooxml-text", 
 ooxml-drawingml = { package = "betteroffice-drawingml", path = "crates/ooxml-drawingml", version = "0.0.4" }
 docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", version = "0.0.4" }
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.0.4" }
+docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.0.4" }
 docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", version = "0.0.4" }
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.0.4" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.0.4" }
