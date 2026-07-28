@@ -35,6 +35,7 @@ export interface FillRectCmd {
   h: number;
   /** css color string (`#rrggbb`, `rgba(...)`), resolved from theme + tint in Rust. */
   color: string;
+  clip?: Rect;
 }
 
 /**
@@ -54,6 +55,35 @@ export interface LineCmd {
    * serialized at its default in Rust, so a solid line omits the field.
    */
   style?: 'dashed' | 'dotted' | 'double';
+  clip?: Rect;
+}
+
+export type GeometryPathCommand =
+  | { type: 'move'; x: number; y: number }
+  | { type: 'line'; x: number; y: number }
+  | { type: 'quad'; cpx: number; cpy: number; x: number; y: number }
+  | {
+      type: 'cubic';
+      cp1x: number;
+      cp1y: number;
+      cp2x: number;
+      cp2y: number;
+      x: number;
+      y: number;
+    }
+  | { type: 'close' };
+
+export interface PathStroke {
+  color: string;
+  width: number;
+}
+
+export interface PathCmd {
+  op: 'path';
+  commands: GeometryPathCommand[];
+  fill: string;
+  stroke?: PathStroke;
+  clip?: Rect;
 }
 
 /**
@@ -89,12 +119,13 @@ export interface TextCmd {
    * `new` text). Painted normally, but excluded from a11y text recovery.
    */
   ghost?: boolean;
+  chart?: boolean;
 }
 
 /**
  * One draw command; discriminated on `op`.
  */
-export type DrawCmd = FillRectCmd | LineCmd | TextCmd;
+export type DrawCmd = FillRectCmd | LineCmd | PathCmd | TextCmd;
 
 /**
  * Grid metadata for the frame: which sheet cells the visible tracks map to and
@@ -126,6 +157,10 @@ export interface HyperlinkRegion {
   tooltip?: string;
 }
 
+export interface ChartA11yAttrs {
+  label: string;
+}
+
 /**
  * A full frame to paint: logical size plus the ordered command stream. `grid`
  * is optional so a synthetic or pre-grid-metadata frame still type-checks; the
@@ -137,4 +172,5 @@ export interface DisplayList {
   commands: DrawCmd[];
   grid?: GridMeta;
   hyperlinks?: HyperlinkRegion[];
+  charts?: ChartA11yAttrs[];
 }

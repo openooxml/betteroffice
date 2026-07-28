@@ -7,7 +7,7 @@ use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
     ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
-    ChartPointLabel, ChartSeries, ChartSpace,
+    ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -92,7 +92,20 @@ fn apply_color_modifiers(mut color: ColorValue, element: &XmlElement) -> ColorVa
             js_round(value / 100_000.0 * 255.0) as i64
         ));
     }
+    color.luminance_modulation = color_fraction(element, "a:lumMod");
+    color.luminance_offset = color_fraction(element, "a:lumOff");
+    color.saturation_modulation = color_fraction(element, "a:satMod");
+    color.alpha = color_fraction(element, "a:alpha");
     color
+}
+
+/// A `ST_Percentage` in thousandths of a percent, as a fraction.
+fn color_fraction(element: &XmlElement, name: &str) -> Option<f64> {
+    let value = element
+        .child_by_full_name(name)
+        .and_then(|child| child.attribute(None, "val"))
+        .and_then(parse_javascript_integer_prefix)?;
+    (value.is_finite() && (0.0..=1_000_000.0).contains(&value)).then_some(value / 100_000.0)
 }
 
 fn scheme_color(value: &str) -> &str {

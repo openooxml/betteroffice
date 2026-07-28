@@ -5,6 +5,7 @@ use xlsx_model::workbook::Sheet;
 use xlsx_model::{CellRange, CellRef};
 
 use crate::Viewport;
+use crate::chart::resolve_chart_anchor;
 use crate::geometry::GridGeometry;
 
 /// content-pixel rectangle spanning an inclusive cell range, with the viewport
@@ -29,7 +30,32 @@ pub fn viewport_for_used_range(sheet: &Sheet) -> Viewport {
     let range = sheet
         .used_range()
         .unwrap_or_else(|| CellRange::new(CellRef::new(0, 0), CellRef::new(49, 25)));
-    viewport_for_range(sheet, range)
+    let mut viewport = viewport_for_range(sheet, range);
+    let geometry = GridGeometry::new(sheet);
+    let (frozen_rows, frozen_cols) = sheet
+        .freeze_pane
+        .map_or((0, 0), |pane| (pane.rows, pane.cols));
+    for chart in &sheet.charts {
+        let Ok(anchor) = resolve_chart_anchor(chart.anchor, &geometry, frozen_rows, frozen_cols)
+        else {
+            continue;
+        };
+        let x = anchor.rect.x as f32;
+        let y = anchor.rect.y as f32;
+        let right = (anchor.rect.x + anchor.rect.w) as f32;
+        let bottom = (anchor.rect.y + anchor.rect.h) as f32;
+        let viewport_right = viewport.x + viewport.width;
+        let viewport_bottom = viewport.y + viewport.height;
+        let left = viewport.x.min(x);
+        let top = viewport.y.min(y);
+        viewport = Viewport {
+            x: left,
+            y: top,
+            width: viewport_right.max(right) - left,
+            height: viewport_bottom.max(bottom) - top,
+        };
+    }
+    viewport
 }
 
 #[cfg(test)]

@@ -7,7 +7,16 @@
  * no allocation of app state and no reads back from the canvas.
  */
 
-import type { DisplayList, DrawCmd, LineCmd, TextCmd } from '../display-list/types';
+import type {
+  DisplayList,
+  DrawCmd,
+  LineCmd,
+  PathCmd,
+  Rect,
+  TextCmd,
+} from '../display-list/types';
+
+const PX_PER_PT = 96 / 72;
 
 const ALIGN_TO_TEXT_ALIGN: Record<NonNullable<TextCmd['align']>, CanvasTextAlign> = {
   left: 'left',
@@ -42,15 +51,75 @@ export function paintDisplayList(
 function paintCommand(ctx: CanvasRenderingContext2D, cmd: DrawCmd): void {
   switch (cmd.op) {
     case 'fillRect':
-      ctx.fillStyle = cmd.color;
-      ctx.fillRect(cmd.x, cmd.y, cmd.w, cmd.h);
+      paintClipped(ctx, cmd.clip, () => {
+        ctx.fillStyle = cmd.color;
+        ctx.fillRect(cmd.x, cmd.y, cmd.w, cmd.h);
+      });
       return;
     case 'line':
-      paintLine(ctx, cmd);
+      paintClipped(ctx, cmd.clip, () => paintLine(ctx, cmd));
+      return;
+    case 'path':
+      paintClipped(ctx, cmd.clip, () => paintPath(ctx, cmd));
       return;
     case 'text':
       paintText(ctx, cmd);
       return;
+  }
+}
+
+function paintClipped(
+  ctx: CanvasRenderingContext2D,
+  clip: Rect | undefined,
+  paint: () => void
+): void {
+  if (!clip) {
+    paint();
+    return;
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(clip.x, clip.y, clip.w, clip.h);
+  ctx.clip();
+  paint();
+  ctx.restore();
+}
+
+function paintPath(ctx: CanvasRenderingContext2D, cmd: PathCmd): void {
+  ctx.beginPath();
+  for (const command of cmd.commands) {
+    switch (command.type) {
+      case 'move':
+        ctx.moveTo(command.x, command.y);
+        break;
+      case 'line':
+        ctx.lineTo(command.x, command.y);
+        break;
+      case 'quad':
+        ctx.quadraticCurveTo(command.cpx, command.cpy, command.x, command.y);
+        break;
+      case 'cubic':
+        ctx.bezierCurveTo(
+          command.cp1x,
+          command.cp1y,
+          command.cp2x,
+          command.cp2y,
+          command.x,
+          command.y
+        );
+        break;
+      case 'close':
+        ctx.closePath();
+        break;
+    }
+  }
+  ctx.fillStyle = cmd.fill;
+  ctx.fill();
+  if (cmd.stroke) {
+    ctx.strokeStyle = cmd.stroke.color;
+    ctx.lineWidth = cmd.stroke.width;
+    ctx.setLineDash([]);
+    ctx.stroke();
   }
 }
 
@@ -116,24 +185,33 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
 function fontString(cmd: TextCmd): string {
   const style = cmd.italic ? 'italic ' : '';
   const weight = cmd.bold ? 'bold ' : '';
-  const family = cmd.fontFamily ? `"${cmd.fontFamily}", sans-serif` : 'sans-serif';
-  return `${style}${weight}${cmd.fontSize}px ${family}`;
+  const family = cmd.fontFamily
+    ? cmd.chart
+      ? cmd.fontFamily
+      : `"${cmd.fontFamily.replace(/"/g, '\\"')}", sans-serif`
+    : 'sans-serif';
+  return `${style}${weight}${fontSizePx(cmd)}px ${family}`;
+}
+
+function fontSizePx(cmd: TextCmd): number {
+  return cmd.chart ? cmd.fontSize * PX_PER_PT : cmd.fontSize;
 }
 
 function paintDecorations(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   const width = ctx.measureText(cmd.text).width;
   const align = cmd.align ?? 'left';
   const x0 = align === 'right' ? cmd.x - width : align === 'center' ? cmd.x - width / 2 : cmd.x;
-  const thickness = Math.max(cmd.fontSize * 0.05, 0.5);
+  const fontSize = fontSizePx(cmd);
+  const thickness = Math.max(fontSize * 0.05, 0.5);
   ctx.fillStyle = cmd.color;
-  if (cmd.underline) ctx.fillRect(x0, cmd.y + cmd.fontSize * 0.1, width, thickness);
-  if (cmd.strike) ctx.fillRect(x0, cmd.y - cmd.fontSize * 0.26, width, thickness);
+  if (cmd.underline) ctx.fillRect(x0, cmd.y + fontSize * 0.1, width, thickness);
+  if (cmd.strike) ctx.fillRect(x0, cmd.y - fontSize * 0.26, width, thickness);
   if (cmd.dashedUnderline) {
     ctx.save();
     ctx.strokeStyle = cmd.color;
     ctx.lineWidth = thickness;
     ctx.setLineDash([3, 2]);
-    strokeSegment(ctx, x0, cmd.y + cmd.fontSize * 0.1, x0 + width, cmd.y + cmd.fontSize * 0.1);
+    strokeSegment(ctx, x0, cmd.y + fontSize * 0.1, x0 + width, cmd.y + fontSize * 0.1);
     ctx.restore();
   }
 }
@@ -143,8 +221,9 @@ function paintHighlight(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
   const width = metrics.width;
   const align = cmd.align ?? 'left';
   const x0 = align === 'right' ? cmd.x - width : align === 'center' ? cmd.x - width / 2 : cmd.x;
-  const ascent = metrics.actualBoundingBoxAscent || cmd.fontSize * 0.8;
-  const descent = metrics.actualBoundingBoxDescent || cmd.fontSize * 0.2;
+  const fontSize = fontSizePx(cmd);
+  const ascent = metrics.actualBoundingBoxAscent || fontSize * 0.8;
+  const descent = metrics.actualBoundingBoxDescent || fontSize * 0.2;
   ctx.fillStyle = cmd.highlight!;
   ctx.fillRect(x0 - 2, cmd.y - ascent - 1, width + 4, ascent + descent + 2);
 }

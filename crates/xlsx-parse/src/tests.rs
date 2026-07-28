@@ -113,6 +113,27 @@ fn parses_inline_string() {
 }
 
 #[test]
+fn hidden_rows_and_columns_have_zero_render_extent() {
+    let body = r#"
+        <cols>
+            <col min="2" max="3" width="12.5" hidden="1"/>
+            <col min="4" max="4" hidden="1"/>
+        </cols>
+        <sheetData>
+            <row r="2" ht="30" hidden="1"/>
+            <row r="3" hidden="1"/>
+        </sheetData>
+    "#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    let sheet = &wb.sheets[0];
+    assert_eq!(sheet.col_widths.get(&1), Some(&0.0));
+    assert_eq!(sheet.col_widths.get(&2), Some(&0.0));
+    assert_eq!(sheet.col_widths.get(&3), Some(&0.0));
+    assert_eq!(sheet.row_heights.get(&1), Some(&0.0));
+    assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
+}
+
+#[test]
 fn flattens_rich_run_shared_string() {
     let sst = "<sst><si><r><t>Hello </t></r><r><t>World</t></r></si></sst>";
     let mut parts = package(
@@ -2781,6 +2802,13 @@ fn hostile_chart_markup_is_refused_not_survived() {
 
     assert!(crate::chart_space(b"<c:chartSpace xmlns:c=\"c\"/>", &Default::default()).is_none());
     assert!(crate::chart_space(b"not xml at all", &Default::default()).is_none());
+    assert!(
+        crate::chart_space(
+            br#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:bar3DChart/></c:plotArea></c:chart></c:chartSpace>"#,
+            &Default::default(),
+        )
+        .is_none()
+    );
 }
 
 /// A reference carrying markup-significant characters must come back escaped,

@@ -383,6 +383,7 @@ function XlsxEditorContent({
 
   const [sheetInfo, setSheetInfo] = useState<SheetInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [frame, setFrame] = useState<DisplayList | null>(null);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [editing, setEditing] = useState<EditState | null>(null);
@@ -465,6 +466,7 @@ function XlsxEditorContent({
     setBorderStyleChoice(undefined);
     setBorderColorChoice(undefined);
     setCapturedFormat(null);
+    setRenderError(null);
     paintSourceRef.current = null;
     pendingSheetViewRef.current = false;
     if (!file) {
@@ -622,7 +624,10 @@ function XlsxEditorContent({
           width: logicalWidth,
           height: logicalHeight,
         });
-      } catch {
+      } catch (paintError) {
+        frameRef.current = null;
+        setFrame(null);
+        setRenderError(paintError instanceof Error ? paintError.message : String(paintError));
         return;
       }
     } else {
@@ -647,6 +652,7 @@ function XlsxEditorContent({
     }
     paintDisplayList(ctx, dl, dpr * zoom);
     frameRef.current = dl;
+    setRenderError(null);
     setVisibleMergedRanges(nextMergedRanges);
     setFrame(dl);
   }, [activeSheet, t, zoom]);
@@ -1737,25 +1743,49 @@ function XlsxEditorContent({
       </div>
 
       {a11yGrid && (
-        <div style={visuallyHidden} role="grid" aria-label={a11yGrid.label}>
-          <div role="row">
-            <span role="columnheader" />
-            {a11yGrid.columnHeaders.map((h) => (
-              <span key={h.col} role="columnheader">
-                {h.label}
-              </span>
-            ))}
-          </div>
-          {a11yGrid.rows.map((r) => (
-            <div key={r.row} role="row">
-              <span role="rowheader">{r.header}</span>
-              {r.cells.map((c) => (
-                <span key={c.col} role="gridcell" aria-selected={c.selected}>
-                  {c.label}
+        <>
+          <div style={visuallyHidden} role="grid" aria-label={a11yGrid.label}>
+            <div role="row">
+              <span role="columnheader" />
+              {a11yGrid.columnHeaders.map((h) => (
+                <span key={h.col} role="columnheader">
+                  {h.label}
                 </span>
               ))}
             </div>
+            {a11yGrid.rows.map((r) => (
+              <div key={r.row} role="row">
+                <span role="rowheader">{r.header}</span>
+                {r.cells.map((c) => (
+                  <span key={c.col} role="gridcell" aria-selected={c.selected}>
+                    {c.label}
+                  </span>
+                ))}
+              </div>
+            ))}
+          </div>
+          {a11yGrid.charts.map((chart, index) => (
+            <div key={`${index}:${chart.label}`} style={visuallyHidden} role="img" aria-label={chart.label} />
           ))}
+        </>
+      )}
+
+      {renderError && (
+        <div
+          data-testid="xlsx-render-error"
+          role="alert"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'grid',
+            placeItems: 'center',
+            padding: 16,
+            textAlign: 'center',
+            color: '#b00020',
+            background: '#ffffff',
+          }}
+        >
+          {renderError}
         </div>
       )}
 

@@ -21,10 +21,15 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 // the committed, hand-built fixture (regenerate via e2e/fixtures/generate-sample.mjs).
 const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
+const CHART_FIXTURE = resolve(import.meta.dir, '../../test-fixtures/charts.xlsx');
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 
 function sampleBytes(): Uint8Array {
   return new Uint8Array(readFileSync(FIXTURE));
+}
+
+function chartBytes(): Uint8Array {
+  return new Uint8Array(readFileSync(CHART_FIXTURE));
 }
 
 describe('wasm loader', () => {
@@ -68,6 +73,22 @@ describe('wasm loader', () => {
       expect(texts.some((c) => c.op === 'text' && c.text.includes('Quarterly'))).toBe(true);
       // the formula cell's cached total value renders as a number command.
       expect(texts.some((c) => c.op === 'text' && c.text === '157')).toBe(true);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('renders every chart anchor variant through the wasm display list', () => {
+    const handle = openWorkbook(chartBytes());
+    try {
+      const dl = handle.displayList({ x: 0, y: 0, width: 800, height: 800 });
+      expect(dl.charts?.length).toBe(4);
+      expect(dl.commands.some((command) => command.op === 'path')).toBe(true);
+      expect(
+        dl.commands.some(
+          (command) => command.op === 'text' && command.chart && command.text === 'Revenue trend'
+        )
+      ).toBe(true);
     } finally {
       handle.dispose();
     }

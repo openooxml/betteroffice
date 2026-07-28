@@ -9,9 +9,22 @@
 import type { DisplayList, GridMeta } from '../display-list/types';
 import { normalizeRange } from '../selection/index';
 import type { CellRange, Selection } from '../selection/index';
-import type { A11yCell, A11yColumnHeader, A11yGrid, A11yRow, A11yStrings } from './types';
+import type {
+  A11yCell,
+  A11yColumnHeader,
+  A11yGrid,
+  A11yRow,
+  A11yStrings,
+} from './types';
 
-export type { A11yCell, A11yColumnHeader, A11yGrid, A11yRow, A11yStrings } from './types';
+export type {
+  A11yCell,
+  A11yChart,
+  A11yColumnHeader,
+  A11yGrid,
+  A11yRow,
+  A11yStrings,
+} from './types';
 
 // bijective base-26 column letter: 0 -> A, 25 -> Z, 26 -> AA.
 function columnLetter(col: number): string {
@@ -43,7 +56,8 @@ function key(x: number, y: number): string {
 function textByCellOrigin(displayList: DisplayList): Map<string, string> {
   const map = new Map<string, string>();
   for (const cmd of displayList.commands) {
-    if (cmd.op === 'text' && cmd.clip && !cmd.ghost) map.set(key(cmd.clip.x, cmd.clip.y), cmd.text);
+    if (cmd.op === 'text' && cmd.clip && !cmd.ghost && !cmd.chart)
+      map.set(key(cmd.clip.x, cmd.clip.y), cmd.text);
   }
   return map;
 }
@@ -99,7 +113,8 @@ export function buildA11yGrid(
 ): A11yGrid {
   const grid = displayList.grid;
   const label = fill(t.gridLabel, { sheet: sheetName });
-  if (!grid) return { label, sheetName, columnHeaders: [], rows: [] };
+  const charts = (displayList.charts ?? []).map((chart) => ({ label: chart.label }));
+  if (!grid) return { label, sheetName, columnHeaders: [], rows: [], charts };
 
   const cols = grid.colOffsets.length - 1;
   const rows = grid.rowOffsets.length - 1;
@@ -126,5 +141,5 @@ export function buildA11yGrid(
     outRows.push({ row, header: fill(t.rowHeaderLabel, { row: row + 1 }), cells });
   }
 
-  return { label, sheetName, columnHeaders, rows: outRows };
+  return { label, sheetName, columnHeaders, rows: outRows, charts };
 }

@@ -226,6 +226,7 @@ dependencies = [
 name = "betteroffice-xlsx"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-opc",
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -279,6 +280,8 @@ dependencies = [
  "betteroffice-xlsx-render",
  "png",
  "rustybuzz",
+ "serde",
+ "serde_json",
  "tiny-skia",
 ]
 
@@ -286,8 +289,10 @@ dependencies = [
 name = "betteroffice-xlsx-render"
 version = "0.0.4"
 dependencies = [
+ "betteroffice-drawingml",
  "betteroffice-xlsx-model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

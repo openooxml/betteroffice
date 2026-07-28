@@ -329,7 +329,9 @@ fn parse_worksheet(
                     };
                     cur_row = Some(row);
                     col_cursor = 0;
-                    if let Some(h) = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok()) {
+                    if attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value)) {
+                        sheet.row_heights.insert(row, 0.0);
+                    } else if let Some(h) = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok()) {
                         sheet.row_heights.insert(row, h);
                     }
                 }
@@ -503,10 +505,13 @@ fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
 /// apply a `<col>` width across its `[min, max]` span (clamped to sheet bounds).
 /// widths are stored per-column since the model has no column-range concept.
 fn parse_col(e: &quick_xml::events::BytesStart, sheet: &mut Sheet) -> Result<(), ParseError> {
+    let hidden = attr(e, b"hidden")?.is_some_and(|value| is_truthy(&value));
     let width = match attr(e, b"width")?.and_then(|v| v.parse::<f64>().ok()) {
         Some(w) => w,
+        None if hidden => 0.0,
         None => return Ok(()),
     };
+    let width = if hidden { 0.0 } else { width };
     let min = attr(e, b"min")?
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(1);

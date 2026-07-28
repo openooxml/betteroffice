@@ -1,6 +1,7 @@
 //! target-agnostic display list consumed by the canvas and raster backends.
 //! coordinates are viewport-local pixels; colors are `#rrggbb` strings.
 
+use ooxml_drawingml::GeometryPathCommand;
 use serde::Serialize;
 
 /// horizontal text anchoring within a cell's clip rect.
@@ -13,7 +14,7 @@ pub enum Align {
 }
 
 /// a rectangle in viewport-local pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -32,6 +33,8 @@ pub enum DrawCmd {
         w: f32,
         h: f32,
         color: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Rect>,
     },
     Line {
         x1: f32,
@@ -43,6 +46,16 @@ pub enum DrawCmd {
         /// `None` = solid; `"dashed"`/`"dotted"`/`"double"` request a backend stroke pattern.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Rect>,
+    },
+    Path {
+        commands: Vec<GeometryPathCommand>,
+        fill: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stroke: Option<PathStroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Rect>,
     },
     #[serde(rename_all = "camelCase")]
     Text {
@@ -73,11 +86,19 @@ pub enum DrawCmd {
         /// excluded from a11y text recovery.
         #[serde(default, skip_serializing_if = "is_false")]
         ghost: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        chart: bool,
     },
 }
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathStroke {
+    pub color: String,
+    pub width: f32,
 }
 
 /// viewport-local grid boundaries for overlay hit-testing. offset vecs are
@@ -110,6 +131,11 @@ pub struct HyperlinkRegion {
     pub tooltip: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChartA11yAttrs {
+    pub label: String,
+}
+
 /// a full frame for one viewport, sized in pixels; commands are emitted in a
 /// fixed order so serialized output is deterministic.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -120,6 +146,8 @@ pub struct DisplayList {
     pub grid: GridMeta,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hyperlinks: Vec<HyperlinkRegion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub charts: Vec<ChartA11yAttrs>,
 }
 
 /// scale every coordinate, size, stroke width, and font size by `factor`,
@@ -129,12 +157,20 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
         .commands
         .into_iter()
         .map(|c| match c {
-            DrawCmd::FillRect { x, y, w, h, color } => DrawCmd::FillRect {
+            DrawCmd::FillRect {
+                x,
+                y,
+                w,
+                h,
+                color,
+                clip,
+            } => DrawCmd::FillRect {
                 x: x * factor,
                 y: y * factor,
                 w: w * factor,
                 h: h * factor,
                 color,
+                clip: clip.map(|clip| scale_rect(clip, factor)),
             },
             DrawCmd::Line {
                 x1,
@@ -144,6 +180,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 width,
                 color,
                 style,
+                clip,
             } => DrawCmd::Line {
                 x1: x1 * factor,
                 y1: y1 * factor,
@@ -152,6 +189,24 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 width: width * factor,
                 color,
                 style,
+                clip: clip.map(|clip| scale_rect(clip, factor)),
+            },
+            DrawCmd::Path {
+                commands,
+                fill,
+                stroke,
+                clip,
+            } => DrawCmd::Path {
+                commands: commands
+                    .into_iter()
+                    .map(|command| scale_path_command(command, factor))
+                    .collect(),
+                fill,
+                stroke: stroke.map(|stroke| PathStroke {
+                    color: stroke.color,
+                    width: stroke.width * factor,
+                }),
+                clip: clip.map(|clip| scale_rect(clip, factor)),
             },
             DrawCmd::Text {
                 x,
@@ -169,18 +224,14 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 dashed_underline,
                 font_family,
                 ghost,
+                chart,
             } => DrawCmd::Text {
                 x: x * factor,
                 y: y * factor,
                 text,
                 font_size: font_size * factor,
                 color,
-                clip: Rect {
-                    x: clip.x * factor,
-                    y: clip.y * factor,
-                    w: clip.w * factor,
-                    h: clip.h * factor,
-                },
+                clip: scale_rect(clip, factor),
                 align,
                 bold,
                 italic,
@@ -190,6 +241,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 dashed_underline,
                 font_family,
                 ghost,
+                chart,
             },
         })
         .collect();
@@ -217,6 +269,52 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 .collect(),
         },
         hyperlinks: dl.hyperlinks,
+        charts: dl.charts,
+    }
+}
+
+fn scale_rect(rect: Rect, factor: f32) -> Rect {
+    Rect {
+        x: rect.x * factor,
+        y: rect.y * factor,
+        w: rect.w * factor,
+        h: rect.h * factor,
+    }
+}
+
+fn scale_path_command(command: GeometryPathCommand, factor: f32) -> GeometryPathCommand {
+    let factor = f64::from(factor);
+    match command {
+        GeometryPathCommand::Move { x, y } => GeometryPathCommand::Move {
+            x: x * factor,
+            y: y * factor,
+        },
+        GeometryPathCommand::Line { x, y } => GeometryPathCommand::Line {
+            x: x * factor,
+            y: y * factor,
+        },
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => GeometryPathCommand::Quad {
+            cpx: cpx * factor,
+            cpy: cpy * factor,
+            x: x * factor,
+            y: y * factor,
+        },
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => GeometryPathCommand::Cubic {
+            cp1x: cp1x * factor,
+            cp1y: cp1y * factor,
+            cp2x: cp2x * factor,
+            cp2y: cp2y * factor,
+            x: x * factor,
+            y: y * factor,
+        },
+        GeometryPathCommand::Close => GeometryPathCommand::Close,
     }
 }
 
@@ -235,6 +333,7 @@ mod tests {
                     w: 10.0,
                     h: 20.0,
                     color: "#ffffff".into(),
+                    clip: None,
                 },
                 DrawCmd::Line {
                     x1: 0.0,
@@ -244,6 +343,29 @@ mod tests {
                     width: 1.0,
                     color: "#d4d4d4".into(),
                     style: None,
+                    clip: None,
+                },
+                DrawCmd::Path {
+                    commands: vec![
+                        GeometryPathCommand::Move { x: 1.0, y: 2.0 },
+                        GeometryPathCommand::Quad {
+                            cpx: 3.0,
+                            cpy: 4.0,
+                            x: 5.0,
+                            y: 6.0,
+                        },
+                    ],
+                    fill: "#123456".into(),
+                    stroke: Some(PathStroke {
+                        color: "#654321".into(),
+                        width: 2.0,
+                    }),
+                    clip: Some(Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 10.0,
+                        h: 10.0,
+                    }),
                 },
                 DrawCmd::Text {
                     x: 3.0,
@@ -266,6 +388,7 @@ mod tests {
                     dashed_underline: false,
                     font_family: None,
                     ghost: false,
+                    chart: false,
                 },
             ],
             grid: GridMeta {
@@ -277,6 +400,9 @@ mod tests {
                 col_offsets: vec![0.0, 64.0],
             },
             hyperlinks: Vec::new(),
+            charts: vec![ChartA11yAttrs {
+                label: "Revenue chart".into(),
+            }],
         }
     }
 
@@ -286,7 +412,9 @@ mod tests {
         assert_eq!(dl.width, 200.0);
         assert_eq!(dl.height, 100.0);
         match &dl.commands[0] {
-            DrawCmd::FillRect { x, y, w, h, color } => {
+            DrawCmd::FillRect {
+                x, y, w, h, color, ..
+            } => {
                 assert_eq!((*x, *y, *w, *h), (2.0, 4.0, 20.0, 40.0));
                 assert_eq!(color, "#ffffff");
             }
@@ -299,6 +427,27 @@ mod tests {
             _ => panic!("expected line"),
         }
         match &dl.commands[2] {
+            DrawCmd::Path {
+                commands,
+                stroke,
+                clip,
+                ..
+            } => {
+                assert!(matches!(
+                    commands.get(1),
+                    Some(GeometryPathCommand::Quad {
+                        cpx,
+                        cpy,
+                        x,
+                        y
+                    }) if (*cpx, *cpy, *x, *y) == (6.0, 8.0, 10.0, 12.0)
+                ));
+                assert_eq!(stroke.as_ref().map(|stroke| stroke.width), Some(4.0));
+                assert_eq!(clip.as_ref().map(|clip| clip.w), Some(20.0));
+            }
+            _ => panic!("expected path"),
+        }
+        match &dl.commands[3] {
             DrawCmd::Text {
                 x,
                 font_size,
@@ -315,6 +464,7 @@ mod tests {
         }
         assert_eq!(dl.grid.start_row, 1);
         assert_eq!(dl.grid.col_offsets, vec![0.0, 128.0]);
+        assert_eq!(dl.charts[0].label, "Revenue chart");
     }
 
     #[test]

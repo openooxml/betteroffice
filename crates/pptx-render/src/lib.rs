@@ -425,7 +425,7 @@ mod tests {
               "legend":{"position":"right","visible":true},
               "series":[{"name":"North","categories":["Q1","Q2"],"values":[3,1],"color":"#6254E7"}],
               "plotGroups":[{"chartType":"column","axisIds":[],"varyColors":false,
-                "dataLabels":{"showValue":true},
+                "showDataLabels":true,
                 "series":[{"name":"North","categories":["Q1","Q2"],"values":[3,1],"color":"#6254E7"}]}]
             }
           }]

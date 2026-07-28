@@ -6,7 +6,7 @@ use crate::xml::XmlElement;
 
 pub use ooxml_drawingml::{ColorValue, parse_color_value};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShadingProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,7 +80,7 @@ pub fn parse_shading_properties(shading: Option<&XmlElement>) -> Option<ShadingP
     (properties != ShadingProperties::default()).then_some(properties)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnderlineValue {
     pub style: String,

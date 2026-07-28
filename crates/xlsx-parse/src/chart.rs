@@ -43,8 +43,19 @@ const TYPE_CHART: &str = "chart";
 /// the workbook theme. `None` when the part carries no recognized plot.
 pub fn chart_space(part: &[u8], theme: &Theme) -> Option<ChartSpace> {
     let root = parse_tree(part).ok()?;
+    if has_3d_plot(&root, 0) {
+        return None;
+    }
     let drawing_theme = drawing_theme(theme);
     parse_chart_space(&ChartNode::new(&root, &drawing_theme))
+}
+
+fn has_3d_plot(element: &Element, depth: usize) -> bool {
+    element.local_name().ends_with("3DChart")
+        || (depth < MAX_DEPTH
+            && element
+                .child_elements()
+                .any(|child| has_3d_plot(child, depth + 1)))
 }
 
 /// A chart element with the workbook theme bound to it, so scheme colors
@@ -218,20 +229,22 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
     for child in root.child_elements().filter(is_anchor) {
         let anchor = match child.local_name() {
             "twoCellAnchor" => ChartAnchor::TwoCell {
-                from: anchor_cell(child.child("from")),
-                to: anchor_cell(child.child("to")),
-                edit_as: child
-                    .attribute(None, "editAs")
-                    .and_then(AnchorEditAs::from_sml)
-                    .unwrap_or_default(),
+                from: anchor_cell(child.child("from"))?,
+                to: anchor_cell(child.child("to"))?,
+                edit_as: match child.attribute(None, "editAs") {
+                    Some(value) => AnchorEditAs::from_sml(value).ok_or_else(|| {
+                        ParseError::Malformed(format!("invalid chart editAs value {value:?}"))
+                    })?,
+                    None => AnchorEditAs::default(),
+                },
             },
             "oneCellAnchor" => ChartAnchor::OneCell {
-                from: anchor_cell(child.child("from")),
-                extent: anchor_extent(child.child("ext")),
+                from: anchor_cell(child.child("from"))?,
+                extent: anchor_extent(child.child("ext"))?,
             },
             _ => ChartAnchor::Absolute {
-                pos: anchor_pos(child.child("pos")),
-                extent: anchor_extent(child.child("ext")),
+                pos: anchor_pos(child.child("pos"))?,
+                extent: anchor_extent(child.child("ext"))?,
             },
         };
         if anchors.len() >= MAX_CHART_ANCHORS {
@@ -269,62 +282,62 @@ fn chart_relationship_id(element: &Element, depth: usize) -> Option<String> {
         .find_map(|child| chart_relationship_id(child, depth + 1))
 }
 
-fn anchor_cell(element: Option<&Element>) -> AnchorCell {
-    let Some(element) = element else {
-        return AnchorCell::default();
-    };
-    AnchorCell {
-        col: child_index(element, "col", MAX_COLS),
-        col_off: child_number(element, "colOff"),
-        row: child_index(element, "row", MAX_ROWS),
-        row_off: child_number(element, "rowOff"),
-    }
+fn anchor_cell(element: Option<&Element>) -> Result<AnchorCell, ParseError> {
+    let element =
+        element.ok_or_else(|| ParseError::Malformed("chart anchor has no cell".into()))?;
+    Ok(AnchorCell {
+        col: child_index(element, "col", MAX_COLS)?,
+        col_off: child_number(element, "colOff")?,
+        row: child_index(element, "row", MAX_ROWS)?,
+        row_off: child_number(element, "rowOff")?,
+    })
 }
 
-fn anchor_extent(element: Option<&Element>) -> AnchorExtent {
-    let Some(element) = element else {
-        return AnchorExtent::default();
-    };
-    AnchorExtent {
-        cx: attribute_number(element, "cx"),
-        cy: attribute_number(element, "cy"),
-    }
+fn anchor_extent(element: Option<&Element>) -> Result<AnchorExtent, ParseError> {
+    let element =
+        element.ok_or_else(|| ParseError::Malformed("chart anchor has no extent".into()))?;
+    Ok(AnchorExtent {
+        cx: attribute_number(element, "cx")?,
+        cy: attribute_number(element, "cy")?,
+    })
 }
 
-fn anchor_pos(element: Option<&Element>) -> AnchorPos {
-    let Some(element) = element else {
-        return AnchorPos::default();
-    };
-    AnchorPos {
-        x: attribute_number(element, "x"),
-        y: attribute_number(element, "y"),
-    }
+fn anchor_pos(element: Option<&Element>) -> Result<AnchorPos, ParseError> {
+    let element = element
+        .ok_or_else(|| ParseError::Malformed("absolute chart anchor has no position".into()))?;
+    Ok(AnchorPos {
+        x: attribute_number(element, "x")?,
+        y: attribute_number(element, "y")?,
+    })
 }
 
-/// a grid index, clamped into the sheet so a hostile drawing can never reach
-/// an out-of-range address.
-fn child_index(element: &Element, local: &str, limit: u32) -> u32 {
-    element
+/// Reads an in-grid chart anchor index.
+fn child_index(element: &Element, local: &str, limit: u32) -> Result<u32, ParseError> {
+    let value = element
         .child(local)
         .map(Element::text_content)
         .and_then(|text| text.trim().parse::<u32>().ok())
-        .unwrap_or(0)
-        .min(limit.saturating_sub(1))
+        .filter(|value| *value < limit)
+        .ok_or_else(|| ParseError::Malformed(format!("invalid chart anchor {local}")))?;
+    Ok(value)
 }
 
-fn child_number(element: &Element, local: &str) -> i64 {
-    element
-        .child(local)
-        .map(Element::text_content)
-        .and_then(|text| text.trim().parse::<i64>().ok())
-        .unwrap_or(0)
+fn child_number(element: &Element, local: &str) -> Result<i64, ParseError> {
+    let Some(child) = element.child(local) else {
+        return Ok(0);
+    };
+    child
+        .text_content()
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| ParseError::Malformed(format!("invalid chart anchor {local}")))
 }
 
-fn attribute_number(element: &Element, name: &str) -> i64 {
+fn attribute_number(element: &Element, name: &str) -> Result<i64, ParseError> {
     element
         .attribute(None, name)
         .and_then(|value| value.trim().parse::<i64>().ok())
-        .unwrap_or(0)
+        .ok_or_else(|| ParseError::Malformed(format!("invalid chart anchor {name}")))
 }
 
 /// The cache sitting beside a `c:f`: the points a consumer reads when it does

@@ -16,8 +16,7 @@ use crate::relationships::{
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
 pub use ooxml_drawingml::chart::{
-    ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
-    ChartPointLabel, ChartSeries,
+    ChartAxes, ChartAxis, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint, ChartSeries,
 };
 
 const MAX_DEEP_DEPTH: usize = 64;

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
+use ooxml_drawingml::chart::ChartSpace;
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
@@ -16,10 +17,13 @@ use xlsx_ops::{
     cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
-    DisplayList, GhostEdit, GridGeometry, Viewport, build_display_list_with_ghosts, display_text,
+    DisplayList, GhostEdit, GridGeometry, RenderError, Viewport,
+    build_display_list_with_charts_and_ghosts, display_text,
 };
 #[cfg(feature = "raster")]
-use xlsx_render::{build_display_list, scaled, viewport_for_range, viewport_for_used_range};
+use xlsx_render::{
+    build_display_list_with_charts, scaled, viewport_for_range, viewport_for_used_range,
+};
 
 use crate::authority::{
     AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate,
@@ -1291,12 +1295,12 @@ impl Workbook {
             }
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
-        Ok(build_display_list_with_ghosts(
-            &self.model,
-            sheet,
-            viewport,
-            &ghosts,
-        ))
+        let source_package = self.source_package.as_ref();
+        let theme = &self.model.styles.theme;
+        build_display_list_with_charts_and_ghosts(&self.model, sheet, viewport, &ghosts, |chart| {
+            resolve_chart_space(source_package, theme, chart)
+        })
+        .map_err(Error::from)
     }
 
     #[cfg(feature = "raster")]
@@ -1343,7 +1347,12 @@ impl Workbook {
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
         validate_render_size(width, height)?;
         validate_display_region(sheet_ref, &viewport)?;
-        let display_list = build_display_list(&self.model, sheet, &viewport);
+        let source_package = self.source_package.as_ref();
+        let theme = &self.model.styles.theme;
+        let display_list =
+            build_display_list_with_charts(&self.model, sheet, &viewport, |chart| {
+                resolve_chart_space(source_package, theme, chart)
+            })?;
         let display_list = if options.scale == 1.0 {
             display_list
         } else {
@@ -2663,6 +2672,24 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
         return Err(Error::InvalidViewport);
     }
     Ok(())
+}
+
+fn resolve_chart_space(
+    package: Option<&xlsx_parse::PreservedPackage>,
+    theme: &xlsx_model::Theme,
+    chart: &SheetChart,
+) -> std::result::Result<ChartSpace, RenderError> {
+    let package = package.ok_or_else(|| RenderError::ChartSourceUnavailable {
+        part: chart.part.clone(),
+    })?;
+    let bytes = package
+        .part_bytes(&chart.part)
+        .ok_or_else(|| RenderError::ChartPartMissing {
+            part: chart.part.clone(),
+        })?;
+    xlsx_parse::chart_space(bytes, theme).ok_or_else(|| RenderError::ChartParseFailed {
+        part: chart.part.clone(),
+    })
 }
 
 fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<()> {

@@ -16,6 +16,7 @@ default = ["raster"]
 raster = ["dep:xlsx-raster"]
 
 [dependencies]
+ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
 xlsx-model.workspace = true
 xlsx-parse.workspace = true

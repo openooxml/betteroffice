@@ -1,10 +1,13 @@
 //! grid geometry and the target-agnostic display list: turns a workbook
 //! viewport into draw commands. never imports canvas, dom, or any raster backend.
 
+pub mod chart;
 pub mod display_list;
 pub mod geometry;
 pub mod region;
 
+pub use ooxml_drawingml::GeometryPathCommand;
+use ooxml_drawingml::chart::ChartSpace;
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
@@ -13,9 +16,17 @@ use xlsx_model::numfmt::{builtin_format_code, format_value};
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet, Theme};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::Sheet;
-use xlsx_model::{CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetId, VAlign, Workbook};
+use xlsx_model::{
+    CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
+};
 
-pub use display_list::{Align, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, Rect, scaled};
+pub use chart::{
+    AnchorError, MAX_CHART_OPS_PER_FRAME, RenderError, ResolvedChartAnchor, resolve_chart_anchor,
+};
+pub use display_list::{
+    Align, ChartA11yAttrs, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, PathStroke, Rect,
+    scaled,
+};
 pub use geometry::GridGeometry;
 pub use region::{viewport_for_range, viewport_for_used_range};
 
@@ -226,20 +237,53 @@ struct CellBox {
     clip: Rect,
 }
 
-/// build the display list for one viewport of one sheet. commands are emitted
-/// background -> fills -> gridlines -> borders -> text -> pane dividers.
-pub fn build_display_list(wb: &Workbook, sheet: SheetId, viewport: &Viewport) -> DisplayList {
+/// Builds a chart-free display list for one worksheet viewport.
+pub fn build_display_list(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+) -> Result<DisplayList, RenderError> {
     build_display_list_with_ghosts(wb, sheet, viewport, &[])
 }
 
-/// like [`build_display_list`], with ghost pairs painted in place of the
-/// committed text of each ghost's cell.
+/// Builds a chart-free display list with pending edit ghosts.
 pub fn build_display_list_with_ghosts(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
-) -> DisplayList {
+) -> Result<DisplayList, RenderError> {
+    build_display_list_with_charts_and_ghosts(wb, sheet, viewport, ghosts, |chart| {
+        Err(RenderError::ChartSourceUnavailable {
+            part: chart.part.clone(),
+        })
+    })
+}
+
+/// Builds a display list using a lazy chart-part resolver.
+pub fn build_display_list_with_charts<F>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+{
+    build_display_list_with_charts_and_ghosts(wb, sheet, viewport, &[], resolver)
+}
+
+/// Builds a display list with charts and pending edit ghosts.
+pub fn build_display_list_with_charts_and_ghosts<F>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    mut resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+{
     let mut commands = Vec::new();
 
     commands.push(DrawCmd::FillRect {
@@ -248,16 +292,18 @@ pub fn build_display_list_with_ghosts(
         w: viewport.width,
         h: viewport.height,
         color: BACKGROUND_COLOR.to_string(),
+        clip: None,
     });
 
     let Some(sheet_ref) = wb.sheet(sheet) else {
-        return DisplayList {
+        return Ok(DisplayList {
             width: viewport.width,
             height: viewport.height,
             commands,
             grid: GridMeta::default(),
             hyperlinks: Vec::new(),
-        };
+            charts: Vec::new(),
+        });
     };
 
     let styles = &wb.styles;
@@ -334,6 +380,7 @@ pub fn build_display_list_with_ghosts(
             w: clip.w,
             h: clip.h,
             color: hex,
+            clip: None,
         });
     }
 
@@ -352,6 +399,7 @@ pub fn build_display_list_with_ghosts(
             width: GRIDLINE_WIDTH,
             color: GRIDLINE_COLOR.to_string(),
             style: None,
+            clip: None,
         });
     }
     for &y in &row_offsets {
@@ -363,6 +411,7 @@ pub fn build_display_list_with_ghosts(
             width: GRIDLINE_WIDTH,
             color: GRIDLINE_COLOR.to_string(),
             style: None,
+            clip: None,
         });
     }
 
@@ -441,6 +490,7 @@ pub fn build_display_list_with_ghosts(
             dashed_underline: false,
             font_family: font.and_then(|f| f.name.clone()),
             ghost: false,
+            chart: false,
         });
     }
 
@@ -471,6 +521,7 @@ pub fn build_display_list_with_ghosts(
             dashed_underline: false,
             font_family: None,
             ghost: false,
+            chart: false,
         });
     }
 
@@ -498,6 +549,18 @@ pub fn build_display_list_with_ghosts(
         emit_ghost(&mut commands, ghost, bx, font, align);
     }
 
+    let mut charts = Vec::new();
+    chart::render_charts(
+        sheet_ref,
+        &geom,
+        viewport,
+        frozen_rows,
+        frozen_cols,
+        &mut commands,
+        &mut charts,
+        &mut resolver,
+    )?;
+
     if let Some(x) = cols.divider {
         commands.push(DrawCmd::Line {
             x1: x,
@@ -507,6 +570,7 @@ pub fn build_display_list_with_ghosts(
             width: PANE_DIVIDER_WIDTH,
             color: PANE_DIVIDER_COLOR.to_string(),
             style: None,
+            clip: None,
         });
     }
     if let Some(y) = rows.divider {
@@ -518,16 +582,18 @@ pub fn build_display_list_with_ghosts(
             width: PANE_DIVIDER_WIDTH,
             color: PANE_DIVIDER_COLOR.to_string(),
             style: None,
+            clip: None,
         });
     }
 
-    DisplayList {
+    Ok(DisplayList {
         width: viewport.width,
         height: viewport.height,
         commands,
         grid,
         hyperlinks,
-    }
+        charts,
+    })
 }
 
 /// paint one pending edit inside a cell box.
@@ -581,6 +647,7 @@ fn emit_ghost(
             dashed_underline: preview,
             font_family: font.family.clone(),
             ghost: preview,
+            chart: false,
         });
     };
 
@@ -913,6 +980,7 @@ fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &BorderEdge, theme: &Th
         width,
         color,
         style,
+        clip: None,
     }
 }
 
@@ -964,7 +1032,7 @@ mod tests {
             width: 400.0,
             height: 100.0,
         };
-        let dl = build_display_list(&wb, SheetId(0), &vp);
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
 
         assert_eq!(dl.width, 400.0);
         assert!(matches!(dl.commands[0], DrawCmd::FillRect { .. }));
@@ -1029,7 +1097,8 @@ mod tests {
                 width: 400.0,
                 height: 120.0,
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(dl.hyperlinks.len(), 2);
         assert_eq!(dl.hyperlinks[0].right, 1);
@@ -1064,7 +1133,7 @@ mod tests {
             width: dc * 2.0,
             height: dr * 1.0,
         };
-        let dl = build_display_list(&wb, SheetId(0), &vp);
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
 
         assert_eq!(dl.grid.start_col, 1);
         assert_eq!(dl.grid.start_row, 2);
@@ -1095,7 +1164,8 @@ mod tests {
                 width: dc * 3.0,
                 height: dr * 3.0,
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(dl.grid.start_col, 0);
         assert_eq!(dl.grid.start_row, 0);
@@ -1223,7 +1293,8 @@ mod tests {
             width: 200.0,
             height: 60.0,
         };
-        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "10", "42")]);
+        let dl = build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "10", "42")])
+            .unwrap();
 
         let texts = text_cmds(&dl);
         assert_eq!(texts.len(), 2);
@@ -1268,7 +1339,8 @@ mod tests {
                 "7",
                 CellValue::Number { value: 7.0 },
             )],
-        );
+        )
+        .unwrap();
 
         let texts = text_cmds(&dl);
         assert_eq!(texts, vec![("7", GHOST_INS_COLOR, false, Align::Right)]);
@@ -1321,7 +1393,8 @@ mod tests {
                 ghost_with_alignment_value(0, 0, "", "7", CellValue::Number { value: 7.0 }),
                 ghost_with_alignment_value(1, 0, "7", "", CellValue::Number { value: 7.0 }),
             ],
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             text_cmds(&dl),
@@ -1350,7 +1423,8 @@ mod tests {
             SheetId(0),
             &vp,
             &[ghost(0, 0, "previous long value", "replacement long value")],
-        );
+        )
+        .unwrap();
 
         let texts = text_cmds(&dl);
         assert_eq!(texts.len(), 2);
@@ -1389,7 +1463,8 @@ mod tests {
             SheetId(0),
             &vp,
             &[ghost(0, 0, "previous", "replacement")],
-        );
+        )
+        .unwrap();
 
         let lines: Vec<(f32, f32)> = dl
             .commands
@@ -1429,7 +1504,8 @@ mod tests {
             height: 60.0,
         };
         let dl =
-            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "4855", "4855")]);
+            build_display_list_with_ghosts(&wb, SheetId(0), &vp, &[ghost(0, 0, "4855", "4855")])
+                .unwrap();
 
         assert_eq!(
             text_cmds(&dl),
@@ -1461,7 +1537,8 @@ mod tests {
                 height: 60.0,
             },
             &[ghost(0, 0, "10", "42")],
-        );
+        )
+        .unwrap();
         let styles: Vec<_> = dl
             .commands
             .iter()
@@ -1500,7 +1577,7 @@ mod tests {
             width: 400.0,
             height: 100.0,
         };
-        let dl = build_display_list(&wb, SheetId(0), &vp);
+        let dl = build_display_list(&wb, SheetId(0), &vp).unwrap();
 
         let texts: Vec<_> = dl
             .commands

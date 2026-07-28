@@ -89,6 +89,17 @@ describe('buildA11yGrid', () => {
     expect(g.rows[0].cells[1].text).toBe('42');
   });
 
+  it('exposes chart labels without treating chart text as cell text', () => {
+    const dl = sampleDisplayList();
+    const chartText = textCmd({ x: 0, y: 0, w: 80, h: 20 }, 'Chart title');
+    if (chartText.op === 'text') chartText.chart = true;
+    dl.commands.push(chartText);
+    dl.charts = [{ label: 'Column chart titled Revenue with 2 series' }];
+    const g = buildA11yGrid(dl, null, 'Sheet1', strings);
+    expect(g.rows[0].cells[0].text).toBe('');
+    expect(g.charts).toEqual([{ label: 'Column chart titled Revenue with 2 series' }]);
+  });
+
   it('addresses columns past Z with bijective letters', () => {
     const dl: DisplayList = {
       width: 80,

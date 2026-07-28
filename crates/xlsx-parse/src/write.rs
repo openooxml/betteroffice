@@ -2410,12 +2410,16 @@ fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
     w.create_element("cols").write_inner_content(|w| {
         for (&col, &width) in &sheet.col_widths {
             let n = (col as u64 + 1).to_string();
-            w.create_element("col")
-                .with_attribute(("min", n.as_str()))
-                .with_attribute(("max", n.as_str()))
-                .with_attribute(("width", fmt_num(width).as_str()))
-                .with_attribute(("customWidth", "1"))
-                .write_empty()?;
+            let width = fmt_num(width);
+            let mut element = BytesStart::new("col");
+            element.push_attribute(("min", n.as_str()));
+            element.push_attribute(("max", n.as_str()));
+            element.push_attribute(("width", width.as_str()));
+            element.push_attribute(("customWidth", "1"));
+            if width == "0" {
+                element.push_attribute(("hidden", "1"));
+            }
+            w.write_event(Event::Empty(element))?;
         }
         Ok(())
     })?;
@@ -2438,6 +2442,9 @@ fn write_row(
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));
         start.push_attribute(("customHeight", "1"));
+        if h == "0" {
+            start.push_attribute(("hidden", "1"));
+        }
     }
     w.write_event(Event::Start(start))?;
     for (addr, cell) in sheet.iter_cells().filter(|(a, _)| a.row == row) {

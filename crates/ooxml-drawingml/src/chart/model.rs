@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A parsed `c:chartSpace`, free of any host-package metadata.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSpace {
     pub chart_type: String,
@@ -15,16 +15,46 @@ pub struct ChartSpace {
     pub plot_groups: Vec<ChartPlotGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub axis_list: Option<Vec<ChartAxis>>,
+    /// `c:txPr` on `c:chartSpace`: the root of chart text inheritance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<ChartTextProperties>,
+    /// `c:txPr` on `c:title`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_text: Option<ChartTextProperties>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChartLegend {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
     pub visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<ChartTextProperties>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Run properties read off a `c:txPr`, all optional so an absent one inherits.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartTextProperties {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+impl ChartTextProperties {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSeries {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,19 +80,27 @@ pub struct ChartSeries {
     pub marker: Option<ChartMarker>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `c:xVal` of a scatter or bubble series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_values: Option<Vec<f64>>,
+    /// `c:bubbleSize` of a bubble series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_sizes: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_labels: Option<ChartDataLabels>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChartMarker {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChartPoint {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<f64>,
@@ -71,46 +109,50 @@ pub struct ChartPoint {
     pub color: String,
 }
 
-/// Data-label settings at one cascade level.
+/// A `c:dLbls`, every switch optional so an unset one inherits its parent.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDataLabels {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_value: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_category_name: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_series_name: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_percent: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_legend_key: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_bubble_size: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<ChartTextProperties>,
+    /// Per-point `c:dLbl` overrides; never nested further.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub points: Option<Vec<ChartPointLabel>>,
 }
 
-/// One point-level data-label override.
+/// One `c:dLbl`: an index plus the switches that override the series default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartPointLabel {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Literal `c:tx` text, which replaces every composed field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     pub labels: ChartDataLabels,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartPlotGroup {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,11 +170,36 @@ pub struct ChartPlotGroup {
     pub first_slice_angle: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hole_size: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_data_labels: bool,
+    /// `c:scatterStyle`: `lineMarker`, `marker`, `smoothMarker`, `line`, `smooth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scatter_style: Option<String>,
+    /// `c:radarStyle`: `standard`, `marker`, `filled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radar_style: Option<String>,
+    /// `c:bubbleScale`, a percentage of the default bubble size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bubble_scale: Option<f64>,
+    /// `c:sizeRepresents`: `area` or `w`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_represents: Option<String>,
+    /// `c:wireframe` of a surface chart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireframe: Option<bool>,
+    /// `c:hiLowLines` of a stock or line chart.
+    #[serde(default)]
+    pub hi_low_lines: bool,
+    /// `c:upDownBars` of a stock or line chart.
+    #[serde(default)]
+    pub up_down_bars: bool,
+    /// `c:marker` of a line chart, which switches every series marker off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_labels: Option<ChartDataLabels>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChartAxes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<ChartAxis>,
@@ -140,7 +207,7 @@ pub struct ChartAxes {
     pub value: Option<ChartAxis>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartAxis {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,4 +245,10 @@ pub struct ChartAxis {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_label_position: Option<String>,
     pub hidden: bool,
+    #[serde(default)]
+    pub major_gridlines: bool,
+    #[serde(default)]
+    pub minor_gridlines: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<ChartTextProperties>,
 }

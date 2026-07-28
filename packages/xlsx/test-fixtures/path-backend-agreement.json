@@ -1,0 +1,24 @@
+{
+  "commands": [
+    { "type": "move", "x": 2, "y": 3 },
+    { "type": "line", "x": 11, "y": 5 },
+    { "type": "quad", "cpx": 17, "cpy": 2, "x": 19, "y": 12 },
+    {
+      "type": "cubic",
+      "cp1x": 20,
+      "cp1y": 16,
+      "cp2x": 7,
+      "cp2y": 21,
+      "x": 3,
+      "y": 14
+    },
+    { "type": "close" }
+  ],
+  "trace": [
+    { "verb": "move", "points": [2, 3] },
+    { "verb": "line", "points": [11, 5] },
+    { "verb": "quad", "points": [17, 2, 19, 12] },
+    { "verb": "cubic", "points": [20, 16, 7, 21, 3, 14] },
+    { "verb": "close", "points": [] }
+  ]
+}

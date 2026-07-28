@@ -79,8 +79,9 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    PlotAxisRange, PlotAxisTitles, PlotChart, PlotGroup, PlotLegend, PlotMarker, PlotOp, PlotPoint,
-    PlotRect, PlotSeries, PlotSink, chart_aria_label, plot_chart_into,
+    PlotAxis, PlotAxisKind, PlotAxisRange, PlotAxisTitles, PlotChart, PlotChartText,
+    PlotDataLabels, PlotGroup, PlotLegend, PlotMarker, PlotMarkerSymbol, PlotOp, PlotPoint,
+    PlotRect, PlotSeries, PlotSink, PlotTextStyle, chart_aria_label, plot_chart_into,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -2179,6 +2180,27 @@ struct ChartIn {
     decorative: Option<bool>,
     #[serde(default)]
     plot_groups: Vec<ChartPlotGroupIn>,
+    #[serde(default)]
+    axis_list: Vec<ChartAxisIn>,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
+    #[serde(default)]
+    title_text: Option<ChartTextIn>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartTextIn {
+    #[serde(default)]
+    font: Option<String>,
+    #[serde(default)]
+    size_pt: Option<f64>,
+    #[serde(default)]
+    bold: Option<bool>,
+    #[serde(default)]
+    italic: Option<bool>,
+    #[serde(default)]
+    color: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2190,6 +2212,63 @@ struct ChartPlotGroupIn {
     grouping: Option<String>,
     #[serde(default)]
     series: Vec<ChartSeriesIn>,
+    #[serde(default)]
+    overlap: Option<f64>,
+    #[serde(default)]
+    gap_width: Option<f64>,
+    #[serde(default)]
+    hole_size: Option<f64>,
+    #[serde(default)]
+    first_slice_angle: Option<f64>,
+    #[serde(default)]
+    vary_colors: bool,
+    #[serde(default)]
+    scatter_style: Option<String>,
+    #[serde(default)]
+    radar_style: Option<String>,
+    #[serde(default)]
+    bubble_scale: Option<f64>,
+    #[serde(default)]
+    size_represents: Option<String>,
+    #[serde(default)]
+    wireframe: Option<bool>,
+    #[serde(default)]
+    hi_low_lines: bool,
+    #[serde(default)]
+    up_down_bars: bool,
+    #[serde(default)]
+    marker: Option<bool>,
+    #[serde(default)]
+    axis_ids: Vec<String>,
+    #[serde(default)]
+    data_labels: Option<ChartDataLabelsIn>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartDataLabelsIn {
+    #[serde(default)]
+    delete: Option<bool>,
+    #[serde(default)]
+    show_value: Option<bool>,
+    #[serde(default)]
+    show_category_name: Option<bool>,
+    #[serde(default)]
+    show_series_name: Option<bool>,
+    #[serde(default)]
+    show_percent: Option<bool>,
+    #[serde(default)]
+    show_legend_key: Option<bool>,
+    #[serde(default)]
+    show_bubble_size: Option<bool>,
+    #[serde(default)]
+    separator: Option<String>,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(default)]
+    number_format: Option<String>,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2209,6 +2288,14 @@ struct ChartSeriesIn {
     grouping: Option<String>,
     #[serde(default)]
     marker: Option<Value>,
+    #[serde(default)]
+    x_values: Vec<f64>,
+    #[serde(default)]
+    bubble_sizes: Vec<f64>,
+    #[serde(default)]
+    smooth: bool,
+    #[serde(default)]
+    data_labels: Option<ChartDataLabelsIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2224,6 +2311,8 @@ struct ChartPointIn {
     marker: Option<Value>,
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    explosion: Option<f64>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2233,6 +2322,8 @@ struct ChartLegendIn {
     position: Option<String>,
     #[serde(default)]
     visible: Option<bool>,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2242,11 +2333,42 @@ struct ChartAxesIn {
 }
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ChartAxisIn {
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default)]
     min: Option<f64>,
     #[serde(default)]
     max: Option<f64>,
+    #[serde(default)]
+    axis_type: Option<String>,
+    #[serde(default)]
+    logarithmic_base: Option<f64>,
+    #[serde(default)]
+    reversed: bool,
+    #[serde(default)]
+    major_unit: Option<f64>,
+    #[serde(default)]
+    minor_unit: Option<f64>,
+    #[serde(default)]
+    major_tick_mark: Option<String>,
+    #[serde(default)]
+    minor_tick_mark: Option<String>,
+    #[serde(default)]
+    major_gridlines: bool,
+    #[serde(default)]
+    minor_gridlines: bool,
+    #[serde(default)]
+    number_format: Option<String>,
+    #[serde(default)]
+    position: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    text: Option<ChartTextIn>,
 }
 
 #[derive(Deserialize)]
@@ -7578,9 +7700,131 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
             .map(|group| PlotGroup {
                 chart_type: group.chart_type.as_deref(),
                 grouping: group.grouping.as_deref(),
-                series: group.series.iter().map(plot_series_from).collect(),
+                series: group
+                    .series
+                    .iter()
+                    .map(|series| {
+                        let mut plotted = plot_series_from(series);
+                        plotted.labels = plot_labels_from(
+                            group.data_labels.as_ref(),
+                            series.data_labels.as_ref(),
+                        );
+                        for point in &mut plotted.points {
+                            point.labels = plotted.labels;
+                        }
+                        plotted
+                    })
+                    .collect(),
+                overlap: group.overlap,
+                gap_width: group.gap_width,
+                hole_size: group.hole_size,
+                first_slice_angle: group.first_slice_angle,
+                vary_colors: group.vary_colors,
+                scatter_style: group.scatter_style.as_deref(),
+                radar_style: group.radar_style.as_deref(),
+                bubble_scale: group.bubble_scale,
+                size_represents: group.size_represents.as_deref(),
+                wireframe: group.wireframe,
+                hi_low_lines: group.hi_low_lines,
+                up_down_bars: group.up_down_bars,
+                markers: group.marker,
+                axis_ids: group.axis_ids.iter().map(String::as_str).collect(),
             })
             .collect(),
+        axes: chart.axis_list.iter().map(plot_axis_from).collect(),
+        text: PlotChartText {
+            chart: plot_text_from(chart.text.as_ref()),
+            title: plot_text_from(chart.title_text.as_ref()),
+            legend: plot_text_from(
+                chart
+                    .legend
+                    .as_ref()
+                    .and_then(|legend| legend.text.as_ref()),
+            ),
+        },
+    }
+}
+
+fn plot_text_from(text: Option<&ChartTextIn>) -> PlotTextStyle<'_> {
+    text.map(|text| PlotTextStyle {
+        font: text.font.as_deref(),
+        size_pt: text.size_pt,
+        bold: text.bold,
+        italic: text.italic,
+        color: text.color.as_deref(),
+    })
+    .unwrap_or_default()
+}
+
+/// Merges a series `dataLabels` over its plot group's, matching the shared
+/// geometry's inheritance.
+fn plot_labels_from<'a>(
+    group: Option<&'a ChartDataLabelsIn>,
+    series: Option<&'a ChartDataLabelsIn>,
+) -> Option<PlotDataLabels<'a>> {
+    let levels = [series, group];
+    levels.iter().copied().flatten().next()?;
+    if levels
+        .iter()
+        .copied()
+        .flatten()
+        .find_map(|labels| labels.delete)
+        == Some(true)
+    {
+        return None;
+    }
+    let switch = |read: fn(&ChartDataLabelsIn) -> Option<bool>| {
+        series
+            .and_then(read)
+            .or_else(|| group.and_then(read))
+            .unwrap_or(false)
+    };
+    let text = |read: fn(&ChartDataLabelsIn) -> Option<&str>| {
+        series.and_then(read).or_else(|| group.and_then(read))
+    };
+    Some(PlotDataLabels {
+        show_value: switch(|labels| labels.show_value),
+        show_category_name: switch(|labels| labels.show_category_name),
+        show_series_name: switch(|labels| labels.show_series_name),
+        show_percent: switch(|labels| labels.show_percent),
+        show_legend_key: switch(|labels| labels.show_legend_key),
+        show_bubble_size: switch(|labels| labels.show_bubble_size),
+        separator: text(|labels| labels.separator.as_deref()),
+        position: text(|labels| labels.position.as_deref()),
+        number_format: text(|labels| labels.number_format.as_deref()),
+        text: plot_text_from(
+            series
+                .and_then(|labels| labels.text.as_ref())
+                .or_else(|| group.and_then(|labels| labels.text.as_ref())),
+        ),
+    })
+}
+
+fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
+    PlotAxis {
+        id: axis.id.as_deref(),
+        kind: axis
+            .axis_type
+            .as_deref()
+            .map(PlotAxisKind::from_name)
+            .unwrap_or(PlotAxisKind::Value),
+        range: PlotAxisRange {
+            min: axis.min,
+            max: axis.max,
+        },
+        log_base: axis.logarithmic_base,
+        reversed: axis.reversed,
+        major_unit: axis.major_unit,
+        minor_unit: axis.minor_unit,
+        major_tick_mark: axis.major_tick_mark.as_deref(),
+        minor_tick_mark: axis.minor_tick_mark.as_deref(),
+        major_gridlines: axis.major_gridlines,
+        minor_gridlines: axis.minor_gridlines,
+        number_format: axis.number_format.as_deref(),
+        position: axis.position.as_deref(),
+        title: axis.title.as_deref(),
+        hidden: axis.hidden,
+        text: plot_text_from(axis.text.as_ref()),
     }
 }
 
@@ -7599,16 +7843,26 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 color: point.color.as_deref(),
                 marker: plot_marker_from(point.marker.as_ref()),
                 label: point.label.as_deref(),
+                explosion: point.explosion,
+                labels: None,
             })
             .collect(),
         grouping: series.grouping.as_deref(),
         marker: plot_marker_from(series.marker.as_ref()),
+        x_values: &series.x_values,
+        bubble_sizes: &series.bubble_sizes,
+        smooth: series.smooth,
+        labels: plot_labels_from(None, series.data_labels.as_ref()),
     }
 }
 
 fn plot_marker_from(marker: Option<&Value>) -> Option<PlotMarker> {
     marker.map(|marker| PlotMarker {
         size: marker.get("size").and_then(Value::as_f64),
+        symbol: marker
+            .get("symbol")
+            .and_then(Value::as_str)
+            .and_then(PlotMarkerSymbol::from_name),
     })
 }
 
@@ -7670,7 +7924,7 @@ struct PrimitiveSink<'a> {
 }
 
 impl PlotSink for PrimitiveSink<'_> {
-    fn push_op(&mut self, op: PlotOp) {
+    fn push_op(&mut self, op: PlotOp) -> bool {
         let (prims, attrs) = (&mut *self.prims, self.attrs);
         match op {
             PlotOp::Rect { x, y, w, h, fill } => prims.push(Primitive::Rect(RectPrimitive {
@@ -7753,6 +8007,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 attrs: attrs.clone(),
             })),
         }
+        true
     }
 }
 
@@ -10268,5 +10523,32 @@ mod tests {
                 .iter()
                 .any(|primitive| primitive["fill"] == "#abcdef")
         );
+    }
+
+    #[test]
+    fn a_group_delete_suppresses_a_series_that_sets_other_switches() {
+        let group = ChartDataLabelsIn {
+            delete: Some(true),
+            ..Default::default()
+        };
+        let series = ChartDataLabelsIn {
+            show_value: Some(true),
+            ..Default::default()
+        };
+        assert!(plot_labels_from(Some(&group), Some(&series)).is_none());
+
+        let restoring = ChartDataLabelsIn {
+            delete: Some(false),
+            show_value: Some(true),
+            ..Default::default()
+        };
+        let resolved = plot_labels_from(Some(&group), Some(&restoring)).unwrap();
+        assert!(resolved.show_value);
+
+        let series_only = ChartDataLabelsIn {
+            delete: Some(true),
+            ..Default::default()
+        };
+        assert!(plot_labels_from(None, Some(&series_only)).is_none());
     }
 }

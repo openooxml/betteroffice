@@ -607,6 +607,7 @@ mod tests {
             Some(true)
         );
         assert!(column.plot_groups[0].data_labels.is_none());
+        assert!(column.plot_groups[0].show_data_labels);
         let axes = column.axis_list.as_ref().unwrap();
         assert_eq!(axes[0].title.as_deref(), Some("Quarter"));
         assert_eq!(axes[1].title.as_deref(), Some("Millions"));

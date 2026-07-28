@@ -161,6 +161,22 @@ mod tests {
     }
 
     #[test]
+    fn luminance_modifiers_resolve_instead_of_leaving_the_accent_oversaturated() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:pieChart><c:ser>
+                 <c:val><c:numCache><c:pt><c:v>3</c:v></c:pt><c:pt><c:v>1</c:v></c:pt></c:numCache></c:val>
+                 <c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></c:spPr></c:dPt>
+                 <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:schemeClr val="accent1"><a:satMod val="0"/></a:schemeClr></a:solidFill></c:spPr></c:dPt>
+               </c:ser></c:pieChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
+        assert_eq!(points[0].color, "#8FAADC");
+        assert_eq!(points[1].color, "#848484");
+    }
+
+    #[test]
     fn a_qualified_val_attribute_resolves_through_the_prefix_fallback() {
         let chart = parse(
             r#"<c:chartSpace xmlns:c="c"><c:chart><c:legend><c:legendPos c:val="b"/></c:legend><c:plotArea><c:pieChart/></c:plotArea></c:chart></c:chartSpace>"#,
