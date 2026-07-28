@@ -5,16 +5,16 @@ use std::path::PathBuf;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{
-    PyException, PyIndexError, PyKeyError, PyOSError, PyTypeError, PyValueError,
+    PyException, PyIndexError, PyKeyError, PyOSError, PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyInt};
 
 use betteroffice_xlsx::{
     CalculationOptions, CellAddress, CellInput, CellRange, CellRef, CellValue, Error as CoreError,
-    HorizontalAlignment, MutationResult, NumberFormatMutation, Proposal, ProposalEditInput,
-    ProposalRequest, RenderOptions, SheetId, StylePatch, TextWrapping, VerticalAlignment,
-    Workbook as CoreWorkbook,
+    HorizontalAlignment, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MutationResult,
+    NumberFormatMutation, Proposal, ProposalEditInput, ProposalRequest, RenderOptions, SheetId,
+    StylePatch, TextWrapping, VerticalAlignment, Workbook as CoreWorkbook,
 };
 
 create_exception!(
@@ -41,10 +41,53 @@ create_exception!(
     XlsxError,
     "Rendering failed or exceeded a size limit."
 );
+create_exception!(
+    _betteroffice_xlsx,
+    InvalidUpdateError,
+    XlsxError,
+    "A peer sent an invalid collaboration update."
+);
+create_exception!(
+    _betteroffice_xlsx,
+    CollaborativeStateError,
+    XlsxError,
+    "The local collaborative state is invalid."
+);
+create_exception!(
+    _betteroffice_xlsx,
+    StaleProposalError,
+    XlsxError,
+    "A proposal's target cells changed before acceptance."
+);
+create_exception!(
+    _betteroffice_xlsx,
+    NotCollaborativeError,
+    XlsxError,
+    "The operation requires a collaborative workbook."
+);
+
+fn stale_proposal_error(message: String, cells: Vec<CellAddress>) -> PyErr {
+    let cells = cells
+        .into_iter()
+        .map(|address| address.cell.to_a1())
+        .collect::<Vec<_>>();
+    Python::attach(|py| {
+        let error = StaleProposalError::new_err(message);
+        match error.value(py).setattr("cells", cells) {
+            Ok(()) => error,
+            Err(attribute_error) => attribute_error,
+        }
+    })
+}
 
 fn map_error(error: CoreError) -> PyErr {
     let message = error.to_string();
     match error {
+        CoreError::InvalidUpdate(_) => InvalidUpdateError::new_err(message),
+        CoreError::CollaborativeState(_) => CollaborativeStateError::new_err(message),
+        CoreError::StaleProposal(cells) => stale_proposal_error(message, cells),
+        CoreError::ProposalNotFound(_) => PyKeyError::new_err(message),
+        CoreError::NotCollaborative => NotCollaborativeError::new_err(message),
         CoreError::Package(_)
         | CoreError::Spreadsheet(_)
         | CoreError::DuplicatePart(_)
@@ -62,6 +105,14 @@ fn map_error(error: CoreError) -> PyErr {
     }
 }
 
+fn map_style_error(error: CoreError) -> PyErr {
+    if matches!(error, CoreError::Operation(_)) {
+        PyValueError::new_err(error.to_string())
+    } else {
+        map_error(error)
+    }
+}
+
 /// The 3-argument form makes `OSError.__new__` pick the errno subclass.
 fn map_io_error(error: &std::io::Error, path: &std::path::Path) -> PyErr {
     PyOSError::new_err((
@@ -72,13 +123,23 @@ fn map_io_error(error: &std::io::Error, path: &std::path::Path) -> PyErr {
 }
 
 fn parse_cell(address: &str) -> PyResult<CellRef> {
-    CellRef::parse_a1(address)
+    CellRef::parse_a1(&address.to_ascii_uppercase())
         .map_err(|error| RangeError::new_err(format!("invalid cell {address:?}: {error}")))
 }
 
 fn parse_range(address: &str) -> PyResult<CellRange> {
-    CellRange::parse_a1(address)
+    CellRange::parse_a1(&address.to_ascii_uppercase())
         .map_err(|error| RangeError::new_err(format!("invalid range {address:?}: {error}")))
+}
+
+fn generated_client_id() -> PyResult<u64> {
+    let mut bytes = [0_u8; size_of::<u64>()];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        PyRuntimeError::new_err(format!(
+            "could not generate a collaboration client ID: {error}"
+        ))
+    })?;
+    Ok(u64::from_le_bytes(bytes) & MAX_COLLABORATION_CLIENT_ID)
 }
 
 /// An Excel error value, distinct from a cell holding that text.
@@ -528,17 +589,17 @@ impl PyWorkbook {
         })
     }
 
-    /// Open a replica that can exchange Yrs updates. Every replica needs its
-    /// own `client_id`; Yrs cannot detect a duplicate once both have authored.
+    /// Open a replica with a generated ID unless `client_id` is supplied.
     #[staticmethod]
-    #[pyo3(signature = (data, *, client_id, recalculate = false, now_serial = None))]
+    #[pyo3(signature = (data, *, client_id = None, recalculate = false, now_serial = None))]
     fn open_collaborative(
         py: Python<'_>,
         data: &[u8],
-        client_id: u64,
+        client_id: Option<u64>,
         recalculate: bool,
         now_serial: Option<f64>,
     ) -> PyResult<Self> {
+        let client_id = client_id.map_or_else(generated_client_id, Ok)?;
         let data = data.to_vec();
         py.detach(|| {
             if recalculate {
@@ -588,6 +649,12 @@ impl PyWorkbook {
         update: &[u8],
         now_serial: Option<f64>,
     ) -> PyResult<PyMutation> {
+        if update.len() > MAX_COLLABORATION_BYTES {
+            return Err(map_error(CoreError::CollaborationDataTooLarge {
+                bytes: update.len(),
+                max: MAX_COLLABORATION_BYTES,
+            }));
+        }
         let update = update.to_vec();
         let result = py
             .detach(|| {
@@ -722,6 +789,7 @@ impl PyWorkbook {
         self.inner.active_sheet().0 as usize
     }
 
+    /// Select a sheet and persist it as the workbook's active tab.
     fn set_active_sheet(&mut self, sheet: &Bound<'_, PyAny>) -> PyResult<()> {
         let sheet = self.resolve_sheet(sheet)?;
         self.inner.set_active_sheet(sheet).map_err(map_error)
@@ -769,8 +837,8 @@ impl PyWorkbook {
             "currency" => NumberFormatMutation::Currency,
             "date" => NumberFormatMutation::Date,
             "time" => NumberFormatMutation::Time,
-            other => NumberFormatMutation::Custom {
-                pattern: other.to_string(),
+            _ => NumberFormatMutation::Custom {
+                pattern: format.to_string(),
             },
         };
         let result = self
@@ -861,7 +929,7 @@ impl PyWorkbook {
         let result = self
             .inner
             .patch_range_style(sheet, range, patch, CalculationOptions { now_serial })
-            .map_err(map_error)?;
+            .map_err(map_style_error)?;
         Ok(PyMutation::from_core(&self.inner, &result))
     }
 
@@ -890,5 +958,16 @@ fn _betteroffice_xlsx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;
     module.add("RenderError", py.get_type::<RenderError>())?;
+    module.add("InvalidUpdateError", py.get_type::<InvalidUpdateError>())?;
+    module.add(
+        "CollaborativeStateError",
+        py.get_type::<CollaborativeStateError>(),
+    )?;
+    module.add("StaleProposalError", py.get_type::<StaleProposalError>())?;
+    module.add(
+        "NotCollaborativeError",
+        py.get_type::<NotCollaborativeError>(),
+    )?;
+    module.add("MAX_COLLABORATION_BYTES", MAX_COLLABORATION_BYTES)?;
     Ok(())
 }

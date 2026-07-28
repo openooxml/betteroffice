@@ -1,3 +1,8 @@
+import io
+import re
+import xml.sax.saxutils
+import zipfile
+
 import pytest
 
 import betteroffice_xlsx as bo
@@ -29,6 +34,15 @@ def test_value_and_formula_are_separate(sample_bytes):
     assert sheet["D3"] == pytest.approx(157.0)
     assert sheet.formula("A1") is None
     assert sheet["A1"] == "Quarterly Budget Report"
+
+
+def test_a1_addresses_are_case_insensitive(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    sheet = wb["Budget"]
+    assert sheet["a1"] == sheet["A1"]
+    sheet["h1"] = 42
+    assert sheet["H1"] == pytest.approx(42.0)
+    assert wb.set_style("Budget", "a1:d1", bold=True)
 
 
 def test_recalculated_open_agrees_with_authored_values(sample_bytes):
@@ -343,7 +357,15 @@ def test_garbage_bytes_raise_parse_error():
 
 
 def test_error_hierarchy_rolls_up_to_xlsx_error():
-    for subclass in (bo.ParseError, bo.RangeError, bo.RenderError):
+    for subclass in (
+        bo.ParseError,
+        bo.RangeError,
+        bo.RenderError,
+        bo.InvalidUpdateError,
+        bo.CollaborativeStateError,
+        bo.StaleProposalError,
+        bo.NotCollaborativeError,
+    ):
         assert issubclass(subclass, bo.XlsxError)
     with pytest.raises(bo.XlsxError):
         bo.Workbook.open(b"not a zip")
@@ -366,6 +388,53 @@ def test_replicas_converge(sample_bytes):
     right["Budget"]["C3"] = 500
     left.apply_update(right.diff(left.state_vector()))
     assert left.value("Budget", "C3") == pytest.approx(500.0)
+
+
+def test_collaborative_open_generates_read_only_client_ids(sample_bytes):
+    left = bo.Workbook.open_collaborative(sample_bytes)
+    right = bo.Workbook.open_collaborative(sample_bytes)
+
+    assert left.client_id != right.client_id
+    assert 0 <= left.client_id < 2**53
+    with pytest.raises(AttributeError):
+        left.client_id = 99
+
+
+@pytest.mark.parametrize("buffer_type", [bytearray, memoryview])
+def test_collaboration_accepts_bytes_like_inputs(sample_bytes, buffer_type):
+    assert bo.Workbook.open(buffer_type(sample_bytes)).sheet_count == 3
+    left = bo.Workbook.open_collaborative(buffer_type(sample_bytes), client_id=401)
+    right = bo.Workbook.open_collaborative(buffer_type(sample_bytes), client_id=402)
+
+    left["Budget"]["B3"] = 1000
+    update = left.diff(buffer_type(right.state_vector()))
+    assert right.apply_update(buffer_type(update))
+
+
+def test_oversized_update_is_rejected_before_copy(sample_bytes):
+    class CopyGuard(bytearray):
+        copied = False
+
+        def __bytes__(self):
+            self.copied = True
+            raise AssertionError("oversized payload was copied")
+
+    wb = bo.Workbook.open_collaborative(sample_bytes)
+    update = CopyGuard(bo.MAX_COLLABORATION_BYTES + 1)
+
+    with pytest.raises(bo.XlsxError, match="exceeds the .*byte limit"):
+        wb.apply_update(update)
+    assert update.copied is False
+
+
+def test_collaboration_errors_are_actionable(sample_bytes):
+    collaborative = bo.Workbook.open_collaborative(sample_bytes)
+    with pytest.raises(bo.InvalidUpdateError):
+        collaborative.apply_update(b"\xff")
+
+    standalone = bo.Workbook.open(sample_bytes)
+    with pytest.raises(bo.NotCollaborativeError):
+        standalone.apply_update(b"\x00")
 
 
 def test_a_fresh_replica_catches_up_from_one_update(sample_bytes):
@@ -442,6 +511,24 @@ def test_a_proposal_does_not_apply_until_accepted(sample_bytes):
     assert wb.proposals() == []
 
 
+def test_stale_proposal_exposes_cells_and_can_be_forced(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    proposal = wb.propose("copilot", [("Budget", "H1", 10)])
+    wb["Budget"]["H1"] = 999
+
+    with pytest.raises(bo.StaleProposalError) as caught:
+        wb.accept_proposal(proposal.id)
+    assert caught.value.cells == ["H1"]
+
+    assert wb.accept_proposal(proposal.id, force=True)
+    assert wb["Budget"]["H1"] == pytest.approx(10.0)
+
+
+def test_missing_proposal_raises_key_error(sample_bytes):
+    with pytest.raises(KeyError, match="missing"):
+        bo.Workbook.open(sample_bytes).accept_proposal("missing")
+
+
 def test_a_rejected_proposal_leaves_the_sheet_alone(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
     proposal = wb.propose("copilot", [("Budget", "H2", 999)])
@@ -463,6 +550,17 @@ def test_sheet_metadata(sample_bytes):
     assert wb.last_calculation().changed >= 1
 
 
+def test_active_sheet_round_trips(sample_bytes):
+    wb = bo.Workbook.open(sample_bytes)
+    wb.set_active_sheet("Summary")
+
+    saved = wb.save()
+    with zipfile.ZipFile(io.BytesIO(saved)) as archive:
+        workbook_xml = archive.read("xl/workbook.xml").decode()
+    assert 'activeTab="1"' in workbook_xml
+    assert bo.Workbook.open(saved).active_sheet == 1
+
+
 def test_formatting(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
     assert wb.set_number_format("Budget", "B3:B10", "#,##0.00")
@@ -470,7 +568,34 @@ def test_formatting(sample_bytes):
     assert bo.Workbook.open(wb.save()).sheet_names == wb.sheet_names
 
 
+def test_custom_number_formats_keep_their_case(sample_bytes):
+    for pattern in ('0.00 "USD"', "[Red]#,##0.00", r"\K0.00"):
+        wb = bo.Workbook.open(sample_bytes)
+        assert wb.set_number_format("Budget", "B3:B4", pattern)
+        with zipfile.ZipFile(io.BytesIO(wb.save())) as archive:
+            styles = archive.read("xl/styles.xml").decode()
+        codes = [
+            xml.sax.saxutils.unescape(code, {"&quot;": '"'})
+            for code in re.findall(r'formatCode="([^"]*)"', styles)
+        ]
+        assert pattern in codes, f"{pattern!r} was not written verbatim, saw {codes}"
+
+
 def test_formatting_rejects_an_unknown_alignment(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
     with pytest.raises(ValueError, match="left, center, or right"):
         wb.set_style("Budget", "A1:D1", horizontal_alignment="sideways")
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        {"font_size": 0},
+        {"text_color": "red"},
+        {"fill_color": "#12345g"},
+    ],
+)
+def test_style_argument_errors_raise_value_error(sample_bytes, style):
+    wb = bo.Workbook.open(sample_bytes)
+    with pytest.raises(ValueError):
+        wb.set_style("Budget", "A1:D1", **style)

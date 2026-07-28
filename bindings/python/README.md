@@ -58,18 +58,22 @@ exposes the byte-level primitives rather than a transport, so it drops into a
 WebSocket server, a queue, or a test harness without committing you to asyncio:
 
 ```python
-left  = Workbook.open_collaborative(data, client_id=101)
-right = Workbook.open_collaborative(data, client_id=202)
+left = Workbook.open_collaborative(data)
+right = Workbook.open_collaborative(data)
+print(left.client_id, right.client_id)
 
 left["Sheet1"]["B3"] = 1000
 right.apply_update(left.diff(right.state_vector()))   # right now agrees
 
-joiner = Workbook.open_collaborative(data, client_id=303)
+joiner = Workbook.open_collaborative(data)
 joiner.apply_update(left.state_as_update())           # catch up from nothing
 ```
 
-Every replica needs its own `client_id`. Yrs cannot detect a duplicate once two
-replicas have started authoring.
+The binding generates a client ID when it is omitted and exposes the chosen ID
+through the read-only `client_id` property. A server may pass a deterministic
+`client_id` explicitly, but it must be unique among connected peers because Yrs
+cannot detect duplicates once two replicas have started authoring. Collaboration
+byte inputs accept `bytes`, `bytearray`, and `memoryview`.
 
 ## Undo, redo, and batches
 
@@ -153,6 +157,7 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `wb.propose(...)` / `accept_proposal` / `reject_proposal` | staged agent edits |
 | `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
 | `wb.open_collaborative(...)` / `diff` / `apply_update` | Yrs replicas |
+| `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
 | `sheet.formula(addr)` | source formula, or `None` |
 | `wb.render_png(sheet, ...)` | render to PNG |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
@@ -188,15 +193,18 @@ Mutating calls return a `Mutation` — truthy when something changed, with
 wrote directly is not itself a recalculation, so it will not always appear
 there.
 
-Errors raise `XlsxError`, or one of `ParseError`, `RangeError`, `RenderError`.
+Errors raise `XlsxError` or a more specific subclass. Invalid peer updates,
+broken local collaboration state, stale proposals, and collaboration-only
+operations use `InvalidUpdateError`, `CollaborativeStateError`,
+`StaleProposalError`, and `NotCollaborativeError`. `StaleProposalError.cells`
+lists the changed A1 addresses, and an unknown proposal ID raises `KeyError`.
 
 ## Status
 
 `0.0.x`, and the API may change before `0.1.0`. `save` regenerates the package
 from the features the model represents; package parts the model does not cover
 are not retained, so this is not a round-trip-preserving editor for arbitrary
-workbooks. Collaboration, agent proposals, undo/redo, and the styling APIs exist
-in the Rust engine but are not yet exposed here.
+workbooks.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.

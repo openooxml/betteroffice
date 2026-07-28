@@ -11,14 +11,19 @@ from typing import Iterable, Iterator, Mapping, Union
 from ._betteroffice_xlsx import (
     Calculation,
     CellError,
+    CollaborativeStateError,
     History,
+    InvalidUpdateError,
+    MAX_COLLABORATION_BYTES,
     Mutation,
+    NotCollaborativeError,
     Proposal,
     ProposedEdit,
     ParseError,
     Png,
     RangeError,
     RenderError,
+    StaleProposalError,
 )
 from ._betteroffice_xlsx import Workbook as _Workbook
 from ._betteroffice_xlsx import XlsxError, __version__
@@ -27,8 +32,12 @@ __all__ = [
     "Calculation",
     "CellError",
     "CellValue",
+    "CollaborativeStateError",
     "History",
+    "InvalidUpdateError",
+    "MAX_COLLABORATION_BYTES",
     "Mutation",
+    "NotCollaborativeError",
     "Proposal",
     "ProposedEdit",
     "ParseError",
@@ -37,6 +46,7 @@ __all__ = [
     "RenderError",
     "Sheet",
     "SheetKey",
+    "StaleProposalError",
     "Workbook",
     "XlsxError",
     "__version__",
@@ -108,7 +118,7 @@ class Workbook:
     @classmethod
     def open(cls, data: "bytes | bytearray | memoryview") -> "Workbook":
         """Open from bytes. Formulas keep the values cached in the file."""
-        return cls(_Workbook.open(bytes(data)))
+        return cls(_Workbook.open(_as_bytes(data)))
 
     @classmethod
     def open_path(cls, path: "str | os.PathLike[str]") -> "Workbook":
@@ -123,7 +133,7 @@ class Workbook:
         now_serial: "float | None" = None,
     ) -> "Workbook":
         """Open from bytes and recalculate every formula up front."""
-        return cls(_Workbook.open_recalculated(bytes(data), now_serial=now_serial))
+        return cls(_Workbook.open_recalculated(_as_bytes(data), now_serial=now_serial))
 
     def recalculate(self, *, now_serial: "float | None" = None) -> Calculation:
         """Recalculate every formula."""
@@ -191,18 +201,18 @@ class Workbook:
         cls,
         data: "bytes | bytearray | memoryview",
         *,
-        client_id: int,
+        client_id: "int | None" = None,
         recalculate: bool = False,
         now_serial: "float | None" = None,
     ) -> "Workbook":
         """Open a replica that exchanges Yrs updates.
 
-        Every replica needs its own ``client_id``; Yrs cannot detect a duplicate
-        once two replicas have started authoring.
+        An omitted ``client_id`` is generated. Explicit IDs must be unique
+        among peers because Yrs cannot detect duplicates after authoring.
         """
         return cls(
             _Workbook.open_collaborative(
-                bytes(data),
+                _as_bytes(data),
                 client_id=client_id,
                 recalculate=recalculate,
                 now_serial=now_serial,
@@ -225,14 +235,22 @@ class Workbook:
         """The whole document as one update, for a peer joining from nothing."""
         return self._inner.state_as_update()
 
-    def diff(self, state_vector: bytes) -> bytes:
+    def diff(self, state_vector: "bytes | bytearray | memoryview") -> bytes:
         """The update carrying everything the peer's state vector is missing."""
-        return self._inner.diff(state_vector)
+        return self._inner.diff(
+            _as_bytes(state_vector, max_length=MAX_COLLABORATION_BYTES)
+        )
 
     def apply_update(
-        self, update: bytes, *, now_serial: "float | None" = None
+        self,
+        update: "bytes | bytearray | memoryview",
+        *,
+        now_serial: "float | None" = None,
     ) -> Mutation:
-        return self._inner.apply_update(update, now_serial=now_serial)
+        return self._inner.apply_update(
+            _as_bytes(update, max_length=MAX_COLLABORATION_BYTES),
+            now_serial=now_serial,
+        )
 
     @property
     def can_undo(self) -> bool:
@@ -304,6 +322,7 @@ class Workbook:
         return self._inner.active_sheet
 
     def set_active_sheet(self, sheet: SheetKey) -> None:
+        """Select a sheet and persist it as the workbook's active tab."""
         self._inner.set_active_sheet(sheet)
 
     def merged_ranges(self, sheet: SheetKey, range: str) -> "list[str]":
@@ -404,3 +423,17 @@ def _as_input(value: object) -> str:
                 "pass a string if you want the text"
             )
     return text
+
+
+def _as_bytes(
+    data: "bytes | bytearray | memoryview", *, max_length: "int | None" = None
+) -> bytes:
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        raise TypeError("data must be bytes, bytearray, or memoryview")
+    length = memoryview(data).nbytes
+    if max_length is not None and length > max_length:
+        raise XlsxError(
+            f"collaboration payload is {length} bytes, exceeds the "
+            f"{max_length}-byte limit"
+        )
+    return data if isinstance(data, bytes) else bytes(data)
