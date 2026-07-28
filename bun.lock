@@ -114,6 +114,10 @@
         "wrangler": "^4.106.0",
       },
     },
+    "bindings/python": {
+      "name": "@betteroffice/python-bindings",
+      "version": "0.0.1",
+    },
     "crates": {
       "name": "@betteroffice/rust-crates",
       "version": "0.0.4",
@@ -464,6 +468,8 @@
     "@betteroffice/pptx-i18n": ["@betteroffice/pptx-i18n@workspace:packages/pptx-i18n"],
 
     "@betteroffice/pptx-react": ["@betteroffice/pptx-react@workspace:packages/pptx-react"],
+
+    "@betteroffice/python-bindings": ["@betteroffice/python-bindings@workspace:bindings/python"],
 
     "@betteroffice/redact-worker": ["@betteroffice/redact-worker@workspace:apps/redact-worker"],
 
