@@ -35,6 +35,7 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-docx-parse](https://crates.io/crates/betteroffice-docx-parse): WordprocessingML parsing and the typed DOCX model.
 - [betteroffice-docx-layout](https://crates.io/crates/betteroffice-docx-layout): DOCX pagination and display lists.
 - [betteroffice-docx-edit](https://crates.io/crates/betteroffice-docx-edit): the Yrs editing schema for DOCX.
+- [betteroffice-docx-raster](https://crates.io/crates/betteroffice-docx-raster): the tiny-skia backend that paints a DOCX display list to PNG.
 - [betteroffice-xlsx-model](https://crates.io/crates/betteroffice-xlsx-model): the workbook, sheet, and cell model, IO-free.
 - [betteroffice-xlsx-parse](https://crates.io/crates/betteroffice-xlsx-parse): streaming SpreadsheetML parse and serialize.
 - [betteroffice-xlsx-ops](https://crates.io/crates/betteroffice-xlsx-ops): the invertible op log behind undo, redo, and agent proposals.
