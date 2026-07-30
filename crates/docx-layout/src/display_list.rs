@@ -7762,8 +7762,15 @@ fn plot_labels_from<'a>(
     group: Option<&'a ChartDataLabelsIn>,
     series: Option<&'a ChartDataLabelsIn>,
 ) -> Option<PlotDataLabels<'a>> {
-    let inherited = if series.is_some() { series } else { group };
-    if inherited?.delete == Some(true) {
+    let levels = [series, group];
+    levels.iter().copied().flatten().next()?;
+    if levels
+        .iter()
+        .copied()
+        .flatten()
+        .find_map(|labels| labels.delete)
+        == Some(true)
+    {
         return None;
     }
     let switch = |read: fn(&ChartDataLabelsIn) -> Option<bool>| {
@@ -10516,5 +10523,32 @@ mod tests {
                 .iter()
                 .any(|primitive| primitive["fill"] == "#abcdef")
         );
+    }
+
+    #[test]
+    fn a_group_delete_suppresses_a_series_that_sets_other_switches() {
+        let group = ChartDataLabelsIn {
+            delete: Some(true),
+            ..Default::default()
+        };
+        let series = ChartDataLabelsIn {
+            show_value: Some(true),
+            ..Default::default()
+        };
+        assert!(plot_labels_from(Some(&group), Some(&series)).is_none());
+
+        let restoring = ChartDataLabelsIn {
+            delete: Some(false),
+            show_value: Some(true),
+            ..Default::default()
+        };
+        let resolved = plot_labels_from(Some(&group), Some(&restoring)).unwrap();
+        assert!(resolved.show_value);
+
+        let series_only = ChartDataLabelsIn {
+            delete: Some(true),
+            ..Default::default()
+        };
+        assert!(plot_labels_from(None, Some(&series_only)).is_none());
     }
 }

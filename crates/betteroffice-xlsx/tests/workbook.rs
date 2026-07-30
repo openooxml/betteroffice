@@ -4368,3 +4368,36 @@ fn collaborative_sessions_refuse_every_op_that_rewrites_defined_names() {
         .unwrap();
     assert_eq!(left.model().defined_names, right.model().defined_names);
 }
+
+#[test]
+fn the_demo_showcase_workbook_renders_its_chart() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/demo/public/showcase.xlsx"),
+    )
+    .unwrap();
+    let workbook = Workbook::open(&bytes).unwrap();
+    let list = workbook
+        .display_list(&Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 1400.0,
+            height: 700.0,
+        })
+        .unwrap();
+    let json = serde_json::to_string(&list).unwrap();
+    let list: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let commands = list["commands"].as_array().expect("display list commands");
+    let beyond_data = commands
+        .iter()
+        .filter(|command| command["x"].as_f64().unwrap_or(0.0) > 520.0)
+        .count();
+    assert!(
+        beyond_data >= 8,
+        "the dashboard chart should paint beyond the A1:F11 data region, saw {beyond_data} commands"
+    );
+    assert!(
+        json.contains("4472C4"),
+        "the revenue series colour should appear in the frame"
+    );
+}
