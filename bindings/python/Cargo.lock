@@ -124,6 +124,7 @@ name = "betteroffice-xlsx-python"
 version = "0.0.1"
 dependencies = [
  "betteroffice-xlsx",
+ "getrandom",
  "pyo3",
 ]
 

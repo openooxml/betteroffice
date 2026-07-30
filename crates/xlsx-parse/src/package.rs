@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
-use xlsx_model::Workbook;
+use xlsx_model::{SheetId, Workbook};
 
 use crate::read::SharedStringCells;
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
@@ -28,6 +28,7 @@ pub struct PreservedPackage {
     pub(crate) calc_chains: Vec<PartReference>,
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
+    pub(crate) active_sheet: SheetId,
     pub(crate) unmodelled_chart_part: Option<String>,
 }
 
@@ -35,6 +36,7 @@ impl PreservedPackage {
     pub(crate) fn capture(
         parts: &[(String, Vec<u8>)],
         workbook: &Workbook,
+        active_sheet: SheetId,
         shared_string_cells: &[SharedStringCells],
     ) -> Result<Self, ParseError> {
         let workbook_xml = find_part(parts, "xl/workbook.xml")
@@ -160,6 +162,7 @@ impl PreservedPackage {
             calc_chains,
             stylesheet_template,
             original_workbook: workbook.clone(),
+            active_sheet,
             unmodelled_chart_part,
         })
     }

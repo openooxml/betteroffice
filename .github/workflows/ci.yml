@@ -96,6 +96,14 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Lint standalone Rust bindings
+        if: steps.ws.outputs.present == 'true'
+        run: |
+          for manifest in bindings/*/Cargo.toml; do
+            cargo fmt --check --manifest-path "$manifest"
+            cargo clippy --manifest-path "$manifest" --all-targets -- -D warnings
+          done
+
       - name: Test
         if: steps.ws.outputs.present == 'true'
         run: cargo test
@@ -141,4 +149,3 @@ jobs:
       - name: Test
         working-directory: bindings/python
         run: pytest -q
-

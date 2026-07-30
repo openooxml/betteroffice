@@ -28,6 +28,7 @@ pub type SharedStringCells = BTreeMap<(u32, u32), usize>;
 
 pub(crate) struct IndexedWorkbook {
     pub(crate) workbook: Workbook,
+    pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
 }
 
@@ -93,6 +94,7 @@ pub(crate) fn parse_workbook_indexed(
             shared_strings,
             styles,
         },
+        active_sheet: meta.active_sheet,
         shared_string_cells,
     })
 }
@@ -145,6 +147,7 @@ struct SheetEntry {
 
 struct WorkbookMeta {
     date_system: DateSystem,
+    active_sheet: SheetId,
     sheets: Vec<SheetEntry>,
     defined_names: Vec<DefinedName>,
 }
@@ -156,6 +159,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
+    let mut active_sheet = None;
     let mut sheets = Vec::new();
     let mut defined_names = Vec::new();
 
@@ -168,6 +172,14 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                     {
                         date_system = DateSystem::V1904;
                     }
+                }
+                b"workbookView" if active_sheet.is_none() => {
+                    active_sheet = Some(
+                        attr(&e, b"activeTab")?
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .map(SheetId)
+                            .unwrap_or(SheetId(0)),
+                    );
                 }
                 b"sheet" => {
                     let name = attr(&e, b"name")?.unwrap_or_default();
@@ -199,6 +211,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     }
     Ok(WorkbookMeta {
         date_system,
+        active_sheet: active_sheet.unwrap_or(SheetId(0)),
         sheets,
         defined_names,
     })

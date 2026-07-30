@@ -51,6 +51,70 @@ server-side output matches what the web canvas paints.
 Opening, recalculating, rendering, and saving release the GIL, so they run in
 parallel across threads instead of serializing your workers.
 
+## Collaboration
+
+Every workbook opened with `open_collaborative` is a Yrs replica. The binding
+exposes the byte-level primitives rather than a transport, so it drops into a
+WebSocket server, a queue, or a test harness without committing you to asyncio:
+
+```python
+left = Workbook.open_collaborative(data)
+right = Workbook.open_collaborative(data)
+print(left.client_id, right.client_id)
+
+left["Sheet1"]["B3"] = 1000
+right.apply_update(left.diff(right.state_vector()))   # right now agrees
+
+joiner = Workbook.open_collaborative(data)
+joiner.apply_update(left.state_as_update())           # catch up from nothing
+```
+
+The binding generates a client ID when it is omitted and exposes the chosen ID
+through the read-only `client_id` property. A server may pass a deterministic
+`client_id` explicitly, but it must be unique among connected peers because Yrs
+cannot detect duplicates once two replicas have started authoring. Collaboration
+byte inputs accept `bytes`, `bytearray`, and `memoryview`.
+
+## Undo, redo, and batches
+
+```python
+wb.set_many("Sheet1", {"H1": 10, "H2": 20, "H3": "=H1+H2"})   # one undo step
+wb.undo()
+wb.redo()
+wb.history()          # History(undo_depth=1, redo_depth=0)
+```
+
+Undo covers this replica's own edits. Updates applied from a peer are not in
+local history, so undo will not revert someone else's work.
+
+## Agent proposals
+
+An agent can stage edits for a human instead of applying them. Each proposed
+edit carries the before and after text a reviewer would compare:
+
+```python
+proposal = wb.propose("copilot", [("Sheet1", "H1", "=SUM(B3:B10)")], note="add a total")
+
+for edit in proposal.edits:
+    print(edit.address, edit.before, "->", edit.after)   # H1  ''  ->  3600
+
+wb.accept_proposal(proposal.id)     # or wb.reject_proposal(proposal.id)
+```
+
+Nothing is written until the proposal is accepted, and accepting applies it as
+a single undo step.
+
+## Formatting
+
+```python
+wb.set_number_format("Sheet1", "B3:B10", "#,##0.00")
+wb.set_style("Sheet1", "A1:D1", bold=True, fill_color="#eeeeee",
+             horizontal_alignment="center")
+```
+
+`set_number_format` takes `automatic`, `text`, `number`, `percent`,
+`scientific`, `currency`, `date`, `time`, or a custom pattern.
+
 ## Reading without recalculating
 
 `Workbook.open` keeps whatever values the file already carried. Use
@@ -88,6 +152,12 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `wb[key]` / `wb.sheet(key)` | a `Sheet` by name or index |
 | `sheet[addr]` | cell value — see the note below on when it is recalculated |
 | `sheet[addr] = value` | set from what a user would type |
+| `wb.set_many(sheet, edits)` | write many cells as one undo step |
+| `wb.undo()` / `wb.redo()` | walk local history |
+| `wb.propose(...)` / `accept_proposal` / `reject_proposal` | staged agent edits |
+| `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
+| `wb.open_collaborative(...)` / `diff` / `apply_update` | Yrs replicas |
+| `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
 | `sheet.formula(addr)` | source formula, or `None` |
 | `wb.render_png(sheet, ...)` | render to PNG |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
@@ -118,15 +188,23 @@ sheet["A1"] = "'=1+1"   # the text "=1+1"
 sheet["A2"] = "=1+1"    # the formula, evaluating to 2.0
 ```
 
-Errors raise `XlsxError`, or one of `ParseError`, `RangeError`, `RenderError`.
+Mutating calls return a `Mutation` — truthy when something changed, with
+`changed` listing the cells the engine *recalculated* as a result. A cell you
+wrote directly is not itself a recalculation, so it will not always appear
+there.
+
+Errors raise `XlsxError` or a more specific subclass. Invalid peer updates,
+broken local collaboration state, stale proposals, and collaboration-only
+operations use `InvalidUpdateError`, `CollaborativeStateError`,
+`StaleProposalError`, and `NotCollaborativeError`. `StaleProposalError.cells`
+lists the changed A1 addresses, and an unknown proposal ID raises `KeyError`.
 
 ## Status
 
 `0.0.x`, and the API may change before `0.1.0`. `save` regenerates the package
 from the features the model represents; package parts the model does not cover
 are not retained, so this is not a round-trip-preserving editor for arbitrary
-workbooks. Collaboration, agent proposals, undo/redo, and the styling APIs exist
-in the Rust engine but are not yet exposed here.
+workbooks.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.
