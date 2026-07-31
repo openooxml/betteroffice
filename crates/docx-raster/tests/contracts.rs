@@ -287,3 +287,36 @@ fn refuses_an_image_past_the_area_budget_before_decoding_it() {
         "decoded image is 9000x9000px, exceeds the 67108864-pixel allocation cap"
     );
 }
+
+/// An unresolvable image reference is skipped, matching the canvas backend's
+/// resolver. Empty `src`, an external or dangling relationship, and media
+/// outside `word/media/` all reach the renderer this way, and one of them must
+/// not blank the page around it.
+#[test]
+fn an_unresolvable_image_reference_is_skipped_not_an_error() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    for reference in ["", "rId9", "http://example.invalid/logo.png"] {
+        let list = list(
+            20.0,
+            20.0,
+            vec![
+                json!({"kind":"image","relId":reference,"x":0,"y":0,"w":20,"h":20}),
+                json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":"#ff0000"}),
+            ],
+        );
+        let png = render_png(&list, 0, &resources)
+            .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+}
+
+#[test]
+fn a_malformed_data_url_is_still_an_error() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    assert_eq!(
+        render_png(&image_list("data:image/png;base64,%%%%"), 0, &resources).unwrap_err(),
+        "invalid image data URL: Invalid symbol 37, offset 0."
+    );
+}

@@ -295,16 +295,6 @@ fn missing_resources_and_unsupported_effects_are_errors() {
     let (fonts, chains, images) = fixture_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
 
-    let missing_image = list(
-        20.0,
-        20.0,
-        vec![json!({"kind":"image","relId":"missing","x":0,"y":0,"w":20,"h":20})],
-    );
-    assert_eq!(
-        render_png(&missing_image, 0, &resources).unwrap_err(),
-        "missing image bytes for relationship `missing`"
-    );
-
     let filtered = list(
         20.0,
         20.0,

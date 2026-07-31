@@ -783,7 +783,9 @@ fn paint_image(
     if !image.attrs.effects.is_empty() {
         return Err("unsupported image field: effects".to_string());
     }
-    let source_bytes = image_bytes(&image.rel_id, resources)?;
+    let Some(source_bytes) = image_bytes(&image.rel_id, resources)? else {
+        return Ok(());
+    };
     let source = decode_image(&source_bytes, &image.rel_id)?;
     let frame = image_frame(image)?;
     if frame.w == 0.0 || frame.h == 0.0 {
@@ -847,10 +849,13 @@ fn paint_image(
     paint_image_revision(pixmap, image, frame, image_transform, mask, opacity)
 }
 
+/// Image bytes for a primitive, or `None` when the reference resolves to
+/// nothing. A `data:` URL that is present but malformed is still an error:
+/// unresolved and undecodable are different failures.
 fn image_bytes<'a>(
     rel_id: &'a str,
     resources: &'a RenderResources<'_>,
-) -> Result<Cow<'a, [u8]>, String> {
+) -> Result<Option<Cow<'a, [u8]>>, String> {
     if rel_id.starts_with("data:") {
         let (metadata, payload) = rel_id
             .split_once(',')
@@ -861,13 +866,12 @@ fn image_bytes<'a>(
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(payload)
             .map_err(|error| format!("invalid image data URL: {error}"))?;
-        return Ok(Cow::Owned(bytes));
+        return Ok(Some(Cow::Owned(bytes)));
     }
-    resources
+    Ok(resources
         .images
         .get(rel_id)
-        .map(|bytes| Cow::Borrowed(bytes.as_slice()))
-        .ok_or_else(|| format!("missing image bytes for relationship `{rel_id}`"))
+        .map(|bytes| Cow::Borrowed(bytes.as_slice())))
 }
 
 fn decode_image(bytes: &[u8], rel_id: &str) -> Result<Pixmap, String> {
