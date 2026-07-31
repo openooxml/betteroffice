@@ -1,5 +1,5 @@
 {
-  "name": "@betteroffice/python-bindings",
+  "name": "@betteroffice/python-xlsx",
   "version": "0.0.1",
   "private": true,
   "scripts": {

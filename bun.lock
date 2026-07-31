@@ -115,7 +115,7 @@
       },
     },
     "bindings/python-xlsx": {
-      "name": "@betteroffice/python-bindings",
+      "name": "@betteroffice/python-xlsx",
       "version": "0.0.1",
     },
     "crates": {
@@ -469,7 +469,7 @@
 
     "@betteroffice/pptx-react": ["@betteroffice/pptx-react@workspace:packages/pptx-react"],
 
-    "@betteroffice/python-bindings": ["@betteroffice/python-bindings@workspace:bindings/python-xlsx"],
+    "@betteroffice/python-xlsx": ["@betteroffice/python-xlsx@workspace:bindings/python-xlsx"],
 
     "@betteroffice/redact-worker": ["@betteroffice/redact-worker@workspace:apps/redact-worker"],
 
