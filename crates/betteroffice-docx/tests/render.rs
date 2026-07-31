@@ -3,7 +3,6 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::io::Write;
-use std::time::{Duration, Instant};
 
 use betteroffice_docx::{DisplayList, Document, ImageScope, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
 use serde_json::{Value, json};
@@ -325,47 +324,32 @@ fn rejects_a_page_over_the_area_budget_that_fits_the_per_side_budget() {
     const { assert!(4096_u64 * 4097 > MAX_PIXMAP_PIXELS) };
 }
 
-/// Ordering probe. The page is over budget *and* carries a primitive the
-/// backend refuses, so the reported error names whichever ran first.
+/// Ordering probe. Which error wins survives a reorder, so this watches the
+/// surface instead: the backend allocates the page before it paints anything,
+/// and the budget has to return before that.
 #[test]
-fn refuses_an_oversized_page_before_the_backend_paints_it() {
-    let page = sized_page(
-        u64::from(MAX_PIXMAP_DIM) + 1,
-        1,
-        vec![json!({
-            "kind": "image",
-            "relId": RED_PNG_DATA_URL,
-            "x": 0,
-            "y": 0,
-            "w": 1,
-            "h": 1,
-            "filter": "grayscale(1)"
-        })],
-    );
-    let error = document().render_png(&page, 0).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "requested render is 16385x1px, exceeds the 16384px per-side cap; lower the page dimensions"
-    );
-}
-
-/// A 40000x40000 surface is 6.4 GB and minutes of fill, so the budget has to
-/// return before the backend is called at all.
-#[test]
-fn refuses_a_page_that_would_allocate_gigabytes() {
-    let started = Instant::now();
-    let error = document()
-        .render_png(&sized_page(40_000, 40_000, vec![]), 0)
-        .unwrap_err();
-    let elapsed = started.elapsed();
-    assert_eq!(
-        error.to_string(),
-        "requested render is 40000x40000px, exceeds the 16384px per-side cap; lower the page dimensions"
-    );
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "the page budget was enforced after allocation, in {elapsed:?}"
-    );
+fn refuses_an_oversized_page_before_the_backend_allocates_its_surface() {
+    let document = document();
+    for (width, height, message) in [
+        (
+            u64::from(MAX_PIXMAP_DIM) + 1,
+            256,
+            "requested render is 16385x256px, exceeds the 16384px per-side cap; lower the page dimensions",
+        ),
+        (
+            4096,
+            4097,
+            "requested render is 4096x4097px, exceeds the 16777216-pixel allocation cap; lower the page dimensions",
+        ),
+    ] {
+        let page = sized_page(width, height, vec![]);
+        let (error, allocated) = allocated_by(|| document.render_png(&page, 0).unwrap_err());
+        assert_eq!(error.to_string(), message);
+        assert!(
+            allocated < 1 << 20,
+            "{width}x{height} allocated {allocated} bytes before the budget refused it"
+        );
+    }
 }
 
 /// A reference is 59 bytes of display list and a decode is milliseconds, so
