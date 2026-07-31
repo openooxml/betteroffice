@@ -155,13 +155,11 @@ jobs:
     permissions:
       contents: read
 
-  # Publishing is a direct job here, never a reusable workflow, so the OIDC
-  # claim names release.yml — the workflow each PyPI project trusts.
+  # Never a reusable workflow: the OIDC claim must name release.yml.
   python-pypi:
     name: Publish betteroffice-${{ matrix.binding }}
     needs: [python-bindings, python-dist]
-    # Not `success()`: a binding whose build broke must fail on its own
-    # `built-` receipt below rather than skip its siblings' upload.
+    # Not `success()`: a broken build must fail its own leg, not skip siblings.
     if: ${{ !cancelled() && needs.python-bindings.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -169,8 +167,7 @@ jobs:
       fail-fast: false
       matrix:
         binding: ${{ fromJSON(needs.python-bindings.outputs.bindings) }}
-    # PyPI cannot tell this repo's publish jobs apart by workflow alone, so the
-    # environment is what scopes a Trusted Publisher to one project.
+    # Scopes each Trusted Publisher to one project; the workflow alone cannot.
     environment: pypi-${{ matrix.binding }}
     permissions:
       id-token: write # OIDC Trusted Publishing
