@@ -174,9 +174,17 @@ pub fn parse_docx_s9_wire(
     data: &[u8],
     options: S9ParseOptions,
 ) -> Result<S9WireEnvelope, ParseError> {
+    parse_docx_s9_wire_with_limits(data, options, &ParseLimits::default())
+}
+
+/// [`parse_docx_s9_wire`] with a caller-supplied resource budget.
+pub fn parse_docx_s9_wire_with_limits(
+    data: &[u8],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<S9WireEnvelope, ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
-    let limits = ParseLimits::default();
-    let mut budget = ParseBudget::new(&limits);
+    let mut budget = ParseBudget::new(limits);
 
     let settings = parse_settings(
         find_part(&parts, "word/settings.xml").map(|(_, bytes)| bytes),

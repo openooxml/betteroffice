@@ -149,7 +149,7 @@ pub use s8::{
 };
 pub use s9::{
     BinaryPartWire, S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions,
-    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire,
+    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire, parse_docx_s9_wire_with_limits,
 };
 pub use scalars::{
     ColorValue, RunScalarProperties, ShadingProperties, UnderlineValue, parse_color_value,
