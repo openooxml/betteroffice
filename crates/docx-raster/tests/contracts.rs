@@ -377,6 +377,18 @@ fn a_page_stops_decoding_once_its_pixel_budget_is_spent() {
     assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
 }
 
+/// Part scoping is a guarantee about the map a caller hands over, not only
+/// about the one `register_image` builds, so an unscoped key resolves nowhere.
+#[test]
+fn an_unscoped_image_key_resolves_in_no_part() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("rIdImage".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered = render_page(&image_list("rIdImage"), 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 1);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+}
+
 /// A skipped reference leaves a hole in an otherwise successful page, so the
 /// count is the only thing a caller can log about it.
 #[test]

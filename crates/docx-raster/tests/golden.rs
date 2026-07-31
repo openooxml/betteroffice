@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, RenderResources, measure_text, render_png};
+use docx_raster::{
+    FontChains, ImageMap, ImageScope, RenderResources, measure_text, render_png, scoped_image_key,
+};
 use ooxml_text::{FontId, FontStore, shape};
 use serde_json::{Value, json};
 
@@ -18,7 +20,7 @@ fn fixture_resources() -> (FontStore, FontChains, ImageMap) {
         ("carlito|0|1".to_string(), vec![id]),
         ("carlito|1|1".to_string(), vec![id]),
     ]);
-    let images = ImageMap::from([("rIdImage".to_string(), source_png())]);
+    let images = ImageMap::from([(scoped_image_key(ImageScope::Body, "rIdImage"), source_png())]);
     (fonts, chains, images)
 }
 

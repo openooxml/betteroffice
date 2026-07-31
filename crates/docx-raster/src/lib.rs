@@ -51,8 +51,8 @@ pub enum ImageScope<'a> {
 }
 
 /// Part-scoped [`ImageMap`] key. A header and the body can both use `rId9` for
-/// different media, so bytes are keyed by owning part; lookup falls back to the
-/// bare relationship id, which resolves in any part.
+/// different media, so bytes are keyed by owning part and resolve in that part
+/// alone.
 pub fn scoped_image_key(scope: ImageScope<'_>, rel_id: &str) -> String {
     match scope {
         ImageScope::Body => format!("\u{1f}{rel_id}"),
@@ -929,10 +929,7 @@ fn image_source<'a>(
         return Some((Cow::Borrowed(rel_id), Cow::Owned(bytes)));
     }
     let key = scoped_image_key(scope, rel_id);
-    let bytes = resources
-        .images
-        .get(&key)
-        .or_else(|| resources.images.get(rel_id))?;
+    let bytes = resources.images.get(&key)?;
     Some((Cow::Owned(key), Cow::Borrowed(bytes.as_slice())))
 }
 
