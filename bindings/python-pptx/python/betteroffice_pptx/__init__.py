@@ -30,6 +30,7 @@ from ._betteroffice_pptx import (
     TextEdit,
     TextRun,
     TransformEdit,
+    UnsupportedWriteError,
 )
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
@@ -65,6 +66,7 @@ __all__ = [
     "TextEdit",
     "TextRun",
     "TransformEdit",
+    "UnsupportedWriteError",
     "__version__",
 ]
 
@@ -134,6 +136,11 @@ class Presentation:
     def is_collaborative(self) -> bool:
         """True only for ``open_collaborative`` decks, which alone may sync."""
         return self._inner.is_collaborative
+
+    @property
+    def is_edited(self) -> bool:
+        """True once an accepted edit has made ``save`` refuse."""
+        return self._inner.is_edited
 
     @property
     def author(self) -> str:
@@ -371,8 +378,9 @@ class Presentation:
     def save(self) -> bytes:
         """Serialize back to PPTX bytes.
 
-        Refuses once the deck has been edited: the engine writes the parsed
-        package, not the edited model, so saving would drop the edits.
+        Raises ``UnsupportedWriteError`` once the deck has been edited: the
+        engine writes the parsed package, not the edited model, so saving
+        would drop the edits. Check ``is_edited`` to branch early.
         """
         return self._inner.save()
 

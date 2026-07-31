@@ -165,8 +165,15 @@ deck = Presentation.open(data)
 deck.save_path("copy.pptx")        # fine: nothing was edited
 
 deck.insert_slide(1)
-deck.save()                        # PptxError: ... cannot write model edits back to PPTX yet
+deck.is_edited                     # True
+deck.save()                        # UnsupportedWriteError
 ```
+
+`UnsupportedWriteError` is its own `PptxError` subclass, so "cannot write edits
+yet" is distinguishable from a zip or filesystem failure without matching on a
+message, and `is_edited` lets a pipeline branch before it does expensive work
+rather than discovering the refusal at the end. Only an edit the engine
+*accepted* sets it: an edit that raised leaves the deck saveable.
 
 Reading, laying out, and collaborative editing are fully usable today; treat
 this release as read, render, and edit-in-memory. Write-back is the next thing
@@ -207,12 +214,13 @@ edits that merge across replicas, that is the gap this fills.
 | `register_font` / `render_slide` | layout |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
 | `deck.is_collaborative` | whether this deck may exchange updates |
+| `deck.is_edited` | whether an accepted edit has made `save` refuse |
 | `undo` / `redo` / `add_undo_barrier` / `can_undo` / `can_redo` | history |
 | `deck.save()` / `save_path(path)` | serialize to PPTX — see *Writing* |
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`.
+`NotCollaborativeError`, `UnsupportedWriteError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.

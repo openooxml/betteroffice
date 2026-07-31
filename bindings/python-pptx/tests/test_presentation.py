@@ -274,11 +274,37 @@ def test_save_path(deck, tmp_path):
 )
 def test_saving_an_edited_deck_refuses_rather_than_dropping_edits(deck, tmp_path, edit):
     """The engine writes the parsed package, not the edited model."""
+    assert deck.is_edited is False
     edit(deck)
+    assert deck.is_edited is True
+
     for call in (deck.save, lambda: deck.save_path(tmp_path / "out.pptx")):
-        with pytest.raises(bo.PptxError, match="cannot write model edits"):
+        with pytest.raises(bo.UnsupportedWriteError):
             call()
     assert not (tmp_path / "out.pptx").exists()
+
+
+def test_the_write_refusal_is_distinguishable_from_a_write_failure(deck, tmp_path):
+    """Callers should not have to match on a message to tell the two apart."""
+    unwritable = tmp_path / "missing-dir" / "out.pptx"
+    with pytest.raises(OSError) as failure:
+        deck.save_path(unwritable)
+    assert not isinstance(failure.value, bo.UnsupportedWriteError)
+
+    deck.insert_slide(1)
+    with pytest.raises(bo.UnsupportedWriteError) as refusal:
+        deck.save_path(tmp_path / "out.pptx")
+    assert not isinstance(refusal.value, OSError)
+
+
+def test_is_edited_lets_a_caller_branch_before_saving(deck):
+    assert deck.is_edited is False
+    assert deck.save()[:4] == PPTX_MAGIC
+
+    deck.move_shape(0, deck[0].shapes[0].id, 5, 5)
+    assert deck.is_edited is True
+    with pytest.raises(AttributeError):
+        deck.is_edited = False
 
 
 def _title_story_id(deck):
@@ -326,6 +352,7 @@ def test_an_edit_the_engine_refused_leaves_the_deck_saveable(
     with pytest.raises(expected):
         edit(deck)
 
+    assert deck.is_edited is False
     assert deck.save()[:4] == PPTX_MAGIC
     deck.save_path(tmp_path / "out.pptx")
 
@@ -336,7 +363,8 @@ def test_applying_a_peer_update_also_blocks_saving(sample_bytes):
     left.move_shape(0, left[0].shapes[0].id, 3, 4)
 
     right.apply_update(left.diff(right.state_vector()))
-    with pytest.raises(bo.PptxError, match="cannot write model edits"):
+    assert right.is_edited is True
+    with pytest.raises(bo.UnsupportedWriteError):
         right.save()
 
 
@@ -368,6 +396,7 @@ def test_error_hierarchy_rolls_up_to_pptx_error():
         bo.InvalidUpdateError,
         bo.CollaborativeStateError,
         bo.NotCollaborativeError,
+        bo.UnsupportedWriteError,
     ):
         assert issubclass(subclass, bo.PptxError)
     with pytest.raises(bo.PptxError):

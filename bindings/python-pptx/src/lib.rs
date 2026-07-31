@@ -61,6 +61,12 @@ create_exception!(
     PptxError,
     "The operation requires a collaborative presentation."
 );
+create_exception!(
+    _betteroffice_pptx,
+    UnsupportedWriteError,
+    PptxError,
+    "The engine cannot write this change back to PPTX yet."
+);
 
 fn map_edit_error(error: EditError, message: String) -> PyErr {
     match error {
@@ -1041,7 +1047,7 @@ impl PyPresentation {
     /// edited deck refuses to serialize rather than dropping the edits.
     fn saved_bytes(&self) -> PyResult<Vec<u8>> {
         if self.edited.get() {
-            return Err(PptxError::new_err(
+            return Err(UnsupportedWriteError::new_err(
                 "this presentation has been edited, and the engine cannot write \
                  model edits back to PPTX yet; saving would drop them",
             ));
@@ -1107,6 +1113,12 @@ impl PyPresentation {
     #[getter]
     fn is_collaborative(&self) -> bool {
         self.collaborative
+    }
+
+    /// Whether an edit the engine accepted has made `save` refuse.
+    #[getter]
+    fn is_edited(&self) -> bool {
+        self.edited.get()
     }
 
     #[getter]
@@ -1622,6 +1634,10 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "NotCollaborativeError",
         py.get_type::<NotCollaborativeError>(),
+    )?;
+    module.add(
+        "UnsupportedWriteError",
+        py.get_type::<UnsupportedWriteError>(),
     )?;
     module.add("MAX_COLLABORATION_BYTES", MAX_COLLABORATION_BYTES)?;
     Ok(())
