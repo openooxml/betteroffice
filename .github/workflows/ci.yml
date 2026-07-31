@@ -98,8 +98,6 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo clippy --all-targets -- -D warnings
 
-      # Optional features are only unified into `cargo clippy` while some other
-      # workspace member enables them.
       - name: Clippy optional features
         if: steps.ws.outputs.present == 'true'
         run: |
