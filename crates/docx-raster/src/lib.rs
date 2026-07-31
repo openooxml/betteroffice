@@ -33,7 +33,6 @@ pub type FontChains = HashMap<String, Vec<FontId>>;
 /// Embedded image bytes keyed by display-list relationship ID.
 pub type ImageMap = HashMap<String, Vec<u8>>;
 
-pub const MAX_IMAGE_DIM: u32 = 16_384;
 pub const MAX_IMAGE_PIXELS: u64 = 67_108_864;
 
 /// The part whose relationships own a display-list relationship id.
@@ -813,10 +812,12 @@ fn paint_image(
     if !image.attrs.effects.is_empty() {
         return Err("unsupported image field: effects".to_string());
     }
-    let Some(source_bytes) = image_bytes(&image.rel_id, scope, resources)? else {
+    let Some(source_bytes) = image_bytes(&image.rel_id, scope, resources) else {
         return Ok(());
     };
-    let source = decode_image(&source_bytes, &image.rel_id)?;
+    let Some(source) = decode_image(&source_bytes) else {
+        return Ok(());
+    };
     let frame = image_frame(image)?;
     if frame.w == 0.0 || frame.h == 0.0 {
         return Ok(());
@@ -880,71 +881,53 @@ fn paint_image(
 }
 
 /// Image bytes for a primitive, or `None` when the reference resolves to
-/// nothing. A `data:` URL that is present but malformed is still an error:
-/// unresolved and undecodable are different failures.
+/// nothing.
 fn image_bytes<'a>(
     rel_id: &'a str,
     scope: ImageScope<'_>,
     resources: &'a RenderResources<'_>,
-) -> Result<Option<Cow<'a, [u8]>>, String> {
+) -> Option<Cow<'a, [u8]>> {
     if rel_id.starts_with("data:") {
-        let (metadata, payload) = rel_id
-            .split_once(',')
-            .ok_or_else(|| "invalid image data URL".to_string())?;
+        let (metadata, payload) = rel_id.split_once(',')?;
         if !metadata.ends_with(";base64") {
-            return Err("unsupported non-base64 image data URL".to_string());
+            return None;
         }
-        let bytes = base64::engine::general_purpose::STANDARD
+        return base64::engine::general_purpose::STANDARD
             .decode(payload)
-            .map_err(|error| format!("invalid image data URL: {error}"))?;
-        return Ok(Some(Cow::Owned(bytes)));
+            .ok()
+            .map(Cow::Owned);
     }
-    Ok(resources
+    resources
         .images
         .get(&scoped_image_key(scope, rel_id))
         .or_else(|| resources.images.get(rel_id))
-        .map(|bytes| Cow::Borrowed(bytes.as_slice())))
+        .map(|bytes| Cow::Borrowed(bytes.as_slice()))
 }
 
-fn decode_image(bytes: &[u8], rel_id: &str) -> Result<Pixmap, String> {
+/// Decoded pixels, or `None` for content this backend will not draw: bytes it
+/// cannot decode, or an image past [`MAX_IMAGE_PIXELS`].
+fn decode_image(bytes: &[u8]) -> Option<Pixmap> {
     use image::ImageDecoder as _;
 
-    let reader = image::ImageReader::new(Cursor::new(bytes))
+    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|error| format!("failed to inspect image `{rel_id}`: {error}"))?;
-    let mut decoder = reader
+        .ok()?
         .into_decoder()
-        .map_err(|error| format!("failed to decode image `{rel_id}`: {error}"))?;
+        .ok()?;
     let (declared_width, declared_height) = decoder.dimensions();
-    validate_image_size(declared_width, declared_height)?;
-    let orientation = decoder
-        .orientation()
-        .map_err(|error| format!("failed to read image orientation `{rel_id}`: {error}"))?;
-    let mut decoded = image::DynamicImage::from_decoder(decoder)
-        .map_err(|error| format!("failed to decode image `{rel_id}`: {error}"))?;
+    if u64::from(declared_width) * u64::from(declared_height) > MAX_IMAGE_PIXELS {
+        return None;
+    }
+    let orientation = decoder.orientation().ok()?;
+    let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
     decoded.apply_orientation(orientation);
     let decoded = decoded.to_rgba8();
     let (width, height) = decoded.dimensions();
-    let mut pixmap =
-        Pixmap::new(width, height).ok_or_else(|| format!("invalid image size for `{rel_id}`"))?;
+    let mut pixmap = Pixmap::new(width, height)?;
     for (target, source) in pixmap.pixels_mut().iter_mut().zip(decoded.pixels()) {
         *target = ColorU8::from_rgba(source[0], source[1], source[2], source[3]).premultiply();
     }
-    Ok(pixmap)
-}
-
-fn validate_image_size(width: u32, height: u32) -> Result<(), String> {
-    if width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
-        return Err(format!(
-            "decoded image is {width}x{height}px, exceeds the {MAX_IMAGE_DIM}px per-side cap"
-        ));
-    }
-    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
-        return Err(format!(
-            "decoded image is {width}x{height}px, exceeds the {MAX_IMAGE_PIXELS}-pixel allocation cap"
-        ));
-    }
-    Ok(())
+    Some(pixmap)
 }
 
 fn image_frame(image: &ImagePrimitive) -> Result<FRect, String> {
