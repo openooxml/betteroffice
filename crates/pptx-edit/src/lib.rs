@@ -36,8 +36,8 @@ pub(crate) const PILCROW_KIND: &str = "pilcrow";
 pub(crate) const KIND: &str = "_kind";
 pub(crate) const PARA_ID: &str = "paraId";
 const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
-const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
-const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
+pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
 pub struct DeckSession {
