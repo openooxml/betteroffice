@@ -233,17 +233,47 @@ Presentation.open(untrusted, limits={"max_shapes": 5_000, "max_runs": 50_000})
 
 An unknown limit name raises `ValueError` rather than being ignored.
 
+## Threads
+
+**A `Presentation` is pinned to the thread that opened it, and must also be
+released there.** The engine's undo manager is not `Send`, so the class is
+declared `unsendable`, and pyo3 enforces that in two ways worth knowing about:
+
+- **Touching one from another thread raises `pyo3_runtime.PanicException`.**
+  That is a direct `BaseException` subclass, so `except Exception` does *not*
+  catch it — a worker that guards its work with `except Exception` will die
+  anyway.
+- **Releasing one on another thread leaks it.** pyo3 skips the Rust destructor
+  and writes an *unraisable* `RuntimeError` instead (visible only through
+  `sys.unraisablehook`), stranding roughly 1.5 MB per deck. Nothing is raised
+  into your code.
+
+The leak is easy to hit by accident, because the release does not have to be an
+explicit `del`:
+
+```python
+with ThreadPoolExecutor() as pool:
+    decks = [f.result() for f in [pool.submit(load, p) for p in paths]]
+# every deck was opened on a worker and is now dropped on the main thread
+```
+
+The cyclic garbage collector counts too. If a `Presentation` is caught in a
+reference cycle — a traceback that reaches it, an object graph that points back
+at itself — the collector frees it wherever it happens to run, which may be any
+thread. Giving each worker its own `Presentation` therefore is *not* enough on
+its own; the deck must also become garbage on its owning thread. Open, use, and
+drop each deck inside one thread, and break any cycle holding it before that
+thread finishes.
+
+Engine calls hold the GIL for their duration, unlike `betteroffice-xlsx`. Only
+`open_path`'s read and `save_path`'s write release it.
+
 ## Status
 
 `0.0.x`, and the API may change before `0.1.0`. `save` re-zips the parts the
 model retained; part bytes survive unchanged but the container is rebuilt, so
 output is not byte-identical to the source, and it refuses on an edited deck —
 see *Writing*.
-
-A `Presentation` is bound to the thread that opened it — the engine's undo
-manager is not `Send`. Give each worker its own `Presentation` rather than
-sharing one across a pool. For the same reason this binding holds the GIL for
-the duration of a call, unlike `betteroffice-xlsx`.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.

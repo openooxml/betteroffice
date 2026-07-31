@@ -1,6 +1,8 @@
+import gc
 import os
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -713,22 +715,63 @@ def test_agent_edits_stay_out_of_local_undo(deck):
     assert deck.can_undo is False
 
 
-def test_a_presentation_works_inside_a_worker_thread(sample_bytes):
-    """It is `unsendable`, so each thread must open its own."""
-    import threading
-
-    results: list = []
-
-    def work() -> None:
-        deck = bo.Presentation.open(sample_bytes)
-        deck.move_shape(0, deck[0].shapes[0].id, 17, 19)
-        results.append((deck[0].shapes[0].x, deck[0].shapes[0].y))
-
+def _on_a_worker_thread(work):
     thread = threading.Thread(target=work)
     thread.start()
     thread.join()
 
-    assert results == [(17, 19)]
+
+def test_touching_a_presentation_off_its_thread_escapes_except_exception(deck):
+    """`unsendable` panics, and PanicException is not an `Exception`."""
+    caught: list = []
+
+    def work() -> None:
+        try:
+            deck.slide_count
+        except Exception as error:
+            caught.append(("Exception", error))
+        except BaseException as error:
+            caught.append(("BaseException", error))
+
+    _on_a_worker_thread(work)
+
+    assert len(caught) == 1, "the deck was reachable from another thread"
+    where, error = caught[0]
+    assert where == "BaseException"
+    assert type(error).__name__ == "PanicException"
+    assert not isinstance(error, Exception)
+    assert deck.slide_count == 3
+
+
+def test_dropping_a_presentation_off_its_thread_leaks_it(sample_bytes, monkeypatch):
+    """pyo3 skips the Rust destructor and writes an unraisable error instead."""
+    unraisable: list = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    holder = [bo.Presentation.open(sample_bytes)]
+
+    _on_a_worker_thread(holder.clear)
+
+    assert [type(hook.exc_value).__name__ for hook in unraisable] == ["RuntimeError"]
+    assert "unsendable" in str(unraisable[0].exc_value)
+
+
+def test_collecting_a_cycle_off_the_owning_thread_leaks_it(sample_bytes, monkeypatch):
+    """One deck per worker is not enough: the collector runs where it likes."""
+    gc.collect()
+    unraisable: list = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+    gc.disable()
+    try:
+        cycle: dict = {"deck": bo.Presentation.open(sample_bytes)}
+        cycle["self"] = cycle
+        del cycle
+        _on_a_worker_thread(gc.collect)
+    finally:
+        gc.enable()
+
+    assert [type(hook.exc_value).__name__ for hook in unraisable] == ["RuntimeError"]
+    assert "unsendable" in str(unraisable[0].exc_value)
 
 
 def test_repr_is_python_shaped(deck):

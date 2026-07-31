@@ -81,7 +81,7 @@ class Presentation:
     """A PPTX presentation.
 
     Geometry is in English Metric Units; text offsets are UTF-16 code units.
-    A presentation is bound to the thread that opened it.
+    Pinned to the thread that opened it, and must be released there too.
     """
 
     __slots__ = ("_inner",)
