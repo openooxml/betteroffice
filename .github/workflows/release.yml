@@ -126,28 +126,89 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run deploy.yml --ref main
 
-  # One call per distribution: `needs` is job-wide, so sharing a matrix would
-  # let one binding's broken platform skip the other binding's publish.
-  python-pptx:
-    name: Python pptx
+  python-bindings:
+    name: Python release train
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
-    uses: ./.github/workflows/python-package.yml
-    with:
-      binding: pptx
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      bindings: ${{ steps.registry.outputs.bindings }}
     permissions:
       contents: read
-      id-token: write
-    secrets: inherit
+    steps:
+      - uses: actions/checkout@v7
 
-  python-xlsx:
-    name: Python xlsx
-    needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
-    uses: ./.github/workflows/python-package.yml
+      - id: registry
+        run: echo "bindings=$(node scripts/python-bindings.mjs)" >> "$GITHUB_OUTPUT"
+
+  python-dist:
+    name: Python ${{ matrix.binding }}
+    needs: python-bindings
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: ${{ fromJSON(needs.python-bindings.outputs.bindings) }}
+    uses: ./.github/workflows/python-dist.yml
     with:
-      binding: xlsx
+      binding: ${{ matrix.binding }}
     permissions:
       contents: read
-      id-token: write
-    secrets: inherit
+
+  # Publishing is a direct job here, never a reusable workflow, so the OIDC
+  # claim names release.yml — the workflow each PyPI project trusts.
+  python-pypi:
+    name: Publish betteroffice-${{ matrix.binding }}
+    needs: [python-bindings, python-dist]
+    # Not `success()`: a binding whose build broke must fail on its own
+    # `built-` receipt below rather than skip its siblings' upload.
+    if: ${{ !cancelled() && needs.python-bindings.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: ${{ fromJSON(needs.python-bindings.outputs.bindings) }}
+    # PyPI cannot tell this repo's publish jobs apart by workflow alone, so the
+    # environment is what scopes a Trusted Publisher to one project.
+    environment: pypi-${{ matrix.binding }}
+    permissions:
+      id-token: write # OIDC Trusted Publishing
+    steps:
+      - name: Require a complete build
+        uses: actions/download-artifact@v4
+        with:
+          name: built-${{ matrix.binding }}
+          path: receipt
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-${{ matrix.binding }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Detect PyPI token
+        id: pypi-token
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish with API token
+        if: steps.pypi-token.outputs.enabled == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
+          skip-existing: true
+
+      - name: Publish via Trusted Publishing
+        if: steps.pypi-token.outputs.enabled != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true

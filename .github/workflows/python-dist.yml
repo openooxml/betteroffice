@@ -1,12 +1,14 @@
-name: Python package
+name: Python dist
 
-# Build, package, and publish one bindings/python-* distribution. Called once
-# per binding so a broken platform in one cannot hold back the other.
+# Build the wheels and sdist for one bindings/python-* distribution. Publishing
+# stays with the caller: PyPI cannot name a reusable workflow as a Trusted
+# Publisher, because the OIDC claim points here instead of at release.yml.
+# https://docs.pypi.org/trusted-publishers/troubleshooting/#reusable-workflows-on-github
 on:
   workflow_call:
     inputs:
       binding:
-        description: The bindings/python-<binding> distribution to publish.
+        description: The bindings/python-<binding> distribution to build.
         required: true
         type: string
 
@@ -69,46 +71,18 @@ jobs:
           name: python-${{ inputs.binding }}-sdist
           path: bindings/python-${{ inputs.binding }}/dist
 
-  publish:
-    name: Publish to PyPI
+  # `needs` inside a called workflow scopes to this binding alone, so this
+  # receipt exists only when every one of its own artifacts does. The publish
+  # matrix demands it per binding instead of depending on the whole build.
+  built:
+    name: Complete
     needs: [wheels, sdist]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Every leg of this repo's release presents the same repository, workflow,
-    # and job OIDC claims, so the environment is what tells PyPI which project
-    # a Trusted Publisher may upload to.
-    environment: pypi-${{ inputs.binding }}
-    permissions:
-      id-token: write # OIDC Trusted Publishing
+    timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: python-${{ inputs.binding }}-*
-          path: dist
-          merge-multiple: true
+      - run: echo "${{ inputs.binding }}" > built.txt
 
-      - name: Detect PyPI token
-        id: pypi-token
-        env:
-          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          if [ -n "$TOKEN" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish with API token
-        if: steps.pypi-token.outputs.enabled == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: actions/upload-artifact@v4
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: dist
-          skip-existing: true
-
-      - name: Publish via Trusted Publishing
-        if: steps.pypi-token.outputs.enabled != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          skip-existing: true
+          name: built-${{ inputs.binding }}
+          path: built.txt
