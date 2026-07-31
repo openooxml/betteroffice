@@ -37,15 +37,44 @@ default build still targets `wasm32-unknown-unknown`.
 betteroffice-docx = { version = "0.0.4", features = ["raster"] }
 ```
 
+`render_png` takes a `DisplayList`, which `layout` returns alongside the typed
+layout. `layout_input` is the measured projection the caller supplies; see
+Limits below for why.
+
 ```rust
+use betteroffice_docx::{Document, ImageScope};
+
 let mut document = Document::open(&docx_bytes)?;
 document.register_font("Carlito", false, false, &font_bytes)?;
+document.register_image(ImageScope::Body, "rId9", &logo_bytes)?;
+
+let display_list = document.layout(layout_input)?.display_list;
 let png = document.render_png(&display_list, 0)?;
 ```
 
-Faces are capped at 256 and fonts at 32 MiB each; either budget is a typed
-error. Embedded images travel on the display list as `data:` URLs already
-resolved against their owning part, so rendering needs no image side table.
+Faces are capped at 256 and fonts at 32 MiB each, images at 256 and 32 MiB
+each, a rendered page at 16384px per side and 16777216 pixels of area, and a
+decoded image at 16384px per side and 67108864 pixels. Every budget is a typed
+error rather than a truncated accept, and the render budgets are checked before
+any surface is allocated.
+
+`register_font` appends to the `family|bold|italic` fallback chain instead of
+replacing it, so a second face for one family adds coverage for the glyphs the
+first face lacks. `Presentation::register_font` replaces, deliberately: PPTX
+resolves one face per family, DOCX resolves a chain.
+
+## Images
+
+Most embedded media arrives on the display list as a `data:` URL that
+`docx-parse` already resolved against its owning part, and needs nothing
+further. Media the parser could not resolve does not: an external (`r:link`)
+or dangling relationship, an image outside `word/media/`, and a picture
+watermark's bare `rId` all reach the backend unresolved.
+
+An unresolved reference is skipped, matching the canvas backend's resolver —
+one missing linked image must not blank the page around it. `register_image`
+supplies the bytes where skipping is not what you want. It is keyed by owning
+part, because a header and the body can both use `rId9` for different media.
 
 ## Limits
 
