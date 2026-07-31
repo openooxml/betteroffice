@@ -293,7 +293,7 @@ fn output_is_byte_deterministic() {
 }
 
 #[test]
-fn missing_resources_and_unsupported_effects_are_errors() {
+fn unsupported_visual_fields_are_errors() {
     let (fonts, chains, images) = fixture_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
 
