@@ -79,8 +79,10 @@ removed = deck.delete_text(story.id, 0, 3)
 print(removed.text)          # 'Q3 '
 ```
 
-`format_text` patches only the arguments you pass. A range that crosses a
-paragraph boundary raises `RangeError` rather than silently splitting the edit.
+`format_text` patches only the arguments you pass, and a range spanning several
+paragraphs styles each of them as a single undoable edit. `delete_text` is the
+strict one: a range crossing a paragraph boundary raises `RangeError` rather
+than silently swallowing the break.
 
 ## Lay a slide out
 
@@ -266,7 +268,8 @@ drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
 Engine calls hold the GIL for their duration, unlike `betteroffice-xlsx`. Only
-`open_path`'s read and `save_path`'s write release it.
+the file I/O releases it: `open_path`'s read, and the writes in `save_path`,
+`Media.write` and `DisplayList.write`.
 
 ## Status
 

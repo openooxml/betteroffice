@@ -218,7 +218,7 @@ def test_insert_paragraph_break_splits_a_paragraph(deck):
     assert deck.story(story.id).text == "H\ni"
 
 
-def test_a_text_range_may_not_cross_a_paragraph_boundary(deck):
+def test_delete_text_may_not_cross_a_paragraph_boundary(deck):
     story = next(s for s in deck[0].shapes if s.name == "Title").stories[0]
     assert len(story.paragraphs) == 2
 
