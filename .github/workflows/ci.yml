@@ -98,6 +98,14 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: cargo clippy --all-targets -- -D warnings
 
+      # Optional features are only unified into `cargo clippy` while some other
+      # workspace member enables them.
+      - name: Clippy optional features
+        if: steps.ws.outputs.present == 'true'
+        run: |
+          cargo clippy -p betteroffice-drawingml --all-targets --all-features -- -D warnings
+          cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
+
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
         run: |
@@ -112,7 +120,9 @@ jobs:
       # workspace member enables them.
       - name: Test optional features
         if: steps.ws.outputs.present == 'true'
-        run: cargo test -p betteroffice-drawingml --all-features
+        run: |
+          cargo test -p betteroffice-drawingml --all-features
+          cargo test -p betteroffice-docx --all-features
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
