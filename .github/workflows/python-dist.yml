@@ -47,10 +47,10 @@ jobs:
           manylinux: ${{ matrix.platform.manylinux }}
           working-directory: bindings/python-${{ inputs.binding }}
 
-      # One name per binding *and* platform: a collision silently overwrites.
+      # A binding name holds no dot, so `python-<a>.*` cannot reach binding `a-b`.
       - uses: actions/upload-artifact@v4
         with:
-          name: python-${{ inputs.binding }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          name: python-${{ inputs.binding }}.${{ matrix.platform.os }}.${{ matrix.platform.target }}
           path: bindings/python-${{ inputs.binding }}/dist
           if-no-files-found: error
 
@@ -69,7 +69,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: python-${{ inputs.binding }}-sdist
+          name: python-${{ inputs.binding }}.sdist
           path: bindings/python-${{ inputs.binding }}/dist
           if-no-files-found: error
 
