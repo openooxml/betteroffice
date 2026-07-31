@@ -49,14 +49,19 @@ document.register_font("Carlito", false, false, &font_bytes)?;
 document.register_image(ImageScope::Body, "rId9", &logo_bytes)?;
 
 let display_list = document.layout(layout_input)?.display_list;
-let png = document.render_png(&display_list, 0)?;
+let rendered = document.render_png(&display_list, 0)?;
+// rendered.bytes, rendered.skipped_images
 ```
 
 Faces are capped at 256 and fonts at 32 MiB each, images at 256 and 32 MiB
-each, a rendered page at 16384px per side and 16777216 pixels of area, and a
-decoded image at 16384px per side and 67108864 pixels. Every budget is a typed
-error rather than a truncated accept, and the render budgets are checked before
-any surface is allocated.
+each, and a rendered page at 16384px per side and 16777216 pixels of area. Each
+is a typed error rather than a truncated accept, and the page budget is checked
+before any surface is allocated.
+
+Images are budgeted by the pixels they decode to: 33554432 for one image and
+67108864 across one page, charged from the declared extent before the decoder
+allocates. A page decodes each resolved image once however many primitives
+reference it, so its cost follows the budget rather than the reference count.
 
 `register_font` appends to the `family|bold|italic` fallback chain instead of
 replacing it, so a second face for one family adds coverage for the glyphs the
@@ -71,10 +76,12 @@ further. Media the parser could not resolve does not: an external (`r:link`)
 or dangling relationship, an image outside `word/media/`, and a picture
 watermark's bare `rId` all reach the backend unresolved.
 
-An unresolved reference is skipped, matching the canvas backend's resolver —
-one missing linked image must not blank the page around it. `register_image`
-supplies the bytes where skipping is not what you want. It is keyed by owning
-part, because a header and the body can both use `rId9` for different media.
+An image the backend will not draw is skipped, matching the canvas backend's
+resolver — one missing linked image, or one past a pixel budget, must not blank
+the page around it. `render_png` reports how many references it skipped, so a
+caller that wants a whole page can reject on it. `register_image` supplies the
+bytes where skipping is not what you want. It is keyed by owning part, because
+a header and the body can both use `rId9` for different media.
 
 ## Limits
 

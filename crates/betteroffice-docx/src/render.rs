@@ -150,16 +150,9 @@ impl Document {
         self.images.register(scope, rel_id, bytes)
     }
 
-    /// Rasterizes one display-list page to deterministic PNG bytes.
-    ///
-    /// A page wider or taller than [`MAX_PIXMAP_DIM`], or larger in area than
-    /// [`MAX_PIXMAP_PIXELS`], is refused before any surface is allocated.
-    ///
-    /// Media the parser resolved arrives as a `data:` URL on the primitive and
-    /// needs nothing further. Anything it could not resolve — an external or
-    /// dangling relationship, media outside `word/media/`, a picture
-    /// watermark's bare `rId` — reaches the backend unresolved, and is skipped
-    /// unless [`Document::register_image`] supplied its bytes.
+    /// Rasterizes one display-list page to deterministic PNG bytes. A page past
+    /// [`MAX_PIXMAP_DIM`] or [`MAX_PIXMAP_PIXELS`] is refused before any surface
+    /// is allocated; an image the backend cannot draw is skipped and counted.
     pub fn render_png(
         &self,
         display_list: &DisplayList,
