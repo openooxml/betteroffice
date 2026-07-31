@@ -281,6 +281,55 @@ def test_saving_an_edited_deck_refuses_rather_than_dropping_edits(deck, tmp_path
     assert not (tmp_path / "out.pptx").exists()
 
 
+def _title_story_id(deck):
+    return next(s for s in deck[0].shapes if s.name == "Title").stories[0].id
+
+
+REFUSED_EDITS = [
+    ("unknown slide", KeyError, lambda deck: deck.delete_slide("nope")),
+    ("unknown shape", KeyError, lambda deck: deck.move_shape(0, "nope", 1, 1)),
+    ("unknown story", KeyError, lambda deck: deck.insert_text("nope", 0, "x")),
+    (
+        "bad geometry",
+        ValueError,
+        lambda deck: deck.add_shape(0, "notashape", x=0, y=0, width=10, height=10),
+    ),
+    (
+        "bad size",
+        ValueError,
+        lambda deck: deck.add_shape(0, "rect", x=0, y=0, width=0, height=10),
+    ),
+    (
+        "bad colour",
+        ValueError,
+        lambda deck: deck.set_shape_fill(0, deck[0].shapes[0].id, "red"),
+    ),
+    ("insert out of range", bo.RangeError, lambda deck: deck.insert_slide(99)),
+    ("move out of range", bo.RangeError, lambda deck: deck.move_slide(0, 99)),
+    (
+        "text across paragraphs",
+        bo.RangeError,
+        lambda deck: deck.delete_text(_title_story_id(deck), 10, 20),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("expected", "edit"),
+    [case[1:] for case in REFUSED_EDITS],
+    ids=[case[0] for case in REFUSED_EDITS],
+)
+def test_an_edit_the_engine_refused_leaves_the_deck_saveable(
+    deck, tmp_path, expected, edit
+):
+    """Only an edit the engine accepted may block save."""
+    with pytest.raises(expected):
+        edit(deck)
+
+    assert deck.save()[:4] == PPTX_MAGIC
+    deck.save_path(tmp_path / "out.pptx")
+
+
 def test_applying_a_peer_update_also_blocks_saving(sample_bytes):
     left = bo.Presentation.open_collaborative(sample_bytes, client_id=101)
     right = bo.Presentation.open_collaborative(sample_bytes, client_id=202)

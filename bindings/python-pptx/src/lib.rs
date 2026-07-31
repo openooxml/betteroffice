@@ -933,14 +933,19 @@ pub struct PyPresentation {
 }
 
 impl PyPresentation {
-    /// Every edit routes through here, which is also where `save` learns it
-    /// can no longer serialize honestly.
-    fn begin_edit(&self) -> EditCtx {
-        self.edited.set(true);
+    fn edit_ctx(&self) -> EditCtx {
         EditCtx {
             origin: self.origin,
             author: self.author.clone(),
         }
+    }
+
+    /// Marks the deck dirty only once the engine has accepted the edit, so a
+    /// raised edit leaves `save` willing to serialize.
+    fn committed<T>(&self, edit: Result<T, CoreError>) -> PyResult<T> {
+        let receipt = edit.map_err(map_error)?;
+        self.edited.set(true);
+        Ok(receipt)
     }
 
     fn all_slide_ids(&self) -> PyResult<Vec<String>> {
@@ -1163,28 +1168,28 @@ impl PyPresentation {
 
     #[pyo3(signature = (index, *, layout = None))]
     fn insert_slide(&self, index: u32, layout: Option<&str>) -> PyResult<PySlideEdit> {
-        let receipt = self
-            .presentation
-            .insert_slide(&self.begin_edit(), index, layout)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.insert_slide(
+            &self.edit_ctx(),
+            index,
+            layout,
+        ))?;
         Ok(PySlideEdit::from_core(receipt))
     }
 
     fn delete_slide(&self, slide: &Bound<'_, PyAny>) -> PyResult<PySlideEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .delete_slide(&self.begin_edit(), &slide_id)
-            .map_err(map_error)?;
+        let receipt =
+            self.committed(self.presentation.delete_slide(&self.edit_ctx(), &slide_id))?;
         Ok(PySlideEdit::from_core(receipt))
     }
 
     fn move_slide(&self, slide: &Bound<'_, PyAny>, index: u32) -> PyResult<PySlideEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .move_slide(&self.begin_edit(), &slide_id, index)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.move_slide(
+            &self.edit_ctx(),
+            &slide_id,
+            index,
+        ))?;
         Ok(PySlideEdit::from_core(receipt))
     }
 
@@ -1217,10 +1222,11 @@ impl PyPresentation {
             text,
             style: text_style(bold, italic, font_size, color, font_family, underline),
         };
-        let receipt = self
-            .presentation
-            .add_text_box(&self.begin_edit(), &slide_id, &draft)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.add_text_box(
+            &self.edit_ctx(),
+            &slide_id,
+            &draft,
+        ))?;
         Ok(PyShapeEdit::from_core(receipt))
     }
 
@@ -1244,10 +1250,11 @@ impl PyPresentation {
             rect: rect(x, y, width, height),
             fill,
         };
-        let receipt = self
-            .presentation
-            .add_shape(&self.begin_edit(), &slide_id, &draft)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.add_shape(
+            &self.edit_ctx(),
+            &slide_id,
+            &draft,
+        ))?;
         Ok(PyShapeEdit::from_core(receipt))
     }
 
@@ -1259,10 +1266,12 @@ impl PyPresentation {
         color: Option<&str>,
     ) -> PyResult<PyFillEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .set_shape_fill(&self.begin_edit(), &slide_id, shape_id, color)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.set_shape_fill(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+            color,
+        ))?;
         Ok(PyFillEdit::from_core(receipt))
     }
 
@@ -1277,10 +1286,12 @@ impl PyPresentation {
     ) -> PyResult<PyStrokeEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
         let stroke = ShapeStroke { color, width_pt };
-        let receipt = self
-            .presentation
-            .set_shape_stroke(&self.begin_edit(), &slide_id, shape_id, &stroke)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.set_shape_stroke(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+            &stroke,
+        ))?;
         Ok(PyStrokeEdit::from_core(receipt))
     }
 
@@ -1291,19 +1302,22 @@ impl PyPresentation {
         adjustments: BTreeMap<String, f64>,
     ) -> PyResult<PyAdjustEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .set_shape_adjust(&self.begin_edit(), &slide_id, shape_id, &adjustments)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.set_shape_adjust(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+            &adjustments,
+        ))?;
         Ok(PyAdjustEdit::from_core(receipt))
     }
 
     fn remove_shape(&self, slide: &Bound<'_, PyAny>, shape_id: &str) -> PyResult<PyShapeEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .remove_shape(&self.begin_edit(), &slide_id, shape_id)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.remove_shape(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+        ))?;
         Ok(PyShapeEdit::from_core(receipt))
     }
 
@@ -1315,10 +1329,13 @@ impl PyPresentation {
         y: i64,
     ) -> PyResult<PyTransformEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .move_shape(&self.begin_edit(), &slide_id, shape_id, x, y)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.move_shape(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+            x,
+            y,
+        ))?;
         Ok(PyTransformEdit::from_core(receipt))
     }
 
@@ -1330,10 +1347,13 @@ impl PyPresentation {
         height: i64,
     ) -> PyResult<PyTransformEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
-        let receipt = self
-            .presentation
-            .resize_shape(&self.begin_edit(), &slide_id, shape_id, width, height)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.resize_shape(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+            width,
+            height,
+        ))?;
         Ok(PyTransformEdit::from_core(receipt))
     }
 
@@ -1357,18 +1377,22 @@ impl PyPresentation {
         underline: Option<String>,
     ) -> PyResult<PyTextEdit> {
         let style = text_style(bold, italic, font_size, color, font_family, underline);
-        let receipt = self
-            .presentation
-            .insert_text(&self.begin_edit(), story_id, index, text, &style)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.insert_text(
+            &self.edit_ctx(),
+            story_id,
+            index,
+            text,
+            &style,
+        ))?;
         Ok(PyTextEdit::from_core(receipt))
     }
 
     fn delete_text(&self, story_id: &str, start: u32, end: u32) -> PyResult<PyTextEdit> {
-        let receipt = self
-            .presentation
-            .delete_text(&self.begin_edit(), story_id, start, end)
-            .map_err(map_error)?;
+        let receipt =
+            self.committed(
+                self.presentation
+                    .delete_text(&self.edit_ctx(), story_id, start, end),
+            )?;
         Ok(PyTextEdit::from_core(receipt))
     }
 
@@ -1398,18 +1422,22 @@ impl PyPresentation {
             font_family,
             underline,
         ));
-        let receipt = self
-            .presentation
-            .format_text(&self.begin_edit(), story_id, start, end, &patch)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.format_text(
+            &self.edit_ctx(),
+            story_id,
+            start,
+            end,
+            &patch,
+        ))?;
         Ok(PyTextEdit::from_core(receipt))
     }
 
     fn insert_paragraph_break(&self, story_id: &str, index: u32) -> PyResult<PyTextEdit> {
-        let receipt = self
-            .presentation
-            .insert_paragraph_break(&self.begin_edit(), story_id, index)
-            .map_err(map_error)?;
+        let receipt = self.committed(self.presentation.insert_paragraph_break(
+            &self.edit_ctx(),
+            story_id,
+            index,
+        ))?;
         Ok(PyTextEdit::from_core(receipt))
     }
 
