@@ -12,6 +12,16 @@ pub enum Error {
     UnsupportedParagraphEdit(String),
     Font(String),
     ResourceLimit(String),
+    RenderTooLarge {
+        width: u32,
+        height: u32,
+        max: u32,
+    },
+    RenderAreaTooLarge {
+        width: u32,
+        height: u32,
+        max_pixels: u64,
+    },
     Render(String),
 }
 
@@ -32,6 +42,18 @@ impl fmt::Display for Error {
             }
             Self::Font(error) => formatter.write_str(error),
             Self::ResourceLimit(error) => formatter.write_str(error),
+            Self::RenderTooLarge { width, height, max } => write!(
+                formatter,
+                "requested render is {width}x{height}px, exceeds the {max}px per-side cap; lower the page dimensions"
+            ),
+            Self::RenderAreaTooLarge {
+                width,
+                height,
+                max_pixels,
+            } => write!(
+                formatter,
+                "requested render is {width}x{height}px, exceeds the {max_pixels}-pixel allocation cap; lower the page dimensions"
+            ),
             Self::Render(error) => formatter.write_str(error),
         }
     }
@@ -49,6 +71,8 @@ impl std::error::Error for Error {
             | Self::UnsupportedParagraphEdit(_)
             | Self::Font(_)
             | Self::ResourceLimit(_)
+            | Self::RenderTooLarge { .. }
+            | Self::RenderAreaTooLarge { .. }
             | Self::Render(_) => None,
         }
     }

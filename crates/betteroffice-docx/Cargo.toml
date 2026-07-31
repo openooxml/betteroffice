@@ -13,7 +13,7 @@ categories = ["parser-implementations", "rendering"]
 
 [features]
 default = []
-raster = ["dep:docx-raster", "dep:ooxml-text"]
+raster = ["dep:docx-raster", "dep:ooxml-text", "dep:serde_json"]
 
 [dependencies]
 docx-edit.workspace = true
@@ -21,6 +21,7 @@ docx-layout.workspace = true
 docx-parse.workspace = true
 docx-raster = { workspace = true, optional = true }
 ooxml-text = { workspace = true, optional = true }
+serde_json = { version = "1", optional = true }
 sha2 = "0.10"
 
 [dev-dependencies]

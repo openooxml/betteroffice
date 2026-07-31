@@ -1,6 +1,8 @@
 #![cfg(feature = "raster")]
 
-use betteroffice_docx::{DisplayList, Document};
+use std::time::{Duration, Instant};
+
+use betteroffice_docx::{DisplayList, Document, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
 use serde_json::{Value, json};
 
 const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
@@ -35,12 +37,16 @@ fn document() -> Document {
 }
 
 fn page(primitives: Vec<Value>) -> DisplayList {
+    sized_page(64, 32, primitives)
+}
+
+fn sized_page(width: u64, height: u64, primitives: Vec<Value>) -> DisplayList {
     serde_json::from_value(json!({
         "contractVersion": 1,
         "pages": [{
             "pageIndex": 0,
-            "width": 64,
-            "height": 32,
+            "width": width,
+            "height": height,
             "primitives": primitives
         }]
     }))
@@ -123,6 +129,72 @@ fn rejects_a_page_ordinal_past_the_end() {
         .render_png(&embedded_image_page(), 1)
         .unwrap_err();
     assert_eq!(error.to_string(), "page ordinal 1 is out of range");
+}
+
+#[test]
+fn rejects_a_page_wider_than_the_per_side_budget() {
+    let error = document()
+        .render_png(&sized_page(MAX_PIXMAP_DIM as u64 + 1, 1, vec![]), 0)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "requested render is 16385x1px, exceeds the 16384px per-side cap; lower the page dimensions"
+    );
+}
+
+#[test]
+fn rejects_a_page_over_the_area_budget_that_fits_the_per_side_budget() {
+    let error = document()
+        .render_png(&sized_page(4096, 4097, vec![]), 0)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "requested render is 4096x4097px, exceeds the 16777216-pixel allocation cap; lower the page dimensions"
+    );
+    const { assert!(4096_u64 * 4097 > MAX_PIXMAP_PIXELS) };
+}
+
+/// Ordering probe. The page is over budget *and* carries a primitive the
+/// backend refuses, so the reported error names whichever ran first.
+#[test]
+fn refuses_an_oversized_page_before_the_backend_paints_it() {
+    let page = sized_page(
+        u64::from(MAX_PIXMAP_DIM) + 1,
+        1,
+        vec![json!({
+            "kind": "image",
+            "relId": RED_PNG_DATA_URL,
+            "x": 0,
+            "y": 0,
+            "w": 1,
+            "h": 1,
+            "filter": "grayscale(1)"
+        })],
+    );
+    let error = document().render_png(&page, 0).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "requested render is 16385x1px, exceeds the 16384px per-side cap; lower the page dimensions"
+    );
+}
+
+/// A 40000x40000 surface is 6.4 GB and minutes of fill, so the budget has to
+/// return before the backend is called at all.
+#[test]
+fn refuses_a_page_that_would_allocate_gigabytes() {
+    let started = Instant::now();
+    let error = document()
+        .render_png(&sized_page(40_000, 40_000, vec![]), 0)
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert_eq!(
+        error.to_string(),
+        "requested render is 40000x40000px, exceeds the 16384px per-side cap; lower the page dimensions"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the page budget was enforced after allocation, in {elapsed:?}"
+    );
 }
 
 #[test]

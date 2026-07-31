@@ -5,11 +5,14 @@ use std::sync::{Mutex, PoisonError};
 use docx_layout::display_list::DisplayList;
 use docx_raster::{FontChains, ImageMap, RenderResources};
 use ooxml_text::FontStore;
+use serde_json::Number;
 
 use crate::{Document, Error, Result};
 
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+pub const MAX_PIXMAP_DIM: u32 = 16_384;
+pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
 
 /// Registered faces plus the `family|bold|italic` chains the raster backend
 /// resolves runs against. The store sits behind a `Mutex` so a [`Document`]
@@ -52,6 +55,34 @@ impl FontRegistry {
     }
 }
 
+fn validate_render_size(width: u32, height: u32) -> Result<()> {
+    if width > MAX_PIXMAP_DIM || height > MAX_PIXMAP_DIM {
+        return Err(Error::RenderTooLarge {
+            width,
+            height,
+            max: MAX_PIXMAP_DIM,
+        });
+    }
+    if u64::from(width) * u64::from(height) > MAX_PIXMAP_PIXELS {
+        return Err(Error::RenderAreaTooLarge {
+            width,
+            height,
+            max_pixels: MAX_PIXMAP_PIXELS,
+        });
+    }
+    Ok(())
+}
+
+/// The pixel extent the raster backend would allocate, or `None` when the
+/// backend rejects the number before allocating anything.
+fn page_pixels(number: &Number) -> Option<u32> {
+    let value = number.as_f64()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    Some(value.ceil().min(f64::from(u32::MAX)) as u32)
+}
+
 fn chain_key(family: &str, bold: bool, italic: bool) -> String {
     format!(
         "{}|{}|{}",
@@ -77,9 +108,18 @@ impl Document {
 
     /// Rasterizes one display-list page to deterministic PNG bytes.
     ///
+    /// A page wider or taller than [`MAX_PIXMAP_DIM`], or larger in area than
+    /// [`MAX_PIXMAP_PIXELS`], is refused before any surface is allocated.
+    ///
     /// Embedded images arrive as `data:` URLs on the primitive, so no image
     /// side table is consulted.
     pub fn render_png(&self, display_list: &DisplayList, page_ordinal: usize) -> Result<Vec<u8>> {
+        if let Some(page) = display_list.pages.get(page_ordinal)
+            && let (Some(width), Some(height)) =
+                (page_pixels(&page.width), page_pixels(&page.height))
+        {
+            validate_render_size(width, height)?;
+        }
         let store = self
             .fonts
             .store
