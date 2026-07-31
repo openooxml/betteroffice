@@ -1,4 +1,4 @@
-use betteroffice_docx::{Document, LayoutInput, get_paragraph_text};
+use betteroffice_docx::{Document, LayoutInput, ParseLimits, get_paragraph_text};
 
 fn sample_docx() -> Vec<u8> {
     let parts = vec![
@@ -55,6 +55,29 @@ fn opens_edits_saves_and_reopens_typed_structure() {
     assert_eq!(reopened.tables().len(), 1);
     assert_eq!(reopened.sections().len(), 2);
     assert_eq!(reopened.headers().len(), 1);
+}
+
+#[test]
+fn open_with_limits_rejects_a_document_over_budget() {
+    let bytes = sample_docx();
+    let limits = ParseLimits {
+        max_paragraphs: 2,
+        ..ParseLimits::default()
+    };
+    let Err(error) = Document::open_with_limits(&bytes, &limits) else {
+        panic!("a 3-paragraph document parsed under a 2-paragraph budget");
+    };
+    assert!(
+        error.to_string().contains("paragraph"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        Document::open_with_limits(&bytes, &ParseLimits::default())
+            .unwrap()
+            .structure()
+            .body_paragraphs,
+        3
+    );
 }
 
 #[test]

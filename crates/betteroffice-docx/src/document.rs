@@ -9,6 +9,7 @@ use docx_parse::serializer::{
     S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13,
 };
 use docx_parse::table::Table;
+use docx_parse::xml::ParseLimits;
 use sha2::{Digest, Sha256};
 
 use crate::types::DEFAULT_SERIALIZATION_TIME;
@@ -18,11 +19,20 @@ pub struct Document {
     original: Vec<u8>,
     seed: String,
     model: DocumentModel,
+    #[cfg(feature = "raster")]
+    pub(crate) fonts: crate::render::FontRegistry,
 }
 
 impl Document {
     pub fn open(bytes: &[u8]) -> Result<Self> {
-        let parsed = docx_parse::parse_docx_s9_wire(bytes, S9ParseOptions::default())?;
+        Self::open_with_limits(bytes, &ParseLimits::default())
+    }
+
+    /// [`Document::open`] under a caller-supplied parse budget. A document that
+    /// exceeds any limit is rejected rather than truncated.
+    pub fn open_with_limits(bytes: &[u8], limits: &ParseLimits) -> Result<Self> {
+        let parsed =
+            docx_parse::parse_docx_s9_wire_with_limits(bytes, S9ParseOptions::default(), limits)?;
         let document = parsed.document;
         let model = model_from_package(
             document.package,
@@ -33,6 +43,8 @@ impl Document {
             original: bytes.to_vec(),
             seed: format!("{:x}", Sha256::digest(bytes)),
             model,
+            #[cfg(feature = "raster")]
+            fonts: crate::render::FontRegistry::default(),
         })
     }
 

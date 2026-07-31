@@ -24,6 +24,10 @@ numbering, relationships, media, and charts. `save` rewrites the parts the
 engine owns and reuses the original package for the rest, so untouched parts
 survive the round trip.
 
+`open_with_limits` swaps the parser's default resource budget for a
+caller-supplied `ParseLimits`, which is what a host ingesting untrusted uploads
+wants. A document past any cap is refused, never truncated.
+
 ## Limits
 
 - `replace_paragraph_text` takes single-run paragraphs. Richer editing goes

@@ -14,6 +14,7 @@ pub use docx_edit::{
 };
 pub use docx_layout::display_list::{DisplayList, DisplayPage, Primitive};
 pub use docx_layout::types::{Input as LayoutInput, Layout, LayoutOptions, MeasuredBlock, Page};
+pub use docx_parse::xml::ParseLimits;
 pub use docx_parse::{
     BlockContent, DocumentBody, HeaderFooter, InlineNode, Paragraph, ParagraphContent, Run,
     RunContent, Section, SectionProperties, Table, TableCell, TableRow, get_paragraph_text,
