@@ -1,0 +1,50 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "betteroffice-pptx"
+dynamic = ["version"]
+description = "Read, edit, and lay out PPTX presentations. Rust engine, no PowerPoint and no LibreOffice."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"]
+requires-python = ">=3.9"
+authors = [{ name = "OpenOOXML" }]
+keywords = [
+  "pptx",
+  "powerpoint",
+  "presentation",
+  "ooxml",
+  "presentationml",
+  "slides",
+  "python-pptx-alternative",
+  "rust",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Topic :: Office/Business :: Office Suites",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://betteroffice.dev"
+Documentation = "https://docs.betteroffice.dev"
+Source = "https://github.com/openooxml/betteroffice"
+Issues = "https://github.com/openooxml/betteroffice/issues"
+
+[tool.maturin]
+module-name = "betteroffice_pptx._betteroffice_pptx"
+python-source = "python"
+features = ["pyo3/extension-module"]
+strip = true
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

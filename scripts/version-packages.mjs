@@ -8,7 +8,7 @@ import {
   validateRustTrain
 } from './rust-crates.mjs';
 
-const PYTHON_BINDINGS = ['bindings/python-xlsx'];
+const PYTHON_BINDINGS = ['bindings/python-pptx', 'bindings/python-xlsx'];
 
 function releaseManifest(binding) {
   return `${binding}/package.json`;

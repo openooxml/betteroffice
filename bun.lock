@@ -114,6 +114,10 @@
         "wrangler": "^4.106.0",
       },
     },
+    "bindings/python-pptx": {
+      "name": "@betteroffice/python-pptx",
+      "version": "0.0.1",
+    },
     "bindings/python-xlsx": {
       "name": "@betteroffice/python-xlsx",
       "version": "0.0.1",
@@ -468,6 +472,8 @@
     "@betteroffice/pptx-i18n": ["@betteroffice/pptx-i18n@workspace:packages/pptx-i18n"],
 
     "@betteroffice/pptx-react": ["@betteroffice/pptx-react@workspace:packages/pptx-react"],
+
+    "@betteroffice/python-pptx": ["@betteroffice/python-pptx@workspace:bindings/python-pptx"],
 
     "@betteroffice/python-xlsx": ["@betteroffice/python-xlsx@workspace:bindings/python-xlsx"],
 

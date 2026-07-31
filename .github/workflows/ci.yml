@@ -138,12 +138,15 @@ jobs:
         with:
           workspaces: bindings
 
-      - name: Build and install the extension
-        working-directory: bindings/python-xlsx
+      - name: Build and install the extensions
         run: |
           python -m pip install --upgrade pip pytest
-          python -m pip install -e .
+          python -m pip install -e bindings/python-xlsx -e bindings/python-pptx
 
-      - name: Test
+      - name: Test xlsx
         working-directory: bindings/python-xlsx
+        run: pytest -q
+
+      - name: Test pptx
+        working-directory: bindings/python-pptx
         run: pytest -q

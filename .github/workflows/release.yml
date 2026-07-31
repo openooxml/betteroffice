@@ -127,15 +127,16 @@ jobs:
         run: gh workflow run deploy.yml --ref main
 
   python-build:
-    name: Python wheel (${{ matrix.os }} ${{ matrix.target }})
+    name: Python wheel (${{ matrix.binding }} ${{ matrix.platform.os }} ${{ matrix.platform.target }})
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
+        binding: [pptx, xlsx]
+        platform:
           - os: ubuntu-latest
             target: x86_64
             manylinux: "2014"
@@ -158,22 +159,26 @@ jobs:
         with:
           command: build
           args: --release --out dist
-          target: ${{ matrix.target }}
-          manylinux: ${{ matrix.manylinux }}
-          working-directory: bindings/python-xlsx
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          working-directory: bindings/python-${{ matrix.binding }}
 
-
+      # One name per binding *and* platform: a collision silently overwrites.
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-${{ matrix.target }}
-          path: bindings/python-xlsx/dist
+          name: python-${{ matrix.binding }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: bindings/python-${{ matrix.binding }}/dist
 
   sdist:
-    name: Source distribution
+    name: Source distribution (${{ matrix.binding }})
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: [pptx, xlsx]
     steps:
       - uses: actions/checkout@v7
 
@@ -181,24 +186,30 @@ jobs:
         with:
           command: sdist
           args: --out dist
-          working-directory: bindings/python-xlsx
+          working-directory: bindings/python-${{ matrix.binding }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-sdist
-          path: bindings/python-xlsx/dist
+          name: python-${{ matrix.binding }}-sdist
+          path: bindings/python-${{ matrix.binding }}/dist
 
+  # One job per distribution: Trusted Publishing mints a project-scoped token,
+  # so two projects cannot share an upload directory.
   python-publish:
-    name: Publish to PyPI
+    name: Publish ${{ matrix.binding }} to PyPI
     needs: [python-build, sdist]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: [pptx, xlsx]
     permissions:
       id-token: write # OIDC Trusted Publishing
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: wheel-*
+          pattern: python-${{ matrix.binding }}-*
           path: dist
           merge-multiple: true
 
