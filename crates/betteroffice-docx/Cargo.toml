@@ -11,12 +11,19 @@ readme = "README.md"
 keywords = ["docx", "word", "ooxml", "wordprocessingml"]
 categories = ["parser-implementations", "rendering"]
 
+[features]
+default = []
+raster = ["dep:docx-raster", "dep:ooxml-text"]
+
 [dependencies]
 docx-edit.workspace = true
 docx-layout.workspace = true
 docx-parse.workspace = true
+docx-raster = { workspace = true, optional = true }
+ooxml-text = { workspace = true, optional = true }
 sha2 = "0.10"
 
 [dev-dependencies]
 ooxml-opc.workspace = true
+png = "0.18"
 serde_json = "1"

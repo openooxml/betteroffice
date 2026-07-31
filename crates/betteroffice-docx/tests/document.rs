@@ -57,6 +57,15 @@ fn opens_edits_saves_and_reopens_typed_structure() {
     assert_eq!(reopened.headers().len(), 1);
 }
 
+fn assert_send_sync<T: Send + Sync>() {}
+
+/// `Document` backs language bindings (`#[pyclass]` requires `Send`), so this
+/// gate is permanent under every feature combination.
+#[test]
+fn document_is_send_and_sync() {
+    assert_send_sync::<Document>();
+}
+
 #[test]
 fn open_with_limits_rejects_a_document_over_budget() {
     let bytes = sample_docx();

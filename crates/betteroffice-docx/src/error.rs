@@ -10,6 +10,9 @@ pub enum Error {
     DisplayList(String),
     ParagraphNotFound(String),
     UnsupportedParagraphEdit(String),
+    Font(String),
+    ResourceLimit(String),
+    Render(String),
 }
 
 impl fmt::Display for Error {
@@ -27,6 +30,9 @@ impl fmt::Display for Error {
                     "paragraph {id:?} is not a plain single-run paragraph"
                 )
             }
+            Self::Font(error) => formatter.write_str(error),
+            Self::ResourceLimit(error) => formatter.write_str(error),
+            Self::Render(error) => formatter.write_str(error),
         }
     }
 }
@@ -40,7 +46,10 @@ impl std::error::Error for Error {
             Self::Layout(error) => Some(error),
             Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
-            | Self::UnsupportedParagraphEdit(_) => None,
+            | Self::UnsupportedParagraphEdit(_)
+            | Self::Font(_)
+            | Self::ResourceLimit(_)
+            | Self::Render(_) => None,
         }
     }
 }

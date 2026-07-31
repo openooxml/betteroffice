@@ -45,7 +45,9 @@ jobs:
           git diff --exit-code -- apps/demo/public/betteroffice-demo.pptx apps/demo/public/showcase.xlsx
 
       - name: Check minimal Wasm features
-        run: cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
+        run: |
+          cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
+          cargo check -p betteroffice-docx --target wasm32-unknown-unknown
 
       - name: Build
         run: bun run build:packages

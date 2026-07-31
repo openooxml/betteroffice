@@ -70,7 +70,10 @@ dependencies = [
  "betteroffice-docx-edit",
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-docx-raster",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
+ "png",
  "serde_json",
  "sha2",
 ]

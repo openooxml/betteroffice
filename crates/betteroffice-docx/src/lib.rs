@@ -2,6 +2,8 @@
 
 mod document;
 mod error;
+#[cfg(feature = "raster")]
+mod render;
 mod types;
 
 pub use document::Document;
