@@ -46,8 +46,25 @@ pub enum ImageScope<'a> {
     Body,
     /// A header or footer part, named by its `HfRegion` `r_id`.
     HeaderFooter(&'a str),
-    /// A notes part, named by its `NoteRegion` `kind`.
-    Notes(&'a str),
+    /// `word/footnotes.xml` or `word/endnotes.xml`.
+    Notes(NoteKind),
+}
+
+/// The notes part a `NoteRegion` belongs to. The display list leaves `kind`
+/// out for footnotes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKind {
+    Footnote,
+    Endnote,
+}
+
+impl NoteKind {
+    fn from_region(kind: Option<&str>) -> Self {
+        match kind {
+            Some("endnote") => Self::Endnote,
+            _ => Self::Footnote,
+        }
+    }
 }
 
 /// Part-scoped [`ImageMap`] key. A header and the body can both use `rId9` for
@@ -57,7 +74,8 @@ pub fn scoped_image_key(scope: ImageScope<'_>, rel_id: &str) -> String {
     match scope {
         ImageScope::Body => format!("\u{1f}{rel_id}"),
         ImageScope::HeaderFooter(part) => format!("hf:{part}\u{1f}{rel_id}"),
-        ImageScope::Notes(kind) => format!("note:{kind}\u{1f}{rel_id}"),
+        ImageScope::Notes(NoteKind::Footnote) => format!("footnotes\u{1f}{rel_id}"),
+        ImageScope::Notes(NoteKind::Endnote) => format!("endnotes\u{1f}{rel_id}"),
     }
 }
 
@@ -157,7 +175,7 @@ impl Renderer {
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
         for area in &page.note_areas {
-            let scope = ImageScope::Notes(area.kind.as_deref().unwrap_or_default());
+            let scope = ImageScope::Notes(NoteKind::from_region(area.kind.as_deref()));
             for primitive in &area.separator_primitives {
                 self.paint_primitive(pixmap, primitive, resources, scope)?;
             }

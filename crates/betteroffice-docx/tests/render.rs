@@ -4,7 +4,9 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::io::Write;
 
-use betteroffice_docx::{DisplayList, Document, ImageScope, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
+use betteroffice_docx::{
+    DisplayList, Document, ImageScope, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, NoteKind,
+};
 use serde_json::{Value, json};
 
 #[global_allocator]
@@ -152,6 +154,28 @@ fn repeated_image_page(count: usize, rel_id: &str) -> DisplayList {
     )
 }
 
+/// A note area that leaves `kind` out, which the display list does for
+/// footnotes.
+fn unnamed_note_area_page() -> DisplayList {
+    serde_json::from_value(json!({
+        "contractVersion": 1,
+        "pages": [{
+            "pageIndex": 0,
+            "width": 64,
+            "height": 32,
+            "primitives": [],
+            "noteAreas": [{
+                "y": 0,
+                "height": 16,
+                "primitives": [
+                    {"kind": "image", "relId": "rId9", "x": 0, "y": 0, "w": 16, "h": 16}
+                ]
+            }]
+        }]
+    }))
+    .unwrap()
+}
+
 fn embedded_image_page() -> DisplayList {
     page(vec![json!({
         "kind": "image",
@@ -274,6 +298,18 @@ fn a_registration_does_not_leak_into_another_part() {
     let (width, _, pixels) = decode(&rendered.bytes);
     assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
     assert_eq!(pixel(width, &pixels, 40, 8), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_note_image_resolves_for_an_area_that_omits_its_kind() {
+    let mut document = document();
+    document
+        .register_image(ImageScope::Notes(NoteKind::Footnote), "rId9", RED_PNG)
+        .unwrap();
+    let rendered = document.render_png(&unnamed_note_area_page(), 0).unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    let (width, _, pixels) = decode(&rendered.bytes);
+    assert_eq!(pixel(width, &pixels, 8, 8), [255, 0, 0, 255]);
 }
 
 #[test]

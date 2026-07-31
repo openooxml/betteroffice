@@ -8,7 +8,7 @@ mod types;
 
 pub use document::Document;
 #[cfg(feature = "raster")]
-pub use docx_raster::{ImageScope, RenderedPage};
+pub use docx_raster::{ImageScope, NoteKind, RenderedPage};
 pub use error::Error;
 #[cfg(feature = "raster")]
 pub use render::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
