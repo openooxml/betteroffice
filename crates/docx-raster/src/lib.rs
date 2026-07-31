@@ -33,6 +33,9 @@ pub type FontChains = HashMap<String, Vec<FontId>>;
 /// Embedded image bytes keyed by display-list relationship ID.
 pub type ImageMap = HashMap<String, Vec<u8>>;
 
+pub const MAX_IMAGE_DIM: u32 = 16_384;
+pub const MAX_IMAGE_PIXELS: u64 = 67_108_864;
+
 /// Shared resources used by layout and rasterization.
 pub struct RenderResources<'a> {
     pub fonts: &'a FontStore,
@@ -876,6 +879,8 @@ fn decode_image(bytes: &[u8], rel_id: &str) -> Result<Pixmap, String> {
     let mut decoder = reader
         .into_decoder()
         .map_err(|error| format!("failed to decode image `{rel_id}`: {error}"))?;
+    let (declared_width, declared_height) = decoder.dimensions();
+    validate_image_size(declared_width, declared_height)?;
     let orientation = decoder
         .orientation()
         .map_err(|error| format!("failed to read image orientation `{rel_id}`: {error}"))?;
@@ -890,6 +895,20 @@ fn decode_image(bytes: &[u8], rel_id: &str) -> Result<Pixmap, String> {
         *target = ColorU8::from_rgba(source[0], source[1], source[2], source[3]).premultiply();
     }
     Ok(pixmap)
+}
+
+fn validate_image_size(width: u32, height: u32) -> Result<(), String> {
+    if width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM {
+        return Err(format!(
+            "decoded image is {width}x{height}px, exceeds the {MAX_IMAGE_DIM}px per-side cap"
+        ));
+    }
+    if u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+        return Err(format!(
+            "decoded image is {width}x{height}px, exceeds the {MAX_IMAGE_PIXELS}-pixel allocation cap"
+        ));
+    }
+    Ok(())
 }
 
 fn image_frame(image: &ImagePrimitive) -> Result<FRect, String> {

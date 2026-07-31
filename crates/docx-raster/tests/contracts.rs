@@ -253,3 +253,37 @@ fn a_tab_leader_paints_from_a_bare_family_name() {
     let png = render_png(&list, 0, &resources).expect("a bare leader family must render");
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
 }
+
+/// PNG headers declaring a bomb-sized surface, with an IDAT too short to
+/// decode. The declared extent is the only thing the budget may consult, so
+/// these fail on the cap and never on the truncated stream.
+const BOMB_40000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAnEAAAJxACAIAAADebplSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+const BOMB_9000_SQUARE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIygAACMoCAIAAADit+XtAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+
+fn image_list(src: &str) -> DisplayList {
+    list(
+        20.0,
+        20.0,
+        vec![json!({"kind":"image","relId":src,"x":0,"y":0,"w":20,"h":20})],
+    )
+}
+
+#[test]
+fn refuses_an_image_past_the_per_side_budget_before_decoding_it() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    assert_eq!(
+        render_png(&image_list(BOMB_40000_SQUARE), 0, &resources).unwrap_err(),
+        "decoded image is 40000x40000px, exceeds the 16384px per-side cap"
+    );
+}
+
+#[test]
+fn refuses_an_image_past_the_area_budget_before_decoding_it() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    assert_eq!(
+        render_png(&image_list(BOMB_9000_SQUARE), 0, &resources).unwrap_err(),
+        "decoded image is 9000x9000px, exceeds the 67108864-pixel allocation cap"
+    );
+}
