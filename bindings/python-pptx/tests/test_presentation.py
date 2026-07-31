@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import pytest
 
 import betteroffice_pptx as bo
@@ -366,6 +370,60 @@ def test_applying_a_peer_update_also_blocks_saving(sample_bytes):
     assert right.is_edited is True
     with pytest.raises(bo.UnsupportedWriteError):
         right.save()
+
+
+GIL_PROBE = """
+import os, sys, threading, time
+
+import betteroffice_pptx as bo
+
+mode, fifo, source = sys.argv[1:4]
+data = open(source, "rb").read()
+
+
+def feed():
+    time.sleep(0.5)
+    handle = os.open(fifo, os.O_WRONLY)
+    written = 0
+    while written < len(data):
+        written += os.write(handle, data[written:])
+    os.close(handle)
+
+
+def drain():
+    time.sleep(0.5)
+    handle = os.open(fifo, os.O_RDONLY)
+    while os.read(handle, 65536):
+        pass
+    os.close(handle)
+
+
+if mode == "read":
+    threading.Thread(target=feed).start()
+    assert bo.Presentation.open_path(fifo).slide_count == 3
+else:
+    threading.Thread(target=drain).start()
+    bo.Presentation.open(data).save_path(fifo)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs POSIX FIFOs")
+@pytest.mark.parametrize("mode", ["read", "write"])
+def test_path_io_releases_the_gil(sample_path, tmp_path, mode):
+    """A FIFO opens only once the peer thread runs, which needs the GIL back."""
+    fifo = tmp_path / "deck.fifo"
+    os.mkfifo(fifo)
+
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", GIL_PROBE, mode, str(fifo), str(sample_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"{mode} deadlocked: the GIL was held across the file IO")
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_missing_file_raises_file_not_found(tmp_path):

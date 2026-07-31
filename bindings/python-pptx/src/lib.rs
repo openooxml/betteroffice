@@ -1082,8 +1082,14 @@ impl PyPresentation {
 
     #[staticmethod]
     #[pyo3(signature = (path, *, limits = None))]
-    fn open_path(path: PathBuf, limits: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let data = fs::read(&path).map_err(|error| map_io_error(&error, &path))?;
+    fn open_path(
+        py: Python<'_>,
+        path: PathBuf,
+        limits: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let data = py
+            .detach(|| fs::read(&path))
+            .map_err(|error| map_io_error(&error, &path))?;
         Self::open_bytes(&data, limits, None)
     }
 
@@ -1515,9 +1521,10 @@ impl PyPresentation {
         Ok(PyBytes::new(py, &bytes))
     }
 
-    fn save_path(&self, path: PathBuf) -> PyResult<()> {
+    fn save_path(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         let bytes = self.saved_bytes()?;
-        fs::write(&path, bytes).map_err(|error| map_io_error(&error, &path))
+        py.detach(|| fs::write(&path, bytes))
+            .map_err(|error| map_io_error(&error, &path))
     }
 
     /// This replica's state vector, to hand a peer so it can compute a diff.
