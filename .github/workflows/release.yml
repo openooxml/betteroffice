@@ -126,115 +126,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run deploy.yml --ref main
 
-  python-build:
-    name: Python wheel (${{ matrix.binding }} ${{ matrix.platform.os }} ${{ matrix.platform.target }})
+  # One call per distribution: `needs` is job-wide, so sharing a matrix would
+  # let one binding's broken platform skip the other binding's publish.
+  python-pptx:
+    name: Python pptx
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
-    runs-on: ${{ matrix.platform.os }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        binding: [pptx, xlsx]
-        platform:
-          - os: ubuntu-latest
-            target: x86_64
-            manylinux: "2014"
-          - os: ubuntu-latest
-            target: aarch64
-            manylinux: "2014"
-          - os: macos-latest
-            target: aarch64
-            manylinux: auto
-          - os: macos-latest
-            target: x86_64
-            manylinux: auto
-          - os: windows-latest
-            target: x64
-            manylinux: auto
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: build
-          args: --release --out dist
-          target: ${{ matrix.platform.target }}
-          manylinux: ${{ matrix.platform.manylinux }}
-          working-directory: bindings/python-${{ matrix.binding }}
-
-      # One name per binding *and* platform: a collision silently overwrites.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-${{ matrix.binding }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}
-          path: bindings/python-${{ matrix.binding }}/dist
-
-  sdist:
-    name: Source distribution (${{ matrix.binding }})
-    needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        binding: [pptx, xlsx]
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-          working-directory: bindings/python-${{ matrix.binding }}
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-${{ matrix.binding }}-sdist
-          path: bindings/python-${{ matrix.binding }}/dist
-
-  # One job per distribution: Trusted Publishing mints a project-scoped token,
-  # so two projects cannot share an upload directory.
-  python-publish:
-    name: Publish ${{ matrix.binding }} to PyPI
-    needs: [python-build, sdist]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        binding: [pptx, xlsx]
+    uses: ./.github/workflows/python-package.yml
+    with:
+      binding: pptx
     permissions:
-      id-token: write # OIDC Trusted Publishing
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: python-${{ matrix.binding }}-*
-          path: dist
-          merge-multiple: true
+      contents: read
+      id-token: write
+    secrets: inherit
 
-      - name: Detect PyPI token
-        id: pypi-token
-        env:
-          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          if [ -n "$TOKEN" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish with API token
-        if: steps.pypi-token.outputs.enabled == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: dist
-          skip-existing: true
-
-      - name: Publish via Trusted Publishing
-        if: steps.pypi-token.outputs.enabled != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          skip-existing: true
+  python-xlsx:
+    name: Python xlsx
+    needs: release
+    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true'
+    uses: ./.github/workflows/python-package.yml
+    with:
+      binding: xlsx
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit

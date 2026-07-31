@@ -1,0 +1,114 @@
+name: Python package
+
+# Build, package, and publish one bindings/python-* distribution. Called once
+# per binding so a broken platform in one cannot hold back the other.
+on:
+  workflow_call:
+    inputs:
+      binding:
+        description: The bindings/python-<binding> distribution to publish.
+        required: true
+        type: string
+
+jobs:
+  wheels:
+    name: Wheel (${{ matrix.platform.os }} ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: "2014"
+          - os: ubuntu-latest
+            target: aarch64
+            manylinux: "2014"
+          - os: macos-latest
+            target: aarch64
+            manylinux: auto
+          - os: macos-latest
+            target: x86_64
+            manylinux: auto
+          - os: windows-latest
+            target: x64
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          working-directory: bindings/python-${{ inputs.binding }}
+
+      # One name per binding *and* platform: a collision silently overwrites.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ inputs.binding }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}
+          path: bindings/python-${{ inputs.binding }}/dist
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: bindings/python-${{ inputs.binding }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-${{ inputs.binding }}-sdist
+          path: bindings/python-${{ inputs.binding }}/dist
+
+  publish:
+    name: Publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Every leg of this repo's release presents the same repository, workflow,
+    # and job OIDC claims, so the environment is what tells PyPI which project
+    # a Trusted Publisher may upload to.
+    environment: pypi-${{ inputs.binding }}
+    permissions:
+      id-token: write # OIDC Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-${{ inputs.binding }}-*
+          path: dist
+          merge-multiple: true
+
+      - name: Detect PyPI token
+        id: pypi-token
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish with API token
+        if: steps.pypi-token.outputs.enabled == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
+          skip-existing: true
+
+      - name: Publish via Trusted Publishing
+        if: steps.pypi-token.outputs.enabled != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
