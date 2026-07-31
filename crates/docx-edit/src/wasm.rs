@@ -50,10 +50,10 @@ use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
 use crate::{
-    CellLoc, ChangeKind, ChangeTarget, ColorPatch, DocUndoManager, EditCtx, EditingDoc,
-    EngineSession, FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta,
-    ParaSelector, Patch, Position, RawOp, SegmentContent, SimpleFormat, StoryRange, TabStop,
-    TableLocator, TableRange, TriState, story_ref,
+    CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
+    FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
+    Patch, Position, RawOp, SegmentContent, SimpleFormat, StoryRange, TabStop, TableLocator,
+    TableRange, TriState, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -833,8 +833,7 @@ pub struct EditSession {
     docx_source: RefCell<Option<Vec<u8>>>,
     update_observer: Option<Subscription>,
     update_event_observer: Option<UpdateEventObserver>,
-    undo: RefCell<Option<DocUndoManager>>,
-    undo_story: RefCell<Option<String>>,
+    undo: UndoSession,
     selection: RefCell<Option<LocalSelection>>,
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
@@ -1076,8 +1075,7 @@ impl EditSession {
             docx_source: RefCell::new(None),
             update_observer: None,
             update_event_observer: None,
-            undo: RefCell::new(None),
-            undo_story: RefCell::new(None),
+            undo: UndoSession::new(),
             selection: RefCell::new(None),
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
@@ -1796,13 +1794,7 @@ impl EditSession {
     /// Re-tracking the same story is a no-op that preserves the history.
     /// Errors on an unknown story.
     pub fn track_undo(&self, story: &str) -> Result<(), JsValue> {
-        if self.undo_story.borrow().as_deref() == Some(story) {
-            return Ok(());
-        }
-        let manager = self.engine.doc().undo_scope(&[story]).map_err(js_err)?;
-        *self.undo.borrow_mut() = Some(manager);
-        *self.undo_story.borrow_mut() = Some(story.to_owned());
-        Ok(())
+        self.undo.track(self.engine.doc(), story).map_err(js_err)
     }
 
     /// Starts local undo tracking for a structural table edit in `story`.
@@ -1812,73 +1804,42 @@ impl EditSession {
     /// [`EditSession::track_undo`] on the same story, so switching between
     /// them starts a fresh history. Errors on an unknown story.
     pub fn track_table_undo(&self, story: &str) -> Result<(), JsValue> {
-        let scope_key = format!("table:{story}");
-        if self.undo_story.borrow().as_deref() == Some(scope_key.as_str()) {
-            return Ok(());
-        }
-        let mut manager = self.engine.doc().undo_scope(&[story]).map_err(js_err)?;
-        let txn = self.engine.doc().yrs_doc().transact();
-        let stories = txn
-            .get_map(STORIES)
-            .expect("stories root is declared by EditingDoc::new");
-        drop(txn);
-        manager
-            .raw()
-            .expand_scope(self.engine.doc().yrs_doc(), &stories);
-        *self.undo.borrow_mut() = Some(manager);
-        *self.undo_story.borrow_mut() = Some(scope_key);
-        Ok(())
+        self.undo
+            .track_table(self.engine.doc(), story)
+            .map_err(js_err)
     }
 
     /// Reverts the latest local-origin transaction and reports whether
     /// anything was reverted. Remote and system transactions are excluded by
     /// the manager's tracked-origin policy; `false` before a story is tracked.
     pub fn undo(&self) -> bool {
-        self.undo
-            .borrow_mut()
-            .as_mut()
-            .is_some_and(DocUndoManager::undo)
+        self.undo.undo()
     }
 
     /// Reapplies the latest locally undone transaction and reports whether
     /// anything was reapplied.
     pub fn redo(&self) -> bool {
-        self.undo
-            .borrow_mut()
-            .as_mut()
-            .is_some_and(DocUndoManager::redo)
+        self.undo.redo()
     }
 
     /// Whether [`EditSession::undo`] would revert something.
     pub fn can_undo(&self) -> bool {
-        self.undo
-            .borrow()
-            .as_ref()
-            .is_some_and(DocUndoManager::can_undo)
+        self.undo.can_undo()
     }
 
     /// Whether [`EditSession::redo`] would reapply something.
     pub fn can_redo(&self) -> bool {
-        self.undo
-            .borrow()
-            .as_ref()
-            .is_some_and(DocUndoManager::can_redo)
+        self.undo.can_redo()
     }
 
     /// Current local undo stack size. Zero before a story starts tracking.
     pub fn undo_depth(&self) -> u32 {
-        self.undo
-            .borrow()
-            .as_ref()
-            .map_or(0, |undo| undo.undo_depth() as u32)
+        self.undo.undo_depth() as u32
     }
 
     /// Current local redo stack size. Zero before a story starts tracking.
     pub fn redo_depth(&self) -> u32 {
-        self.undo
-            .borrow()
-            .as_ref()
-            .map_or(0, |undo| undo.redo_depth() as u32)
+        self.undo.redo_depth() as u32
     }
 
     /// Stores this peer's anchor and head as sticky positions, replacing any

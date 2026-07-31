@@ -6,14 +6,15 @@
 //! [`EditingDoc::undo_scope_with_clock`]; the plain [`EditingDoc::undo_scope`] picks a per-target
 //! default.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use yrs::sync::time::Clock;
-use yrs::{Origin, Transact};
+use yrs::{Origin, ReadTxn, Transact};
 
 use crate::op::OpResult;
-use crate::{EditingDoc, story_ref};
+use crate::{EditingDoc, STORIES, story_ref};
 
 /// Undo capture window.
 pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
@@ -142,5 +143,98 @@ impl DocUndoManager {
     /// Low-level escape hatch for the transport/awareness bridges.
     pub fn raw(&mut self) -> &mut yrs::undo::UndoManager<()> {
         &mut self.inner
+    }
+}
+
+/// One tracked undo scope per session, shared by the WASM boundary and the native facade.
+///
+/// Every accessor is inert until a scope is tracked, so a host may call it before import.
+#[derive(Default)]
+pub struct UndoSession {
+    manager: RefCell<Option<DocUndoManager>>,
+    scope: RefCell<Option<String>>,
+}
+
+impl UndoSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Tracks one story, replacing any other scope and its history. Re-tracking is a no-op.
+    pub fn track(&self, doc: &EditingDoc, story: &str) -> OpResult<()> {
+        if self.scope.borrow().as_deref() == Some(story) {
+            return Ok(());
+        }
+        let manager = doc.undo_scope(&[story])?;
+        *self.manager.borrow_mut() = Some(manager);
+        *self.scope.borrow_mut() = Some(story.to_owned());
+        Ok(())
+    }
+
+    /// [`UndoSession::track`] widened to the stories root so structural table edits also
+    /// restore the cell stories they created or destroyed. Tracked as its own scope.
+    pub fn track_table(&self, doc: &EditingDoc, story: &str) -> OpResult<()> {
+        let scope = format!("table:{story}");
+        if self.scope.borrow().as_deref() == Some(scope.as_str()) {
+            return Ok(());
+        }
+        let mut manager = doc.undo_scope(&[story])?;
+        let txn = doc.yrs_doc().transact();
+        let stories = txn
+            .get_map(STORIES)
+            .expect("stories root is declared by EditingDoc::new");
+        drop(txn);
+        manager.raw().expand_scope(doc.yrs_doc(), &stories);
+        *self.manager.borrow_mut() = Some(manager);
+        *self.scope.borrow_mut() = Some(scope);
+        Ok(())
+    }
+
+    pub fn undo(&self) -> bool {
+        self.manager
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(DocUndoManager::undo)
+    }
+
+    pub fn redo(&self) -> bool {
+        self.manager
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(DocUndoManager::redo)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.manager
+            .borrow()
+            .as_ref()
+            .is_some_and(DocUndoManager::can_undo)
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.manager
+            .borrow()
+            .as_ref()
+            .is_some_and(DocUndoManager::can_redo)
+    }
+
+    pub fn add_undo_barrier(&self) {
+        if let Some(manager) = self.manager.borrow_mut().as_mut() {
+            manager.add_undo_barrier();
+        }
+    }
+
+    pub fn undo_depth(&self) -> usize {
+        self.manager
+            .borrow()
+            .as_ref()
+            .map_or(0, DocUndoManager::undo_depth)
+    }
+
+    pub fn redo_depth(&self) -> usize {
+        self.manager
+            .borrow()
+            .as_ref()
+            .map_or(0, DocUndoManager::redo_depth)
     }
 }
