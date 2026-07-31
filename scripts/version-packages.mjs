@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { PYTHON_BINDINGS } from './python-bindings.mjs';
 import {
   RUST_CRATES,
   WORKSPACE_MANIFEST,
@@ -7,8 +8,6 @@ import {
   rustReleaseVersion,
   validateRustTrain
 } from './rust-crates.mjs';
-
-const PYTHON_BINDINGS = ['bindings/python-pptx', 'bindings/python-xlsx'];
 
 function releaseManifest(binding) {
   return `${binding}/package.json`;

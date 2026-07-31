@@ -141,12 +141,12 @@ jobs:
       - name: Build and install the extensions
         run: |
           python -m pip install --upgrade pip pytest
-          python -m pip install -e bindings/python-xlsx -e bindings/python-pptx
+          for binding in $(node scripts/python-bindings.mjs --paths); do
+            python -m pip install -e "$binding"
+          done
 
-      - name: Test xlsx
-        working-directory: bindings/python-xlsx
-        run: pytest -q
-
-      - name: Test pptx
-        working-directory: bindings/python-pptx
-        run: pytest -q
+      - name: Test
+        run: |
+          for binding in $(node scripts/python-bindings.mjs --paths); do
+            (cd "$binding" && pytest -q)
+          done
