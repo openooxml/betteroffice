@@ -14,6 +14,7 @@ from ._betteroffice_pptx import (
     InvalidUpdateError,
     MAX_COLLABORATION_BYTES,
     Media,
+    NotCollaborativeError,
     Paragraph,
     ParseError,
     RangeError,
@@ -45,6 +46,7 @@ __all__ = [
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
     "Media",
+    "NotCollaborativeError",
     "Paragraph",
     "ParseError",
     "PptxError",
@@ -127,6 +129,11 @@ class Presentation:
     @property
     def client_id(self) -> int:
         return self._inner.client_id
+
+    @property
+    def is_collaborative(self) -> bool:
+        """True only for ``open_collaborative`` decks, which alone may sync."""
+        return self._inner.is_collaborative
 
     @property
     def author(self) -> str:
@@ -374,7 +381,10 @@ class Presentation:
         self._inner.save_path(os.fspath(path))
 
     def state_vector(self) -> bytes:
-        """This replica's state vector, to hand a peer so it can compute a diff."""
+        """This replica's state vector, to hand a peer so it can compute a diff.
+
+        Raises ``NotCollaborativeError`` unless the deck is collaborative.
+        """
         return self._inner.state_vector()
 
     def state_as_update(self) -> bytes:

@@ -367,6 +367,7 @@ def test_error_hierarchy_rolls_up_to_pptx_error():
         bo.RenderError,
         bo.InvalidUpdateError,
         bo.CollaborativeStateError,
+        bo.NotCollaborativeError,
     ):
         assert issubclass(subclass, bo.PptxError)
     with pytest.raises(bo.PptxError):
@@ -537,6 +538,46 @@ def test_collaboration_errors_are_actionable(sample_bytes):
         deck.apply_update(b"\xff")
     with pytest.raises(bo.InvalidUpdateError):
         deck.diff(b"\xff\xff\xff")
+
+
+def test_two_standalone_decks_cannot_be_synced_into_divergence(sample_bytes):
+    """`open` decks share one client ID, so syncing them would never converge."""
+    left = bo.Presentation.open(sample_bytes)
+    right = bo.Presentation.open(sample_bytes)
+    assert left.is_collaborative is False
+    assert left.client_id == right.client_id
+
+    left.move_shape(0, left[0].shapes[0].id, 100, 100)
+    right.move_shape(0, right[0].shapes[0].id, 200, 200)
+
+    for call in (
+        left.state_vector,
+        left.state_as_update,
+        lambda: left.diff(b""),
+        lambda: right.apply_update(b"\x00"),
+    ):
+        with pytest.raises(bo.NotCollaborativeError, match="open_collaborative"):
+            call()
+
+
+def test_collaborative_decks_are_the_ones_that_converge(sample_bytes):
+    left = bo.Presentation.open_collaborative(sample_bytes, client_id=101)
+    right = bo.Presentation.open_collaborative(sample_bytes, client_id=202)
+    assert left.is_collaborative and right.is_collaborative
+
+    left.move_shape(0, left[0].shapes[0].id, 100, 100)
+    right.move_shape(0, right[0].shapes[0].id, 200, 200)
+    left.apply_update(right.diff(left.state_vector()))
+    right.apply_update(left.diff(right.state_vector()))
+
+    assert left[0].shapes[0].x == right[0].shapes[0].x
+    assert left.state_vector() == right.state_vector()
+
+
+def test_is_collaborative_is_read_only(sample_bytes):
+    deck = bo.Presentation.open(sample_bytes)
+    with pytest.raises(AttributeError):
+        deck.is_collaborative = True
 
 
 def test_undo_redo_round_trip(deck):

@@ -55,6 +55,12 @@ create_exception!(
     PptxError,
     "The local collaborative state is invalid."
 );
+create_exception!(
+    _betteroffice_pptx,
+    NotCollaborativeError,
+    PptxError,
+    "The operation requires a collaborative presentation."
+);
 
 fn map_edit_error(error: EditError, message: String) -> PyErr {
     match error {
@@ -930,6 +936,7 @@ pub struct PyPresentation {
     author: String,
     origin: EditOrigin,
     edited: Cell<bool>,
+    collaborative: bool,
 }
 
 impl PyPresentation {
@@ -1007,13 +1014,27 @@ impl PyPresentation {
             .ok_or_else(|| PyIndexError::new_err(format!("slide index {index} out of range")))
     }
 
-    fn wrap(presentation: CorePresentation) -> Self {
+    fn wrap(presentation: CorePresentation, collaborative: bool) -> Self {
         Self {
             presentation,
             author: "python".to_owned(),
             origin: EditOrigin::Local,
             edited: Cell::new(false),
+            collaborative,
         }
+    }
+
+    /// Every non-collaborative deck shares one client ID, so two of them would
+    /// author under the same identity and never converge.
+    fn require_collaborative(&self) -> PyResult<()> {
+        if self.collaborative {
+            return Ok(());
+        }
+        Err(NotCollaborativeError::new_err(
+            "this presentation was not opened with open_collaborative, so it \
+             has no unique client ID; exchanging updates between standalone \
+             decks would silently diverge",
+        ))
     }
 
     /// The engine writes the parsed package, not the edited model, so an
@@ -1040,7 +1061,7 @@ impl PyPresentation {
             }
             None => CorePresentation::open_with_limits(data, &limits),
         }
-        .map(Self::wrap)
+        .map(|presentation| Self::wrap(presentation, client_id.is_some()))
         .map_err(map_error)
     }
 }
@@ -1079,6 +1100,13 @@ impl PyPresentation {
     #[getter]
     fn client_id(&self) -> u64 {
         self.presentation.client_id()
+    }
+
+    /// Whether this deck was opened with `open_collaborative`. Only then does
+    /// it carry a client ID peers can converge against.
+    #[getter]
+    fn is_collaborative(&self) -> bool {
+        self.collaborative
     }
 
     #[getter]
@@ -1481,19 +1509,22 @@ impl PyPresentation {
     }
 
     /// This replica's state vector, to hand a peer so it can compute a diff.
-    fn state_vector<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    fn state_vector<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.require_collaborative()?;
         let bytes = self.presentation.encode_state_vector_v1();
-        PyBytes::new(py, &bytes)
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// The whole document as one update, for a peer joining from nothing.
-    fn state_as_update<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    fn state_as_update<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        self.require_collaborative()?;
         let bytes = self.presentation.encode_state_as_update_v1();
-        PyBytes::new(py, &bytes)
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// The update carrying everything the peer's state vector is missing.
     fn diff<'py>(&self, py: Python<'py>, state_vector: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+        self.require_collaborative()?;
         let update = self
             .presentation
             .encode_diff_v1(state_vector)
@@ -1502,6 +1533,7 @@ impl PyPresentation {
     }
 
     fn apply_update(&self, update: &[u8]) -> PyResult<PyDeck> {
+        self.require_collaborative()?;
         if update.len() > MAX_COLLABORATION_BYTES {
             return Err(InvalidUpdateError::new_err(format!(
                 "collaboration payload is {} bytes, exceeds the {MAX_COLLABORATION_BYTES}-byte limit",
@@ -1586,6 +1618,10 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "CollaborativeStateError",
         py.get_type::<CollaborativeStateError>(),
+    )?;
+    module.add(
+        "NotCollaborativeError",
+        py.get_type::<NotCollaborativeError>(),
     )?;
     module.add("MAX_COLLABORATION_BYTES", MAX_COLLABORATION_BYTES)?;
     Ok(())

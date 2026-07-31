@@ -103,9 +103,8 @@ to the engine's metrics-only path. Register the faces you actually use.
 
 ## Collaboration
 
-Every presentation is a Yrs replica. `open_collaborative` differs from `open`
-only in giving this replica a unique client ID, which peers need in order to
-converge:
+`open_collaborative` gives this replica a unique client ID, which peers need in
+order to converge:
 
 ```python
 left = Presentation.open_collaborative(data)
@@ -116,6 +115,18 @@ right.apply_update(left.diff(right.state_vector()))   # right now agrees
 
 joiner = Presentation.open_collaborative(data)
 joiner.apply_update(left.state_as_update())           # catch up from nothing
+```
+
+A deck from `open` or `open_path` is *not* a replica: it has no client ID of its
+own, so two of them would author under the same identity and never converge.
+`state_vector`, `state_as_update`, `diff`, and `apply_update` raise
+`NotCollaborativeError` on such a deck rather than diverging silently, and
+`is_collaborative` says which kind you are holding:
+
+```python
+deck = Presentation.open(data)
+deck.is_collaborative                  # False
+deck.state_vector()                    # NotCollaborativeError
 ```
 
 The binding generates a client ID when it is omitted and exposes it through the
@@ -195,11 +206,13 @@ edits that merge across replicas, that is the gap this fills.
 | `insert_paragraph_break` | split a paragraph |
 | `register_font` / `render_slide` | layout |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
+| `deck.is_collaborative` | whether this deck may exchange updates |
 | `undo` / `redo` / `add_undo_barrier` / `can_undo` / `can_redo` | history |
 | `deck.save()` / `save_path(path)` | serialize to PPTX — see *Writing* |
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
-`RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`.
+`RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
+`NotCollaborativeError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.
