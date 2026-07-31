@@ -4,11 +4,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use pyo3::create_exception;
-use pyo3::exceptions::{
-    PyException, PyIndexError, PyKeyError, PyOSError, PyRuntimeError, PyTypeError, PyValueError,
-};
+use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyInt};
+use python_common::{generated_client_id, map_io_error};
 
 use betteroffice_xlsx::{
     CalculationOptions, CellAddress, CellInput, CellRange, CellRef, CellValue, Error as CoreError,
@@ -113,15 +112,6 @@ fn map_style_error(error: CoreError) -> PyErr {
     }
 }
 
-/// The 3-argument form makes `OSError.__new__` pick the errno subclass.
-fn map_io_error(error: &std::io::Error, path: &std::path::Path) -> PyErr {
-    PyOSError::new_err((
-        error.raw_os_error(),
-        error.to_string(),
-        path.display().to_string(),
-    ))
-}
-
 fn parse_cell(address: &str) -> PyResult<CellRef> {
     CellRef::parse_a1(&address.to_ascii_uppercase())
         .map_err(|error| RangeError::new_err(format!("invalid cell {address:?}: {error}")))
@@ -130,16 +120,6 @@ fn parse_cell(address: &str) -> PyResult<CellRef> {
 fn parse_range(address: &str) -> PyResult<CellRange> {
     CellRange::parse_a1(&address.to_ascii_uppercase())
         .map_err(|error| RangeError::new_err(format!("invalid range {address:?}: {error}")))
-}
-
-fn generated_client_id() -> PyResult<u64> {
-    let mut bytes = [0_u8; size_of::<u64>()];
-    getrandom::fill(&mut bytes).map_err(|error| {
-        PyRuntimeError::new_err(format!(
-            "could not generate a collaboration client ID: {error}"
-        ))
-    })?;
-    Ok(u64::from_le_bytes(bytes) & MAX_COLLABORATION_CLIENT_ID)
 }
 
 /// An Excel error value, distinct from a cell holding that text.
@@ -599,7 +579,8 @@ impl PyWorkbook {
         recalculate: bool,
         now_serial: Option<f64>,
     ) -> PyResult<Self> {
-        let client_id = client_id.map_or_else(generated_client_id, Ok)?;
+        let client_id =
+            client_id.map_or_else(|| generated_client_id(MAX_COLLABORATION_CLIENT_ID), Ok)?;
         let data = data.to_vec();
         py.detach(|| {
             if recalculate {

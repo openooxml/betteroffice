@@ -1,0 +1,7 @@
+[workspace]
+members = ["python-common", "python-xlsx"]
+resolver = "3"
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -1,0 +1,13 @@
+[package]
+name = "betteroffice-python-common"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+homepage = "https://betteroffice.dev"
+repository = "https://github.com/openooxml/betteroffice"
+description = "PyO3 glue shared by the BetterOffice Python bindings."
+publish = false
+
+[dependencies]
+getrandom = "0.4"
+pyo3 = { version = "0.29", features = ["abi3-py39"] }

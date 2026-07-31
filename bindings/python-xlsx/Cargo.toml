@@ -1,5 +1,3 @@
-[workspace]
-
 [package]
 name = "betteroffice-xlsx-python"
 version = "0.0.1"
@@ -16,9 +14,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx" }
-getrandom = "0.4"
 pyo3 = { version = "0.29", features = ["abi3-py39", "extension-module"] }
-
-[profile.release]
-opt-level = 3
-lto = true
+python-common = { package = "betteroffice-python-common", path = "../python-common" }

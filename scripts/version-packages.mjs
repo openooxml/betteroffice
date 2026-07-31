@@ -8,24 +8,31 @@ import {
   validateRustTrain
 } from './rust-crates.mjs';
 
-const PYTHON_RELEASE_MANIFEST = 'bindings/python/package.json';
-const PYTHON_MANIFEST = 'bindings/python/Cargo.toml';
+const PYTHON_BINDINGS = ['bindings/python-xlsx'];
 
-function pythonReleaseVersion() {
-  return JSON.parse(readFileSync(PYTHON_RELEASE_MANIFEST, 'utf8')).version;
+function releaseManifest(binding) {
+  return `${binding}/package.json`;
 }
 
-function packageVersion(source) {
+function cargoManifest(binding) {
+  return `${binding}/Cargo.toml`;
+}
+
+function pythonReleaseVersion(binding) {
+  return JSON.parse(readFileSync(releaseManifest(binding), 'utf8')).version;
+}
+
+function packageVersion(binding, source) {
   const section = source.match(/\[package\]\n([\s\S]*?)(?=\n\[|$)/);
   const version = section?.[1].match(/^version = "([^"]+)"$/m)?.[1];
-  if (!version) throw new Error('bindings/python package.version is missing');
+  if (!version) throw new Error(`${binding} package.version is missing`);
   return version;
 }
 
 // pyproject reads its version from Cargo.toml, so this is the only file to rewrite.
-function synchronizePythonVersion(source, from, to) {
-  if (packageVersion(source) !== from) {
-    throw new Error(`Python binding is not at ${from}`);
+function synchronizePythonVersion(binding, source, from, to) {
+  if (packageVersion(binding, source) !== from) {
+    throw new Error(`${binding} is not at ${from}`);
   }
   return source.replace(/(\[package\]\n[\s\S]*?^version = ")[^"]+("$)/m, `$1${to}$2`);
 }
@@ -70,13 +77,17 @@ function validate(version, locked) {
 
 const checkOnly = process.argv.includes('--check');
 const before = rustReleaseVersion();
-const pythonBefore = pythonReleaseVersion();
 const cargoBefore = readFileSync(WORKSPACE_MANIFEST, 'utf8');
-const pythonCargoBefore = readFileSync(PYTHON_MANIFEST, 'utf8');
-if (packageVersion(pythonCargoBefore) !== pythonBefore) {
-  throw new Error(
-    `Python changeset marker is ${pythonBefore}, but Cargo is ${packageVersion(pythonCargoBefore)}`
-  );
+const pythonBefore = new Map(
+  PYTHON_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
+);
+
+for (const binding of PYTHON_BINDINGS) {
+  const marker = pythonBefore.get(binding);
+  const locked = packageVersion(binding, readFileSync(cargoManifest(binding), 'utf8'));
+  if (locked !== marker) {
+    throw new Error(`${binding} changeset marker is ${marker}, but Cargo is ${locked}`);
+  }
 }
 if (workspaceVersion(cargoBefore) !== before) {
   throw new Error(`Rust changeset marker is ${before}, but Cargo is ${workspaceVersion(cargoBefore)}`);
@@ -87,13 +98,23 @@ if (checkOnly) {
   if (workspaceVersion(simulated) !== '999.999.999') {
     throw new Error('Cargo release train version synchronization failed');
   }
-  const simulatedPython = synchronizePythonVersion(pythonCargoBefore, pythonBefore, '999.999.999');
-  if (packageVersion(simulatedPython) !== '999.999.999') {
-    throw new Error('Python binding version synchronization failed');
+  for (const binding of PYTHON_BINDINGS) {
+    const source = readFileSync(cargoManifest(binding), 'utf8');
+    const simulatedPython = synchronizePythonVersion(
+      binding,
+      source,
+      pythonBefore.get(binding),
+      '999.999.999'
+    );
+    if (packageVersion(binding, simulatedPython) !== '999.999.999') {
+      throw new Error(`${binding} version synchronization failed`);
+    }
   }
   validate(before, true);
   console.log(`Rust release train is synchronized at ${before}.`);
-  console.log(`Python binding is synchronized at ${pythonBefore}.`);
+  for (const binding of PYTHON_BINDINGS) {
+    console.log(`${binding} is synchronized at ${pythonBefore.get(binding)}.`);
+  }
   process.exit(0);
 }
 
@@ -108,20 +129,27 @@ if (after !== before) {
   validate(after, false);
 }
 
-const pythonAfter = pythonReleaseVersion();
-if (pythonAfter !== pythonBefore) {
+const pythonAfter = new Map(
+  PYTHON_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
+);
+for (const binding of PYTHON_BINDINGS) {
+  const from = pythonBefore.get(binding);
+  const to = pythonAfter.get(binding);
+  if (to === from) continue;
   writeFileSync(
-    PYTHON_MANIFEST,
-    synchronizePythonVersion(readFileSync(PYTHON_MANIFEST, 'utf8'), pythonBefore, pythonAfter)
+    cargoManifest(binding),
+    synchronizePythonVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
   );
 }
 
 validate(after, true);
-console.log(
-  pythonAfter === pythonBefore
-    ? `Python binding remains at ${pythonAfter}.`
-    : `Synchronized Python binding ${pythonBefore} -> ${pythonAfter}.`
-);
+for (const binding of PYTHON_BINDINGS) {
+  const from = pythonBefore.get(binding);
+  const to = pythonAfter.get(binding);
+  console.log(
+    to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
+  );
+}
 console.log(
   after === before
     ? `Rust release train remains at ${after}.`

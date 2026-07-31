@@ -160,13 +160,13 @@ jobs:
           args: --release --out dist
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          working-directory: bindings/python
+          working-directory: bindings/python-xlsx
 
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}-${{ matrix.target }}
-          path: bindings/python/dist
+          path: bindings/python-xlsx/dist
 
   sdist:
     name: Source distribution
@@ -181,12 +181,12 @@ jobs:
         with:
           command: sdist
           args: --out dist
-          working-directory: bindings/python
+          working-directory: bindings/python-xlsx
 
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-sdist
-          path: bindings/python/dist
+          path: bindings/python-xlsx/dist
 
   python-publish:
     name: Publish to PyPI

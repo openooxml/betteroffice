@@ -70,6 +70,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-python-common"
+version = "0.0.1"
+dependencies = [
+ "getrandom",
+ "pyo3",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.0.4"
 dependencies = [
@@ -123,8 +131,8 @@ dependencies = [
 name = "betteroffice-xlsx-python"
 version = "0.0.1"
 dependencies = [
+ "betteroffice-python-common",
  "betteroffice-xlsx",
- "getrandom",
  "pyo3",
 ]
 

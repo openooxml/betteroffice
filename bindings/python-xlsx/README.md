@@ -218,7 +218,7 @@ package's own code is Apache-2.0.
 
 - [BetterOffice](https://betteroffice.dev) — the project
 - [Documentation](https://docs.betteroffice.dev)
-- [Source](https://github.com/openooxml/betteroffice) — `bindings/python`
+- [Source](https://github.com/openooxml/betteroffice) — `bindings/python-xlsx`
 - [betteroffice-xlsx on crates.io](https://crates.io/crates/betteroffice-xlsx) — the engine this wraps
 
 Apache-2.0.
