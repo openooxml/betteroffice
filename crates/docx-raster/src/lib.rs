@@ -75,12 +75,28 @@ impl<'a> RenderResources<'a> {
     }
 }
 
+/// A rendered page and the image references it left undrawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedPage {
+    pub bytes: Vec<u8>,
+    pub skipped_images: usize,
+}
+
 /// Renders one display-list page to deterministic PNG bytes.
 pub fn render_png(
     display_list: &DisplayList,
     page_ordinal: usize,
     resources: &RenderResources<'_>,
 ) -> Result<Vec<u8>, String> {
+    render_page(display_list, page_ordinal, resources).map(|page| page.bytes)
+}
+
+/// Renders one display-list page, reporting the image references it skipped.
+pub fn render_page(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+) -> Result<RenderedPage, String> {
     let page = display_list
         .pages
         .get(page_ordinal)
@@ -91,7 +107,10 @@ pub fn render_png(
     pixmap.fill(Color::WHITE);
     let mut renderer = Renderer::default();
     renderer.paint_page(&mut pixmap, page, resources)?;
-    encode_png(pixmap, width, height)
+    Ok(RenderedPage {
+        bytes: encode_png(pixmap, width, height)?,
+        skipped_images: renderer.skipped_images,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -106,6 +125,7 @@ pub(crate) struct FRect {
 struct Renderer {
     clips: ClipSurface,
     glyphs: GlyphCache,
+    skipped_images: usize,
 }
 
 impl Renderer {
@@ -170,10 +190,11 @@ impl Renderer {
         let clip = clip_rect(attrs)?;
         let clips = &mut self.clips;
         let glyphs = &mut self.glyphs;
+        let skipped = &mut self.skipped_images;
         if let Some(clip) = clip {
             clips.paint(pixmap, clip, |target, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, glyphs, transform, mask, opacity, scope,
+                    target, primitive, resources, glyphs, skipped, transform, mask, opacity, scope,
                 )
             })
         } else {
@@ -182,6 +203,7 @@ impl Renderer {
                 primitive,
                 resources,
                 glyphs,
+                skipped,
                 Transform::identity(),
                 None,
                 opacity,
@@ -197,6 +219,7 @@ fn paint_primitive_core(
     primitive: &Primitive,
     resources: &RenderResources<'_>,
     glyphs: &mut GlyphCache,
+    skipped: &mut usize,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -228,7 +251,7 @@ fn paint_primitive_core(
         Primitive::Rect(rect) => paint_rect(pixmap, rect, transform, mask, opacity),
         Primitive::Line(line) => paint_line_primitive(pixmap, line, transform, mask, opacity),
         Primitive::Image(image) => {
-            paint_image(pixmap, image, resources, transform, mask, opacity, scope)
+            paint_image(pixmap, image, resources, skipped, transform, mask, opacity, scope)
         }
         Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity),
         Primitive::Decoration(decoration) => {
@@ -797,10 +820,12 @@ fn build_shape_path(commands: &[ShapePathCommand]) -> Result<Path, String> {
         .ok_or_else(|| "shape path has no drawable commands".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_image(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
     resources: &RenderResources<'_>,
+    skipped: &mut usize,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -813,9 +838,11 @@ fn paint_image(
         return Err("unsupported image field: effects".to_string());
     }
     let Some(source_bytes) = image_bytes(&image.rel_id, scope, resources) else {
+        *skipped += 1;
         return Ok(());
     };
     let Some(source) = decode_image(&source_bytes) else {
+        *skipped += 1;
         return Ok(());
     };
     let frame = image_frame(image)?;

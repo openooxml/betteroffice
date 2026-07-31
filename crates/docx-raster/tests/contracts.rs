@@ -3,7 +3,7 @@
 use std::io::{Cursor, Write};
 
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, RenderResources, render_png};
+use docx_raster::{FontChains, ImageMap, RenderResources, render_page, render_png};
 use ooxml_text::{FontStore, shape};
 use serde_json::{Value, json};
 
@@ -345,6 +345,26 @@ fn an_unresolvable_image_reference_is_skipped_not_an_error() {
             .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
         assert_eq!(pixel(&png, 10, 10), [255, 0, 0, 255]);
     }
+}
+
+/// A skipped reference leaves a hole in an otherwise successful page, so the
+/// count is the only thing a caller can log about it.
+#[test]
+fn a_render_reports_every_image_reference_it_skipped() {
+    let (fonts, chains, images) = empty_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let list = list(
+        20.0,
+        20.0,
+        vec![
+            json!({"kind":"image","relId":"rId9","x":0,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":BOMB_9000_SQUARE,"x":5,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":"data:image/png;base64,%%%%","x":10,"y":0,"w":5,"h":5}),
+        ],
+    );
+    let rendered = render_page(&list, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 3);
+    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
 
 /// The canvas resolver skips what will not load as well as what does not

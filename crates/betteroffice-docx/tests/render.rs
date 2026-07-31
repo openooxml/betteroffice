@@ -137,9 +137,10 @@ fn pixel(width: u32, pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 #[test]
 fn renders_an_embedded_image_from_its_data_url_without_an_image_map() {
     let document = document();
-    let png = document.render_png(&embedded_image_page(), 0).unwrap();
-    assert_eq!(&png[..8], PNG_MAGIC);
-    let (width, height, pixels) = decode(&png);
+    let rendered = document.render_png(&embedded_image_page(), 0).unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(&rendered.bytes[..8], PNG_MAGIC);
+    let (width, height, pixels) = decode(&rendered.bytes);
     assert_eq!((width, height), (64, 32));
     assert_eq!(pixel(width, &pixels, 16, 16), [255, 0, 0, 255]);
     assert_eq!(pixel(width, &pixels, 48, 16), [255, 255, 255, 255]);
@@ -155,9 +156,9 @@ fn renders_text_only_once_its_family_is_registered() {
         .register_font("Carlito", false, false, CARLITO)
         .unwrap();
     assert_eq!(id, 0);
-    let png = document.render_png(&text_page(), 0).unwrap();
-    assert_eq!(&png[..8], PNG_MAGIC);
-    let (_, _, pixels) = decode(&png);
+    let rendered = document.render_png(&text_page(), 0).unwrap();
+    assert_eq!(&rendered.bytes[..8], PNG_MAGIC);
+    let (_, _, pixels) = decode(&rendered.bytes);
     let painted = pixels
         .chunks_exact(4)
         .filter(|p| *p != [255, 255, 255, 255])
@@ -176,10 +177,11 @@ fn rejects_a_page_ordinal_past_the_end() {
 #[test]
 fn an_unresolvable_image_is_skipped_rather_than_failing_the_page() {
     let document = document();
-    let png = document
+    let rendered = document
         .render_png(&shared_relationship_id_page(), 0)
         .unwrap();
-    let (width, _, pixels) = decode(&png);
+    assert_eq!(rendered.skipped_images, 2);
+    let (width, _, pixels) = decode(&rendered.bytes);
     assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
     assert_eq!(pixel(width, &pixels, 40, 8), [255, 255, 255, 255]);
 }
@@ -193,10 +195,11 @@ fn a_registered_image_resolves_per_part_so_a_shared_id_stays_distinct() {
     document
         .register_image(ImageScope::HeaderFooter("rId7"), "rId9", BLUE_PNG)
         .unwrap();
-    let png = document
+    let rendered = document
         .render_png(&shared_relationship_id_page(), 0)
         .unwrap();
-    let (width, _, pixels) = decode(&png);
+    assert_eq!(rendered.skipped_images, 0);
+    let (width, _, pixels) = decode(&rendered.bytes);
     assert_eq!(pixel(width, &pixels, 8, 8), [255, 0, 0, 255]);
     assert_eq!(pixel(width, &pixels, 40, 8), [0, 0, 255, 255]);
 }
@@ -207,10 +210,11 @@ fn a_registration_does_not_leak_into_another_part() {
     document
         .register_image(ImageScope::HeaderFooter("rId7"), "rId9", BLUE_PNG)
         .unwrap();
-    let png = document
+    let rendered = document
         .render_png(&shared_relationship_id_page(), 0)
         .unwrap();
-    let (width, _, pixels) = decode(&png);
+    assert_eq!(rendered.skipped_images, 1);
+    let (width, _, pixels) = decode(&rendered.bytes);
     assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
     assert_eq!(pixel(width, &pixels, 40, 8), [0, 0, 255, 255]);
 }

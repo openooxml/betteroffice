@@ -3,7 +3,9 @@
 use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, ImageScope, RenderResources, scoped_image_key};
+use docx_raster::{
+    FontChains, ImageMap, ImageScope, RenderResources, RenderedPage, scoped_image_key,
+};
 use ooxml_text::FontStore;
 use serde_json::Number;
 
@@ -158,7 +160,11 @@ impl Document {
     /// dangling relationship, media outside `word/media/`, a picture
     /// watermark's bare `rId` — reaches the backend unresolved, and is skipped
     /// unless [`Document::register_image`] supplied its bytes.
-    pub fn render_png(&self, display_list: &DisplayList, page_ordinal: usize) -> Result<Vec<u8>> {
+    pub fn render_png(
+        &self,
+        display_list: &DisplayList,
+        page_ordinal: usize,
+    ) -> Result<RenderedPage> {
         if let Some(page) = display_list.pages.get(page_ordinal)
             && let (Some(width), Some(height)) =
                 (page_pixels(&page.width), page_pixels(&page.height))
@@ -171,6 +177,6 @@ impl Document {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let resources = RenderResources::new(&store, &self.fonts.chains, &self.images.entries);
-        docx_raster::render_png(display_list, page_ordinal, &resources).map_err(Error::Render)
+        docx_raster::render_page(display_list, page_ordinal, &resources).map_err(Error::Render)
     }
 }
