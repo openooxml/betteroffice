@@ -52,6 +52,7 @@ jobs:
         with:
           name: python-${{ inputs.binding }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}
           path: bindings/python-${{ inputs.binding }}/dist
+          if-no-files-found: error
 
   sdist:
     name: Source distribution
@@ -70,6 +71,7 @@ jobs:
         with:
           name: python-${{ inputs.binding }}-sdist
           path: bindings/python-${{ inputs.binding }}/dist
+          if-no-files-found: error
 
   # `needs` inside a called workflow scopes to this binding alone, so this
   # receipt exists only when every one of its own artifacts does. The publish
