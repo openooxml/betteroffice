@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use betteroffice_docx::{DisplayList, Document, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
+use betteroffice_docx::{DisplayList, Document, ImageScope, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
 use serde_json::{Value, json};
 
 const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
@@ -13,6 +13,22 @@ const SMALL_FONT: &[u8] =
 const RED_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAEklEQVR42mP4z8DwHxkzkC4AADxAH+Ea86VIAAAAAElFTkSuQmCC";
 
 const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// 4x4 solid PNGs, registered as the media an unresolved `rId` stands for.
+const RED_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x02, 0x00, 0x00, 0x00, 0x26, 0x93, 0x09,
+    0x29, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+    0x47, 0x0C, 0xC4, 0x71, 0x00, 0xAE, 0x93, 0x0F, 0xF1, 0x38, 0x5E, 0x8C, 0x11, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+const BLUE_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x02, 0x00, 0x00, 0x00, 0x26, 0x93, 0x09,
+    0x29, 0x00, 0x00, 0x00, 0x10, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x60, 0x60, 0xF8, 0x8F,
+    0x84, 0x88, 0xE2, 0x00, 0x00, 0x8E, 0xB3, 0x0F, 0xF1, 0x5B, 0xA2, 0x80, 0xBC, 0x00, 0x00, 0x00,
+    0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
 
 fn minimal_docx() -> Vec<u8> {
     let parts = vec![
@@ -48,6 +64,32 @@ fn sized_page(width: u64, height: u64, primitives: Vec<Value>) -> DisplayList {
             "width": width,
             "height": height,
             "primitives": primitives
+        }]
+    }))
+    .unwrap()
+}
+
+/// One `rId9` image in the body and another in a header whose part is `rId7`.
+/// Word hands out relationship ids per part, so these are different media.
+fn shared_relationship_id_page() -> DisplayList {
+    serde_json::from_value(json!({
+        "contractVersion": 1,
+        "pages": [{
+            "pageIndex": 0,
+            "width": 64,
+            "height": 32,
+            "primitives": [
+                {"kind": "image", "relId": "rId9", "x": 0, "y": 0, "w": 16, "h": 16}
+            ],
+            "header": {
+                "rId": "rId7",
+                "kind": "header",
+                "y": 0,
+                "height": 16,
+                "primitives": [
+                    {"kind": "image", "relId": "rId9", "x": 32, "y": 0, "w": 16, "h": 16}
+                ]
+            }
         }]
     }))
     .unwrap()
@@ -129,6 +171,73 @@ fn rejects_a_page_ordinal_past_the_end() {
         .render_png(&embedded_image_page(), 1)
         .unwrap_err();
     assert_eq!(error.to_string(), "page ordinal 1 is out of range");
+}
+
+#[test]
+fn an_unresolvable_image_is_skipped_rather_than_failing_the_page() {
+    let document = document();
+    let png = document
+        .render_png(&shared_relationship_id_page(), 0)
+        .unwrap();
+    let (width, _, pixels) = decode(&png);
+    assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
+    assert_eq!(pixel(width, &pixels, 40, 8), [255, 255, 255, 255]);
+}
+
+#[test]
+fn a_registered_image_resolves_per_part_so_a_shared_id_stays_distinct() {
+    let mut document = document();
+    document
+        .register_image(ImageScope::Body, "rId9", RED_PNG)
+        .unwrap();
+    document
+        .register_image(ImageScope::HeaderFooter("rId7"), "rId9", BLUE_PNG)
+        .unwrap();
+    let png = document
+        .render_png(&shared_relationship_id_page(), 0)
+        .unwrap();
+    let (width, _, pixels) = decode(&png);
+    assert_eq!(pixel(width, &pixels, 8, 8), [255, 0, 0, 255]);
+    assert_eq!(pixel(width, &pixels, 40, 8), [0, 0, 255, 255]);
+}
+
+#[test]
+fn a_registration_does_not_leak_into_another_part() {
+    let mut document = document();
+    document
+        .register_image(ImageScope::HeaderFooter("rId7"), "rId9", BLUE_PNG)
+        .unwrap();
+    let png = document
+        .render_png(&shared_relationship_id_page(), 0)
+        .unwrap();
+    let (width, _, pixels) = decode(&png);
+    assert_eq!(pixel(width, &pixels, 8, 8), [255, 255, 255, 255]);
+    assert_eq!(pixel(width, &pixels, 40, 8), [0, 0, 255, 255]);
+}
+
+#[test]
+fn rejects_an_image_registration_the_backend_could_never_match() {
+    let mut document = document();
+    let error = document
+        .register_image(ImageScope::Body, "", RED_PNG)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "image relationship id is empty");
+
+    let oversized = vec![0_u8; 32 * 1024 * 1024 + 1];
+    let error = document
+        .register_image(ImageScope::Body, "rId9", &oversized)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "image exceeds 33554432 bytes");
+
+    for index in 0..256 {
+        document
+            .register_image(ImageScope::Body, &format!("rId{index}"), RED_PNG)
+            .unwrap_or_else(|error| panic!("image {index} was refused: {error}"));
+    }
+    let error = document
+        .register_image(ImageScope::Body, "rIdOneTooMany", RED_PNG)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "more than 256 images");
 }
 
 #[test]

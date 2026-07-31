@@ -11,6 +11,7 @@ pub enum Error {
     ParagraphNotFound(String),
     UnsupportedParagraphEdit(String),
     Font(String),
+    Image(String),
     ResourceLimit(String),
     RenderTooLarge {
         width: u32,
@@ -41,6 +42,7 @@ impl fmt::Display for Error {
                 )
             }
             Self::Font(error) => formatter.write_str(error),
+            Self::Image(error) => formatter.write_str(error),
             Self::ResourceLimit(error) => formatter.write_str(error),
             Self::RenderTooLarge { width, height, max } => write!(
                 formatter,
@@ -70,6 +72,7 @@ impl std::error::Error for Error {
             | Self::ParagraphNotFound(_)
             | Self::UnsupportedParagraphEdit(_)
             | Self::Font(_)
+            | Self::Image(_)
             | Self::ResourceLimit(_)
             | Self::RenderTooLarge { .. }
             | Self::RenderAreaTooLarge { .. }

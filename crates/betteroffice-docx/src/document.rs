@@ -21,6 +21,8 @@ pub struct Document {
     model: DocumentModel,
     #[cfg(feature = "raster")]
     pub(crate) fonts: crate::render::FontRegistry,
+    #[cfg(feature = "raster")]
+    pub(crate) images: crate::render::ImageRegistry,
 }
 
 impl Document {
@@ -45,6 +47,8 @@ impl Document {
             model,
             #[cfg(feature = "raster")]
             fonts: crate::render::FontRegistry::default(),
+            #[cfg(feature = "raster")]
+            images: crate::render::ImageRegistry::default(),
         })
     }
 

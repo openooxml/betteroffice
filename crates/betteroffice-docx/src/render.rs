@@ -3,7 +3,7 @@
 use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, RenderResources};
+use docx_raster::{FontChains, ImageMap, ImageScope, RenderResources, scoped_image_key};
 use ooxml_text::FontStore;
 use serde_json::Number;
 
@@ -11,6 +11,8 @@ use crate::{Document, Error, Result};
 
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
+const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IMAGES: usize = 256;
 pub const MAX_PIXMAP_DIM: u32 = 16_384;
 pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
 
@@ -52,6 +54,34 @@ impl FontRegistry {
             .push(id);
         self.faces += 1;
         Ok(id.to_u32())
+    }
+}
+
+/// Caller-supplied bytes for relationship ids the display list did not already
+/// carry as `data:` URLs, keyed by owning part.
+#[derive(Default)]
+pub(crate) struct ImageRegistry {
+    entries: ImageMap,
+}
+
+impl ImageRegistry {
+    fn register(&mut self, scope: ImageScope<'_>, rel_id: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(Error::ResourceLimit(format!(
+                "image exceeds {MAX_IMAGE_BYTES} bytes"
+            )));
+        }
+        if rel_id.is_empty() {
+            return Err(Error::Image("image relationship id is empty".to_owned()));
+        }
+        let key = scoped_image_key(scope, rel_id);
+        if self.entries.len() >= MAX_IMAGES && !self.entries.contains_key(&key) {
+            return Err(Error::ResourceLimit(format!(
+                "more than {MAX_IMAGES} images"
+            )));
+        }
+        self.entries.insert(key, bytes.to_vec());
+        Ok(())
     }
 }
 
@@ -106,13 +136,28 @@ impl Document {
         self.fonts.register(family, bold, italic, bytes)
     }
 
+    /// Supplies bytes for one relationship id the display list left
+    /// unresolved, scoped to the part that owns the id. Images are capped at
+    /// 256 and each at 32 MiB.
+    pub fn register_image(
+        &mut self,
+        scope: ImageScope<'_>,
+        rel_id: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.images.register(scope, rel_id, bytes)
+    }
+
     /// Rasterizes one display-list page to deterministic PNG bytes.
     ///
     /// A page wider or taller than [`MAX_PIXMAP_DIM`], or larger in area than
     /// [`MAX_PIXMAP_PIXELS`], is refused before any surface is allocated.
     ///
-    /// Embedded images arrive as `data:` URLs on the primitive, so no image
-    /// side table is consulted.
+    /// Media the parser resolved arrives as a `data:` URL on the primitive and
+    /// needs nothing further. Anything it could not resolve — an external or
+    /// dangling relationship, media outside `word/media/`, a picture
+    /// watermark's bare `rId` — reaches the backend unresolved, and is skipped
+    /// unless [`Document::register_image`] supplied its bytes.
     pub fn render_png(&self, display_list: &DisplayList, page_ordinal: usize) -> Result<Vec<u8>> {
         if let Some(page) = display_list.pages.get(page_ordinal)
             && let (Some(width), Some(height)) =
@@ -125,8 +170,7 @@ impl Document {
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let images = ImageMap::new();
-        let resources = RenderResources::new(&store, &self.fonts.chains, &images);
+        let resources = RenderResources::new(&store, &self.fonts.chains, &self.images.entries);
         docx_raster::render_png(display_list, page_ordinal, &resources).map_err(Error::Render)
     }
 }

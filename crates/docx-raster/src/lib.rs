@@ -36,6 +36,28 @@ pub type ImageMap = HashMap<String, Vec<u8>>;
 pub const MAX_IMAGE_DIM: u32 = 16_384;
 pub const MAX_IMAGE_PIXELS: u64 = 67_108_864;
 
+/// The part whose relationships own a display-list relationship id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageScope<'a> {
+    /// `word/document.xml`.
+    Body,
+    /// A header or footer part, named by its `HfRegion` `r_id`.
+    HeaderFooter(&'a str),
+    /// A notes part, named by its `NoteRegion` `kind`.
+    Notes(&'a str),
+}
+
+/// Part-scoped [`ImageMap`] key. A header and the body can both use `rId9` for
+/// different media, so bytes are keyed by owning part; lookup falls back to the
+/// bare relationship id, which resolves in any part.
+pub fn scoped_image_key(scope: ImageScope<'_>, rel_id: &str) -> String {
+    match scope {
+        ImageScope::Body => format!("\u{1f}{rel_id}"),
+        ImageScope::HeaderFooter(part) => format!("hf:{part}\u{1f}{rel_id}"),
+        ImageScope::Notes(kind) => format!("note:{kind}\u{1f}{rel_id}"),
+    }
+}
+
 /// Shared resources used by layout and rasterization.
 pub struct RenderResources<'a> {
     pub fonts: &'a FontStore,
@@ -109,19 +131,21 @@ impl Renderer {
             paint_page_border(pixmap, border)?;
         }
         for primitive in &page.primitives {
-            self.paint_primitive(pixmap, primitive, resources)?;
+            self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
         }
         for area in &page.note_areas {
+            let scope = ImageScope::Notes(area.kind.as_deref().unwrap_or_default());
             for primitive in &area.separator_primitives {
-                self.paint_primitive(pixmap, primitive, resources)?;
+                self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
             for primitive in &area.primitives {
-                self.paint_primitive(pixmap, primitive, resources)?;
+                self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
         for region in [&page.header, &page.footer].into_iter().flatten() {
+            let scope = ImageScope::HeaderFooter(&region.r_id);
             for primitive in &region.primitives {
-                self.paint_primitive(pixmap, primitive, resources)?;
+                self.paint_primitive(pixmap, primitive, resources, scope)?;
             }
         }
         for border in page
@@ -139,6 +163,7 @@ impl Renderer {
         pixmap: &mut Pixmap,
         primitive: &Primitive,
         resources: &RenderResources<'_>,
+        scope: ImageScope<'_>,
     ) -> Result<(), String> {
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
@@ -149,7 +174,7 @@ impl Renderer {
         if let Some(clip) = clip {
             clips.paint(pixmap, clip, |target, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, glyphs, transform, mask, opacity,
+                    target, primitive, resources, glyphs, transform, mask, opacity, scope,
                 )
             })
         } else {
@@ -161,6 +186,7 @@ impl Renderer {
                 Transform::identity(),
                 None,
                 opacity,
+                scope,
             )
         }
     }
@@ -175,6 +201,7 @@ fn paint_primitive_core(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    scope: ImageScope<'_>,
 ) -> Result<(), String> {
     match primitive {
         Primitive::Text(run) => {
@@ -201,7 +228,9 @@ fn paint_primitive_core(
         }
         Primitive::Rect(rect) => paint_rect(pixmap, rect, transform, mask, opacity),
         Primitive::Line(line) => paint_line_primitive(pixmap, line, transform, mask, opacity),
-        Primitive::Image(image) => paint_image(pixmap, image, resources, transform, mask, opacity),
+        Primitive::Image(image) => {
+            paint_image(pixmap, image, resources, transform, mask, opacity, scope)
+        }
         Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity),
         Primitive::Decoration(decoration) => {
             paint_decoration(pixmap, decoration, transform, mask, opacity)
@@ -776,6 +805,7 @@ fn paint_image(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    scope: ImageScope<'_>,
 ) -> Result<(), String> {
     if image.filter.is_some() {
         return Err("unsupported image field: filter".to_string());
@@ -783,7 +813,7 @@ fn paint_image(
     if !image.attrs.effects.is_empty() {
         return Err("unsupported image field: effects".to_string());
     }
-    let Some(source_bytes) = image_bytes(&image.rel_id, resources)? else {
+    let Some(source_bytes) = image_bytes(&image.rel_id, scope, resources)? else {
         return Ok(());
     };
     let source = decode_image(&source_bytes, &image.rel_id)?;
@@ -854,6 +884,7 @@ fn paint_image(
 /// unresolved and undecodable are different failures.
 fn image_bytes<'a>(
     rel_id: &'a str,
+    scope: ImageScope<'_>,
     resources: &'a RenderResources<'_>,
 ) -> Result<Option<Cow<'a, [u8]>>, String> {
     if rel_id.starts_with("data:") {
@@ -870,7 +901,8 @@ fn image_bytes<'a>(
     }
     Ok(resources
         .images
-        .get(rel_id)
+        .get(&scoped_image_key(scope, rel_id))
+        .or_else(|| resources.images.get(rel_id))
         .map(|bytes| Cow::Borrowed(bytes.as_slice())))
 }
 
