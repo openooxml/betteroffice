@@ -3,7 +3,10 @@
 use std::io::{Cursor, Write};
 
 use docx_layout::display_list::DisplayList;
-use docx_raster::{FontChains, ImageMap, RenderResources, render_page, render_png};
+use docx_raster::{
+    FontChains, ImageMap, MAX_IMAGE_PIXELS, MAX_PAGE_IMAGE_PIXELS, RenderResources, render_page,
+    render_png,
+};
 use ooxml_text::{FontStore, shape};
 use serde_json::{Value, json};
 
@@ -345,6 +348,33 @@ fn an_unresolvable_image_reference_is_skipped_not_an_error() {
             .unwrap_or_else(|error| panic!("`{reference}` failed the page: {error}"));
         assert_eq!(pixel(&png, 10, 10), [255, 0, 0, 255]);
     }
+}
+
+/// Two distinct headers, each declaring exactly [`MAX_IMAGE_PIXELS`], with an
+/// IDAT too short to decode. Together they claim the whole page budget.
+const CAP_8192_BY_4096: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAIAAAABAACAIAAABVq/hcAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+const CAP_4096_BY_8192: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAEAAAACAACAIAAADVohYSAAAAC0lEQVR4nGNgQAUAABAAATm9j2UAAAAASUVORK5CYII=";
+
+/// The page budget is spent across the whole render, so an image that arrives
+/// after it is gone is skipped however cheap it is on its own.
+#[test]
+fn a_page_stops_decoding_once_its_pixel_budget_is_spent() {
+    const { assert!(MAX_IMAGE_PIXELS * 2 == MAX_PAGE_IMAGE_PIXELS) };
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("\u{1f}rIdSmall".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let list = list(
+        20.0,
+        20.0,
+        vec![
+            json!({"kind":"image","relId":CAP_8192_BY_4096,"x":0,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":CAP_4096_BY_8192,"x":5,"y":0,"w":5,"h":5}),
+            json!({"kind":"image","relId":"rIdSmall","x":0,"y":0,"w":20,"h":20}),
+        ],
+    );
+    let rendered = render_page(&list, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 3);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
 }
 
 /// A skipped reference leaves a hole in an otherwise successful page, so the

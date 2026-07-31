@@ -1,9 +1,59 @@
 #![cfg(feature = "raster")]
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use betteroffice_docx::{DisplayList, Document, ImageScope, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
 use serde_json::{Value, json};
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+struct CountingAllocator;
+
+thread_local! {
+    static ALLOCATED: Cell<u64> = const { Cell::new(0) };
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = ALLOCATED.try_with(|counter| counter.set(counter.get() + layout.size() as u64));
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+}
+
+/// Bytes this thread allocated while `body` ran. Tests share the process, so
+/// the counter is per thread.
+fn allocated_by<T>(body: impl FnOnce() -> T) -> (T, u64) {
+    let before = ALLOCATED.with(Cell::get);
+    let value = body();
+    (value, ALLOCATED.with(Cell::get) - before)
+}
+
+/// A solid RGBA PNG of any extent, streamed a row at a time.
+fn solid_png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        let mut writer = encoder.write_header().expect("png header");
+        let mut stream = writer.stream_writer().expect("png stream");
+        let row: Vec<u8> = [0x11_u8, 0x66, 0xcc, 0xff].repeat(width as usize);
+        for _ in 0..height {
+            stream.write_all(&row).expect("png row");
+        }
+        stream.finish().expect("png finish");
+    }
+    bytes
+}
 
 const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
 const SMALL_FONT: &[u8] =
@@ -93,6 +143,14 @@ fn shared_relationship_id_page() -> DisplayList {
         }]
     }))
     .unwrap()
+}
+
+fn repeated_image_page(count: usize, rel_id: &str) -> DisplayList {
+    page(
+        (0..count)
+            .map(|index| json!({"kind":"image","relId":rel_id,"x":index,"y":0,"w":16,"h":16}))
+            .collect(),
+    )
 }
 
 fn embedded_image_page() -> DisplayList {
@@ -307,6 +365,23 @@ fn refuses_a_page_that_would_allocate_gigabytes() {
     assert!(
         elapsed < Duration::from_secs(10),
         "the page budget was enforced after allocation, in {elapsed:?}"
+    );
+}
+
+/// A reference is 59 bytes of display list and a decode is milliseconds, so
+/// repeated references to one image have to cost one decode.
+#[test]
+fn repeated_references_to_one_image_decode_once() {
+    let mut document = document();
+    document
+        .register_image(ImageScope::Body, "rId9", &solid_png(512, 512))
+        .unwrap();
+    let list = repeated_image_page(32, "rId9");
+    let (rendered, allocated) = allocated_by(|| document.render_png(&list, 0).unwrap());
+    assert_eq!(rendered.skipped_images, 0);
+    assert!(
+        allocated < 4 * 512 * 512 * 4,
+        "32 references to one image allocated {allocated} bytes, more than a single decode"
     );
 }
 

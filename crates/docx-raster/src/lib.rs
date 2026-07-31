@@ -10,6 +10,7 @@ pub use font::measure_text;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::rc::Rc;
 
 use base64::Engine as _;
 use docx_layout::display_list::{
@@ -20,9 +21,9 @@ use docx_layout::display_list::{
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Mask,
-    Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, Rect, SpreadMode, Stroke,
-    StrokeDash, Transform,
+    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
+    LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient,
+    Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use font::{GlyphCache, PaintContext};
@@ -33,7 +34,10 @@ pub type FontChains = HashMap<String, Vec<FontId>>;
 /// Embedded image bytes keyed by display-list relationship ID.
 pub type ImageMap = HashMap<String, Vec<u8>>;
 
-pub const MAX_IMAGE_PIXELS: u64 = 67_108_864;
+/// One decoded image, at twice the surface a page may allocate.
+pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
+/// Every image decoded for one page, at four times that surface.
+pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
 
 /// The part whose relationships own a display-list relationship id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,7 +113,7 @@ pub fn render_page(
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
-        skipped_images: renderer.skipped_images,
+        skipped_images: renderer.images.skipped,
     })
 }
 
@@ -125,7 +129,7 @@ pub(crate) struct FRect {
 struct Renderer {
     clips: ClipSurface,
     glyphs: GlyphCache,
-    skipped_images: usize,
+    images: ImageCache,
 }
 
 impl Renderer {
@@ -190,11 +194,11 @@ impl Renderer {
         let clip = clip_rect(attrs)?;
         let clips = &mut self.clips;
         let glyphs = &mut self.glyphs;
-        let skipped = &mut self.skipped_images;
+        let images = &mut self.images;
         if let Some(clip) = clip {
             clips.paint(pixmap, clip, |target, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, glyphs, skipped, transform, mask, opacity, scope,
+                    target, primitive, resources, glyphs, images, transform, mask, opacity, scope,
                 )
             })
         } else {
@@ -203,7 +207,7 @@ impl Renderer {
                 primitive,
                 resources,
                 glyphs,
-                skipped,
+                images,
                 Transform::identity(),
                 None,
                 opacity,
@@ -219,7 +223,7 @@ fn paint_primitive_core(
     primitive: &Primitive,
     resources: &RenderResources<'_>,
     glyphs: &mut GlyphCache,
-    skipped: &mut usize,
+    images: &mut ImageCache,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -250,9 +254,9 @@ fn paint_primitive_core(
         }
         Primitive::Rect(rect) => paint_rect(pixmap, rect, transform, mask, opacity),
         Primitive::Line(line) => paint_line_primitive(pixmap, line, transform, mask, opacity),
-        Primitive::Image(image) => {
-            paint_image(pixmap, image, resources, skipped, transform, mask, opacity, scope)
-        }
+        Primitive::Image(image) => paint_image(
+            pixmap, image, resources, images, transform, mask, opacity, scope,
+        ),
         Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity),
         Primitive::Decoration(decoration) => {
             paint_decoration(pixmap, decoration, transform, mask, opacity)
@@ -825,7 +829,7 @@ fn paint_image(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
     resources: &RenderResources<'_>,
-    skipped: &mut usize,
+    images: &mut ImageCache,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -837,14 +841,14 @@ fn paint_image(
     if !image.attrs.effects.is_empty() {
         return Err("unsupported image field: effects".to_string());
     }
-    let Some(source_bytes) = image_bytes(&image.rel_id, scope, resources) else {
-        *skipped += 1;
+    let Some((key, source_bytes)) = image_source(&image.rel_id, scope, resources) else {
+        images.skipped += 1;
         return Ok(());
     };
-    let Some(source) = decode_image(&source_bytes) else {
-        *skipped += 1;
+    let Some(decoded) = images.resolve(key, &source_bytes) else {
         return Ok(());
     };
+    let source: &Pixmap = &decoded;
     let frame = image_frame(image)?;
     if frame.w == 0.0 || frame.h == 0.0 {
         return Ok(());
@@ -907,54 +911,85 @@ fn paint_image(
     paint_image_revision(pixmap, image, frame, image_transform, mask, opacity)
 }
 
-/// Image bytes for a primitive, or `None` when the reference resolves to
-/// nothing.
-fn image_bytes<'a>(
+/// The identity a reference resolved to and its bytes, or `None` when the
+/// reference resolves to nothing.
+fn image_source<'a>(
     rel_id: &'a str,
     scope: ImageScope<'_>,
     resources: &'a RenderResources<'_>,
-) -> Option<Cow<'a, [u8]>> {
+) -> Option<(Cow<'a, str>, Cow<'a, [u8]>)> {
     if rel_id.starts_with("data:") {
         let (metadata, payload) = rel_id.split_once(',')?;
         if !metadata.ends_with(";base64") {
             return None;
         }
-        return base64::engine::general_purpose::STANDARD
+        let bytes = base64::engine::general_purpose::STANDARD
             .decode(payload)
-            .ok()
-            .map(Cow::Owned);
+            .ok()?;
+        return Some((Cow::Borrowed(rel_id), Cow::Owned(bytes)));
     }
-    resources
+    let key = scoped_image_key(scope, rel_id);
+    let bytes = resources
         .images
-        .get(&scoped_image_key(scope, rel_id))
-        .or_else(|| resources.images.get(rel_id))
-        .map(|bytes| Cow::Borrowed(bytes.as_slice()))
+        .get(&key)
+        .or_else(|| resources.images.get(rel_id))?;
+    Some((Cow::Owned(key), Cow::Borrowed(bytes.as_slice())))
 }
 
-/// Decoded pixels, or `None` for content this backend will not draw: bytes it
-/// cannot decode, or an image past [`MAX_IMAGE_PIXELS`].
-fn decode_image(bytes: &[u8]) -> Option<Pixmap> {
-    use image::ImageDecoder as _;
+/// One decode per resolved image, and at most [`MAX_PAGE_IMAGE_PIXELS`]
+/// decoded for the whole page.
+#[derive(Default)]
+struct ImageCache {
+    decoded: HashMap<String, Option<Rc<Pixmap>>>,
+    pixels: u64,
+    skipped: usize,
+}
 
-    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?
-        .into_decoder()
-        .ok()?;
-    let (declared_width, declared_height) = decoder.dimensions();
-    if u64::from(declared_width) * u64::from(declared_height) > MAX_IMAGE_PIXELS {
-        return None;
+impl ImageCache {
+    fn resolve(&mut self, key: Cow<'_, str>, bytes: &[u8]) -> Option<Rc<Pixmap>> {
+        let decoded = match self.decoded.get(key.as_ref()) {
+            Some(entry) => entry.clone(),
+            None => {
+                let decoded = self.decode(bytes).map(Rc::new);
+                self.decoded.insert(key.into_owned(), decoded.clone());
+                decoded
+            }
+        };
+        if decoded.is_none() {
+            self.skipped += 1;
+        }
+        decoded
     }
-    let orientation = decoder.orientation().ok()?;
-    let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
-    decoded.apply_orientation(orientation);
-    let decoded = decoded.to_rgba8();
-    let (width, height) = decoded.dimensions();
-    let mut pixmap = Pixmap::new(width, height)?;
-    for (target, source) in pixmap.pixels_mut().iter_mut().zip(decoded.pixels()) {
-        *target = ColorU8::from_rgba(source[0], source[1], source[2], source[3]).premultiply();
+
+    /// Decoded pixels, or `None` for content this backend will not draw: bytes
+    /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the page
+    /// has no budget left for. Declared pixels are charged before the decoder
+    /// allocates, so a stream that fails late still costs what it claimed.
+    fn decode(&mut self, bytes: &[u8]) -> Option<Pixmap> {
+        use image::ImageDecoder as _;
+
+        let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_decoder()
+            .ok()?;
+        let (declared_width, declared_height) = decoder.dimensions();
+        let declared = u64::from(declared_width) * u64::from(declared_height);
+        if declared > MAX_IMAGE_PIXELS || self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
+            return None;
+        }
+        self.pixels += declared;
+        let orientation = decoder.orientation().ok()?;
+        let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
+        decoded.apply_orientation(orientation);
+        let size = IntSize::from_wh(decoded.width(), decoded.height())?;
+        let mut data = decoded.into_rgba8().into_raw();
+        for pixel in data.chunks_exact_mut(4) {
+            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
+            pixel.copy_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
+        }
+        Pixmap::from_vec(data, size)
     }
-    Some(pixmap)
 }
 
 fn image_frame(image: &ImagePrimitive) -> Result<FRect, String> {
