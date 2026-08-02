@@ -94,6 +94,11 @@ A PyPI API token is scoped either to a single project or to the entire account,
 and a project that does not exist yet cannot be named — so a bootstrap token is
 necessarily account-wide. That blast radius is what pending publishers remove.
 
+A token that is kept anyway must be **project-scoped** and held as an environment
+secret on `pypi-<binding>`, never at repository or organization scope. The guard
+below proves only that a token is not repository- or organization-scoped; nothing
+in CI can prove a token is project-scoped, so that part is on whoever adds it.
+
 **Outstanding:** `PYPI_API_TOKEN` is a **repository** secret today, and it
 created `betteroffice-xlsx`, so it is almost certainly account-scoped. Delete it
 under Settings → Secrets and variables → Actions, revoke it on PyPI, and add a

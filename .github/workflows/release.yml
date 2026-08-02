@@ -144,7 +144,11 @@ jobs:
           TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           if [ -n "$TOKEN" ]; then
-            echo "::error::PYPI_API_TOKEN is readable by a job that declares no environment, so it is a repository or organization secret and every binding's publish leg can upload with it. Delete it under Settings > Secrets and variables > Actions, and revoke it on PyPI. Then either add a PyPI Trusted Publisher (owner openooxml, repository betteroffice, workflow release.yml, environment pypi-<binding>) and use no token at all, or re-add the token as an environment secret on the pypi-<binding> environment only. See RELEASING.md."
+            echo "::error::PYPI_API_TOKEN is readable by a job that declares no environment, so it is a repository or organization secret and every binding's publish leg can upload with it."
+            echo "::error::Delete it under Settings > Secrets and variables > Actions, then revoke it on PyPI."
+            echo "::error::Preferred: add a PyPI Trusted Publisher (owner openooxml, repository betteroffice, workflow release.yml, environment pypi-<binding>) and keep no token at all."
+            echo "::error::Otherwise: mint a project-scoped token and re-add it as an environment secret on the pypi-<binding> environment only. This step cannot tell a project-scoped token from an account-scoped one, so an account-scoped token would pass."
+            echo "::error::See RELEASING.md."
             exit 1
           fi
 

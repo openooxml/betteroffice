@@ -136,6 +136,7 @@ describe('repository-scoped token guard', () => {
     expect(result.stdout).toContain('::error::');
     expect(result.stdout).toContain('pypi-<binding>');
     expect(result.stdout).toContain('Trusted Publisher');
+    expect(result.stdout).toContain('project-scoped');
     expect(result.stdout).not.toContain('AgEIcHlwaS5vcmc');
   });
 });
