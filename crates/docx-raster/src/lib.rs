@@ -1714,9 +1714,14 @@ fn paint_wave(
 
 /// Quadratics one lane of a wave expands into. The length is a number off the
 /// display list, so it is charged before the path builder grows to hold it.
+/// Two individually finite coordinates subtract to an infinite length, which
+/// nothing can afford: the loop that walks it never reaches its end.
 fn wave_segments(length: f32, wavelength: f32) -> u64 {
     let steps = (f64::from(length) / f64::from(wavelength / 2.0)).ceil();
-    if !steps.is_finite() || steps <= 0.0 {
+    if steps.is_nan() || steps == f64::INFINITY {
+        return u64::MAX;
+    }
+    if steps <= 0.0 {
         return 0;
     }
     steps.min(u64::MAX as f64) as u64

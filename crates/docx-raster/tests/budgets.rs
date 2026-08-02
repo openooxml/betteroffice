@@ -188,6 +188,44 @@ fn a_wave_past_the_work_budget_is_refused_before_it_expands() {
     );
 }
 
+/// A wave's length is a subtraction of two display-list coordinates, and two
+/// finite coordinates subtract to an infinite one. The budget has to see that
+/// as unaffordable, or the loop that walks the wave never reaches its end.
+#[test]
+fn a_wave_whose_length_overflows_to_infinity_is_refused() {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        let scene = list(
+            64.0,
+            64.0,
+            vec![json!({
+                "kind": "line",
+                "x1": -3.0e38_f64,
+                "y1": 32,
+                "x2": 3.0e38_f64,
+                "y2": 32,
+                "strokeWidth": 1.0,
+                "color": "#000000",
+                "borderStyle": "wave"
+            })],
+        );
+        let _ = sender.send(allocated_by(|| render_png(&scene, 0, &resources)));
+    });
+    let (result, allocated) = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap_or_else(|_| panic!("a wave over an infinite length never returned"));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(
+        allocated < MIB,
+        "a refused wave allocated {allocated} bytes expanding its path"
+    );
+}
+
 /// The glyph budget has to be charged against the text before the shaper runs,
 /// not against the glyph vector the shaper already allocated.
 #[test]
