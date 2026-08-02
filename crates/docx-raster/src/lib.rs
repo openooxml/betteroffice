@@ -67,6 +67,7 @@ const CLIP_BYTES_PER_PIXEL: u64 = 5;
 const PATH_SEGMENT_BYTES: u64 = 40;
 const MAX_CACHED_CROP_MASKS: usize = 16;
 const MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL: u64 = 8;
+const CLIP_SURFACE_SLACK: u64 = 4;
 const MAX_IMAGE_CACHE_ENTRIES: usize = 256;
 const MAX_IMAGE_CACHE_KEY_BYTES: usize = 65_536;
 
@@ -189,6 +190,7 @@ pub(crate) struct PageBudget {
     scratch: u64,
     limit: u64,
     masks: u64,
+    clips: u64,
     glyphs: u64,
 }
 
@@ -202,6 +204,7 @@ impl PageBudget {
             scratch: 0,
             limit,
             masks: 0,
+            clips: 0,
             glyphs: 0,
         }
     }
@@ -234,12 +237,9 @@ impl PageBudget {
         Ok(())
     }
 
-    fn charge_surface(&mut self, width: u32, height: u32, per_pixel: u64) -> Result<(), String> {
-        self.charge_scratch(
-            u64::from(width)
-                .saturating_mul(u64::from(height))
-                .saturating_mul(per_pixel),
-        )
+    fn charge_clips(&mut self, bytes: u64) -> Result<(), String> {
+        self.clips = self.charge_high_water(self.clips, bytes)?;
+        Ok(())
     }
 
     fn charge_path(&mut self, segments: u64) -> Result<(), String> {
@@ -2244,6 +2244,23 @@ struct ClipSurface {
 }
 
 impl ClipSurface {
+    /// The surface to allocate for a clip this size, or `None` to keep the one
+    /// already there. Every clipped primitive clears and blits the whole
+    /// surface, so a surface kept far larger than the clip it now serves costs
+    /// more than reallocating it: one page-sized clip early on would otherwise
+    /// charge every small clip after it for the whole page.
+    fn resize(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let Some(pixmap) = &self.pixmap else {
+            return Some((width, height));
+        };
+        if self.size.0 < width || self.size.1 < height {
+            return Some((self.size.0.max(width), self.size.1.max(height)));
+        }
+        let held = u64::from(pixmap.width()).saturating_mul(u64::from(pixmap.height()));
+        let needed = u64::from(width).saturating_mul(u64::from(height));
+        (held > needed.saturating_mul(CLIP_SURFACE_SLACK)).then_some((width, height))
+    }
+
     fn paint<'k, F>(
         &mut self,
         target: &mut Pixmap,
@@ -2262,11 +2279,12 @@ impl ClipSurface {
             let origin_y = clip.y.floor() as i32;
             let width = ((clip.x + clip.w).ceil() as i32 - origin_x) as u32;
             let height = ((clip.y + clip.h).ceil() as i32 - origin_y) as u32;
-            if self.pixmap.is_none() || self.size.0 < width || self.size.1 < height {
-                let size = (self.size.0.max(width), self.size.1.max(height));
-                scratch
-                    .budget
-                    .charge_surface(size.0, size.1, CLIP_BYTES_PER_PIXEL)?;
+            if let Some(size) = self.resize(width, height) {
+                scratch.budget.charge_clips(
+                    u64::from(size.0)
+                        .saturating_mul(u64::from(size.1))
+                        .saturating_mul(CLIP_BYTES_PER_PIXEL),
+                )?;
                 self.pixmap = Some(
                     Pixmap::new(size.0, size.1).ok_or_else(|| "invalid clip size".to_string())?,
                 );
@@ -2555,4 +2573,62 @@ fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String
             .map_err(|error| error.to_string())?;
     }
     Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(x: f32, y: f32, w: f32, h: f32) -> FRect {
+        FRect { x, y, w, h }
+    }
+
+    /// Every clipped primitive clears its surface and blits it whole, so a
+    /// surface grown to a running maximum makes one page-sized clip charge
+    /// every small clip after it for the whole page.
+    #[test]
+    fn a_clip_surface_shrinks_back_to_the_clip_it_serves() {
+        let mut pixmap = Pixmap::new(800, 1120).expect("page");
+        let mut renderer = Renderer::new(800, 1120);
+        let mut surface = ClipSurface::default();
+        for rect in [clip(0.0, 0.0, 800.0, 1120.0), clip(8.0, 8.0, 64.0, 16.0)] {
+            surface
+                .paint(
+                    &mut pixmap,
+                    rect,
+                    &mut renderer.scratch,
+                    |_, _, _, _| Ok(()),
+                )
+                .expect("clipped paint");
+        }
+        assert_eq!(surface.size, (64, 16));
+    }
+
+    /// The surface is one reused allocation, so a page that keeps resizing it
+    /// is charged its high-water mark rather than every resize.
+    #[test]
+    fn a_resized_clip_surface_is_charged_once_at_its_high_water_mark() {
+        let mut pixmap = Pixmap::new(400, 560).expect("page");
+        let mut renderer = Renderer::new(400, 560);
+        let mut surface = ClipSurface::default();
+        for index in 0..32 {
+            let rect = if index % 2 == 0 {
+                clip(0.0, 0.0, 400.0, 560.0)
+            } else {
+                clip(8.0, index as f32, 64.0, 16.0)
+            };
+            surface
+                .paint(
+                    &mut pixmap,
+                    rect,
+                    &mut renderer.scratch,
+                    |_, _, _, _| Ok(()),
+                )
+                .expect("clipped paint");
+        }
+        assert_eq!(
+            renderer.scratch.budget.scratch,
+            400 * 560 * CLIP_BYTES_PER_PIXEL
+        );
+    }
 }
