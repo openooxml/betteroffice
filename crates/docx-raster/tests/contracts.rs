@@ -4,8 +4,8 @@ use std::io::{Cursor, Write};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, MAX_IMAGE_PIXELS, MAX_PAGE_IMAGE_PIXELS, RenderResources, render_page,
-    render_png,
+    FontChains, ImageMap, ImageScope, MAX_IMAGE_PIXELS, MAX_PAGE_IMAGE_PIXELS, RenderResources,
+    render_page, render_png, scoped_image_key,
 };
 use ooxml_text::{FontStore, shape};
 use serde_json::{Value, json};
@@ -416,6 +416,22 @@ fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
     }))
     .expect("display list");
     let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 1);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
+}
+
+/// Scoping runs both ways. A body relationship id that spells a header's
+/// scoped key must not reach the header's bytes through the legacy lookup.
+#[test]
+fn a_body_relationship_id_cannot_spell_another_parts_scoped_key() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::HeaderFooter("rId7"), "rIdImage"),
+        solid_png(8, 8),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let rendered =
+        render_page(&image_list("hf:rId7\u{1f}rIdImage"), 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 1);
     assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
 }

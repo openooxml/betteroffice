@@ -99,15 +99,18 @@ impl NoteKind {
     }
 }
 
+/// Separates a scope from the relationship id it owns.
+const SCOPE_SEPARATOR: char = '\u{1f}';
+
 /// Part-scoped [`ImageMap`] key. A header and the body can both use `rId9` for
 /// different media, so bytes are keyed by owning part and resolve in that part
 /// alone.
 pub fn scoped_image_key(scope: ImageScope<'_>, rel_id: &str) -> String {
     match scope {
-        ImageScope::Body => format!("\u{1f}{rel_id}"),
-        ImageScope::HeaderFooter(part) => format!("hf:{part}\u{1f}{rel_id}"),
-        ImageScope::Notes(NoteKind::Footnote) => format!("footnotes\u{1f}{rel_id}"),
-        ImageScope::Notes(NoteKind::Endnote) => format!("endnotes\u{1f}{rel_id}"),
+        ImageScope::Body => format!("{SCOPE_SEPARATOR}{rel_id}"),
+        ImageScope::HeaderFooter(part) => format!("hf:{part}{SCOPE_SEPARATOR}{rel_id}"),
+        ImageScope::Notes(NoteKind::Footnote) => format!("footnotes{SCOPE_SEPARATOR}{rel_id}"),
+        ImageScope::Notes(NoteKind::Endnote) => format!("endnotes{SCOPE_SEPARATOR}{rel_id}"),
     }
 }
 
@@ -1225,13 +1228,14 @@ fn image_source<'k, 'b>(
 
 /// [`ImageMap`] shipped keyed by bare relationship id, so a body image still
 /// resolves that way. The body alone: a header reaching a bare key is the
-/// cross-part lookup scoping exists to prevent.
+/// cross-part lookup scoping exists to prevent. A relationship id carrying the
+/// separator would spell another part's scoped key, so it resolves to nothing.
 fn legacy_body_image<'b>(
     rel_id: &str,
     scope: ImageScope<'_>,
     resources: &RenderResources<'b>,
 ) -> Option<&'b [u8]> {
-    if !matches!(scope, ImageScope::Body) {
+    if !matches!(scope, ImageScope::Body) || rel_id.contains(SCOPE_SEPARATOR) {
         return None;
     }
     resources.images.get(rel_id).map(Vec::as_slice)
