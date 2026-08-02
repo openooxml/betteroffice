@@ -70,14 +70,21 @@ than the reference count.
 
 A page also carries a work budget for what it allocates beyond its own
 surface. Crop masks, clip surfaces and generated paths are charged in bytes —
-16 per page pixel, and never under 32 MiB — because a crop mask and a clip
+32 per page pixel, and never under 32 MiB — because a crop mask and a clip
 surface are both page-sized and a path grows with a number off the display
-list. Glyphs are counted instead of weighed, 1000000 across every run on the
-page, and charged from the text before the shaper runs. Repeated crop geometry
-reuses one filled mask and a clip surface reuses its allocation, so the budget
-tracks distinct work rather than reference count. Exceeding it is an error:
-unlike an image, the display list is the caller's own artifact and half a
-wave has no partial form to fall back on.
+list. A wave, a dash pattern and a shape's geometry all expand into such a
+path before anything clips them, so each is charged from the length it expands
+over. Glyphs are counted instead of weighed, 1000000 across every run on the
+page, and charged before the shaper runs: from the uppercased text where
+`allCaps` is set, and from a tab leader's glyph times its repeat count.
+
+A surface the page holds is charged its high-water mark, not once per use. One
+clip surface and one crop-mask cache are alive at a time, so a page of distinct
+cropped images costs the cache rather than a page-sized mask per reference. The
+cache evicts the least recently used, because one cropped icon per table row
+walks its geometries in a round robin. Exceeding the budget is an error: unlike
+an image, the display list is the caller's own artifact and half a wave has no
+partial form to fall back on.
 
 `register_font` appends to the `family|bold|italic` fallback chain instead of
 replacing it, so a second face for one family adds coverage for the glyphs the
