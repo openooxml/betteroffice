@@ -100,7 +100,7 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         run: |
           cargo fmt --check --all --manifest-path bindings/Cargo.toml
-          cargo clippy --manifest-path bindings/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path bindings/Cargo.toml --workspace --all-targets -- -D warnings
 
       - name: Test
         if: steps.ws.outputs.present == 'true'
