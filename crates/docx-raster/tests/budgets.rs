@@ -614,7 +614,7 @@ fn a_repeated_data_url_decodes_its_base64_once() {
     });
     assert_eq!(rendered.skipped_images, 16);
     assert!(
-        allocated < 8 * MIB,
+        allocated < 4 * MIB,
         "16 references to one data URL allocated {allocated} bytes, more than one decode"
     );
 }
