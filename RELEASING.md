@@ -79,7 +79,8 @@ To launch `betteroffice-docx`:
    Publishing must stay a direct job in `release.yml`: PyPI [cannot name a
    reusable workflow][reusable] as a Trusted Publisher.
 4. Flip the registry entry to `publish: true`. The next push to `main` with no
-   pending changesets uploads the distribution and converts the publisher.
+   pending changesets uploads the distribution and converts the publisher. The
+   site's PyPI downloads badge reads the same flag, so no other list needs it.
 
 No step needs a `PYPI_API_TOKEN`.
 

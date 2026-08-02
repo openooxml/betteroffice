@@ -1,12 +1,11 @@
+import { PYPI_DISTRIBUTIONS } from "../../../scripts/python-bindings.mjs";
+
 const PYPISTATS_API = "https://pypistats.org/api/packages";
 const USER_AGENT =
   "betteroffice.dev downloads badge (https://github.com/openooxml/betteroffice)";
 
-/**
- * PyPI has no org listing endpoint, so the distributions are named here. Add a
- * line when a new one ships.
- */
-export const PYPI_PACKAGES = ["betteroffice-xlsx"];
+/** PyPI has no org listing endpoint, so the binding registry is the source. */
+export const PYPI_PACKAGES: string[] = PYPI_DISTRIBUTIONS;
 
 interface RecentDownloads {
   data?: { last_month?: number };

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { PYTHON_PUBLISH_NAMES } from "../../../../../scripts/python-bindings.mjs";
 import {
   PYPI_PACKAGES,
   monthlyDownloads,
@@ -81,5 +82,12 @@ describe("PyPI downloads total", () => {
     for (const name of PYPI_PACKAGES) {
       expect(name.startsWith("betteroffice-")).toBe(true);
     }
+  });
+
+  test("the list tracks the binding registry's publish flag", () => {
+    expect(PYPI_PACKAGES).toEqual(
+      PYTHON_PUBLISH_NAMES.map((name) => `betteroffice-${name}`),
+    );
+    expect(PYPI_PACKAGES).not.toContain("betteroffice-pptx");
   });
 });

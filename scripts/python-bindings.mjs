@@ -20,6 +20,9 @@ export const PYTHON_PUBLISH_NAMES = REGISTRY.filter((entry) => entry.publish).ma
   bindingName(entry.path)
 );
 
+/** The PyPI projects that exist, so a `publish: false` binding is absent. */
+export const PYPI_DISTRIBUTIONS = PYTHON_PUBLISH_NAMES.map((name) => `betteroffice-${name}`);
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   // A typo must not fall through to the full list: a caller asking for the publish

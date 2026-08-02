@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  PYPI_DISTRIBUTIONS,
   PYTHON_BINDINGS,
   PYTHON_BINDING_NAMES,
   PYTHON_PUBLISH_NAMES
@@ -35,10 +36,12 @@ describe('registry', () => {
     expect(PYTHON_BINDINGS).toContain('bindings/python-pptx');
     expect(PYTHON_BINDING_NAMES).toContain('pptx');
     expect(PYTHON_PUBLISH_NAMES).not.toContain('pptx');
+    expect(PYPI_DISTRIBUTIONS).not.toContain('betteroffice-pptx');
   });
 
   test('xlsx publishes', () => {
     expect(PYTHON_PUBLISH_NAMES).toContain('xlsx');
+    expect(PYPI_DISTRIBUTIONS).toContain('betteroffice-xlsx');
   });
 
   test('the CLI reports the registry three ways', () => {
