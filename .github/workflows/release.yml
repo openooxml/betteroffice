@@ -138,6 +138,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      # This job declares no `environment:`, so any token it can read is repository- or org-scoped.
+      - name: Refuse a repository-scoped PyPI token
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "::error::PYPI_API_TOKEN is readable by a job that declares no environment, so it is a repository or organization secret and every binding's publish leg can upload with it. Delete it under Settings > Secrets and variables > Actions, and revoke it on PyPI. Then either add a PyPI Trusted Publisher (owner openooxml, repository betteroffice, workflow release.yml, environment pypi-<binding>) and use no token at all, or re-add the token as an environment secret on the pypi-<binding> environment only. See RELEASING.md."
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       - id: registry

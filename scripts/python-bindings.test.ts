@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   PYTHON_BINDINGS,
@@ -73,5 +75,38 @@ describe('release wiring', () => {
     const steps = python.jobs.python.steps.map((step: any) => step.run ?? '').join('\n');
     expect(steps).toContain('scripts/python-bindings.mjs --paths');
     expect(steps).not.toContain('--publish');
+  });
+});
+
+describe('repository-scoped token guard', () => {
+  const job = release.jobs['python-bindings'];
+  const guard = job.steps.find((step: any) => step.name === 'Refuse a repository-scoped PyPI token');
+
+  function runGuard(token: string) {
+    const path = join(mkdtempSync(join(tmpdir(), 'pypi-guard-')), 'guard.sh');
+    writeFileSync(path, guard.run);
+    return spawnSync('bash', ['-e', path], {
+      encoding: 'utf8',
+      env: { ...process.env, TOKEN: token }
+    });
+  }
+
+  test('runs where an environment secret is invisible', () => {
+    expect(job.environment).toBeUndefined();
+    expect(guard.env.TOKEN).toBe('${{ secrets.PYPI_API_TOKEN }}');
+    expect(release.jobs['python-pypi'].environment).toBe('pypi-${{ matrix.binding }}');
+  });
+
+  test('passes when no token is visible', () => {
+    expect(runGuard('').status).toBe(0);
+  });
+
+  test('fails and says what to do when a token is visible', () => {
+    const result = runGuard('pypi-AgEIcHlwaS5vcmcSECAGENUINE-LOOKING-TOKEN');
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('::error::');
+    expect(result.stdout).toContain('pypi-<binding>');
+    expect(result.stdout).toContain('Trusted Publisher');
+    expect(result.stdout).not.toContain('AgEIcHlwaS5vcmc');
   });
 });
