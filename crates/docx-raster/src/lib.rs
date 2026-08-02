@@ -22,8 +22,8 @@ use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
     Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
-    LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient,
-    Rect, SpreadMode, Stroke, StrokeDash, Transform,
+    LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
+    RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use font::{GlyphCache, PaintContext};
@@ -546,6 +546,7 @@ fn paint_decoration(
             mask,
             opacity,
             StrokeStyle::default(),
+            budget,
         );
     }
     let rect =
@@ -575,8 +576,11 @@ fn paint_shape(
     if let Some(paint) = shape_fill(shape, opacity)? {
         pixmap.fill_path(&path, &paint, FillRule::Winding, transform, mask);
     }
-    if let Some((paint, stroke)) = shape_stroke(shape, opacity)? {
-        pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
+    if let Some(stroked) = shape_stroke(shape, opacity)? {
+        if let Some(dash) = &stroked.dash {
+            budget.charge_path(dash_segments(path_length(&path), dash))?;
+        }
+        pixmap.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
     }
     Ok(())
 }
@@ -816,10 +820,15 @@ fn gradient_stops(
         .collect())
 }
 
-fn shape_stroke(
-    shape: &ShapePrimitive,
-    opacity: f32,
-) -> Result<Option<(Paint<'static>, Stroke)>, String> {
+/// A resolved shape stroke, keeping the dash array the [`Stroke`] hides so the
+/// path it expands into can be charged.
+struct ShapeStroke {
+    paint: Paint<'static>,
+    stroke: Stroke,
+    dash: Option<Vec<f32>>,
+}
+
+fn shape_stroke(shape: &ShapePrimitive, opacity: f32) -> Result<Option<ShapeStroke>, String> {
     let mut color = shape.stroke.as_ref().map(|stroke| stroke.color.as_str());
     let mut width = shape
         .stroke
@@ -923,7 +932,11 @@ fn shape_stroke(
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
     let stroke = stroke_style(width, dash.as_deref(), style)?;
-    Ok(Some((paint, stroke)))
+    Ok(Some(ShapeStroke {
+        paint,
+        stroke,
+        dash,
+    }))
 }
 
 fn shape_transform(shape: &ShapePrimitive) -> Result<Transform, String> {
@@ -1090,8 +1103,24 @@ fn paint_image<'k>(
         frame_mask.as_deref().or(mask),
     );
     frame_mask.take();
-    paint_image_border(pixmap, image, frame, image_transform, mask, opacity)?;
-    paint_image_revision(pixmap, image, frame, image_transform, mask, opacity)
+    paint_image_border(
+        pixmap,
+        image,
+        frame,
+        image_transform,
+        mask,
+        opacity,
+        &mut scratch.budget,
+    )?;
+    paint_image_revision(
+        pixmap,
+        image,
+        frame,
+        image_transform,
+        mask,
+        opacity,
+        &mut scratch.budget,
+    )
 }
 
 /// Where a reference's bytes come from. A `data:` payload stays encoded so the
@@ -1346,6 +1375,7 @@ fn transformed_rect_mask(
     Ok(mask)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_image_border(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
@@ -1353,6 +1383,7 @@ fn paint_image_border(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let Some(value) = &image.attrs.border else {
         return Ok(());
@@ -1385,10 +1416,14 @@ fn paint_image_border(
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
     let stroke = stroke_style(width, dash.as_deref(), StrokeStyle::default())?;
+    if let Some(dash) = &dash {
+        budget.charge_path(dash_segments((frame.w + frame.h) * 2.0, dash))?;
+    }
     pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_image_revision(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
@@ -1396,6 +1431,7 @@ fn paint_image_revision(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let Some(revision) = &image.attrs.revision else {
         return Ok(());
@@ -1436,6 +1472,7 @@ fn paint_image_revision(
             mask,
             opacity,
             StrokeStyle::default(),
+            budget,
         )?;
     }
     Ok(())
@@ -1496,7 +1533,7 @@ fn paint_border_recipe(
         | DisplayBorderStyle::Triple
         | DisplayBorderStyle::ThinThick
         | DisplayBorderStyle::ThickThin => paint_compound_border(
-            pixmap, segment, width, color, style, transform, mask, opacity,
+            pixmap, segment, width, color, style, transform, mask, opacity, budget,
         ),
         DisplayBorderStyle::Groove
         | DisplayBorderStyle::Ridge
@@ -1528,6 +1565,7 @@ fn paint_border_recipe(
                 mask,
                 opacity,
                 StrokeStyle::default(),
+                budget,
             )
         }
     }
@@ -1544,7 +1582,12 @@ fn stroke_segment(
     mask: Option<&Mask>,
     opacity: f32,
     style: StrokeStyle,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
+    let stroke = stroke_style(width, dash, style)?;
+    if let Some(dash) = dash {
+        budget.charge_path(dash_segments(segment_length(segment), dash))?;
+    }
     let mut builder = PathBuilder::new();
     builder.move_to(segment.x1, segment.y1);
     builder.line_to(segment.x2, segment.y2);
@@ -1554,9 +1597,67 @@ fn stroke_segment(
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
-    let stroke = stroke_style(width, dash, style)?;
     pixmap.stroke_path(&path, &paint, &stroke, transform, mask);
     Ok(())
+}
+
+fn segment_length(segment: Segment) -> f32 {
+    (segment.x2 - segment.x1).hypot(segment.y2 - segment.y1)
+}
+
+/// Subpaths a dash pattern expands a path of this length into, counted the way
+/// tiny-skia counts them before it builds them. The length comes off the
+/// display list, so it is charged before the expansion allocates.
+fn dash_segments(length: f32, dash: &[f32]) -> u64 {
+    let period = f64::from(dash.iter().sum::<f32>());
+    let intervals = (dash.len() / 2).max(1) as f64;
+    let count = (f64::from(length) * intervals / period).ceil();
+    if count.is_nan() || count == f64::INFINITY {
+        return u64::MAX;
+    }
+    if count <= 0.0 {
+        return 0;
+    }
+    count.min(u64::MAX as f64) as u64
+}
+
+/// An upper bound on the length a stroke walks, since a curve is no longer
+/// than the control polygon it is drawn from.
+fn path_length(path: &Path) -> f32 {
+    let mut total = 0.0;
+    let mut cursor = Point::zero();
+    let mut start = Point::zero();
+    let mut step = |from: Point, to: Point| {
+        total += (to.x - from.x).hypot(to.y - from.y);
+    };
+    for segment in path.segments() {
+        match segment {
+            PathSegment::MoveTo(point) => {
+                cursor = point;
+                start = point;
+            }
+            PathSegment::LineTo(point) => {
+                step(cursor, point);
+                cursor = point;
+            }
+            PathSegment::QuadTo(control, point) => {
+                step(cursor, control);
+                step(control, point);
+                cursor = point;
+            }
+            PathSegment::CubicTo(first, second, point) => {
+                step(cursor, first);
+                step(first, second);
+                step(second, point);
+                cursor = point;
+            }
+            PathSegment::Close => {
+                step(cursor, start);
+                cursor = start;
+            }
+        }
+    }
+    total
 }
 
 fn stroke_style(width: f32, dash: Option<&[f32]>, style: StrokeStyle) -> Result<Stroke, String> {
@@ -1605,6 +1706,7 @@ fn paint_compound_border(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let (normal_x, normal_y) = segment_normal(segment);
     let strokes = match style {
@@ -1643,6 +1745,7 @@ fn paint_compound_border(
             mask,
             opacity,
             StrokeStyle::default(),
+            budget,
         )?;
     }
     Ok(())

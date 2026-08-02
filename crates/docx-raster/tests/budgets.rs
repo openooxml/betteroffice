@@ -226,6 +226,105 @@ fn a_wave_whose_length_overflows_to_infinity_is_refused() {
     );
 }
 
+/// A dash expands one drawn segment into a subpath per interval, in path space
+/// and before anything clips it, so the dash is as much a generated path as the
+/// wave is and has to be charged like one.
+#[test]
+fn a_dashed_line_past_the_work_budget_is_refused_before_it_expands() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        64.0,
+        64.0,
+        vec![json!({
+            "kind": "line",
+            "x1": 0,
+            "y1": 32,
+            "x2": 4_000_000,
+            "y2": 32,
+            "strokeWidth": 0.5,
+            "color": "#000000",
+            "borderStyle": "dashed"
+        })],
+    );
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(
+        allocated < MIB,
+        "a refused dash allocated {allocated} bytes expanding its path"
+    );
+}
+
+/// A shape stroke dashes an arbitrary geometry path, so its length has to be
+/// charged the same way a line's is.
+#[test]
+fn a_dashed_shape_path_past_the_work_budget_is_refused_before_it_expands() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        64.0,
+        64.0,
+        vec![json!({
+            "kind": "shape",
+            "x": 0,
+            "y": 0,
+            "w": 64,
+            "h": 64,
+            "geometryPath": [
+                {"type": "move", "x": 0, "y": 32},
+                {"type": "line", "x": 4_000_000, "y": 32}
+            ],
+            "strokePaint": {"color": "#000000", "width": 0.5, "dash": "dash"}
+        })],
+    );
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(
+        allocated < MIB,
+        "a refused shape dash allocated {allocated} bytes expanding its path"
+    );
+}
+
+/// An image border dashes the frame's rectangle, whose perimeter is four more
+/// numbers off the display list.
+#[test]
+fn a_dashed_image_border_past_the_work_budget_is_refused_before_it_expands() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdEdge"),
+        solid_png(4, 4),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        64.0,
+        64.0,
+        vec![json!({
+            "kind": "image",
+            "relId": "rIdEdge",
+            "x": 0,
+            "y": 0,
+            "w": 4_000_000,
+            "h": 8,
+            "border": {"width": 0.5, "style": "dash"}
+        })],
+    );
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(
+        allocated < MIB,
+        "a refused image border allocated {allocated} bytes expanding its path"
+    );
+}
+
 /// The glyph budget has to be charged against the text before the shaper runs,
 /// not against the glyph vector the shaper already allocated.
 #[test]
