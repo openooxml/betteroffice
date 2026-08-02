@@ -21,9 +21,17 @@ export const PYTHON_PUBLISH_NAMES = REGISTRY.filter((entry) => entry.publish).ma
 );
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  if (process.argv.includes('--paths')) {
+  const args = process.argv.slice(2);
+  // A typo must not fall through to the full list: a caller asking for the publish
+  // matrix would silently get every binding, including the ones held back.
+  const unknown = args.find((arg) => arg !== '--paths' && arg !== '--publish');
+  if (unknown) {
+    console.error(`python-bindings.mjs: unknown argument ${unknown}; expected --paths or --publish`);
+    process.exit(1);
+  }
+  if (args.includes('--paths')) {
     console.log(PYTHON_BINDINGS.join('\n'));
-  } else if (process.argv.includes('--publish')) {
+  } else if (args.includes('--publish')) {
     console.log(JSON.stringify(PYTHON_PUBLISH_NAMES));
   } else {
     console.log(JSON.stringify(PYTHON_BINDING_NAMES));

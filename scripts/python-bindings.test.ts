@@ -11,6 +11,7 @@ import {
 } from './python-bindings.mjs';
 
 const script = fileURLToPath(new URL('./python-bindings.mjs', import.meta.url));
+const repository = fileURLToPath(new URL('..', import.meta.url));
 const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
 const ciWorkflow = fileURLToPath(new URL('../.github/workflows/ci.yml', import.meta.url));
 
@@ -45,9 +46,37 @@ describe('registry', () => {
     expect(JSON.parse(cli())).toEqual(PYTHON_BINDING_NAMES);
     expect(JSON.parse(cli('--publish'))).toEqual(PYTHON_PUBLISH_NAMES);
   });
+
+  test('an unknown argument fails instead of printing every binding', () => {
+    const result = spawnSync('node', [script, '--publsh'], { encoding: 'utf8' });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('--publsh');
+    expect(result.stdout).toBe('');
+  });
 });
 
 describe('release wiring', () => {
+  test('the registry step computes each list from the registry', () => {
+    const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
+    expect(step.run).toContain('scripts/python-bindings.mjs --publish');
+
+    const directory = mkdtempSync(join(tmpdir(), 'registry-'));
+    const outputs = join(directory, 'outputs');
+    const path = join(directory, 'registry.sh');
+    writeFileSync(path, step.run);
+    const result = spawnSync('bash', ['-e', path], {
+      encoding: 'utf8',
+      cwd: repository,
+      env: { ...process.env, GITHUB_OUTPUT: outputs }
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(outputs, 'utf8').trim().split('\n')).toEqual([
+      `bindings=${JSON.stringify(PYTHON_BINDING_NAMES)}`,
+      `publish=${JSON.stringify(PYTHON_PUBLISH_NAMES)}`
+    ]);
+  });
+
   test('the release train exposes both lists', () => {
     expect(release.jobs['python-bindings'].outputs).toEqual({
       bindings: '${{ steps.registry.outputs.bindings }}',
