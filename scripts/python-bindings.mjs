@@ -1,14 +1,31 @@
 import { fileURLToPath } from 'node:url';
 
 // The Python release train. Adding a distribution here enrols it in versioning,
-// CI, and publishing; see RELEASING.md for the PyPI side.
-export const PYTHON_BINDINGS = ['bindings/python-pptx', 'bindings/python-xlsx'];
+// CI, and wheel builds; see RELEASING.md for the PyPI side.
+// `publish: false` holds it out of the PyPI matrix until its project is ready.
+const REGISTRY = [
+  { path: 'bindings/python-pptx', publish: false },
+  { path: 'bindings/python-xlsx', publish: true }
+];
 
-export const PYTHON_BINDING_NAMES = PYTHON_BINDINGS.map((binding) =>
-  binding.replace('bindings/python-', '')
+function bindingName(path) {
+  return path.replace('bindings/python-', '');
+}
+
+export const PYTHON_BINDINGS = REGISTRY.map((entry) => entry.path);
+
+export const PYTHON_BINDING_NAMES = PYTHON_BINDINGS.map(bindingName);
+
+export const PYTHON_PUBLISH_NAMES = REGISTRY.filter((entry) => entry.publish).map((entry) =>
+  bindingName(entry.path)
 );
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const paths = process.argv.includes('--paths');
-  console.log(paths ? PYTHON_BINDINGS.join('\n') : JSON.stringify(PYTHON_BINDING_NAMES));
+  if (process.argv.includes('--paths')) {
+    console.log(PYTHON_BINDINGS.join('\n'));
+  } else if (process.argv.includes('--publish')) {
+    console.log(JSON.stringify(PYTHON_PUBLISH_NAMES));
+  } else {
+    console.log(JSON.stringify(PYTHON_BINDING_NAMES));
+  }
 }

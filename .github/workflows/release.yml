@@ -134,13 +134,18 @@ jobs:
     timeout-minutes: 5
     outputs:
       bindings: ${{ steps.registry.outputs.bindings }}
+      publish: ${{ steps.registry.outputs.publish }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
 
       - id: registry
-        run: echo "bindings=$(node scripts/python-bindings.mjs)" >> "$GITHUB_OUTPUT"
+        run: |
+          {
+            echo "bindings=$(node scripts/python-bindings.mjs)"
+            echo "publish=$(node scripts/python-bindings.mjs --publish)"
+          } >> "$GITHUB_OUTPUT"
 
   python-dist:
     name: Python ${{ matrix.binding }}
@@ -160,13 +165,13 @@ jobs:
     name: Publish betteroffice-${{ matrix.binding }}
     needs: [python-bindings, python-dist]
     # `needs` collapses the python-dist matrix: `success()` would skip every binding on one failure.
-    if: ${{ !cancelled() && needs.python-bindings.result == 'success' }}
+    if: ${{ !cancelled() && needs.python-bindings.result == 'success' && needs.python-bindings.outputs.publish != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        binding: ${{ fromJSON(needs.python-bindings.outputs.bindings) }}
+        binding: ${{ fromJSON(needs.python-bindings.outputs.publish) }}
     # Scopes each Trusted Publisher to one project; the workflow alone cannot.
     environment: pypi-${{ matrix.binding }}
     permissions:
