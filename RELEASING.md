@@ -36,6 +36,11 @@ obtain a short-lived crates.io token.
 workflow read it at runtime — `release.yml` turns it into the build and publish
 matrices — so the list is never duplicated in a workflow.
 
+`bindings/Cargo.lock` pins the workspace crates by version, so every bump
+invalidates it and CI's `cargo clippy --locked` would fail.
+`scripts/version-packages.mjs` regenerates it after writing the new versions, and
+the release commit carries it alongside the manifests.
+
 Each entry carries a `publish` flag. Every registered binding is versioned by
 Changesets, installed and tested by the CI gate, and built into wheels and an
 sdist by the release; only a flagged one enters the publish matrix. A binding

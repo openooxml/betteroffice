@@ -9,6 +9,8 @@ import {
   validateRustTrain
 } from './rust-crates.mjs';
 
+const BINDINGS_MANIFEST = 'bindings/Cargo.toml';
+
 function releaseManifest(binding) {
   return `${binding}/package.json`;
 }
@@ -74,6 +76,13 @@ function validate(version, locked) {
   validateRustTrain(metadata, version);
 }
 
+// bindings/Cargo.lock pins every bumped crate by version and nothing else rewrites it.
+// `cargo metadata` regenerates the lock; the second call is CI's `--locked` gate.
+function synchronizeBindingsLock() {
+  cargoMetadata({ locked: false, manifestPath: BINDINGS_MANIFEST });
+  cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
+}
+
 const checkOnly = process.argv.includes('--check');
 const before = rustReleaseVersion();
 const cargoBefore = readFileSync(WORKSPACE_MANIFEST, 'utf8');
@@ -110,10 +119,12 @@ if (checkOnly) {
     }
   }
   validate(before, true);
+  cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
   console.log(`Rust release train is synchronized at ${before}.`);
   for (const binding of PYTHON_BINDINGS) {
     console.log(`${binding} is synchronized at ${pythonBefore.get(binding)}.`);
   }
+  console.log('bindings/Cargo.lock is current.');
   process.exit(0);
 }
 
@@ -142,6 +153,7 @@ for (const binding of PYTHON_BINDINGS) {
 }
 
 validate(after, true);
+synchronizeBindingsLock();
 for (const binding of PYTHON_BINDINGS) {
   const from = pythonBefore.get(binding);
   const to = pythonAfter.get(binding);
@@ -149,6 +161,7 @@ for (const binding of PYTHON_BINDINGS) {
     to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
   );
 }
+console.log('Synchronized bindings/Cargo.lock.');
 console.log(
   after === before
     ? `Rust release train remains at ${after}.`

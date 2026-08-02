@@ -44,8 +44,9 @@ export function run(command, args, { capture = false, allowFailure = false } = {
   return result;
 }
 
-export function cargoMetadata({ locked = true } = {}) {
+export function cargoMetadata({ locked = true, manifestPath } = {}) {
   const args = ['metadata', '--format-version', '1'];
+  if (manifestPath) args.push('--manifest-path', manifestPath);
   if (locked) args.push('--locked');
   const result = run('cargo', args, { capture: true });
   return JSON.parse(result.stdout);
