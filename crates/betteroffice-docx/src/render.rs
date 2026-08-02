@@ -15,8 +15,8 @@ const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
-pub const MAX_PIXMAP_DIM: u32 = 16_384;
-pub const MAX_PIXMAP_PIXELS: u64 = 16_777_216;
+pub const MAX_PIXMAP_DIM: u32 = docx_raster::MAX_PAGE_DIM;
+pub const MAX_PIXMAP_PIXELS: u64 = docx_raster::MAX_PAGE_PIXELS;
 
 /// Registered faces plus the `family|bold|italic` chains the raster backend
 /// resolves runs against. The store sits behind a `Mutex` so a [`Document`]

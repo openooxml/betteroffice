@@ -38,6 +38,10 @@ pub type ImageMap = HashMap<String, Vec<u8>>;
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 /// Every image decoded for one page, at four times that surface.
 pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
+/// One rendered page's longest side.
+pub const MAX_PAGE_DIM: u32 = 16_384;
+/// One rendered page's surface.
+pub const MAX_PAGE_PIXELS: u64 = 16_777_216;
 
 /// The part whose relationships own a display-list relationship id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +129,7 @@ pub fn render_page(
         .ok_or_else(|| format!("page ordinal {page_ordinal} is out of range"))?;
     let width = page_dimension(&page.width, "page width")?;
     let height = page_dimension(&page.height, "page height")?;
+    validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut renderer = Renderer::default();
@@ -1921,6 +1926,22 @@ fn value_number_array(value: &Value) -> Result<Vec<f32>, String> {
         .iter()
         .map(value_f32)
         .collect()
+}
+
+/// The surface cap the published entry points enforce for themselves, so a
+/// consumer of this crate is bounded without a facade in front of it.
+fn validate_page_surface(width: u32, height: u32) -> Result<(), String> {
+    if width > MAX_PAGE_DIM || height > MAX_PAGE_DIM {
+        return Err(format!(
+            "page is {width}x{height}px, past the {MAX_PAGE_DIM}px per-side cap"
+        ));
+    }
+    if u64::from(width) * u64::from(height) > MAX_PAGE_PIXELS {
+        return Err(format!(
+            "page is {width}x{height}px, past the {MAX_PAGE_PIXELS}-pixel surface cap"
+        ));
+    }
+    Ok(())
 }
 
 fn page_dimension(number: &Number, name: &str) -> Result<u32, String> {
