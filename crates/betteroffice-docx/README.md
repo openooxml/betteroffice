@@ -58,10 +58,26 @@ each, and a rendered page at 16384px per side and 16777216 pixels of area. Each
 is a typed error rather than a truncated accept, and the page budget is checked
 before any surface is allocated.
 
-Images are budgeted by the pixels they decode to: 33554432 for one image and
-67108864 across one page, charged from the declared extent before the decoder
-allocates. A page decodes each resolved image once however many primitives
-reference it, so its cost follows the budget rather than the reference count.
+Images are budgeted by both the pixels and the bytes they decode to: 33554432
+pixels for one image and 67108864 across one page, and 268435456 bytes for one
+image and 536870912 across one page, charged from the declared extent and
+colour depth before the decoder allocates. Pixels alone are not memory — a
+16-bit source needs twice the buffer an 8-bit one of the same extent does. A
+`data:` payload is bounded at 33554432 bytes and charged from its encoded
+length before base64 expands it. A page decodes each resolved image once
+however many primitives reference it, so its cost follows the budget rather
+than the reference count.
+
+A page also carries a work budget for what it allocates beyond its own
+surface. Crop masks, clip surfaces and generated paths are charged in bytes —
+16 per page pixel, and never under 32 MiB — because a crop mask and a clip
+surface are both page-sized and a path grows with a number off the display
+list. Glyphs are counted instead of weighed, 1000000 across every run on the
+page, and charged from the text before the shaper runs. Repeated crop geometry
+reuses one filled mask and a clip surface reuses its allocation, so the budget
+tracks distinct work rather than reference count. Exceeding it is an error:
+unlike an image, the display list is the caller's own artifact and half a
+wave has no partial form to fall back on.
 
 `register_font` appends to the `family|bold|italic` fallback chain instead of
 replacing it, so a second face for one family adds coverage for the glyphs the
@@ -77,11 +93,17 @@ or dangling relationship, an image outside `word/media/`, and a picture
 watermark's bare `rId` all reach the backend unresolved.
 
 An image the backend will not draw is skipped, matching the canvas backend's
-resolver — one missing linked image, or one past a pixel budget, must not blank
+resolver — one missing linked image, or one past a budget, must not blank
 the page around it. `render_png` reports how many references it skipped, so a
 caller that wants a whole page can reject on it. `register_image` supplies the
 bytes where skipping is not what you want. It is keyed by owning part, because
 a header and the body can both use `rId9` for different media.
+
+Images skip and fonts do not, deliberately. An image is one element of a page
+and its absence is a bounded hole a caller can see in `skipped_images` and act
+on. A missing font chain is not bounded: every run in that family disappears,
+and a page of invisible text reports the same success as a page of text. The
+asymmetry is which failures leave a signal a caller can act on.
 
 ## Limits
 
