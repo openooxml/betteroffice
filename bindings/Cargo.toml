@@ -1,5 +1,5 @@
 [workspace]
-members = ["python-common", "python-pptx", "python-xlsx"]
+members = ["python-*"]
 resolver = "3"
 
 [profile.release]
