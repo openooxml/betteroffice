@@ -64,6 +64,8 @@ pub const MAX_PAGE_GLYPHS: u64 = 1_000_000;
 
 const MASK_BYTES_PER_PIXEL: u64 = 1;
 const CLIP_BYTES_PER_PIXEL: u64 = 5;
+// Keeps the affordable wave step count under f32 stagnation: raising the scratch
+// budget per pixel or lowering this turns `paint_wave`'s loop into a hang.
 const PATH_SEGMENT_BYTES: u64 = 40;
 const MAX_CACHED_CROP_MASKS: usize = 16;
 const MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL: u64 = 8;
@@ -329,7 +331,9 @@ impl MaskCache {
             let Some((key, _)) = self.entries.pop() else {
                 break;
             };
-            self.bytes -= mask_bytes(key.size.0, key.size.1);
+            self.bytes = self
+                .bytes
+                .saturating_sub(mask_bytes(key.size.0, key.size.1));
         }
     }
 }
