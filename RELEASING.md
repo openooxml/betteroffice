@@ -31,54 +31,81 @@ obtain a short-lived crates.io token.
 
 ## Python bindings
 
-`scripts/python-bindings.mjs` is the single registry of published Python
-distributions. `scripts/version-packages.mjs` imports it, and both the CI gate
-and the release workflow read it at runtime — `release.yml` turns it into the
-build and publish matrices — so the list is never duplicated in a workflow.
+`scripts/python-bindings.mjs` is the single registry of Python distributions.
+`scripts/version-packages.mjs` imports it, and both the CI gate and the release
+workflow read it at runtime — `release.yml` turns it into the build and publish
+matrices — so the list is never duplicated in a workflow.
 
-Step 3 below is the one that arms publishing: from the moment a path is in
-`PYTHON_BINDINGS`, the next push to `main` with no pending changesets uploads
-that distribution to real PyPI. Steps 1 and 2 must already be done when the
-registry entry merges, or that upload runs against a project with no Trusted
-Publisher — and, if a token was left at repository scope, under another
-project's token — burning the version irreversibly.
+Each entry carries a `publish` flag. Every registered binding is versioned by
+Changesets, installed and tested by the CI gate, and built into wheels and an
+sdist by the release; only a flagged one enters the publish matrix. A binding
+lands with `publish: false`, so merging it cannot create a PyPI project.
+Flipping that flag is what arms the upload, and it is the last step of a launch.
 
-`bindings/python-pptx` is in the registry already while `betteroffice-pptx` is
-not yet on PyPI, so steps 1 and 2 are outstanding for `pypi-pptx`. Both must be
-done before that registry entry merges to `main`; delete this paragraph once
-they are.
+`bindings/python-pptx` is at `publish: false`: `betteroffice-pptx` does not
+exist on PyPI and has no publisher configured.
+
+### Launching a binding
+
+A **pending** Trusted Publisher is configured before the project exists and
+creates it on first upload, converting itself into a normal publisher, so a new
+distribution never needs an API token ([PyPI docs][pending]). A pending
+publisher reserves nothing until it is used — if someone else registers the
+project name first, it is invalidated.
 
 To launch `betteroffice-docx`:
 
-1. Create the GitHub environment `pypi-docx`. The publish job runs in
+1. Add `bindings/python-docx` to the registry with `publish: false`, and give
+   the directory a private `package.json` at the version its `Cargo.toml`
+   carries, so Changesets versions it. Those are the only two files to write:
+   the `members = ["python-*"]` glob in `bindings/Cargo.toml` already covers the
+   crate — which is also why every `bindings/python-*` **directory** must be a
+   cargo crate, or the whole workspace fails to load — and `bindings/*` is
+   already a Bun workspace. Regenerate and commit both lockfiles: `bun install`
+   writes `bun.lock`, and `cargo metadata --manifest-path bindings/Cargo.toml`
+   writes `bindings/Cargo.lock`. `bun install` never touches the Cargo lock. CI
+   fails on either being stale (`bun install --frozen-lockfile`, and
+   `cargo clippy --locked` on the bindings workspace).
+2. Create the GitHub environment `pypi-docx`. The publish job runs in
    `pypi-<binding>`, which is what scopes a Trusted Publisher to one project.
-2. Add `PYPI_API_TOKEN` to that environment as an **environment secret**, never
-   at repository scope. A first publication needs a token because a Trusted
-   Publisher can only be configured after the project exists, and a PyPI token
-   is scoped to a single project — a repository secret reaches every binding's
-   publish job, and each one uploads with a token whenever it can see one.
-3. Add `bindings/python-docx` to `PYTHON_BINDINGS`, and give the directory a
-   private `package.json` at the version its `Cargo.toml` carries, so Changesets
-   versions it. Those are the only two files to write: the `members` glob in
-   `bindings/Cargo.toml` already covers the crate, and `bindings/*` is already a
-   Bun workspace. Run `bun install` and commit `bun.lock` and
-   `bindings/Cargo.lock` alongside them, or the frozen-lockfile install fails.
-   CI then installs and tests the binding, and the release builds, packages, and
-   publishes it.
-4. Add a Trusted Publisher to the PyPI project with owner `openooxml`,
-   repository `betteroffice`, workflow `release.yml`, and environment
-   `pypi-docx`, then delete that environment's `PYPI_API_TOKEN`. Publishing
-   must stay a direct job in `release.yml`: PyPI [cannot name a reusable
-   workflow][reusable] as a Trusted Publisher.
+3. Add a pending publisher at <https://pypi.org/manage/account/publishing/> with
+   project name `betteroffice-docx`, owner `openooxml`, repository
+   `betteroffice`, workflow `release.yml`, and environment `pypi-docx`.
+   Publishing must stay a direct job in `release.yml`: PyPI [cannot name a
+   reusable workflow][reusable] as a Trusted Publisher.
+4. Flip the registry entry to `publish: true`. The next push to `main` with no
+   pending changesets uploads the distribution and converts the publisher.
 
-Because the token lives on the environment, each binding moves to Trusted
-Publishing on its own schedule: dropping one binding's secret leaves the others
-alone, and launching a later binding does not drag the earlier ones back onto a
-token.
+No step needs a `PYPI_API_TOKEN`.
+
+### The API token path
+
+`release.yml` keeps a token path that runs only when the `pypi-<binding>`
+environment holds a `PYPI_API_TOKEN`. It exists for `betteroffice-xlsx`, which
+shipped on a token before pending publishers were used here. Delete both steps
+once that project has a Trusted Publisher; a new binding must never take it.
+
+A PyPI API token is scoped either to a single project or to the entire account,
+and a project that does not exist yet cannot be named — so a bootstrap token is
+necessarily account-wide. That blast radius is what pending publishers remove.
+
+**Outstanding:** `PYPI_API_TOKEN` is a **repository** secret today, and it
+created `betteroffice-xlsx`, so it is almost certainly account-scoped. Delete it
+under Settings → Secrets and variables → Actions, revoke it on PyPI, and add a
+Trusted Publisher to `betteroffice-xlsx` (owner `openooxml`, repository
+`betteroffice`, workflow `release.yml`, environment `pypi-xlsx`). Until it is
+gone the release fails at `Refuse a repository-scoped PyPI token`: that job
+declares no environment, so anything it can read is repository- or
+organization-scoped, and a repository secret reaches every binding's publish leg.
+
+Naming an environment that does not exist does not fail a job — GitHub creates it
+empty — so `environment: pypi-<binding>` cannot block a publish by itself. The
+`publish` flag and that guard are what block it.
 
 Each binding builds and publishes independently. A broken wheel in one
 distribution fails only that distribution's upload.
 
+[pending]: https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/
 [reusable]: https://docs.pypi.org/trusted-publishers/troubleshooting/#reusable-workflows-on-github
 
 ## Publish order
