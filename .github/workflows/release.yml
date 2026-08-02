@@ -184,6 +184,7 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Never at repository scope: one secret would reach every binding's leg.
       - name: Detect PyPI token
         id: pypi-token
         env:
