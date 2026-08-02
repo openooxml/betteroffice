@@ -157,6 +157,118 @@ fn a_repeated_crop_geometry_reuses_one_page_mask() {
     );
 }
 
+/// A4 at 96dpi, the page size the layout engine emits.
+const A4: (f64, f64) = (794.0, 1123.0);
+
+fn cropped(index: usize, left: f64) -> Value {
+    json!({
+        "kind": "image",
+        "relId": "rIdCrop",
+        "x": (index % 5) * 150,
+        "y": (index / 5) * 130,
+        "w": 120,
+        "h": 100,
+        "crop": {"left": left, "top": 0.1, "right": 0.1, "bottom": 0.1}
+    })
+}
+
+/// A contact sheet is not exotic: a page of distinct crops is a page of
+/// page-sized masks, and only one of them is ever live outside the cache. The
+/// budget has to charge what the page holds rather than one mask per
+/// reference, or a catalogue page fails as a whole.
+#[test]
+fn a_contact_sheet_of_distinct_crops_renders_on_an_a4_page() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdCrop"),
+        solid_png(4, 4),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitives = (0..40)
+        .map(|index| cropped(index, 0.01 * index as f64))
+        .collect();
+    let scene = list(A4.0, A4.1, primitives);
+    let rendered = render_page(&scene, 0, &resources)
+        .unwrap_or_else(|error| panic!("40 distinct crops on an A4 page: {error}"));
+    assert_eq!(rendered.skipped_images, 0);
+}
+
+/// One cropped icon per table row walks the mask cache in a round robin, the
+/// order a cache that evicts by age of insertion misses on every single time.
+#[test]
+fn repeating_crop_geometries_reuse_their_masks_down_a_page() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdCrop"),
+        solid_png(4, 4),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitives = (0..60)
+        .map(|index| {
+            json!({
+                "kind": "image",
+                "relId": "rIdCrop",
+                "x": (index % 5) * 150,
+                "y": 8,
+                "w": 120,
+                "h": 100,
+                "crop": {"left": 0.1, "top": 0.1, "right": 0.1, "bottom": 0.1}
+            })
+        })
+        .collect();
+    let scene = list(A4.0, A4.1, primitives);
+    let (rendered, allocated) = allocated_by(|| {
+        render_page(&scene, 0, &resources).unwrap_or_else(|error| panic!("render: {error}"))
+    });
+    assert_eq!(rendered.skipped_images, 0);
+    assert!(
+        allocated < 24 * MIB,
+        "5 crop geometries over 60 references allocated {allocated} bytes, more than 5 masks"
+    );
+}
+
+/// The resolutions a caller renders A4 at. Every budget scales with the page,
+/// so a page that renders at 96dpi has to render at 300dpi too.
+#[test]
+fn a_realistic_page_renders_at_every_common_resolution() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdCrop"),
+        solid_png(4, 4),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let mut primitives: Vec<Value> = (0..40)
+        .map(|index| cropped(index, 0.01 * index as f64))
+        .collect();
+    primitives.push(json!({
+        "kind": "rect",
+        "x": 0, "y": 0, "w": 794, "h": 1123,
+        "fill": "#f5f5f5",
+        "clipGroup": {"clip": {"x": 0, "y": 0, "w": 794, "h": 1123}}
+    }));
+    for row in 0..60 {
+        primitives.push(json!({
+            "kind": "rect",
+            "x": 8, "y": 8 + row * 18, "w": 120, "h": 16,
+            "fill": "#4472c4",
+            "clipGroup": {"clip": {"x": 8, "y": 8 + row * 18, "w": 120, "h": 16}}
+        }));
+        primitives.push(json!({
+            "kind": "line",
+            "x1": 8, "y1": 26 + row * 18, "x2": 786, "y2": 26 + row * 18,
+            "strokeWidth": 1.0,
+            "color": "#c0c0c0",
+            "borderStyle": "dashed"
+        }));
+    }
+    for (dpi, scale) in [(96, 1.0), (150, 1.5625), (300, 3.125)] {
+        let scene = list(A4.0 * scale, A4.1 * scale, primitives.clone());
+        let rendered = render_page(&scene, 0, &resources)
+            .unwrap_or_else(|error| panic!("a realistic A4 page at {dpi}dpi: {error}"));
+        assert_eq!(rendered.skipped_images, 0, "at {dpi}dpi");
+    }
+}
+
 /// A wave expands a numeric line length into path segments before anything
 /// clips it, so the length has to be charged before the path grows.
 #[test]

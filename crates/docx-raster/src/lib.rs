@@ -53,8 +53,10 @@ pub const MAX_PAGE_DIM: u32 = 16_384;
 pub const MAX_PAGE_PIXELS: u64 = 16_777_216;
 /// Scratch one page render may allocate for crop masks, clip surfaces and
 /// generated paths, per pixel of the page being drawn. A mask and a clip
-/// surface are both page-sized, so the page is what their cost scales with.
-pub const MAX_PAGE_SCRATCH_BYTES_PER_PIXEL: u64 = 16;
+/// surface are both page-sized, so the page is what their cost scales with:
+/// the crop-mask cache accounts for 8 of these bytes, a clip surface 5, the one
+/// mask live outside the cache 1, and generated paths the rest.
+pub const MAX_PAGE_SCRATCH_BYTES_PER_PIXEL: u64 = 32;
 /// The floor under that, so a small page still affords its clips and paths.
 pub const MIN_PAGE_SCRATCH_BYTES: u64 = 33_554_432;
 /// Glyphs one page render may paint across every run on it.
@@ -63,7 +65,8 @@ pub const MAX_PAGE_GLYPHS: u64 = 1_000_000;
 const MASK_BYTES_PER_PIXEL: u64 = 1;
 const CLIP_BYTES_PER_PIXEL: u64 = 5;
 const PATH_SEGMENT_BYTES: u64 = 40;
-const MAX_CACHED_CROP_MASKS: usize = 4;
+const MAX_CACHED_CROP_MASKS: usize = 16;
+const MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL: u64 = 8;
 const MAX_IMAGE_CACHE_ENTRIES: usize = 256;
 const MAX_IMAGE_CACHE_KEY_BYTES: usize = 65_536;
 
@@ -177,9 +180,15 @@ pub(crate) struct FRect {
 /// allocate, which is the one unit they share; glyphs keep their own counter,
 /// since a glyph costs its rasterization rather than its footprint. Both are
 /// charged before the allocation, so a page cannot overspend and then refuse.
+///
+/// A surface is held rather than consumed: one clip surface and one crop-mask
+/// cache are alive at a time, so they are charged their high-water mark and
+/// refilling one allocates nothing further. A generated path is charged every
+/// time it is built, because one primitive expands into an unbounded one.
 pub(crate) struct PageBudget {
     scratch: u64,
     limit: u64,
+    masks: u64,
     glyphs: u64,
 }
 
@@ -192,18 +201,36 @@ impl PageBudget {
         Self {
             scratch: 0,
             limit,
+            masks: 0,
             glyphs: 0,
         }
     }
 
     fn charge_scratch(&mut self, bytes: u64) -> Result<(), String> {
-        self.scratch = self.scratch.saturating_add(bytes);
-        if self.scratch > self.limit {
+        let spent = self.scratch.saturating_add(bytes);
+        if spent > self.limit {
             return Err(format!(
                 "page exceeds its {} byte render work budget",
                 self.limit
             ));
         }
+        self.scratch = spent;
+        Ok(())
+    }
+
+    /// Charges the growth of a held surface, leaving what it already cost
+    /// charged once.
+    fn charge_high_water(&mut self, held: u64, bytes: u64) -> Result<u64, String> {
+        let growth = bytes.saturating_sub(held);
+        if growth == 0 {
+            return Ok(held);
+        }
+        self.charge_scratch(growth)?;
+        Ok(bytes)
+    }
+
+    fn charge_masks(&mut self, bytes: u64) -> Result<(), String> {
+        self.masks = self.charge_high_water(self.masks, bytes)?;
         Ok(())
     }
 
@@ -261,9 +288,53 @@ impl CropMaskKey {
     }
 }
 
-#[derive(Default)]
+/// Filled crop masks, most recently used first. A page walks its geometries in
+/// whatever order the display list lists them, so a cache that evicts by age of
+/// insertion drops the entry a round-robin is about to ask for again.
 struct MaskCache {
     entries: Vec<(CropMaskKey, Rc<Mask>)>,
+    bytes: u64,
+    limit: u64,
+}
+
+impl MaskCache {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            entries: Vec::new(),
+            bytes: 0,
+            limit: u64::from(width)
+                .saturating_mul(u64::from(height))
+                .saturating_mul(MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL),
+        }
+    }
+
+    fn take(&mut self, key: CropMaskKey) -> Option<Rc<Mask>> {
+        let index = self.entries.iter().position(|(cached, _)| *cached == key)?;
+        let entry = self.entries.remove(index);
+        let mask = entry.1.clone();
+        self.entries.insert(0, entry);
+        Some(mask)
+    }
+
+    fn remember(&mut self, key: CropMaskKey, mask: Rc<Mask>, bytes: u64) {
+        if bytes > self.limit {
+            return;
+        }
+        self.entries.insert(0, (key, mask));
+        self.bytes += bytes;
+        while self.entries.len() > MAX_CACHED_CROP_MASKS || self.bytes > self.limit {
+            let Some((key, _)) = self.entries.pop() else {
+                break;
+            };
+            self.bytes -= mask_bytes(key.size.0, key.size.1);
+        }
+    }
+}
+
+fn mask_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(MASK_BYTES_PER_PIXEL)
 }
 
 /// Everything one page render accumulates: the caches that keep repeated work
@@ -287,7 +358,7 @@ impl<'k> Renderer<'k> {
             scratch: Scratch {
                 glyphs: GlyphCache::default(),
                 images: ImageCache::default(),
-                masks: MaskCache::default(),
+                masks: MaskCache::new(width, height),
                 budget: PageBudget::new(width, height),
             },
         }
@@ -1326,8 +1397,9 @@ fn image_transform(image: &ImagePrimitive, frame: FRect) -> Result<Transform, St
 }
 
 /// The crop mask for one image reference, reused where the geometry repeats.
-/// An outer clip mixes into the fill, so a clipped crop is built fresh and
-/// charged rather than shared.
+/// An outer clip mixes into the fill, so a clipped crop is built fresh rather
+/// than shared. Only one mask is ever live outside the cache, so the page is
+/// charged what the cache holds plus that one, not one charge per reference.
 fn crop_mask(
     pixmap: &Pixmap,
     frame: FRect,
@@ -1336,22 +1408,20 @@ fn crop_mask(
     masks: &mut MaskCache,
     budget: &mut PageBudget,
 ) -> Result<Rc<Mask>, String> {
+    let bytes = mask_bytes(pixmap.width(), pixmap.height());
     if outer.is_some() {
-        budget.charge_surface(pixmap.width(), pixmap.height(), MASK_BYTES_PER_PIXEL)?;
+        budget.charge_masks(masks.bytes.saturating_add(bytes))?;
         return Ok(Rc::new(transformed_rect_mask(
             pixmap, frame, transform, outer,
         )?));
     }
     let key = CropMaskKey::new(pixmap, frame, transform);
-    if let Some((_, mask)) = masks.entries.iter().find(|(cached, _)| *cached == key) {
-        return Ok(mask.clone());
+    if let Some(mask) = masks.take(key) {
+        return Ok(mask);
     }
-    budget.charge_surface(pixmap.width(), pixmap.height(), MASK_BYTES_PER_PIXEL)?;
+    budget.charge_masks(masks.bytes.saturating_add(bytes))?;
     let mask = Rc::new(transformed_rect_mask(pixmap, frame, transform, None)?);
-    if masks.entries.len() == MAX_CACHED_CROP_MASKS {
-        masks.entries.remove(0);
-    }
-    masks.entries.push((key, mask.clone()));
+    masks.remember(key, mask.clone(), bytes);
     Ok(mask)
 }
 
