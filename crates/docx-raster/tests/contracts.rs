@@ -377,14 +377,45 @@ fn a_page_stops_decoding_once_its_pixel_budget_is_spent() {
     assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
 }
 
-/// Part scoping is a guarantee about the map a caller hands over, not only
-/// about the one `register_image` builds, so an unscoped key resolves nowhere.
+/// `ImageMap` shipped documented and keyed by bare relationship id, and a
+/// caller that predates part scoping still hands one over. A body image has to
+/// keep resolving that way rather than turning into a silent hole.
 #[test]
-fn an_unscoped_image_key_resolves_in_no_part() {
+fn a_legacy_unscoped_image_key_still_resolves_in_the_body() {
     let (fonts, chains) = (FontStore::new(), FontChains::new());
     let images = ImageMap::from([("rIdImage".to_string(), solid_png(8, 8))]);
     let resources = RenderResources::new(&fonts, &chains, &images);
     let rendered = render_page(&image_list("rIdImage"), 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 10, 10), [0x11, 0x66, 0xcc, 255]);
+}
+
+/// The legacy key is the body's alone. Reaching one from a header is the
+/// cross-part lookup scoping exists to prevent, so it stays a hole.
+#[test]
+fn a_legacy_unscoped_image_key_resolves_in_no_other_part() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("rIdImage".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene: DisplayList = serde_json::from_value(json!({
+        "pages": [{
+            "pageIndex": 0,
+            "width": 20,
+            "height": 20,
+            "primitives": [],
+            "header": {
+                "rId": "rId7",
+                "kind": "header",
+                "y": 0,
+                "height": 20,
+                "primitives": [
+                    {"kind": "image", "relId": "rIdImage", "x": 0, "y": 0, "w": 20, "h": 20}
+                ]
+            }
+        }]
+    }))
+    .expect("display list");
+    let rendered = render_page(&scene, 0, &resources).expect("render");
     assert_eq!(rendered.skipped_images, 1);
     assert_eq!(pixel(&rendered.bytes, 10, 10), [255, 255, 255, 255]);
 }

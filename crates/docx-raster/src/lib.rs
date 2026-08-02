@@ -952,8 +952,25 @@ fn image_source<'a>(
         return Some((Cow::Borrowed(rel_id), Cow::Owned(bytes)));
     }
     let key = scoped_image_key(scope, rel_id);
-    let bytes = resources.images.get(&key)?;
-    Some((Cow::Owned(key), Cow::Borrowed(bytes.as_slice())))
+    if let Some(bytes) = resources.images.get(&key) {
+        return Some((Cow::Owned(key), Cow::Borrowed(bytes.as_slice())));
+    }
+    let bytes = legacy_body_image(rel_id, scope, resources)?;
+    Some((Cow::Borrowed(rel_id), Cow::Borrowed(bytes)))
+}
+
+/// [`ImageMap`] shipped keyed by bare relationship id, so a body image still
+/// resolves that way. The body alone: a header reaching a bare key is the
+/// cross-part lookup scoping exists to prevent.
+fn legacy_body_image<'a>(
+    rel_id: &str,
+    scope: ImageScope<'_>,
+    resources: &'a RenderResources<'_>,
+) -> Option<&'a [u8]> {
+    if !matches!(scope, ImageScope::Body) {
+        return None;
+    }
+    resources.images.get(rel_id).map(Vec::as_slice)
 }
 
 /// One decode per resolved image, and at most [`MAX_PAGE_IMAGE_PIXELS`]
