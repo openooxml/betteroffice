@@ -42,6 +42,19 @@ pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
 pub const MAX_PAGE_DIM: u32 = 16_384;
 /// One rendered page's surface.
 pub const MAX_PAGE_PIXELS: u64 = 16_777_216;
+/// Scratch one page render may allocate for crop masks, clip surfaces and
+/// generated paths, per pixel of the page being drawn. A mask and a clip
+/// surface are both page-sized, so the page is what their cost scales with.
+pub const MAX_PAGE_SCRATCH_BYTES_PER_PIXEL: u64 = 16;
+/// The floor under that, so a small page still affords its clips and paths.
+pub const MIN_PAGE_SCRATCH_BYTES: u64 = 33_554_432;
+/// Glyphs one page render may paint across every run on it.
+pub const MAX_PAGE_GLYPHS: u64 = 1_000_000;
+
+const MASK_BYTES_PER_PIXEL: u64 = 1;
+const CLIP_BYTES_PER_PIXEL: u64 = 5;
+const PATH_SEGMENT_BYTES: u64 = 40;
+const MAX_CACHED_CROP_MASKS: usize = 4;
 
 /// The part whose relationships own a display-list relationship id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,11 +145,11 @@ pub fn render_page(
     validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
-    let mut renderer = Renderer::default();
+    let mut renderer = Renderer::new(width, height);
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
-        skipped_images: renderer.images.skipped,
+        skipped_images: renderer.scratch.images.skipped,
     })
 }
 
@@ -148,14 +161,127 @@ pub(crate) struct FRect {
     h: f32,
 }
 
+/// What one page render may spend beyond the page surface itself. Masks, clip
+/// surfaces and generated paths are charged in the bytes they are about to
+/// allocate, which is the one unit they share; glyphs keep their own counter,
+/// since a glyph costs its rasterization rather than its footprint. Both are
+/// charged before the allocation, so a page cannot overspend and then refuse.
+pub(crate) struct PageBudget {
+    scratch: u64,
+    limit: u64,
+    glyphs: u64,
+}
+
+impl PageBudget {
+    fn new(width: u32, height: u32) -> Self {
+        let limit = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(MAX_PAGE_SCRATCH_BYTES_PER_PIXEL)
+            .max(MIN_PAGE_SCRATCH_BYTES);
+        Self {
+            scratch: 0,
+            limit,
+            glyphs: 0,
+        }
+    }
+
+    fn charge_scratch(&mut self, bytes: u64) -> Result<(), String> {
+        self.scratch = self.scratch.saturating_add(bytes);
+        if self.scratch > self.limit {
+            return Err(format!(
+                "page exceeds its {} byte render work budget",
+                self.limit
+            ));
+        }
+        Ok(())
+    }
+
+    fn charge_surface(&mut self, width: u32, height: u32, per_pixel: u64) -> Result<(), String> {
+        self.charge_scratch(
+            u64::from(width)
+                .saturating_mul(u64::from(height))
+                .saturating_mul(per_pixel),
+        )
+    }
+
+    fn charge_path(&mut self, segments: u64) -> Result<(), String> {
+        self.charge_scratch(segments.saturating_mul(PATH_SEGMENT_BYTES))
+    }
+
+    pub(crate) fn charge_glyphs(&mut self, glyphs: u64) -> Result<(), String> {
+        self.glyphs = self.glyphs.saturating_add(glyphs);
+        if self.glyphs > MAX_PAGE_GLYPHS {
+            return Err(format!(
+                "page exceeds the {MAX_PAGE_GLYPHS} painted glyph budget"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The geometry a crop mask was filled for. A mask covers the whole page
+/// whatever it crops, so identical geometry has to reuse one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CropMaskKey {
+    size: (u32, u32),
+    frame: [u32; 4],
+    transform: [u32; 6],
+}
+
+impl CropMaskKey {
+    fn new(pixmap: &Pixmap, frame: FRect, transform: Transform) -> Self {
+        Self {
+            size: (pixmap.width(), pixmap.height()),
+            frame: [
+                frame.x.to_bits(),
+                frame.y.to_bits(),
+                frame.w.to_bits(),
+                frame.h.to_bits(),
+            ],
+            transform: [
+                transform.sx.to_bits(),
+                transform.kx.to_bits(),
+                transform.ky.to_bits(),
+                transform.sy.to_bits(),
+                transform.tx.to_bits(),
+                transform.ty.to_bits(),
+            ],
+        }
+    }
+}
+
 #[derive(Default)]
-struct Renderer {
-    clips: ClipSurface,
+struct MaskCache {
+    entries: Vec<(CropMaskKey, Rc<Mask>)>,
+}
+
+/// Everything one page render accumulates: the caches that keep repeated work
+/// from repeating, and the budget that bounds the work left over.
+struct Scratch {
     glyphs: GlyphCache,
     images: ImageCache,
+    masks: MaskCache,
+    budget: PageBudget,
+}
+
+struct Renderer {
+    clips: ClipSurface,
+    scratch: Scratch,
 }
 
 impl Renderer {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            clips: ClipSurface::default(),
+            scratch: Scratch {
+                glyphs: GlyphCache::default(),
+                images: ImageCache::default(),
+                masks: MaskCache::default(),
+                budget: PageBudget::new(width, height),
+            },
+        }
+    }
+
     fn paint_page(
         &mut self,
         pixmap: &mut Pixmap,
@@ -174,7 +300,7 @@ impl Renderer {
             .iter()
             .filter(|border| border.z_order == Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border)?;
+            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
         }
         for primitive in &page.primitives {
             self.paint_primitive(pixmap, primitive, resources, ImageScope::Body)?;
@@ -199,7 +325,7 @@ impl Renderer {
             .iter()
             .filter(|border| border.z_order != Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border)?;
+            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
         }
         Ok(())
     }
@@ -216,12 +342,11 @@ impl Renderer {
         let opacity = primitive_opacity(primitive)?;
         let clip = clip_rect(attrs)?;
         let clips = &mut self.clips;
-        let glyphs = &mut self.glyphs;
-        let images = &mut self.images;
+        let scratch = &mut self.scratch;
         if let Some(clip) = clip {
-            clips.paint(pixmap, clip, |target, transform, mask| {
+            clips.paint(pixmap, clip, scratch, |target, scratch, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, glyphs, images, transform, mask, opacity, scope,
+                    target, primitive, resources, scratch, transform, mask, opacity, scope,
                 )
             })
         } else {
@@ -229,8 +354,7 @@ impl Renderer {
                 pixmap,
                 primitive,
                 resources,
-                glyphs,
-                images,
+                scratch,
                 Transform::identity(),
                 None,
                 opacity,
@@ -245,8 +369,7 @@ fn paint_primitive_core(
     pixmap: &mut Pixmap,
     primitive: &Primitive,
     resources: &RenderResources<'_>,
-    glyphs: &mut GlyphCache,
-    images: &mut ImageCache,
+    scratch: &mut Scratch,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -257,7 +380,8 @@ fn paint_primitive_core(
             let mut context = PaintContext {
                 pixmap,
                 resources,
-                cache: glyphs,
+                cache: &mut scratch.glyphs,
+                budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
                 opacity,
@@ -268,7 +392,8 @@ fn paint_primitive_core(
             let mut context = PaintContext {
                 pixmap,
                 resources,
-                cache: glyphs,
+                cache: &mut scratch.glyphs,
+                budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
                 opacity,
@@ -276,14 +401,23 @@ fn paint_primitive_core(
             font::paint_glyph_run(&mut context, run)
         }
         Primitive::Rect(rect) => paint_rect(pixmap, rect, transform, mask, opacity),
-        Primitive::Line(line) => paint_line_primitive(pixmap, line, transform, mask, opacity),
-        Primitive::Image(image) => paint_image(
-            pixmap, image, resources, images, transform, mask, opacity, scope,
-        ),
-        Primitive::Shape(shape) => paint_shape(pixmap, shape, transform, mask, opacity),
-        Primitive::Decoration(decoration) => {
-            paint_decoration(pixmap, decoration, transform, mask, opacity)
+        Primitive::Line(line) => {
+            paint_line_primitive(pixmap, line, transform, mask, opacity, &mut scratch.budget)
         }
+        Primitive::Image(image) => paint_image(
+            pixmap, image, resources, scratch, transform, mask, opacity, scope,
+        ),
+        Primitive::Shape(shape) => {
+            paint_shape(pixmap, shape, transform, mask, opacity, &mut scratch.budget)
+        }
+        Primitive::Decoration(decoration) => paint_decoration(
+            pixmap,
+            decoration,
+            transform,
+            mask,
+            opacity,
+            &mut scratch.budget,
+        ),
     }
 }
 
@@ -314,6 +448,7 @@ fn paint_line_primitive(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let x1 = number_f32(&line.x1)?;
     let y1 = number_f32(&line.y1)?;
@@ -332,6 +467,7 @@ fn paint_line_primitive(
         transform,
         mask,
         opacity,
+        budget,
     )
 }
 
@@ -341,6 +477,7 @@ fn paint_decoration(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let x = number_f32(&decoration.x)?;
     let y = number_f32(&decoration.y)?;
@@ -368,6 +505,7 @@ fn paint_decoration(
             transform,
             mask,
             opacity,
+            budget,
         );
     }
     if decoration.dashed || decoration.dotted {
@@ -414,10 +552,12 @@ fn paint_shape(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     if !shape.attrs.effects.is_empty() {
         return Err("unsupported shape field: effects".to_string());
     }
+    budget.charge_path(shape.geometry_path.len() as u64)?;
     let path = build_shape_path(&shape.geometry_path)?;
     let visual = shape_transform(shape)?;
     let transform = transform.pre_concat(visual);
@@ -852,7 +992,7 @@ fn paint_image(
     pixmap: &mut Pixmap,
     image: &ImagePrimitive,
     resources: &RenderResources<'_>,
-    images: &mut ImageCache,
+    scratch: &mut Scratch,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
@@ -865,10 +1005,10 @@ fn paint_image(
         return Err("unsupported image field: effects".to_string());
     }
     let Some((key, source_bytes)) = image_source(&image.rel_id, scope, resources) else {
-        images.skipped += 1;
+        scratch.images.skipped += 1;
         return Ok(());
     };
-    let Some(decoded) = images.resolve(key, &source_bytes) else {
+    let Some(decoded) = scratch.images.resolve(key, &source_bytes) else {
         return Ok(());
     };
     let source: &Pixmap = &decoded;
@@ -914,7 +1054,16 @@ fn paint_image(
     );
     let mut frame_mask = crop
         .is_some()
-        .then(|| transformed_rect_mask(pixmap, frame, image_transform, mask))
+        .then(|| {
+            crop_mask(
+                pixmap,
+                frame,
+                image_transform,
+                mask,
+                &mut scratch.masks,
+                &mut scratch.budget,
+            )
+        })
         .transpose()?;
     let paint = PixmapPaint {
         opacity,
@@ -927,7 +1076,7 @@ fn paint_image(
         source.as_ref(),
         &paint,
         image_transform.pre_concat(source_to_frame),
-        frame_mask.as_ref().or(mask),
+        frame_mask.as_deref().or(mask),
     );
     frame_mask.take();
     paint_image_border(pixmap, image, frame, image_transform, mask, opacity)?;
@@ -1086,6 +1235,36 @@ fn image_transform(image: &ImagePrimitive, frame: FRect) -> Result<Transform, St
     Ok(transform)
 }
 
+/// The crop mask for one image reference, reused where the geometry repeats.
+/// An outer clip mixes into the fill, so a clipped crop is built fresh and
+/// charged rather than shared.
+fn crop_mask(
+    pixmap: &Pixmap,
+    frame: FRect,
+    transform: Transform,
+    outer: Option<&Mask>,
+    masks: &mut MaskCache,
+    budget: &mut PageBudget,
+) -> Result<Rc<Mask>, String> {
+    if outer.is_some() {
+        budget.charge_surface(pixmap.width(), pixmap.height(), MASK_BYTES_PER_PIXEL)?;
+        return Ok(Rc::new(transformed_rect_mask(
+            pixmap, frame, transform, outer,
+        )?));
+    }
+    let key = CropMaskKey::new(pixmap, frame, transform);
+    if let Some((_, mask)) = masks.entries.iter().find(|(cached, _)| *cached == key) {
+        return Ok(mask.clone());
+    }
+    budget.charge_surface(pixmap.width(), pixmap.height(), MASK_BYTES_PER_PIXEL)?;
+    let mask = Rc::new(transformed_rect_mask(pixmap, frame, transform, None)?);
+    if masks.entries.len() == MAX_CACHED_CROP_MASKS {
+        masks.entries.remove(0);
+    }
+    masks.entries.push((key, mask.clone()));
+    Ok(mask)
+}
+
 fn transformed_rect_mask(
     pixmap: &Pixmap,
     frame: FRect,
@@ -1238,6 +1417,7 @@ fn paint_border_recipe(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     match style {
         DisplayBorderStyle::Wave | DisplayBorderStyle::DoubleWave => paint_wave(
@@ -1249,6 +1429,7 @@ fn paint_border_recipe(
             transform,
             mask,
             opacity,
+            budget,
         ),
         DisplayBorderStyle::Double
         | DisplayBorderStyle::Triple
@@ -1416,6 +1597,7 @@ fn paint_wave(
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let dx = segment.x2 - segment.x1;
     let dy = segment.y2 - segment.y1;
@@ -1430,6 +1612,7 @@ fn paint_wave(
     let wavelength = (width * 4.0).max(4.0);
     let amplitude = width.max(1.0);
     let lanes: &[f32] = if double { &[-1.0, 1.0] } else { &[0.0] };
+    budget.charge_path(wave_segments(length, wavelength).saturating_mul(lanes.len() as u64))?;
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
@@ -1466,6 +1649,16 @@ fn paint_wave(
         );
     }
     Ok(())
+}
+
+/// Quadratics one lane of a wave expands into. The length is a number off the
+/// display list, so it is charged before the path builder grows to hold it.
+fn wave_segments(length: f32, wavelength: f32) -> u64 {
+    let steps = (f64::from(length) / f64::from(wavelength / 2.0)).ceil();
+    if !steps.is_finite() || steps <= 0.0 {
+        return 0;
+    }
+    steps.min(u64::MAX as f64) as u64
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1584,7 +1777,11 @@ fn shape_dash_pattern(name: Option<&str>, width: f32) -> Result<Option<Vec<f32>>
     Ok((!pattern.is_empty()).then_some(pattern))
 }
 
-fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Result<(), String> {
+fn paint_page_border(
+    pixmap: &mut Pixmap,
+    border: &PageBorderPrimitive,
+    budget: &mut PageBudget,
+) -> Result<(), String> {
     let x = number_f32(&border.x)?;
     let y = number_f32(&border.y)?;
     let w = number_f32(&border.w)?;
@@ -1599,6 +1796,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y,
             },
             side,
+            budget,
         )?;
     }
     if let Some(side) = &border.right {
@@ -1611,6 +1809,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y + h,
             },
             side,
+            budget,
         )?;
     }
     if let Some(side) = &border.bottom {
@@ -1623,6 +1822,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y + h,
             },
             side,
+            budget,
         )?;
     }
     if let Some(side) = &border.left {
@@ -1635,6 +1835,7 @@ fn paint_page_border(pixmap: &mut Pixmap, border: &PageBorderPrimitive) -> Resul
                 y2: y + h,
             },
             side,
+            budget,
         )?;
     }
     Ok(())
@@ -1644,6 +1845,7 @@ fn paint_page_border_side(
     pixmap: &mut Pixmap,
     segment: Segment,
     side: &PageBorderSide,
+    budget: &mut PageBudget,
 ) -> Result<(), String> {
     let style = match side.style.as_str() {
         "solid" => DisplayBorderStyle::Solid,
@@ -1667,6 +1869,7 @@ fn paint_page_border_side(
         Transform::identity(),
         None,
         1.0,
+        budget,
     )
 }
 
@@ -1796,14 +1999,21 @@ fn clip_rect(attrs: &DocAttrs) -> Result<Option<FRect>, String> {
 struct ClipSurface {
     rect: Option<FRect>,
     origin: (i32, i32),
+    size: (u32, u32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
 }
 
 impl ClipSurface {
-    fn paint<F>(&mut self, target: &mut Pixmap, clip: FRect, painter: F) -> Result<(), String>
+    fn paint<F>(
+        &mut self,
+        target: &mut Pixmap,
+        clip: FRect,
+        scratch: &mut Scratch,
+        painter: F,
+    ) -> Result<(), String>
     where
-        F: FnOnce(&mut Pixmap, Transform, Option<&Mask>) -> Result<(), String>,
+        F: FnOnce(&mut Pixmap, &mut Scratch, Transform, Option<&Mask>) -> Result<(), String>,
     {
         let Some(clip) = clipped_to_target(clip, target.width(), target.height()) else {
             return Ok(());
@@ -1813,8 +2023,24 @@ impl ClipSurface {
             let origin_y = clip.y.floor() as i32;
             let width = ((clip.x + clip.w).ceil() as i32 - origin_x) as u32;
             let height = ((clip.y + clip.h).ceil() as i32 - origin_y) as u32;
-            let mut mask =
-                Mask::new(width, height).ok_or_else(|| "invalid clip mask size".to_string())?;
+            if self.pixmap.is_none() || self.size.0 < width || self.size.1 < height {
+                let size = (self.size.0.max(width), self.size.1.max(height));
+                scratch
+                    .budget
+                    .charge_surface(size.0, size.1, CLIP_BYTES_PER_PIXEL)?;
+                self.pixmap = Some(
+                    Pixmap::new(size.0, size.1).ok_or_else(|| "invalid clip size".to_string())?,
+                );
+                self.mask = Some(
+                    Mask::new(size.0, size.1)
+                        .ok_or_else(|| "invalid clip mask size".to_string())?,
+                );
+                self.size = size;
+            }
+            let mask = self
+                .mask
+                .as_mut()
+                .ok_or_else(|| "clip mask is unavailable".to_string())?;
             let rect = Rect::from_xywh(
                 clip.x - origin_x as f32,
                 clip.y - origin_y as f32,
@@ -1823,12 +2049,10 @@ impl ClipSurface {
             )
             .ok_or_else(|| "invalid clip rectangle".to_string())?;
             let path = PathBuilder::from_rect(rect);
+            mask.clear();
             mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
             self.rect = Some(clip);
             self.origin = (origin_x, origin_y);
-            self.pixmap =
-                Some(Pixmap::new(width, height).ok_or_else(|| "invalid clip size".to_string())?);
-            self.mask = Some(mask);
         }
         let pixmap = self
             .pixmap
@@ -1836,7 +2060,7 @@ impl ClipSurface {
             .ok_or_else(|| "clip surface is unavailable".to_string())?;
         pixmap.fill(Color::TRANSPARENT);
         let transform = Transform::from_translate(-(self.origin.0 as f32), -(self.origin.1 as f32));
-        painter(pixmap, transform, self.mask.as_ref())?;
+        painter(pixmap, scratch, transform, self.mask.as_ref())?;
         target.draw_pixmap(
             self.origin.0,
             self.origin.1,
