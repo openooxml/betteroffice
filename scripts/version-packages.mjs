@@ -79,6 +79,7 @@ function validate(version, locked) {
 // Nothing else rewrites bindings/Cargo.lock, which pins every bumped crate by version.
 function synchronizeBindingsLock() {
   cargoMetadata({ locked: false, manifestPath: BINDINGS_MANIFEST });
+  // Re-assert under `--locked`, the way CI reads the lock it just wrote.
   cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
 }
 
