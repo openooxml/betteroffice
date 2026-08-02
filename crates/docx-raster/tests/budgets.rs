@@ -7,8 +7,8 @@ use std::io::Write;
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, ImageScope, MAX_PAGE_DIM, MAX_PAGE_PIXELS, RenderResources, render_page,
-    render_png, scoped_image_key,
+    FontChains, ImageMap, ImageScope, MAX_IMAGE_BYTES, MAX_PAGE_DIM, MAX_PAGE_IMAGE_PIXELS,
+    MAX_PAGE_PIXELS, RenderResources, render_page, render_png, scoped_image_key,
 };
 use ooxml_text::FontStore;
 use serde_json::{Value, json};
@@ -220,5 +220,162 @@ fn the_glyph_budget_is_spent_across_every_run_on_a_page() {
     assert_eq!(
         render_png(&scene, 0, &resources).unwrap_err(),
         "page exceeds the 1000000 painted glyph budget"
+    );
+}
+
+fn pixel(png: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .expect("png header");
+    let mut pixels = vec![0_u8; reader.output_buffer_size().expect("buffer size")];
+    let info = reader.next_frame(&mut pixels).expect("png frame");
+    let start = ((y * info.width + x) * 4) as usize;
+    pixels[start..start + 4].try_into().expect("rgba pixel")
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+/// A PNG that declares a large extent at a given colour depth but carries one
+/// pixel of data. The header is all a budget may consult, so this costs what
+/// it declares and never what it decodes to.
+fn png_bomb(width: u32, height: u32, depth: png::BitDepth) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(depth);
+        let mut writer = encoder.write_header().expect("png header");
+        let pixel = if depth == png::BitDepth::Sixteen {
+            vec![0_u8; 8]
+        } else {
+            vec![0_u8; 4]
+        };
+        writer.write_image_data(&pixel).expect("png data");
+        writer.finish().expect("png finish");
+    }
+    bytes[16..20].copy_from_slice(&width.to_be_bytes());
+    bytes[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = crc32(&bytes[12..29]);
+    bytes[29..33].copy_from_slice(&crc.to_be_bytes());
+    bytes
+}
+
+/// A `data:` payload was decoded from base64 before anything looked at what it
+/// declared, so the encoded length is the only thing that can bound it.
+#[test]
+fn an_oversized_data_url_is_refused_before_its_base64_is_decoded() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let reference = format!("data:image/png;base64,{}", "A".repeat(48 * 1024 * 1024));
+    let scene = list(
+        1.0,
+        1.0,
+        vec![json!({"kind":"image","relId":reference,"x":0,"y":0,"w":1,"h":1})],
+    );
+    let (rendered, allocated) = allocated_by(|| {
+        render_page(&scene, 0, &resources).unwrap_or_else(|error| panic!("render: {error}"))
+    });
+    assert_eq!(rendered.skipped_images, 1);
+    assert!(
+        allocated < MIB,
+        "an oversized data URL allocated {allocated} bytes decoding base64 on a 1x1 page"
+    );
+}
+
+/// The decode cache is keyed by the reference, so a repeated `data:` URL must
+/// not repeat the base64 decode that the cached result already paid for.
+#[test]
+fn a_repeated_data_url_decodes_its_base64_once() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let reference = format!("data:image/png;base64,{}", "A".repeat(4 * 1024 * 1024));
+    let primitives = (0..16)
+        .map(|index| json!({"kind":"image","relId":reference,"x":index,"y":0,"w":8,"h":8}))
+        .collect();
+    let scene = list(64.0, 32.0, primitives);
+    let (rendered, allocated) = allocated_by(|| {
+        render_page(&scene, 0, &resources).unwrap_or_else(|error| panic!("render: {error}"))
+    });
+    assert_eq!(rendered.skipped_images, 16);
+    assert!(
+        allocated < 8 * MIB,
+        "16 references to one data URL allocated {allocated} bytes, more than one decode"
+    );
+}
+
+/// Pixels are not bytes: a 16-bit source needs twice the buffer an 8-bit one
+/// of the same extent does. Two 8-bit bombs spend the page's whole image
+/// budget and squeeze out the image after them; two 16-bit ones need more than
+/// one image may have, so they are refused on their own and spend nothing.
+#[test]
+fn an_image_is_charged_by_the_bytes_it_decodes_to_not_its_pixels() {
+    const { assert!(4096 * 8192 * 8 + 4096 * 8192 * 4 > MAX_IMAGE_BYTES) };
+    const { assert!(2 * 4096 * 8192 == MAX_PAGE_IMAGE_PIXELS) };
+    for (depth, skipped, drawn) in [
+        (png::BitDepth::Eight, 3, [255, 255, 255, 255]),
+        (png::BitDepth::Sixteen, 2, [0x11, 0x66, 0xcc, 255]),
+    ] {
+        let (fonts, chains) = (FontStore::new(), FontChains::new());
+        let images = ImageMap::from([
+            (
+                scoped_image_key(ImageScope::Body, "rIdTall"),
+                png_bomb(4096, 8192, depth),
+            ),
+            (
+                scoped_image_key(ImageScope::Body, "rIdWide"),
+                png_bomb(8192, 4096, depth),
+            ),
+            (
+                scoped_image_key(ImageScope::Body, "rIdSmall"),
+                solid_png(8, 8),
+            ),
+        ]);
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        let scene = list(
+            20.0,
+            20.0,
+            vec![
+                json!({"kind":"image","relId":"rIdTall","x":0,"y":0,"w":5,"h":5}),
+                json!({"kind":"image","relId":"rIdWide","x":5,"y":0,"w":5,"h":5}),
+                json!({"kind":"image","relId":"rIdSmall","x":0,"y":0,"w":20,"h":20}),
+            ],
+        );
+        let rendered = render_page(&scene, 0, &resources).expect("render");
+        assert_eq!(rendered.skipped_images, skipped, "at {depth:?}");
+        assert_eq!(pixel(&rendered.bytes, 10, 10), drawn, "at {depth:?}");
+    }
+}
+
+/// A reference the backend will not draw still takes a cache entry, and a
+/// `data:` URL is as long as its author made it. The cache may not copy those
+/// keys: they already live in the display list, and there is no bound on how
+/// many an attacker sends.
+#[test]
+fn the_decode_cache_does_not_copy_attacker_sized_keys() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitives = (0..512)
+        .map(|index| {
+            let reference = format!("data:image/png;x={}{index};base64,QQ==", "p".repeat(65_536));
+            json!({"kind":"image","relId":reference,"x":0,"y":0,"w":8,"h":8})
+        })
+        .collect();
+    let scene = list(64.0, 32.0, primitives);
+    let (rendered, allocated) = allocated_by(|| {
+        render_page(&scene, 0, &resources).unwrap_or_else(|error| panic!("render: {error}"))
+    });
+    assert_eq!(rendered.skipped_images, 512);
+    assert!(
+        allocated < 8 * MIB,
+        "512 distinct 64KiB references cost {allocated} bytes of cache key"
     );
 }

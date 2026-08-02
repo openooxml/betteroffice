@@ -38,6 +38,15 @@ pub type ImageMap = HashMap<String, Vec<u8>>;
 pub const MAX_IMAGE_PIXELS: u64 = 33_554_432;
 /// Every image decoded for one page, at four times that surface.
 pub const MAX_PAGE_IMAGE_PIXELS: u64 = 67_108_864;
+/// One decoded image's source buffer plus the pixmap it converts to, at
+/// [`MAX_IMAGE_PIXELS`] of RGBA8. A deeper source costs more per pixel, so
+/// pixels alone do not bound the memory a decode needs.
+pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
+/// The same, summed across every image one page decodes.
+pub const MAX_PAGE_IMAGE_BYTES: u64 = 536_870_912;
+/// One `data:` payload, matching the bytes a facade registers for a
+/// relationship id.
+pub const MAX_DATA_URL_BYTES: u64 = 33_554_432;
 /// One rendered page's longest side.
 pub const MAX_PAGE_DIM: u32 = 16_384;
 /// One rendered page's surface.
@@ -55,6 +64,8 @@ const MASK_BYTES_PER_PIXEL: u64 = 1;
 const CLIP_BYTES_PER_PIXEL: u64 = 5;
 const PATH_SEGMENT_BYTES: u64 = 40;
 const MAX_CACHED_CROP_MASKS: usize = 4;
+const MAX_IMAGE_CACHE_ENTRIES: usize = 256;
+const MAX_IMAGE_CACHE_KEY_BYTES: usize = 65_536;
 
 /// The part whose relationships own a display-list relationship id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,19 +268,19 @@ struct MaskCache {
 
 /// Everything one page render accumulates: the caches that keep repeated work
 /// from repeating, and the budget that bounds the work left over.
-struct Scratch {
+struct Scratch<'k> {
     glyphs: GlyphCache,
-    images: ImageCache,
+    images: ImageCache<'k>,
     masks: MaskCache,
     budget: PageBudget,
 }
 
-struct Renderer {
+struct Renderer<'k> {
     clips: ClipSurface,
-    scratch: Scratch,
+    scratch: Scratch<'k>,
 }
 
-impl Renderer {
+impl<'k> Renderer<'k> {
     fn new(width: u32, height: u32) -> Self {
         Self {
             clips: ClipSurface::default(),
@@ -285,7 +296,7 @@ impl Renderer {
     fn paint_page(
         &mut self,
         pixmap: &mut Pixmap,
-        page: &DisplayPage,
+        page: &'k DisplayPage,
         resources: &RenderResources<'_>,
     ) -> Result<(), String> {
         if let Some(background) = &page.background {
@@ -333,9 +344,9 @@ impl Renderer {
     fn paint_primitive(
         &mut self,
         pixmap: &mut Pixmap,
-        primitive: &Primitive,
+        primitive: &'k Primitive,
         resources: &RenderResources<'_>,
-        scope: ImageScope<'_>,
+        scope: ImageScope<'k>,
     ) -> Result<(), String> {
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
@@ -365,15 +376,15 @@ impl Renderer {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_primitive_core(
+fn paint_primitive_core<'k>(
     pixmap: &mut Pixmap,
-    primitive: &Primitive,
+    primitive: &'k Primitive,
     resources: &RenderResources<'_>,
-    scratch: &mut Scratch,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
-    scope: ImageScope<'_>,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
     match primitive {
         Primitive::Text(run) => {
@@ -988,15 +999,15 @@ fn build_shape_path(commands: &[ShapePathCommand]) -> Result<Path, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_image(
+fn paint_image<'k>(
     pixmap: &mut Pixmap,
-    image: &ImagePrimitive,
+    image: &'k ImagePrimitive,
     resources: &RenderResources<'_>,
-    scratch: &mut Scratch,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
-    scope: ImageScope<'_>,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
     if image.filter.is_some() {
         return Err("unsupported image field: filter".to_string());
@@ -1008,7 +1019,7 @@ fn paint_image(
         scratch.images.skipped += 1;
         return Ok(());
     };
-    let Some(decoded) = scratch.images.resolve(key, &source_bytes) else {
+    let Some(decoded) = scratch.images.resolve(key, source_bytes) else {
         return Ok(());
     };
     let source: &Pixmap = &decoded;
@@ -1083,39 +1094,43 @@ fn paint_image(
     paint_image_revision(pixmap, image, frame, image_transform, mask, opacity)
 }
 
+/// Where a reference's bytes come from. A `data:` payload stays encoded so the
+/// cache is consulted before base64 expands it.
+enum ImageSource<'k, 'b> {
+    Data(&'k str),
+    Registered(&'b [u8]),
+}
+
 /// The identity a reference resolved to and its bytes, or `None` when the
 /// reference resolves to nothing.
-fn image_source<'a>(
-    rel_id: &'a str,
+fn image_source<'k, 'b>(
+    rel_id: &'k str,
     scope: ImageScope<'_>,
-    resources: &'a RenderResources<'_>,
-) -> Option<(Cow<'a, str>, Cow<'a, [u8]>)> {
+    resources: &RenderResources<'b>,
+) -> Option<(Cow<'k, str>, ImageSource<'k, 'b>)> {
     if rel_id.starts_with("data:") {
         let (metadata, payload) = rel_id.split_once(',')?;
         if !metadata.ends_with(";base64") {
             return None;
         }
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(payload)
-            .ok()?;
-        return Some((Cow::Borrowed(rel_id), Cow::Owned(bytes)));
+        return Some((Cow::Borrowed(rel_id), ImageSource::Data(payload)));
     }
     let key = scoped_image_key(scope, rel_id);
     if let Some(bytes) = resources.images.get(&key) {
-        return Some((Cow::Owned(key), Cow::Borrowed(bytes.as_slice())));
+        return Some((Cow::Owned(key), ImageSource::Registered(bytes.as_slice())));
     }
     let bytes = legacy_body_image(rel_id, scope, resources)?;
-    Some((Cow::Borrowed(rel_id), Cow::Borrowed(bytes)))
+    Some((Cow::Borrowed(rel_id), ImageSource::Registered(bytes)))
 }
 
 /// [`ImageMap`] shipped keyed by bare relationship id, so a body image still
 /// resolves that way. The body alone: a header reaching a bare key is the
 /// cross-part lookup scoping exists to prevent.
-fn legacy_body_image<'a>(
+fn legacy_body_image<'b>(
     rel_id: &str,
     scope: ImageScope<'_>,
-    resources: &'a RenderResources<'_>,
-) -> Option<&'a [u8]> {
+    resources: &RenderResources<'b>,
+) -> Option<&'b [u8]> {
     if !matches!(scope, ImageScope::Body) {
         return None;
     }
@@ -1125,19 +1140,21 @@ fn legacy_body_image<'a>(
 /// One decode per resolved image, and at most [`MAX_PAGE_IMAGE_PIXELS`]
 /// decoded for the whole page.
 #[derive(Default)]
-struct ImageCache {
-    decoded: HashMap<String, Option<Rc<Pixmap>>>,
+struct ImageCache<'k> {
+    decoded: HashMap<Cow<'k, str>, Option<Rc<Pixmap>>>,
+    key_bytes: usize,
     pixels: u64,
+    bytes: u64,
     skipped: usize,
 }
 
-impl ImageCache {
-    fn resolve(&mut self, key: Cow<'_, str>, bytes: &[u8]) -> Option<Rc<Pixmap>> {
+impl<'k> ImageCache<'k> {
+    fn resolve(&mut self, key: Cow<'k, str>, source: ImageSource<'_, '_>) -> Option<Rc<Pixmap>> {
         let decoded = match self.decoded.get(key.as_ref()) {
             Some(entry) => entry.clone(),
             None => {
-                let decoded = self.decode(bytes).map(Rc::new);
-                self.decoded.insert(key.into_owned(), decoded.clone());
+                let decoded = self.materialize(source).map(Rc::new);
+                self.remember(key, decoded.clone());
                 decoded
             }
         };
@@ -1145,6 +1162,43 @@ impl ImageCache {
             self.skipped += 1;
         }
         decoded
+    }
+
+    /// Keeps a decode against its reference, while the map has room. Only an
+    /// owned key costs bytes: a `data:` URL is borrowed from the display list,
+    /// so the cache holds a pointer into it rather than a copy of it.
+    fn remember(&mut self, key: Cow<'k, str>, decoded: Option<Rc<Pixmap>>) {
+        let owned = match &key {
+            Cow::Owned(value) => value.len(),
+            Cow::Borrowed(_) => 0,
+        };
+        if self.decoded.len() >= MAX_IMAGE_CACHE_ENTRIES
+            || self.key_bytes + owned > MAX_IMAGE_CACHE_KEY_BYTES
+        {
+            return;
+        }
+        self.key_bytes += owned;
+        self.decoded.insert(key, decoded);
+    }
+
+    /// The bytes behind a reference the cache has not seen. A `data:` payload
+    /// is bounded and charged from its encoded length, before base64 expands
+    /// it into a buffer.
+    fn materialize(&mut self, source: ImageSource<'_, '_>) -> Option<Pixmap> {
+        match source {
+            ImageSource::Registered(bytes) => self.decode(bytes),
+            ImageSource::Data(payload) => {
+                let declared = payload.len() as u64 / 4 * 3;
+                if declared > MAX_DATA_URL_BYTES || self.bytes + declared > MAX_PAGE_IMAGE_BYTES {
+                    return None;
+                }
+                self.bytes += declared;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .ok()?;
+                self.decode(&bytes)
+            }
+        }
     }
 
     /// Decoded pixels, or `None` for content this backend will not draw: bytes
@@ -1164,7 +1218,14 @@ impl ImageCache {
         if declared > MAX_IMAGE_PIXELS || self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
             return None;
         }
+        let cost = decoder
+            .total_bytes()
+            .saturating_add(declared.saturating_mul(4));
+        if cost > MAX_IMAGE_BYTES || self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return None;
+        }
         self.pixels += declared;
+        self.bytes += cost;
         let orientation = decoder.orientation().ok()?;
         let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
         decoded.apply_orientation(orientation);
@@ -2005,15 +2066,15 @@ struct ClipSurface {
 }
 
 impl ClipSurface {
-    fn paint<F>(
+    fn paint<'k, F>(
         &mut self,
         target: &mut Pixmap,
         clip: FRect,
-        scratch: &mut Scratch,
+        scratch: &mut Scratch<'k>,
         painter: F,
     ) -> Result<(), String>
     where
-        F: FnOnce(&mut Pixmap, &mut Scratch, Transform, Option<&Mask>) -> Result<(), String>,
+        F: FnOnce(&mut Pixmap, &mut Scratch<'k>, Transform, Option<&Mask>) -> Result<(), String>,
     {
         let Some(clip) = clipped_to_target(clip, target.width(), target.height()) else {
             return Ok(());
