@@ -227,6 +227,21 @@ def test_delete_text_may_not_cross_a_paragraph_boundary(deck):
     assert deck.story(story.id).text == story.text
 
 
+def test_format_text_may_cross_a_paragraph_boundary(deck):
+    story = next(s for s in deck[0].shapes if s.name == "Title").stories[0]
+    assert len(story.paragraphs) == 2
+
+    edit = deck.format_text(story.id, 10, 20, color="#00ff00")
+    assert (edit.start, edit.end) == (10, 20)
+
+    formatted = deck.story(story.id)
+    assert formatted.text == story.text
+    assert [
+        "".join(run.text for run in para.runs if run.color == "#00ff00")
+        for para in formatted.paragraphs
+    ] == ["es,", "withou"]
+
+
 def test_render_slide_needs_a_registered_font(deck):
     with pytest.raises(bo.RenderError, match="font"):
         deck.render_slide(0)
