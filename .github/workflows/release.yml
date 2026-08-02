@@ -159,7 +159,7 @@ jobs:
   python-pypi:
     name: Publish betteroffice-${{ matrix.binding }}
     needs: [python-bindings, python-dist]
-    # Not `success()`: a broken build must fail its own leg, not skip siblings.
+    # `needs` collapses the python-dist matrix: `success()` would skip every binding on one failure.
     if: ${{ !cancelled() && needs.python-bindings.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
