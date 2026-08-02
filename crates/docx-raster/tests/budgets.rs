@@ -345,6 +345,64 @@ fn an_oversized_text_run_is_refused_before_the_shaper_allocates() {
     );
 }
 
+/// A leader repeats its glyph `count` times, and the glyph is a display-list
+/// string of any length. The charge is the product, not the count: 1:1 shaping
+/// leaves no excess for the shaped-glyph charge to recover.
+#[test]
+fn a_leader_run_is_charged_for_every_character_it_repeats() {
+    let (fonts, chains) = carlito();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        64.0,
+        32.0,
+        vec![json!({
+            "kind": "text",
+            "text": ".",
+            "x": 2,
+            "baselineY": 15,
+            "width": 10,
+            "font": "400 12px Carlito, sans-serif",
+            "color": "#000000",
+            "leaderGlyphs": {
+                "glyph": ".".repeat(51),
+                "count": 20_000,
+                "advance": 1
+            }
+        })],
+    );
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds the 1000000 painted glyph budget"
+    );
+    assert!(
+        allocated < MIB,
+        "a refused leader allocated {allocated} bytes painting its glyph"
+    );
+}
+
+/// `allCaps` uppercases before shaping, and one character can uppercase into
+/// three, so the charge has to be the uppercased length.
+#[test]
+fn an_all_caps_run_is_charged_for_the_characters_it_uppercases_into() {
+    let (fonts, chains) = carlito();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let mut run = text_run(&"\u{fb03}".repeat(400_000));
+    run["allCaps"] = json!(true);
+    let scene = list(64.0, 32.0, vec![run]);
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds the 1000000 painted glyph budget"
+    );
+    assert!(
+        allocated < MIB,
+        "a refused allCaps run allocated {allocated} bytes uppercasing its text"
+    );
+}
+
 /// The glyph budget belongs to the page, not to one run: two runs that each
 /// fit on their own still have to run out together.
 #[test]

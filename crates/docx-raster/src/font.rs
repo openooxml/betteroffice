@@ -87,9 +87,7 @@ pub(crate) fn paint_text(
     if let Some(leader) = active_leader(&run.attrs.leader_glyphs) {
         return paint_leader(context, run, leader, &spec, color, transform);
     }
-    context
-        .budget
-        .charge_glyphs(run.text.chars().count() as u64)?;
+    context.budget.charge_glyphs(painted_chars(run))?;
     let text = if run.all_caps {
         run.text.to_uppercase()
     } else {
@@ -200,6 +198,19 @@ fn validate_glyph_effects(run: &GlyphRunPrimitive) -> Result<(), String> {
     Ok(())
 }
 
+/// Characters a run paints. `allCaps` uppercases first, and one character can
+/// uppercase into three, so the charge is counted without building the string.
+fn painted_chars(run: &TextRunPrimitive) -> u64 {
+    if run.all_caps {
+        run.text
+            .chars()
+            .map(|character| character.to_uppercase().count() as u64)
+            .sum()
+    } else {
+        run.text.chars().count() as u64
+    }
+}
+
 fn active_leader(leader: &Option<LeaderGlyphMetadata>) -> Option<&LeaderGlyphMetadata> {
     leader.as_ref().filter(|leader| {
         leader
@@ -220,7 +231,13 @@ fn paint_leader(
 ) -> Result<(), String> {
     let count = usize::try_from(leader.count.unwrap_or(0))
         .map_err(|_| "leader glyph count is too large".to_string())?;
-    context.budget.charge_glyphs(count as u64)?;
+    let glyph = leader
+        .glyph
+        .as_deref()
+        .ok_or_else(|| "leader glyph is missing".to_string())?;
+    context
+        .budget
+        .charge_glyphs((count as u64).saturating_mul(glyph.chars().count() as u64))?;
     let advance = leader
         .advance
         .as_ref()
@@ -230,10 +247,6 @@ fn paint_leader(
     if advance <= 0.0 {
         return Ok(());
     }
-    let glyph = leader
-        .glyph
-        .as_deref()
-        .ok_or_else(|| "leader glyph is missing".to_string())?;
     let x = leader
         .x
         .as_ref()
