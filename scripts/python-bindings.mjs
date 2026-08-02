@@ -25,8 +25,7 @@ export const PYPI_DISTRIBUTIONS = PYTHON_PUBLISH_NAMES.map((name) => `betteroffi
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  // A typo must not fall through to the full list: a caller asking for the publish
-  // matrix would silently get every binding, including the ones held back.
+  // Falling through to the full list would publish bindings deliberately held back.
   const unknown = args.find((arg) => arg !== '--paths' && arg !== '--publish');
   if (unknown) {
     console.error(`python-bindings.mjs: unknown argument ${unknown}; expected --paths or --publish`);

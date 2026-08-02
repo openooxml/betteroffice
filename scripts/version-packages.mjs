@@ -76,8 +76,7 @@ function validate(version, locked) {
   validateRustTrain(metadata, version);
 }
 
-// bindings/Cargo.lock pins every bumped crate by version and nothing else rewrites it.
-// `cargo metadata` regenerates the lock; the second call is CI's `--locked` gate.
+// Nothing else rewrites bindings/Cargo.lock, which pins every bumped crate by version.
 function synchronizeBindingsLock() {
   cargoMetadata({ locked: false, manifestPath: BINDINGS_MANIFEST });
   cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
