@@ -733,6 +733,112 @@ fn renaming_a_sheet_rewrites_hash_prefixed_hyperlink_locations() {
     );
 }
 
+/// Two sheets whose drawings both name one chart part, which the package
+/// format permits. The chart's references are unqualified, so each sheet
+/// resolves them against itself.
+fn shared_chart_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("First"));
+    model.sheets.push(Sheet::new("Second"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+
+    for index in 1..=2 {
+        let path = format!("xl/worksheets/sheet{index}.xml");
+        let worksheet = test_part_text(&parts, &path).replace(
+            "</worksheet>",
+            r#"<drawing r:id="rIdDrawing"/></worksheet>"#,
+        );
+        set_test_part(&mut parts, &path, worksheet.into_bytes());
+        parts.push((
+            format!("xl/worksheets/_rels/sheet{index}.xml.rels"),
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing{index}.xml"/></Relationships>"#
+            )
+            .into_bytes(),
+        ));
+        parts.push((
+            format!("xl/drawings/drawing{index}.xml"),
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#.to_vec(),
+        ));
+        parts.push((
+            format!("xl/drawings/_rels/drawing{index}.xml.rels"),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_vec(),
+        ));
+    }
+    parts.push((
+        "xl/charts/chart1.xml".to_owned(),
+        br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>$A$1:$A$2</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec(),
+    ));
+    let content_types = test_part_text(&parts, "[Content_Types].xml").replace(
+        "</Types>",
+        r#"<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#,
+    );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        content_types.into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn shared_chart_formula(workbook: &Workbook, sheet: SheetId) -> String {
+    workbook.model().sheet(sheet).unwrap().charts[0].refs[0]
+        .formula
+        .clone()
+}
+
+/// Inserting a row on one of two sheets that share a chart part moves only that
+/// sheet's references, so the part can no longer carry both. The save is
+/// refused rather than rewriting the chart the other sheet shows.
+#[test]
+fn refuses_to_save_a_shared_chart_part_a_structural_edit_split() {
+    let mut workbook = Workbook::open(&shared_chart_fixture()).unwrap();
+    assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$1:$A$2");
+    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
+    let untouched = workbook.save().unwrap();
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(shared_chart_formula(&workbook, SheetId(0)), "$A$2:$A$3");
+    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
+
+    let error = workbook.save().unwrap_err();
+    assert!(
+        matches!(&error, Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+            if message.contains("xl/charts/chart1.xml")
+                && message.contains("sheet First")
+                && message.contains("sheet Second")),
+        "{error:?}"
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(shared_chart_formula(&workbook, SheetId(1)), "$A$1:$A$2");
+    let restored = package_map(&workbook.save().unwrap());
+    let before = package_map(&untouched);
+    for path in [
+        "xl/charts/chart1.xml",
+        "xl/drawings/drawing1.xml",
+        "xl/drawings/drawing2.xml",
+    ] {
+        assert_eq!(
+            restored.get(path),
+            before.get(path),
+            "undoing the split lets {path} save unchanged again"
+        );
+    }
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(shared_chart_formula(&reopened, SheetId(0)), "$A$1:$A$2");
+    assert_eq!(shared_chart_formula(&reopened, SheetId(1)), "$A$1:$A$2");
+}
+
 #[test]
 fn edits_recalculate_render_and_round_trip() {
     let mut workbook =

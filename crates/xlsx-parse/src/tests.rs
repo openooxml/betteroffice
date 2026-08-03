@@ -1728,6 +1728,57 @@ const DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.or
 
 const CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache></c:strRef></c:tx><c:spPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></c:spPr><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
 
+/// A two-sheet package whose sheets each anchor the same chart part through
+/// their own drawing. The package format permits it, and the chart's
+/// references are unqualified, so each sheet resolves them against itself.
+fn shared_chart_package() -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/><drawing r:id="rIdDrawing"/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        br#"<workbook><sheets><sheet name="First" sheetId="1" r:id="rId1"/><sheet name="Second" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+    );
+    let sheet_rels = |drawing: &str| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/{drawing}"/></Relationships>"#
+        )
+        .into_bytes()
+    };
+    parts.extend([
+        (
+            "xl/worksheets/sheet2.xml".to_owned(),
+            br#"<worksheet><sheetData/><drawing r:id="rIdDrawing"/></worksheet>"#.to_vec(),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+            sheet_rels("drawing1.xml"),
+        ),
+        (
+            "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+            sheet_rels("drawing2.xml"),
+        ),
+        ("xl/drawings/drawing1.xml".to_owned(), DRAWING.to_vec()),
+        ("xl/drawings/drawing2.xml".to_owned(), DRAWING.to_vec()),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
+            SHARED_DRAWING_RELS.to_vec(),
+        ),
+        (
+            "xl/drawings/_rels/drawing2.xml.rels".to_owned(),
+            SHARED_DRAWING_RELS.to_vec(),
+        ),
+        ("xl/charts/chart1.xml".to_owned(), SHARED_CHART.to_vec()),
+    ]);
+    parts
+}
+
+const SHARED_DRAWING_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+
+const SHARED_CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>$A$1:$A$2</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+
 fn pivoted_package() -> Vec<(String, Vec<u8>)> {
     let mut parts = package(r#"<sheetData/>"#, &[], false);
     parts[0] = (
@@ -2167,6 +2218,202 @@ fn refuses_chart_state_with_no_one_to_one_source() {
         matches!(&error, ParseError::UnsupportedEdit(message)
             if message.contains("cannot create one")),
         "{error:?}"
+    );
+}
+
+fn save_shared(
+    parsed: &crate::ParsedWorkbook,
+    workbook: &Workbook,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    crate::serialize_workbook_with_package_and_origins_after_edits(
+        workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+}
+
+/// One chart part cannot hold two sheets' references at once. A save where the
+/// sheets sharing it no longer want the same content is refused, rather than
+/// writing whichever sheet came last and silently rewriting the chart the other
+/// one shows.
+#[test]
+fn refuses_a_shared_chart_part_its_sheets_disagree_on() {
+    let parsed = parse_workbook_with_package(&shared_chart_package()).unwrap();
+    assert_eq!(
+        parsed.workbook.sheets[0].charts[0].part,
+        "xl/charts/chart1.xml"
+    );
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].part,
+        "xl/charts/chart1.xml"
+    );
+    assert_eq!(
+        parsed.workbook.sheets[0].charts[0].refs[0].formula,
+        "$A$1:$A$2"
+    );
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].refs[0].formula,
+        "$A$1:$A$2"
+    );
+
+    let mut one_sheet_moved = parsed.workbook.clone();
+    one_sheet_moved.sheets[0].charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+    let error = save_shared(&parsed, &one_sheet_moved).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("xl/charts/chart1.xml")
+                && message.contains("sheet First")
+                && message.contains("sheet Second")),
+        "{error:?}"
+    );
+
+    let mut owners_diverge = parsed.workbook.clone();
+    owners_diverge.sheets[0].set_cell(
+        CellRef::parse_a1("A2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    for sheet in &mut owners_diverge.sheets {
+        sheet.charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+    }
+    let error = save_shared(&parsed, &owners_diverge).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("xl/charts/chart1.xml")),
+        "an unqualified reference each sheet caches differently is still a disagreement: {error:?}"
+    );
+}
+
+/// Sharing a chart part between two sheets is legal, and the common case is
+/// that both want the same thing out of it. That must keep saving: untouched,
+/// byte for byte; moved on both sheets alike, patched once.
+#[test]
+fn saves_a_shared_chart_part_its_sheets_agree_on() {
+    let source = shared_chart_package();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+
+    let mut untouched = parsed.workbook.clone();
+    edit_a1(&mut untouched, 1.0);
+    let saved = save_shared(&parsed, &untouched).unwrap();
+    for path in [
+        "xl/charts/chart1.xml",
+        "xl/drawings/drawing1.xml",
+        "xl/drawings/drawing2.xml",
+    ] {
+        assert_eq!(
+            part_bytes(&saved, path),
+            part_bytes(&source, path),
+            "{path} must not change when no chart did"
+        );
+    }
+
+    let mut both_moved = parsed.workbook.clone();
+    for sheet in &mut both_moved.sheets {
+        sheet.charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+    }
+    let saved = save_shared(&parsed, &both_moved).unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    assert_eq!(
+        patched,
+        String::from_utf8(SHARED_CHART.to_vec())
+            .unwrap()
+            .replace("$A$1:$A$2", "$A$2:$A$3")
+            .replace(
+                r#"<c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache>"#,
+                r#"<c:numCache><c:ptCount val="2"/></c:numCache>"#,
+            )
+    );
+    let reopened = parse_workbook_with_package(&saved).unwrap();
+    for sheet in &reopened.workbook.sheets {
+        assert_eq!(sheet.charts[0].refs[0].formula, "$A$2:$A$3");
+    }
+
+    let mut renamed = parsed.workbook.clone();
+    renamed.sheets[0].set_cell(
+        CellRef::parse_a1("A2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    for sheet in &mut renamed.sheets {
+        sheet.charts[0].refs[0].formula = "First!$A$1:$A$2".to_owned();
+    }
+    let saved = save_shared(&parsed, &renamed).unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    assert!(
+        patched.contains("<c:f>First!$A$1:$A$2</c:f>")
+            && patched
+                .contains(r#"<c:ptCount val="2"/><c:pt idx="1"><c:v>5</c:v></c:pt></c:numCache>"#),
+        "a qualified reference both sheets took resolves the same either way: {patched}"
+    );
+}
+
+/// The same aliasing reaches drawing parts: two sheets may relate to one
+/// drawing, whose anchors then belong to both. An anchor one sheet moved and
+/// the other did not is refused for the same reason a chart part is.
+#[test]
+fn refuses_a_shared_drawing_its_sheets_disagree_on() {
+    let mut source = shared_chart_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet2.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].drawing,
+        "xl/drawings/drawing1.xml"
+    );
+
+    let moved = |anchor: xlsx_model::ChartAnchor| match anchor {
+        xlsx_model::ChartAnchor::TwoCell { from, to, edit_as } => {
+            xlsx_model::ChartAnchor::TwoCell {
+                from: xlsx_model::AnchorCell {
+                    row: from.row + 1,
+                    ..from
+                },
+                to: xlsx_model::AnchorCell {
+                    row: to.row + 1,
+                    ..to
+                },
+                edit_as,
+            }
+        }
+        other => other,
+    };
+
+    let mut one_sheet_moved = parsed.workbook.clone();
+    one_sheet_moved.sheets[0].charts[0].anchor = moved(one_sheet_moved.sheets[0].charts[0].anchor);
+    let error = save_shared(&parsed, &one_sheet_moved).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("xl/drawings/drawing1.xml")
+                && message.contains("sheet First")
+                && message.contains("sheet Second")),
+        "{error:?}"
+    );
+
+    let mut both_moved = parsed.workbook.clone();
+    for sheet in &mut both_moved.sheets {
+        sheet.charts[0].anchor = moved(sheet.charts[0].anchor);
+    }
+    let saved = save_shared(&parsed, &both_moved).unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap();
+    assert_eq!(
+        patched,
+        String::from_utf8(DRAWING.to_vec())
+            .unwrap()
+            .replace("<xdr:row>4</xdr:row>", "<xdr:row>5</xdr:row>")
+            .replace("<xdr:row>19</xdr:row>", "<xdr:row>20</xdr:row>"),
+        "an anchor both sheets moved alike is written once"
     );
 }
 
