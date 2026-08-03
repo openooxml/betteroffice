@@ -1,0 +1,39 @@
+---
+title: Packages
+description: What to install from npm, crates.io, and PyPI, and what each package does
+---
+
+Every BetterOffice package is a face on the same Rust engines — one parser, one
+editing core, and one layout pass per format. What changes between registries is
+the runtime you call them from and how much of the pipeline is exposed.
+
+| Runtime | Install | Guide |
+| --- | --- | --- |
+| Browser, React, or Node | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
+| Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
+| Python | `pip install betteroffice-xlsx` | [Python](./python) |
+
+## What exists per format
+
+| Format | npm | crates.io | PyPI |
+| --- | --- | --- | --- |
+| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` | none |
+| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
+| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | not published yet |
+
+npm and crates.io carry all three formats. PyPI carries one distribution today,
+`betteroffice-xlsx`. The PPTX binding is built and tested in the repository but
+has no PyPI project yet, and there is no DOCX binding for Python at all.
+
+## Picking one
+
+- **An editor UI in a React app** — the `-react` packages. They own the toolbar,
+  canvas, selection, keyboard, and review UI.
+- **Your own UI in the browser** — the framework-free cores. Same engine, no
+  React: display lists, hit-testing, and a document handle.
+- **A server, a CLI, or a pipeline in Rust** — the three facade crates.
+- **A server, a notebook, or an agent in Python** — `betteroffice-xlsx`.
+- **One stage of the pipeline** — the per-layer crates, published individually.
+
+Versions are `0.0.x` and the APIs are still settling. Breaking changes are listed
+in each package's changelog.

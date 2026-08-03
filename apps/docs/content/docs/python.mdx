@@ -1,0 +1,94 @@
+---
+title: Python
+description: betteroffice-xlsx on PyPI — open, recalculate, render, and save workbooks
+---
+
+```bash
+pip install betteroffice-xlsx
+```
+
+[`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) is the one
+BetterOffice distribution on PyPI today. The Rust XLSX engine is compiled into
+the wheel: no Excel, no LibreOffice subprocess, no COM. Wheels are built for
+Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the
+stable ABI for CPython 3.9 and up.
+
+## Formulas calculate
+
+```python
+from betteroffice_xlsx import Workbook
+
+wb = Workbook.open_path("budget.xlsx")
+sheet = wb["Sheet1"]
+
+sheet["B1"] = 10
+sheet["B2"] = 32
+sheet["B3"] = "=SUM(B1:B2)"
+
+print(sheet["B3"])           # 42.0, computed here
+print(sheet.formula("B3"))   # 'SUM(B1:B2)'
+
+wb.save_path("budget-out.xlsx")
+```
+
+Writing a cell recalculates its dependents. A cell you have not touched keeps
+whatever the authoring application cached, stale or not; `Workbook.open_recalculated`
+or a later `recalculate()` evaluates the whole workbook with this engine instead.
+Values come back as `None`, `float`, `str`, `bool`, or a `CellError` that compares
+equal to its code, so `#DIV/0!` as a value stays distinguishable from a cell
+holding that text.
+
+## Render a sheet
+
+```python
+png = wb.render_png("Sheet1", scale=2.0, range="A1:H40")
+png.write("preview.png")
+```
+
+This is the same grid layout and display list the browser editor uses, and the
+raster backend embeds Carlito to measure and draw cell text, so nothing has to be
+registered first. Opening, recalculating, rendering, and saving release the GIL,
+so they run in parallel across threads instead of serializing your workers.
+
+## What a save keeps
+
+`save()` returns bytes and `save_path()` writes a file. The parts the model does
+not represent — charts, pivot tables, comments, macros, custom XML — are kept,
+and sheets an edit did not touch are copied through byte for byte. A sheet you do
+edit is reserialized from the model, so unmodeled markup on that one sheet is
+lost.
+
+## Collaboration and agent proposals
+
+`Workbook.open_collaborative` makes the workbook a Yrs replica and exposes the
+byte-level primitives — `state_vector`, `state_as_update`, `diff`,
+`apply_update` — rather than a transport, so it drops into a WebSocket server, a
+queue, or a test harness without committing you to asyncio. `propose` stages an
+agent's edits with the before and after text of each one, and nothing reaches the
+sheet until `accept_proposal` applies it as a single undo step.
+
+The package README on PyPI carries the full API table, the openpyxl comparison,
+and the error hierarchy.
+
+## PPTX and DOCX
+
+The PPTX binding is not on PyPI yet, so `pip` will not find it. It lives in the
+repository at
+[`bindings/python-pptx`](https://github.com/openooxml/betteroffice/tree/main/bindings/python-pptx),
+and CI builds and tests it on every change. From a checkout, with a Rust
+toolchain installed:
+
+```bash
+pip install -e bindings/python-pptx
+```
+
+It reads decks, edits shapes and text in memory, and lays slides out into the
+same display-list contract the canvas paints. `render_slide` fails until
+`register_font` has supplied at least one face — no font is compiled into that
+wheel — and `save()` raises `UnsupportedWriteError` once a deck has been edited,
+because the engine cannot write model edits back to PPTX yet. A `Presentation` is
+also pinned to the thread that opened it, and must be released there.
+
+There is no DOCX binding for Python. Reach for
+[`betteroffice-docx`](./rust) in Rust, or
+[`@betteroffice/docx`](./javascript) in JavaScript.

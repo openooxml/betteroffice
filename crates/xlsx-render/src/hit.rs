@@ -7,6 +7,10 @@ use crate::display_list::ChartRegion;
 /// The topmost chart whose visible region contains the point. Regions are in
 /// paint order, so the last match wins; the clipped region is used, and a chart
 /// scrolled under a frozen pane is therefore not hit where it is hidden.
+///
+/// A chart that degraded to a placeholder still answers: failing to draw it
+/// does not stop it being an object on the sheet that occupies that space, and
+/// moving it out of the way is exactly what a reader is likely to want.
 pub fn chart_at_point(charts: &[ChartRegion], x: f32, y: f32) -> Option<&ChartRegion> {
     if !x.is_finite() || !y.is_finite() {
         return None;
@@ -26,6 +30,7 @@ mod tests {
         ChartRegion {
             id: id.into(),
             label: String::new(),
+            placeholder: false,
             rect,
             clip,
             movable: true,
@@ -66,6 +71,20 @@ mod tests {
         ];
         assert_eq!(chart_at_point(&charts, 60.0, 60.0).unwrap().id, "over");
         assert_eq!(chart_at_point(&charts, 10.0, 10.0).unwrap().id, "under");
+    }
+
+    /// A chart the renderer could not draw is painted as a placeholder but is
+    /// still an object on the sheet, so it stays selectable and movable.
+    #[test]
+    fn a_placeholdered_chart_is_still_addressable() {
+        let box_ = square(0.0, 0.0, 50.0, 40.0);
+        let charts = [ChartRegion {
+            placeholder: true,
+            ..region("undrawable", box_, box_)
+        }];
+        let hit = chart_at_point(&charts, 25.0, 20.0).expect("a placeholder still answers");
+        assert_eq!(hit.id, "undrawable");
+        assert!(hit.movable);
     }
 
     #[test]

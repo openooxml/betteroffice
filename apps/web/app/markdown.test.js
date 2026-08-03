@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { prefersMarkdown } from "../../../shared/accept.ts";
 import { homepageMarkdown } from "./markdown.ts";
-import { EDITORS, HERO, PACKAGES } from "./content.ts";
+import { ECOSYSTEMS, EDITORS, HERO, PACKAGES } from "./content.ts";
 
 describe("accept negotiation", () => {
   test("serves HTML to browsers", () => {
@@ -52,6 +52,13 @@ describe("homepage markdown", () => {
     for (const pkg of PACKAGES) {
       expect(markdown).toContain(pkg.name);
       expect(markdown).toContain(pkg.desc);
+    }
+  });
+
+  test("carries an install line and a guide for every ecosystem", () => {
+    for (const eco of ECOSYSTEMS) {
+      expect(markdown).toContain(eco.install);
+      expect(markdown).toContain(eco.docs);
     }
   });
 

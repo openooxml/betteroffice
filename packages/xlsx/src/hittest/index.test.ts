@@ -136,6 +136,14 @@ describe('chartRegionAtPoint', () => {
     expect(chartRegionAtPoint(undefined, 10, 20)).toBeNull();
   });
 
+  // a chart the renderer could not draw still occupies its space, so it stays
+  // an object the pointer can reach.
+  it('answers for a chart that degraded to a placeholder', () => {
+    const box = { x: 0, y: 0, w: 50, h: 40 };
+    const charts = [{ ...region('undrawable', box), placeholder: true }];
+    expect(chartRegionAtPoint(charts, 25, 20)?.id).toBe('undrawable');
+  });
+
   it('resolves overlapping regions to the last painted', () => {
     const charts = [
       region('under', { x: 0, y: 0, w: 100, h: 100 }),

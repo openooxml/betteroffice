@@ -50,6 +50,108 @@ pub fn chart_space(part: &[u8], theme: &Theme) -> Option<ChartSpace> {
     parse_chart_space(&ChartNode::new(&root, &drawing_theme))
 }
 
+/// Upper bound on the references one part may have projected, so a hostile
+/// part cannot turn one frame into thousands of resolutions.
+const MAX_PROJECTED_REFERENCES: usize = 256;
+
+/// A chart part rendered against the current workbook. Every cache this crate
+/// can resolve safely is rebuilt from live cells so an ordinary edit reaches
+/// the chart; every other cache keeps the values the file was authored with.
+/// This changes only what is drawn — a save still writes the source bytes back
+/// untouched.
+///
+/// This parses the part twice per frame: once here to find the cache sites,
+/// once in [`chart_space`] to read the spliced result. Memoizing it needs a key
+/// over everything the output depends on: the part bytes, the theme, the owner
+/// sheet name, the value of every cell the references name, and the workbook's
+/// set of sheet names — a rename alone flips the output, because a reference
+/// into a sheet the workbook no longer holds walks no cells at all. So a memo
+/// has to be invalidated by cell writes and by sheet renames, not by a
+/// workbook-wide revision counter, or a chart stops following the grid again.
+pub fn preserved_chart_space(
+    part: &[u8],
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+    theme: &Theme,
+) -> Option<ChartSpace> {
+    match refreshed_chart_part(part, workbook, owner) {
+        Some(refreshed) => chart_space(&refreshed, theme).or_else(|| chart_space(part, theme)),
+        None => chart_space(part, theme),
+    }
+}
+
+/// The part with its resolvable caches spliced up to date, or `None` when
+/// nothing could be refreshed and the source bytes already say it best.
+/// Anything that puts the reference vocabulary itself in doubt — ChartEx, a
+/// pivot or external source, a filtered-series `sqref` — declines the whole
+/// part rather than refreshing the references beside it.
+fn refreshed_chart_part(
+    part: &[u8],
+    workbook: &xlsx_model::Workbook,
+    owner: &str,
+) -> Option<Vec<u8>> {
+    if names_a_foreign_vocabulary(part) {
+        return None;
+    }
+    let source = Part::decode(part).ok()?;
+    let root = source.tree().ok()?;
+    if !root.is(NS_CHART, "chartSpace") || unsupported_reference_form(&root, 0) {
+        return None;
+    }
+    let sites = ref_sites(&root).ok()?;
+    if sites.len() > MAX_PROJECTED_REFERENCES {
+        return None;
+    }
+    let mut rebuild = CacheRebuild::displayed();
+    let mut declined = std::collections::HashSet::new();
+    let mut edits: Vec<(Option<usize>, Edit)> = Vec::new();
+    for site in &sites {
+        let Some(cache) = &site.cache else {
+            continue;
+        };
+        let refreshed = cache
+            .span
+            .clone()
+            .zip(regenerated_cache(cache, &site.formula, workbook, owner, &mut rebuild).ok());
+        match refreshed {
+            Some((span, markup)) => {
+                edits.push((site.series, (span, Replacement::Markup(markup))));
+            }
+            None => {
+                declined.extend(site.series);
+            }
+        }
+    }
+    // A renderer pairs a series' values with its categories slot by slot, so
+    // refreshing one of them while the other keeps authored values would draw a
+    // pairing no version of the file ever held. A series is projected whole or
+    // left alone.
+    let mut edits = edits
+        .into_iter()
+        .filter(|(series, _)| series.is_none_or(|series| !declined.contains(&series)))
+        .map(|(_, edit)| edit)
+        .collect::<Vec<_>>();
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(span, _)| span.start);
+    source.splice(&edits).ok()
+}
+
+/// Whether the raw bytes name a reference vocabulary this crate does not read,
+/// checked before the part is decoded so a pivot or ChartEx chart pays nothing
+/// per frame. Only ever causes a fall back to authored values, so a false match
+/// costs freshness rather than correctness; [`unsupported_reference_form`] is
+/// still the authority once a part is decoded.
+fn names_a_foreign_vocabulary(part: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(part) else {
+        return false;
+    };
+    ["pivotSource", "externalData", "sqref", "chartex"]
+        .iter()
+        .any(|needle| text.contains(needle))
+}
+
 fn has_3d_plot(element: &Element, depth: usize) -> bool {
     element.local_name().ends_with("3DChart")
         || (depth < MAX_DEPTH
@@ -352,6 +454,9 @@ struct CacheSite {
     /// whether the cache carries content [`regenerated_cache`] does not
     /// re-emit, which it would therefore delete.
     unmodelled_content: bool,
+    /// the points the file was authored with, so a rebuild that would empty a
+    /// populated cache can be recognized and declined.
+    authored_points: usize,
 }
 
 /// One `c:f` found in a chart part: what it references and where its content
@@ -361,6 +466,10 @@ struct RefSite {
     formula: String,
     span: Option<Range<usize>>,
     cache: Option<CacheSite>,
+    /// the `c:ser` this reference sits in, by document order. a series is the
+    /// unit a renderer pairs values and categories within, so it is the unit a
+    /// projection has to accept or decline whole.
+    series: Option<usize>,
 }
 
 fn chart_refs(root: &Element) -> Result<Vec<ChartRef>, ParseError> {
@@ -375,13 +484,24 @@ fn chart_refs(root: &Element) -> Result<Vec<ChartRef>, ParseError> {
 
 fn ref_sites(root: &Element) -> Result<Vec<RefSite>, ParseError> {
     let mut sites = Vec::new();
-    walk_refs(root, ChartRefKind::Other, 0, &mut sites)?;
+    let mut series = Series {
+        current: None,
+        next: 0,
+    };
+    walk_refs(root, ChartRefKind::Other, &mut series, 0, &mut sites)?;
     Ok(sites)
+}
+
+/// Which `c:ser` a walk is inside, and the ordinal the next one takes.
+struct Series {
+    current: Option<usize>,
+    next: usize,
 }
 
 fn walk_refs(
     element: &Element,
     inherited: ChartRefKind,
+    series: &mut Series,
     depth: usize,
     out: &mut Vec<RefSite>,
 ) -> Result<(), ParseError> {
@@ -398,13 +518,20 @@ fn walk_refs(
             formula: element.text_content().trim().to_owned(),
             span: element.splice_target(),
             cache: None,
+            series: series.current,
         });
         return Ok(());
     }
+    let enclosing = series.current;
+    if element.is(NS_CHART, "ser") {
+        series.current = Some(series.next);
+        series.next += 1;
+    }
     let before = out.len();
     for child in element.child_elements() {
-        walk_refs(child, kind, depth + 1, out)?;
+        walk_refs(child, kind, series, depth + 1, out)?;
     }
+    series.current = enclosing;
     if out.len() == before + 1
         && element
             .child(FORMULA_LOCAL)
@@ -438,6 +565,10 @@ fn cache_site(reference: &Element) -> Option<CacheSite> {
             .child("formatCode")
             .map(|element| element.text_content()),
         unmodelled_content: !cache_is_fully_modelled(cache),
+        authored_points: cache
+            .child_elements()
+            .filter(|child| child.is(NS_CHART, "pt"))
+            .count(),
     })
 }
 
@@ -477,7 +608,7 @@ fn slot_kind(local: &str) -> Option<ChartRefKind> {
 /// Upper bound on the points one regenerated cache may carry. Excel plots
 /// 32,000 per series; a reference longer than this is refused rather than
 /// turned into megabytes of markup.
-const MAX_CACHE_POINTS: u32 = 65_536;
+pub(crate) const MAX_CACHE_POINTS: u32 = 65_536;
 
 /// Write `refs` back into their `c:f` elements and regenerate the caches
 /// beside them from `workbook`, leaving every other byte alone. Refuses when
@@ -525,6 +656,7 @@ pub(crate) fn patch_chart_refs(
                 &reference.formula,
                 workbook,
                 owner,
+                &mut CacheRebuild::persisted(),
             )?),
         ));
     }
@@ -535,13 +667,54 @@ pub(crate) fn patch_chart_refs(
     source.splice(&edits)
 }
 
-/// The content of a cache rebuilt from the post-edit workbook. Refused when
-/// the authored cache holds anything the rebuild would not write back.
+/// What a rebuilt cache must be able to stand behind, and how many points the
+/// caller still allows.
+struct CacheRebuild {
+    fidelity: CacheFidelity,
+    /// the most cells any one reference may resolve to.
+    limit: usize,
+    /// what is left for the whole part, where the caller bounds it.
+    budget: usize,
+}
+
+/// Whether a rebuilt cache is written back into a package or only read by a
+/// renderer. A save must express exactly what the authored cache did; a render
+/// only has to put a readable value on the screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CacheFidelity {
+    Persisted,
+    Displayed,
+}
+
+impl CacheRebuild {
+    /// A save: bounded per reference by what one cache may already carry, the
+    /// way this crate has always written one back.
+    fn persisted() -> Self {
+        Self {
+            fidelity: CacheFidelity::Persisted,
+            limit: MAX_CACHE_POINTS as usize,
+            budget: usize::MAX,
+        }
+    }
+
+    /// A render: bounded across the whole part, because it runs every frame.
+    fn displayed() -> Self {
+        Self {
+            fidelity: CacheFidelity::Displayed,
+            limit: crate::MAX_PROJECTED_CACHE_POINTS,
+            budget: crate::MAX_PROJECTED_CACHE_POINTS,
+        }
+    }
+}
+
+/// The content of a cache rebuilt from the current workbook. Refused when the
+/// authored cache holds anything the rebuild would not write back.
 fn regenerated_cache(
     cache: &CacheSite,
     formula: &str,
     workbook: &xlsx_model::Workbook,
     owner: &str,
+    rebuild: &mut CacheRebuild,
 ) -> Result<String, ParseError> {
     if cache.local == "multiLvlStrCache" {
         return Err(ParseError::UnsupportedEdit(
@@ -554,7 +727,38 @@ fn regenerated_cache(
         ));
     }
     let numeric = cache.local == "numCache";
-    let cells = resolve_reference(formula, workbook, owner)?;
+    let cells = resolve_reference(formula, workbook, owner, rebuild.limit.min(rebuild.budget))?;
+    rebuild.budget -= cells.len();
+    // A populated cache over cells the grid reads as empty — including a
+    // reference that names none at all, such as `#REF!` — is the file speaking
+    // for data the workbook does not hold; emptying the chart would be a worse
+    // answer than a stale one. A save is regenerating because the reference
+    // moved, so there the new emptiness is the truth.
+    if rebuild.fidelity == CacheFidelity::Displayed
+        && cache.authored_points > 0
+        && cells.iter().all(|cell| *cell == CellValue::Empty)
+    {
+        return Err(ParseError::UnsupportedEdit(
+            "a chart cache over cells the grid reads as empty keeps its authored values".into(),
+        ));
+    }
+    let points = cells
+        .iter()
+        .map(|value| cache_point(value, numeric, rebuild.fidelity))
+        .collect::<Result<Vec<_>, _>>()?;
+    // A cache omits the points a consumer cannot read, and the shared parser
+    // collects what remains positionally rather than by `@idx`. A hole before
+    // the last surviving point would therefore slide every later value into an
+    // earlier slot, under another point's category. A trailing hole shifts
+    // nothing, so only an interior one declines.
+    if rebuild.fidelity == CacheFidelity::Displayed
+        && let Some(last) = points.iter().rposition(Option::is_some)
+        && points[..last].iter().any(Option::is_none)
+    {
+        return Err(ParseError::UnsupportedEdit(
+            "a chart cache with a gap between points keeps its authored values".into(),
+        ));
+    }
     let prefix = &cache.prefix;
     let mut out = String::new();
     if let Some(format_code) = &cache.format_code {
@@ -564,32 +768,42 @@ fn regenerated_cache(
         ));
     }
     out.push_str(&format!("<{prefix}ptCount val=\"{}\"/>", cells.len()));
-    for (index, value) in cells.iter().enumerate() {
-        let Some(text) = cache_point(value, numeric)? else {
+    for (index, text) in points.iter().enumerate() {
+        let Some(text) = text else {
             continue;
         };
         out.push_str(&format!(
             "<{prefix}pt idx=\"{index}\"><{prefix}v>{}</{prefix}v></{prefix}pt>",
-            escape_text(&text)?
+            escape_text(text)?
         ));
     }
     Ok(out)
 }
 
-/// One cached point, or `None` for a cell a cache omits. A string cache over a
-/// value that is not text cannot be rebuilt without applying the cell's number
-/// format, so it is refused instead of guessed at.
-fn cache_point(value: &CellValue, numeric: bool) -> Result<Option<String>, ParseError> {
+/// One cached point, or `None` for a cell a cache omits. A save cannot put a
+/// value that is not text into a string cache without applying the cell's
+/// number format, so it refuses instead of guessing; a render only has to show
+/// a readable value.
+fn cache_point(
+    value: &CellValue,
+    numeric: bool,
+    fidelity: CacheFidelity,
+) -> Result<Option<String>, ParseError> {
     Ok(match (value, numeric) {
         (CellValue::Empty, _) => None,
         (CellValue::Number { value }, true) => Some(format_number(*value)),
         (_, true) => None,
         (CellValue::Text { value }, false) => Some(value.clone()),
-        (_, false) => {
+        (_, false) if fidelity == CacheFidelity::Persisted => {
             return Err(ParseError::UnsupportedEdit(
                 "a string cache over non-text cells cannot be regenerated".into(),
             ));
         }
+        (CellValue::Number { value }, false) => Some(format_number(*value)),
+        (CellValue::Bool { value }, false) => {
+            Some(if *value { "TRUE" } else { "FALSE" }.to_owned())
+        }
+        (CellValue::Error { value }, false) => Some(value.as_str().to_owned()),
     })
 }
 
@@ -601,24 +815,26 @@ fn format_number(value: f64) -> String {
     }
 }
 
-/// The cells one chart reference names, in the order a cache lists them. Only
-/// a single contiguous one-dimensional area on a sheet this workbook holds can
-/// be resolved; `#REF!` resolves to nothing, which is the correct empty cache.
+/// The cells one chart reference names, in the order a cache lists them, up to
+/// `limit` of them. Only a single contiguous one-dimensional area on a sheet
+/// this workbook holds can be resolved; `#REF!` resolves to nothing, which is
+/// the correct empty cache. Every other form — a union, an external book, a
+/// defined name, a two-dimensional area — is refused here, so a caller needs no
+/// predicate of its own.
 fn resolve_reference(
     formula: &str,
     workbook: &xlsx_model::Workbook,
     owner: &str,
+    limit: usize,
 ) -> Result<Vec<CellValue>, ParseError> {
     let trimmed = formula.trim();
     if trimmed.is_empty() || trimmed == ErrorValue::Ref.as_str() {
         return Ok(Vec::new());
     }
-    let refused = |reason: &str| {
-        ParseError::UnsupportedEdit(format!(
-            "chart reference {trimmed} moved but its cache {reason}"
-        ))
-    };
-    let (sheet_name, area) = split_qualifier(trimmed).ok_or_else(|| refused("is not one area"))?;
+    let refused =
+        |reason: &str| ParseError::UnsupportedEdit(format!("chart reference {trimmed} {reason}"));
+    let (sheet_name, area) =
+        split_qualifier(trimmed).ok_or_else(|| refused("is not a single same-workbook area"))?;
     let sheet_name = sheet_name.unwrap_or_else(|| owner.to_owned());
     let Some(sheet) = workbook
         .sheets
@@ -633,7 +849,7 @@ fn resolve_reference(
         return Err(refused("spans more than one row and column"));
     }
     let count = u64::from(rows) * u64::from(cols);
-    if count > u64::from(MAX_CACHE_POINTS) {
+    if count > limit as u64 {
         return Err(refused("would hold more points than a chart can carry"));
     }
     let mut values = Vec::with_capacity(count as usize);

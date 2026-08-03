@@ -27,8 +27,8 @@ use xlsx_render::{
 };
 
 use crate::authority::{
-    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, StagedLocalUpdate, StagedUpdate,
-    SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
+    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -97,6 +97,13 @@ struct PreservedSheetState {
 }
 
 impl PreservedSheetState {
+    /// Sheets a restored state added carry no package identity.
+    fn resize(&mut self, sheets: usize) {
+        self.origins.resize(sheets, None);
+        self.shared_string_cells
+            .resize_with(sheets, Default::default);
+    }
+
     fn insert(&mut self, index: usize) {
         let index = index.min(self.origins.len());
         self.origins.insert(index, None);
@@ -191,12 +198,13 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_package(&parts)?;
-        Self::from_parts(
+        Self::from_source(
             parsed.workbook,
             Some(parsed.package),
             parsed.active_sheet,
             build_graph,
             client_id,
+            &parsed.legacy_dimensions,
         )
     }
 
@@ -233,6 +241,24 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
     ) -> Result<Self> {
+        Self::from_source(
+            model,
+            source_package,
+            active_sheet,
+            build_graph,
+            client_id,
+            &[],
+        )
+    }
+
+    fn from_source(
+        model: WorkbookModel,
+        source_package: Option<xlsx_parse::PreservedPackage>,
+        active_sheet: SheetId,
+        build_graph: bool,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
         let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
@@ -243,11 +269,8 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let authority = match client_id {
-            Some(client_id) => WorkbookAuthority::from_model_with_client_id(&model, client_id),
-            None => WorkbookAuthority::from_model(&model),
-        }
-        .map_err(authority_error)?;
+        let authority = WorkbookAuthority::from_source(&model, client_id, legacy_dimensions)
+            .map_err(authority_error)?;
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
@@ -339,6 +362,9 @@ impl Workbook {
             self.pending_remote_updates.remove(index);
         }
         let before = self.model.clone();
+        if self.restore_snapshot(update, options)? {
+            return Ok(self.remote_mutation_result(&before, true));
+        }
         let staged = self.stage_remote_updates(&[update])?;
         if staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
@@ -357,6 +383,64 @@ impl Workbook {
         let mut applied = self.apply_staged_remote_update(staged, options)?.applied;
         applied |= self.resolve_pending_remote_updates(&structure, options)?;
         Ok(self.remote_mutation_result(&before, applied))
+    }
+
+    /// Adopts a persisted snapshot, refreezing the shared structure around it.
+    /// The replica's own bootstrap is superseded, so the identities in the
+    /// structure captured at open no longer describe this document — but what
+    /// that structure describes still has to hold, or the snapshot is not this
+    /// workbook's and adopting it would smuggle a structural edit past the
+    /// freeze.
+    ///
+    /// The upgraded state, not the snapshot, is what peers are told about: the
+    /// upgrade writes new structs under this client, and an incremental update
+    /// that later builds on them would stay pending forever on a peer that
+    /// never received them.
+    fn restore_snapshot(&mut self, update: &[u8], options: CalculationOptions) -> Result<bool> {
+        if self.edited_since_open {
+            return Ok(false);
+        }
+        let WorkbookMode::Collaborative { structure: frozen } = &self.mode else {
+            return Ok(false);
+        };
+        let frozen = frozen.clone();
+        let candidate = match self.authority.snapshot_replacement(update) {
+            SnapshotAdoption::NotApplicable => return Ok(false),
+            SnapshotAdoption::Incompatible(error) => return Err(Error::CollaborativeState(error)),
+            SnapshotAdoption::Replacement(candidate) => *candidate,
+        };
+        let structure = candidate.structure().map_err(authority_error)?;
+        if !structure.describes_same_workbook(&frozen) {
+            return Err(Error::CollaborativeStructureChanged);
+        }
+        let mut model = candidate.materialize().map_err(authority_error)?;
+        validate_model(&model)?;
+        validate_chart_source(&model, self.source_package.is_some())
+            .map_err(|error| Error::CollaborativeState(error.to_string()))?;
+        let migrated = candidate.encode_state_as_update_v1();
+        validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
+        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let mut calculation = calculation_result(&recalc);
+        calculation.changed = changed_cells_between(&self.model, &model);
+        self.authority = candidate;
+        self.preserved.resize(model.sheets.len());
+        self.model = model;
+        self.graph = Some(graph);
+        self.last_calculation = calculation;
+        self.mode = WorkbookMode::Collaborative { structure };
+        self.pending_remote_updates.clear();
+        self.undo.clear();
+        self.preserved_undo.clear();
+        self.preserved_redo.clear();
+        self.preserved.forget_shared_strings();
+        self.authority.clear_history();
+        self.proposals.clear();
+        self.edited_since_open = true;
+        self.emit_update(UpdateEvent {
+            update: migrated,
+            origin: UpdateOrigin::Local,
+        });
+        Ok(true)
     }
 
     fn stage_remote_updates(&self, updates: &[&[u8]]) -> Result<StagedUpdate> {
@@ -1310,8 +1394,10 @@ impl Workbook {
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let source_package = self.source_package.as_ref();
         let theme = &self.model.styles.theme;
+        let model = &self.model;
+        let owner = sheet_ref.name.clone();
         build_display_list_with_charts_and_ghosts(&self.model, sheet, viewport, &ghosts, |chart| {
-            resolve_chart_space(source_package, theme, chart)
+            resolve_chart_space(source_package, theme, model, &owner, chart)
         })
         .map_err(Error::from)
     }
@@ -1424,9 +1510,11 @@ impl Workbook {
         validate_display_region(sheet_ref, &viewport)?;
         let source_package = self.source_package.as_ref();
         let theme = &self.model.styles.theme;
+        let model = &self.model;
+        let owner = sheet_ref.name.clone();
         let display_list =
             build_display_list_with_charts(&self.model, sheet, &viewport, |chart| {
-                resolve_chart_space(source_package, theme, chart)
+                resolve_chart_space(source_package, theme, model, &owner, chart)
             })?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -2807,9 +2895,14 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
     Ok(())
 }
 
+/// The `ChartSpace` both renderers draw. The part supplies the chart's shape;
+/// the references inside it are resolved against the current workbook, so an
+/// ordinary cell edit reaches the chart without a save.
 fn resolve_chart_space(
     package: Option<&xlsx_parse::PreservedPackage>,
     theme: &xlsx_model::Theme,
+    model: &WorkbookModel,
+    owner: &str,
     chart: &SheetChart,
 ) -> std::result::Result<ChartSpace, RenderError> {
     let package = package.ok_or_else(|| RenderError::ChartSourceUnavailable {
@@ -2820,8 +2913,10 @@ fn resolve_chart_space(
         .ok_or_else(|| RenderError::ChartPartMissing {
             part: chart.part.clone(),
         })?;
-    xlsx_parse::chart_space(bytes, theme).ok_or_else(|| RenderError::ChartParseFailed {
-        part: chart.part.clone(),
+    xlsx_parse::preserved_chart_space(bytes, model, owner, theme).ok_or_else(|| {
+        RenderError::ChartParseFailed {
+            part: chart.part.clone(),
+        }
     })
 }
 

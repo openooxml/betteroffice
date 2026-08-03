@@ -19,6 +19,10 @@ import { XlsxEditor } from './XlsxEditor';
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
 const CHART_FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/charts.xlsx');
+const UNDRAWABLE_FIXTURE = resolve(
+  import.meta.dir,
+  '../../xlsx/test-fixtures/unsupported-charts.xlsx'
+);
 const VIEWPORT = { width: 800, height: 600 };
 const LINK_TARGET = 'https://example.com/report';
 const LINK_CELL: CellAddr = { row: 5, col: 4 };
@@ -101,6 +105,7 @@ function fixtureFrom(bytes: Uint8Array): Fixture {
 let plain: Fixture;
 let linked: Fixture;
 let charted: Fixture;
+let undrawable: Fixture;
 let opened: string[] = [];
 
 beforeAll(async () => {
@@ -121,6 +126,7 @@ beforeAll(async () => {
   plain = fixtureFrom(source);
   linked = fixtureFrom(withHyperlink(source));
   charted = fixtureFrom(new Uint8Array(readFileSync(CHART_FIXTURE)));
+  undrawable = fixtureFrom(new Uint8Array(readFileSync(UNDRAWABLE_FIXTURE)));
 });
 
 afterAll(async () => {
@@ -347,6 +353,25 @@ describe('XlsxEditor chart objects', () => {
     await waitFor(() => expect(view.outline()).toBeNull());
     expect(view.selectionBox()).not.toBeNull();
     expect(view.nameBox().value).toBe('A1');
+  });
+
+  // the renderer paints a chart it cannot draw as a neutral box rather than
+  // failing the frame. it is still an object on the sheet, so it must select
+  // and move like any other.
+  it('selects and moves a chart the renderer could not draw', async () => {
+    const chart = undrawable.charts.find((candidate) => candidate.placeholder);
+    expect(chart).toBeDefined();
+    expect(chart!.movable).toBe(true);
+    const view = await mountEditor(undrawable);
+    await selectChart(view, chart!);
+
+    expect(view.outline()!.getAttribute('data-chart-id')).toBe(chart!.id);
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowRight', shiftKey: true });
+    });
+    await waitFor(() => expect(view.canUndo()).toBe(true), { timeout: 2000 });
+    expect(view.error()).toBeNull();
+    await waitFor(() => expect(view.outlineAt().x).toBe(Math.round(chart!.rect.x + 10)));
   });
 
   it('keeps cell-editing keys off the cells hidden behind a selected chart', async () => {

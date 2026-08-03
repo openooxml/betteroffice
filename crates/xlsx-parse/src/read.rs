@@ -30,6 +30,18 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
+    pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
+}
+
+/// One sheet's row heights and column widths as releases before `hidden` was
+/// read as a zero dimension stored them: authored `ht`/`width` only.
+///
+/// A collaboration fingerprint hashes both maps, so a peer that persisted its
+/// state under those releases can only be recognised against these.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LegacySheetDimensions {
+    pub col_widths: BTreeMap<u32, f64>,
+    pub row_heights: BTreeMap<u32, f64>,
 }
 
 pub(crate) fn parse_workbook_indexed(
@@ -53,6 +65,7 @@ pub(crate) fn parse_workbook_indexed(
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
+    let mut legacy_dimensions = Vec::with_capacity(meta.sheets.len());
     for (idx, entry) in meta.sheets.iter().enumerate() {
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
@@ -65,6 +78,7 @@ pub(crate) fn parse_workbook_indexed(
             }
             sheets.push(sheet);
             shared_string_cells.push(SharedStringCells::new());
+            legacy_dimensions.push(LegacySheetDimensions::default());
             continue;
         }
         let path = worksheet_path(relationship, idx);
@@ -74,16 +88,19 @@ pub(crate) fn parse_workbook_indexed(
             .transpose()?
             .unwrap_or_default();
         let mut indices = SharedStringCells::new();
+        let mut legacy = LegacySheetDimensions::default();
         let mut sheet = parse_worksheet(
             &entry.name,
             bytes,
             &shared_strings,
             &sheet_rels,
             &mut indices,
+            &mut legacy,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
         sheets.push(sheet);
         shared_string_cells.push(indices);
+        legacy_dimensions.push(legacy);
     }
 
     Ok(IndexedWorkbook {
@@ -96,6 +113,7 @@ pub(crate) fn parse_workbook_indexed(
         },
         active_sheet: meta.active_sheet,
         shared_string_cells,
+        legacy_dimensions,
     })
 }
 
@@ -321,6 +339,7 @@ fn parse_worksheet(
     shared: &[String],
     relationships: &BTreeMap<String, Relationship>,
     shared_string_cells: &mut SharedStringCells,
+    legacy: &mut LegacySheetDimensions,
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
@@ -342,10 +361,14 @@ fn parse_worksheet(
                     };
                     cur_row = Some(row);
                     col_cursor = 0;
+                    let height = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok());
+                    if let Some(height) = height {
+                        legacy.row_heights.insert(row, height);
+                    }
                     if attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value)) {
                         sheet.row_heights.insert(row, 0.0);
-                    } else if let Some(h) = attr(&e, b"ht")?.and_then(|v| v.parse::<f64>().ok()) {
-                        sheet.row_heights.insert(row, h);
+                    } else if let Some(height) = height {
+                        sheet.row_heights.insert(row, height);
                     }
                 }
                 b"c" => {
@@ -406,7 +429,7 @@ fn parse_worksheet(
                         sheet.hyperlinks.push(link);
                     }
                 }
-                b"col" => parse_col(&e, &mut sheet)?,
+                b"col" => parse_col(&e, &mut sheet, legacy)?,
                 _ => {}
             },
             Event::End(e) => {
@@ -517,9 +540,14 @@ fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
 
 /// apply a `<col>` width across its `[min, max]` span (clamped to sheet bounds).
 /// widths are stored per-column since the model has no column-range concept.
-fn parse_col(e: &quick_xml::events::BytesStart, sheet: &mut Sheet) -> Result<(), ParseError> {
+fn parse_col(
+    e: &quick_xml::events::BytesStart,
+    sheet: &mut Sheet,
+    legacy: &mut LegacySheetDimensions,
+) -> Result<(), ParseError> {
     let hidden = attr(e, b"hidden")?.is_some_and(|value| is_truthy(&value));
-    let width = match attr(e, b"width")?.and_then(|v| v.parse::<f64>().ok()) {
+    let authored = attr(e, b"width")?.and_then(|v| v.parse::<f64>().ok());
+    let width = match authored {
         Some(w) => w,
         None if hidden => 0.0,
         None => return Ok(()),
@@ -535,6 +563,9 @@ fn parse_col(e: &quick_xml::events::BytesStart, sheet: &mut Sheet) -> Result<(),
     let max = max.clamp(min, MAX_COLS);
     for col in min..=max {
         sheet.col_widths.insert(col - 1, width);
+        if let Some(authored) = authored {
+            legacy.col_widths.insert(col - 1, authored);
+        }
     }
     Ok(())
 }

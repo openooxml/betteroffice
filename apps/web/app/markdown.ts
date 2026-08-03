@@ -3,10 +3,10 @@ import {
   COLLABORATION,
   DEMO,
   DOCS,
+  ECOSYSTEMS,
   EDITORS,
   FOUNDATION,
   HERO,
-  INSTALL,
   OPENOOXML,
   PACKAGES,
   PACKAGES_SECTION,
@@ -33,6 +33,11 @@ export function homepageMarkdown(): string {
       `- [\`${pkg.name}\`](https://www.npmjs.com/package/${pkg.name}) — ${pkg.desc}`,
   ).join("\n");
 
+  const ecosystems = ECOSYSTEMS.map(
+    (eco) =>
+      `- **${eco.name}** (\`${eco.install}\`) — ${eco.desc} [${eco.registry}](${eco.url}), [guide](${eco.docs})`,
+  ).join("\n");
+
   return `# ${HERO.title}
 
 ${HERO.tagline}
@@ -55,9 +60,9 @@ ${PACKAGES_SECTION.prose}
 
 ${packages}
 
-\`\`\`bash
-${INSTALL}
-\`\`\`
+One install line per ecosystem:
+
+${ecosystems}
 
 ## ${FOUNDATION.heading}
 

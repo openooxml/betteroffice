@@ -9,9 +9,9 @@ mod tree;
 mod write;
 mod xml;
 
-pub use chart::chart_space;
+pub use chart::{chart_space, preserved_chart_space};
 pub use package::PreservedPackage;
-pub use read::{SharedStringCells, parse_workbook};
+pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use write::{
     SaveEdits, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
@@ -25,6 +25,9 @@ pub struct ParsedWorkbook {
     pub workbook: Workbook,
     pub active_sheet: SheetId,
     pub package: PreservedPackage,
+    /// Per sheet, the dimensions releases before hidden rows and columns read
+    /// as zero stored. Only a legacy collaboration fingerprint needs these.
+    pub legacy_dimensions: Vec<LegacySheetDimensions>,
 }
 
 /// Parses the model and captures source package state.
@@ -42,6 +45,7 @@ pub fn parse_workbook_with_package(
         workbook: parsed.workbook,
         active_sheet: parsed.active_sheet,
         package,
+        legacy_dimensions: parsed.legacy_dimensions,
     })
 }
 
@@ -79,6 +83,11 @@ pub const MAX_CHART_REFS: usize = 16_384;
 /// upper bound on drawing anchors read from one drawing part, and on charts
 /// attached to one worksheet.
 pub const MAX_CHART_ANCHORS: usize = 4_096;
+
+/// upper bound on the cells one chart part may resolve while being projected
+/// against the live workbook. a projection runs on every frame, so it is far
+/// tighter than the cache a preserved part may already carry.
+pub const MAX_PROJECTED_CACHE_POINTS: usize = 4_096;
 
 /// everything that can go wrong turning bytes into a workbook (or back).
 #[derive(Debug, Clone, PartialEq)]

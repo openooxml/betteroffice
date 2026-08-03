@@ -14,13 +14,15 @@ use yrs::{
 
 use crate::story::{seed_plain_story, seed_story, snapshot_story, validate_story};
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, PresetShapeDraft, SHAPES,
-    SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind,
-    ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
-    SlideSnapshot, TransformReceipt,
+    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN,
+    PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft,
+    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.0;
+/// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 2] = [1.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -635,13 +637,38 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-fn validate_schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<()> {
-    if map_number(meta, txn, "schemaVersion") != Some(SCHEMA_VERSION) {
-        return Err(EditError::InvalidState(
-            "unsupported deck schema version".to_owned(),
-        ));
-    }
+/// Rewrites a hydrated older document into the current schema and stamps it, so
+/// the next snapshot this session writes is a v2 one.
+pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
+    let package = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        if schema_version(&meta, &txn)? == SCHEMA_VERSION {
+            return Ok(());
+        }
+        package_from_meta(&meta, &txn)?
+    };
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
+}
+
+fn schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<f64> {
+    map_number(meta, txn, "schemaVersion")
+        .filter(|version| MIGRATABLE_SCHEMA_VERSIONS.contains(version))
+        .ok_or_else(|| EditError::InvalidState("unsupported deck schema version".to_owned()))
+}
+
+fn validate_schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<()> {
+    schema_version(meta, txn).map(|_| ())
 }
 
 fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPackage> {
@@ -1106,12 +1133,12 @@ mod tests {
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
     #[test]
-    fn schema_version_is_validated_before_package_json() {
+    fn an_unmigratable_schema_version_is_reported_before_package_json() {
         let session = DeckSession::open(FIXTURE, 100).unwrap();
         {
             let mut txn = session.doc.transact_mut();
             let meta = required_map(&txn, META).unwrap();
-            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION - 1.0);
+            meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION + 1.0);
             meta.insert(
                 &mut txn,
                 "packageJson",
@@ -1129,6 +1156,14 @@ mod tests {
             Err(EditError::InvalidState(message))
                 if message == "unsupported deck schema version"
         ));
+    }
+
+    #[test]
+    fn migration_leaves_a_current_document_untouched() {
+        let session = DeckSession::open(FIXTURE, 102).unwrap();
+        let before = session.encode_state_as_update_v1();
+        migrate_doc(&session.doc).unwrap();
+        assert_eq!(session.encode_state_as_update_v1(), before);
     }
 
     #[test]

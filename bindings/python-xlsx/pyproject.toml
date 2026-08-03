@@ -41,7 +41,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://betteroffice.dev"
-Documentation = "https://docs.betteroffice.dev"
+Documentation = "https://docs.betteroffice.dev/docs/python"
 Source = "https://github.com/openooxml/betteroffice"
 Issues = "https://github.com/openooxml/betteroffice/issues"
 

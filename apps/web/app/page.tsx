@@ -6,16 +6,19 @@ import { FadeIn, Reveal } from "./components/motion";
 import {
   CAPABILITIES,
   COLLABORATION,
+  CRATES,
   DEMO,
   DOCS,
+  ECOSYSTEMS,
   EDITORS,
   FOUNDATION,
   HERO,
-  INSTALL,
+  NPM,
   OPENOOXML,
   PACKAGES,
   PACKAGES_SECTION,
   PEERS,
+  PYPI,
   REPO,
   SITE,
   SUITE,
@@ -41,6 +44,8 @@ const cardName =
   "flex items-center justify-between gap-3 font-mono text-[0.8125rem] text-fg";
 const cardLink =
   "inline-flex items-center gap-1 font-mono text-[0.6875rem] text-dim no-underline hover:text-fg";
+const ecoLabel =
+  "mb-2 flex items-baseline gap-3 font-mono text-[0.6875rem] uppercase tracking-[0.16em] text-dim";
 const demoLink =
   "ml-auto inline-flex items-center gap-1 rounded border border-line px-2 py-0.5 font-mono text-[0.6875rem] text-ink no-underline transition-colors hover:border-dim hover:text-fg";
 
@@ -69,7 +74,7 @@ const JSON_LD = {
     name: "OpenOOXML",
     url: OPENOOXML,
   },
-  sameAs: [REPO, "https://www.npmjs.com/org/betteroffice", OPENOOXML],
+  sameAs: [REPO, NPM, CRATES, PYPI, OPENOOXML],
 };
 
 export default function Home() {
@@ -204,7 +209,27 @@ export default function Home() {
               </article>
             ))}
           </div>
-          <Cmd command={INSTALL} />
+          <div className="flex flex-col gap-4">
+            {ECOSYSTEMS.map((eco) => (
+              <div key={eco.name}>
+                <p className={ecoLabel}>
+                  {eco.name}
+                  <a
+                    href={eco.url}
+                    target="_blank"
+                    rel="noopener"
+                    className={cardLink}
+                  >
+                    {eco.registry} <ArrowUpRight size={11} strokeWidth={2} />
+                  </a>
+                  <a href={eco.docs} className={cardLink}>
+                    docs <ArrowUpRight size={11} strokeWidth={2} />
+                  </a>
+                </p>
+                <Cmd command={eco.install} />
+              </div>
+            ))}
+          </div>
         </Reveal>
       </section>
 

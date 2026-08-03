@@ -132,14 +132,19 @@ pub struct HyperlinkRegion {
 }
 
 /// a chart's placement in the frame: the id that addresses it across the wasm
-/// boundary, its full viewport-local rect, the visible part after pane
-/// clipping, and the label a screen reader reads.
+/// boundary, what a screen reader reads, whether the renderer managed to draw
+/// it, its full viewport-local rect and the visible part after pane clipping.
+/// A chart that degraded to a placeholder still gets a region, so it stays an
+/// addressable object on the sheet.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRegion {
     /// package path of the `c:chartSpace` part; unique within a sheet.
     pub id: String,
     pub label: String,
+    /// the chart could not be drawn; a neutral box occupies its rect instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub placeholder: bool,
     pub rect: Rect,
     /// `rect` intersected with the pane band it paints in — the hit area.
     pub clip: Rect,
@@ -289,6 +294,7 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
             .map(|chart| ChartRegion {
                 id: chart.id,
                 label: chart.label,
+                placeholder: chart.placeholder,
                 rect: scale_rect(chart.rect, factor),
                 clip: scale_rect(chart.clip, factor),
                 movable: chart.movable,
@@ -427,6 +433,7 @@ mod tests {
             charts: vec![ChartRegion {
                 id: "xl/charts/chart1.xml".into(),
                 label: "Revenue chart".into(),
+                placeholder: false,
                 rect: Rect {
                     x: 10.0,
                     y: 20.0,

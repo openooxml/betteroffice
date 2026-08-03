@@ -53,6 +53,8 @@ export interface A11yRow {
 
 export interface A11yChart {
   label: string;
+  /** the chart could not be drawn; a neutral box occupies its rect instead. */
+  placeholder: boolean;
 }
 
 /**

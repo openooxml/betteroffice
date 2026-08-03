@@ -18,6 +18,8 @@ pub struct PptxPackage {
     pub layouts: Vec<SlideLayout>,
     pub masters: Vec<SlideMaster>,
     pub themes: Vec<ThemePart>,
+    /// Absent from packages serialized before charts were parsed.
+    #[serde(default)]
     pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,

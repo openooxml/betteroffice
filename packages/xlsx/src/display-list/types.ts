@@ -159,14 +159,21 @@ export interface HyperlinkRegion {
 
 /**
  * A chart's placement in the frame: the id that addresses it across the wasm
- * boundary (the chart part's package path), its full viewport-local rect, the
- * visible part after pane clipping, and the label a screen reader reads.
+ * boundary (the chart part's package path), what a screen reader reads, whether
+ * the renderer managed to draw it, its full viewport-local rect and the visible
+ * part after pane clipping. A chart that degraded to a placeholder still gets a
+ * region, so it stays an addressable object on the sheet.
  *
  * Hand-mirrored from crates/xlsx-render/src/display_list.rs — keep in sync.
  */
 export interface ChartRegion {
   id: string;
   label: string;
+  /**
+   * the chart could not be drawn; a neutral box occupies its rect instead.
+   * skip-serialized at `false` in Rust, so treat absent as `false`.
+   */
+  placeholder?: boolean;
   rect: Rect;
   /** `rect` intersected with the pane band it paints in — the hit area. */
   clip: Rect;

@@ -1,0 +1,112 @@
+---
+title: Rust
+description: The crates.io packages — three format facades and the per-layer crates behind them
+---
+
+The crates are the engines the WebAssembly packages are compiled from, without
+the wasm boundary: parsed models and Yrs state are plain Rust structs, and calls
+do not cross JSON. Use one of the three facades unless you want a single stage of
+the pipeline.
+
+```bash
+cargo add betteroffice-xlsx
+```
+
+## Open, edit, render, save
+
+```rust
+use betteroffice_xlsx::{CalculationOptions, CellRef, RenderOptions, SheetId, Workbook};
+
+let mut workbook = Workbook::open_recalculated(&xlsx_bytes, CalculationOptions::default())?;
+
+workbook.edit_cell(
+    SheetId(0),
+    CellRef::parse_a1("A1").unwrap(),
+    "42",
+    CalculationOptions::default(),
+)?;
+
+let png = workbook.render_sheet(SheetId(0), &RenderOptions::default())?;
+let saved = workbook.save()?;
+```
+
+Saving preserves the source package: parts the model does not represent — charts,
+pivot tables, comments, macros, custom XML and their relationships — are kept,
+and sheets an edit did not touch are copied through byte for byte. A sheet you do
+edit is reserialized from the model, so unmodeled markup on that one sheet is
+lost.
+
+DOCX and PPTX have the same shape:
+
+```rust
+use betteroffice_docx::Document;
+
+let mut document = Document::open(&docx_bytes)?;
+let paragraph_id = document.paragraphs()[0].para_id.clone().unwrap();
+
+document.replace_paragraph_text(&paragraph_id, "Updated in Rust")?;
+let saved = document.save()?;
+```
+
+```rust
+use betteroffice_pptx::Presentation;
+
+let mut presentation = Presentation::open(&pptx_bytes)?;
+let deck = presentation.snapshot()?; // slides, shapes, and text as plain structs
+
+presentation.register_font("Inter", false, false, &font_bytes)?;
+let rendered = presentation.render_slide(0)?; // display list + hit-test metadata
+```
+
+`open_with_limits` on DOCX and PPTX swaps the parser's default resource budget
+for one you supply, which is what a host ingesting untrusted uploads wants. A
+file past any cap is refused, never truncated.
+
+## Rendering
+
+XLSX rasterizes by default: `render_sheet` returns a PNG, and the raster backend
+embeds Carlito to measure and paint cell text. DOCX keeps its raster backend
+behind a feature, because the default build still targets
+`wasm32-unknown-unknown`:
+
+```bash
+cargo add betteroffice-docx --features raster
+```
+
+PPTX has no rasterizer. `render_slide` returns the display list the browser
+editor paints — vector geometry, images, shaped text, caret data — alongside
+hit-test metadata, and it fails until at least one font face has been registered.
+Yrs edits reach that display list but are not projected back into
+PresentationML, so `save` re-zips the parts it retained rather than your edits.
+
+## The facades
+
+| Crate | What it is |
+| --- | --- |
+| `betteroffice-docx` | Typed native API for opening, editing, laying out, and saving DOCX documents. |
+| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks. |
+| `betteroffice-pptx` | Typed native API for opening, editing, collaborating on, and rendering PPTX presentations. |
+
+## The layers
+
+| Crate | What it is |
+| --- | --- |
+| `betteroffice-opc` | The OPC container reader and writer, with zip-bomb and path-traversal limits enforced by construction. Shared by all three formats. |
+| `betteroffice-ooxml-text` | Shared text shaping, measurement, line breaking, and bidirectional text. |
+| `betteroffice-drawingml` | The DrawingML colors, themes, shape models, and preset geometry shared by all three formats. |
+| `betteroffice-docx-parse` | WordprocessingML parsing, typed relationship models, and the canonical document contract. |
+| `betteroffice-docx-layout` | DOCX pagination, line flow, tables, floats, notes, and display lists. |
+| `betteroffice-docx-edit` | The pilcrow-stream Yrs editing schema for DOCX. |
+| `betteroffice-docx-raster` | The tiny-skia backend that paints a DOCX display list to PNG. Never part of the wasm build. |
+| `betteroffice-xlsx-model` | The workbook, worksheet, and cell model: address types, values, styles. IO-free. |
+| `betteroffice-xlsx-parse` | Streaming SpreadsheetML parse and serialize. |
+| `betteroffice-xlsx-calc` | The standalone formula engine: lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376. |
+| `betteroffice-xlsx-ops` | The invertible op log behind undo, redo, address remapping, and agent proposals. |
+| `betteroffice-xlsx-render` | Grid geometry and the target-agnostic display list. |
+| `betteroffice-xlsx-raster` | The tiny-skia backend that paints an XLSX display list to PNG. Never part of the wasm build. |
+| `betteroffice-pptx-parse` | Bounded PresentationML parsing and part-preserving package writes. |
+| `betteroffice-pptx-edit` | The Yrs deck model for PPTX. |
+| `betteroffice-pptx-render` | Slide layout and the PPTX display-list compiler. |
+
+Every crate publishes to crates.io from one release train, so they always share a
+version.
