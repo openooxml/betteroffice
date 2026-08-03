@@ -14,6 +14,10 @@ use crate::geometry::{GridGeometry, emu_to_px};
 
 pub const MAX_CHART_OPS_PER_FRAME: usize = 65_536;
 
+const PLACEHOLDER_FILL: &str = "#f2f2f2";
+const PLACEHOLDER_BORDER: &str = "#bfbfbf";
+const PLACEHOLDER_BORDER_WIDTH: f32 = 1.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedChartAnchor {
     pub rect: PlotRect,
@@ -68,6 +72,7 @@ pub enum RenderError {
         anchor_index: usize,
         error: AnchorError,
     },
+    /// no longer raised: a geometry failure degrades that one chart instead.
     InvalidChartGeometry {
         part: String,
     },
@@ -120,6 +125,21 @@ impl fmt::Display for RenderError {
 }
 
 impl std::error::Error for RenderError {}
+
+impl RenderError {
+    /// Whether the whole frame must be refused. Everything else is a defect in
+    /// one chart and degrades to a placeholder, leaving the sheet renderable.
+    /// Governs only errors handed back by the resolver and by the family and
+    /// feature checks; sink failures, the placeholder's own budget and the a11y
+    /// reservation each decide their disposition where they occur, so adding a
+    /// variant here does not change what those paths do.
+    pub fn refuses_frame(&self) -> bool {
+        matches!(
+            self,
+            Self::ChartOpBudgetExceeded { .. } | Self::DisplayListAllocationFailed
+        )
+    }
+}
 
 pub fn resolve_chart_anchor(
     anchor: ChartAnchor,
@@ -263,12 +283,22 @@ where
 {
     let mut remaining = max_ops;
     for chart in &sheet.charts {
-        let resolved = resolve_chart_anchor(chart.anchor, geometry, frozen_rows, frozen_cols)
-            .map_err(|error| RenderError::InvalidChartAnchor {
-                part: chart.part.clone(),
-                anchor_index: chart.anchor_index,
-                error,
-            })?;
+        let resolved = match resolve_chart_anchor(chart.anchor, geometry, frozen_rows, frozen_cols)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let error = RenderError::InvalidChartAnchor {
+                    part: chart.part.clone(),
+                    anchor_index: chart.anchor_index,
+                    error,
+                };
+                if error.refuses_frame() {
+                    return Err(error);
+                }
+                // no resolved rect, so there is nowhere to put a placeholder.
+                continue;
+            }
+        };
         let Some((rect, clip)) =
             viewport_geometry(resolved, geometry, viewport, frozen_rows, frozen_cols)
         else {
@@ -277,40 +307,179 @@ where
         if remaining == 0 {
             return Err(RenderError::ChartOpBudgetExceeded { max: max_ops });
         }
-        let space = resolver(chart)?;
-        if let Some(family) = unsupported_family(&space) {
-            return Err(RenderError::UnsupportedChartFamily {
-                part: chart.part.clone(),
-                family: family.to_string(),
-            });
-        }
-        if let Some(feature) = unsupported_feature(&space) {
-            return Err(RenderError::UnsupportedChartFeature {
-                part: chart.part.clone(),
-                feature,
-            });
-        }
-        let plot = PlotChart::from(&space);
-        let label = chart_aria_label(&plot);
-        let mut sink = ChartSink {
-            commands,
+        let (label, placeholder) = match plot_one_chart(
+            chart,
+            rect,
             clip,
-            remaining: &mut remaining,
-            failure: None,
+            commands,
+            &mut remaining,
+            max_ops,
+            resolver,
+        ) {
+            ChartOutcome::Drawn(label) => (label, false),
+            ChartOutcome::Degraded(label) => {
+                paint_chart_placeholder(commands, rect, clip, &mut remaining, max_ops)?;
+                (label, true)
+            }
+            ChartOutcome::Fatal(error) => return Err(error),
         };
-        plot_chart_into(&plot, rect, &mut sink);
-        if let Some(failure) = sink.failure {
-            return Err(match failure {
-                SinkFailure::Budget => RenderError::ChartOpBudgetExceeded { max: max_ops },
-                SinkFailure::Geometry => RenderError::InvalidChartGeometry {
-                    part: chart.part.clone(),
-                },
-                SinkFailure::Allocation => RenderError::DisplayListAllocationFailed,
-            });
-        }
         a11y.try_reserve(1)
             .map_err(|_| RenderError::DisplayListAllocationFailed)?;
-        a11y.push(ChartA11yAttrs { label });
+        a11y.push(ChartA11yAttrs { label, placeholder });
+    }
+    Ok(())
+}
+
+/// What one chart contributed to the frame.
+enum ChartOutcome {
+    Drawn(String),
+    Degraded(String),
+    Fatal(RenderError),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plot_one_chart<F>(
+    chart: &SheetChart,
+    rect: PlotRect,
+    clip: Rect,
+    commands: &mut Vec<DrawCmd>,
+    remaining: &mut usize,
+    max_ops: usize,
+    resolver: &mut F,
+) -> ChartOutcome
+where
+    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+{
+    let space = match resolver(chart) {
+        Ok(space) => space,
+        Err(error) if error.refuses_frame() => return ChartOutcome::Fatal(error),
+        Err(_) => return ChartOutcome::Degraded(degraded_label(None)),
+    };
+    let plot = PlotChart::from(&space);
+    let label = chart_aria_label(&plot);
+    if let Some(error) = chart_refusal(chart, &space) {
+        if error.refuses_frame() {
+            return ChartOutcome::Fatal(error);
+        }
+        let known = match &error {
+            RenderError::UnsupportedChartFamily { family, .. } => {
+                unsupported_family_label(&space, family)
+            }
+            _ => label,
+        };
+        return ChartOutcome::Degraded(degraded_label(Some(&known)));
+    }
+    let baseline = commands.len();
+    let mut sink = ChartSink {
+        commands: &mut *commands,
+        clip,
+        remaining: &mut *remaining,
+        failure: None,
+    };
+    plot_chart_into(&plot, rect, &mut sink);
+    let failure = sink.failure;
+    match failure {
+        None => ChartOutcome::Drawn(label),
+        Some(SinkFailure::Budget) => {
+            ChartOutcome::Fatal(RenderError::ChartOpBudgetExceeded { max: max_ops })
+        }
+        Some(SinkFailure::Allocation) => {
+            ChartOutcome::Fatal(RenderError::DisplayListAllocationFailed)
+        }
+        Some(SinkFailure::Geometry) => {
+            commands.truncate(baseline);
+            ChartOutcome::Degraded(degraded_label(Some(&label)))
+        }
+    }
+}
+
+fn chart_refusal(chart: &SheetChart, space: &ChartSpace) -> Option<RenderError> {
+    if let Some(family) = unsupported_family(space) {
+        return Some(RenderError::UnsupportedChartFamily {
+            part: chart.part.clone(),
+            family: family.to_string(),
+        });
+    }
+    unsupported_feature(space).map(|feature| RenderError::UnsupportedChartFeature {
+        part: chart.part.clone(),
+        feature,
+    })
+}
+
+/// Screen-reader label for a chart the frame could not draw.
+fn degraded_label(known: Option<&str>) -> String {
+    format!("{}, not shown", known.unwrap_or("Chart"))
+}
+
+/// `chart_aria_label` announces any family it does not recognize as a column
+/// chart, so a refused family names itself rather than borrowing that guess.
+fn unsupported_family_label(space: &ChartSpace, family: &str) -> String {
+    let title = space
+        .title
+        .as_deref()
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Untitled chart");
+    format!("{title}, {family} chart")
+}
+
+/// Neutral box in the chart's own rect, so an undrawable chart still occupies
+/// its space instead of taking the rest of the frame down with it.
+fn paint_chart_placeholder(
+    commands: &mut Vec<DrawCmd>,
+    rect: PlotRect,
+    clip: Rect,
+    remaining: &mut usize,
+    max_ops: usize,
+) -> Result<(), RenderError> {
+    let (Ok(x), Ok(y), Ok(w), Ok(h)) = (
+        finite_f32(rect.x),
+        finite_f32(rect.y),
+        positive_f32(rect.w),
+        positive_f32(rect.h),
+    ) else {
+        return Ok(());
+    };
+    let mut push = |command: DrawCmd| -> Result<(), RenderError> {
+        let Some(next) = remaining.checked_sub(1) else {
+            return Err(RenderError::ChartOpBudgetExceeded { max: max_ops });
+        };
+        *remaining = next;
+        commands
+            .try_reserve(1)
+            .map_err(|_| RenderError::DisplayListAllocationFailed)?;
+        commands.push(command);
+        Ok(())
+    };
+    push(DrawCmd::FillRect {
+        x,
+        y,
+        w,
+        h,
+        color: PLACEHOLDER_FILL.to_string(),
+        clip: Some(clip),
+    })?;
+    if w <= PLACEHOLDER_BORDER_WIDTH || h <= PLACEHOLDER_BORDER_WIDTH {
+        return Ok(());
+    }
+    let inset = PLACEHOLDER_BORDER_WIDTH / 2.0;
+    let (left, top) = (x + inset, y + inset);
+    let (right, bottom) = (x + w - inset, y + h - inset);
+    for (x1, y1, x2, y2) in [
+        (left, top, right, top),
+        (right, top, right, bottom),
+        (right, bottom, left, bottom),
+        (left, bottom, left, top),
+    ] {
+        push(DrawCmd::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            width: PLACEHOLDER_BORDER_WIDTH,
+            color: PLACEHOLDER_BORDER.to_string(),
+            style: None,
+            clip: Some(clip),
+        })?;
     }
     Ok(())
 }
@@ -889,5 +1058,85 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(unsupported_family(&area), None);
+    }
+
+    #[test]
+    fn only_resource_guards_refuse_the_frame() {
+        let part = || "xl/charts/chart1.xml".to_string();
+        for error in [
+            RenderError::ChartSourceUnavailable { part: part() },
+            RenderError::ChartPartMissing { part: part() },
+            RenderError::ChartParseFailed { part: part() },
+            RenderError::UnsupportedChartFamily {
+                part: part(),
+                family: "treemap".into(),
+            },
+            RenderError::UnsupportedChartFeature {
+                part: part(),
+                feature: "stacked chart grouping",
+            },
+            RenderError::InvalidChartAnchor {
+                part: part(),
+                anchor_index: 0,
+                error: AnchorError::OutsideGrid,
+            },
+            RenderError::InvalidChartGeometry { part: part() },
+        ] {
+            assert!(!error.refuses_frame(), "{error} must degrade one chart");
+        }
+        assert!(RenderError::ChartOpBudgetExceeded { max: 1 }.refuses_frame());
+        assert!(RenderError::DisplayListAllocationFailed.refuses_frame());
+    }
+
+    #[test]
+    fn a_placeholder_cannot_outrun_the_op_budget() {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.charts.push(SheetChart {
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "xl/drawings/drawing1.xml".into(),
+            anchor_index: 0,
+            anchor: ChartAnchor::Absolute {
+                pos: AnchorPos { x: 0, y: 0 },
+                extent: AnchorExtent {
+                    cx: 952_500,
+                    cy: 952_500,
+                },
+            },
+            refs: Vec::new(),
+        });
+        let geometry = GridGeometry::new(&sheet);
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 200.0,
+        };
+        let mut resolver = |chart: &SheetChart| {
+            Err(RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            })
+        };
+        let mut render = |max_ops: usize| {
+            let mut commands = Vec::new();
+            let mut a11y = Vec::new();
+            render_charts_with_budget(
+                &sheet,
+                &geometry,
+                &viewport,
+                0,
+                0,
+                &mut commands,
+                &mut a11y,
+                &mut resolver,
+                max_ops,
+            )
+            .map(|()| (commands.len(), a11y.len()))
+        };
+
+        assert_eq!(
+            render(3).unwrap_err(),
+            RenderError::ChartOpBudgetExceeded { max: 3 }
+        );
+        assert_eq!(render(5).unwrap(), (5, 1));
     }
 }

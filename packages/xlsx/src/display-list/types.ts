@@ -159,6 +159,8 @@ export interface HyperlinkRegion {
 
 export interface ChartA11yAttrs {
   label: string;
+  /** the chart could not be drawn; a neutral box occupies its rect instead. */
+  placeholder?: boolean;
 }
 
 /**

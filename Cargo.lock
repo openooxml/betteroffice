@@ -250,6 +250,7 @@ dependencies = [
  "betteroffice-xlsx-parse",
  "betteroffice-xlsx-raster",
  "betteroffice-xlsx-render",
+ "png",
  "serde",
  "serde_json",
  "sha2",

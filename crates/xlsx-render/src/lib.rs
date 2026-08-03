@@ -237,7 +237,8 @@ struct CellBox {
     clip: Rect,
 }
 
-/// Builds a chart-free display list for one worksheet viewport.
+/// Builds a display list for one worksheet viewport, with every chart drawn as
+/// a placeholder because no chart source is supplied.
 pub fn build_display_list(
     wb: &Workbook,
     sheet: SheetId,
@@ -246,7 +247,7 @@ pub fn build_display_list(
     build_display_list_with_ghosts(wb, sheet, viewport, &[])
 }
 
-/// Builds a chart-free display list with pending edit ghosts.
+/// Builds a chart-placeholder display list with pending edit ghosts.
 pub fn build_display_list_with_ghosts(
     wb: &Workbook,
     sheet: SheetId,

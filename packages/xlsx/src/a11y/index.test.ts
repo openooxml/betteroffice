@@ -97,7 +97,19 @@ describe('buildA11yGrid', () => {
     dl.charts = [{ label: 'Column chart titled Revenue with 2 series' }];
     const g = buildA11yGrid(dl, null, 'Sheet1', strings);
     expect(g.rows[0].cells[0].text).toBe('');
-    expect(g.charts).toEqual([{ label: 'Column chart titled Revenue with 2 series' }]);
+    expect(g.charts).toEqual([
+      { label: 'Column chart titled Revenue with 2 series', placeholder: false },
+    ]);
+  });
+
+  it('carries the placeholder flag for a chart the renderer could not draw', () => {
+    const dl = sampleDisplayList();
+    dl.charts = [
+      { label: 'Revenue, bar chart, 1 series, 4 categories, not shown', placeholder: true },
+      { label: 'Costs, pie chart, 1 series, 2 categories' },
+    ];
+    const g = buildA11yGrid(dl, null, 'Sheet1', strings);
+    expect(g.charts.map((chart) => chart.placeholder)).toEqual([true, false]);
   });
 
   it('addresses columns past Z with bijective letters', () => {

@@ -134,6 +134,9 @@ pub struct HyperlinkRegion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ChartA11yAttrs {
     pub label: String,
+    /// the chart could not be drawn; a neutral box occupies its rect instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub placeholder: bool,
 }
 
 /// a full frame for one viewport, sized in pixels; commands are emitted in a
@@ -402,6 +405,7 @@ mod tests {
             hyperlinks: Vec::new(),
             charts: vec![ChartA11yAttrs {
                 label: "Revenue chart".into(),
+                placeholder: false,
             }],
         }
     }
