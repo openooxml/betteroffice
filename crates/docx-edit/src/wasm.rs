@@ -1457,9 +1457,11 @@ impl EditSession {
 
     /// Region-aware hit test against the resident display list, so no
     /// display-list JSON crosses the boundary. `x`/`y` are page-local px.
-    /// Returns `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}`, or
-    /// `"null"` for a page index outside the frame. A header/footer `pos`
-    /// refers to that header/footer's own document, not the body.
+    /// Returns
+    /// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null,"target":"text"|"image"|"none"}`,
+    /// or `"null"` for a page index outside the frame. A header/footer `pos`
+    /// refers to that header/footer's own document, not the body; `target` is
+    /// what sits under the point, which is what a pointer cursor needs.
     pub fn display_hit_test_regions_json(
         &self,
         page_index: u32,

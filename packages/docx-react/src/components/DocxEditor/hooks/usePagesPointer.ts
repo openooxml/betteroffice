@@ -18,6 +18,11 @@ import type { YrsCellLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { useDragAutoScroll } from '../../../hooks/useDragAutoScroll';
+import {
+  canvasHoverCursor,
+  createCursorPainter,
+  type CanvasHoverCursor,
+} from '../hoverCursor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import type { YrsEditorCommand } from '../yrsCommands';
 
@@ -71,6 +76,8 @@ export interface UsePagesPointerOptions {
 export interface UsePagesPointerReturn {
   handlePagesMouseDown: (e: React.MouseEvent) => void;
   handlePagesMouseMove: (e: React.MouseEvent) => void;
+  /** drops the hover cursor when the pointer leaves the pages */
+  handlePagesMouseLeave: () => void;
   handlePagesClick: (e: React.MouseEvent) => void;
   handlePagesContextMenu: (e: React.MouseEvent) => void;
   handleTableInsertClick: (e: React.MouseEvent) => void;
@@ -213,6 +220,40 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     },
     [displayListQueries, canvasHostRef, pagesContainerRef]
   );
+
+  // written straight to the DOM: hover fires on every pointer move, and
+  // re-rendering the editor for it is not affordable
+  const cursorPainterRef = useRef(createCursorPainter());
+  const paintHoverCursor = useCallback(
+    (cursor: CanvasHoverCursor) => {
+      cursorPainterRef.current(canvasHostRef?.current ?? pagesContainerRef.current, cursor);
+    },
+    [canvasHostRef, pagesContainerRef]
+  );
+  // last point over the pages, so a cursor that outlived what it described can
+  // be re-resolved without waiting for a move. Null while it is elsewhere.
+  const hoverPointRef = useRef<{ x: number; y: number } | null>(null);
+  const resolveHoverCursor = useCallback(
+    (clientX: number, clientY: number) => {
+      hoverPointRef.current = { x: clientX, y: clientY };
+      const hit = readOnly ? null : (resolveCanvasHit(clientX, clientY, false)?.hit ?? null);
+      paintHoverCursor(canvasHoverCursor({ readOnly, hfEditMode }, hit));
+    },
+    [hfEditMode, paintHoverCursor, readOnly, resolveCanvasHit]
+  );
+  // A mode flip changes what is typeable under a pointer that has not moved.
+  // A gesture still holds its own cursor; the release resolves the new mode.
+  useEffect(() => {
+    const point = hoverPointRef.current;
+    if (!point || isDraggingRef.current || yrsCellDraggingRef.current) return;
+    resolveHoverCursor(point.x, point.y);
+  }, [resolveHoverCursor]);
+  // Clears the cursor on unmount only. Keying this on the painter would clear
+  // it on every identity change too — the effect above re-resolves in the same
+  // commit, so nothing shows, but the write is redundant and reads as an exit.
+  const paintHoverCursorRef = useRef(paintHoverCursor);
+  paintHoverCursorRef.current = paintHoverCursor;
+  useEffect(() => () => paintHoverCursorRef.current('default'), []);
 
   const getPositionFromMouse = useCallback(
     (clientX: number, clientY: number): number | null => {
@@ -383,12 +424,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [extendCellSelection, getPositionFromMouse, setTextSelection, updateDragScroll]
   );
 
-  const handleMouseUp = useCallback(() => {
-    isDraggingRef.current = false;
-    yrsCellDragAnchorRef.current = null;
-    yrsCellDraggingRef.current = false;
-    stopDragAutoScroll();
-  }, [stopDragAutoScroll]);
+  const handleMouseUp = useCallback(
+    (e: MouseEvent) => {
+      const wasDragging = isDraggingRef.current || yrsCellDraggingRef.current;
+      isDraggingRef.current = false;
+      yrsCellDragAnchorRef.current = null;
+      yrsCellDraggingRef.current = false;
+      stopDragAutoScroll();
+      // the gesture held its own cursor; a pointer that never moves again
+      // gets its answer here
+      if (wasDragging) resolveHoverCursor(e.clientX, e.clientY);
+    },
+    [resolveHoverCursor, stopDragAutoScroll]
+  );
 
   useEffect(() => {
     window.addEventListener('mousemove', handleMouseMove);
@@ -401,7 +449,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      if (readOnly || isDraggingRef.current || yrsCellDraggingRef.current) return;
+      // a live gesture keeps the cursor it started with, and the release is
+      // what re-reads the point under it
+      if (isDraggingRef.current || yrsCellDraggingRef.current) return;
+      hoverPointRef.current = { x: e.clientX, y: e.clientY };
+      const point = readOnly ? null : resolveCanvasHit(e.clientX, e.clientY, false);
+      paintHoverCursor(canvasHoverCursor({ readOnly, hfEditMode }, point?.hit ?? null));
+      if (readOnly) return;
       const scheduleHide = () => {
         tableInsertHideTimerRef.current ??= setTimeout(() => {
           setTableInsertButton(null);
@@ -413,7 +467,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const overlayTarget = canvasOverlayTarget ?? pagesContainerRef.current?.parentElement;
       const projection = getYrsPositionProjection(yrsRootStory);
       if (!queries || !host || !overlayTarget || !projection) return;
-      const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const pageSize = point ? queries.pageSize(point.pageIndex) : null;
       const pageRect = point ? resolveDisplayPageClientRect(host, queries, point.pageIndex) : null;
       if (!point || !pageSize || !pageRect) {
@@ -463,11 +516,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       getYrsPositionProjection,
       hfEditMode,
       pagesContainerRef,
+      paintHoverCursor,
       readOnly,
       resolveCanvasHit,
       yrsRootStory,
     ]
   );
+
+  const handlePagesMouseLeave = useCallback(() => {
+    // a drag that runs off the pages keeps its cursor, like the move path
+    if (isDraggingRef.current || yrsCellDraggingRef.current) return;
+    hoverPointRef.current = null;
+    paintHoverCursor('default');
+  }, [paintHoverCursor]);
 
   const handleTableInsertClick = useCallback(
     (e: React.MouseEvent) => {
@@ -682,12 +743,14 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   const canvasHandlersRef = useRef({
     mousedown: handlePagesMouseDown,
     mousemove: handlePagesMouseMove,
+    mouseleave: handlePagesMouseLeave,
     click: handlePagesClick,
     contextmenu: handlePagesContextMenu,
   });
   canvasHandlersRef.current = {
     mousedown: handlePagesMouseDown,
     mousemove: handlePagesMouseMove,
+    mouseleave: handlePagesMouseLeave,
     click: handlePagesClick,
     contextmenu: handlePagesContextMenu,
   };
@@ -703,7 +766,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (onCurrentCanvas(e)) canvasHandlersRef.current.mousedown(asReactEvent(e));
     };
     const onMouseMove = (e: MouseEvent) => {
+      // no event fires once the pointer is off the pages, so the move that
+      // leaves them is what drops the hover cursor
       if (onCurrentCanvas(e)) canvasHandlersRef.current.mousemove(asReactEvent(e));
+      else canvasHandlersRef.current.mouseleave();
     };
     const onClick = (e: MouseEvent) => {
       if (onCurrentCanvas(e)) canvasHandlersRef.current.click(asReactEvent(e));
@@ -729,6 +795,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   return {
     handlePagesMouseDown,
     handlePagesMouseMove,
+    handlePagesMouseLeave,
     handlePagesClick,
     handlePagesContextMenu,
     handleTableInsertClick,

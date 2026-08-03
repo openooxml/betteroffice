@@ -76,6 +76,14 @@ export interface ResidentDisplayListQueryEngine {
 export type DisplayListHitRegion = 'body' | 'header' | 'footer';
 
 /**
+ * What a click at a hit point would act on — mirrors `HoverTarget` in hit.rs.
+ * `'text'` is the typeable area (a run's box, or the content box around it),
+ * which is what a pointer cursor keys off; `pos` cannot say, since it resolves
+ * everywhere on a page that carries text.
+ */
+export type DisplayListHoverTarget = 'text' | 'image' | 'none';
+
+/**
  * Region-aware hit result. For `header`/`footer` the position refers to the
  * header/footer document identified by `rId`, NOT the body document — the
  * caller must route the selection to that editor. `pos` is null when the point
@@ -85,6 +93,8 @@ export interface DisplayListRegionHit {
   region: DisplayListHitRegion;
   rId?: string;
   pos: number | null;
+  /** Absent from a wasm build predating it; read that as "not text". */
+  target?: DisplayListHoverTarget;
 }
 
 /**

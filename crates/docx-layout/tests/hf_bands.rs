@@ -1,7 +1,9 @@
 //! Header/footer fixture and interaction gates.
 
 use docx_layout::display_list::{DisplayList, HfKind, build_display_list_json};
-use docx_layout::hit::{HitRegion, hit_test, hit_test_regions, range_rects, range_rects_in_region};
+use docx_layout::hit::{
+    HitRegion, HoverTarget, hit_test, hit_test_regions, range_rects, range_rects_in_region,
+};
 
 const SCENARIOS: &[&str] = &["hf-default-both", "hf-title-page", "hf-even-odd"];
 
@@ -156,6 +158,27 @@ fn hit_test_regions_resolves_bands_and_body() {
 
     // out-of-range page
     assert!(hit_test_regions(&dl, 9, 0.0, 0.0).is_none());
+}
+
+#[test]
+fn hover_target_in_a_band_follows_its_runs_not_the_body_columns() {
+    // hf-default-both: header band y 48..72, footer band y 984..1008, each
+    // paragraph painted from x 96. A band carries no content box, so only its
+    // own runs read as text — the body's must not leak into a band hit.
+    let dl = build("hf-default-both");
+
+    for y in [60.0, 990.0] {
+        assert_eq!(
+            hit_test_regions(&dl, 0, 120.0, y).unwrap().target,
+            HoverTarget::Text,
+            "over the run at y {y}"
+        );
+        assert_eq!(
+            hit_test_regions(&dl, 0, 700.0, y).unwrap().target,
+            HoverTarget::None,
+            "past the run at y {y}"
+        );
+    }
 }
 
 #[test]

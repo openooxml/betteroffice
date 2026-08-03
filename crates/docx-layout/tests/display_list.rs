@@ -26,7 +26,10 @@ use docx_layout::display_list::{
     RevisionKind, ShapePathCommand, StructuralRevisionKind, StructuralRevisionScope, TableCellRef,
     build_display_list_json,
 };
-use docx_layout::hit::{VerticalDirection, caret_rect, hit_test, range_rects, vertical_move};
+use docx_layout::hit::{
+    HoverTarget, VerticalDirection, caret_rect, hit_test, hit_test_regions, range_rects,
+    vertical_move,
+};
 
 const DEMO_FIXTURE: &str =
     include_str!("../../../packages/docx/src/layout/render/__fixtures__/displayList.demo.json");
@@ -234,6 +237,49 @@ fn hit_test_resolves_clicks_to_nearest_text_position() {
 
     // out-of-range page yields nothing
     assert_eq!(hit_test(&dl, 5, 100.0, 100.0), None);
+}
+
+// column-break-in-multi-column: two column boxes, x 96..396 and x 420..720,
+// inside one content box of x 96..720 / y 96..960
+#[test]
+fn hover_target_covers_the_gutter_between_laid_out_columns() {
+    let dl = snapshot("column-break-in-multi-column");
+    let gutter = hit_test_regions(&dl, 0, 408.0, 300.0).unwrap();
+
+    // a click in the gutter lands in one of the columns, so it is typeable
+    assert!(gutter.pos.is_some());
+    assert_eq!(gutter.target, HoverTarget::Text);
+    assert_eq!(
+        hit_test_regions(&dl, 0, 40.0, 300.0).unwrap().target,
+        HoverTarget::None
+    );
+}
+
+// same fixture: an 816x1056 page whose single column box is x 96..720,
+// y 96..960
+#[test]
+fn hover_target_separates_the_typeable_column_from_the_margins() {
+    let dl = build("single-page-multi-paragraph");
+    let target = |x: f64, y: f64| hit_test_regions(&dl, 0, x, y).unwrap().target;
+
+    // over the glyphs, right of a short line, and below the last paragraph
+    assert_eq!(target(120.0, 110.0), HoverTarget::Text);
+    assert_eq!(target(600.0, 110.0), HoverTarget::Text);
+    assert_eq!(target(300.0, 900.0), HoverTarget::Text);
+
+    // every margin, where a click still resolves a position
+    for (x, y) in [
+        (40.0, 110.0),
+        (780.0, 110.0),
+        (300.0, 40.0),
+        (300.0, 1000.0),
+    ] {
+        assert_eq!(target(x, y), HoverTarget::None, "margin ({x},{y})");
+        assert!(
+            hit_test(&dl, 0, x, y).is_some(),
+            "margin ({x},{y}) position"
+        );
+    }
 }
 
 #[test]

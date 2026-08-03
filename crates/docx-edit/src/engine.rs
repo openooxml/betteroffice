@@ -2103,10 +2103,10 @@ mod tests {
         assert_eq!(engine.stats().retained_pages, 1);
     }
 
-    #[test]
-    fn region_layout_operation_stabilizes_and_emits_note_areas() {
-        let engine = EngineSession::new(132);
-        let request = serde_json::json!({
+    /// One 200x120 page (10px margins, so a content box of x 10..190 /
+    /// y 10..110) whose single paragraph carries a footnote reference.
+    fn note_area_layout_request() -> serde_json::Value {
+        serde_json::json!({
             "measured": [{
                 "block": {
                     "kind": "paragraph",
@@ -2152,11 +2152,15 @@ mod tests {
             "notes": {
                 "contents": [{"id": 7, "height": 20}]
             }
-        });
+        })
+    }
 
+    #[test]
+    fn region_layout_operation_stabilizes_and_emits_note_areas() {
+        let engine = EngineSession::new(132);
         let output: serde_json::Value = serde_json::from_str(
             &engine
-                .layout_document_with_regions_json(&request.to_string())
+                .layout_document_with_regions_json(&note_area_layout_request().to_string())
                 .unwrap(),
         )
         .unwrap();
@@ -2170,6 +2174,41 @@ mod tests {
         assert_eq!(page["noteAreas"][0]["columns"], 2);
         assert_eq!(page["noteAreas"][0]["notes"][0]["displayLabel"], "III");
         assert_eq!(engine.stats().pagination_calls, 2);
+    }
+
+    /// Note text is not editable through the display hit test, which answers a
+    /// click in the note band with the BODY position above it. The pointer must
+    /// not invite that click.
+    #[test]
+    fn hover_target_is_absent_over_a_laid_out_note_area() {
+        let engine = EngineSession::new(133);
+        let output = engine
+            .layout_document_with_regions_json(&note_area_layout_request().to_string())
+            .unwrap();
+        engine.build_display_list_json(&output).unwrap();
+        let band = engine
+            .with_display_list(|list| {
+                let area = &list.pages[0].note_areas[0];
+                (
+                    area.y.as_ref().unwrap().as_f64().unwrap(),
+                    area.height.as_ref().unwrap().as_f64().unwrap(),
+                )
+            })
+            .expect("the display list is built");
+        assert!(band.1 > 0.0, "the note band has no height");
+
+        let hit = |y: f64| -> serde_json::Value {
+            serde_json::from_str(&engine.display_hit_test_regions_json(0, 20.0, y).unwrap())
+                .unwrap()
+        };
+        let note = hit(band.0 + band.1 / 2.0);
+        assert_eq!(note["target"], "none");
+        assert!(
+            note["pos"].is_i64(),
+            "the note band still resolves a body position"
+        );
+        // the body line above the band stays typeable
+        assert_eq!(hit(band.0 - 2.0)["target"], "text");
     }
 
     #[test]
@@ -2910,7 +2949,7 @@ mod tests {
             engine
                 .display_hit_test_regions_json(0, 100.0, 100.0)
                 .unwrap(),
-            r#"{"region":"body","pos":null}"#
+            r#"{"region":"body","pos":null,"target":"none"}"#
         );
         assert_eq!(engine.display_range_rects_json(0, 1).unwrap(), "[]");
         assert_eq!(
@@ -2979,5 +3018,17 @@ mod tests {
 
         assert_eq!(hit["region"], "body");
         assert!((target.3..=target.4).contains(&position));
+        assert_eq!(hit["target"], "text");
+
+        // the same line's left margin resolves a position all the same, but is
+        // not typeable area
+        let margin: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_hit_test_regions_json(target.0, 8.0, target.2)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(margin["pos"].is_i64());
+        assert_eq!(margin["target"], "none");
     }
 }

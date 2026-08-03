@@ -271,7 +271,7 @@ export class RustDisplayListSourceError extends Error {
  * `createDisplayListQueries` falls back to the `*Json` path when it is not.
  */
 export interface RustDisplayListQueryEngine {
-  /** region-aware hit test → `{"region","rId"?,"pos"}` or `"null"` JSON */
+  /** region-aware hit test → `{"region","rId"?,"pos","target"}` or `"null"` JSON */
   hitTestRegionsJson(displayList: string, pageIndex: number, x: number, y: number): string;
   /** closest caret position on the adjacent visual line */
   verticalMoveJson?(

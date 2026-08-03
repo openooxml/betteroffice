@@ -106,6 +106,7 @@ export {
   isDisplayListQuerySourceDead,
   onDisplayListQuerySourceFailure,
   type DisplayListHitRegion,
+  type DisplayListHoverTarget,
   type DisplayListImageGeometry,
   type DisplayListParagraphGeometry,
   type DisplayListQueries,

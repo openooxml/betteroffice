@@ -406,8 +406,9 @@ pub fn range_rects_region_json(
 }
 
 /// wasm wrapper over [`hit::hit_test_regions_json`]: region-aware hit test —
-/// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` (or `"null"` for
-/// an out-of-range page). The plain `hit_test_json` export stays body-only.
+/// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null,"target":"text"|"image"|"none"}`
+/// (or `"null"` for an out-of-range page). The plain `hit_test_json` export
+/// stays body-only.
 #[wasm_bindgen]
 pub fn hit_test_regions_json(
     display_list: &str,

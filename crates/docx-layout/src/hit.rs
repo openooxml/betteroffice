@@ -38,8 +38,16 @@
 //! the selection-geometry twin, and [`range_rects`] the body-only wrapper. The
 //! same header/footer part paints on every page that uses it, so a scoped range
 //! query emits one rect set per such page, each stamped with its own page index.
+//!
+//! Resolving a point also reports what it landed on ([`HoverTarget`]), which a
+//! pointer cursor needs and a position cannot give: the nearest-line fallback
+//! answers everywhere on a page carrying any text. The target instead names
+//! what a click would act on, in the pointer path's own order — a selectable
+//! image, then a run's own box, then [`in_typeable_area`].
 
-use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive, TableCellRef};
+use crate::display_list::{
+    DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, Primitive, TableCellRef,
+};
 use serde::Serialize;
 use serde_json::Number;
 use std::collections::{BTreeMap, HashMap};
@@ -689,13 +697,100 @@ pub fn vertical_move(
 /// Region-aware callers use [`hit_test_regions`].
 pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i64> {
     let page = dl.pages.get(page_index)?;
-    resolve_point(&page.primitives, x, y)
+    resolve_point(&page.primitives, in_typeable_area(page, x, y), x, y).pos
+}
+
+/// What a resolved point landed on: the caret position, plus the thing under
+/// the pointer that earned it.
+struct PointResolution {
+    pos: Option<i64>,
+    target: HoverTarget,
+}
+
+/// What sits under a point, for pointer-cursor feedback.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverTarget {
+    /// typeable text — a run's own box, or the typeable area around it
+    #[serde(rename = "text")]
+    Text,
+    /// a selectable picture, which a click selects instead of typing into
+    #[serde(rename = "image")]
+    Image,
+    #[serde(rename = "none")]
+    None,
+}
+
+fn in_bounds(bounds: &DisplayBounds, x: f64, y: f64) -> bool {
+    let left = bounds.x.as_f64().unwrap_or(0.0);
+    let top = bounds.y.as_f64().unwrap_or(0.0);
+    x >= left
+        && x <= left + bounds.width.as_f64().unwrap_or(0.0)
+        && y >= top
+        && y <= top + bounds.height.as_f64().unwrap_or(0.0)
+}
+
+/// Whether a body point lies in the page's typeable area: the authored content
+/// box (so a column gutter counts like the columns it separates), minus note
+/// areas, whose text this path cannot reach. Column boxes are the fallback for
+/// a list without a content box, and neither degrades to the runs alone.
+///
+/// Deliberately blind to content positioned OUTSIDE the content box — a
+/// floating text box in a margin. Its glyphs still read as text (a run's own
+/// box is tested first), but the blank tail of its lines does not, since no
+/// container rect for it exists in the display list. That under-claims, never
+/// over-claims: the cursor is an arrow where a click would still type.
+fn in_typeable_area(page: &DisplayPage, x: f64, y: f64) -> bool {
+    let boxed = match &page.content_bounds {
+        Some(bounds) => in_bounds(bounds, x, y),
+        None => page.column_bounds.iter().any(|c| in_bounds(c, x, y)),
+    };
+    boxed
+        && !page.note_areas.iter().any(|area| {
+            let top = area.y.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            let height = area.height.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+            height > 0.0 && y >= top && y <= top + height
+        })
+}
+
+/// Whether the topmost image under the point is one a click would select.
+/// Mirrors `displayListImages.ts`: reverse paint order, and no document
+/// position means nothing selects it (a picture watermark), so text painted
+/// over such an image stays readable through it.
+fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
+    prims
+        .iter()
+        .rev()
+        .filter_map(|p| match p {
+            Primitive::Image(img) => Some(img),
+            _ => None,
+        })
+        .find(|img| {
+            let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
+            let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
+            x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+        })
+        .is_some_and(|img| img.attrs.doc_start.is_some())
 }
 
 /// The shared point resolver over one primitive list — a page body or a single
-/// header/footer band, both of which use page coordinates.
-fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
+/// header/footer band, both of which use page coordinates. `typeable` says the
+/// point is in the region's typeable area (false for a band, which has no
+/// content box); it widens the target only, never the position.
+fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointResolution {
+    // outranks text for the CURSOR only: the pointer path selects an image
+    // before it asks for a position, so position resolution keeps its own order
+    let image_target = over_selectable_image(prims, x, y);
     let hits = text_hits(prims);
+    // What the point earns once no run claims it. An area with no positionable
+    // text is not typeable whatever it encloses: such a click is answered with
+    // the document's end.
+    let target = if image_target {
+        HoverTarget::Image
+    } else if typeable && !hits.is_empty() {
+        HoverTarget::Text
+    } else {
+        HoverTarget::None
+    };
 
     // 1. direct hit on a text primitive's box, in paint order
     for h in &hits {
@@ -703,11 +798,20 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
             continue;
         }
         if x >= h.x && x <= h.x + h.width && y >= h.top - BAND_SLACK && y <= h.bottom + BAND_SLACK {
-            return Some(position_in_run(h, x));
+            return PointResolution {
+                pos: Some(position_in_run(h, x)),
+                target: if image_target {
+                    HoverTarget::Image
+                } else {
+                    HoverTarget::Text
+                },
+            };
         }
     }
 
-    // 2. direct hit on an image with a doc position (caret parks before it)
+    // 2. direct hit on an image with a doc position (caret parks before it).
+    // Only the topmost image decides the target, so an unselectable one over
+    // this leaves the area's answer standing.
     for p in prims {
         let Primitive::Image(img) = p else { continue };
         let Some(ds) = img.attrs.doc_start else {
@@ -716,12 +820,15 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
         let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
         let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
         if x >= ix && x <= ix + iw && y >= iy && y <= iy + ih {
-            return Some(ds);
+            return PointResolution {
+                pos: Some(ds),
+                target,
+            };
         }
     }
 
     if hits.is_empty() {
-        return None;
+        return PointResolution { pos: None, target };
     }
 
     // 3. nearest line by vertical center distance (blank-line markers included)
@@ -744,13 +851,17 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
 
     // 4. nearest primitive on the line; inside -> interpolate, outside -> snap
     // to the closer edge's position
-    position_for_hits(line.iter().copied(), x)
+    PointResolution {
+        pos: position_for_hits(line.iter().copied(), x),
+        target,
+    }
 }
 
-/// Which part of the page owns a point, and the position inside that part's
-/// document. For `header` / `footer` the position addresses the header/footer
-/// document identified by `rId`, never the body document, so the caller must
-/// route the resulting selection to that editor.
+/// Which part of the page owns a point, the position inside that part's
+/// document, and what sits under the pointer. For `header` / `footer` the
+/// position addresses the header/footer document identified by `rId`, never the
+/// body document, so the caller must route the resulting selection to that
+/// editor.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionHit {
@@ -758,6 +869,7 @@ pub struct RegionHit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r_id: Option<String>,
     pub pos: Option<i64>,
+    pub target: HoverTarget,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -801,25 +913,31 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
     if let Some(h) = &page.header
         && in_band(h)
     {
+        let resolved = resolve_point(&h.primitives, false, x, y);
         return Some(RegionHit {
             region: HitRegion::Header,
             r_id: Some(h.r_id.clone()),
-            pos: resolve_point(&h.primitives, x, y),
+            pos: resolved.pos,
+            target: resolved.target,
         });
     }
     if let Some(f) = &page.footer
         && in_band(f)
     {
+        let resolved = resolve_point(&f.primitives, false, x, y);
         return Some(RegionHit {
             region: HitRegion::Footer,
             r_id: Some(f.r_id.clone()),
-            pos: resolve_point(&f.primitives, x, y),
+            pos: resolved.pos,
+            target: resolved.target,
         });
     }
+    let resolved = resolve_point(&page.primitives, in_typeable_area(page, x, y), x, y);
     Some(RegionHit {
         region: HitRegion::Body,
         r_id: None,
-        pos: resolve_point(&page.primitives, x, y),
+        pos: resolved.pos,
+        target: resolved.target,
     })
 }
 
@@ -1092,8 +1210,8 @@ pub fn range_rects_region_json(
 }
 
 /// `hit_test_regions` over serialized inputs; returns
-/// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` or `"null"`
-/// for an out-of-range page
+/// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null,"target":"text"|"image"|"none"}`
+/// or `"null"` for an out-of-range page
 pub fn hit_test_regions_json(
     display_list: &str,
     page_index: usize,
@@ -1110,6 +1228,203 @@ pub fn hit_test_regions_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(x: f64, baseline: f64, width: f64, doc_start: i64) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "text",
+            "text": "hello",
+            "x": x,
+            "baselineY": baseline,
+            "width": width,
+            "font": "400 16px Calibri",
+            "color": "#000000",
+            "docStart": doc_start,
+            "docEnd": doc_start + 5,
+            "blockId": doc_start,
+            "lineIndex": 0
+        })
+    }
+
+    fn image(x: f64, y: f64, doc_start: Option<i64>) -> serde_json::Value {
+        let mut image = serde_json::json!({
+            "kind": "image", "relId": "rId1", "x": x, "y": y, "w": 60, "h": 40
+        });
+        if let Some(doc_start) = doc_start {
+            image["docStart"] = doc_start.into();
+            image["docEnd"] = (doc_start + 1).into();
+        }
+        image
+    }
+
+    fn page(content: serde_json::Value, primitives: Vec<serde_json::Value>) -> DisplayList {
+        serde_json::from_value(serde_json::json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 500,
+                "height": 500,
+                "contentBounds": content,
+                "primitives": primitives
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A content box at x 80..420 / y 80..420, one run whose band is y 84..104
+    /// (± [`BAND_SLACK`]) over x 100..150, and one inline image at
+    /// x 100..160 / y 200..240.
+    fn hover_fixture() -> DisplayList {
+        page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![run(100.0, 100.0, 50.0, 1), image(100.0, 200.0, Some(10))],
+        )
+    }
+
+    fn target(dl: &DisplayList, x: f64, y: f64) -> HoverTarget {
+        hit_test_regions(dl, 0, x, y).unwrap().target
+    }
+
+    #[test]
+    fn hover_target_reports_the_typeable_area_and_direct_hits() {
+        let dl = hover_fixture();
+
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 120.0, 220.0), HoverTarget::Image);
+        // right of a short line and below the last one — typeable, no primitive
+        assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 120.0, 400.0), HoverTarget::Text);
+        // margins and page background
+        assert_eq!(target(&dl, 40.0, 95.0), HoverTarget::None);
+        assert_eq!(target(&dl, 120.0, 460.0), HoverTarget::None);
+    }
+
+    /// The target discriminates where the position cannot: the nearest-line
+    /// fallback answers over the margins too.
+    #[test]
+    fn hover_target_narrows_a_position_that_resolves_everywhere() {
+        let dl = hover_fixture();
+        let margin = hit_test_regions(&dl, 0, 40.0, 95.0).unwrap();
+        assert!(margin.pos.is_some());
+        assert_eq!(margin.target, HoverTarget::None);
+    }
+
+    /// Column boxes stand in for a list built without a content box; with
+    /// neither, only the runs' own boxes answer.
+    #[test]
+    fn hover_target_without_a_content_box_falls_back() {
+        let mut dl = hover_fixture();
+        dl.pages[0].content_bounds = None;
+        dl.pages[0].column_bounds = serde_json::from_value(
+            serde_json::json!([{"x": 80, "y": 80, "width": 340, "height": 340}]),
+        )
+        .unwrap();
+        assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::Text);
+
+        dl.pages[0].column_bounds.clear();
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::None);
+    }
+
+    /// Content positioned outside the content box — a floating text box in a
+    /// margin — reads as text over its glyphs but not over the blank tail of
+    /// its lines, which no container rect in the display list describes. The
+    /// cursor under-claims there; it must never claim what a click will not do.
+    #[test]
+    fn hover_target_outside_the_content_box_covers_glyphs_only() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![run(100.0, 100.0, 50.0, 1), run(440.0, 450.0, 50.0, 20)],
+        );
+        assert_eq!(target(&dl, 460.0, 445.0), HoverTarget::Text);
+
+        let tail = hit_test_regions(&dl, 0, 520.0, 445.0).unwrap();
+        assert_eq!(tail.target, HoverTarget::None);
+        assert!(
+            tail.pos.is_some(),
+            "the blank tail still resolves a position"
+        );
+    }
+
+    /// The gutter between columns is typeable — a click there lands in one of
+    /// them — so the content box, not the column boxes, defines the area.
+    #[test]
+    fn hover_target_covers_the_gutter_between_columns() {
+        let mut dl = hover_fixture();
+        dl.pages[0].column_bounds = serde_json::from_value(serde_json::json!([
+            {"x": 80, "y": 80, "width": 150, "height": 340},
+            {"x": 270, "y": 80, "width": 150, "height": 340}
+        ]))
+        .unwrap();
+        assert_eq!(target(&dl, 250.0, 300.0), HoverTarget::Text);
+    }
+
+    /// Note text lives outside `primitives` and is not editable through this
+    /// path, so the pointer must not invite a click that lands in the body.
+    #[test]
+    fn hover_target_treats_note_areas_as_holes() {
+        let mut dl = hover_fixture();
+        dl.pages[0].note_areas =
+            serde_json::from_value(serde_json::json!([{"y": 360, "height": 60}])).unwrap();
+        let note = hit_test_regions(&dl, 0, 120.0, 390.0).unwrap();
+        assert_eq!(note.target, HoverTarget::None);
+        // the position it would have handed a click is the body run above it
+        assert!(matches!(note.pos, Some(pos) if (1..=6).contains(&pos)));
+        assert_eq!(target(&dl, 120.0, 340.0), HoverTarget::Text);
+    }
+
+    /// A picture with a document position is a click target whatever its wrap
+    /// mode, and outranks text painted under it — the pointer path selects one
+    /// before it asks for a position.
+    #[test]
+    fn hover_target_prefers_a_selectable_image_over_the_text_it_covers() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![run(100.0, 100.0, 50.0, 1), image(100.0, 80.0, Some(10))],
+        );
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Image);
+    }
+
+    /// A picture with no document position cannot be selected (a watermark),
+    /// so text painted over it stays typeable.
+    #[test]
+    fn hover_target_reads_through_an_unpositioned_image() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![image(80.0, 80.0, None), run(100.0, 100.0, 50.0, 1)],
+        );
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 120.0, 110.0), HoverTarget::Text);
+    }
+
+    /// Only the TOPMOST image decides, as the click does: a watermark over a
+    /// positioned picture leaves nothing to select, and the reverse selects.
+    #[test]
+    fn hover_target_takes_the_topmost_of_stacked_images() {
+        let area = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let covered = page(
+            area.clone(),
+            vec![image(100.0, 200.0, Some(10)), image(80.0, 180.0, None)],
+        );
+        assert_eq!(target(&covered, 120.0, 220.0), HoverTarget::None);
+
+        let on_top = page(
+            area,
+            vec![image(80.0, 180.0, None), image(100.0, 200.0, Some(10))],
+        );
+        assert_eq!(target(&on_top, 120.0, 220.0), HoverTarget::Image);
+    }
+
+    /// With nothing positionable on the page a click jumps the caret to the
+    /// document's end, so the area must not advertise typing.
+    #[test]
+    fn hover_target_ignores_an_area_with_no_positionable_text() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![image(100.0, 200.0, None)],
+        );
+        let hit = hit_test_regions(&dl, 0, 300.0, 300.0).unwrap();
+        assert_eq!(hit.pos, None);
+        assert_eq!(hit.target, HoverTarget::None);
+    }
 
     #[test]
     fn vertical_move_materializes_hits_only_for_neighboring_pages() {

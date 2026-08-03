@@ -42,9 +42,10 @@ export function preloadLayoutWasm(input?: WasmAsyncInput): Promise<void> {
 
 /**
  * Region-aware hit test over a display list: page-local point in,
- * `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` (or `"null"` for
- * an out-of-range page) JSON out. Header/footer hits identify the HF doc
- * by `rId`; their `pos` refers to that doc, not the body doc.
+ * `{"region":"body"|"header"|"footer","rId"?,"pos":n|null,"target":"text"|"image"|"none"}`
+ * (or `"null"` for an out-of-range page) JSON out. Header/footer hits identify
+ * the HF doc by `rId`; their `pos` refers to that doc, not the body doc.
+ * `target` is what sits under the point, which is what a pointer cursor needs.
  */
 export function hitTestRegionsJson(
   displayList: string,
