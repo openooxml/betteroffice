@@ -114,12 +114,15 @@ beforeAll(async () => {
   linked = fixtureFrom(withHyperlink(source));
 });
 
-afterAll(() => {
+afterAll(async () => {
   HTMLCanvasElement.prototype.getContext = originalGetContext;
   window.open = originalOpen;
   for (const [property, descriptor] of originalLayout) {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, property, descriptor);
   }
+  // last: bun shares one process across test files, and happy-dom's fetch
+  // rejects the file: urls other suites initialise their wasm from.
+  await GlobalRegistrator.unregister();
 });
 
 afterEach(() => {
