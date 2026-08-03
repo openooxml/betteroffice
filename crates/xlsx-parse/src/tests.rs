@@ -2003,7 +2003,10 @@ fn refuses_a_moved_reference_whose_cache_cannot_be_regenerated() {
     for (formula, reason) in [
         ("Missing!$B$2:$B$4", "sheet this workbook does not hold"),
         ("Data!$A$2:$B$4", "more than one row and column"),
-        ("(Data!$B$2:$B$4,Data!$D$2:$D$4)", "is not one area"),
+        (
+            "(Data!$B$2:$B$4,Data!$D$2:$D$4)",
+            "is not a single same-workbook area",
+        ),
         ("Data!$B$2:$B$1000000", "more points than a chart can carry"),
     ] {
         refs[2].formula = formula.to_owned();
@@ -2845,4 +2848,305 @@ fn refuses_to_patch_a_chart_part_that_no_longer_matches() {
             if message.contains("holds 3 references but the model carries 2")),
         "{error:?}"
     );
+}
+
+/// A workbook holding the cells [`CHART`] and [`imported_chart`] reference.
+fn imported_source() -> Workbook {
+    let mut sheet = xlsx_model::Sheet::new("Data");
+    for (a1, text) in [("B1", "Live name"), ("A2", "Spring"), ("A3", "Summer")] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Text {
+                    value: text.to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    for (a1, value) in [("B2", 100.0), ("B3", 200.0)] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    Workbook {
+        sheets: vec![sheet],
+        ..Workbook::default()
+    }
+}
+
+/// One imported `c:ser` whose category and value references are the caller's,
+/// with caches that disagree with the cells so a refresh is visible.
+fn imported_chart(categories: &str, values: &str) -> Vec<u8> {
+    format!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>{categories}</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>Stale one</c:v></c:pt><c:pt idx="1"><c:v>Stale two</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>{values}</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    )
+    .into_bytes()
+}
+
+fn imported_series(part: &[u8], workbook: &Workbook) -> ooxml_drawingml::chart::ChartSeries {
+    crate::chart::preserved_chart_space(part, workbook, "Data", &workbook.styles.theme)
+        .unwrap()
+        .plot_groups[0]
+        .series[0]
+        .clone()
+}
+
+/// An imported chart replayed the cache the file was saved with, so a cell
+/// edit never reached it. Every reference this crate can resolve now comes
+/// from the grid instead.
+#[test]
+fn an_imported_chart_projects_the_cells_its_references_name() {
+    let series = imported_series(
+        &imported_chart("Data!$A$2:$A$3", "Data!$B$2:$B$3"),
+        &imported_source(),
+    );
+    assert_eq!(series.values, vec![100.0, 200.0]);
+    assert_eq!(
+        series.categories,
+        vec!["Spring".to_owned(), "Summer".to_owned()]
+    );
+}
+
+/// A series is the unit a renderer pairs values and categories within, so it
+/// is the unit a projection accepts or declines whole. Refreshing resolvable
+/// categories over authored values would draw live labels against numbers they
+/// never belonged to.
+#[test]
+fn one_unresolvable_reference_declines_its_whole_series() {
+    let series = imported_series(
+        &imported_chart("Data!$A$2:$A$3", "Revenues"),
+        &imported_source(),
+    );
+    assert_eq!(series.values, vec![1.0, 2.0]);
+    assert_eq!(
+        series.categories,
+        vec!["Stale one".to_owned(), "Stale two".to_owned()]
+    );
+}
+
+/// Every reference form this crate cannot resolve keeps the values the file
+/// was authored with, because a wrong number is worse than a stale one.
+#[test]
+fn an_imported_chart_keeps_a_cache_it_cannot_resolve() {
+    let workbook = imported_source();
+    for (values, reason) in [
+        ("(Data!$B$2,Data!$B$3)", "a union"),
+        ("Revenues", "a defined name"),
+        ("[1]Data!$B$2:$B$3", "an external book"),
+        ("Data!$A$2:$B$3", "a two-dimensional area"),
+        ("Elsewhere!$B$2:$B$3", "a sheet this workbook does not hold"),
+        ("Data!$D$2:$D$3", "cells the grid reads as empty"),
+    ] {
+        let series = imported_series(&imported_chart("Data!$A$2:$A$3", values), &workbook);
+        assert_eq!(series.values, vec![1.0, 2.0], "{reason}");
+    }
+}
+
+/// A part whose reference vocabulary is not the one this crate reads declines
+/// live projection whole: the references beside a pivot, external or filtered
+/// source do not mean what a plain `c:f` means.
+#[test]
+fn a_chart_with_a_foreign_reference_vocabulary_is_never_projected() {
+    let workbook = imported_source();
+    for (extra, reason) in [
+        (
+            r#"<c:pivotSource><c:name>P</c:name></c:pivotSource>"#,
+            "a pivot source",
+        ),
+        (
+            r#"<c:externalData xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId9"/>"#,
+            "an external data part",
+        ),
+        (
+            r#"<c:extLst><c:ext><c15:filteredSeriesTitle xmlns:c15="x"><c15:tx><c15:strRef><c15:sqref>A1</c15:sqref></c15:strRef></c15:tx></c15:filteredSeriesTitle></c:ext></c:extLst>"#,
+            "a filtered-series sqref",
+        ),
+    ] {
+        let part = String::from_utf8(imported_chart("Data!$A$2:$A$3", "Data!$B$2:$B$3"))
+            .unwrap()
+            .replace("<c:chart>", &format!("<c:chart>{extra}"));
+        let series = imported_series(part.as_bytes(), &workbook);
+        assert_eq!(series.values, vec![1.0, 2.0], "{reason}");
+        assert_eq!(
+            series.categories,
+            vec!["Stale one".to_owned(), "Stale two".to_owned()],
+            "{reason}"
+        );
+    }
+}
+
+/// Live projection is a render-time concern. The bytes a save writes back must
+/// still be the bytes that were imported.
+#[test]
+fn projecting_an_imported_chart_live_does_not_change_what_a_save_writes() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut model = parsed.workbook.clone();
+    for (a1, text) in [("A2", "Live"), ("B1", "Series")] {
+        model.sheets[0].set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Text {
+                    value: text.to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 4242.0 },
+            ..Cell::default()
+        },
+    );
+    let space =
+        crate::chart::preserved_chart_space(CHART, &model, "Data", &model.styles.theme).unwrap();
+    assert_eq!(space.plot_groups[0].series[0].values, vec![4242.0]);
+    assert_eq!(space.plot_groups[0].series[0].categories, vec!["Live"]);
+
+    let saved = serialize_workbook_with_package(&model, &parsed.package).unwrap();
+    let written = saved
+        .iter()
+        .find(|(path, _)| path == "xl/charts/chart1.xml")
+        .map(|(_, bytes)| bytes.as_slice())
+        .unwrap();
+    assert_eq!(written, CHART);
+}
+
+/// A three-point source, so a hole can sit between two live points.
+fn holed_source(middle: CellValue) -> Workbook {
+    let mut sheet = xlsx_model::Sheet::new("Data");
+    for (a1, text) in [("A2", "Q1"), ("A3", "Q2"), ("A4", "Q3")] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Text {
+                    value: text.to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    for (a1, value) in [("B2", 12.0), ("B4", 9.0)] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.set_cell(
+        CellRef::parse_a1("B3").unwrap(),
+        Cell {
+            value: middle,
+            ..Cell::default()
+        },
+    );
+    Workbook {
+        sheets: vec![sheet],
+        ..Workbook::default()
+    }
+}
+
+fn three_point_chart() -> Vec<u8> {
+    br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>12</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt><c:pt idx="2"><c:v>9</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec()
+}
+
+/// A hole between two live points must never be projected. The shared cache
+/// parser collects points positionally and ignores `@idx`, so a sparse cache
+/// slides every later point left: the value after the hole would be drawn in
+/// the wrong slot, under the wrong category label.
+#[test]
+fn an_interior_hole_is_never_projected() {
+    for (middle, reason) in [
+        (CellValue::Empty, "a cleared cell"),
+        (
+            CellValue::Text {
+                value: "n/a".to_owned(),
+            },
+            "text where a number was",
+        ),
+        (
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+            "an =NA() result",
+        ),
+    ] {
+        let series = imported_series(&three_point_chart(), &holed_source(middle));
+        assert_eq!(
+            series.values,
+            vec![12.0, 7.0, 9.0],
+            "{reason} must keep the authored cache rather than slide points left"
+        );
+        assert_eq!(
+            series.categories,
+            vec!["Q1".to_owned(), "Q2".to_owned(), "Q3".to_owned()],
+            "{reason}"
+        );
+    }
+}
+
+/// A hole in the categories shifts labels under values the same way, so it
+/// declines too — and it declines the whole series, not just its own cache,
+/// because live labels over authored numbers is a pairing no version of the
+/// file ever had.
+#[test]
+fn an_interior_category_hole_declines_the_whole_series() {
+    let mut workbook = holed_source(CellValue::Number { value: 7.0 });
+    workbook.sheets[0].set_cell(CellRef::parse_a1("A3").unwrap(), Cell::default());
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 4242.0 },
+            ..Cell::default()
+        },
+    );
+    let series = imported_series(&three_point_chart(), &workbook);
+    assert_eq!(series.categories, vec!["Q1", "Q2", "Q3"]);
+    assert_eq!(series.values, vec![12.0, 7.0, 9.0]);
+}
+
+/// A hole after the last live point shifts nothing, so it still projects.
+#[test]
+fn a_trailing_hole_still_projects() {
+    let mut workbook = holed_source(CellValue::Number { value: 7.0 });
+    workbook.sheets[0].set_cell(CellRef::parse_a1("B4").unwrap(), Cell::default());
+    let series = imported_series(&three_point_chart(), &workbook);
+    assert_eq!(series.values, vec![12.0, 7.0]);
+}
+
+/// The save's per-reference cache bound is its own, far larger than the bound a
+/// render projects under, and it is charged per reference rather than across
+/// the part. Narrowing either — which a shared budget would do silently — is
+/// what this pins: a range over the projection bound but under the save bound
+/// must still save, and two such references must both save.
+#[test]
+fn a_save_keeps_its_own_cache_bound_rather_than_the_projections() {
+    let over_projection = crate::MAX_PROJECTED_CACHE_POINTS + 1;
+    assert!(over_projection < crate::chart::MAX_CACHE_POINTS as usize);
+
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    let wide = format!("Data!$B$2:$B${}", over_projection + 1);
+    refs[1].formula = wide.clone();
+    refs[2].formula = wide;
+    let patched = patch_refs(CHART, &refs).expect("a save carries its own, larger bound");
+    assert!(
+        String::from_utf8_lossy(&patched)
+            .contains(&format!("<c:ptCount val=\"{over_projection}\"/>"))
+    );
+
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    let each = 4_000;
+    assert!(each * 2 > crate::MAX_PROJECTED_CACHE_POINTS);
+    refs[1].formula = format!("Data!$A$2:$A${}", each + 1);
+    refs[2].formula = format!("Data!$B$2:$B${}", each + 1);
+    patch_refs(CHART, &refs).expect("the save bound is charged per reference, not across the part");
 }

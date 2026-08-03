@@ -9,7 +9,7 @@ mod tree;
 mod write;
 mod xml;
 
-pub use chart::chart_space;
+pub use chart::{chart_space, preserved_chart_space};
 pub use package::PreservedPackage;
 pub use read::{SharedStringCells, parse_workbook};
 pub use write::{
@@ -79,6 +79,11 @@ pub const MAX_CHART_REFS: usize = 16_384;
 /// upper bound on drawing anchors read from one drawing part, and on charts
 /// attached to one worksheet.
 pub const MAX_CHART_ANCHORS: usize = 4_096;
+
+/// upper bound on the cells one chart part may resolve while being projected
+/// against the live workbook. a projection runs on every frame, so it is far
+/// tighter than the cache a preserved part may already carry.
+pub const MAX_PROJECTED_CACHE_POINTS: usize = 4_096;
 
 /// everything that can go wrong turning bytes into a workbook (or back).
 #[derive(Debug, Clone, PartialEq)]

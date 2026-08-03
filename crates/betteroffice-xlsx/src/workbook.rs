@@ -1309,8 +1309,10 @@ impl Workbook {
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let source_package = self.source_package.as_ref();
         let theme = &self.model.styles.theme;
+        let model = &self.model;
+        let owner = sheet_ref.name.clone();
         build_display_list_with_charts_and_ghosts(&self.model, sheet, viewport, &ghosts, |chart| {
-            resolve_chart_space(source_package, theme, chart)
+            resolve_chart_space(source_package, theme, model, &owner, chart)
         })
         .map_err(Error::from)
     }
@@ -1361,9 +1363,11 @@ impl Workbook {
         validate_display_region(sheet_ref, &viewport)?;
         let source_package = self.source_package.as_ref();
         let theme = &self.model.styles.theme;
+        let model = &self.model;
+        let owner = sheet_ref.name.clone();
         let display_list =
             build_display_list_with_charts(&self.model, sheet, &viewport, |chart| {
-                resolve_chart_space(source_package, theme, chart)
+                resolve_chart_space(source_package, theme, model, &owner, chart)
             })?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -2686,9 +2690,14 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
     Ok(())
 }
 
+/// The `ChartSpace` both renderers draw. The part supplies the chart's shape;
+/// the references inside it are resolved against the current workbook, so an
+/// ordinary cell edit reaches the chart without a save.
 fn resolve_chart_space(
     package: Option<&xlsx_parse::PreservedPackage>,
     theme: &xlsx_model::Theme,
+    model: &WorkbookModel,
+    owner: &str,
     chart: &SheetChart,
 ) -> std::result::Result<ChartSpace, RenderError> {
     let package = package.ok_or_else(|| RenderError::ChartSourceUnavailable {
@@ -2699,8 +2708,10 @@ fn resolve_chart_space(
         .ok_or_else(|| RenderError::ChartPartMissing {
             part: chart.part.clone(),
         })?;
-    xlsx_parse::chart_space(bytes, theme).ok_or_else(|| RenderError::ChartParseFailed {
-        part: chart.part.clone(),
+    xlsx_parse::preserved_chart_space(bytes, model, owner, theme).ok_or_else(|| {
+        RenderError::ChartParseFailed {
+            part: chart.part.clone(),
+        }
     })
 }
 

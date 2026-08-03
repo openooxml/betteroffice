@@ -4401,3 +4401,139 @@ fn the_demo_showcase_workbook_renders_its_chart() {
         "the revenue series colour should appear in the frame"
     );
 }
+
+/// A package whose only chart came from another producer: this crate models
+/// its anchor and references but owns none of its markup.
+fn imported_chart_xlsx(categories: &str, values: &str) -> Vec<u8> {
+    let chart = format!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Revenue</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>{categories}</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>{values}</c:f><c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>12</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt><c:pt idx="2"><c:v>9</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:delete val="0"/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:delete val="0"/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#
+    );
+    let worksheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="B1" t="inlineStr"><is><t>Revenue</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Q1</t></is></c><c r="B2"><v>12</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Q2</t></is></c><c r="B3"><v>7</v></c></row><row r="4"><c r="A4" t="inlineStr"><is><t>Q3</t></is></c><c r="B4"><v>9</v></c></row></sheetData><drawing r:id="rIdDrawing"/></worksheet>"#;
+    let parts = vec![
+        (
+            "xl/workbook.xml".to_owned(),
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/worksheets/sheet1.xml".to_owned(), worksheet.as_bytes().to_vec()),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "xl/drawings/drawing1.xml".to_owned(),
+            br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>15</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Imported"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#.to_vec(),
+        ),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/charts/chart1.xml".to_owned(), chart.into_bytes()),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn chart_viewport() -> Viewport {
+    Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 900.0,
+        height: 600.0,
+    }
+}
+
+/// Everything the display list draws for a sheet except its cell text, so a
+/// comparison sees the chart rather than the edited cell's own label.
+fn plotted(workbook: &Workbook) -> Vec<DrawCmd> {
+    workbook
+        .display_list_for(SheetId(0), &chart_viewport())
+        .unwrap()
+        .commands
+        .into_iter()
+        .filter(|command| !matches!(command, DrawCmd::Text { .. }))
+        .collect()
+}
+
+fn chart_part(saved: &[u8]) -> Vec<u8> {
+    ooxml_opc::unzip_parts(saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "xl/charts/chart1.xml")
+        .map(|(_, bytes)| bytes)
+        .expect("the chart part survives a save")
+}
+
+/// A viewport holding the chart and nothing else. The whole-sheet viewport
+/// also contains the edited cell, whose own repaint would make a pixel
+/// comparison pass with the projection switched off entirely.
+fn chart_only_viewport(workbook: &Workbook) -> Viewport {
+    let sheet = workbook.model().sheet(SheetId(0)).unwrap();
+    let geometry = GridGeometry::new(sheet);
+    Viewport {
+        x: geometry.col_x(3),
+        y: 0.0,
+        width: 520.0,
+        height: 320.0,
+    }
+}
+
+fn bump_b2(workbook: &mut Workbook) {
+    workbook
+        .edit_cells(
+            SheetId(0),
+            &[CellInput {
+                cell: cell("B2"),
+                input: "100".to_owned(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+/// The second P1: an imported chart replayed its stored cache, so an ordinary
+/// cell edit never reached it. It must now follow the cells in both backends,
+/// while the bytes a save writes back stay exactly what was imported.
+#[test]
+#[cfg(feature = "raster")]
+fn an_imported_chart_follows_a_cell_edit_without_a_save() {
+    let source = imported_chart_xlsx("Data!$A$2:$A$4", "Data!$B$2:$B$4");
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts.len(), 1);
+
+    let plot = chart_only_viewport(&workbook);
+    let before = plotted(&workbook);
+    let before_png = workbook.render_png_for(SheetId(0), &plot).unwrap();
+    bump_b2(&mut workbook);
+    let after_png = workbook.render_png_for(SheetId(0), &plot).unwrap();
+
+    assert_ne!(before, plotted(&workbook));
+    assert_ne!(before_png.bytes, after_png.bytes);
+
+    // rendering live never rewrites the part: only the formulas moving does.
+    assert_eq!(chart_part(&workbook.save().unwrap()), chart_part(&source));
+}
+
+/// A reference this crate cannot resolve safely keeps the values the file was
+/// authored with. A wrong number is worse than a stale one.
+#[test]
+fn an_imported_chart_keeps_a_cache_it_cannot_resolve_safely() {
+    for (categories, values, reason) in [
+        ("Data!$A$2:$A$4", "(Data!$B$2:$B$3,Data!$B$4)", "a union"),
+        ("Data!$A$2:$A$4", "Revenues", "a defined name"),
+        ("Data!$A$2:$A$4", "[1]Data!$B$2:$B$4", "an external book"),
+        ("Data!$A$2:$A$4", "Data!$A$2:$B$4", "a two-dimensional area"),
+        (
+            "Data!$A$2:$A$4",
+            "Data!$D$2:$D$4",
+            "cells the grid reads as empty",
+        ),
+    ] {
+        let mut workbook = Workbook::open(&imported_chart_xlsx(categories, values)).unwrap();
+        let before = plotted(&workbook);
+        bump_b2(&mut workbook);
+        assert_eq!(before, plotted(&workbook), "{reason} must keep its cache");
+    }
+}
