@@ -1299,17 +1299,24 @@ function XlsxEditorContent({
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!selection || editing) return;
+      if (!selection) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) return;
+      const dismissesEditor = editing != null;
+      if (dismissesEditor) {
+        if (editorInputRef.current?.contains(e.target as Node)) return;
+        commitEditor();
+      }
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
       else setSelection(selectionAt(addr));
-      clickStartRef.current = addr;
+      // no click start: a press that dismissed the editor must not also follow a
+      // hyperlink in the cell it selects.
+      clickStartRef.current = dismissesEditor ? null : addr;
       draggingRef.current = true;
       setDragging(true);
       focusContainer();
     },
-    [editing, selection, pointToCell, limits, focusContainer]
+    [editing, selection, pointToCell, limits, focusContainer, commitEditor]
   );
 
   const onMouseMove = useCallback(
