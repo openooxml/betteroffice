@@ -31,8 +31,12 @@ const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
+/// The schema each feature first appeared in. These are frozen: gating a
+/// feature on the current version instead would silently reclassify the
+/// newest schema as predating it the moment the current version moves on.
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
+const CHARTS_SCHEMA_VERSION: i64 = 6;
 const SCHEMA_VERSION: i64 = 6;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
@@ -96,22 +100,32 @@ struct WorkbookBase {
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
+    hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
 }
 
 impl WorkbookBase {
-    /// A legacy fingerprint hashes no chart state, so it cannot prove two
-    /// bases carry the same charts. A charted workbook therefore registers a
-    /// fingerprint only for the current schema.
+    /// A legacy fingerprint hashes no chart state, so a charted workbook pairs
+    /// with one on its other content alone and keeps the charts it parsed. It
+    /// is the only reading of a state written before charts were shared, and
+    /// refusing it would strand every snapshot an earlier release persisted.
+    #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, String> {
+        Self::from_model_with_legacy_dimensions(model, &[])
+    }
+
+    /// `legacy_dimensions` are the row heights and column widths releases
+    /// before hidden rows and columns read as zero stored, per sheet. Those
+    /// maps are hashed at every schema, so a peer that persisted its state
+    /// under one of those releases is only recognisable against them.
+    fn from_model_with_legacy_dimensions(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    ) -> Result<Self, String> {
         let (fingerprint, bootstrap_client_id) = fingerprint_model(model)?;
-        let charted = model.sheets.iter().any(|sheet| !sheet.charts.is_empty());
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            if charted && version < SCHEMA_VERSION {
-                continue;
-            }
             let (version_fingerprint, _) = fingerprint_model_for_schema(model, version)?;
             fingerprints.insert(version, vec![version_fingerprint]);
         }
@@ -119,6 +133,21 @@ impl WorkbookBase {
             let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
             if !version_3.contains(&defined_names_v3) {
                 version_3.push(defined_names_v3);
+            }
+        }
+        if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+                let (legacy_fingerprint, _) = fingerprint_model_for_schema(&legacy, version)?;
+                let accepted = fingerprints.entry(version).or_default();
+                if !accepted.contains(&legacy_fingerprint) {
+                    accepted.push(legacy_fingerprint);
+                }
+            }
+            if let Some(version_3) = fingerprints.get_mut(&3) {
+                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true)?;
+                if !version_3.contains(&defined_names_v3) {
+                    version_3.push(defined_names_v3);
+                }
             }
         }
         Ok(Self {
@@ -138,6 +167,7 @@ impl WorkbookBase {
                 .iter()
                 .map(|sheet| sheet.charts.clone())
                 .collect(),
+            hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
         })
@@ -172,6 +202,20 @@ pub(crate) struct WorkbookStructure {
     shared_types: BTreeMap<String, SheetSharedTypes>,
 }
 
+impl WorkbookStructure {
+    /// Whether two structures describe the same workbook, disregarding the Yrs
+    /// branch identities. Replacing a bootstrap rebuilds every shared type, so
+    /// those always differ and cannot say whether the structure itself did.
+    pub(crate) fn describes_same_workbook(&self, other: &Self) -> bool {
+        self.sheet_keys == other.sheet_keys
+            && self.sheet_names == other.sheet_names
+            && self.freeze_panes == other.freeze_panes
+            && self.hyperlinks == other.hyperlinks
+            && self.charts == other.charts
+            && self.merges == other.merges
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SheetSharedTypes {
     sheet: BranchID,
@@ -179,6 +223,16 @@ struct SheetSharedTypes {
     contents: BranchID,
     row_heights: BranchID,
     styles: BranchID,
+}
+
+/// What a replica can do with an update offered as its whole state.
+pub(crate) enum SnapshotAdoption {
+    /// Not a whole document, or this replica already holds more than its own
+    /// bootstrap. The update is an ordinary one; merge it.
+    NotApplicable,
+    /// A whole document this replica cannot take on.
+    Incompatible(String),
+    Replacement(Box<WorkbookAuthority>),
 }
 
 pub(crate) struct StagedUpdate {
@@ -233,22 +287,34 @@ pub(crate) struct WorkbookAuthority {
 }
 
 impl WorkbookAuthority {
-    pub(crate) fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, None)
+    #[cfg(test)]
+    fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
+        Self::from_model_internal(model, None, &[])
     }
 
-    pub(crate) fn from_model_with_client_id(
+    #[cfg(test)]
+    fn from_model_with_client_id(
         model: &WorkbookModel,
         client_id: u64,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, Some(client_id))
+        Self::from_model_internal(model, Some(client_id), &[])
+    }
+
+    pub(crate) fn from_source(
+        model: &WorkbookModel,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    ) -> Result<Self, AuthorityError> {
+        Self::from_model_internal(model, client_id, legacy_dimensions)
     }
 
     fn from_model_internal(
         model: &WorkbookModel,
         client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
     ) -> Result<Self, AuthorityError> {
-        let base = WorkbookBase::from_model(model).map_err(AuthorityError::InvalidState)?;
+        let base = WorkbookBase::from_model_with_legacy_dimensions(model, legacy_dimensions)
+            .map_err(AuthorityError::InvalidState)?;
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
@@ -356,6 +422,73 @@ impl WorkbookAuthority {
         let state_vector = decode_state_vector_v1(remote_state_vector)
             .map_err(AuthorityError::InvalidStateVector)?;
         Ok(self.doc.transact().encode_diff_v1(&state_vector))
+    }
+
+    /// The replica this one would become by taking a persisted snapshot as its
+    /// whole state and upgrading it to the current schema.
+    ///
+    /// Merging cannot restore a snapshot an earlier release wrote. The
+    /// bootstrap client ID is the head of the base fingerprint, which hashes
+    /// the schema version, so a bootstrap this build seeds never dedupes
+    /// against the one such a snapshot carries: the two bases double up and
+    /// the survivor is whichever client ID sorts higher. A snapshot supersedes
+    /// an untouched bootstrap of the same workbook whatever schema it was
+    /// written at, and where the bootstraps do agree the two are the same
+    /// document, so adopting is never worse than merging.
+    pub(crate) fn snapshot_replacement(&self, update: &[u8]) -> SnapshotAdoption {
+        if !self.is_pristine() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        let doc = Doc::with_client_id(self.client_id());
+        if hydrate_doc(&doc, update).is_err() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        let candidate = Self {
+            doc,
+            base: self.base.clone(),
+            history: SheetOrderHistory::default(),
+            next_sheet_id: self.next_sheet_id,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        };
+        if !candidate.is_whole_document() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        if let Err(error) = candidate.upgrade_schema() {
+            return SnapshotAdoption::Incompatible(error);
+        }
+        match candidate.strict_materialize() {
+            Err(error) => SnapshotAdoption::Incompatible(error),
+            Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
+        }
+    }
+
+    /// True while the replica still holds nothing but its own bootstrap.
+    fn is_pristine(&self) -> bool {
+        let state_vector = self.doc.transact().state_vector();
+        state_vector.len() == 1
+            && state_vector
+                .iter()
+                .all(|(client, _)| client.get() == self.base.bootstrap_client_id)
+    }
+
+    /// True when the document stands on its own rather than being the tail of
+    /// someone else's — an incremental update hydrates into neither the roots
+    /// nor the metadata a whole workbook carries.
+    fn is_whole_document(&self) -> bool {
+        let txn = self.doc.transact();
+        if require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS]).is_err() {
+            return false;
+        }
+        txn.get_map(META).is_some_and(|meta| {
+            require_map_keys(
+                &meta,
+                &txn,
+                &[BASE_FINGERPRINT, "schemaVersion", STRUCTURE_GENERATION],
+                "workbook metadata",
+            )
+            .is_ok()
+        })
     }
 
     pub(crate) fn stage_updates_v1(
@@ -601,7 +734,16 @@ impl WorkbookAuthority {
                     .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
                 let charts = serde_json::to_string(&sheet.charts)
                     .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
-                Ok((key.clone(), (sheet.freeze_pane, hyperlinks, charts)))
+                Ok((
+                    key.clone(),
+                    (
+                        sheet.freeze_pane,
+                        hyperlinks,
+                        charts,
+                        sheet.col_widths.clone(),
+                        sheet.row_heights.clone(),
+                    ),
+                ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
@@ -614,9 +756,15 @@ impl WorkbookAuthority {
                 .get(&txn, &key)
                 .and_then(|value| value.cast::<MapRef>().ok())
                 .ok_or_else(|| format!("sheet {key} is not a map"))?;
+            if let Some((.., col_widths, row_heights)) = features.get(&key) {
+                let widths: MapRef = sheet.get_or_init(&mut txn, COL_WIDTHS);
+                sync_numbers(&widths, &mut txn, col_widths);
+                let heights: MapRef = sheet.get_or_init(&mut txn, ROW_HEIGHTS);
+                sync_numbers(&heights, &mut txn, row_heights);
+            }
             let (freeze_pane, hyperlinks, charts) = features
                 .get(&key)
-                .map(|(freeze_pane, hyperlinks, charts)| {
+                .map(|(freeze_pane, hyperlinks, charts, ..)| {
                     (*freeze_pane, hyperlinks.as_str(), charts.as_str())
                 })
                 .unwrap_or((None, "[]", "[]"));
@@ -626,7 +774,7 @@ impl WorkbookAuthority {
             if version < HYPERLINK_SCHEMA_VERSION {
                 sheet.try_update(&mut txn, HYPERLINKS, hyperlinks);
             }
-            if version < SCHEMA_VERSION {
+            if version < CHARTS_SCHEMA_VERSION {
                 sheet.try_update(&mut txn, CHARTS, charts);
             }
         }
@@ -693,12 +841,6 @@ impl WorkbookAuthority {
             .and_then(|value| value.cast::<String>().ok())
             .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
         if !self.base.accepts_fingerprint(version, &fingerprint) {
-            if version < SCHEMA_VERSION && self.base.charts.iter().any(|charts| !charts.is_empty())
-            {
-                return Err(format!(
-                    "schema version {version} carries no chart state, so it cannot pair with a charted workbook"
-                ));
-            }
             return Err("workbook base fingerprint does not match shared state".to_string());
         }
         let generation = structure_generation(&meta, &txn)?;
@@ -748,14 +890,20 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.charts.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let hidden_dimensions = base_sheet
+                .and_then(|base| self.base.hidden_dimensions.get(base))
+                .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
             model.sheets.push(materialize_sheet(
                 &sheet_map,
                 &txn,
                 &style_indices,
                 version,
-                freeze_pane,
-                hyperlinks,
-                charts,
+                SheetFallbacks {
+                    freeze_pane,
+                    hyperlinks,
+                    charts,
+                    hidden_dimensions,
+                },
             )?);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
@@ -776,7 +924,13 @@ impl WorkbookAuthority {
                     expected_sheet_keys,
                     &format!("inactive sheet {key}"),
                 )?;
-                materialize_sheet(&sheet_map, &txn, &style_indices, version, None, &[], &[])?;
+                materialize_sheet(
+                    &sheet_map,
+                    &txn,
+                    &style_indices,
+                    version,
+                    SheetFallbacks::default(),
+                )?;
             }
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
@@ -2299,14 +2453,33 @@ fn sync_number(map: &MapRef, txn: &mut TransactionMut<'_>, index: u32, value: Op
     }
 }
 
+/// What a sheet reads from the workbook it was parsed from rather than from
+/// the shared document, because the document's schema cannot express it.
+#[derive(Clone, Copy)]
+struct SheetFallbacks<'a> {
+    freeze_pane: Option<FreezePane>,
+    hyperlinks: &'a [Hyperlink],
+    charts: &'a [SheetChart],
+    hidden_dimensions: &'a HiddenDimensions,
+}
+
+impl Default for SheetFallbacks<'_> {
+    fn default() -> Self {
+        Self {
+            freeze_pane: None,
+            hyperlinks: &[],
+            charts: &[],
+            hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
+        }
+    }
+}
+
 fn materialize_sheet<T: ReadTxn>(
     sheet_map: &MapRef,
     txn: &T,
     style_indices: &BTreeMap<String, Option<u32>>,
     version: i64,
-    fallback_freeze_pane: Option<FreezePane>,
-    fallback_hyperlinks: &[Hyperlink],
-    fallback_charts: &[SheetChart],
+    fallbacks: SheetFallbacks<'_>,
 ) -> Result<Sheet, String> {
     let name = sheet_map
         .get(txn, NAME)
@@ -2348,12 +2521,20 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
+    if version < SCHEMA_VERSION {
+        for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
+            sheet.col_widths.entry(at).or_insert(size);
+        }
+        for (&at, &size) in &fallbacks.hidden_dimensions.row_heights {
+            sheet.row_heights.entry(at).or_insert(size);
+        }
+    }
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
         }
-        _ => fallback_freeze_pane,
+        _ => fallbacks.freeze_pane,
     };
     sheet.hyperlinks = match (version, sheet_map.get(txn, HYPERLINKS)) {
         (HYPERLINK_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => {
@@ -2365,13 +2546,15 @@ fn materialize_sheet<T: ReadTxn>(
         (HYPERLINK_SCHEMA_VERSION.., None) => {
             return Err("sheet is missing hyperlinks".to_string());
         }
-        _ => fallback_hyperlinks.to_vec(),
+        _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
-        (SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
-        (SCHEMA_VERSION.., Some(_)) => return Err("sheet charts are not a string".to_string()),
-        (SCHEMA_VERSION.., None) => return Err("sheet is missing charts".to_string()),
-        _ => fallback_charts.to_vec(),
+        (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
+        (CHARTS_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet charts are not a string".to_string());
+        }
+        (CHARTS_SCHEMA_VERSION.., None) => return Err("sheet is missing charts".to_string()),
+        _ => fallbacks.charts.to_vec(),
     };
     sheet.merges = match sheet_map.get(txn, MERGES) {
         Some(Out::Any(value)) => merges_from_any(&value)?,
@@ -2792,6 +2975,71 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
     }
 }
 
+/// Dimensions only this build's parser records: a hidden row or column with no
+/// authored size. A state written before it did carries no entry at all, so
+/// materializing one has to put them back or the row silently unhides.
+#[derive(Clone, Debug, Default)]
+struct HiddenDimensions {
+    col_widths: BTreeMap<u32, f64>,
+    row_heights: BTreeMap<u32, f64>,
+}
+
+static EMPTY_HIDDEN_DIMENSIONS: HiddenDimensions = HiddenDimensions {
+    col_widths: BTreeMap::new(),
+    row_heights: BTreeMap::new(),
+};
+
+fn hidden_dimensions(
+    model: &WorkbookModel,
+    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+) -> Vec<HiddenDimensions> {
+    model
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| {
+            let Some(legacy) = legacy_dimensions.get(index) else {
+                return HiddenDimensions::default();
+            };
+            let only_current = |current: &BTreeMap<u32, f64>, before: &BTreeMap<u32, f64>| {
+                current
+                    .iter()
+                    .filter(|(at, _)| !before.contains_key(at))
+                    .map(|(at, size)| (*at, *size))
+                    .collect()
+            };
+            HiddenDimensions {
+                col_widths: only_current(&sheet.col_widths, &legacy.col_widths),
+                row_heights: only_current(&sheet.row_heights, &legacy.row_heights),
+            }
+        })
+        .collect()
+}
+
+/// The same workbook as an earlier release would have modelled it, or `None`
+/// when no sheet's dimensions changed meaning and the two agree already.
+fn model_with_legacy_dimensions(
+    model: &WorkbookModel,
+    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+) -> Option<WorkbookModel> {
+    let differs = model
+        .sheets
+        .iter()
+        .zip(legacy_dimensions)
+        .any(|(sheet, legacy)| {
+            sheet.col_widths != legacy.col_widths || sheet.row_heights != legacy.row_heights
+        });
+    if !differs {
+        return None;
+    }
+    let mut legacy_model = model.clone();
+    for (sheet, legacy) in legacy_model.sheets.iter_mut().zip(legacy_dimensions) {
+        sheet.col_widths.clone_from(&legacy.col_widths);
+        sheet.row_heights.clone_from(&legacy.row_heights);
+    }
+    Some(legacy_model)
+}
+
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     fingerprint_model_for_schema(model, SCHEMA_VERSION)
 }
@@ -2883,7 +3131,7 @@ fn fingerprint_model_with_schema(
                 .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
             hash_bytes(&mut hasher, &hyperlinks);
         }
-        if schema_version >= SCHEMA_VERSION {
+        if schema_version >= CHARTS_SCHEMA_VERSION {
             let charts = serde_json::to_vec(&sheet.charts)
                 .map_err(|error| format!("cannot fingerprint sheet charts: {error}"))?;
             hash_bytes(&mut hasher, &charts);
@@ -3014,7 +3262,7 @@ mod tests {
                     .get(&txn, &key)
                     .and_then(|value| value.cast::<MapRef>().ok())
                     .unwrap();
-                if version < SCHEMA_VERSION {
+                if version < CHARTS_SCHEMA_VERSION {
                     sheet.remove(&mut txn, CHARTS);
                 }
                 if version < HYPERLINK_SCHEMA_VERSION {
@@ -3157,21 +3405,50 @@ mod tests {
         );
     }
 
-    /// A v3-v5 fingerprint hashes no chart state, so it cannot prove two bases
-    /// carry the same charts; a charted workbook refuses to pair with one.
+    /// A v3-v5 state carries no chart state at all, so a charted workbook
+    /// pairs with it on the rest and keeps the charts it parsed. Refusing
+    /// instead would strand every snapshot written before charts were shared.
     #[test]
-    fn a_charted_workbook_refuses_a_legacy_fingerprint() {
+    fn a_charted_workbook_pairs_with_a_legacy_fingerprint() {
         let mut model = WorkbookModel::default();
         model.sheets.push(charted("Report", "Report!$A$1"));
         for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
             let update = legacy_update(&model, version, true);
             let authority = authority_from_update(&model, &update, 130 + version as u64);
-            let error = authority.materialize().unwrap_err();
-            assert!(
-                format!("{error:?}").contains("cannot pair with a charted workbook"),
-                "version {version}: {error:?}"
-            );
+            let materialized = authority.materialize().unwrap();
+            assert_eq!(materialized, model, "version {version}");
+            assert!(authority.upgrade_schema().unwrap());
+            assert_eq!(authority.strict_materialize().unwrap().0, model);
         }
+    }
+
+    /// Charts must stay pinned to the schema that introduced them. Gating them
+    /// on the current version instead reads the newest schema as pre-chart the
+    /// moment the current version moves past it, which is how a released
+    /// snapshot came to be unreadable in the first place.
+    #[test]
+    fn chart_state_is_gated_on_the_schema_that_introduced_it() {
+        const { assert!(CHARTS_SCHEMA_VERSION <= SCHEMA_VERSION) };
+        const { assert!(HYPERLINK_SCHEMA_VERSION < CHARTS_SCHEMA_VERSION) };
+
+        let mut model = WorkbookModel::default();
+        model.sheets.push(charted("Report", "Report!$A$1"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 140).unwrap();
+        {
+            let mut txn = authority.doc.transact_mut_with("test:charts-gate");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.remove(&mut txn, CHARTS);
+        }
+        assert!(
+            authority.materialize().is_err(),
+            "a document at the chart schema must carry its own chart state"
+        );
+        assert!(sheet_schema_keys(CHARTS_SCHEMA_VERSION).contains(&CHARTS));
+        assert!(!sheet_schema_keys(CHARTS_SCHEMA_VERSION - 1).contains(&CHARTS));
     }
 
     #[test]

@@ -11,7 +11,7 @@ mod xml;
 
 pub use chart::chart_space;
 pub use package::PreservedPackage;
-pub use read::{SharedStringCells, parse_workbook};
+pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use write::{
     SaveEdits, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
@@ -25,6 +25,9 @@ pub struct ParsedWorkbook {
     pub workbook: Workbook,
     pub active_sheet: SheetId,
     pub package: PreservedPackage,
+    /// Per sheet, the dimensions releases before hidden rows and columns read
+    /// as zero stored. Only a legacy collaboration fingerprint needs these.
+    pub legacy_dimensions: Vec<LegacySheetDimensions>,
 }
 
 /// Parses the model and captures source package state.
@@ -42,6 +45,7 @@ pub fn parse_workbook_with_package(
         workbook: parsed.workbook,
         active_sheet: parsed.active_sheet,
         package,
+        legacy_dimensions: parsed.legacy_dimensions,
     })
 }
 
