@@ -37,6 +37,9 @@ jobs:
       - name: Test
         run: bun run test
 
+      - name: Check generated Wasm declarations
+        run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
+
       - name: Check demo assets
         run: |
           bun scripts/create-demo-deck.ts
