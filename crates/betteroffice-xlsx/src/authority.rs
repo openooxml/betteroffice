@@ -1131,6 +1131,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetCharts { .. }
+            | Op::SetChartAnchor { .. }
             | Op::SetDefinedNames { .. }
     )
 }
@@ -1892,6 +1893,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::SetCharts { .. }
+            | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
@@ -1984,6 +1986,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::SetCharts { sheet, .. }
+        | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
         | Op::PatchRangeStyle { sheet, .. }

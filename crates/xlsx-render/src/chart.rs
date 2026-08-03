@@ -9,8 +9,8 @@ use xlsx_model::workbook::Sheet;
 use xlsx_model::{MAX_COLS, MAX_ROWS};
 
 use crate::Viewport;
-use crate::display_list::{Align, ChartA11yAttrs, DrawCmd, PathStroke, Rect};
-use crate::geometry::{GridGeometry, emu_to_px};
+use crate::display_list::{Align, ChartRegion, DrawCmd, PathStroke, Rect};
+use crate::geometry::{EMU_PER_PT, GridGeometry, PX_PER_PT, emu_to_px};
 
 pub const MAX_CHART_OPS_PER_FRAME: usize = 65_536;
 
@@ -219,6 +219,124 @@ fn cell_position(cell: AnchorCell, geometry: &GridGeometry) -> Result<(f64, f64)
     ))
 }
 
+/// The anchor `anchor` would carry after sliding `dx`/`dy` viewport pixels,
+/// clamped so it never leaves the grid. `None` for an absolute anchor, which
+/// is pinned to the sheet and whose position a save cannot rewrite.
+pub fn moved_chart_anchor(
+    anchor: ChartAnchor,
+    geometry: &GridGeometry,
+    dx: f64,
+    dy: f64,
+) -> Option<ChartAnchor> {
+    if matches!(anchor, ChartAnchor::Absolute { .. }) || !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+    let resolved = resolve_chart_anchor(anchor, geometry, 0, 0).ok()?;
+    let rect = resolved.rect;
+    let sheet_width = f64::from(geometry.col_x(MAX_COLS));
+    let sheet_height = f64::from(geometry.row_y(MAX_ROWS));
+    let x = (rect.x + dx).clamp(0.0, (sheet_width - rect.w).max(0.0));
+    let y = (rect.y + dy).clamp(0.0, (sheet_height - rect.h).max(0.0));
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let from = anchor_cell_at(x, y, geometry)?;
+    match anchor {
+        ChartAnchor::TwoCell { edit_as, .. } => Some(ChartAnchor::TwoCell {
+            from,
+            to: anchor_cell_at(x + rect.w, y + rect.h, geometry)?,
+            edit_as,
+        }),
+        ChartAnchor::OneCell { extent, .. } => Some(ChartAnchor::OneCell { from, extent }),
+        ChartAnchor::Absolute { .. } => None,
+    }
+}
+
+/// The grid-anchored corner a sheet-pixel point falls in: the cell containing
+/// it plus the EMU offset from that cell's top-left.
+fn anchor_cell_at(x: f64, y: f64, geometry: &GridGeometry) -> Option<AnchorCell> {
+    let col = geometry.col_at_x(finite_f32(x).ok()?).min(MAX_COLS - 1);
+    let row = geometry.row_at_y(finite_f32(y).ok()?).min(MAX_ROWS - 1);
+    Some(AnchorCell {
+        col,
+        col_off: px_to_emu(x - f64::from(geometry.col_x(col)))?,
+        row,
+        row_off: px_to_emu(y - f64::from(geometry.row_y(row)))?,
+    })
+}
+
+/// Pixels back to EMU, rounded to the nearest unit and floored at zero — an
+/// anchor offset the schema and the writer both accept.
+fn px_to_emu(px: f64) -> Option<i64> {
+    let emu = (px / PX_PER_PT * EMU_PER_PT).round();
+    (emu.is_finite() && emu <= i64::MAX as f64).then(|| (emu as i64).max(0))
+}
+
+/// Every chart the viewport shows, in paint order, carrying the geometry the
+/// display list publishes. The label is left empty: resolving anchors needs no
+/// chart part, and a hit test has no use for one.
+pub fn chart_regions(sheet: &Sheet, viewport: &Viewport) -> Result<Vec<ChartRegion>, RenderError> {
+    let geometry = GridGeometry::new(sheet);
+    let (frozen_rows, frozen_cols) = sheet
+        .freeze_pane
+        .map_or((0, 0), |pane| (pane.rows, pane.cols));
+    Ok(
+        visible_charts(sheet, &geometry, viewport, frozen_rows, frozen_cols)?
+            .into_iter()
+            .map(|visible| visible.region)
+            .collect(),
+    )
+}
+
+/// a chart the viewport shows: which one, where its plot goes, and the region
+/// the display list publishes for it.
+struct VisibleChart<'a> {
+    chart: &'a SheetChart,
+    plot: PlotRect,
+    region: ChartRegion,
+}
+
+fn visible_charts<'a>(
+    sheet: &'a Sheet,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+    frozen_rows: u32,
+    frozen_cols: u32,
+) -> Result<Vec<VisibleChart<'a>>, RenderError> {
+    let mut visible = Vec::new();
+    for chart in &sheet.charts {
+        let resolved = resolve_chart_anchor(chart.anchor, geometry, frozen_rows, frozen_cols)
+            .map_err(|error| RenderError::InvalidChartAnchor {
+                part: chart.part.clone(),
+                anchor_index: chart.anchor_index,
+                error,
+            })?;
+        let Some((plot, clip)) =
+            viewport_geometry(resolved, geometry, viewport, frozen_rows, frozen_cols)
+        else {
+            continue;
+        };
+        let rect = plot_rect_to_rect(plot).ok_or_else(|| RenderError::InvalidChartGeometry {
+            part: chart.part.clone(),
+        })?;
+        visible
+            .try_reserve(1)
+            .map_err(|_| RenderError::DisplayListAllocationFailed)?;
+        visible.push(VisibleChart {
+            chart,
+            plot,
+            region: ChartRegion {
+                id: chart.part.clone(),
+                label: String::new(),
+                rect,
+                clip,
+                movable: !matches!(chart.anchor, ChartAnchor::Absolute { .. }),
+            },
+        });
+    }
+    Ok(visible)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_charts<F>(
     sheet: &Sheet,
@@ -227,7 +345,7 @@ pub(crate) fn render_charts<F>(
     frozen_rows: u32,
     frozen_cols: u32,
     commands: &mut Vec<DrawCmd>,
-    a11y: &mut Vec<ChartA11yAttrs>,
+    regions: &mut Vec<ChartRegion>,
     resolver: &mut F,
 ) -> Result<(), RenderError>
 where
@@ -240,7 +358,7 @@ where
         frozen_rows,
         frozen_cols,
         commands,
-        a11y,
+        regions,
         resolver,
         MAX_CHART_OPS_PER_FRAME,
     )
@@ -254,7 +372,7 @@ fn render_charts_with_budget<F>(
     frozen_rows: u32,
     frozen_cols: u32,
     commands: &mut Vec<DrawCmd>,
-    a11y: &mut Vec<ChartA11yAttrs>,
+    regions: &mut Vec<ChartRegion>,
     resolver: &mut F,
     max_ops: usize,
 ) -> Result<(), RenderError>
@@ -262,18 +380,13 @@ where
     F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
 {
     let mut remaining = max_ops;
-    for chart in &sheet.charts {
-        let resolved = resolve_chart_anchor(chart.anchor, geometry, frozen_rows, frozen_cols)
-            .map_err(|error| RenderError::InvalidChartAnchor {
-                part: chart.part.clone(),
-                anchor_index: chart.anchor_index,
-                error,
-            })?;
-        let Some((rect, clip)) =
-            viewport_geometry(resolved, geometry, viewport, frozen_rows, frozen_cols)
-        else {
-            continue;
-        };
+    for visible in visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)? {
+        let VisibleChart {
+            chart,
+            plot: rect,
+            mut region,
+        } = visible;
+        let clip = region.clip;
         if remaining == 0 {
             return Err(RenderError::ChartOpBudgetExceeded { max: max_ops });
         }
@@ -291,7 +404,7 @@ where
             });
         }
         let plot = PlotChart::from(&space);
-        let label = chart_aria_label(&plot);
+        region.label = chart_aria_label(&plot);
         let mut sink = ChartSink {
             commands,
             clip,
@@ -308,9 +421,10 @@ where
                 SinkFailure::Allocation => RenderError::DisplayListAllocationFailed,
             });
         }
-        a11y.try_reserve(1)
+        regions
+            .try_reserve(1)
             .map_err(|_| RenderError::DisplayListAllocationFailed)?;
-        a11y.push(ChartA11yAttrs { label });
+        regions.push(region);
     }
     Ok(())
 }
@@ -889,5 +1003,124 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(unsupported_family(&area), None);
+    }
+
+    fn charted_sheet(anchor: ChartAnchor) -> Sheet {
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.charts.push(SheetChart {
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "xl/drawings/drawing1.xml".into(),
+            anchor_index: 0,
+            anchor,
+            refs: Vec::new(),
+        });
+        sheet
+    }
+
+    #[test]
+    fn a_moved_anchor_lands_where_the_pixels_asked_and_keeps_its_size() {
+        let sheet = charted_sheet(ChartAnchor::TwoCell {
+            from: cell(1, 0, 1, 0),
+            to: cell(4, 0, 6, 0),
+            edit_as: AnchorEditAs::TwoCell,
+        });
+        let geometry = GridGeometry::new(&sheet);
+        let before = resolve_chart_anchor(sheet.charts[0].anchor, &geometry, 0, 0).unwrap();
+        let moved = moved_chart_anchor(sheet.charts[0].anchor, &geometry, 17.0, -5.0).unwrap();
+        let after = resolve_chart_anchor(moved, &geometry, 0, 0).unwrap();
+
+        assert!((after.rect.x - (before.rect.x + 17.0)).abs() < 0.01);
+        assert!((after.rect.y - (before.rect.y - 5.0)).abs() < 0.01);
+        assert!((after.rect.w - before.rect.w).abs() < 0.01);
+        assert!((after.rect.h - before.rect.h).abs() < 0.01);
+        assert!(matches!(
+            moved,
+            ChartAnchor::TwoCell {
+                edit_as: AnchorEditAs::TwoCell,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_one_cell_anchor_moves_without_resizing_and_clamps_at_the_origin() {
+        let extent = AnchorExtent {
+            cx: 952_500,
+            cy: 476_250,
+        };
+        let sheet = charted_sheet(ChartAnchor::OneCell {
+            from: cell(1, 0, 1, 0),
+            extent,
+        });
+        let geometry = GridGeometry::new(&sheet);
+        let moved =
+            moved_chart_anchor(sheet.charts[0].anchor, &geometry, -10_000.0, -10_000.0).unwrap();
+        assert_eq!(
+            moved,
+            ChartAnchor::OneCell {
+                from: cell(0, 0, 0, 0),
+                extent,
+            }
+        );
+    }
+
+    #[test]
+    fn an_absolute_anchor_refuses_to_move() {
+        let sheet = charted_sheet(ChartAnchor::Absolute {
+            pos: AnchorPos { x: 0, y: 0 },
+            extent: AnchorExtent {
+                cx: 952_500,
+                cy: 476_250,
+            },
+        });
+        let geometry = GridGeometry::new(&sheet);
+        assert!(moved_chart_anchor(sheet.charts[0].anchor, &geometry, 5.0, 5.0).is_none());
+        assert!(
+            moved_chart_anchor(
+                ChartAnchor::OneCell {
+                    from: cell(0, 0, 0, 0),
+                    extent: AnchorExtent { cx: 100, cy: 100 },
+                },
+                &geometry,
+                f64::NAN,
+                0.0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn regions_carry_the_geometry_the_display_list_publishes() {
+        let sheet = charted_sheet(ChartAnchor::OneCell {
+            from: cell(1, 0, 1, 0),
+            extent: AnchorExtent {
+                cx: 952_500,
+                cy: 476_250,
+            },
+        });
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
+        };
+        let regions = chart_regions(&sheet, &viewport).unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].id, "xl/charts/chart1.xml");
+        assert!(regions[0].label.is_empty());
+        assert_eq!((regions[0].rect.w, regions[0].rect.h), (100.0, 50.0));
+        assert_eq!(regions[0].clip, regions[0].rect);
+
+        let scrolled = chart_regions(
+            &sheet,
+            &Viewport {
+                x: 2_000.0,
+                y: 2_000.0,
+                width: 400.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+        assert!(scrolled.is_empty());
     }
 }

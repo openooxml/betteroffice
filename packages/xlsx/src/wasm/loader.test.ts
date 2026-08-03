@@ -94,6 +94,66 @@ describe('wasm loader', () => {
     }
   });
 
+  it('resolves a point to the chart under it and nothing outside one', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const chart = (handle.displayList(viewport).charts ?? [])[0];
+      expect(chart.id.length).toBeGreaterThan(0);
+      const hit = handle.chartAtPoint(
+        viewport,
+        chart.clip.x + chart.clip.w / 2,
+        chart.clip.y + chart.clip.h / 2
+      );
+      expect(hit?.id).toBe(chart.id);
+      expect(hit?.rect).toEqual(chart.rect);
+      expect(handle.chartAtPoint(viewport, chart.rect.x - 8, chart.rect.y - 8)).toBeNull();
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('moves a chart by a pixel delta that survives save and undoes in one step', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = (handle.displayList(viewport).charts ?? [])[0];
+      expect(handle.moveChart(0, before.id, 24, 12).applied).toBe(true);
+
+      const moved = (handle.displayList(viewport).charts ?? [])[0];
+      expect(moved.rect.x).toBeCloseTo(before.rect.x + 24, 1);
+      expect(moved.rect.y).toBeCloseTo(before.rect.y + 12, 1);
+      expect(moved.rect.w).toBeCloseTo(before.rect.w, 1);
+      expect(moved.rect.h).toBeCloseTo(before.rect.h, 1);
+
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect((reopened.displayList(viewport).charts ?? [])[0].rect).toEqual(moved.rect);
+      } finally {
+        reopened.dispose();
+      }
+
+      handle.undo();
+      expect((handle.displayList(viewport).charts ?? [])[0].rect).toEqual(before.rect);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('refuses to move a chart pinned to the sheet by an absolute anchor', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const charts = handle.displayList(viewport).charts ?? [];
+      const pinned = charts.filter((chart) => !chart.movable);
+      expect(pinned.length).toBe(1);
+      expect(() => handle.moveChart(0, pinned[0].id, 1, 0)).toThrow(/pinned/);
+      expect(() => handle.moveChart(0, 'xl/charts/nope.xml', 1, 0)).toThrow(/nope\.xml/);
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('updates display-list font fields after style patch and format paint', () => {
     const handle = openWorkbook(sampleBytes());
     const viewport = { x: 0, y: 0, width: 500, height: 220 };

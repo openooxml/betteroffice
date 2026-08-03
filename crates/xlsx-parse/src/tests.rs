@@ -2170,9 +2170,9 @@ fn refuses_chart_state_with_no_one_to_one_source() {
     );
 }
 
-/// A save writes an anchor's row and column back and nothing else, so a model
-/// that also moved its mode, offsets, extent or kind is refused rather than
-/// saved with that change dropped.
+/// A save writes an anchor's grid position back and nothing else, so a model
+/// that also moved its mode, extent or kind is refused rather than saved with
+/// that change dropped.
 #[test]
 fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
@@ -2188,17 +2188,6 @@ fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
                 from,
                 to,
                 edit_as: xlsx_model::AnchorEditAs::TwoCell,
-            },
-        ),
-        (
-            "offset",
-            xlsx_model::ChartAnchor::TwoCell {
-                from: xlsx_model::AnchorCell {
-                    col_off: 4_242,
-                    ..from
-                },
-                to,
-                edit_as: xlsx_model::AnchorEditAs::OneCell,
             },
         ),
         (
@@ -2224,7 +2213,7 @@ fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
         .unwrap_err();
         assert!(
             matches!(&error, ParseError::UnsupportedEdit(message)
-                if message.contains("more than the row and column")),
+                if message.contains("more than the grid position")),
             "{label}: {error:?}"
         );
     }
@@ -2244,10 +2233,10 @@ fn a_deleted_reference_empties_its_cache() {
     );
 }
 
-/// A moved anchor is written back as `col`/`row` alone; offsets and the rest of
-/// the drawing stay as authored.
+/// A moved anchor is written back as the markers' `col`/`colOff`/`row`/`rowOff`
+/// alone; the rest of the drawing stays as authored.
 #[test]
-fn patches_only_the_moved_anchor_indices() {
+fn patches_only_the_moved_anchor_markers() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
     let mut workbook = parsed.workbook.clone();
     edit_a1(&mut workbook, 1.0);
@@ -2257,8 +2246,16 @@ fn patches_only_the_moved_anchor_indices() {
         panic!("two-cell anchor");
     };
     workbook.sheets[0].charts[0].anchor = xlsx_model::ChartAnchor::TwoCell {
-        from: xlsx_model::AnchorCell { row: 7, ..from },
-        to: xlsx_model::AnchorCell { row: 22, ..to },
+        from: xlsx_model::AnchorCell {
+            row: 7,
+            col_off: 4_242,
+            ..from
+        },
+        to: xlsx_model::AnchorCell {
+            row: 22,
+            row_off: 1_234,
+            ..to
+        },
         edit_as,
     };
 
@@ -2279,7 +2276,93 @@ fn patches_only_the_moved_anchor_indices() {
         patched,
         original
             .replace("<xdr:row>4</xdr:row>", "<xdr:row>7</xdr:row>")
+            .replace(
+                "<xdr:colOff>12700</xdr:colOff>",
+                "<xdr:colOff>4242</xdr:colOff>"
+            )
             .replace("<xdr:row>19</xdr:row>", "<xdr:row>22</xdr:row>")
+            .replacen(
+                "<xdr:rowOff>0</xdr:rowOff></xdr:to>",
+                "<xdr:rowOff>1234</xdr:rowOff></xdr:to>",
+                1
+            )
+    );
+}
+
+/// A drawing that never wrote `colOff`/`rowOff` reads as zero, so there is no
+/// span to splice a moved offset into. The marker is regenerated whole rather
+/// than saving an anchor that silently lost half its move — and a move that
+/// lands on a cell boundary still patches in place, leaving the omission alone.
+#[test]
+fn synthesises_anchor_offsets_a_drawing_never_wrote() {
+    let offsetless = String::from_utf8(DRAWING.to_vec())
+        .unwrap()
+        .replace("<xdr:colOff>12700</xdr:colOff>", "")
+        .replace("<xdr:colOff>0</xdr:colOff>", "")
+        .replace("<xdr:rowOff>0</xdr:rowOff>", "");
+    let mut parts = charted_package();
+    for part in &mut parts {
+        if part.0 == "xl/drawings/drawing1.xml" {
+            part.1 = offsetless.clone().into_bytes();
+        }
+    }
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let xlsx_model::ChartAnchor::TwoCell { from, to, edit_as } =
+        parsed.workbook.sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    assert_eq!((from.col_off, from.row_off), (0, 0));
+
+    let save = |anchor| {
+        let mut workbook = parsed.workbook.clone();
+        edit_a1(&mut workbook, 1.0);
+        workbook.sheets[0].charts[0].anchor = anchor;
+        crate::serialize_workbook_with_package_and_origins_after_edits(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &vec![SharedStringCells::new(); 2],
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
+        )
+        .unwrap()
+    };
+
+    let saved = save(xlsx_model::ChartAnchor::TwoCell {
+        from: xlsx_model::AnchorCell {
+            col_off: 161_925,
+            row_off: 85_725,
+            ..from
+        },
+        to,
+        edit_as,
+    });
+    let patched = String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap();
+    assert!(
+        patched.contains(
+            "<xdr:from><xdr:col>2</xdr:col><xdr:colOff>161925</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>85725</xdr:rowOff></xdr:from>"
+        ),
+        "{patched}"
+    );
+    let reparsed = parse_workbook_with_package(&saved).unwrap();
+    let xlsx_model::ChartAnchor::TwoCell { from: reopened, .. } =
+        reparsed.workbook.sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    assert_eq!((reopened.col_off, reopened.row_off), (161_925, 85_725));
+
+    let whole_cells = save(xlsx_model::ChartAnchor::TwoCell {
+        from: xlsx_model::AnchorCell { col: 3, ..from },
+        to,
+        edit_as,
+    });
+    assert_eq!(
+        String::from_utf8(part_bytes(&whole_cells, "xl/drawings/drawing1.xml")).unwrap(),
+        offsetless.replacen("<xdr:col>2</xdr:col>", "<xdr:col>3</xdr:col>", 1)
     );
 }
 

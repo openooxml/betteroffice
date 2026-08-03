@@ -4,6 +4,7 @@
 pub mod chart;
 pub mod display_list;
 pub mod geometry;
+pub mod hit;
 pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
@@ -21,13 +22,15 @@ use xlsx_model::{
 };
 
 pub use chart::{
-    AnchorError, MAX_CHART_OPS_PER_FRAME, RenderError, ResolvedChartAnchor, resolve_chart_anchor,
+    AnchorError, MAX_CHART_OPS_PER_FRAME, RenderError, ResolvedChartAnchor, chart_regions,
+    moved_chart_anchor, resolve_chart_anchor,
 };
 pub use display_list::{
-    Align, ChartA11yAttrs, DisplayList, DrawCmd, GridMeta, HyperlinkRegion, PathStroke, Rect,
-    scaled,
+    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
+    PathStroke, Rect, scaled,
 };
 pub use geometry::GridGeometry;
+pub use hit::chart_at_point;
 pub use region::{viewport_for_range, viewport_for_used_range};
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.

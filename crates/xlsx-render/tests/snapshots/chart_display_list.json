@@ -1,7 +1,21 @@
 {
   "charts": [
     {
-      "label": "Revenue, pie chart, 1 series, 1 categories"
+      "clip": {
+        "h": 120.0,
+        "w": 200.0,
+        "x": 10.0,
+        "y": 20.0
+      },
+      "id": "xl/charts/chart1.xml",
+      "label": "Revenue, pie chart, 1 series, 1 categories",
+      "movable": false,
+      "rect": {
+        "h": 120.0,
+        "w": 200.0,
+        "x": 10.0,
+        "y": 20.0
+      }
     }
   ],
   "commands": [

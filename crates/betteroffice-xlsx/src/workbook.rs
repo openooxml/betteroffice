@@ -17,8 +17,9 @@ use xlsx_ops::{
     cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
-    DisplayList, GhostEdit, GridGeometry, RenderError, Viewport,
-    build_display_list_with_charts_and_ghosts, display_text,
+    ChartRegion, DisplayList, GhostEdit, GridGeometry, RenderError, Viewport,
+    build_display_list_with_charts_and_ghosts, chart_at_point, chart_regions, display_text,
+    moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -1315,6 +1316,68 @@ impl Workbook {
         .map_err(Error::from)
     }
 
+    /// The chart under a viewport-local point on the active sheet, resolved
+    /// from the same anchor geometry the display list is built from — no chart
+    /// part is read.
+    pub fn chart_at_point(
+        &self,
+        viewport: &Viewport,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<ChartRegion>> {
+        self.chart_at_point_on(self.active_sheet, viewport, x, y)
+    }
+
+    pub fn chart_at_point_on(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<ChartRegion>> {
+        let regions = chart_regions(self.sheet(sheet)?, viewport)?;
+        Ok(chart_at_point(&regions, x, y).cloned())
+    }
+
+    /// Slide a chart by `dx`/`dy` content pixels, clamped to the grid. One undo
+    /// step; the new anchor is written back on save.
+    pub fn move_chart(
+        &mut self,
+        sheet: SheetId,
+        part: &str,
+        dx: f32,
+        dy: f32,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        let sheet_ref = self.sheet(sheet)?;
+        let chart = sheet_ref
+            .charts
+            .iter()
+            .find(|chart| chart.part == part)
+            .ok_or_else(|| {
+                Error::InvalidOperation(format!("no chart on this sheet is backed by {part}"))
+            })?;
+        let anchor = moved_chart_anchor(
+            chart.anchor,
+            &GridGeometry::new(sheet_ref),
+            f64::from(dx),
+            f64::from(dy),
+        )
+        .ok_or_else(|| {
+            Error::InvalidOperation(format!(
+                "chart {part} is pinned to the sheet and cannot be moved"
+            ))
+        })?;
+        self.apply_ops(
+            vec![Op::SetChartAnchor {
+                sheet,
+                part: part.to_owned(),
+                anchor,
+            }],
+            options,
+        )
+    }
+
     #[cfg(feature = "raster")]
     pub fn render_png(&self, viewport: &Viewport) -> Result<RenderedPng> {
         self.render_png_for(self.active_sheet, viewport)
@@ -2055,6 +2118,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::SetCharts { sheet, .. }
+        | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
         | Op::PatchRangeStyle { sheet, .. }
@@ -2140,6 +2204,23 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetHyperlinks { sheet, hyperlinks } => {
             require_sheet(model, *sheet)?;
             validate_hyperlinks(hyperlinks)?;
+        }
+        Op::SetChartAnchor {
+            sheet,
+            part,
+            anchor,
+        } => {
+            let sheet_ref = require_sheet(model, *sheet)?;
+            let chart = sheet_ref
+                .charts
+                .iter()
+                .find(|chart| chart.part == *part)
+                .ok_or_else(|| {
+                    Error::InvalidOperation(format!("no chart on this sheet is backed by {part}"))
+                })?;
+            validate_anchor_change(chart.anchor, *anchor, part)?;
+            resolve_chart_anchor(*anchor, &GridGeometry::new(sheet_ref), 0, 0)
+                .map_err(|error| Error::InvalidOperation(error.to_string()))?;
         }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
@@ -2358,6 +2439,46 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Exactly what a save can express when a chart's anchor changes, so an op is
+/// refused here rather than written back with part of it dropped. A save writes
+/// a grid-anchored marker whole, cell and offset alike, so both corners of a
+/// two-cell anchor are free: it may be moved and resized. A one-cell anchor's
+/// size lives in `xdr:ext`, which is never patched, so only its corner moves.
+/// An absolute anchor carries its position in attributes the writer cannot
+/// rewrite, and no anchor may change kind, which would rename the element.
+fn validate_anchor_change(authored: ChartAnchor, moved: ChartAnchor, part: &str) -> Result<()> {
+    match (authored, moved) {
+        (
+            ChartAnchor::TwoCell { edit_as, .. },
+            ChartAnchor::TwoCell {
+                edit_as: moved_edit_as,
+                ..
+            },
+        ) if edit_as == moved_edit_as => Ok(()),
+        (
+            ChartAnchor::OneCell { extent, .. },
+            ChartAnchor::OneCell {
+                extent: moved_extent,
+                ..
+            },
+        ) if extent == moved_extent => Ok(()),
+        (ChartAnchor::Absolute { .. }, _) | (_, ChartAnchor::Absolute { .. }) => {
+            Err(Error::InvalidOperation(format!(
+                "chart {part} is pinned to the sheet and cannot be moved"
+            )))
+        }
+        (ChartAnchor::TwoCell { .. }, ChartAnchor::TwoCell { .. }) => Err(Error::InvalidOperation(
+            format!("chart {part} cannot change how it follows a grid edit"),
+        )),
+        (ChartAnchor::OneCell { .. }, ChartAnchor::OneCell { .. }) => Err(Error::InvalidOperation(
+            format!("chart {part} cannot be resized: a one-cell extent is not written back"),
+        )),
+        _ => Err(Error::InvalidOperation(format!(
+            "chart {part} cannot change its anchor kind"
+        ))),
+    }
 }
 
 /// Both corners of an anchor must land on the grid; an off-grid one would be

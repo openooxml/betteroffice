@@ -27,6 +27,10 @@ export class XlsxDocument {
     cellJson(args: string): string;
     cellPositionJson(args: string): string;
     /**
+     * the chart under a viewport-local point, or `null`.
+     */
+    chartAtPointJson(args: string): string;
+    /**
      * Stop observation and discard queued events.
      */
     clearUpdateObservation(): void;
@@ -55,6 +59,10 @@ export class XlsxDocument {
      */
     listProposalsJson(): string;
     mergedRangesJson(args: string): string;
+    /**
+     * slide a chart by a pixel delta as one undo step.
+     */
+    moveChartJson(args: string): string;
     /**
      * open a workbook from raw `.xlsx` bytes.
      */
@@ -142,6 +150,7 @@ export interface InitOutput {
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -154,6 +163,7 @@ export interface InitOutput {
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];

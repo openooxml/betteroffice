@@ -12,6 +12,7 @@ import {
   buildA11yGrid,
   cellAtPoint,
   cellRect,
+  chartRegionAtPoint,
   extendTo,
   fromTsv,
   hyperlinkAtCell,
@@ -35,6 +36,7 @@ import type {
   CellEdit,
   CellInputEdit,
   CapturedFormat,
+  ChartRegion,
   DisplayList,
   DrawCmd,
   Direction,
@@ -125,6 +127,19 @@ const BRAND = '#217346';
 const DEFAULT_XLSX_TOOLBAR_HEIGHT = 87;
 const MAX_OVERLAY_MERGED_RANGES = 1024;
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const CHART_NUDGE_PX = 1;
+const CHART_NUDGE_MULTIPLIER = 10;
+// how long a run of arrow presses may stay local before it lands as one edit.
+const CHART_NUDGE_SETTLE_MS = 250;
+const CHART_NUDGE_KEYS: Record<string, [number, number] | undefined> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+};
+// chrome shortcuts that stay live while a chart is selected; every other key
+// stops at the chart rather than reaching the cells behind it.
+const CHART_GLOBAL_KEYS = new Set(['z', 'y', 's']);
 
 // a placeholder grid frame so the shell paints something real when no file is
 // open. real files render through the wasm display list instead.
@@ -370,10 +385,20 @@ function XlsxEditorContent({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
   const frameRef = useRef<DisplayList | null>(null);
+  // the exact frame on screen, stored with the zoom it was painted at. scroll
+  // repaints are rAF-coalesced and a mutation republishes the frame, so hit
+  // testing reads this snapshot rather than the live scroll offset or the
+  // current model — either would answer for pixels that are not on screen.
+  const paintedRef = useRef<{ frame: DisplayList; zoom: number } | null>(null);
   const rafRef = useRef<number | null>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
   const clickStartRef = useRef<CellAddr | null>(null);
+  // an in-flight chart drag: which chart, and where the pointer went down.
+  const chartDragRef = useRef<{ id: string; clientX: number; clientY: number } | null>(null);
+  // an arrow-key burst not yet landed: the chart and the logical px accumulated.
+  const nudgeRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  const nudgeTimerRef = useRef<number | null>(null);
   const suppressBlurRef = useRef(false);
   const pendingSheetViewRef = useRef(false);
   // latest onReady, read (not depended on) by the open effect so a changing
@@ -393,6 +418,14 @@ function XlsxEditorContent({
   const [zoom, setZoom] = useState(1);
   const [revision, setRevision] = useState(0);
   const [dragging, setDragging] = useState(false);
+  // the selected chart, and the live pointer offset while it is dragged.
+  // `movable` rides along so the arrow keys never depend on a frame lookup.
+  const [selectedChart, setSelectedChart] = useState<{ id: string; movable: boolean } | null>(
+    null
+  );
+  const [chartDragOffset, setChartDragOffset] = useState<{ x: number; y: number } | null>(null);
+  // logical-px preview of an arrow burst that has not landed yet.
+  const [nudgeOffset, setNudgeOffset] = useState<{ x: number; y: number } | null>(null);
   const [selectionFormatting, setSelectionFormatting] = useState<SelectionFormatting>({});
   const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
   const [mergedRanges, setMergedRanges] = useState<
@@ -455,6 +488,15 @@ function XlsxEditorContent({
   useEffect(() => {
     setEditing(null);
     setFormulaDraft(null);
+    setSelectedChart(null);
+    // a burst belongs to the document it was typed on: its timer would fire
+    // against whatever workbook `handleRef` holds by then.
+    nudgeRef.current = null;
+    setNudgeOffset(null);
+    if (nudgeTimerRef.current != null) {
+      clearTimeout(nudgeTimerRef.current);
+      nudgeTimerRef.current = null;
+    }
     setProposals([]);
     setStaleFor({});
     setProposalsPanelOpen(false);
@@ -614,18 +656,20 @@ function XlsxEditorContent({
     canvas.style.height = `${h}px`;
     const logicalWidth = w / zoom;
     const logicalHeight = h / zoom;
+    const viewport = {
+      x: scroll.scrollLeft / zoom,
+      y: scroll.scrollTop / zoom,
+      width: logicalWidth,
+      height: logicalHeight,
+    };
     const handle = handleRef.current;
     let dl: DisplayList;
     if (handle) {
       try {
-        dl = handle.displayList({
-          x: scroll.scrollLeft / zoom,
-          y: scroll.scrollTop / zoom,
-          width: logicalWidth,
-          height: logicalHeight,
-        });
+        dl = handle.displayList(viewport);
       } catch (paintError) {
         frameRef.current = null;
+        paintedRef.current = null;
         setFrame(null);
         setRenderError(paintError instanceof Error ? paintError.message : String(paintError));
         return;
@@ -652,6 +696,7 @@ function XlsxEditorContent({
     }
     paintDisplayList(ctx, dl, dpr * zoom);
     frameRef.current = dl;
+    paintedRef.current = { frame: dl, zoom };
     setRenderError(null);
     setVisibleMergedRanges(nextMergedRanges);
     setFrame(dl);
@@ -798,6 +843,141 @@ function XlsxEditorContent({
       return cellAtPoint(grid, (clientX - rect.left) / zoom, (clientY - rect.top) / zoom);
     },
     [zoom]
+  );
+
+  // which chart a pointer event lands on. containment runs over the regions the
+  // painted frame published — engine geometry, engine clipping, engine paint
+  // order — so no geometry is rebuilt here and the answer cannot drift from the
+  // pixels by a scroll frame or a mutation the canvas has not drawn yet.
+  const pointToChart = useCallback((clientX: number, clientY: number): ChartRegion | null => {
+    const canvas = canvasRef.current;
+    const painted = paintedRef.current;
+    if (!canvas || !painted) return null;
+    const rect = canvas.getBoundingClientRect();
+    return chartRegionAtPoint(
+      painted.frame.charts,
+      (clientX - rect.left) / painted.zoom,
+      (clientY - rect.top) / painted.zoom
+    );
+  }, []);
+
+  const selectedChartRegion = useMemo(
+    () =>
+      selectedChart
+        ? (frame?.charts?.find((chart) => chart.id === selectedChart.id) ?? null)
+        : null,
+    [frame, selectedChart]
+  );
+
+  // a selected chart that scrolled out of the painted frame has no outline to
+  // show, so drop it rather than leave an invisible selection swallowing keys.
+  useEffect(() => {
+    if (!selectedChart || !frame) return;
+    if (frame.charts?.some((chart) => chart.id === selectedChart.id)) return;
+    // land what the burst already earned before the selection goes away, and
+    // drop any armed drag with it.
+    flushNudgeRef.current();
+    chartDragRef.current = null;
+    setChartDragOffset(null);
+    setSelectedChart(null);
+  }, [frame, selectedChart]);
+
+  // slide a chart through the engine's edit path, so the new anchor is
+  // undoable and reaches the drawing part on save.
+  const moveChartBy = useCallback(
+    (id: string, dx: number, dy: number) => {
+      const handle = handleRef.current;
+      if (!handle || (dx === 0 && dy === 0)) return;
+      try {
+        applyResult(handle.moveChart(activeSheet, id, dx, dy));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeSheet, applyResult]
+  );
+
+  // land a run of arrow nudges as one edit. key repeat fires as fast as the os
+  // pleases and every move is a whole-workbook semantic sync, so presses only
+  // accumulate a local delta and preview it; the burst lands once it settles.
+  const flushNudge = useCallback(() => {
+    if (nudgeTimerRef.current != null) {
+      clearTimeout(nudgeTimerRef.current);
+      nudgeTimerRef.current = null;
+    }
+    const pending = nudgeRef.current;
+    nudgeRef.current = null;
+    setNudgeOffset(null);
+    if (!pending) return;
+    moveChartBy(pending.id, pending.dx, pending.dy);
+  }, [moveChartBy]);
+
+  const flushNudgeRef = useRef(flushNudge);
+  flushNudgeRef.current = flushNudge;
+
+  const nudgeChart = useCallback((id: string, dx: number, dy: number) => {
+    const pending = nudgeRef.current;
+    if (pending && pending.id !== id) flushNudgeRef.current();
+    const base = nudgeRef.current ?? { id, dx: 0, dy: 0 };
+    const next = { id, dx: base.dx + dx, dy: base.dy + dy };
+    nudgeRef.current = next;
+    setNudgeOffset({ x: next.dx, y: next.dy });
+    if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
+    nudgeTimerRef.current = setTimeout(() => {
+      nudgeTimerRef.current = null;
+      // a burst that returns to where it started is not an edit.
+      const settled = nudgeRef.current;
+      nudgeRef.current = null;
+      setNudgeOffset(null);
+      if (settled && (settled.dx !== 0 || settled.dy !== 0)) {
+        moveChartByRef.current(settled.id, settled.dx, settled.dy);
+      }
+    }, CHART_NUDGE_SETTLE_MS) as unknown as number;
+  }, []);
+
+  const moveChartByRef = useRef(moveChartBy);
+  moveChartByRef.current = moveChartBy;
+
+  // commit a chart drag on release, as one edit for the whole gesture. a drag
+  // the window loses (focus leaves mid-gesture) is dropped, not committed
+  // later against whatever the pointer has since moved over.
+  useEffect(() => {
+    const commit = (event: MouseEvent) => {
+      const drag = chartDragRef.current;
+      // any release ends the gesture; only a primary one lands it, so a
+      // non-primary release cannot leave the drag armed for a later mouseup.
+      chartDragRef.current = null;
+      setChartDragOffset(null);
+      if (!drag || event.button !== 0) return;
+      moveChartBy(
+        drag.id,
+        (event.clientX - drag.clientX) / zoom,
+        (event.clientY - drag.clientY) / zoom
+      );
+    };
+    const cancel = () => {
+      chartDragRef.current = null;
+      setChartDragOffset(null);
+      flushNudgeRef.current();
+    };
+    window.addEventListener('mouseup', commit);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('mouseup', commit);
+      window.removeEventListener('blur', cancel);
+    };
+  }, [moveChartBy, zoom]);
+
+  // on unmount this only stops the timer: cleanups run in hook order, so the
+  // open effect above has already disposed the workbook and a flush here would
+  // find no handle to move a chart on. an unfinished burst is dropped.
+  useEffect(
+    () => () => {
+      if (nudgeTimerRef.current != null) clearTimeout(nudgeTimerRef.current);
+      nudgeTimerRef.current = null;
+      nudgeRef.current = null;
+    },
+    []
   );
 
   const openEditor = useCallback(
@@ -1049,6 +1229,7 @@ function XlsxEditorContent({
   const undo = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) return;
+    flushNudgeRef.current();
     try {
       applyResult(handle.undo());
     } catch (e) {
@@ -1059,6 +1240,7 @@ function XlsxEditorContent({
   const redo = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) return;
+    flushNudgeRef.current();
     try {
       applyResult(handle.redo());
     } catch (e) {
@@ -1167,6 +1349,7 @@ function XlsxEditorContent({
   const save = useCallback(() => {
     const handle = handleRef.current;
     if (!handle) return;
+    flushNudgeRef.current();
     try {
       const bytes = handle.save();
       if (onSave) onSave(bytes);
@@ -1219,6 +1402,37 @@ function XlsxEditorContent({
       if (!handle || !selection || !sheetInfo || editing) return;
       const mod = e.metaKey || e.ctrlKey;
       const lower = e.key.toLowerCase();
+
+      // a selected chart owns the keyboard: arrows nudge it, escape drops it,
+      // and nothing else reaches the cells hidden behind it — the grid overlay
+      // is suppressed while it is selected, so a delete or a keystroke there
+      // would edit a target the user cannot see. undo/redo/save stay global.
+      if (selectedChart && !(mod && CHART_GLOBAL_KEYS.has(lower))) {
+        if (e.key === 'Escape') {
+          // escape cancels the whole gesture, pointer or keyboard: an armed
+          // drag must not land a move the user just abandoned.
+          chartDragRef.current = null;
+          setChartDragOffset(null);
+          nudgeRef.current = null;
+          setNudgeOffset(null);
+          if (nudgeTimerRef.current != null) {
+            clearTimeout(nudgeTimerRef.current);
+            nudgeTimerRef.current = null;
+          }
+          setSelectedChart(null);
+          e.preventDefault();
+          return;
+        }
+        const nudge = mod ? undefined : CHART_NUDGE_KEYS[e.key];
+        if (nudge) {
+          const step = CHART_NUDGE_PX * (e.shiftKey ? CHART_NUDGE_MULTIPLIER : 1);
+          if (selectedChart.movable) {
+            nudgeChart(selectedChart.id, nudge[0] * step, nudge[1] * step);
+          }
+          e.preventDefault();
+        }
+        return;
+      }
 
       if (mod) {
         if (lower === 'c') {
@@ -1294,19 +1508,57 @@ function XlsxEditorContent({
       save,
       openEditor,
       clearCells,
+      selectedChart,
+      nudgeChart,
     ]
   );
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      // the editor input is a dom overlay above the canvas, so a press inside
+      // it is the editor's own — it places a caret, and must not commit, reach
+      // a chart painted under it, or move the grid.
+      const dismissesEditor = editing != null;
+      if (dismissesEditor && editorInputRef.current?.contains(e.target as Node)) return;
+      // a release the window never saw would otherwise leave the last gesture
+      // armed and commit its accumulated delta on some later, unrelated mouseup.
+      chartDragRef.current = null;
+      // a pointer gesture ends any arrow burst, so the two never interleave.
+      flushNudgeRef.current();
+
+      // a chart takes the press as a whole object: it finishes any open edit,
+      // then selects, leaving the grid selection where the edit left it. the
+      // commit is stated here rather than left to the blur `focusContainer`
+      // triggers, so both branches finish the edit for the same visible reason.
+      const chart = pointToChart(e.clientX, e.clientY);
+      if (chart) {
+        if (dismissesEditor) commitEditor();
+        setSelectedChart({ id: chart.id, movable: chart.movable });
+        // only a primary press starts a drag: a right-press opens a context
+        // menu whose release this window never sees, and an armed drag would
+        // then land on whatever the next unrelated click released over.
+        if (chart.movable && e.button === 0) {
+          chartDragRef.current = { id: chart.id, clientX: e.clientX, clientY: e.clientY };
+        }
+        setChartDragOffset(null);
+        // no click start: a press on a chart is not a cell click, so it must
+        // not follow a hyperlink in whatever cell sits behind it.
+        clickStartRef.current = null;
+        focusContainer();
+        e.preventDefault();
+        return;
+      }
+
+      setSelectedChart(null);
+      setChartDragOffset(null);
+      // an async reopen leaves the previous frame painted, so a chart here can
+      // outlive `selection` for a moment. that is fine: the chart branch has
+      // already returned above, and selecting a chart the user can still see is
+      // what should happen. only the cell path needs a selection to extend.
       if (!selection) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) return;
-      const dismissesEditor = editing != null;
-      if (dismissesEditor) {
-        if (editorInputRef.current?.contains(e.target as Node)) return;
-        commitEditor();
-      }
+      if (dismissesEditor) commitEditor();
       if (e.shiftKey) setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
       else setSelection(selectionAt(addr));
       // no click start: a press that dismissed the editor must not also follow a
@@ -1316,11 +1568,29 @@ function XlsxEditorContent({
       setDragging(true);
       focusContainer();
     },
-    [editing, selection, pointToCell, limits, focusContainer, commitEditor]
+    [editing, selection, pointToCell, pointToChart, limits, focusContainer, commitEditor]
   );
 
   const onMouseMove = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
+      const chartDrag = chartDragRef.current;
+      if (chartDrag) {
+        // the button came back up somewhere this window never heard about, so
+        // the gesture is over; do not keep accumulating it.
+        if (e.buttons === 0) {
+          chartDragRef.current = null;
+          setChartDragOffset(null);
+          return;
+        }
+        e.currentTarget.style.cursor = 'move';
+        // a tooltip from whatever cell was hovered before must not ride along.
+        e.currentTarget.title = '';
+        setChartDragOffset({
+          x: e.clientX - chartDrag.clientX,
+          y: e.clientY - chartDrag.clientY,
+        });
+        return;
+      }
       const addr = pointToCell(e.clientX, e.clientY);
       if (!addr) {
         if (!draggingRef.current) {
@@ -1330,6 +1600,13 @@ function XlsxEditorContent({
         return;
       }
       if (!draggingRef.current) {
+        const chart = pointToChart(e.clientX, e.clientY);
+        if (chart) {
+          // a pinned chart still selects on click, so it must not read as a cell.
+          e.currentTarget.style.cursor = chart.movable ? 'move' : 'pointer';
+          e.currentTarget.title = '';
+          return;
+        }
         const hyperlink = frameRef.current
           ? hyperlinkAtCell(frameRef.current, addr.row, addr.col)
           : null;
@@ -1339,7 +1616,7 @@ function XlsxEditorContent({
       }
       setSelection((prev) => (prev ? extendTo(prev, addr, limits()) : prev));
     },
-    [pointToCell, limits]
+    [pointToCell, pointToChart, limits]
   );
 
   const activateHyperlink = useCallback(
@@ -1404,6 +1681,7 @@ function XlsxEditorContent({
   const onDoubleClick = useCallback(
     (e: React.MouseEvent) => {
       if (editing) return;
+      if (pointToChart(e.clientX, e.clientY)) return;
       const addr = pointToCell(e.clientX, e.clientY);
       if (
         addr &&
@@ -1414,7 +1692,7 @@ function XlsxEditorContent({
       }
       if (selection) openEditor();
     },
-    [editing, openEditor, pointToCell, selection]
+    [editing, openEditor, pointToCell, pointToChart, selection]
   );
 
   const onMouseLeave = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -1444,6 +1722,12 @@ function XlsxEditorContent({
   const scaledFocusRect = focusRect ? scaledRect(focusRect, zoom) : null;
   const scaledEditRect = editRect ? scaledRect(editRect, zoom) : null;
 
+  // the selected chart's outline, placed from the engine-published region and
+  // offset by the live drag so the box tracks the pointer before it commits.
+  const chartOutlineRect = selectedChartRegion
+    ? scaledRect(selectedChartRegion.rect, zoom)
+    : null;
+
   const spacerWidth = sheetInfo ? sheetInfo.contentWidth * zoom : undefined;
   const spacerHeight = sheetInfo ? sheetInfo.contentHeight * zoom : undefined;
   const formulaValue = formulaDraft ?? focusedCell?.input ?? '';
@@ -1459,10 +1743,13 @@ function XlsxEditorContent({
   const switchSheet = (index: number) => {
     const handle = handleRef.current;
     if (!handle) return;
+    // the burst belongs to the sheet it was typed on.
+    flushNudgeRef.current();
     try {
       handle.setActiveSheet(index);
       pendingSheetViewRef.current = true;
       setSelection(selectionAt({ row: 0, col: 0 }));
+      setSelectedChart(null);
       setEditing(null);
       setFormulaDraft(null);
       setCapturedFormat(null);
@@ -1665,7 +1952,7 @@ function XlsxEditorContent({
               pointerEvents: 'none',
             }}
           >
-            {scaledSelectionRect && (
+            {scaledSelectionRect && !selectedChart && (
               <div
                 data-testid="xlsx-selection"
                 style={{
@@ -1680,7 +1967,27 @@ function XlsxEditorContent({
                 }}
               />
             )}
-            {scaledFocusRect && !editing && (
+            {chartOutlineRect && (
+              <div
+                data-testid="xlsx-chart-selection"
+                data-chart-id={selectedChart?.id}
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  left:
+                    chartOutlineRect.x + (chartDragOffset?.x ?? 0) + (nudgeOffset?.x ?? 0) * zoom,
+                  top:
+                    chartOutlineRect.y + (chartDragOffset?.y ?? 0) + (nudgeOffset?.y ?? 0) * zoom,
+                  width: chartOutlineRect.w,
+                  height: chartOutlineRect.h,
+                  boxSizing: 'border-box',
+                  border: `2px solid ${BRAND}`,
+                  boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)',
+                  background: chartDragOffset ? 'rgba(33, 115, 70, 0.08)' : 'transparent',
+                }}
+              />
+            )}
+            {scaledFocusRect && !selectedChart && !editing && (
               <div
                 style={{
                   position: 'absolute',

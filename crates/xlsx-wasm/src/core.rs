@@ -72,6 +72,21 @@ struct RangeArgs {
 }
 
 #[derive(Deserialize)]
+struct ChartHitArgs {
+    viewport: Viewport,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Deserialize)]
+struct MoveChartArgs {
+    sheet: u32,
+    chart: String,
+    dx: f32,
+    dy: f32,
+}
+
+#[derive(Deserialize)]
 struct StyleArgs {
     sheet: u32,
     range: String,
@@ -242,6 +257,36 @@ impl Session {
             .display_list(&viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    pub fn chart_at_point_json(&self, args: &str) -> Result<String, String> {
+        let args: ChartHitArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad chart hit args: {error}"))?;
+        let hit = self
+            .workbook
+            .chart_at_point(&args.viewport, args.x, args.y)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&hit).map_err(|error| error.to_string())
+    }
+
+    pub fn move_chart_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: MoveChartArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad chart move args: {error}"))?;
+        let result = self
+            .workbook
+            .move_chart(
+                SheetId(args.sheet),
+                &args.chart,
+                args.dx,
+                args.dy,
+                calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
     }
 
     #[cfg(feature = "raster")]

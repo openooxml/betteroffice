@@ -94,7 +94,16 @@ describe('buildA11yGrid', () => {
     const chartText = textCmd({ x: 0, y: 0, w: 80, h: 20 }, 'Chart title');
     if (chartText.op === 'text') chartText.chart = true;
     dl.commands.push(chartText);
-    dl.charts = [{ label: 'Column chart titled Revenue with 2 series' }];
+    const box = { x: 0, y: 0, w: 80, h: 20 };
+    dl.charts = [
+      {
+        id: 'xl/charts/chart1.xml',
+        label: 'Column chart titled Revenue with 2 series',
+        rect: box,
+        clip: box,
+        movable: true,
+      },
+    ];
     const g = buildA11yGrid(dl, null, 'Sheet1', strings);
     expect(g.rows[0].cells[0].text).toBe('');
     expect(g.charts).toEqual([{ label: 'Column chart titled Revenue with 2 series' }]);

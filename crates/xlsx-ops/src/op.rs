@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, FreezePane, Hyperlink, RowId,
-    SheetChart, SheetId,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, DefinedName, FreezePane, Hyperlink,
+    RowId, SheetChart, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -105,6 +105,12 @@ pub enum Op {
     SetCharts {
         sheet: SheetId,
         charts: Vec<SheetChart>,
+    },
+    /// Repin one chart, addressed by the package path of its chart part.
+    SetChartAnchor {
+        sheet: SheetId,
+        part: String,
+        anchor: ChartAnchor,
     },
     MergeCells {
         sheet: SheetId,

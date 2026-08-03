@@ -699,9 +699,11 @@ fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
     ))
 }
 
-/// Write moved anchors back into their drawing part. Only `col` and `row`
-/// move; an anchor whose kind, `editAs` mode, offsets, extent or absolute
-/// position also changed is refused, because none of that is written back.
+/// Write moved anchors back into their drawing part. A grid-anchored marker is
+/// written whole — `col`, `colOff`, `row` and `rowOff` — so a two-cell anchor
+/// may be re-placed and resized by moving its corners. An anchor whose kind,
+/// `editAs` mode, one-cell extent or absolute position also changed is refused,
+/// because none of that is written back.
 pub(crate) fn patch_drawing_anchors(
     part: &[u8],
     anchors: &[(usize, ChartAnchor)],
@@ -717,9 +719,9 @@ pub(crate) fn patch_drawing_anchors(
                 "a chart anchor no longer exists in its drawing part".into(),
             ));
         };
-        if !only_grid_indices_moved(&authored.anchor, anchor) {
+        if !only_grid_position_moved(&authored.anchor, anchor) {
             return Err(ParseError::UnsupportedEdit(
-                "a chart anchor changed more than the row and column a save writes back".into(),
+                "a chart anchor changed more than the grid position a save writes back".into(),
             ));
         }
         match anchor {
@@ -749,38 +751,38 @@ fn anchor_elements(root: &Element) -> Vec<&Element> {
     root.child_elements().filter(is_anchor).collect()
 }
 
-/// Whether the only difference between the authored anchor and the model's is
-/// a grid index, which is all [`push_cell_edits`] writes.
-fn only_grid_indices_moved(authored: &ChartAnchor, moved: &ChartAnchor) -> bool {
+/// Whether the model's anchor differs from the authored one only in what
+/// [`push_cell_edits`] writes: the markers, cell and offset alike. The corners
+/// themselves are unconstrained, so a two-cell anchor may also have been
+/// resized. What is refused is what no marker carries — a different anchor
+/// kind, a different `editAs` mode, a one-cell extent (which lives in
+/// `xdr:ext`) and an absolute position (which lives in attributes).
+fn only_grid_position_moved(authored: &ChartAnchor, moved: &ChartAnchor) -> bool {
     match (authored, moved) {
         (
-            ChartAnchor::TwoCell { from, to, edit_as },
+            ChartAnchor::TwoCell { edit_as, .. },
             ChartAnchor::TwoCell {
-                from: moved_from,
-                to: moved_to,
                 edit_as: moved_edit_as,
+                ..
             },
-        ) => {
-            edit_as == moved_edit_as
-                && offsets_match(from, moved_from)
-                && offsets_match(to, moved_to)
-        }
+        ) => edit_as == moved_edit_as,
         (
-            ChartAnchor::OneCell { from, extent },
+            ChartAnchor::OneCell { extent, .. },
             ChartAnchor::OneCell {
-                from: moved_from,
                 extent: moved_extent,
+                ..
             },
-        ) => extent == moved_extent && offsets_match(from, moved_from),
+        ) => extent == moved_extent,
         (ChartAnchor::Absolute { .. }, ChartAnchor::Absolute { .. }) => authored == moved,
         _ => false,
     }
 }
 
-fn offsets_match(authored: &AnchorCell, moved: &AnchorCell) -> bool {
-    authored.col_off == moved.col_off && authored.row_off == moved.row_off
-}
-
+/// Writes a moved marker back. A child the drawing already carries is patched
+/// in place, so the rest of the part survives byte for byte. A drawing that
+/// omitted `colOff`/`rowOff` — which [`child_number`] reads as zero — has no
+/// span to splice a non-zero offset into, so the whole marker is regenerated
+/// rather than dropping the offset silently.
 fn push_cell_edits(
     element: Option<&Element>,
     cell: AnchorCell,
@@ -789,20 +791,65 @@ fn push_cell_edits(
     let Some(element) = element else {
         return Ok(());
     };
-    for (local, value) in [("col", cell.col), ("row", cell.row)] {
+    let mut patches = Vec::new();
+    let mut moved = false;
+    let mut absent = false;
+    for (local, value) in marker_values(cell) {
         let Some(child) = element.child(local) else {
+            moved |= value != 0;
+            absent |= value != 0;
             continue;
         };
-        let value = value.to_string();
-        if child.text_content().trim() == value {
+        let authored = child
+            .text_content()
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| ParseError::Malformed(format!("invalid chart anchor {local}")))?;
+        if authored == value {
             continue;
         }
+        moved = true;
         let span = child.splice_target().ok_or_else(|| {
-            ParseError::UnsupportedEdit("a self-closing anchor index cannot be moved".into())
+            ParseError::UnsupportedEdit("a self-closing anchor marker cannot be moved".into())
         })?;
-        out.push((span, Replacement::Text(value)));
+        patches.push((span, Replacement::Text(value.to_string())));
     }
+    if !moved {
+        return Ok(());
+    }
+    if absent {
+        let span = element.splice_target().ok_or_else(|| {
+            ParseError::UnsupportedEdit("a self-closing chart anchor cannot be moved".into())
+        })?;
+        out.push((span, Replacement::Markup(marker_markup(element, cell))));
+        return Ok(());
+    }
+    out.append(&mut patches);
     Ok(())
+}
+
+/// The four elements `CT_Marker` sequences, in schema order.
+fn marker_values(cell: AnchorCell) -> [(&'static str, i64); 4] {
+    [
+        ("col", i64::from(cell.col)),
+        ("colOff", cell.col_off),
+        ("row", i64::from(cell.row)),
+        ("rowOff", cell.row_off),
+    ]
+}
+
+/// A whole marker body in schema order, carrying the prefix the drawing binds
+/// the marker itself with.
+fn marker_markup(element: &Element, cell: AnchorCell) -> String {
+    let prefix = element
+        .name
+        .rsplit_once(':')
+        .map(|(prefix, _)| format!("{prefix}:"))
+        .unwrap_or_default();
+    marker_values(cell)
+        .iter()
+        .map(|(local, value)| format!("<{prefix}{local}>{value}</{prefix}{local}>"))
+        .collect()
 }
 
 /// content types that carry workbook references in a chart vocabulary. the

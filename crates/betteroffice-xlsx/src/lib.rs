@@ -29,8 +29,9 @@ pub use xlsx_ops::{
     TextWrapping, Transaction, VerticalAlignment,
 };
 pub use xlsx_render::{
-    Align, ChartA11yAttrs, DisplayList, DrawCmd, GridGeometry, GridMeta, HyperlinkRegion,
-    PathStroke, Rect, RenderError, Viewport, viewport_for_range, viewport_for_used_range,
+    Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
+    HyperlinkRegion, PathStroke, Rect, RenderError, Viewport, viewport_for_range,
+    viewport_for_used_range,
 };
 
 pub type Result<T> = std::result::Result<T, Error>;

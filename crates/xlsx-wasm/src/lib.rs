@@ -181,6 +181,22 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// the chart under a viewport-local point, or `null`.
+    #[wasm_bindgen(js_name = chartAtPointJson)]
+    pub fn chart_at_point_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .chart_at_point_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// slide a chart by a pixel delta as one undo step.
+    #[wasm_bindgen(js_name = moveChartJson)]
+    pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .move_chart_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// render the current sheet viewport to png bytes (raster feature only).
     #[cfg(feature = "raster")]
     #[wasm_bindgen(js_name = renderPng)]

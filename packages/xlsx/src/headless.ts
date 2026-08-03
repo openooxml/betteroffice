@@ -18,6 +18,7 @@ export type {
   DisplayList,
   GridMeta,
   HyperlinkRegion,
+  ChartRegion,
   ChartA11yAttrs,
 } from './display-list/types';
 
@@ -53,7 +54,7 @@ export {
   selectionKeyReducer,
 } from './selection/index';
 
-export { cellAtPoint, cellRect, rangeRect } from './hittest/index';
+export { cellAtPoint, cellRect, chartRegionAtPoint, rangeRect } from './hittest/index';
 
 export type { HyperlinkDestination } from './hyperlinks/index';
 export {

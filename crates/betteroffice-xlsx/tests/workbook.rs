@@ -1,12 +1,12 @@
 #[cfg(feature = "raster")]
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
-    AnchorCell, AnchorEditAs, CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState,
-    CellValue, ChartAnchor, ChartRef, ChartRefKind, DefinedName, DrawCmd, Error, FreezePane,
-    GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
-    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
-    ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, UpdateOrigin,
-    Viewport, Workbook, WorkbookModel,
+    AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, DefinedName, DrawCmd,
+    Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
+    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS,
+    NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet,
+    SheetChart, SheetId, StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4287,6 +4287,265 @@ fn removing_a_charted_sheet_synchronises_and_undoes_cleanly() {
     assert_eq!(
         reopened.model().sheets[0].charts[0].refs[2].formula,
         "#REF!"
+    );
+}
+
+/// The point the chart paints under resolves to the chart, a point beside it
+/// to nothing, and a scrolled-away viewport publishes no region at all.
+#[test]
+fn a_point_over_a_chart_resolves_to_it_and_a_point_beside_it_does_not() {
+    let workbook = Workbook::open(&charted_fixture()).unwrap();
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let anchored = workbook.chart_at_point(&viewport, 300.0, 150.0).unwrap();
+    assert_eq!(
+        anchored.map(|chart| chart.id),
+        Some("xl/charts/chart1.xml".to_owned())
+    );
+    assert_eq!(workbook.chart_at_point(&viewport, 4.0, 4.0).unwrap(), None);
+    assert_eq!(
+        workbook
+            .chart_at_point(
+                &Viewport {
+                    x: 4_000.0,
+                    y: 4_000.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+                300.0,
+                150.0,
+            )
+            .unwrap(),
+        None
+    );
+}
+
+/// Moving a chart is one undo step that survives a save and reopen: the new
+/// anchor reaches the drawing part, and undo puts the old one back.
+#[test]
+fn a_moved_chart_survives_a_save_and_undoes_in_one_step() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let before = workbook.model().sheets[0].charts[0].anchor;
+    let viewport = Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let region = workbook
+        .chart_at_point(&viewport, 300.0, 150.0)
+        .unwrap()
+        .expect("the fixture anchors a chart under this point");
+
+    assert!(
+        workbook
+            .move_chart(
+                SheetId(0),
+                &region.id,
+                70.0,
+                45.0,
+                CalculationOptions::default()
+            )
+            .unwrap()
+            .applied
+    );
+    let moved = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(moved, before);
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, moved);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, moved);
+}
+
+/// A drawing that omitted `colOff`/`rowOff` reads as zero, so a sub-cell move
+/// has no span to write into. The save must not report success while dropping
+/// the offsets — the reopened anchor has to match what the move produced.
+#[test]
+fn a_sub_cell_move_survives_a_drawing_that_wrote_no_offsets() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+        .unwrap()
+        .replace("<xdr:colOff>12700</xdr:colOff>", "")
+        .replace("<xdr:colOff>0</xdr:colOff>", "")
+        .replace("<xdr:rowOff>0</xdr:rowOff>", "");
+    set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+
+    workbook
+        .move_chart(
+            SheetId(0),
+            "xl/charts/chart1.xml",
+            17.0,
+            9.0,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let moved = workbook.model().sheets[0].charts[0].anchor;
+    let AnchorCell {
+        col_off, row_off, ..
+    } = moved.from_cell().expect("a grid-anchored chart");
+    assert!(col_off > 0 && row_off > 0, "{moved:?}");
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, moved);
+}
+
+/// A chart pinned to the sheet cannot be moved, because a save cannot rewrite
+/// the attributes that carry its position; an unknown part names nothing.
+#[test]
+fn moving_refuses_an_absolute_anchor_and_an_unknown_part() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let drawing = String::from_utf8(CHART_DRAWING.to_vec())
+        .unwrap()
+        .replace(
+            r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>"#,
+            r#"<xdr:absoluteAnchor><xdr:pos x="95250" y="190500"/><xdr:ext cx="1905000" cy="1143000"/>"#,
+        )
+        .replace("</xdr:twoCellAnchor>", "</xdr:absoluteAnchor>");
+    set_test_part(&mut parts, "xl/drawings/drawing1.xml", drawing.into_bytes());
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let error = workbook
+        .move_chart(
+            SheetId(0),
+            "xl/charts/chart1.xml",
+            10.0,
+            10.0,
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("pinned")),
+        "{error:?}"
+    );
+
+    let error = workbook
+        .move_chart(
+            SheetId(0),
+            "xl/charts/nope.xml",
+            10.0,
+            10.0,
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("nope.xml")),
+        "{error:?}"
+    );
+}
+
+/// `SetChartAnchor` accepts exactly what a save can write back, and each
+/// refusal says which part of the anchor the writer could not carry.
+#[test]
+fn set_chart_anchor_refuses_what_a_save_cannot_write() {
+    let mut workbook = Workbook::open(&charted_fixture()).unwrap();
+    let repin = |workbook: &mut Workbook, anchor| {
+        workbook.apply_ops(
+            vec![Op::SetChartAnchor {
+                sheet: SheetId(0),
+                part: "xl/charts/chart1.xml".to_owned(),
+                anchor,
+            }],
+            CalculationOptions::default(),
+        )
+    };
+    for (anchor, reason) in [
+        (
+            ChartAnchor::TwoCell {
+                from: AnchorCell::default(),
+                to: AnchorCell {
+                    col: 4,
+                    row: 8,
+                    ..AnchorCell::default()
+                },
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            "follows a grid edit",
+        ),
+        (
+            ChartAnchor::OneCell {
+                from: AnchorCell::default(),
+                extent: AnchorExtent {
+                    cx: 100_000,
+                    cy: 100_000,
+                },
+            },
+            "anchor kind",
+        ),
+    ] {
+        let error = repin(&mut workbook, anchor).unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains(reason)),
+            "{error:?}"
+        );
+    }
+
+    // both corners of a two-cell anchor are written whole, so a resize is
+    // expressible and must round-trip rather than be half-saved.
+    let ChartAnchor::TwoCell { from, to, edit_as } = workbook.model().sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    let resized = ChartAnchor::TwoCell {
+        from,
+        to: AnchorCell {
+            col: to.col + 3,
+            row: to.row + 5,
+            ..to
+        },
+        edit_as,
+    };
+    assert!(repin(&mut workbook, resized).unwrap().applied);
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
+}
+
+/// Chart state lives in the shared document as one blob per sheet, so repinning
+/// one is structural and a collaborative session refuses it outright — the same
+/// answer freeze panes and hyperlinks give. Moving a chart is a standalone-only
+/// edit, and nothing partial is left behind by the refusal.
+#[test]
+fn collaborative_sessions_refuse_a_chart_move() {
+    let bytes = charted_fixture();
+    let mut workbook = Workbook::open_collaborative(&bytes, 303).unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .move_chart(
+            SheetId(0),
+            "xl/charts/chart1.xml",
+            12.0,
+            8.0,
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::CollaborativeStructureOperation),
+        "{error:?}"
+    );
+    assert_eq!(workbook.model(), &before);
+
+    // the same move on a standalone session is accepted, so the refusal is the
+    // collaboration guard and not a broken op.
+    let mut standalone = Workbook::open(&bytes).unwrap();
+    assert!(
+        standalone
+            .move_chart(
+                SheetId(0),
+                "xl/charts/chart1.xml",
+                12.0,
+                8.0,
+                CalculationOptions::default()
+            )
+            .unwrap()
+            .applied
     );
 }
 

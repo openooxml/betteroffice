@@ -28,6 +28,7 @@ pub enum OpError {
     DefinedNameNotRewritable { name: String },
     ChartRefNotRewritable { part: String },
     ChartAnchorNotMovable { part: String },
+    ChartNotFound { part: String },
     InvalidStyle(String),
 }
 
@@ -50,6 +51,9 @@ impl fmt::Display for OpError {
             }
             OpError::ChartAnchorNotMovable { part } => {
                 write!(f, "the anchor of {part} would leave the sheet grid")
+            }
+            OpError::ChartNotFound { part } => {
+                write!(f, "no chart on this sheet is backed by {part}")
             }
             OpError::InvalidStyle(message) => f.write_str(message),
         }
@@ -128,6 +132,24 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::SetCharts {
                 sheet: *sheet,
                 charts: old,
+            }]))
+        }
+        Op::SetChartAnchor {
+            sheet,
+            part,
+            anchor,
+        } => {
+            let sheet_ref = sheet_mut(wb, *sheet)?;
+            let chart = sheet_ref
+                .charts
+                .iter_mut()
+                .find(|chart| chart.part == *part)
+                .ok_or_else(|| OpError::ChartNotFound { part: part.clone() })?;
+            let old = std::mem::replace(&mut chart.anchor, *anchor);
+            Ok(InvertedOp(vec![Op::SetChartAnchor {
+                sheet: *sheet,
+                part: part.clone(),
+                anchor: old,
             }]))
         }
         Op::MergeCells { sheet, range } => {
@@ -1515,5 +1537,55 @@ mod tests {
 
         assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
         assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn setting_a_chart_anchor_inverts_to_the_previous_one() {
+        use xlsx_model::{AnchorCell, AnchorEditAs, ChartAnchor, SheetChart};
+
+        let anchor = |col, row| ChartAnchor::TwoCell {
+            from: AnchorCell {
+                col,
+                row,
+                ..AnchorCell::default()
+            },
+            to: AnchorCell {
+                col: col + 4,
+                row: row + 8,
+                ..AnchorCell::default()
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        };
+        let mut wb = wb_one_sheet();
+        wb.sheets[0].charts.push(SheetChart {
+            part: "xl/charts/chart1.xml".into(),
+            drawing: "xl/drawings/drawing1.xml".into(),
+            anchor_index: 0,
+            anchor: anchor(0, 0),
+            refs: Vec::new(),
+        });
+
+        let op = Op::SetChartAnchor {
+            sheet: SheetId(0),
+            part: "xl/charts/chart1.xml".into(),
+            anchor: anchor(3, 5),
+        };
+        let inverse = apply(&mut wb, &op).unwrap();
+        assert_eq!(wb.sheets[0].charts[0].anchor, anchor(3, 5));
+        for op in &inverse.0 {
+            apply(&mut wb, op).unwrap();
+        }
+        assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
+
+        let error = apply(
+            &mut wb,
+            &Op::SetChartAnchor {
+                sheet: SheetId(0),
+                part: "xl/charts/chart9.xml".into(),
+                anchor: anchor(1, 1),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, OpError::ChartNotFound { .. }));
     }
 }

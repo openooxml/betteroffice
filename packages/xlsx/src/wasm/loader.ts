@@ -9,7 +9,7 @@
 import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
-import type { DisplayList } from '../display-list/types';
+import type { ChartRegion, DisplayList } from '../display-list/types';
 
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
@@ -281,6 +281,23 @@ export interface WorkbookHandle extends CollaborationReplica {
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
+  /**
+   * the chart under a viewport-local point on the active sheet, or `null`,
+   * resolved against the current model from the same anchor geometry the
+   * display list is built from. the returned `label` is always empty: a hit
+   * test resolves anchors only and never reads a chart part.
+   *
+   * this answers for the model as it is now. chrome painting a frame should
+   * hit-test that frame's own `charts` with `chartRegionAtPoint` instead, or a
+   * mutation the canvas has not drawn yet will move the answer off the pixels.
+   */
+  chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
+  /**
+   * slide a chart by a content-pixel delta, clamped to the grid, as one undo
+   * step. the new anchor is written back on save. throws for a chart pinned to
+   * the sheet by an absolute anchor.
+   */
+  moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
   setActiveSheet(index: number): void;
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
@@ -569,6 +586,12 @@ export function openWorkbook(
     },
     displayList(viewport: Viewport): DisplayList {
       return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
+    },
+    chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null {
+      return parseJson(() => doc.chartAtPointJson(JSON.stringify({ viewport, x, y })));
+    },
+    moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult {
+      return parseJson(() => doc.moveChartJson(JSON.stringify({ sheet, chart, dx, dy })), true);
     },
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));
