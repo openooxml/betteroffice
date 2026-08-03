@@ -32,6 +32,7 @@ pub(crate) const SHAPES: &str = "pptx:shapes";
 pub(crate) const STORIES: &str = "pptx:stories";
 pub(crate) const REMOTE_ORIGIN: &str = "pptx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "pptx:hydrate";
+pub(crate) const MIGRATE_ORIGIN: &str = "pptx:migrate";
 pub(crate) const PILCROW_KIND: &str = "pilcrow";
 pub(crate) const KIND: &str = "_kind";
 pub(crate) const PARA_ID: &str = "paraId";
@@ -97,6 +98,7 @@ impl DeckSession {
         }
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
+        deck::migrate_doc(&doc)?;
         deck::validate_doc(&doc)?;
         let package = deck::package_from_doc(&doc)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
