@@ -6,7 +6,8 @@
  *
  * Two ways a module becomes ready:
  *  - `preload()` (async): browsers and workers — passes the asset URL to the
- *    wasm-bindgen glue, which fetches and instantiates it.
+ *    wasm-bindgen glue, which fetches and instantiates it. A `file:` asset is
+ *    read from disk instead, since `fetch` may reject that scheme.
  *  - `ensure()` (sync): Node/Bun/SSR — reads the asset from disk via
  *    `process.getBuiltinModule` (no static `node:fs` import, so browser
  *    bundlers never see a node builtin) and feeds `initSync`. In a browser
@@ -27,7 +28,7 @@ interface NodeFsLike {
   readFileSync(path: string): Uint8Array;
 }
 interface NodeUrlLike {
-  fileURLToPath(url: URL): string;
+  fileURLToPath(url: string): string;
 }
 
 function builtinModule<T>(name: string): T | undefined {
@@ -51,10 +52,23 @@ export function readWasmSync(url: URL): Uint8Array | undefined {
   const nodeUrl = builtinModule<NodeUrlLike>('node:url');
   if (!fs || !nodeUrl) return undefined;
   try {
-    return fs.readFileSync(nodeUrl.fileURLToPath(url));
+    // `.href` and not the URL object: fileURLToPath brand-checks its argument,
+    // so a shim supplying a non-native URL would otherwise fail the read.
+    return fs.readFileSync(nodeUrl.fileURLToPath(url.href));
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Default async input. wasm-bindgen fetches URL inputs, but `file:` is served
+ * only by Bun's own `fetch` — Node's rejects it, and a DOM shim replaces Bun's
+ * with one that rejects it too. So `file:` assets resolve to disk bytes, as
+ * `ensure()` already does; http(s) stays a URL for the browser streaming path.
+ */
+function defaultAsyncInput(url: URL): WasmAsyncInput {
+  if (url.protocol !== 'file:') return url;
+  return readWasmSync(url) ?? url;
 }
 
 export interface WasmModuleState {
@@ -79,7 +93,7 @@ export function createWasmModuleState(options: {
       if (initialized) return Promise.resolve();
       if (pending) return pending;
       pending = options
-        .initAsync({ module_or_path: input ?? options.assetUrl() })
+        .initAsync({ module_or_path: input ?? defaultAsyncInput(options.assetUrl()) })
         .then(
           () => {
             initialized = true;

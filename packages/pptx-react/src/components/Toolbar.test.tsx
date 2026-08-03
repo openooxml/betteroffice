@@ -1,17 +1,25 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, describe, expect, it } from 'bun:test';
 import type { ShapeFormattingAction } from './Toolbar';
 import { LocaleProvider } from '../i18n';
 import { Toolbar } from './Toolbar';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
-Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+const elementPrototype = HTMLElement.prototype;
+const clientWidth = Object.getOwnPropertyDescriptor(elementPrototype, 'clientWidth');
+Object.defineProperty(elementPrototype, 'clientWidth', {
   configurable: true,
   get: () => 1_200,
 });
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 
 afterEach(cleanup);
+// The globals are process-wide; leaving them installed poisons every later suite.
+afterAll(async () => {
+  if (clientWidth) Object.defineProperty(elementPrototype, 'clientWidth', clientWidth);
+  else Reflect.deleteProperty(elementPrototype, 'clientWidth');
+  if (GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
+});
 
 describe('Toolbar shape controls', () => {
   it('arms a preset shape placement tool', () => {
