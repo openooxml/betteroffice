@@ -1,6 +1,6 @@
 # BetterOffice
 
-> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship two ways — compiled to WebAssembly for the browser packages, and published to crates.io as native crates for servers. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
+> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship three ways — compiled to WebAssembly for the browser packages, published to crates.io as native crates for servers, and compiled into Python wheels on PyPI. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
 
 All three formats are available today. The packages work as full editors or as read-only viewers. Versions are `0.0.x` and the APIs are still settling; breaking changes are listed in each package changelog.
 
@@ -47,6 +47,14 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all three formats.
 
+## Python packages
+
+Published to PyPI, Apache-2.0. The Rust engine is compiled into the wheel — no Excel, no LibreOffice subprocess, no COM. Wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the stable ABI for CPython 3.9 and up. The [Python guide](https://docs.betteroffice.dev/docs/python) carries the install line, a first example, and what is not published yet.
+
+- [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): `pip install betteroffice-xlsx`. Open, recalculate, style, render to PNG, and save XLSX workbooks; formulas are evaluated by this engine rather than read back from the file. Yrs collaboration and agent proposals are exposed as byte-level primitives, and opening, recalculating, rendering, and saving release the GIL.
+
+The PPTX binding lives in the repository at `bindings/python-pptx` and is built and tested in CI, but it has no PyPI project yet, so `pip` will not find it. There is no DOCX binding for Python.
+
 ## Collaboration
 
 Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the standard Yjs sync-v1 wire protocol used by y-websocket. Room routing, authentication, awareness, and reconnection stay transport concerns, so any reliable binary transport works. Updates flow between the connection and the Rust replica without a second JavaScript `Y.Doc`.
@@ -54,6 +62,7 @@ Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the s
 ## Docs and demos
 
 - [Documentation](https://docs.betteroffice.dev): guides and API reference.
+- [Packages](https://docs.betteroffice.dev/docs/packages): what to install from npm, crates.io, and PyPI, and what each one does.
 - [Live demos](https://demo.betteroffice.dev): DOCX, XLSX, and PPTX editors running in the browser.
 
 ## Migrating from eigenpal

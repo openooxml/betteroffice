@@ -1,0 +1,74 @@
+---
+title: JavaScript
+description: The npm packages — React editors, framework-free cores, and locale strings
+---
+
+Every format ships three packages under the `@betteroffice` scope: a
+framework-free core, a React editor built on it, and that editor's locale
+strings. There is no Vue package — React and framework-free JavaScript are the
+supported entry points.
+
+```bash
+npm install @betteroffice/docx-react @betteroffice/docx react react-dom
+```
+
+`react` and `react-dom` (18 or 19) are peer dependencies of every `-react`
+package.
+
+## Drop in an editor
+
+```tsx
+import { DocxEditor } from "@betteroffice/docx-react";
+import "@betteroffice/docx-react/styles.css";
+
+<DocxEditor documentBuffer={bytes} onSave={(saved) => upload(saved)} />;
+```
+
+`documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
+Without `onSave`, File > Save downloads the edited bytes. The other two editors
+take their file as a `Uint8Array`:
+
+```tsx
+<XlsxEditor file={bytes} fileName="report.xlsx" />
+<PptxEditor file={bytes} fonts={[{ family: "Inter", bytes: fontBytes }]} />
+```
+
+`PptxEditor` needs `fonts`: no face is bundled, and the engine refuses to lay out
+slide text until the host registers at least one.
+
+## Drive the core yourself
+
+```ts
+import { initWasm, openWorkbook, paintDisplayList } from "@betteroffice/xlsx";
+
+await initWasm();
+const workbook = openWorkbook(new Uint8Array(await file.arrayBuffer()));
+
+const frame = workbook.displayList({ x: 0, y: 0, width: 800, height: 600 });
+paintDisplayList(canvas.getContext("2d")!, frame, devicePixelRatio);
+
+workbook.editCell(0, 9, 2, "=SUM(C1:C9)");
+const saved = workbook.save();
+```
+
+`initWasm()` fetches the packaged wasm asset once in browsers; pass wasm bytes or
+a precompiled `WebAssembly.Module` in runtimes that cannot fetch that URL. Around
+the handle the core exports what a custom grid needs — hit-testing, viewport
+math, an accessibility tree, and TSV clipboard helpers.
+
+## Every package
+
+| Package | What it is |
+| --- | --- |
+| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips the original package, so untouched parts survive. |
+| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes. |
+| `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
+| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and agent proposals a human accepts or rejects. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
+| `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
+| `@betteroffice/pptx` | Framework-free PPTX core: PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing and collaboration are live; writing edits back to a `.pptx` file is not exposed here yet. |
+| `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |
+| `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
+
+Connecting any of the three editors to a relay is the same shape in each:
+see [Collaboration](./collaboration).

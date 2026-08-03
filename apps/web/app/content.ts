@@ -3,6 +3,9 @@ export const REPO = "https://github.com/openooxml/betteroffice";
 export const DOCS = "https://docs.betteroffice.dev";
 export const DEMO = "https://demo.betteroffice.dev";
 export const OPENOOXML = "https://openooxml.org";
+export const NPM = "https://www.npmjs.com/org/betteroffice";
+export const CRATES = "https://crates.io/search?q=betteroffice";
+export const PYPI = "https://pypi.org/project/betteroffice-xlsx";
 
 export const HERO = {
   title: "BetterOffice",
@@ -10,7 +13,32 @@ export const HERO = {
     "The open-source office suite. Word-faithful editing and real-time collaboration on engines we build ourselves — running entirely in your browser, by the OpenOOXML project.",
 };
 
-export const INSTALL = "npm install @betteroffice/docx-react";
+export const ECOSYSTEMS = [
+  {
+    name: "JavaScript",
+    registry: "npm",
+    install: "npm install @betteroffice/docx-react",
+    url: NPM,
+    docs: `${DOCS}/docs/javascript`,
+    desc: "React editors and framework-free cores for all three formats.",
+  },
+  {
+    name: "Rust",
+    registry: "crates.io",
+    install: "cargo add betteroffice-docx",
+    url: CRATES,
+    docs: `${DOCS}/docs/rust`,
+    desc: "The same engines natively, for servers, CLIs and agent pipelines.",
+  },
+  {
+    name: "Python",
+    registry: "PyPI",
+    install: "pip install betteroffice-xlsx",
+    url: PYPI,
+    docs: `${DOCS}/docs/python`,
+    desc: "Spreadsheets from Python: formulas evaluated, sheets rendered to PNG, workbooks saved.",
+  },
+];
 
 export const SUITE = {
   label: "Suite",
@@ -44,7 +72,7 @@ export const PACKAGES_SECTION = {
   label: "Packages",
   heading: "Ships as components, not iframes",
   prose:
-    "The editors install from npm and render inside your app — no embeds, no external services, documents never leave the page.",
+    "The editors install from npm and render inside your app — no embeds, no external services, documents never leave the page. The same engines publish to crates.io for native Rust and to PyPI for Python.",
 };
 
 export const PACKAGES = [
