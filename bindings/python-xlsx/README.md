@@ -1,12 +1,16 @@
 # betteroffice-xlsx
 
-Read, recalculate, render, and write XLSX workbooks from Python. The engine is
-the Rust [BetterOffice](https://betteroffice.dev) XLSX core, compiled into the
-wheel — no Excel, no LibreOffice subprocess, no COM.
+Read, recalculate, render, and write XLSX workbooks from Python. Where
+`openpyxl` hands back a formula's source text or whatever value the authoring
+application happened to cache, this evaluates the formula and can rasterize the
+sheet: the Rust [BetterOffice](https://betteroffice.dev) XLSX core is compiled
+into the wheel — no Excel, no LibreOffice subprocess, no COM.
 
 ```bash
 pip install betteroffice-xlsx
 ```
+
+The distribution is hyphenated, the module is not: `import betteroffice_xlsx`.
 
 ## Formulas actually calculate
 
@@ -90,19 +94,38 @@ local history, so undo will not revert someone else's work.
 ## Agent proposals
 
 An agent can stage edits for a human instead of applying them. Each proposed
-edit carries the before and after text a reviewer would compare:
+edit carries the display text a reviewer would compare — `before` and `after`
+are what the cell shows, as strings, while `input` is what would be written:
 
 ```python
-proposal = wb.propose("copilot", [("Sheet1", "H1", "=SUM(B3:B10)")], note="add a total")
+proposal = wb.propose("copilot", [("Sheet1", "H1", "=B3*2")], note="double the total")
 
 for edit in proposal.edits:
-    print(edit.address, edit.before, "->", edit.after)   # H1  ''  ->  3600
+    print(edit.address, repr(edit.before), "->", repr(edit.after))   # H1 '' -> '84'
 
 wb.accept_proposal(proposal.id)     # or wb.reject_proposal(proposal.id)
 ```
 
 Nothing is written until the proposal is accepted, and accepting applies it as
-a single undo step.
+a single undo step. `proposals()` lists the ones still awaiting a decision.
+
+A proposal goes stale when one of its target cells changes after it was staged.
+`accept_proposal` then raises `StaleProposalError`, whose `cells` names the
+addresses that moved underneath it — re-propose against the new values, or
+apply it anyway with `force=True`:
+
+```python
+from betteroffice_xlsx import StaleProposalError
+
+try:
+    wb.accept_proposal(proposal.id)
+except StaleProposalError as stale:
+    print("changed underneath:", stale.cells)   # ['H1']
+    wb.accept_proposal(proposal.id, force=True)
+```
+
+An unknown proposal ID raises `KeyError`; `reject_proposal` returns `False`
+instead when there is nothing left to reject.
 
 ## Formatting
 
@@ -147,20 +170,38 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `Workbook.open(data)` | open from `bytes` |
 | `Workbook.open_path(path)` | open from a path |
 | `Workbook.open_recalculated(data)` | open and evaluate every formula |
+| `Workbook.open_collaborative(data)` | open a Yrs replica — on the class, like the other openers |
 | `wb.recalculate()` | re-evaluate; returns a `Calculation` summary |
+| `wb.last_calculation()` | the `Calculation` the most recent one produced |
 | `wb.sheet_names` / `wb.sheet_count` | sheet metadata |
 | `wb[key]` / `wb.sheet(key)` | a `Sheet` by name or index |
+| `wb.sheet_index(key)` | resolve a name or index to an index |
 | `sheet[addr]` | cell value — see the note below on when it is recalculated |
 | `sheet[addr] = value` | set from what a user would type |
-| `wb.set_many(sheet, edits)` | write many cells as one undo step |
-| `wb.undo()` / `wb.redo()` | walk local history |
-| `wb.propose(...)` / `accept_proposal` / `reject_proposal` | staged agent edits |
-| `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
-| `wb.open_collaborative(...)` / `diff` / `apply_update` | Yrs replicas |
-| `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
 | `sheet.formula(addr)` | source formula, or `None` |
+| `wb.value(sheet, addr)` / `wb.formula(sheet, addr)` | the same two reads without a `Sheet` |
+| `wb.set(sheet, addr, value)` / `wb.set_many(sheet, edits)` | write one cell, or many as one undo step |
+| `wb.merged_ranges(sheet, range)` | merged regions overlapping a range |
+| `wb.undo()` / `wb.redo()` | walk local history |
+| `wb.can_undo` / `wb.can_redo` / `wb.history()` | what history is available |
+| `wb.propose(...)` / `proposals()` / `accept_proposal` / `reject_proposal` | staged agent edits |
+| `wb.set_style(...)` / `set_number_format(...)` | formatting over a range |
+| `wb.diff(sv)` / `apply_update(u)` / `state_vector()` / `state_as_update()` | exchange Yrs updates |
+| `wb.client_id` / `wb.is_collaborative` | which kind of workbook you are holding |
+| `wb.active_sheet` / `set_active_sheet(...)` | read or persist the active tab |
 | `wb.render_png(sheet, ...)` | render to PNG |
 | `wb.save()` / `wb.save_path(path)` | serialize to XLSX |
+
+Every call that can trigger a calculation — `open_recalculated`,
+`open_collaborative`, `recalculate`, `set`, `set_many`, `undo`, `redo`,
+`apply_update`, `propose`, `accept_proposal`, `set_number_format`, and
+`set_style` — takes a keyword-only `now_serial`. It is the clock `TODAY()` and
+`NOW()` read, as an Excel serial number. The engine has none of its own, so
+both return `#VALUE!` unless you pass one:
+
+```python
+wb.recalculate(now_serial=45658.5)   # 2025-01-01, midday
+```
 
 Cell values come back as `None`, `float`, `str`, `bool`, or `CellError`.
 Numbers are `f64` in the engine, so they arrive as `float` and are not narrowed
@@ -189,22 +230,40 @@ sheet["A2"] = "=1+1"    # the formula, evaluating to 2.0
 ```
 
 Mutating calls return a `Mutation` — truthy when something changed, with
-`changed` listing the cells the engine *recalculated* as a result. A cell you
-wrote directly is not itself a recalculation, so it will not always appear
-there.
+`changed` listing the cells the engine *recalculated* as a result, and `cycles`
+and `limited` the ones it gave up on. A cell you wrote directly is not itself a
+recalculation, so it will not always appear there. Addresses are bare A1 on the
+active sheet and `Sheet!A1` anywhere else, so match on the suffix rather than
+the whole string.
 
-Errors raise `XlsxError` or a more specific subclass. Invalid peer updates,
-broken local collaboration state, stale proposals, and collaboration-only
-operations use `InvalidUpdateError`, `CollaborativeStateError`,
-`StaleProposalError`, and `NotCollaborativeError`. `StaleProposalError.cells`
-lists the changed A1 addresses, and an unknown proposal ID raises `KeyError`.
+Errors raise `XlsxError` or a more specific subclass: `ParseError`,
+`RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
+`StaleProposalError`, `NotCollaborativeError`. Invalid peer updates, broken
+local collaboration state, stale proposals, and collaboration-only operations
+are the last four in that order. `StaleProposalError.cells` lists the changed A1
+addresses, and an unknown proposal ID raises `KeyError`.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. `save` regenerates the package
-from the features the model represents; package parts the model does not cover
-are not retained, so this is not a round-trip-preserving editor for arbitrary
-workbooks.
+`0.0.x`, and the API may change before `0.1.0`.
+
+`save` keeps the parts the model does not represent — charts, drawings, pivot
+tables, comments, macros, custom XML, and their relationships — rather than
+regenerating the package from the modeled features, and sheets you did not
+touch are copied through byte for byte. The stylesheet is left alone unless
+styles actually change.
+
+A sheet you *do* edit is reserialized from the model, so unmodeled row, column,
+and cell markup on that one sheet is lost, and its autofilter, data-validation,
+conditional-formatting, table, and sparkline ranges stay at their source
+coordinates. Collaborative sessions compare only the modeled workbook, so two
+peers holding the same cells but different macros or custom XML still accept
+each other as the same base.
+
+This binding exposes no structural edits: no sheet rename or removal, no row or
+column insert or delete. The engine refuses those anyway while a pivot table or
+an unmodeled chart part is preserved, because it cannot rewrite the references
+they hold.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.
@@ -217,7 +276,7 @@ package's own code is Apache-2.0.
 ## Links
 
 - [BetterOffice](https://betteroffice.dev) — the project
-- [Documentation](https://docs.betteroffice.dev)
+- [Documentation](https://docs.betteroffice.dev/docs/python)
 - [Source](https://github.com/openooxml/betteroffice) — `bindings/python-xlsx`
 - [betteroffice-xlsx on crates.io](https://crates.io/crates/betteroffice-xlsx) — the engine this wraps
 

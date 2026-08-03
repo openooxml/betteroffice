@@ -1,15 +1,21 @@
 # betteroffice-pptx
 
-Read, edit, and lay out PPTX presentations from Python. The engine is the Rust
-[BetterOffice](https://betteroffice.dev) PPTX core, compiled into the wheel —
+Read, edit, and lay out PPTX presentations from Python. `python-pptx` reads a
+deck and writes one back; this also *lays slides out* — line breaking, text
+metrics, a display list — and merges edits across replicas, because the Rust
+[BetterOffice](https://betteroffice.dev) PPTX core is compiled into the wheel:
 no PowerPoint, no LibreOffice subprocess, no COM.
 
 Editing is in-memory today: see [Writing](#writing) before you reach for
 `save()`.
 
+Not on PyPI yet. From a checkout, with a Rust toolchain installed:
+
 ```bash
-pip install betteroffice-pptx
+pip install -e bindings/python-pptx
 ```
+
+The distribution is hyphenated, the module is not: `import betteroffice_pptx`.
 
 ## Read a deck
 
@@ -21,8 +27,9 @@ deck = Presentation.open_path("quarterly.pptx")
 for slide in deck:
     print(slide.index, slide.name, repr(slide.text))
 
-shape = deck[0].shapes[0]
-print(shape.kind, shape.geometry, shape.x, shape.y, shape.width, shape.height)
+shape = next((s for slide in deck for s in slide.shapes), None)
+if shape is not None:
+    print(shape.kind, shape.geometry, shape.x, shape.y, shape.width, shape.height)
 ```
 
 Geometry is in English Metric Units — 914400 to the inch. The module exports
@@ -69,15 +76,21 @@ UTF-16 code units, and every paragraph ends with a pilcrow occupying one of
 them.
 
 ```python
-story = deck[0].shapes[0].stories[0]
-print(story.text, story.length)
+story = next(
+    (s for slide in deck for shape in slide.shapes for s in shape.stories), None
+)
+if story is not None:
+    print(story.text, story.length)
 
-deck.insert_text(story.id, 0, "Q3 ", bold=True)
-deck.format_text(story.id, 0, 3, color="#dc2626")
-deck.insert_paragraph_break(story.id, 3)
-removed = deck.delete_text(story.id, 0, 3)
-print(removed.text)          # 'Q3 '
+    deck.insert_text(story.id, 0, "Q3 ", bold=True)
+    deck.format_text(story.id, 0, 3, color="#dc2626")
+    deck.insert_paragraph_break(story.id, 3)
+    removed = deck.delete_text(story.id, 0, 3)
+    print(removed.text)      # 'Q3 '
 ```
+
+A shape with no text has no story, so a deck of pictures alone yields none.
+`deck.story(id)` looks one up directly and raises `KeyError` if it is gone.
 
 `format_text` patches only the arguments you pass, and a range spanning several
 paragraphs styles each of them as a single undoable edit. `delete_text` is the
@@ -86,9 +99,22 @@ than silently swallowing the break.
 
 ## Lay a slide out
 
+**No font is compiled into the wheel**, so laying out a slide that has text
+needs at least one registered face. Before that, `render_slide` raises:
+
 ```python
-deck.register_font("Inter", open("Inter-Regular.ttf", "rb").read())
-deck.register_font("Inter", open("Inter-Bold.ttf", "rb").read(), bold=True)
+deck.render_slide(0)
+# RenderError: no font has been registered for slide text
+```
+
+Register the faces the deck uses — one call per family, weight, and slant — and
+it lays out:
+
+```python
+from pathlib import Path
+
+deck.register_font("Inter", Path("Inter-Regular.ttf").read_bytes())
+deck.register_font("Inter", Path("Inter-Bold.ttf").read_bytes(), bold=True)
 
 layout = deck.render_slide(0)
 print(layout.width, layout.height, len(layout))   # 1280.0 720.0 42
@@ -96,12 +122,15 @@ layout.write("slide-0.json")
 scene = layout.to_dict()
 ```
 
+Once at least one face exists nothing raises again: a family the deck names but
+you never registered resolves to the same family at regular weight, and failing
+that to the first face you registered at all. One registration therefore renders
+every slide — in that one typeface, at its metrics. Register the real faces when
+line breaking has to match what PowerPoint would do.
+
 `render_slide` returns the display list — the same drawing contract the browser
 editor paints, as JSON. There is no PPTX rasterizer yet, so this is a scene
 description rather than pixels; feed it to your own canvas or renderer.
-
-No font is compiled into the wheel, so families you do not register fall back
-to the engine's metrics-only path. Register the faces you actually use.
 
 ## Collaboration
 
@@ -112,7 +141,7 @@ order to converge:
 left = Presentation.open_collaborative(data)
 right = Presentation.open_collaborative(data)
 
-left.move_shape(0, left[0].shapes[0].id, 100000, 100000)
+left.add_text_box(0, x=INCH, y=INCH, width=4 * INCH, height=INCH, text="Q3")
 right.apply_update(left.diff(right.state_vector()))   # right now agrees
 
 joiner = Presentation.open_collaborative(data)
@@ -141,7 +170,8 @@ oversized payload is refused before it is copied.
 
 ```python
 deck.author = "ana"
-deck.move_shape(0, shape_id, 0, 0)
+edit = deck.add_text_box(0, x=INCH, y=INCH, width=INCH, height=INCH, text="Q3")
+deck.move_shape(0, edit.shape_id, 0, 0)
 deck.add_undo_barrier()      # the next edit starts a new undo step
 deck.undo()
 deck.redo()
@@ -205,6 +235,8 @@ edits that merge across replicas, that is the gap this fills.
 | `deck.snapshot()` | the whole deck as plain data |
 | `deck[key]` / `deck.slide(key)` | a `Slide` by index or ID |
 | `deck.slide_ids` / `slide_count` / `layouts` | deck metadata |
+| `deck.width_emu` / `height_emu` | slide size in EMU |
+| `deck.author` / `deck.origin` | who an edit is attributed to, and how |
 | `deck.story(id)` | one text flow |
 | `deck.media()` | embedded images and other binary parts |
 | `insert_slide` / `delete_slide` / `move_slide` | slide order |
@@ -215,7 +247,7 @@ edits that merge across replicas, that is the gap this fills.
 | `insert_paragraph_break` | split a paragraph |
 | `register_font` / `render_slide` | layout |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
-| `deck.is_collaborative` | whether this deck may exchange updates |
+| `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
 | `deck.is_edited` | whether an accepted edit has made `save` refuse |
 | `undo` / `redo` / `add_undo_barrier` / `can_undo` / `can_redo` | history |
 | `deck.save()` / `save_path(path)` | serialize to PPTX — see *Writing* |
@@ -284,7 +316,7 @@ Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 ## Links
 
 - [BetterOffice](https://betteroffice.dev) — the project
-- [Documentation](https://docs.betteroffice.dev)
+- [Documentation](https://docs.betteroffice.dev/docs/python)
 - [Source](https://github.com/openooxml/betteroffice) — `bindings/python-pptx`
 - [betteroffice-pptx on crates.io](https://crates.io/crates/betteroffice-pptx) — the engine this wraps
 

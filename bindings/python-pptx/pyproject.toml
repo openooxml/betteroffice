@@ -18,15 +18,21 @@ keywords = [
   "ooxml",
   "presentationml",
   "slides",
-  "python-pptx-alternative",
+  "python-pptx",
   "rust",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Programming Language :: Rust",
   "Topic :: Office/Business :: Office Suites",
   "Topic :: Software Development :: Libraries",
@@ -36,6 +42,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://betteroffice.dev"
 Documentation = "https://docs.betteroffice.dev/docs/python"
+Changelog = "https://github.com/openooxml/betteroffice/blob/main/bindings/python-pptx/CHANGELOG.md"
 Source = "https://github.com/openooxml/betteroffice"
 Issues = "https://github.com/openooxml/betteroffice/issues"
 
