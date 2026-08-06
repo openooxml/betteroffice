@@ -317,6 +317,25 @@ fn to_any_array(values: Vec<Any>) -> Any {
     Any::Array(Arc::from(values))
 }
 
+/// `tcPr.borders` for a freshly inserted table: Word's Table Grid rules, a
+/// single 0.5pt (`w:sz="4"`) black line on every edge.
+fn default_cell_borders() -> Any {
+    let edge = to_any_map(HashMap::from([
+        ("style".to_owned(), Any::from("single")),
+        ("size".to_owned(), Any::Number(4.0)),
+        (
+            "color".to_owned(),
+            to_any_map(HashMap::from([("rgb".to_owned(), Any::from("000000"))])),
+        ),
+    ]));
+    to_any_map(HashMap::from([
+        ("top".to_owned(), edge.clone()),
+        ("bottom".to_owned(), edge.clone()),
+        ("left".to_owned(), edge.clone()),
+        ("right".to_owned(), edge),
+    ]))
+}
+
 fn write_table(txn: &mut TransactionMut<'_>, map: &MapRef, data: &TableData) {
     let rows = data
         .rows
@@ -1073,6 +1092,7 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let borders = default_cell_borders();
         let mut table_rows = Vec::with_capacity(rows as usize);
         for row in 0..rows as usize {
             let mut cells = Vec::with_capacity(columns as usize);
@@ -1083,6 +1103,7 @@ impl EditingDoc {
                     tc_pr: HashMap::from([
                         ("rowspan".to_owned(), Any::Number(1.0)),
                         ("colspan".to_owned(), Any::Number(1.0)),
+                        ("borders".to_owned(), borders.clone()),
                     ]),
                     story: story_id.clone(),
                 });
@@ -1935,6 +1956,97 @@ mod tests {
         let value = serde_json::to_value(&blocks).unwrap();
         assert_eq!(value[0]["kind"], "table");
         assert_eq!(value[0]["rows"].as_array().unwrap().len(), 3);
+    }
+
+    fn inserted(ctx: &EditCtx, rows: u32, columns: u32) -> EditingDoc {
+        let doc = EditingDoc::new(74);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.insert_table(ctx, Position::new("body", 0), rows, columns)
+            .unwrap();
+        doc
+    }
+
+    fn assert_grid_borders(doc: &EditingDoc) {
+        let (_, _, rows) = table_value(doc);
+        for row in rows.as_array().unwrap() {
+            for cell in row["cells"].as_array().unwrap() {
+                let borders = &cell["tcPr"]["borders"];
+                for side in ["top", "bottom", "left", "right"] {
+                    assert_eq!(borders[side]["style"], "single", "{side} of {cell}");
+                    assert_eq!(borders[side]["size"], 4.0, "{side} of {cell}");
+                    assert_eq!(borders[side]["color"]["rgb"], "000000", "{side} of {cell}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inserted_table_carries_word_default_grid_borders() {
+        assert_grid_borders(&inserted(&direct(), 3, 2));
+        assert_grid_borders(&inserted(&suggesting(), 3, 2));
+    }
+
+    #[test]
+    fn inserted_table_keeps_grid_borders_when_rows_and_columns_grow() {
+        let doc = inserted(&direct(), 2, 2);
+        doc.insert_row(&direct(), &cell(1, 0), true).unwrap();
+        doc.insert_column(&direct(), &cell(0, 1), true).unwrap();
+        let (_, grid, rows) = table_value(&doc);
+        assert_eq!(grid.as_array().unwrap().len(), 3);
+        assert_eq!(rows.as_array().unwrap().len(), 3);
+        assert_grid_borders(&doc);
+    }
+
+    #[test]
+    fn inserted_table_paints_a_rule_on_every_cell_edge() {
+        use docx_layout::display_list::{LineRole, Primitive};
+        use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
+        use docx_layout::types::{Input, LayoutOptions, MeasuredBlock, PageMargins, Size};
+
+        let doc = inserted(&direct(), 2, 2);
+        let mut blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let measures = measure_blocks(&mut blocks, 600.0, &MeasurementConfig::default()).unwrap();
+        let mut input = Input {
+            measured: blocks
+                .into_iter()
+                .zip(measures)
+                .map(|(block, measure)| MeasuredBlock { block, measure })
+                .collect(),
+            options: LayoutOptions {
+                page_size: Some(Size {
+                    w: 816.0,
+                    h: 1056.0,
+                }),
+                margins: Some(PageMargins {
+                    top: 96.0,
+                    right: 108.0,
+                    bottom: 96.0,
+                    left: 108.0,
+                    header: None,
+                    footer: None,
+                }),
+                ..LayoutOptions::default()
+            },
+        };
+        let layout = docx_layout::compute_layout_input(&mut input).unwrap();
+        let display_list = docx_layout::build_display_list(&input, &layout).unwrap();
+        let rules: Vec<_> = display_list.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Line(line) if line.role == Some(LineRole::TableBorder) => Some(line),
+                _ => None,
+            })
+            .collect();
+        // A 2x2 grid draws three horizontal and three vertical rules, each
+        // split into one segment per cell it borders.
+        let horizontal = rules.iter().filter(|line| line.y1 == line.y2).count();
+        let vertical = rules.iter().filter(|line| line.x1 == line.x2).count();
+        assert_eq!((horizontal, vertical), (6, 6), "every grid edge is painted");
+        for line in &rules {
+            assert_eq!(line.color, "#000000");
+            assert_eq!(line.stroke_width.as_f64(), Some(1.0));
+        }
     }
 
     #[test]
