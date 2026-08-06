@@ -604,12 +604,14 @@ export interface YrsCellBorder {
 }
 
 /**
- * Complete per-side border object for {@link YrsSession.setCellBorders}.
+ * Per-side border patch for {@link YrsSession.setCellBorders}. An omitted side
+ * is left alone, `style: 'none'` authors an explicit no-border, and `null`
+ * drops the authored side.
  *
  * @public
  */
 export type YrsCellBorders = Partial<
-  Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder>
+  Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
 /**
@@ -776,7 +778,10 @@ export interface YrsSession extends CollaborationReplica {
     range: YrsTableRange,
     patch: Readonly<Record<string, unknown>>
   ): YrsTableReceipt;
-  /** Replaces the complete selected-cell border property object. */
+  /**
+   * Merges border sides into the selected cells. `insideH`/`insideV` resolve
+   * per cell to the physical edges interior to the selection.
+   */
   setCellBorders(range: YrsTableRange, borders: YrsCellBorders): YrsTableReceipt;
   /** Sets one authored grid-column width in twips. */
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;

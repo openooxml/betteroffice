@@ -2296,8 +2296,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Replaces every selected cell's complete `tcPr.borders` object with the
-    /// JSON object `borders_json`. `range_json` is a [`TableRange`]. Always a
+    /// Merges the sides of the JSON object `borders_json` into every selected
+    /// cell's `tcPr.borders`; `insideH`/`insideV` resolve to the physical edges
+    /// interior to the selection. `range_json` is a [`TableRange`]. Always a
     /// plain local edit.
     pub fn set_cell_borders(
         &self,

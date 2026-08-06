@@ -18,6 +18,7 @@ use yrs::{
 };
 
 use crate::op::{OpError, OpResult};
+use crate::seed::border_side_sources;
 use crate::{
     EditCtx, EditingDoc, KIND_KEY, Position, STORIES, check_position, insertion_attrs, map_string,
     out_len, revision_value, story_ref, write_pilcrow_properties,
@@ -315,6 +316,33 @@ fn to_any_map(map: HashMap<String, Any>) -> Any {
 
 fn to_any_array(values: Vec<Any>) -> Any {
     Any::Array(Arc::from(values))
+}
+
+/// Merges physical border edges into a cell's `tcPr.borders`. A `None` value
+/// drops that edge; an emptied object drops the whole key.
+fn merge_cell_borders<'a>(
+    cell: &mut CellData,
+    edges: impl IntoIterator<Item = (&'a str, &'a Option<Any>)>,
+) {
+    let mut merged = cell
+        .tc_pr
+        .get("borders")
+        .and_then(|value| match value {
+            Any::Map(map) => Some(map.as_ref().clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for (edge, value) in edges {
+        match value {
+            Some(value) => merged.insert(edge.to_owned(), value.clone()),
+            None => merged.remove(edge),
+        };
+    }
+    if merged.is_empty() {
+        cell.tc_pr.remove("borders");
+    } else {
+        cell.tc_pr.insert("borders".to_owned(), to_any_map(merged));
+    }
 }
 
 fn write_table(txn: &mut TransactionMut<'_>, map: &MapRef, data: &TableData) {
@@ -1673,7 +1701,11 @@ impl EditingDoc {
         receipt(locator, Some(&data), Vec::new(), Vec::new(), Vec::new())
     }
 
-    /// Replaces the complete `tcPr.borders` object on every selected cell.
+    /// Merges the supplied border sides into every selected cell's
+    /// `tcPr.borders`. `insideH`/`insideV` resolve per cell to the physical
+    /// edges interior to the selection, the same mapping seeding uses to push
+    /// `tblBorders` down. An omitted side is left untouched, `style: "none"`
+    /// authors an explicit no-border, and JSON `null` drops the authored side.
     pub fn set_cell_borders(
         &self,
         ctx: &EditCtx,
@@ -1684,21 +1716,43 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let (_, table, _) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
+        let rect = checked_rect(&data, range)?;
         let selected = selected_anchors(&data, range)?;
         let (all, _) = anchors(&data)?;
 
-        for anchor in &selected {
-            data.rows[anchor.row].cells[anchor.cell_index]
-                .tc_pr
-                .insert("borders".to_owned(), to_any_map(borders.clone()));
+        let resolved: Vec<(&CellAnchor, Vec<(&'static str, Option<Any>)>)> = selected
+            .iter()
+            .map(|anchor| {
+                let edges = border_side_sources(
+                    anchor.row == rect.top,
+                    anchor.row + anchor.rowspan == rect.bottom,
+                    anchor.column == rect.left,
+                    anchor.column + anchor.colspan == rect.right,
+                )
+                .into_iter()
+                .filter_map(|(edge, source)| {
+                    let value = borders.get(source)?;
+                    let keep = !matches!(value, Any::Null | Any::Undefined);
+                    Some((edge, keep.then(|| value.clone())))
+                })
+                .collect();
+                (anchor, edges)
+            })
+            .collect();
+
+        for (anchor, edges) in &resolved {
+            merge_cell_borders(
+                &mut data.rows[anchor.row].cells[anchor.cell_index],
+                edges.iter().map(|(edge, value)| (*edge, value)),
+            );
         }
 
-        // Keep shared edges symmetric. A supplied top/bottom/left/right value
-        // is mirrored onto every cell touching that edge, including cells just
-        // outside the selection.
-        for anchor in &selected {
-            for (side, value) in borders {
-                let (facing, slots): (&str, Vec<(usize, usize)>) = match side.as_str() {
+        // Keep shared edges symmetric. A resolved edge is mirrored onto the
+        // facing edge of every cell across it, including cells just outside
+        // the selection.
+        for (anchor, edges) in &resolved {
+            for (edge, value) in edges {
+                let (facing, slots): (&str, Vec<(usize, usize)>) = match *edge {
                     "top" if anchor.row > 0 => (
                         "bottom",
                         (anchor.column..anchor.column + anchor.colspan)
@@ -1733,18 +1787,10 @@ impl EditingDoc {
                     if !neighbors.insert(neighbor.cell.story.clone()) {
                         continue;
                     }
-                    let cell = &mut data.rows[neighbor.row].cells[neighbor.cell_index];
-                    let mut neighbor_borders = cell
-                        .tc_pr
-                        .get("borders")
-                        .and_then(|value| match value {
-                            Any::Map(map) => Some(map.as_ref().clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    neighbor_borders.insert(facing.to_owned(), value.clone());
-                    cell.tc_pr
-                        .insert("borders".to_owned(), to_any_map(neighbor_borders));
+                    merge_cell_borders(
+                        &mut data.rows[neighbor.row].cells[neighbor.cell_index],
+                        std::iter::once((facing, value)),
+                    );
                 }
             }
         }
@@ -2224,6 +2270,283 @@ mod tests {
         assert_eq!(grid[0], 2400);
         assert_eq!(tbl_pr["width"], 5000);
         assert_eq!(tbl_pr["widthType"], "dxa");
+    }
+
+    fn line(color: &str) -> Any {
+        Any::from_json(&format!(
+            r#"{{"style":"single","size":4,"color":{{"rgb":"{color}"}}}}"#
+        ))
+        .unwrap()
+    }
+
+    fn cleared() -> Any {
+        Any::from_json(r#"{"style":"none","size":0,"color":{"rgb":"000000"}}"#).unwrap()
+    }
+
+    fn sides(names: &[&str], value: &Any) -> HashMap<String, Any> {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), value.clone()))
+            .collect()
+    }
+
+    /// The six-, four- and two-key payloads the border toolbar actually sends.
+    const ALL: &[&str] = &["top", "bottom", "left", "right", "insideH", "insideV"];
+    const OUTSIDE: &[&str] = &["top", "bottom", "left", "right"];
+    const INSIDE: &[&str] = &["insideH", "insideV"];
+
+    fn whole_table() -> TableRange {
+        TableRange::new(cell(0, 0), cell(1, 1))
+    }
+
+    fn grid_table() -> EditingDoc {
+        let doc = seed_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(ALL, &line("000000")))
+            .unwrap();
+        doc
+    }
+
+    /// Every cell's four physical edge styles, `None` where unauthored.
+    fn edges(doc: &EditingDoc, row: usize, column: usize) -> [Option<String>; 4] {
+        let (_, _, rows) = table_value(doc);
+        let borders = &rows[row]["cells"][column]["tcPr"]["borders"];
+        ["top", "bottom", "left", "right"].map(|side| {
+            borders[side]["style"]
+                .as_str()
+                .filter(|style| *style != "none")
+                .map(str::to_owned)
+        })
+    }
+
+    fn authored(styles: [&str; 4]) -> [Option<String>; 4] {
+        styles.map(|style| Some(style.to_owned()))
+    }
+
+    /// Painted table-border rules as `(x1, y1, x2, y2, color)` page pixels.
+    fn rules(doc: &EditingDoc) -> Vec<(f64, f64, f64, f64, String)> {
+        use docx_layout::display_list::{LineRole, Primitive};
+        use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
+        use docx_layout::types::{Input, LayoutOptions, MeasuredBlock, PageMargins, Size};
+
+        let mut blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+        let measures = measure_blocks(&mut blocks, 600.0, &MeasurementConfig::default()).unwrap();
+        let mut input = Input {
+            measured: blocks
+                .into_iter()
+                .zip(measures)
+                .map(|(block, measure)| MeasuredBlock { block, measure })
+                .collect(),
+            options: LayoutOptions {
+                page_size: Some(Size {
+                    w: 816.0,
+                    h: 1056.0,
+                }),
+                margins: Some(PageMargins {
+                    top: 96.0,
+                    right: 108.0,
+                    bottom: 96.0,
+                    left: 108.0,
+                    header: None,
+                    footer: None,
+                }),
+                ..LayoutOptions::default()
+            },
+        };
+        let layout = docx_layout::compute_layout_input(&mut input).unwrap();
+        let display_list = docx_layout::build_display_list(&input, &layout).unwrap();
+        let number = |value: &serde_json::Number| value.as_f64().unwrap();
+        display_list.pages[0]
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Line(l) if l.role == Some(LineRole::TableBorder) => Some((
+                    number(&l.x1),
+                    number(&l.y1),
+                    number(&l.x2),
+                    number(&l.y2),
+                    l.color.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `(horizontal, vertical)` painted rule segments.
+    fn rule_counts(doc: &EditingDoc) -> (usize, usize) {
+        let painted = rules(doc);
+        (
+            painted.iter().filter(|rule| rule.1 == rule.3).count(),
+            painted.iter().filter(|rule| rule.0 == rule.2).count(),
+        )
+    }
+
+    #[test]
+    fn border_all_authors_four_physical_edges_and_no_inside_keys() {
+        let doc = grid_table();
+        let (_, _, rows) = table_value(&doc);
+        for row in 0..2 {
+            for column in 0..2 {
+                assert_eq!(edges(&doc, row, column), authored(["single"; 4]));
+                let borders = &rows[row]["cells"][column]["tcPr"]["borders"];
+                assert!(borders["insideH"].is_null(), "insideH reached a cell");
+                assert!(borders["insideV"].is_null(), "insideV reached a cell");
+            }
+        }
+        assert_eq!(rule_counts(&doc), (6, 6));
+    }
+
+    #[test]
+    fn a_single_side_button_keeps_the_cell_s_other_three_sides() {
+        let doc = grid_table();
+        assert_eq!(rule_counts(&doc), (6, 6));
+        doc.set_cell_borders(
+            &direct(),
+            &TableRange::cell(cell(0, 0)),
+            &sides(&["top"], &line("FF0000")),
+        )
+        .unwrap();
+        assert_eq!(edges(&doc, 0, 0), authored(["single"; 4]));
+        assert_eq!(rule_counts(&doc), (6, 6));
+    }
+
+    #[test]
+    fn single_side_buttons_apply_to_the_selection_s_own_edge() {
+        for (side, painted, authored_at) in [
+            ("top", (2, 0), [(0, 0), (0, 1)]),
+            ("bottom", (2, 0), [(1, 0), (1, 1)]),
+            ("left", (0, 2), [(0, 0), (1, 0)]),
+            ("right", (0, 2), [(0, 1), (1, 1)]),
+        ] {
+            let doc = seed_table();
+            doc.set_cell_borders(&direct(), &whole_table(), &sides(&[side], &line("000000")))
+                .unwrap();
+            let index = ["top", "bottom", "left", "right"]
+                .iter()
+                .position(|name| *name == side)
+                .unwrap();
+            for row in 0..2 {
+                for column in 0..2 {
+                    let expected = authored_at.contains(&(row, column));
+                    assert_eq!(
+                        edges(&doc, row, column)[index].is_some(),
+                        expected,
+                        "{side} on cell ({row},{column})"
+                    );
+                }
+            }
+            assert_eq!(rule_counts(&doc), painted, "{side}");
+        }
+    }
+
+    #[test]
+    fn border_outside_leaves_the_selection_s_interior_alone() {
+        let doc = seed_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(OUTSIDE, &line("000000")))
+            .unwrap();
+        assert_eq!(
+            edges(&doc, 0, 0),
+            [
+                Some("single".to_owned()),
+                None,
+                Some("single".to_owned()),
+                None
+            ]
+        );
+        assert_eq!(
+            edges(&doc, 1, 1),
+            [
+                None,
+                Some("single".to_owned()),
+                None,
+                Some("single".to_owned())
+            ]
+        );
+        assert_eq!(rule_counts(&doc), (4, 4));
+
+        let grid = grid_table();
+        grid.set_cell_borders(&direct(), &whole_table(), &sides(OUTSIDE, &line("FF0000")))
+            .unwrap();
+        assert_eq!(rule_counts(&grid), (6, 6));
+        let painted = rules(&grid);
+        let interior = painted.iter().filter(|rule| rule.4 == "#000000").count();
+        assert_eq!(interior, 4, "the four interior segments keep their colour");
+    }
+
+    #[test]
+    fn border_inside_paints_the_interior_rules_and_no_exterior_ones() {
+        let doc = seed_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(INSIDE, &line("000000")))
+            .unwrap();
+        let interior = Some("single".to_owned());
+        assert_eq!(
+            edges(&doc, 0, 0),
+            [None, interior.clone(), None, interior.clone()]
+        );
+        // the same two edges seen from the far side, kept symmetric
+        assert_eq!(edges(&doc, 1, 1), [interior.clone(), None, interior, None]);
+
+        let painted = rules(&doc);
+        let horizontal: Vec<_> = painted.iter().filter(|rule| rule.1 == rule.3).collect();
+        let vertical: Vec<_> = painted.iter().filter(|rule| rule.0 == rule.2).collect();
+        assert_eq!((horizontal.len(), vertical.len()), (2, 2));
+        let y = horizontal[0].1;
+        let x = vertical[0].0;
+        assert!(horizontal.iter().all(|rule| rule.1 == y));
+        assert!(vertical.iter().all(|rule| rule.0 == x));
+        let left = horizontal
+            .iter()
+            .map(|rule| rule.0)
+            .fold(f64::MAX, f64::min);
+        let right = horizontal
+            .iter()
+            .map(|rule| rule.2)
+            .fold(f64::MIN, f64::max);
+        let top = vertical.iter().map(|rule| rule.1).fold(f64::MAX, f64::min);
+        let bottom = vertical.iter().map(|rule| rule.3).fold(f64::MIN, f64::max);
+        assert!(left < x && x < right, "the column rule is interior");
+        assert!(top < y && y < bottom, "the row rule is interior");
+    }
+
+    #[test]
+    fn border_none_clears_the_selection_and_the_edges_its_neighbours_own() {
+        let doc = grid_table();
+        doc.set_cell_borders(&direct(), &whole_table(), &sides(ALL, &cleared()))
+            .unwrap();
+        assert_eq!(edges(&doc, 0, 0), [const { None }; 4]);
+        assert_eq!(rule_counts(&doc), (0, 0));
+
+        let corner = grid_table();
+        corner
+            .set_cell_borders(
+                &direct(),
+                &TableRange::cell(cell(1, 1)),
+                &sides(ALL, &cleared()),
+            )
+            .unwrap();
+        assert_eq!(rule_counts(&corner), (4, 4));
+    }
+
+    #[test]
+    fn one_side_clears_by_style_none_or_by_null_without_touching_the_rest() {
+        for value in [cleared(), Any::Null] {
+            let doc = grid_table();
+            doc.set_cell_borders(
+                &direct(),
+                &TableRange::cell(cell(0, 0)),
+                &sides(&["top"], &value),
+            )
+            .unwrap();
+            assert_eq!(
+                edges(&doc, 0, 0),
+                [
+                    None,
+                    Some("single".to_owned()),
+                    Some("single".to_owned()),
+                    Some("single".to_owned())
+                ]
+            );
+            assert_eq!(rule_counts(&doc), (5, 6));
+        }
     }
 
     #[test]

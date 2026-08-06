@@ -587,8 +587,9 @@ export class EditSession {
      */
     selection_context(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number): string;
     /**
-     * Replaces every selected cell's complete `tcPr.borders` object with the
-     * JSON object `borders_json`. `range_json` is a [`TableRange`]. Always a
+     * Merges the sides of the JSON object `borders_json` into every selected
+     * cell's `tcPr.borders`; `insideH`/`insideV` resolve to the physical edges
+     * interior to the selection. `range_json` is a [`TableRange`]. Always a
      * plain local edit.
      */
     set_cell_borders(range_json: string, borders_json: string): string;

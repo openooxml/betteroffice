@@ -2183,6 +2183,22 @@ fn revision_attrs(info: &Value) -> Value {
     })
 }
 
+/// Maps each physical cell edge to the border side that feeds it: the matching
+/// outer side where the cell sits on the boundary, `insideH`/`insideV` within.
+pub(crate) fn border_side_sources(
+    first_row: bool,
+    last_row: bool,
+    first_column: bool,
+    last_column: bool,
+) -> [(&'static str, &'static str); 4] {
+    [
+        ("top", if first_row { "top" } else { "insideH" }),
+        ("bottom", if last_row { "bottom" } else { "insideH" }),
+        ("left", if first_column { "left" } else { "insideV" }),
+        ("right", if last_column { "right" } else { "insideV" }),
+    ]
+}
+
 fn cell_borders(
     formatting: Option<&Value>,
     table_borders: Option<&Value>,
@@ -2192,12 +2208,12 @@ fn cell_borders(
     last_column: bool,
 ) -> Option<Value> {
     let inherited = object(table_borders).map(|borders| {
-        json!({
-            "top": nullish(if first_row { borders.get("top") } else { borders.get("insideH") }),
-            "bottom": nullish(if last_row { borders.get("bottom") } else { borders.get("insideH") }),
-            "left": nullish(if first_column { borders.get("left") } else { borders.get("insideV") }),
-            "right": nullish(if last_column { borders.get("right") } else { borders.get("insideV") })
-        })
+        Value::Object(
+            border_side_sources(first_row, last_row, first_column, last_column)
+                .into_iter()
+                .map(|(edge, source)| (edge.to_owned(), nullish(borders.get(source))))
+                .collect(),
+        )
     });
     let direct = field(formatting, "borders");
     if inherited.is_none() && direct.is_none() {

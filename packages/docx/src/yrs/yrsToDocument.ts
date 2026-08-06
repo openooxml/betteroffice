@@ -1297,30 +1297,26 @@ function paragraphFromStory(
   return paragraph;
 }
 
+/**
+ * Lifts a `w:tblBorders` back out of the per-cell edges seeding pushed down:
+ * outer sides come from the cells owning the table's boundary, `insideH`/
+ * `insideV` from an interior edge. Sides no cell authors stay absent.
+ */
 function inferTableBorders(rows: TableRow[]): TableBorders | undefined {
-  for (const row of rows) {
-    for (const cell of row.cells) {
-      const borders = cell.formatting?.borders;
-      if (!borders) continue;
-      const base =
-        borders.top ||
-        borders.left ||
-        borders.right ||
-        borders.bottom ||
-        borders.insideH ||
-        borders.insideV;
-      if (!base) return undefined;
-      return {
-        top: borders.top ?? base,
-        bottom: borders.bottom ?? base,
-        left: borders.left ?? base,
-        right: borders.right ?? base,
-        insideH: borders.insideH ?? borders.bottom ?? base,
-        insideV: borders.insideV ?? borders.right ?? base,
-      };
-    }
-  }
-  return undefined;
+  const firstRow = rows[0]?.cells;
+  const lastRow = rows[rows.length - 1]?.cells;
+  const corner = firstRow?.[0]?.formatting?.borders;
+  if (!firstRow || !lastRow || !corner) return undefined;
+  const borders: TableBorders = {
+    top: corner.top,
+    left: corner.left,
+    bottom: lastRow[0]?.formatting?.borders?.bottom,
+    right: firstRow[firstRow.length - 1]?.formatting?.borders?.right,
+    insideH: rows.length > 1 ? corner.bottom : undefined,
+    insideV: firstRow.length > 1 ? corner.right : undefined,
+  };
+  const authored = Object.entries(borders).filter(([, value]) => value !== undefined);
+  return authored.length > 0 ? (Object.fromEntries(authored) as TableBorders) : undefined;
 }
 
 function normalizeVMergeRuns(rows: TableRow[]): void {
