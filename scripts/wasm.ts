@@ -63,18 +63,35 @@ async function hashTree(hash: Hash, dir: string, prefix: string): Promise<void> 
   }
 }
 
+// Everything cargo lets you redirect codegen with from outside the manifest.
+// CARGO_ENCODED_RUSTFLAGS takes precedence over RUSTFLAGS, and any
+// CARGO_PROFILE_* override rewrites the release profile the wasm is built under.
+const CODEGEN_ENV = [
+  'RUSTFLAGS',
+  'CARGO_ENCODED_RUSTFLAGS',
+  'CARGO_BUILD_RUSTFLAGS',
+  'CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS',
+];
+
 /** Digest of every input the emitted wasm depends on: the crates, the workspace
- * manifest (release profiles), the toolchain and these scripts. */
-async function hashSources(): Promise<string> {
+ * manifest (release profiles), the toolchain, the cargo environment and these
+ * scripts. Shared by every module, so it doubles as the CI cache key. */
+export async function sourcesFingerprint(): Promise<string> {
   const hash = createHash('sha256');
   // `stable` moves, so the toolchain has to be part of the identity.
   const rustc = spawnSync('rustc', ['-vV'], { encoding: 'utf8' });
   if (rustc.status !== 0) throw new Error('rustc -vV failed');
   hash.update(rustc.stdout);
-  hash.update(`${WASM_PACK_VERSION}\0${process.env.RUSTFLAGS ?? ''}\0`);
-  for (const file of ['Cargo.toml', 'Cargo.lock']) {
+  hash.update(`${WASM_PACK_VERSION}\0`);
+  const overrides = Object.keys(process.env)
+    .filter((name) => name.startsWith('CARGO_PROFILE_'))
+    .sort();
+  for (const name of [...CODEGEN_ENV, ...overrides]) {
+    hash.update(`${name}=${process.env[name] ?? ''}\0`);
+  }
+  for (const file of ['Cargo.toml', 'Cargo.lock', '.cargo/config.toml']) {
     hash.update(`${file}\0`);
-    hash.update(await readFile(resolve(root, file)));
+    hash.update(await readFile(resolve(root, file)).catch(() => Buffer.alloc(0)));
   }
   await hashTree(hash, resolve(root, 'crates'), 'crates/');
   const scripts = resolve(root, 'scripts');
@@ -109,7 +126,7 @@ async function intact(dir: string, expected: Record<string, string> | undefined)
 /** Builds every module whose inputs or vendored output changed. */
 export async function buildWasmModules(modules: WasmModule[]): Promise<void> {
   requireWasmPack();
-  const sources = await hashSources();
+  const sources = await sourcesFingerprint();
 
   for (const { crate, name, generated, cargoArgs = [] } of modules) {
     const dest = resolve(root, generated);
