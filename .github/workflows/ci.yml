@@ -72,8 +72,11 @@ jobs:
         run: bun audit
         continue-on-error: true
 
+      # GHSA-5p4m-2wfm-xmqj reaches only read-yaml-file under @changesets/cli,
+      # which parses our own changesets; every way to move it is worse than the
+      # advisory. See SECURITY.md.
       - name: Fail on high or critical advisories
-        run: bun audit --audit-level=high
+        run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj
 
   rust:
     name: Rust gate
