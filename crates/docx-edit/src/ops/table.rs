@@ -343,6 +343,8 @@ fn merge_cell_borders<'a>(
     } else {
         cell.tc_pr.insert("borders".to_owned(), to_any_map(merged));
     }
+}
+
 /// `tcPr.borders` for a freshly inserted table: Word's Table Grid rules, a
 /// single 0.5pt (`w:sz="4"`) black line on every edge.
 fn default_cell_borders() -> Any {
