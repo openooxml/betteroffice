@@ -183,7 +183,7 @@ impl VsdxDocument {
 
     #[wasm_bindgen(js_name = mediaBytes)]
     pub fn media_bytes(&self, part_path: &str) -> Result<Vec<u8>, JsValue> {
-        self.media_bytes_result(part_path).map_err(js_error)
+        self.media_bytes_inner(part_path).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = encodeStateVector)]
@@ -205,7 +205,7 @@ impl VsdxDocument {
 
     #[wasm_bindgen(js_name = applyUpdateJson)]
     pub fn apply_update_json(&self, update: &[u8]) -> Result<String, JsValue> {
-        json(self.apply_update(update).map_err(js_error)?)
+        self.apply_update_json_inner(update).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = startUpdateObservation)]
@@ -273,20 +273,17 @@ impl VsdxDocument {
 
     #[wasm_bindgen(js_name = setCellFormulaJson)]
     pub fn set_cell_formula_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: SetCellFormulaArgs = parse_args(args)?;
-        json(self.set_cell_formula(args).map_err(js_error)?)
+        self.set_cell_formula_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = moveShapeJson)]
     pub fn move_shape_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: MoveShapeArgs = parse_args(args)?;
-        json(self.move_shape(args).map_err(js_error)?)
+        self.move_shape_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = resizeShapeJson)]
     pub fn resize_shape_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: ResizeShapeArgs = parse_args(args)?;
-        json(self.resize_shape(args).map_err(js_error)?)
+        self.resize_shape_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = reorderShapeJson)]
@@ -316,13 +313,7 @@ impl VsdxDocument {
 
     #[wasm_bindgen(js_name = addShapeJson)]
     pub fn add_shape_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: AddShapeArgs = parse_args(args)?;
-        let draft = args.draft.try_into().map_err(JsValue::from_str)?;
-        json(
-            self.session
-                .add_shape(&local_context(), &args.page_id, &draft)
-                .map_err(js_error)?,
-        )
+        self.add_shape_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = undoJson)]
@@ -365,12 +356,20 @@ impl VsdxDocument {
         self.session.apply_update_v1(update)
     }
 
-    fn media_bytes_result(&self, part_path: &str) -> crate::EditResult<Vec<u8>> {
+    fn apply_update_json_inner(&self, update: &[u8]) -> Result<String, String> {
+        self.apply_update(update)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn media_bytes_inner(&self, part_path: &str) -> Result<Vec<u8>, String> {
         self.session
-            .package()?
+            .package()
+            .map_err(|error| error.to_string())?
             .part_bytes(part_path)
             .map(ToOwned::to_owned)
             .ok_or_else(|| crate::EditError::InvalidState("media part was not found".to_owned()))
+            .map_err(|error| error.to_string())
     }
 
     fn set_cell_formula(
@@ -388,6 +387,13 @@ impl VsdxDocument {
         )
     }
 
+    fn set_cell_formula_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.set_cell_formula(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn move_shape(&self, args: MoveShapeArgs) -> crate::EditResult<[crate::CellFormulaReceipt; 2]> {
         self.session.move_shape(
             &local_context(),
@@ -396,6 +402,22 @@ impl VsdxDocument {
             args.x_formula,
             args.y_formula,
         )
+    }
+
+    fn move_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.move_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddShapeArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_shape(&local_context(), &args.page_id, &draft)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
     }
 
     fn resize_shape(
@@ -410,6 +432,13 @@ impl VsdxDocument {
             args.height_formula,
         )
     }
+
+    fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.resize_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
 }
 
 fn local_context() -> EditCtx {
@@ -420,8 +449,16 @@ fn parse_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, JsValue> 
     serde_json::from_str(args).map_err(js_error)
 }
 
+fn parse_args_inner<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, String> {
+    serde_json::from_str(args).map_err(|error| error.to_string())
+}
+
 fn json(value: impl Serialize) -> Result<String, JsValue> {
     serde_json::to_string(&value).map_err(js_error)
+}
+
+fn json_inner(value: impl Serialize) -> Result<String, String> {
+    serde_json::to_string(&value).map_err(|error| error.to_string())
 }
 
 fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
@@ -446,7 +483,6 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 #[cfg(test)]
 mod tests {
     use super::{VsdxDocument, parse_client_id_raw};
-    #[cfg(target_arch = "wasm32")]
     use crate::DiagramSession;
     use crate::{MAX_SAFE_CLIENT_ID, SHEETS};
     use yrs::{Map, MapPrelim, Out, ReadTxn, Transact};
@@ -479,9 +515,28 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn error_string(result: Result<String, wasm_bindgen::JsValue>) -> String {
-        result.unwrap_err().as_string().unwrap()
+    fn rewrite_formula_update(document: &VsdxDocument, key: &str, formula: &str) -> Vec<u8> {
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let cell = match cells.get(&txn, key) {
+            Some(Out::YMap(cell)) => cell,
+            _ => unreachable!(),
+        };
+        cell.insert(&mut txn, "formula", formula);
+        drop(txn);
+        attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap()
     }
 
     #[test]
@@ -491,28 +546,26 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
     #[test]
-    fn wasm_refuses_guarded_section_row_cell_edits() {
+    fn set_cell_formula_json_inner_refuses_guarded_section_row_cell_edits() {
         let document = document();
         add_cell(&document, "Geometry\u{1f}IX:0\u{1f}X", "X", "GUARD(1)");
         assert_eq!(
-            error_string(document.set_cell_formula_json(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"section":"Geometry","rowIndex":0,"cellName":"X"},"formula":"2"}"#)),
+            document.set_cell_formula_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"section":"Geometry","rowIndex":0,"cellName":"X"},"formula":"2"}"#).unwrap_err(),
             "invalid diagram state: GUARD protects the requested cell"
         );
     }
 
-    #[cfg(target_arch = "wasm32")]
     #[test]
-    fn wasm_locks_refuse_atomic_move_and_resize() {
+    fn move_shape_json_inner_refuses_atomic_locks() {
         let document = document();
         add_cell(&document, "PinX", "PinX", "1");
         add_cell(&document, "PinY", "PinY", "1");
         add_cell(&document, "LockMoveY", "LockMoveY", "1");
         assert_eq!(
-            error_string(document.move_shape_json(
+            document.move_shape_json_inner(
                 r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3"}"#
-            )),
+            ).unwrap_err(),
             "invalid diagram state: LockMoveY protects this move gesture"
         );
         let snapshot = document.snapshot_json().unwrap();
@@ -523,7 +576,7 @@ mod tests {
         add_cell(&document, "Height", "Height", "1");
         add_cell(&document, "LockHeight", "LockHeight", "1");
         assert_eq!(
-            error_string(document.resize_shape_json(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","widthFormula":"2","heightFormula":"3"}"#)),
+            document.resize_shape_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1","widthFormula":"2","heightFormula":"3"}"#).unwrap_err(),
             "invalid diagram state: LockHeight protects this resize gesture"
         );
         let snapshot = document.snapshot_json().unwrap();
@@ -562,11 +615,11 @@ mod tests {
         );
     }
 
-    #[cfg(target_arch = "wasm32")]
     #[test]
-    fn wasm_rejects_malicious_setatref_updates_without_changing_the_document() {
+    fn apply_update_json_inner_rejects_setatref_bypasses_without_changing_the_document() {
         let document = document();
         add_cell(&document, "Width", "Width", "SETATREF(Target)");
+        add_cell(&document, "Target", "Target", "1");
         let before = document.encode_state_as_update();
         let attacker = DiagramSession::open_from_update(&before, 2).unwrap();
         let mut txn = attacker.yrs_doc().transact_mut();
@@ -589,10 +642,111 @@ mod tests {
             .encode_diff_v1(&document.encode_state_vector())
             .unwrap();
         assert_eq!(
-            error_string(document.apply_update_json(&update)),
+            document.apply_update_json_inner(&update).unwrap_err(),
             "invalid diagram state: remote update bypasses formula redirect at page:1/page:1:shape:1/Width"
         );
         assert_eq!(before, document.encode_state_as_update());
+    }
+
+    #[test]
+    fn apply_update_json_inner_reports_decode_and_size_errors() {
+        let document = document();
+        assert_eq!(
+            document.apply_update_json_inner(&[0]).unwrap_err(),
+            "invalid yrs update: while trying to read more data (expected: 1 bytes), an unexpected end of buffer was reached"
+        );
+        assert_eq!(
+            document
+                .apply_update_json_inner(&vec![0; crate::MAX_UPDATE_BYTES + 1])
+                .unwrap_err(),
+            "invalid yrs update: update exceeds 67108864 bytes"
+        );
+    }
+
+    #[test]
+    fn set_cell_formula_json_inner_reports_unevaluable_lock_and_malformed_formula() {
+        let locked_document = document();
+        add_cell(&locked_document, "PinX", "PinX", "1");
+        add_cell(&locked_document, "PinY", "PinY", "1");
+        add_cell(&locked_document, "LockMoveX", "LockMoveX", "Unknown()");
+        assert_eq!(
+            locked_document
+                .move_shape_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3"}"#
+                )
+                .unwrap_err(),
+            "invalid diagram state: cannot evaluate LockMoveX"
+        );
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1+");
+        assert_eq!(
+            document
+                .set_cell_formula_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"PinX"},"formula":"2"}"#
+                )
+                .unwrap_err(),
+            "invalid diagram state: cannot inspect existing formula: expected expression"
+        );
+    }
+
+    #[test]
+    fn apply_update_json_inner_refuses_protected_and_malformed_formula_changes() {
+        let guarded = document();
+        add_cell(&guarded, "Width", "Width", "GUARD(1)");
+        assert_eq!(
+            guarded
+                .apply_update_json_inner(&rewrite_formula_update(&guarded, "Width", "2"))
+                .unwrap_err(),
+            "invalid diagram state: GUARD protects the requested cell"
+        );
+
+        let locked = document();
+        add_cell(&locked, "PinX", "PinX", "1");
+        add_cell(&locked, "LockMoveX", "LockMoveX", "1");
+        assert_eq!(
+            locked
+                .apply_update_json_inner(&rewrite_formula_update(&locked, "PinX", "2"))
+                .unwrap_err(),
+            "invalid diagram state: LockMoveX protects this move gesture"
+        );
+
+        let unevaluable = document();
+        add_cell(&unevaluable, "PinX", "PinX", "1");
+        add_cell(&unevaluable, "LockMoveX", "LockMoveX", "Unknown()");
+        assert_eq!(
+            unevaluable
+                .apply_update_json_inner(&rewrite_formula_update(&unevaluable, "PinX", "2"))
+                .unwrap_err(),
+            "invalid diagram state: cannot evaluate LockMoveX"
+        );
+
+        let malformed = document();
+        add_cell(&malformed, "Width", "Width", "1+");
+        assert_eq!(
+            malformed
+                .apply_update_json_inner(&rewrite_formula_update(&malformed, "Width", "2"))
+                .unwrap_err(),
+            "invalid diagram state: cannot inspect existing formula: expected expression"
+        );
+    }
+
+    #[test]
+    fn apply_update_json_inner_refuses_frozen_metadata_changes() {
+        let document = document();
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        txn.get_map(crate::META)
+            .unwrap()
+            .insert(&mut txn, "fingerprint", "changed");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: remote update changes immutable diagram metadata fingerprint"
+        );
     }
 
     #[test]
@@ -603,7 +757,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            document.media_bytes("visio/media/image1.png").unwrap(),
+            document
+                .media_bytes_inner("visio/media/image1.png")
+                .unwrap(),
             vec![137, 80, 78, 71, 13, 10, 26, 10]
         );
     }
@@ -621,26 +777,24 @@ mod tests {
         );
     }
 
-    #[cfg(target_arch = "wasm32")]
     #[test]
-    fn wasm_media_bytes_rejects_unknown_parts() {
+    fn media_bytes_inner_rejects_unknown_parts() {
         assert_eq!(
             document()
-                .media_bytes("visio/media/missing.png")
-                .unwrap_err()
-                .as_string()
-                .unwrap(),
+                .media_bytes_inner("visio/media/missing.png")
+                .unwrap_err(),
             "invalid diagram state: media part was not found"
         );
     }
 
-    #[cfg(target_arch = "wasm32")]
     #[test]
-    fn wasm_add_shape_json_rejects_raw_values() {
+    fn add_shape_json_inner_rejects_raw_values() {
         assert_eq!(
-            error_string(document().add_shape_json(
-                r#"{"pageId":"page:1","draft":{"sourceId":3,"cells":[{"value":"1"}]}}"#
-            )),
+            document()
+                .add_shape_json_inner(
+                    r#"{"pageId":"page:1","draft":{"sourceId":3,"cells":[{"value":"1"}]}}"#
+                )
+                .unwrap_err(),
             "shape draft cells must not contain value"
         );
     }
