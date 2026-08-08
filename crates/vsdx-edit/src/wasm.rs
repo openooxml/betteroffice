@@ -486,8 +486,9 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 mod tests {
     use super::{VsdxDocument, parse_client_id_raw};
     use crate::DiagramSession;
-    use crate::{MAX_SAFE_CLIENT_ID, SHEETS};
-    use yrs::{Map, MapPrelim, Out, ReadTxn, Transact};
+    use crate::diagram::MAX_SHAPE_NESTING;
+    use crate::{MAX_SAFE_CLIENT_ID, PAGE_ORDER, PAGES, SHEETS};
+    use yrs::{Array, ArrayPrelim, Map, MapPrelim, Out, ReadTxn, Transact};
 
     fn document() -> VsdxDocument {
         VsdxDocument::open_collaborative(
@@ -495,6 +496,24 @@ mod tests {
             1.0,
         )
         .unwrap()
+    }
+
+    fn two_page_document() -> VsdxDocument {
+        let seed = document();
+        let session = DiagramSession::open_from_update(&seed.encode_state_as_update(), 2).unwrap();
+        let mut txn = session.yrs_doc().transact_mut();
+        let order = txn.get_array(PAGE_ORDER).unwrap();
+        order.push_back(&mut txn, "page:2");
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = pages.insert(&mut txn, "page:2", MapPrelim::default());
+        page.insert(&mut txn, "id", "page:2");
+        page.insert(&mut txn, "sourcePartPath", "visio/pages/page2.xml");
+        page.insert(&mut txn, "shapes", ArrayPrelim::default());
+        drop(txn);
+        VsdxDocument {
+            session,
+            update_observer: None,
+        }
     }
 
     fn add_cell(document: &VsdxDocument, key: &str, name: &str, formula: &str) {
@@ -845,6 +864,126 @@ mod tests {
             formula
                 .apply_update_json_inner(&add_remote_cell_update(&formula, Some("1"), None))
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_updates_reject_shape_nesting_beyond_the_limit() {
+        let document = document();
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let root = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let mut parent_id = "page:1:shape:1".to_owned();
+        for index in 0..MAX_SHAPE_NESTING {
+            let shape_id = format!("page:1:shape:deep:{index}");
+            let shape = sheets.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
+            shape.insert(&mut txn, "id", shape_id.as_str());
+            shape.insert(&mut txn, "pageId", "page:1");
+            shape.insert(&mut txn, "sourceId", (index + 10) as f64);
+            shape.insert(&mut txn, "parentId", parent_id.as_str());
+            shape.insert(&mut txn, "cells", MapPrelim::default());
+            shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+            if index == 0 {
+                let roots = match root.get(&txn, "shapes") {
+                    Some(Out::YArray(shapes)) => shapes,
+                    _ => unreachable!(),
+                };
+                roots.push_back(&mut txn, shape_id.as_str());
+            } else {
+                let parent = match sheets.get(&txn, &parent_id) {
+                    Some(Out::YMap(shape)) => shape,
+                    _ => unreachable!(),
+                };
+                let parent_children = match parent.get(&txn, "shapes") {
+                    Some(Out::YArray(shapes)) => shapes,
+                    _ => unreachable!(),
+                };
+                parent_children.push_back(&mut txn, shape_id.as_str());
+            }
+            parent_id = shape_id;
+        }
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: shape nesting exceeds maximum depth"
+        );
+    }
+
+    #[test]
+    fn remote_updates_reject_shape_attached_to_two_pages() {
+        let document = two_page_document();
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 3).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let root = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        root.remove(&mut txn, "pageId");
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = match pages.get(&txn, "page:2") {
+            Some(Out::YMap(page)) => page,
+            _ => unreachable!(),
+        };
+        let shapes = match page.get(&txn, "shapes") {
+            Some(Out::YArray(shapes)) => shapes,
+            _ => unreachable!(),
+        };
+        shapes.push_back(&mut txn, "page:1:shape:1");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: shape is attached to multiple pages"
+        );
+    }
+
+    #[test]
+    fn remote_updates_reject_non_string_parent_id() {
+        let document = document();
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = sheets.insert(
+            &mut txn,
+            "page:1:shape:invalid-parent",
+            MapPrelim::default(),
+        );
+        shape.insert(&mut txn, "id", "page:1:shape:invalid-parent");
+        shape.insert(&mut txn, "pageId", "page:1");
+        shape.insert(&mut txn, "sourceId", 99.0);
+        shape.insert(&mut txn, "parentId", 1.0);
+        shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = match pages.get(&txn, "page:1") {
+            Some(Out::YMap(page)) => page,
+            _ => unreachable!(),
+        };
+        let roots = match page.get(&txn, "shapes") {
+            Some(Out::YArray(shapes)) => shapes,
+            _ => unreachable!(),
+        };
+        roots.push_back(&mut txn, "page:1:shape:invalid-parent");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: shape parentId is not a string"
         );
     }
 

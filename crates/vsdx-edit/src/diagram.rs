@@ -19,6 +19,7 @@ use crate::{
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
+pub(crate) const MAX_SHAPE_NESTING: usize = 256;
 
 pub(crate) fn seed_doc(
     doc: &Doc,
@@ -69,7 +70,7 @@ pub(crate) fn seed_doc(
                     .map_err(|error| EditError::InvalidState(error.to_string()))?;
                 seed_shape(
                     &sheets, &stories, &mut txn, &shape_id, &id, None, path, sheet, shape,
-                    &resolver, &resolved,
+                    &resolver, &resolved, 1,
                 )?;
             }
         }
@@ -96,20 +97,24 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage>
                 .map_err(|error| EditError::InvalidState(error.to_string()))?
         }
     };
-    materialize_snapshot(&mut package, &snapshot_doc(doc)?);
+    materialize_snapshot(&mut package, &snapshot_doc(doc)?)?;
     Ok(package)
 }
 
-fn materialize_snapshot(package: &mut vsdx_parse::VsdxPackage, snapshot: &DiagramSnapshot) {
+fn materialize_snapshot(
+    package: &mut vsdx_parse::VsdxPackage,
+    snapshot: &DiagramSnapshot,
+) -> EditResult<()> {
     for page in &snapshot.pages {
         let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
             continue;
         };
-        materialize_page_shapes(sheet, page);
+        materialize_page_shapes(sheet, page)?;
     }
+    Ok(())
 }
 
-fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) {
+fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) -> EditResult<()> {
     let originals = sheet
         .shapes()
         .cloned()
@@ -127,7 +132,7 @@ fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) {
         } else {
             shape_from_snapshot(snapshot, &mut next_id)
         };
-        materialize_shape(&mut shape, snapshot);
+        materialize_shape(&mut shape, snapshot, 1)?;
         shapes.push(ShapesChild::Shape(shape));
     }
     if let Some(SheetChild::Shapes(existing)) = sheet
@@ -139,23 +144,17 @@ fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) {
     } else {
         sheet.children.push(SheetChild::Shapes(shapes));
     }
+    Ok(())
 }
 
 fn largest_shape_id(sheet: &vsdx_parse::Sheet) -> u32 {
-    sheet
-        .shapes()
-        .map(largest_shape_id_including_children)
-        .max()
-        .unwrap_or_default()
-}
-
-fn largest_shape_id_including_children(shape: &Shape) -> u32 {
-    shape
-        .shapes()
-        .map(largest_shape_id_including_children)
-        .max()
-        .unwrap_or_default()
-        .max(shape.id)
+    let mut largest = 0;
+    let mut pending = sheet.shapes().collect::<Vec<_>>();
+    while let Some(shape) = pending.pop() {
+        largest = largest.max(shape.id);
+        pending.extend(shape.shapes());
+    }
+    largest
 }
 
 fn shape_from_snapshot(snapshot: &ShapeSnapshot, next_id: &mut u32) -> Shape {
@@ -176,7 +175,12 @@ fn shape_from_snapshot(snapshot: &ShapeSnapshot, next_id: &mut u32) -> Shape {
     }
 }
 
-fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot) {
+fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot, depth: usize) -> EditResult<()> {
+    if depth > MAX_SHAPE_NESTING {
+        return Err(EditError::InvalidState(
+            "shape nesting exceeds maximum depth".to_owned(),
+        ));
+    }
     if shape.id == snapshot.source_id {
         for cell in &snapshot.cells {
             materialize_cell(shape, cell);
@@ -187,18 +191,19 @@ fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot) {
         .cloned()
         .map(|child| (child.id, child))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut next_id = shape
-        .shapes()
-        .map(largest_shape_id_including_children)
-        .max()
-        .unwrap_or(shape.id);
+    let mut next_id = shape.id;
+    let mut pending = shape.shapes().collect::<Vec<_>>();
+    while let Some(child) = pending.pop() {
+        next_id = next_id.max(child.id);
+        pending.extend(child.shapes());
+    }
     let mut children = Vec::with_capacity(snapshot.children.len());
     for child_snapshot in &snapshot.children {
         let mut child = originals
             .get(&child_snapshot.source_id)
             .cloned()
             .unwrap_or_else(|| shape_from_snapshot(child_snapshot, &mut next_id));
-        materialize_shape(&mut child, child_snapshot);
+        materialize_shape(&mut child, child_snapshot, depth + 1)?;
         children.push(ShapesChild::Shape(child));
     }
     if let Some(ShapeChild::Shapes(existing)) = shape
@@ -210,6 +215,7 @@ fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot) {
     } else {
         shape.children.push(ShapeChild::Shapes(children));
     }
+    Ok(())
 }
 
 fn materialize_cell(shape: &mut Shape, snapshot: &CellSnapshot) {
@@ -335,7 +341,13 @@ fn seed_shape(
     shape: &vsdx_parse::Shape,
     resolver: &Resolver<'_>,
     resolved: &vsdx_resolve::ResolvedShape,
+    depth: usize,
 ) -> EditResult<()> {
+    if depth > MAX_SHAPE_NESTING {
+        return Err(EditError::InvalidState(
+            "shape nesting exceeds maximum depth".to_owned(),
+        ));
+    }
     let map = sheets.insert(txn, id, MapPrelim::default());
     map.insert(txn, "id", id);
     map.insert(txn, "pageId", page_id);
@@ -422,6 +434,7 @@ fn seed_shape(
             child,
             resolver,
             &child_resolved,
+            depth + 1,
         )?;
     }
     Ok(())
@@ -736,17 +749,23 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
             }
         }
     }
-    let reachable = required_map(&txn, PAGES)?.iter(&txn).try_fold(
+    let attached = required_map(&txn, PAGES)?.iter(&txn).try_fold(
         HashSet::new(),
-        |mut reachable, (_, page)| -> EditResult<_> {
+        |mut attached, (_, page)| -> EditResult<_> {
             let Out::YMap(page) = page else {
                 return Err(EditError::InvalidState("page is not a map".to_owned()));
             };
-            reachable.extend(reachable_shape_ids(&sheets, &txn, &page)?);
-            Ok(reachable)
+            for shape_id in reachable_shape_ids(&sheets, &txn, &page)? {
+                if !attached.insert(shape_id) {
+                    return Err(EditError::InvalidState(
+                        "shape is attached to multiple pages".to_owned(),
+                    ));
+                }
+            }
+            Ok(attached)
         },
     )?;
-    if reachable.len() != sheets.len(&txn) as usize {
+    if attached.len() != sheets.len(&txn) as usize {
         return Err(EditError::InvalidState(
             "shape is not reachable from a page shape order".to_owned(),
         ));
@@ -961,43 +980,54 @@ fn reachable_shape_ids<T: ReadTxn>(
     page: &MapRef,
 ) -> EditResult<Vec<String>> {
     let roots = map_array(page, txn, "shapes")?;
+    let page_id = required_string(page, txn, "id")?;
     let mut result = Vec::new();
     let mut seen = HashSet::new();
-    fn visit<T: ReadTxn>(
-        sheets: &MapRef,
-        txn: &T,
-        shape_id: String,
-        parent_id: Option<&str>,
-        seen: &mut HashSet<String>,
-        result: &mut Vec<String>,
-    ) -> EditResult<()> {
+    let mut pending = Vec::new();
+    for index in (0..roots.len(txn)).rev() {
+        let shape_id = array_string(&roots, txn, index)
+            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
+        pending.push((shape_id, None, 1));
+    }
+    while let Some((shape_id, parent_id, depth)) = pending.pop() {
+        if depth > MAX_SHAPE_NESTING {
+            return Err(EditError::InvalidState(
+                "shape nesting exceeds maximum depth".to_owned(),
+            ));
+        }
         if !seen.insert(shape_id.clone()) {
             return Err(EditError::InvalidState(
                 "shape order contains a duplicate or cycle".to_owned(),
             ));
         }
         let shape = map_ref(sheets, txn, &shape_id)?;
-        if map_string(&shape, txn, "parentId").as_deref() != parent_id {
+        let stored_parent_id = shape.get(txn, "parentId");
+        if stored_parent_id.is_some() && map_string(&shape, txn, "parentId").is_none() {
+            return Err(EditError::InvalidState(
+                "shape parentId is not a string".to_owned(),
+            ));
+        }
+        if map_string(&shape, txn, "parentId").as_deref() != parent_id.as_deref() {
             return Err(EditError::InvalidState(
                 "shape parentId does not match shape order".to_owned(),
             ));
         }
-        result.push(shape_id.clone());
-        let Some(Out::YArray(children)) = shape.get(txn, "shapes") else {
-            return Ok(());
-        };
-        for index in 0..children.len(txn) {
-            let child_id = array_string(&children, txn, index).ok_or_else(|| {
-                EditError::InvalidState("shape order contains non-string".to_owned())
-            })?;
-            visit(sheets, txn, child_id, Some(&shape_id), seen, result)?;
+        if shape.get(txn, "pageId").is_some()
+            && map_string(&shape, txn, "pageId").as_deref() != Some(page_id.as_str())
+        {
+            return Err(EditError::InvalidState(
+                "shape pageId does not match page shape order".to_owned(),
+            ));
         }
-        Ok(())
-    }
-    for index in 0..roots.len(txn) {
-        let shape_id = array_string(&roots, txn, index)
-            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        visit(sheets, txn, shape_id, None, &mut seen, &mut result)?;
+        result.push(shape_id.clone());
+        if let Some(Out::YArray(children)) = shape.get(txn, "shapes") {
+            for index in (0..children.len(txn)).rev() {
+                let child_id = array_string(&children, txn, index).ok_or_else(|| {
+                    EditError::InvalidState("shape order contains non-string".to_owned())
+                })?;
+                pending.push((child_id, Some(shape_id.clone()), depth + 1));
+            }
+        }
     }
     Ok(result)
 }
@@ -1025,6 +1055,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
                 id.strip_prefix("page:")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
+                1,
             )?);
         }
         result.push(PageSnapshot {
@@ -1042,7 +1073,13 @@ fn snapshot_shape<T: ReadTxn>(
     txn: &T,
     shape_id: &str,
     page_id: u32,
+    depth: usize,
 ) -> EditResult<ShapeSnapshot> {
+    if depth > MAX_SHAPE_NESTING {
+        return Err(EditError::InvalidState(
+            "shape nesting exceeds maximum depth".to_owned(),
+        ));
+    }
     let shape = map_ref(sheets, txn, shape_id)?;
     let source_id = map_number(&shape, txn, "sourceId")
         .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
@@ -1075,7 +1112,7 @@ fn snapshot_shape<T: ReadTxn>(
     for index in 0..child_order.len(txn) {
         let child_id = array_string(&child_order, txn, index)
             .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        children.push(snapshot_shape(sheets, txn, &child_id, page_id)?);
+        children.push(snapshot_shape(sheets, txn, &child_id, page_id, depth + 1)?);
     }
     Ok(ShapeSnapshot {
         id: shape_id.to_owned(),
