@@ -181,16 +181,36 @@ fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot) {
             materialize_cell(shape, cell);
         }
     }
-    for child in &snapshot.children {
-        for value in &mut shape.children {
-            if let ShapeChild::Shapes(shapes) = value {
-                for value in shapes {
-                    if let ShapesChild::Shape(shape) = value {
-                        materialize_shape(shape, child);
-                    }
-                }
-            }
-        }
+    if snapshot.children.is_empty() {
+        return;
+    }
+    let originals = shape
+        .shapes()
+        .cloned()
+        .map(|child| (child.id, child))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut next_id = shape
+        .shapes()
+        .map(largest_shape_id_including_children)
+        .max()
+        .unwrap_or(shape.id);
+    let mut children = Vec::with_capacity(snapshot.children.len());
+    for child_snapshot in &snapshot.children {
+        let mut child = originals
+            .get(&child_snapshot.source_id)
+            .cloned()
+            .unwrap_or_else(|| shape_from_snapshot(child_snapshot, &mut next_id));
+        materialize_shape(&mut child, child_snapshot);
+        children.push(ShapesChild::Shape(child));
+    }
+    if let Some(ShapeChild::Shapes(existing)) = shape
+        .children
+        .iter_mut()
+        .find(|child| matches!(child, ShapeChild::Shapes(_)))
+    {
+        *existing = children;
+    } else {
+        shape.children.push(ShapeChild::Shapes(children));
     }
 }
 
@@ -329,6 +349,7 @@ fn seed_shape(
         map.insert(txn, "name", name.as_str());
     }
     let cells = map.insert(txn, "cells", MapPrelim::default());
+    let child_order = map.insert(txn, "shapes", ArrayPrelim::default());
     for (name, value) in &resolved.cells {
         if let Lookup::Found(cell) = value {
             seed_cell(
@@ -387,6 +408,7 @@ fn seed_shape(
     );
     for child in shape.shapes() {
         let child_id = format!("{id}:shape:{}", child.id);
+        child_order.push_back(txn, child_id.as_str());
         let child_resolved = resolver
             .resolve_shape(page_path, child.id)
             .map_err(|error| EditError::InvalidState(error.to_string()))?;
@@ -587,6 +609,7 @@ impl DiagramSession {
             shape.insert(&mut txn, "name", name.as_str());
         }
         let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
         for cell in &draft.cells {
             seed_cell(
                 &cells,
@@ -725,7 +748,62 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_doc(staged)?;
     validate_immutable_metadata(before, staged)?;
+    validate_session_topology(before, staged)?;
     validate_formula_mutations(before, staged)?;
+    Ok(())
+}
+
+fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let before_order = required_array(&before_txn, PAGE_ORDER)?;
+    let staged_order = required_array(&staged_txn, PAGE_ORDER)?;
+    if before_order != staged_order {
+        return Err(EditError::InvalidState(
+            "remote update changes immutable page topology".to_owned(),
+        ));
+    }
+    let before_pages = required_map(&before_txn, PAGES)?;
+    let staged_pages = required_map(&staged_txn, PAGES)?;
+    if before_pages.len(&before_txn) != staged_pages.len(&staged_txn) {
+        return Err(EditError::InvalidState(
+            "remote update changes immutable page topology".to_owned(),
+        ));
+    }
+    for (page_id, before_page) in before_pages.iter(&before_txn) {
+        let Out::YMap(before_page) = before_page else {
+            return Err(EditError::InvalidState("page is not a map".to_owned()));
+        };
+        let staged_page = map_ref(&staged_pages, &staged_txn, page_id)?;
+        for key in ["id", "sourcePartPath"] {
+            if before_page.get(&before_txn, key) != staged_page.get(&staged_txn, key) {
+                return Err(EditError::InvalidState(format!(
+                    "remote update changes immutable page {key}"
+                )));
+            }
+        }
+    }
+    let before_sheets = required_map(&before_txn, SHEETS)?;
+    let staged_sheets = required_map(&staged_txn, SHEETS)?;
+    for (shape_id, before_shape) in before_sheets.iter(&before_txn) {
+        let Out::YMap(before_shape) = before_shape else {
+            continue;
+        };
+        let staged_shape = map_ref(&staged_sheets, &staged_txn, shape_id)?;
+        let before_cells = map_map(&before_shape, &before_txn, "cells")?;
+        let staged_cells = map_map(&staged_shape, &staged_txn, "cells")?;
+        for (cell_id, before_cell) in before_cells.iter(&before_txn) {
+            let Out::YMap(before_cell) = before_cell else {
+                continue;
+            };
+            let staged_cell = map_ref(&staged_cells, &staged_txn, cell_id)?;
+            if before_cell.get(&before_txn, "value") != staged_cell.get(&staged_txn, "value") {
+                return Err(EditError::InvalidState(
+                    "remote update changes untrusted cached cell value".to_owned(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -775,11 +853,7 @@ fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
     let sheets = required_map(&before_txn, SHEETS)?;
     for (page_id, page) in pages.iter(&before_txn) {
         let Out::YMap(page) = page else { continue };
-        let order = map_array(&page, &before_txn, "shapes")?;
-        for index in 0..order.len(&before_txn) {
-            let shape_id = array_string(&order, &before_txn, index).ok_or_else(|| {
-                EditError::InvalidState("shape order contains non-string".to_owned())
-            })?;
+        for shape_id in reachable_shape_ids(&sheets, &before_txn, &page)? {
             let shape = map_ref(&sheets, &before_txn, &shape_id)?;
             let cells = map_map(&shape, &before_txn, "cells")?;
             let context = CrdtMutationContext::new(&before_txn, page_id, &shape_id)?;
@@ -827,6 +901,36 @@ fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
         }
     }
     Ok(())
+}
+
+fn reachable_shape_ids<T: ReadTxn>(
+    sheets: &MapRef,
+    txn: &T,
+    page: &MapRef,
+) -> EditResult<Vec<String>> {
+    let roots = map_array(page, txn, "shapes")?;
+    let mut pending = Vec::new();
+    for index in 0..roots.len(txn) {
+        pending.push(array_string(&roots, txn, index).ok_or_else(|| {
+            EditError::InvalidState("shape order contains non-string".to_owned())
+        })?);
+    }
+    let mut result = Vec::new();
+    while let Some(shape_id) = pending.pop() {
+        if result.contains(&shape_id) {
+            continue;
+        }
+        map_ref(sheets, txn, &shape_id)?;
+        result.push(shape_id.clone());
+        for (child_id, child) in sheets.iter(txn) {
+            if let Out::YMap(child) = child
+                && map_string(&child, txn, "parentId").as_deref() == Some(&shape_id)
+            {
+                pending.push(child_id.to_owned());
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
@@ -889,19 +993,32 @@ fn snapshot_shape<T: ReadTxn>(
         });
     }
     snapshots.sort_by_key(|cell| locator_key(&cell.locator));
-    let mut children = sheets
-        .iter(txn)
-        .filter_map(|(id, value)| match value {
-            Out::YMap(child)
-                if map_string(&child, txn, "parentId").as_deref() == Some(shape_id) =>
-            {
-                Some(id.to_owned())
-            }
-            _ => None,
-        })
-        .map(|id| snapshot_shape(sheets, txn, &id, page_id))
-        .collect::<EditResult<Vec<_>>>()?;
-    children.sort_by(|left, right| left.id.cmp(&right.id));
+    let children = if let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") {
+        let mut children = Vec::with_capacity(child_order.len(txn) as usize);
+        for index in 0..child_order.len(txn) {
+            let child_id = array_string(&child_order, txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            children.push(snapshot_shape(sheets, txn, &child_id, page_id)?);
+        }
+        children
+    } else {
+        let mut ids = sheets
+            .iter(txn)
+            .filter_map(|(id, value)| match value {
+                Out::YMap(child)
+                    if map_string(&child, txn, "parentId").as_deref() == Some(shape_id) =>
+                {
+                    Some(id.to_owned())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| snapshot_shape(sheets, txn, &id, page_id))
+            .collect::<EditResult<Vec<_>>>()?
+    };
     Ok(ShapeSnapshot {
         id: shape_id.to_owned(),
         source_id,
