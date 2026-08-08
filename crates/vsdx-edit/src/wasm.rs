@@ -288,27 +288,12 @@ impl VsdxDocument {
 
     #[wasm_bindgen(js_name = reorderShapeJson)]
     pub fn reorder_shape_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: ReorderShapeArgs = parse_args(args)?;
-        json(
-            self.session
-                .reorder_shape(
-                    &local_context(),
-                    &args.page_id,
-                    &args.shape_id,
-                    args.to_index,
-                )
-                .map_err(js_error)?,
-        )
+        self.reorder_shape_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = reorderPageJson)]
     pub fn reorder_page_json(&self, args: &str) -> Result<String, JsValue> {
-        let args: ReorderPageArgs = parse_args(args)?;
-        json(
-            self.session
-                .reorder_page(&local_context(), &args.page_id, args.to_index)
-                .map_err(js_error)?,
-        )
+        self.reorder_page_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = addShapeJson)]
@@ -411,6 +396,27 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn reorder_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: ReorderShapeArgs = parse_args_inner(args)?;
+        self.session
+            .reorder_shape(
+                &local_context(),
+                &args.page_id,
+                &args.shape_id,
+                args.to_index,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn reorder_page_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: ReorderPageArgs = parse_args_inner(args)?;
+        self.session
+            .reorder_page(&local_context(), &args.page_id, args.to_index)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
     fn add_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args: AddShapeArgs = parse_args_inner(args)?;
         let draft = args.draft.try_into().map_err(str::to_owned)?;
@@ -443,10 +449,6 @@ impl VsdxDocument {
 
 fn local_context() -> EditCtx {
     EditCtx::local("wasm")
-}
-
-fn parse_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, JsValue> {
-    serde_json::from_str(args).map_err(js_error)
 }
 
 fn parse_args_inner<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, String> {
@@ -533,6 +535,37 @@ mod tests {
             _ => unreachable!(),
         };
         cell.insert(&mut txn, "formula", formula);
+        drop(txn);
+        attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap()
+    }
+
+    fn add_remote_cell_update(
+        document: &VsdxDocument,
+        formula: Option<&str>,
+        value: Option<&str>,
+    ) -> Vec<u8> {
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let cell = cells.insert(&mut txn, "Added", MapPrelim::default());
+        cell.insert(&mut txn, "name", "Added");
+        if let Some(formula) = formula {
+            cell.insert(&mut txn, "formula", formula);
+        }
+        if let Some(value) = value {
+            cell.insert(&mut txn, "value", value);
+        }
         drop(txn);
         attacker
             .encode_diff_v1(&document.encode_state_vector())
@@ -796,6 +829,51 @@ mod tests {
                 )
                 .unwrap_err(),
             "shape draft cells must not contain value"
+        );
+    }
+
+    #[test]
+    fn remote_cell_additions_must_be_formula_only() {
+        let raw = document();
+        assert_eq!(
+            raw.apply_update_json_inner(&add_remote_cell_update(&raw, None, Some("1")))
+                .unwrap_err(),
+            "invalid diagram state: remote update adds untrusted cached cell value"
+        );
+        let formula = document();
+        assert!(
+            formula
+                .apply_update_json_inner(&add_remote_cell_update(&formula, Some("1"), None))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_updates_cannot_detach_grouped_children() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let child_id = document.session().snapshot().unwrap().pages[0].shapes[0].children[0]
+            .id
+            .clone();
+        let attacker =
+            DiagramSession::open_from_update(&document.encode_state_as_update(), 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let child = match sheets.get(&txn, &child_id) {
+            Some(Out::YMap(child)) => child,
+            _ => unreachable!(),
+        };
+        child.insert(&mut txn, "parentId", "page:1:shape:detached");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: shape parentId does not match shape order"
         );
     }
 

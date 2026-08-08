@@ -959,6 +959,37 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_groups_last_child_materializes_an_empty_shapes_collection() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            7,
+        )
+        .unwrap();
+        let parent_id = session.snapshot().unwrap().pages[0].shapes[0].id.clone();
+        let mut txn = session.doc.transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let parent = match sheets.get(&txn, &parent_id) {
+            Some(yrs::Out::YMap(parent)) => parent,
+            _ => unreachable!(),
+        };
+        let children = match parent.get(&txn, "shapes") {
+            Some(yrs::Out::YArray(children)) => children,
+            _ => unreachable!(),
+        };
+        let child_count = children.len(&txn);
+        children.remove_range(&mut txn, 0, child_count);
+        drop(txn);
+        assert!(
+            session.snapshot().unwrap().pages[0].shapes[0]
+                .children
+                .is_empty()
+        );
+        let package = session.package().unwrap();
+        let sheet = package.page_contents.get("visio/pages/page1.xml").unwrap();
+        assert_eq!(sheet.shapes().next().unwrap().shapes().count(), 0);
+    }
+
+    #[test]
     fn shared_seed_is_identical_for_distinct_clients() {
         let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
         let first = DiagramSession::open(source, 17).unwrap();
