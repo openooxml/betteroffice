@@ -1,11 +1,14 @@
 use std::fs;
 
 use vsdx_parse::{
-    Cell, Row, RowChild, Section, SectionChild, Shape, ShapeChild, Sheet, SheetChild, TextToken,
-    VsdxPackage, parse_vsdx,
+    Cell, Connect, ConnectsChild, Row, RowChild, Section, SectionChild, Shape, ShapeChild, Sheet,
+    SheetChild, TextToken, VsdxPackage, parse_vsdx,
 };
 
-use crate::{Lookup, Provenance, ResolveError, ResolvedTextToken, Resolver};
+use crate::{
+    ConnectivityDiagnostic, ConnectorEndpoint, Lookup, Provenance, ResolveError, ResolvedTextToken,
+    Resolver,
+};
 
 fn package() -> VsdxPackage {
     serde_json::from_value(serde_json::json!({
@@ -112,6 +115,98 @@ fn deleted_row_with_cells(index: u32, cells: Vec<Cell>) -> Row {
         children: cells.into_iter().map(RowChild::Cell).collect(),
         other_attrs: vec![],
     }
+}
+
+#[test]
+fn resolves_glue_connection_points_and_part_fields() {
+    let mut package = package();
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![
+                SheetChild::Shapes(vec![
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        1,
+                        vec![
+                            ShapeChild::Cell(cell("OneD", "1")),
+                            ShapeChild::Cell(cell("BeginX", "1")),
+                            ShapeChild::Cell(cell("BeginY", "2")),
+                            ShapeChild::Cell(cell("EndX", "4")),
+                            ShapeChild::Cell(cell("EndY", "2")),
+                        ],
+                    )),
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        2,
+                        vec![
+                            ShapeChild::Cell(cell("Width", "4")),
+                            ShapeChild::Cell(cell("Height", "2")),
+                            ShapeChild::Cell(cell("PinX", "10")),
+                            ShapeChild::Cell(cell("PinY", "5")),
+                            ShapeChild::Section(section(
+                                "Connection",
+                                vec![row(1, vec![cell("X", "4"), cell("Y", "1")])],
+                            )),
+                        ],
+                    )),
+                ]),
+                SheetChild::Connects(vec![ConnectsChild::Connect(Connect {
+                    from_sheet: 1,
+                    from_cell: Some("BeginX".into()),
+                    from_part: Some(9),
+                    to_sheet: 2,
+                    to_cell: Some("Connections.X1".into()),
+                    to_part: Some(100),
+                    other_attrs: vec![],
+                })]),
+            ],
+        ),
+    );
+    let connectivity = Resolver::new(&package)
+        .resolve_page_connectivity("page")
+        .unwrap();
+    let connector = connectivity.connectors.get(&1).unwrap();
+    assert_eq!(connector.begin.unwrap().x, 1.0);
+    assert_eq!(connector.glue[0].endpoint, ConnectorEndpoint::Begin);
+    assert_eq!(connector.glue[0].from_part, Some(9));
+    let target = connector.glue[0].to.as_ref().unwrap();
+    assert_eq!(target.part, Some(100));
+    assert_eq!(target.connection_point.as_ref().unwrap().position.x, 12.0);
+    assert_eq!(target.connection_point.as_ref().unwrap().position.y, 5.0);
+}
+
+#[test]
+fn reports_dangling_connects_without_dropping_them() {
+    let mut package = package();
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![
+                SheetChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(shape(
+                    1,
+                    vec![ShapeChild::Cell(cell("OneD", "1"))],
+                ))]),
+                SheetChild::Connects(vec![ConnectsChild::Connect(Connect {
+                    from_sheet: 1,
+                    from_cell: Some("EndX".into()),
+                    from_part: None,
+                    to_sheet: 99,
+                    to_cell: Some("Connections.X7".into()),
+                    to_part: None,
+                    other_attrs: vec![],
+                })]),
+            ],
+        ),
+    );
+    let connectivity = Resolver::new(&package)
+        .resolve_page_connectivity("page")
+        .unwrap();
+    assert_eq!(connectivity.connectors.get(&1).unwrap().glue.len(), 1);
+    assert_eq!(
+        connectivity.diagnostics,
+        vec![ConnectivityDiagnostic::MissingToShape { shape_id: 99 }]
+    );
 }
 
 #[test]
