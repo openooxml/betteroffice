@@ -20,19 +20,31 @@
 
 ## Packages
 
-| package | what it does |
-|---|---|
-| [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | typed Rust API for opening, editing, laying out, and saving DOCX documents |
-| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
-| [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | drop-in React .docx editor |
-| [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
-| [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
-| [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | drop-in React spreadsheet editor |
-| [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) (PyPI) | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
-| [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
-| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
-| [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | drop-in React .pptx editor |
-| [`betteroffice-pptx`](./bindings/python-pptx) (Python) | Python API for reading, editing, and laying out PPTX presentations — not published to PyPI yet |
+### Documents — `.docx`
+
+| package | registry | what it does |
+|---|---|---|
+| [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | crates.io | typed Rust API for opening, editing, laying out, and saving DOCX documents |
+| [`@betteroffice/docx`](https://www.npmjs.com/package/@betteroffice/docx) | npm | framework-free .docx editor core — parsing, CRDT editing, and page layout in Rust through WebAssembly |
+| [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
+
+### Spreadsheets — `.xlsx`
+
+| package | registry | what it does |
+|---|---|---|
+| [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | crates.io | typed Rust API for opening, editing, calculating, rendering, and saving XLSX workbooks |
+| [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | npm | framework-free spreadsheet core powered by the Rust engine through WebAssembly |
+| [`@betteroffice/xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | npm | drop-in React spreadsheet editor |
+| [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) | PyPI | Python API for opening, recalculating, styling, rendering, and saving XLSX workbooks |
+
+### Presentations — `.pptx`
+
+| package | registry | what it does |
+|---|---|---|
+| [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
+| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
+| [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
+| [`betteroffice-pptx`](./bindings/python-pptx) | — | Python API for reading, editing, and laying out PPTX presentations — not published to PyPI yet |
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
