@@ -270,10 +270,15 @@ name = "betteroffice-vsdx-eval"
 version = "0.0.4"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-vsdx-formula",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
  "thiserror",
 ]
+
+[[package]]
+name = "betteroffice-vsdx-formula"
+version = "0.0.4"
 
 [[package]]
 name = "betteroffice-vsdx-parse"
@@ -305,6 +310,7 @@ name = "betteroffice-vsdx-resolve"
 version = "0.0.4"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-vsdx-formula",
  "betteroffice-vsdx-parse",
  "serde",
  "serde_json",

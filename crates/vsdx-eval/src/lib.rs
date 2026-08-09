@@ -1,18 +1,13 @@
 //! Bounded baseline ShapeSheet evaluation. Unsupported formulas never use cached values.
 
-mod ast;
 mod colour;
 #[path = "tests.rs"]
 mod corpus;
 mod eval;
 mod policy;
-mod tokenizer;
-mod units;
-
-pub use ast::{Expr, Op};
 pub use policy::{MutationContext, MutationOutcome, decide as decide_mutation};
-pub use units::Unit;
-use units::unit;
+use vsdx_formula::unit;
+pub use vsdx_formula::{Expr, Op, Unit};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -312,6 +307,14 @@ impl References for BTreeMap<String, String> {
 }
 
 pub fn parse(input: &str, limits: &ParseLimits) -> Result<Expr, Diagnostic> {
+    let _ = vsdx_formula::parse(
+        input,
+        vsdx_formula::Limits {
+            max_depth: limits.max_formula_depth,
+            max_nodes: limits.max_formula_nodes,
+            max_tokens: limits.max_formula_tokens,
+        },
+    );
     if input.trim().eq_ignore_ascii_case("No Formula") {
         return Ok(Expr::Call("No Formula".into(), Vec::new()));
     }

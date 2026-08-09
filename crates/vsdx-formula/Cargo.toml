@@ -1,22 +1,15 @@
 [package]
-name = "betteroffice-vsdx-eval"
+name = "betteroffice-vsdx-formula"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "Bounded baseline ShapeSheet formula evaluator for VSDX display."
+description = "Dependency-leaf ShapeSheet formula parser and numeric evaluator."
 readme = "README.md"
 keywords = ["vsdx", "visio", "shapesheet"]
 categories = ["parser-implementations", "graphics"]
 
 [lib]
-name = "vsdx_eval"
-
-[dependencies]
-ooxml-drawingml.workspace = true
-thiserror = "2"
-vsdx-parse.workspace = true
-vsdx-formula.workspace = true
-vsdx-resolve.workspace = true
+name = "vsdx_formula"

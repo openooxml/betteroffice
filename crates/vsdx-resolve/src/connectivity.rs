@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use vsdx_formula::{Limits as FormulaLimits, evaluate_number};
 use vsdx_parse::{Connect, Shape};
 
 use crate::{Lookup, ResolvedShape, Resolver};
@@ -348,46 +349,26 @@ fn number_from_cell(
 /// syntax because `vsdx-eval` depends on this crate. If a formula is unsupported, callers fall
 /// back to a finite cached `V`; a supported formula always wins over a conflicting cache.
 fn formula_number(shape: &ResolvedShape, formula: &str) -> Option<f64> {
-    let formula = formula.trim_start_matches('=').trim();
-    let value = formula
-        .parse::<f64>()
-        .ok()
-        .or_else(|| {
-            ['+', '-', '*', '/'].into_iter().find_map(|operator| {
-                formula.rfind(operator).and_then(|index| {
-                    (index > 0)
-                        .then(|| {
-                            let (left, right) = formula.split_at(index);
-                            let left = formula_number(shape, left)?;
-                            let right = formula_number(shape, &right[operator.len_utf8()..])?;
-                            Some(match operator {
-                                '+' => left + right,
-                                '-' => left - right,
-                                '*' => left * right,
-                                '/' => left / right,
-                                _ => unreachable!(),
-                            })
-                        })
-                        .flatten()
-                })
-            })
-        })
-        .or_else(|| number_from_value(shape, formula));
-    value.filter(|value| value.is_finite())
+    evaluate_number(
+        formula,
+        FormulaLimits {
+            max_depth: 64,
+            max_nodes: 1_024,
+            max_tokens: 1_024,
+        },
+        &mut |name| {
+            let Lookup::Found(value) = shape.cell(name.trim())? else {
+                return None;
+            };
+            value
+                .cell
+                .formula
+                .clone()
+                .or_else(|| value.cell.value.clone())
+        },
+    )
 }
 
-fn number_from_value(shape: &ResolvedShape, name: &str) -> Option<f64> {
-    let Lookup::Found(value) = shape.cell(name.trim())? else {
-        return None;
-    };
-    value
-        .cell
-        .value
-        .as_deref()?
-        .parse()
-        .ok()
-        .filter(|value: &f64| value.is_finite())
-}
 fn endpoint_name(name: &str) -> Option<ConnectorEndpoint> {
     match name {
         "BeginX" | "BeginY" => Some(ConnectorEndpoint::Begin),

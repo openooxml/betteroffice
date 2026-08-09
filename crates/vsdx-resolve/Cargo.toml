@@ -17,6 +17,7 @@ name = "vsdx_resolve"
 [dependencies]
 ooxml-drawingml.workspace = true
 vsdx-parse.workspace = true
+vsdx-formula.workspace = true
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
