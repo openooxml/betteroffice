@@ -8,16 +8,19 @@ import type { FormulaShapeDraft } from '../types';
 const root = resolve(import.meta.dir, '../../../..');
 let foundation: Uint8Array;
 let nestedGroups: Uint8Array;
+let textAccounting: Uint8Array;
 
 beforeAll(async () => {
-  const [wasm, foundationBytes, nestedGroupsBytes] = await Promise.all([
+  const [wasm, foundationBytes, nestedGroupsBytes, textAccountingBytes] = await Promise.all([
     readFile(resolve(import.meta.dir, 'generated/vsdx_wasm_bg.wasm')),
     readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/foundation.vsdx')),
     readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/nested-groups.vsdx')),
+    readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/text-accounting.vsdx')),
   ]);
   await initWasm(wasm);
   foundation = foundationBytes;
   nestedGroups = nestedGroupsBytes;
+  textAccounting = textAccountingBytes;
 });
 
 describe('VSDX wasm boundary', () => {
@@ -47,6 +50,13 @@ describe('VSDX wasm boundary', () => {
     expect(diagram.hitTest(0, 0)).toBeNull();
     diagram.layoutPage(0);
     expect(diagram.hitTest(-1, -1)).toBeNull();
+    diagram.dispose();
+  });
+
+  test('decodes wasm text diagnostic categories using wire casing', () => {
+    const diagram = openDiagram(textAccounting, { clientId: 9011 });
+    const diagnostics = diagram.layoutPage(0).primitives.flatMap(primitive => primitive.kind === 'textBox' ? primitive.paragraphs.flatMap(paragraph => paragraph.runs.flatMap(run => run.diagnostics)) : []);
+    expect(diagnostics).toContainEqual(expect.objectContaining({ category: 'fidelity', code: 'unregistered-font' }));
     diagram.dispose();
   });
 

@@ -11,7 +11,7 @@ export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean
 export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; stops: Array<{ position: number; color: string }> };
 export interface Stroke { color: string; width: number; dashed?: boolean; }
 export interface GeometryPathCommand { type: string; [key: string]: number | string; }
-export interface TextDiagnostic { category: 'Integrity' | 'Fidelity'; code: string; detail: string; }
+export interface TextDiagnostic { category: 'integrity' | 'fidelity'; code: string; detail: string; }
 export interface TextRun { text: string; family: string; sizeIn: number; bold: boolean; italic: boolean; underline: boolean; smallCaps: boolean; superscript: boolean; subscript: boolean; letterSpacing: number; color: string; diagnostics: TextDiagnostic[]; }
 export interface TextParagraph { runs: TextRun[]; }
 export interface PositionedLine { x: number; y: number; width: number; height: number; start: number; end: number; caretStops: Array<{ position: number; x: number; y: number }>; }
