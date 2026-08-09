@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use vsdx_eval::{Evaluation, PageShapeReferences, Value, evaluate_cell_with_shape_package_theme};
 use vsdx_parse::{ParseLimits, Shape, VsdxPackage};
-use vsdx_resolve::{Lookup, ResolvedShape, Resolver, realize_geometry};
+use vsdx_resolve::{Lookup, ResolvedShape, Resolver, ScenePoint, realize_geometry};
 
 const MAX_RECURSION_DEPTH: usize = 64;
 
@@ -592,6 +592,11 @@ impl Renderer {
         if paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0) {
             return Ok(());
         }
+        if paint::number(&resolved, "OneD").is_some_and(|value| value != 0.0) {
+            return self.layout_connector(
+                package, resolver, references, page_part, shape, id, z_order, &resolved, state,
+            );
+        }
         let Some(bounds) = bounds(package, references, &resolved, shape.id) else {
             return self.placeholder(shape, state, "unresolvable transform");
         };
@@ -730,6 +735,69 @@ impl Renderer {
         self.text(
             package, resolver, references, page_part, shape, &resolved, id, bounds, state,
         )?;
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn layout_connector(
+        &self,
+        package: &VsdxPackage,
+        resolver: &Resolver<'_>,
+        references: Option<&PageShapeReferences>,
+        page_part: &str,
+        shape: &Shape,
+        id: String,
+        z_order: u32,
+        resolved: &ResolvedShape,
+        state: &mut State,
+    ) -> Result<(), RenderError> {
+        let connectivity = resolver.resolve_page_connectivity(page_part)?;
+        let Some(connector) = connectivity.connectors.get(&shape.id) else {
+            return self.placeholder(shape, state, "1D shape is missing connector state");
+        };
+        let mut begin = connector.begin;
+        let mut end = connector.end;
+        for glue in &connector.glue {
+            if let Some(point) = glue
+                .to
+                .as_ref()
+                .and_then(|target| target.connection_point.as_ref())
+                .map(|point| point.position)
+            {
+                match glue.endpoint {
+                    vsdx_resolve::ConnectorEndpoint::Begin => begin = Some(point),
+                    vsdx_resolve::ConnectorEndpoint::End => end = Some(point),
+                }
+            }
+        }
+        let (Some(begin), Some(end)) = (begin, end) else {
+            return self.placeholder(
+                shape,
+                state,
+                "connector route cannot be computed: unresolved endpoint",
+            );
+        };
+        if ![begin.x, begin.y, end.x, end.y]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return self.placeholder(
+                shape,
+                state,
+                "connector route cannot be computed: non-finite endpoint",
+            );
+        }
+        let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
+            Ok(paint) => paint,
+            Err(reason) => return self.placeholder(shape, state, &reason),
+        };
+        state.primitives.push(Primitive::Shape {
+            id,
+            z_order,
+            path: connector_route(begin, end, paint::number(resolved, "RoutStyle")),
+            fill,
+            stroke,
+            transform: Affine::identity(),
+        });
         Ok(())
     }
     #[allow(clippy::too_many_arguments)]
@@ -1383,6 +1451,28 @@ struct Bounds {
     angle: f64,
     flip_x: bool,
     flip_y: bool,
+}
+/// Deterministic dynamic-connector policy: `RoutStyle != 0` uses one horizontal-first
+/// orthogonal bend; every other connector uses a direct segment. This deliberately does not
+/// reproduce Visio obstacle avoidance, jump styles, or user-edited route geometry.
+fn connector_route(
+    begin: ScenePoint,
+    end: ScenePoint,
+    route_style: Option<f64>,
+) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    use ooxml_drawingml::GeometryPathCommand::{Line, Move};
+    let mut path = vec![Move {
+        x: begin.x,
+        y: begin.y,
+    }];
+    if route_style.is_some_and(|style| style != 0.0) && begin.x != end.x && begin.y != end.y {
+        path.push(Line {
+            x: end.x,
+            y: begin.y,
+        });
+    }
+    path.push(Line { x: end.x, y: end.y });
+    path
 }
 fn bounds_finite(bounds: Bounds) -> bool {
     [
