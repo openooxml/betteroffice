@@ -39,6 +39,12 @@ function publishedCrates() {
 }
 
 describe("llms.txt", () => {
+  test("publishes the pinned VSDX corpus results", () => {
+    expect(LLMS).toContain(
+      "Formula evaluation covers 52.62% of corpus formulas (3,679/6,992). Of these evaluated formulas, 3,670 have a comparable Visio cached value and 100% agree; nine are excluded because their caches are stale.",
+    );
+  });
+
   test("names no npm package that does not exist", () => {
     const real = new Set(publishedPackages());
     const claimed = [...LLMS.matchAll(/@betteroffice\/[a-z0-9-]+/g)].map((m) => m[0]);

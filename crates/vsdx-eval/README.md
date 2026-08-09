@@ -36,9 +36,9 @@ The corpus harness compares evaluated formulas with Visio's cell `@V` cache,
 interpreting `@V` using its `@U` display unit before comparison. Numeric agreement
 requires both equal canonical magnitudes and equal dimensions. Those cache values
 may be stale; the reported agreement rate is an imperfect compatibility signal,
-not proof of exact Visio compatibility. The current rate is 100.00% (3,670/3,670
-comparable evaluated formulas), while evaluator coverage is 3,679/6,992 corpus
-formulas (52.62%).
+not proof of exact Visio compatibility. Evaluator coverage is 3,679/6,992 corpus
+formulas (52.62%). Of those evaluated formulas, 3,670 have a comparable Visio
+cached value and 100.00% agree; nine are excluded because their caches are stale.
 
 The oracle excludes only nine demonstrated stale cache encodings, pinned to their
 corpus source parts and shapes: four `LineWeight` `F="Inh"` values from a prior
