@@ -1,0 +1,6 @@
+export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+export default function init(input?: { module_or_path: InitInput | Promise<InitInput> }): Promise<void>;
+export class VsdxDocument { static openCollaborative(bytes: Uint8Array, clientId: number): VsdxDocument; readonly clientId: number; snapshotJson(): string; mediaBytes(partPath: string): Uint8Array; encodeStateVector(): Uint8Array; encodeStateAsUpdate(): Uint8Array; encodeDiff(vector: Uint8Array): Uint8Array; applyUpdateJson(update: Uint8Array): string; startUpdateObservation(): void; clearUpdateObservation(): void; drainUpdateEvent(): Uint8Array; setCellFormulaJson(args: string): string; moveShapeJson(args: string): string; resizeShapeJson(args: string): string; reorderShapeJson(args: string): string; reorderPageJson(args: string): string; addShapeJson(args: string): string; undoJson(): string; redoJson(): string; canUndo(): boolean; canRedo(): boolean; free(): void; }
+export class VsdxRenderer { registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number; layoutPageJson(document: VsdxDocument, pageIndex: number): string; hitTestJson(x: number, y: number): string; free(): void; }
+export function parseVsdxJson(bytes: Uint8Array): string;
+export function rendererVersion(): string;
