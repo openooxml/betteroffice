@@ -102,6 +102,14 @@ pub fn bounds_affine(
 pub struct ConnectionPoint {
     pub row: u32,
     pub position: ScenePoint,
+    pub x_provenance: NumericProvenance,
+    pub y_provenance: NumericProvenance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumericProvenance {
+    Formula,
+    CachedValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,7 +258,14 @@ impl<'a> Resolver<'a> {
                         })
                     }
                     None if matches!(connect.to_cell.as_deref(), Some("PinX") | Some("PinY")) => {
-                        shape_pin(target).map(|position| ConnectionPoint { row: 0, position })
+                        shape_pin(target).map(|(position, x_provenance, y_provenance)| {
+                            ConnectionPoint {
+                                row: 0,
+                                position,
+                                x_provenance,
+                                y_provenance,
+                            }
+                        })
                     }
                     None => {
                         diagnostics.push(ConnectivityDiagnostic::UnsupportedToCell {
@@ -292,24 +307,33 @@ fn endpoint(shape: &ResolvedShape, x: &str, y: &str) -> Option<ScenePoint> {
     })
 }
 fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {
+    number_with_provenance(shape, name).map(|(value, _)| value)
+}
+
+fn number_with_provenance(shape: &ResolvedShape, name: &str) -> Option<(f64, NumericProvenance)> {
     let Lookup::Found(value) = shape.cell(name)? else {
         return None;
     };
-    if let Some(number) = value
-        .cell
+    number_from_cell(shape, &value.cell)
+}
+
+fn number_from_cell(
+    shape: &ResolvedShape,
+    cell: &vsdx_parse::Cell,
+) -> Option<(f64, NumericProvenance)> {
+    if let Some(number) = cell
         .formula
         .as_deref()
         .and_then(|formula| formula_number(shape, formula))
     {
-        return Some(number);
+        return Some((number, NumericProvenance::Formula));
     }
-    value
-        .cell
-        .value
+    cell.value
         .as_deref()?
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite())
+        .map(|value| (value, NumericProvenance::CachedValue))
 }
 
 fn formula_number(shape: &ResolvedShape, formula: &str) -> Option<f64> {
@@ -374,14 +398,16 @@ fn connection_point(
         return None;
     }
     let value = |name: &str| match resolved_row.cells.get(name)? {
-        Lookup::Found(cell) => cell.cell.value.as_deref()?.parse::<f64>().ok(),
+        Lookup::Found(cell) => number_from_cell(shape, &cell.cell),
         _ => None,
     };
-    let x = value("X")?;
-    let y = value("Y")?;
+    let (x, x_provenance) = value("X")?;
+    let (y, y_provenance) = value("Y")?;
     Some(ConnectionPoint {
         row,
         position: transform?.apply_point(x, y),
+        x_provenance,
+        y_provenance,
     })
 }
 
@@ -476,9 +502,8 @@ fn shape_bounds(
     })
 }
 
-fn shape_pin(shape: &ResolvedShape) -> Option<ScenePoint> {
-    Some(ScenePoint {
-        x: number(shape, "PinX")?,
-        y: number(shape, "PinY")?,
-    })
+fn shape_pin(shape: &ResolvedShape) -> Option<(ScenePoint, NumericProvenance, NumericProvenance)> {
+    let (x, x_provenance) = number_with_provenance(shape, "PinX")?;
+    let (y, y_provenance) = number_with_provenance(shape, "PinY")?;
+    Some((ScenePoint { x, y }, x_provenance, y_provenance))
 }

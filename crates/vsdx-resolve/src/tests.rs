@@ -145,7 +145,13 @@ fn resolves_glue_connection_points_and_part_fields() {
                             ShapeChild::Cell(cell("PinY", "5")),
                             ShapeChild::Section(section(
                                 "Connection",
-                                vec![row(1, vec![cell("X", "4"), cell("Y", "1")])],
+                                vec![row(
+                                    1,
+                                    vec![
+                                        formula_cell("X", "Width*0.5"),
+                                        formula_cell("Y", "Height/2"),
+                                    ],
+                                )],
                             )),
                         ],
                     )),
@@ -171,8 +177,16 @@ fn resolves_glue_connection_points_and_part_fields() {
     assert_eq!(connector.glue[0].from_part, Some(9));
     let target = connector.glue[0].to.as_ref().unwrap();
     assert_eq!(target.part, Some(100));
-    assert_eq!(target.connection_point.as_ref().unwrap().position.x, 12.0);
+    assert_eq!(target.connection_point.as_ref().unwrap().position.x, 10.0);
     assert_eq!(target.connection_point.as_ref().unwrap().position.y, 5.0);
+    assert_eq!(
+        target.connection_point.as_ref().unwrap().x_provenance,
+        crate::NumericProvenance::Formula
+    );
+    assert_eq!(
+        target.connection_point.as_ref().unwrap().y_provenance,
+        crate::NumericProvenance::Formula
+    );
 }
 
 #[test]
