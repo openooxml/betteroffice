@@ -350,15 +350,40 @@ fn evaluate_cell_with_theme(
         return unsupported("TheText requires phase-4b text layout");
     }
     if input.trim().eq_ignore_ascii_case("Inh") {
-        return match refs.formula(name) {
-            Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
-                evaluate_with_theme_at(formula, refs, limits, theme, Some(name))
-            }
-            _ if refs.exhausted_inheritance(name) => err("Inh has no concrete inherited value"),
-            _ => unsupported("Inh requires an inheritance host"),
-        };
+        return normalize_host_cell_value(
+            name,
+            match refs.formula(name) {
+                Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
+                    evaluate_with_theme_at(formula, refs, limits, theme, Some(name))
+                }
+                _ if refs.exhausted_inheritance(name) => err("Inh has no concrete inherited value"),
+                _ => unsupported("Inh requires an inheritance host"),
+            },
+        );
     }
-    evaluate_with_theme_at(input, refs, limits, theme, Some(name))
+    normalize_host_cell_value(
+        name,
+        evaluate_with_theme_at(input, refs, limits, theme, Some(name)),
+    )
+}
+
+fn normalize_host_cell_value(name: &str, evaluation: Evaluation) -> Evaluation {
+    let Some(unit) = host_cell_unit(name) else {
+        return evaluation;
+    };
+    match evaluation {
+        Evaluation::Evaluated(Evaluated {
+            value: Value::Number(mut value),
+            guarded,
+        }) => {
+            value.unit = unit;
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Number(value),
+                guarded,
+            })
+        }
+        other => other,
+    }
 }
 
 fn is_event_cell(name: &str) -> bool {
@@ -998,16 +1023,44 @@ fn number(number: f64, unit: Unit) -> Evaluation {
     numeric_result(number, unit, false)
 }
 fn cell_value(value: &str, unit_name: Option<&str>) -> Evaluation {
+    cell_value_with_default(value, unit_name, "")
+}
+
+#[cfg(test)]
+fn cell_value_for_cell(name: &str, value: &str, unit_name: Option<&str>) -> Evaluation {
+    cell_value_with_default(value, unit_name, name)
+}
+
+fn cell_value_with_default(value: &str, unit_name: Option<&str>, name: &str) -> Evaluation {
     if let Some(color) = parse_color(value) {
         return result(Value::Color(color), false);
     }
     let Ok(value) = value.parse::<f64>() else {
         return unsupported("cell value is not a supported display literal");
     };
-    let Some((unit, scale)) = unit(unit_name.unwrap_or("")) else {
+    let unit_name = unit_name.unwrap_or_else(|| default_cell_unit(name));
+    let Some((unit, scale)) = unit(unit_name) else {
         return unsupported("cell value has an unsupported unit");
     };
     number(value * scale, unit)
+}
+
+fn default_cell_unit(name: &str) -> &'static str {
+    match host_cell_unit(name) {
+        Some(Unit::Inches) => "DL",
+        Some(Unit::Radians) => "DA",
+        Some(Unit::Bool) => "BOOL",
+        _ => "",
+    }
+}
+
+fn host_cell_unit(name: &str) -> Option<Unit> {
+    match name.rsplit_once('!').map_or(name, |(_, name)| name) {
+        "Width" | "Height" | "LocPinX" | "LocPinY" => Some(Unit::Inches),
+        "Angle" => Some(Unit::Radians),
+        "FillGradientEnabled" | "FlipX" | "FlipY" | "LineGradientEnabled" => Some(Unit::Bool),
+        _ => None,
+    }
 }
 fn numeric_result(number: f64, unit: Unit, guarded: bool) -> Evaluation {
     if number.is_finite() {
@@ -2030,7 +2083,8 @@ mod tests {
                 self.oracle_no_cache += 1;
                 return;
             };
-            let Evaluation::Evaluated(cached_value) = cell_value(cached, unit) else {
+            let Evaluation::Evaluated(cached_value) = cell_value_for_cell(name, cached, unit)
+            else {
                 self.oracle_no_cache += 1;
                 return;
             };
@@ -2128,6 +2182,24 @@ mod tests {
             unit: Unit::Radians,
         });
         assert!(!oracle_values_agree(inches, degrees));
+    }
+
+    #[test]
+    fn omitted_cell_units_use_the_host_default() {
+        for (name, expected) in [
+            ("Width", Unit::Inches),
+            ("Angle", Unit::Radians),
+            ("FlipX", Unit::Bool),
+        ] {
+            let Evaluation::Evaluated(Evaluated {
+                value: Value::Number(value),
+                ..
+            }) = cell_value_for_cell(name, "0", None)
+            else {
+                panic!("expected numeric value");
+            };
+            assert_eq!(value.unit, expected);
+        }
     }
 
     #[test]
