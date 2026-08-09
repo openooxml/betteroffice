@@ -541,11 +541,13 @@ impl<R: References> Engine<'_, R> {
                         Ok(e) => {
                             let previous = self.sheet;
                             let previous_scope = self.scope;
+                            let previous_host = self.host.replace(lookup.to_owned());
                             self.sheet = sheet;
                             self.scope = scope;
                             let result = self.expr(&e, depth + 1);
                             self.sheet = previous;
                             self.scope = previous_scope;
+                            self.host = previous_host;
                             result
                         }
                         Err(e) => Evaluation::Error(e),
@@ -1729,6 +1731,24 @@ mod tests {
                 alpha: None
             }
         );
+    }
+
+    #[test]
+    fn resolves_host_relative_theme_value_through_a_reference() {
+        let refs = BTreeMap::from([("FillForegnd".into(), "THEMEVAL()".into())]);
+        let theme = Theme::default();
+        assert!(matches!(
+            evaluate_cell_with_theme("LineColor", "FillForegnd", &refs, &limits(), Some(&theme)),
+            Evaluation::Evaluated(Evaluated {
+                value: Value::Color(Color {
+                    red: 68,
+                    green: 114,
+                    blue: 196,
+                    ..
+                }),
+                ..
+            })
+        ));
     }
 
     #[test]

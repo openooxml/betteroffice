@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
     Shape, ShapeChild, ShapesChild, SheetChild,
@@ -1324,7 +1324,8 @@ impl MutationContext for CrdtMutationContext {
         let Some(formula) = formula else {
             return Ok(false);
         };
-        match evaluate(
+        match vsdx_eval::evaluate_cell(
+            lock,
             formula.trim_start_matches('='),
             &self.formulas,
             &ParseLimits::default(),
