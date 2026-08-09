@@ -1077,13 +1077,15 @@ fn tint(color: Color, amount: f64) -> Color {
     hls_to_rgb(hue, saturation, (luminosity + amount).clamp(0.0, 240.0))
 }
 fn mso_tint(color: Color, percentage: f64) -> Color {
-    let (hue, saturation, luminosity) = rgb_to_hls(color);
-    let luminosity = if percentage < 0.0 {
-        luminosity + (-percentage / 100.0) * (240.0 - luminosity)
-    } else {
-        luminosity * (1.0 - percentage / 100.0)
-    };
-    hls_to_rgb(hue, saturation, luminosity)
+    let target = if percentage < 0.0 { 0.0 } else { 255.0 };
+    let fraction = percentage.abs() / 100.0;
+    let channel = |value: u8| (f64::from(value) + (target - f64::from(value)) * fraction) as u8;
+    Color {
+        red: channel(color.red),
+        green: channel(color.green),
+        blue: channel(color.blue),
+        alpha: color.alpha,
+    }
 }
 fn rgb_to_hls(color: Color) -> (f64, f64, f64) {
     let red = f64::from(color.red) / 255.0;
@@ -1606,18 +1608,36 @@ mod tests {
         assert_eq!(
             color("MSOTINT(RGB(255,0,0),-50)", None),
             Color {
-                red: 255,
-                green: 128,
-                blue: 128,
+                red: 127,
+                green: 0,
+                blue: 0,
                 alpha: None
             }
         );
         assert_eq!(
             color("MSOTINT(RGB(255,0,0),50)", None),
             Color {
-                red: 128,
-                green: 0,
-                blue: 0,
+                red: 255,
+                green: 127,
+                blue: 127,
+                alpha: None
+            }
+        );
+        assert_eq!(
+            color("MSOTINT(RGB(0,0,0),5)", None),
+            Color {
+                red: 12,
+                green: 12,
+                blue: 12,
+                alpha: None
+            }
+        );
+        assert_eq!(
+            color("MSOTINT(RGB(255,255,255),-35)", None),
+            Color {
+                red: 165,
+                green: 165,
+                blue: 165,
                 alpha: None
             }
         );
