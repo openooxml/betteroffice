@@ -1,4 +1,4 @@
-import type { Affine, ImagePrimitive, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, Stroke, TextBoxPrimitive } from '../types';
+import type { Affine, ImagePrimitive, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, Stroke, TextBoxPrimitive, TextRun } from '../types';
 
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
 export interface PaintPageOptions { resolveImage?: CanvasImageResolver; }
@@ -32,6 +32,23 @@ function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void 
 function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint): string | CanvasGradient { if (paint.kind === 'solid') return paint.color; const gradient = ctx.createLinearGradient(0, 0, 1, 1); for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color); return gradient; }
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
 async function paintImage(ctx: CanvasRenderingContext2D, image: ImagePrimitive, resolve: CanvasImageResolver | undefined): Promise<void> { const source = resolve ? await resolve(image.assetId) : null; if (source) ctx.drawImage(source, image.x, image.y, image.width, image.height); }
-function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void { ctx.beginPath(); ctx.rect(text.x, text.y, text.width, text.height); ctx.clip(); for (const paragraph of text.paragraphs) for (const run of paragraph.runs) { ctx.font = `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${run.sizeIn}px ${quote(run.family)}`; ctx.fillStyle = run.color; ctx.fillText(run.text, text.x, text.y); } }
+function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
+  ctx.beginPath(); ctx.rect(text.x, text.y, text.width, text.height); ctx.clip();
+  let offset = 0;
+  const runs = text.paragraphs.flatMap(paragraph => paragraph.runs.map(run => {
+    const start = offset;
+    offset += utf8Length(run.text);
+    return { run, start, end: offset };
+  }));
+  for (const line of text.lines) for (const entry of runs) {
+    const start = Math.max(line.start, entry.start), end = Math.min(line.end, entry.end);
+    if (start >= end) continue;
+    const x = line.caretStops.find(stop => stop.position === start)?.x ?? line.x;
+    paintTextRun(ctx, entry.run, utf8Slice(entry.run.text, start - entry.start, end - entry.start), x, line.y);
+  }
+}
+function paintTextRun(ctx: CanvasRenderingContext2D, run: TextRun, value: string, x: number, y: number): void { ctx.font = `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${run.sizeIn}px ${quote(run.family)}`; ctx.fillStyle = run.color; ctx.fillText(value, x, y); }
+function utf8Length(value: string): number { return new TextEncoder().encode(value).byteLength; }
+function utf8Slice(value: string, start: number, end: number): string { return new TextDecoder().decode(new TextEncoder().encode(value).slice(start, end)); }
 function quote(family: string): string { return family.includes(' ') ? JSON.stringify(family) : family; }
 function paintPlaceholder(ctx: CanvasRenderingContext2D, value: PlaceholderPrimitive): void { ctx.strokeStyle = '#8a94a6'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]); ctx.strokeRect(value.x, value.y, value.width, value.height); ctx.setLineDash([]); ctx.fillStyle = '#5d6675'; ctx.font = '12px sans-serif'; ctx.fillText(value.reason, value.x + 6, value.y + 16, Math.max(0, value.width - 12)); }

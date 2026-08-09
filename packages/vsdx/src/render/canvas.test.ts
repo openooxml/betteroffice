@@ -34,3 +34,23 @@ test('replays primitives in z order and paints placeholders', async () => {
 test('rejects display-list versions other than v3', async () => {
   await expect(paintPage(context([]), { contractVersion: 2, width: 1, height: 1, paintTransform: transform, primitives: [] } as unknown as PageDisplayList)).rejects.toThrow('unsupported VSDX display-list contract version 2');
 });
+
+test('replays positioned text runs at their line caret positions', async () => {
+  const log: string[] = [];
+  const list: PageDisplayList = {
+    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
+    primitives: [{
+      kind: 'textBox', id: 'text', zOrder: 1, x: 1, y: 2, width: 90, height: 80,
+      paragraphs: [
+        { runs: [{ text: 'left', family: 'Arial', sizeIn: 12, bold: false, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#111', diagnostics: [] }] },
+        { runs: [{ text: 'right', family: 'Arial', sizeIn: 12, bold: true, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#222', diagnostics: [] }] },
+      ],
+      lines: [
+        { x: 30, y: 20, width: 20, height: 12, start: 0, end: 4, caretStops: [{ position: 0, x: 30, y: 20 }, { position: 4, x: 50, y: 20 }] },
+        { x: 60, y: 45, width: 25, height: 12, start: 4, end: 9, caretStops: [{ position: 4, x: 60, y: 45 }, { position: 9, x: 85, y: 45 }] },
+      ],
+    }],
+  };
+  await paintPage(context(log), list);
+  expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
+});
