@@ -3,11 +3,8 @@ import type { Format } from "../../lib/formats";
 
 export function FormatCard({ format }: { format: Format }) {
   const live = format.status === "live";
-  return (
-    <Link
-      href={`/${format.id}`}
-      className="group flex min-h-52 flex-col bg-bg p-6 no-underline transition-colors hover:bg-surface"
-    >
+  const content = (
+    <>
       <div>
         <div className="flex items-center justify-between">
           <span className="font-mono text-[0.8125rem] text-fg">
@@ -23,8 +20,21 @@ export function FormatCard({ format }: { format: Format }) {
         </p>
       </div>
       <span className="mt-auto pt-6 font-mono text-xs text-dim transition-colors group-hover:text-fg">
-        {live ? "open demo →" : "preview →"}
+        {live ? "open demo →" : "coming soon"}
       </span>
+    </>
+  );
+
+  if (!live) {
+    return <div className="flex min-h-52 flex-col bg-bg p-6">{content}</div>;
+  }
+
+  return (
+    <Link
+      href={`/${format.id}`}
+      className="group flex min-h-52 flex-col bg-bg p-6 no-underline transition-colors hover:bg-surface"
+    >
+      {content}
     </Link>
   );
 }

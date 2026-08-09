@@ -39,6 +39,8 @@ export const formats: Format[] = [
   },
 ];
 
+export const liveFormats = formats.filter((format) => format.status === "live");
+
 export function getFormat(id: string): Format | undefined {
-  return formats.find((f) => f.id === id);
+  return liveFormats.find((format) => format.id === id);
 }
