@@ -15,7 +15,7 @@ export const metadata: Metadata = {
     template: `%s — ${appName}`,
   },
   description:
-    'Guides and API reference for the BetterOffice DOCX, XLSX and PPTX editors — Apache-2.0 OOXML engines written in Rust for React, JavaScript and native servers.',
+    'Guides and API reference for the BetterOffice DOCX, XLSX and PPTX editors, plus VSDX support in development — Apache-2.0 OOXML engines written in Rust for React, JavaScript and native servers.',
   openGraph: {
     type: 'website',
     siteName: `${appName} documentation`,

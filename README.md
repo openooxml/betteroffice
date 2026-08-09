@@ -31,6 +31,8 @@
 | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
 | [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | drop-in React .pptx editor |
+| [`betteroffice-vsdx`](https://crates.io/crates/betteroffice-vsdx) | VSDX diagram core in development — parses, resolves, renders, round-trips, transactionally edits, and collaborates on `.vsdx` files |
+| [`@betteroffice/vsdx`](https://www.npmjs.com/package/@betteroffice/vsdx) | framework-free VSDX core in development, powered by Rust through WebAssembly; no React editor or demo yet |
 
 ## Structure
 

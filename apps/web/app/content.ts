@@ -14,9 +14,9 @@ export const INSTALL = "npm install @betteroffice/docx-react";
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors",
+  heading: "One suite, three editors and a diagram engine",
   prose:
-    "BetterOffice packages the OpenOOXML engines as ready-to-use editors. Documents, spreadsheets and slides are all live today on the same foundation.",
+    "BetterOffice packages the OpenOOXML engines as ready-to-use editors. Documents, spreadsheets and slides are live today; the VSDX diagram engine is in development on the same foundation.",
 };
 
 export const EDITORS = [
@@ -37,6 +37,12 @@ export const EDITORS = [
     format: "pptx",
     desc: "Slide model, masters and shape editing on the same shared core.",
     live: true,
+  },
+  {
+    name: "Diagrams",
+    format: "vsdx",
+    desc: "VSDX parsing, resolution, rendering, round-tripping, and transactional editing are in development.",
+    live: false,
   },
 ];
 
@@ -71,6 +77,10 @@ export const PACKAGES = [
   {
     name: "@betteroffice/pptx-react",
     desc: "The slides editor as a drop-in React component.",
+  },
+  {
+    name: "@betteroffice/vsdx",
+    desc: "VSDX core in development — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, and collaboration.",
   },
 ];
 

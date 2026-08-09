@@ -1,7 +1,7 @@
 export type FormatStatus = "live" | "soon";
 
 export interface Format {
-  id: "docx" | "xlsx" | "pptx";
+  id: "docx" | "xlsx" | "pptx" | "vsdx";
   name: string;
   kind: string;
   tagline: string;
@@ -29,6 +29,13 @@ export const formats: Format[] = [
     kind: "Slides",
     tagline: "Collaborative slides, shaped and rendered by a native Rust engine.",
     status: "live",
+  },
+  {
+    id: "vsdx",
+    name: "Vsdx",
+    kind: ".vsdx diagrams",
+    tagline: "VSDX support is in development.",
+    status: "soon",
   },
 ];
 

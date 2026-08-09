@@ -1,11 +1,15 @@
 ---
 title: Collaboration
-description: Connect DOCX, XLSX, and PPTX editors through a shared sync-v1 relay
+description: Connect DOCX, XLSX, and PPTX editors through a shared sync-v1 relay; VSDX collaboration is in development
 ---
 
 BetterOffice exposes the same collaboration boundary for DOCX, XLSX, and PPTX:
 an editor-owned Yrs replica, a sync-v1 provider, and a caller-owned binary
 transport. The backend routes frames by room and never parses Office files.
+
+VSDX's framework-free core has a convergent Yrs CRDT and WebAssembly boundary in
+development. It does not yet expose this React editor/provider integration or a
+live demo.
 
 ## Architecture
 
