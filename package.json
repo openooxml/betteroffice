@@ -22,7 +22,7 @@
     "dev": "bun run --filter './apps/web' dev",
     "dev:docs": "bun run --filter './apps/docs' dev",
     "dev:demo": "bun run --filter './apps/demo' dev",
-    "pretest": "bun run build:pptx-wasm",
+    "pretest": "bun run build:pptx-wasm && bun run build:vsdx-wasm",
     "build:pptx-wasm": "bun scripts/build-pptx-wasm.ts",
     "build:vsdx-wasm": "bun scripts/build-vsdx-wasm.ts",
     "build:pptx": "bun run --filter '@betteroffice/pptx-i18n' build && bun run --filter '@betteroffice/pptx' build && bun run --filter '@betteroffice/pptx-react' build",
