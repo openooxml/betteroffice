@@ -50,10 +50,9 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
-  test('delivers local and remote frames but resyncs on the distinct overflow frame', () => {
+  test('delivers local and remote frames', () => {
     const diagram = openDiagram(foundation, { clientId: 9004 });
     const drainUpdateEvent = VsdxDocument.prototype.drainUpdateEvent;
-    const encodeStateAsUpdate = VsdxDocument.prototype.encodeStateAsUpdate;
     const frames = [Uint8Array.of(0, 9), Uint8Array.of(1, 8), new Uint8Array()];
     const received: Array<{ update: Uint8Array; origin: string }> = [];
     VsdxDocument.prototype.drainUpdateEvent = () => frames.shift() ?? new Uint8Array();
@@ -67,24 +66,31 @@ describe('VSDX wasm boundary', () => {
       VsdxDocument.prototype.drainUpdateEvent = drainUpdateEvent;
     }
 
-    const overflowFrames = [Uint8Array.of(0, 7), Uint8Array.of(2), new Uint8Array()];
-    let resyncs = 0;
-    VsdxDocument.prototype.drainUpdateEvent = () => overflowFrames.shift() ?? new Uint8Array();
-    VsdxDocument.prototype.encodeStateAsUpdate = function () {
-      resyncs++;
-      return encodeStateAsUpdate.call(this);
-    };
+    diagram.dispose();
+  });
+
+  test('delivers a full-state resync after a genuine observation overflow', () => {
+    const diagram = openDiagram(foundation, { clientId: 9008 });
+    const drainUpdateEvent = VsdxDocument.prototype.drainUpdateEvent;
+    const resyncs: Uint8Array[] = [];
+    const updates: Uint8Array[] = [];
+    const unsubscribeUpdate = diagram.onUpdate(update => updates.push(update));
+    const unsubscribeResync = diagram.onResync(({ update }) => resyncs.push(update));
+    VsdxDocument.prototype.drainUpdateEvent = () => new Uint8Array();
     try {
-      const unsubscribe = diagram.onUpdate(() => received.push({ update: Uint8Array.of(1), origin: 'unexpected' }));
-      diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, '4');
-      expect(received).toHaveLength(2);
-      expect(resyncs).toBe(1);
-      unsubscribe();
+      for (let index = 0; index <= 1024; index++) diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, String(index));
     } finally {
       VsdxDocument.prototype.drainUpdateEvent = drainUpdateEvent;
-      VsdxDocument.prototype.encodeStateAsUpdate = encodeStateAsUpdate;
-      diagram.dispose();
     }
+    diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, '1025');
+    expect(updates).toHaveLength(0);
+    expect(resyncs).toHaveLength(1);
+    const recovered = openDiagram(foundation, { clientId: 9009 });
+    expect(recovered.applyUpdate(resyncs[0]).pages[0].shapes[0].cells.find(cell => cell.name === 'FOnly')?.formula).toBe('1025');
+    recovered.dispose();
+    unsubscribeUpdate();
+    unsubscribeResync();
+    diagram.dispose();
   });
 
   test('returns committed media and plain missing-media errors', () => {
@@ -98,6 +104,14 @@ describe('VSDX wasm boundary', () => {
     const diagram = openDiagram(foundation, { clientId: 9006 });
     diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, 'GUARD(1)');
     expect(() => diagram.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, '2')).toThrow('GUARD protects the requested cell');
+    diagram.dispose();
+  });
+
+  test('does not change the snapshot when applyUpdate rejects malformed bytes', () => {
+    const diagram = openDiagram(foundation, { clientId: 9010 });
+    const before = diagram.snapshot();
+    expect(() => diagram.applyUpdate(Uint8Array.of(0))).toThrow('invalid yrs update');
+    expect(diagram.snapshot()).toEqual(before);
     diagram.dispose();
   });
 
