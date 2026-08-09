@@ -6,6 +6,7 @@ use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::{SheetId, Workbook};
 
 use crate::read::SharedStringCells;
+use crate::reference::UnpatchableReference;
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
@@ -29,7 +30,7 @@ pub struct PreservedPackage {
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
     pub(crate) active_sheet: SheetId,
-    pub(crate) unmodelled_chart_part: Option<String>,
+    pub(crate) unpatchable_references: Vec<UnpatchableReference>,
 }
 
 impl PreservedPackage {
@@ -136,10 +137,14 @@ impl PreservedPackage {
             .map(parse_content_types)
             .transpose()?
             .unwrap_or_default();
-        let unmodelled_chart_part = crate::chart::unmodelled_chart_part(
+        let unpatchable_references = crate::reference::unpatchable_references(
             parts,
             &part_content_types(&content_types, parts),
             workbook,
+            &sheets
+                .iter()
+                .map(|sheet| sheet.path.clone())
+                .collect::<Vec<_>>(),
         )?;
 
         Ok(Self {
@@ -163,7 +168,7 @@ impl PreservedPackage {
             stylesheet_template,
             original_workbook: workbook.clone(),
             active_sheet,
-            unmodelled_chart_part,
+            unpatchable_references,
         })
     }
 
@@ -177,20 +182,46 @@ impl PreservedPackage {
         self.sheets.len()
     }
 
+    /// Every preserved part whose references cannot be patched, with the cells
+    /// each one names.
+    #[doc(hidden)]
+    pub fn unpatchable_references(&self) -> &[UnpatchableReference] {
+        &self.unpatchable_references
+    }
+
     /// Returns a preserved part whose references cannot be patched.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
-        const REFERENCE_BEARING: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
-        self.parts
+        self.unpatchable_references
+            .first()
+            .map(UnpatchableReference::part)
+    }
+
+    /// Returns a preserved part that renaming, dropping or reordering `sheet`
+    /// would strand.
+    #[doc(hidden)]
+    pub fn reference_naming_sheet(&self, sheet: &str) -> Option<&str> {
+        self.stranded(|reference| reference.names_sheet(sheet))
+    }
+
+    /// Returns a preserved part that inserting or deleting rows at `at` on
+    /// `sheet` would strand.
+    #[doc(hidden)]
+    pub fn reference_moved_by_rows(&self, sheet: &str, at: u32) -> Option<&str> {
+        self.stranded(|reference| reference.moved_by_rows(sheet, at))
+    }
+
+    /// The column-wise counterpart of [`Self::reference_moved_by_rows`].
+    #[doc(hidden)]
+    pub fn reference_moved_by_cols(&self, sheet: &str, at: u32) -> Option<&str> {
+        self.stranded(|reference| reference.moved_by_cols(sheet, at))
+    }
+
+    fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
+        self.unpatchable_references
             .iter()
-            .find_map(|(path, _)| {
-                let normalized = path.trim_start_matches('/').to_ascii_lowercase();
-                REFERENCE_BEARING
-                    .iter()
-                    .any(|prefix| normalized.starts_with(prefix))
-                    .then_some(path.as_str())
-            })
-            .or(self.unmodelled_chart_part.as_deref())
+            .find(|reference| disturbed(reference))
+            .map(UnpatchableReference::part)
     }
 
     /// The shared-string entries a source sheet's cells were authored against.

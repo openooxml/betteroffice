@@ -22,7 +22,7 @@ use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
-const NS_RELATIONSHIPS: &str =
+pub(crate) const NS_RELATIONSHIPS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 /// the `.rels` part vocabulary itself.
 const NS_PACKAGE_RELATIONSHIPS: &str =
@@ -907,7 +907,7 @@ fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
 }
 
 /// `$A$1:$A$5` or `$A$1` as an inclusive corner pair.
-fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
+pub(crate) fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
     let (start, end) = match source.split_once(':') {
         Some((start, end)) => (start, end),
         None => (source, source),
@@ -1083,32 +1083,88 @@ const CHART_CONTENT_TYPES: [&str; 2] = [
 /// A chart part in the package that the model does not fully cover: one no
 /// sheet claims, one that is not a classic `c:chartSpace`, one carrying a
 /// reference form the remapper cannot rewrite, or one whose cache sits beside
-/// a reference this crate cannot rebuild it from. Structural edits are refused
-/// while such a part is present, because moving cells would strand it.
-pub(crate) fn unmodelled_chart_part(
+/// a reference this crate cannot rebuild it from. Structural edits that would
+/// move what such a part names are refused, because nothing rewrites it.
+///
+/// Each part comes with the sheet an unqualified reference in it resolves
+/// against: the one sheet claiming it, absent when no sheet or several do.
+pub(crate) fn unmodelled_chart_parts(
     parts: &[(String, Vec<u8>)],
     content_types: &[PartContentType],
     workbook: &xlsx_model::Workbook,
-) -> Result<Option<String>, ParseError> {
-    let modelled = workbook
-        .sheets
-        .iter()
-        .flat_map(|sheet| sheet.charts.iter())
-        .map(|chart| normalize_part_path(&chart.part))
-        .collect::<std::collections::HashSet<_>>();
+) -> Result<Vec<UnmodelledChart>, ParseError> {
+    let mut claims: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for sheet in &workbook.sheets {
+        for chart in &sheet.charts {
+            claims
+                .entry(normalize_part_path(&chart.part))
+                .or_default()
+                .push(sheet.name.as_str());
+        }
+    }
+    let mut unmodelled = Vec::new();
     for (path, bytes) in parts {
         if !is_chart_part(path, content_types) {
             continue;
         }
-        if !modelled.contains(normalize_part_path(path)) {
-            return Ok(Some(path.clone()));
+        let owners = claims.get(normalize_part_path(path));
+        let claimed = owners.is_some();
+        if claimed {
+            let root = parse_tree(bytes)?;
+            if !unsupported_reference_form(&root, 0) && !holds_an_unrebuildable_cache(&root)? {
+                continue;
+            }
         }
-        let root = parse_tree(bytes)?;
-        if unsupported_reference_form(&root, 0) || holds_an_unrebuildable_cache(&root)? {
-            return Ok(Some(path.clone()));
-        }
+        unmodelled.push(UnmodelledChart {
+            path: path.clone(),
+            owner: owners
+                .filter(|owners| owners.len() == 1)
+                .map(|owners| owners[0].to_owned()),
+            claimed,
+        });
     }
-    Ok(None)
+    Ok(unmodelled)
+}
+
+/// A chart part no save rewrites, with the sheet its unqualified references
+/// resolve against.
+pub(crate) struct UnmodelledChart {
+    pub(crate) path: String,
+    pub(crate) owner: Option<String>,
+    /// whether a sheet anchors it. A part nothing anchors is one this crate
+    /// has not read the shape of, so what it names is not resolved from it.
+    pub(crate) claimed: bool,
+}
+
+/// The areas a chart part names, or `None` when one of its references is not a
+/// form this crate reads and every cell has to be assumed named. `owner` is the
+/// sheet an unqualified reference resolves against.
+pub(crate) fn chart_reference_areas(
+    part: &[u8],
+    owner: Option<&str>,
+) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
+    let root = parse_tree(part)?;
+    if unsupported_reference_form(&root, 0) {
+        return Ok(None);
+    }
+    let mut areas = Vec::new();
+    for site in ref_sites(&root)? {
+        let formula = site.formula.trim();
+        if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
+            continue;
+        }
+        let Some((qualifier, area)) = split_qualifier(formula) else {
+            return Ok(None);
+        };
+        let (Some(sheet), Some((_, end))) = (
+            qualifier.or_else(|| owner.map(str::to_owned)),
+            parse_area(area),
+        ) else {
+            return Ok(None);
+        };
+        areas.push((sheet, end));
+    }
+    Ok(Some(areas))
 }
 
 /// Whether a cache sits beside a reference this crate could not rebuild it

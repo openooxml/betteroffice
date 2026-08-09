@@ -1053,15 +1053,17 @@ impl Workbook {
         }
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
+        let mut names = self.sheet_names();
         for op in &ops {
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet(sheet)?;
             }
-            self.ensure_references_stay_valid(op)?;
+            self.ensure_references_stay_valid(&names, op)?;
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
             xlsx_ops::apply(&mut preview, op)?;
             validate_model_sheets(&preview)?;
+            rename_sheet_view(&mut names, op);
         }
         validate_shared_drawings(&preview)?;
         if preview == self.model {
@@ -1124,6 +1126,7 @@ impl Workbook {
             return self.collaborative_history_step(options, false);
         }
         let active_name = self.active_sheet_name();
+        let names_before = self.sheet_names();
         let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
@@ -1136,7 +1139,7 @@ impl Workbook {
             self.preserved = history.before.clone();
             self.preserved_redo.push(history);
         } else {
-            self.apply_preserved_state_ops(&ops);
+            self.apply_preserved_state_ops(&names_before, &ops);
         }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
@@ -1162,6 +1165,7 @@ impl Workbook {
             return self.collaborative_history_step(options, true);
         }
         let active_name = self.active_sheet_name();
+        let names_before = self.sheet_names();
         let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
@@ -1174,7 +1178,7 @@ impl Workbook {
             self.preserved = history.after.clone();
             self.preserved_undo.push(history);
         } else {
-            self.apply_preserved_state_ops(&ops);
+            self.apply_preserved_state_ops(&names_before, &ops);
         }
         self.restore_active_sheet(active_name.as_deref());
         if ops.iter().any(invalidates_proposals) {
@@ -1675,32 +1679,81 @@ impl Workbook {
         validate_cell_ref(cell)
     }
 
-    /// Charts, pivot tables and external links reference sheets by name and
-    /// address, and neither this crate nor the model can rewrite them. Refuse
-    /// the ops that would strand those references rather than write a workbook
-    /// whose parts disagree.
-    fn ensure_references_stay_valid(&self, op: &Op) -> Result<()> {
-        if !matches!(
-            op,
-            Op::RenameSheet { .. }
-                | Op::RemoveSheet { .. }
-                | Op::InsertRows { .. }
-                | Op::DeleteRows { .. }
-                | Op::InsertCols { .. }
-                | Op::DeleteCols { .. }
-        ) {
-            return Ok(());
-        }
-        let Some(part) = self
-            .source_package
-            .as_ref()
-            .and_then(xlsx_parse::PreservedPackage::unpatchable_reference_part)
-        else {
+    /// Pivot caches, pivot tables and the charts the model does not cover name
+    /// sheets and cells by address, and neither this crate nor the model can
+    /// rewrite them. Refuse the ops that would move what one of them names,
+    /// rather than write a workbook whose parts disagree. An op that leaves
+    /// every named cell where it was goes through, whatever sheet it lands on.
+    ///
+    /// `names` are the sheet names as this op sees them, which in a batch is
+    /// what the ops before it left behind rather than what the workbook opened
+    /// with.
+    fn ensure_references_stay_valid(&self, names: &[String], op: &Op) -> Result<()> {
+        let Some(package) = self.source_package.as_ref() else {
             return Ok(());
         };
-        Err(Error::InvalidOperation(format!(
-            "{part} references sheets this edit would move, and it cannot be rewritten"
-        )))
+        let at = |sheet: SheetId| {
+            names
+                .get(sheet.0 as usize)
+                .ok_or(Error::SheetOutOfRange(sheet))
+        };
+        let stranded = match op {
+            Op::RenameSheet { sheet, name } => {
+                let current = at(*sheet)?;
+                (current != name)
+                    .then(|| package.reference_naming_sheet(current))
+                    .flatten()
+            }
+            Op::RemoveSheet { index } => {
+                package.reference_naming_sheet(at(SheetId(*index as u32))?)
+            }
+            Op::InsertRows { sheet, at: row, .. } | Op::DeleteRows { sheet, at: row, .. } => {
+                package.reference_moved_by_rows(at(*sheet)?, *row)
+            }
+            Op::InsertCols { sheet, at: col, .. } | Op::DeleteCols { sheet, at: col, .. } => {
+                package.reference_moved_by_cols(at(*sheet)?, *col)
+            }
+            _ => return Ok(()),
+        };
+        match stranded {
+            Some(part) => Err(Error::InvalidOperation(format!(
+                "{part} references cells this edit would move, and it cannot be rewritten"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn sheet_names(&self) -> Vec<String> {
+        self.model
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.clone())
+            .collect()
+    }
+
+    /// Whether an op moves cells a preserved part names and no save rewrites,
+    /// which is what a save has to be told about.
+    fn moves_referenced_cells(&self, names: &[String], op: &Op) -> bool {
+        let Some(package) = self.source_package.as_ref() else {
+            return false;
+        };
+        let (sheet, at, by_rows) = match *op {
+            Op::InsertRows { sheet, at, .. } | Op::DeleteRows { sheet, at, .. } => {
+                (sheet, at, true)
+            }
+            Op::InsertCols { sheet, at, .. } | Op::DeleteCols { sheet, at, .. } => {
+                (sheet, at, false)
+            }
+            _ => return false,
+        };
+        let Some(name) = names.get(sheet.0 as usize) else {
+            return true;
+        };
+        if by_rows {
+            package.reference_moved_by_rows(name, at).is_some()
+        } else {
+            package.reference_moved_by_cols(name, at).is_some()
+        }
     }
 
     /// Rejects edits aimed at a preserved chartsheet or dialogsheet.
@@ -1727,6 +1780,7 @@ impl Workbook {
 
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
+        let names_before = self.sheet_names();
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
@@ -1753,7 +1807,7 @@ impl Workbook {
                 });
             }
         }
-        self.apply_preserved_state_ops(ops);
+        self.apply_preserved_state_ops(&names_before, ops);
         if let Some(before) = preserved_before {
             self.preserved_undo.push(PreservedStateHistory {
                 before,
@@ -1767,6 +1821,7 @@ impl Workbook {
 
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
+        let names_before = self.sheet_names();
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
@@ -1793,7 +1848,7 @@ impl Workbook {
                 });
             }
         }
-        self.apply_preserved_state_ops(ops);
+        self.apply_preserved_state_ops(&names_before, ops);
         if let Some(before) = preserved_before {
             self.preserved_undo.push(PreservedStateHistory {
                 before,
@@ -1890,8 +1945,15 @@ impl Workbook {
             .map(|sheet| sheet.name.clone())
     }
 
-    fn apply_preserved_state_ops(&mut self, ops: &[Op]) {
-        self.moved_references_since_open |= ops.iter().any(moves_cell_references);
+    /// `before` are the sheet names as they stood when `ops` were applied, so
+    /// each op is read against the names it actually named rather than the ones
+    /// the batch left behind.
+    fn apply_preserved_state_ops(&mut self, before: &[String], ops: &[Op]) {
+        let mut names = before.to_vec();
+        for op in ops {
+            self.moved_references_since_open |= self.moves_referenced_cells(&names, op);
+            rename_sheet_view(&mut names, op);
+        }
         for op in ops {
             match *op {
                 Op::AddSheet { index, .. } => self.preserved.insert(index),
@@ -3182,15 +3244,21 @@ fn validate_axis(axis: &str, at: u32, count: u32, limit: u32) -> Result<()> {
     Ok(())
 }
 
-/// Whether an op moves the cells preserved parts name by address.
-fn moves_cell_references(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::InsertRows { .. }
-            | Op::DeleteRows { .. }
-            | Op::InsertCols { .. }
-            | Op::DeleteCols { .. }
-    )
+/// Carries a sheet-name view across one op, so the next op in a batch resolves
+/// its sheet ids the way the model will.
+fn rename_sheet_view(names: &mut Vec<String>, op: &Op) {
+    match op {
+        Op::AddSheet { index, name } => names.insert((*index).min(names.len()), name.clone()),
+        Op::RemoveSheet { index } if *index < names.len() => {
+            names.remove(*index);
+        }
+        Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } => {
+            if let Some(slot) = names.get_mut(sheet.0 as usize) {
+                *slot = name.clone();
+            }
+        }
+        _ => {}
+    }
 }
 
 fn invalidates_proposals(op: &Op) -> bool {

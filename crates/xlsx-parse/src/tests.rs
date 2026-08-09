@@ -1847,7 +1847,7 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     let removed = crate::serialize_workbook_with_package_and_origins_after_edits(
         &workbook,
         &parsed.package,
-        &[Some(0), None],
+        &[None, Some(1)],
         &provenance,
         SaveEdits {
             changed: true,
@@ -1856,6 +1856,18 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     )
     .unwrap_err();
     assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
+
+    crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+        &provenance,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .expect("dropping a sheet the cache does not name strands nothing");
 
     let mut renamed = workbook.clone();
     renamed.sheets[0].name = "Renamed".to_owned();
@@ -1889,6 +1901,322 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     assert!(
         matches!(&axis_edit, ParseError::UnsupportedEdit(message) if message.contains("pivotCacheDefinition1.xml")),
         "{axis_edit:?}"
+    );
+}
+
+/// The cache names one range on one sheet, and that is all a structural edit
+/// has to stay clear of.
+#[test]
+fn resolves_the_range_a_pivot_cache_is_built_from() {
+    let parsed = parse_workbook_with_package(&pivoted_package()).unwrap();
+    let package = &parsed.package;
+
+    assert!(package.reference_naming_sheet("Data").is_some());
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert!(package.reference_moved_by_cols("Data", 1).is_some());
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+    assert_eq!(package.reference_moved_by_rows("Report", 0), None);
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert_eq!(package.reference_moved_by_cols("Data", 2), None);
+}
+
+/// A cache source this crate does not read names every cell, so nothing
+/// structural gets through while one is preserved.
+#[test]
+fn refuses_everything_for_a_pivot_source_it_cannot_resolve() {
+    for (label, attributes, source) in [
+        (
+            "defined name",
+            "",
+            r#"<worksheetSource name="SalesRange"/>"#,
+        ),
+        ("no ref", "", r#"<worksheetSource sheet="Data"/>"#),
+        ("no sheet", "", r#"<worksheetSource ref="A1:B4"/>"#),
+        (
+            "ref and name",
+            "",
+            r#"<worksheetSource sheet="Data" ref="A1:B4" name="SalesRange"/>"#,
+        ),
+        (
+            "another book",
+            "",
+            r#"<worksheetSource sheet="Data" ref="A1:B4" r:id="rIdBook"/>"#,
+        ),
+        (
+            "an extension beside it",
+            "",
+            r#"<worksheetSource sheet="Data" ref="A1:B4"/><extLst><ext uri="{F1C0A1B2}"><x14:cacheSource><xm:f>Notes!A1:B100</xm:f></x14:cacheSource></ext></extLst>"#,
+        ),
+        (
+            "external",
+            r#" type="external""#,
+            r#"<worksheetSource sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "scenario",
+            r#" type="scenario""#,
+            r#"<worksheetSource sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "consolidation carrying an unmodelled child",
+            r#" type="consolidation""#,
+            r#"<consolidation><rangeSets><rangeSet sheet="Data" ref="A1:B4"/></rangeSets><extLst/></consolidation>"#,
+        ),
+        ("empty", "", ""),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            format!(
+                "<pivotCacheDefinition><cacheSource{attributes}>{source}</cacheSource></pivotCacheDefinition>"
+            )
+            .as_bytes(),
+        );
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert!(
+            parsed
+                .package
+                .reference_moved_by_rows("Report", 999)
+                .is_some(),
+            "{label} was resolved"
+        );
+    }
+}
+
+/// A consolidated cache names one range per set, and all of them resolve or
+/// none do.
+#[test]
+fn resolves_every_range_a_consolidated_cache_names() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition><cacheSource type="consolidation"><consolidation><rangeSets><rangeSet sheet="Data" ref="A1:B4"/><rangeSet sheet="Report" ref="A1:C2"/></rangeSets></consolidation></cacheSource></pivotCacheDefinition>"#,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert!(package.reference_moved_by_cols("Report", 2).is_some());
+    assert_eq!(package.reference_moved_by_cols("Report", 3), None);
+}
+
+/// A sheet the workbook does not hold exactly one of is not one a reference can
+/// be bound to: a later rename could put a different sheet under that name, so
+/// the part names everything instead.
+#[test]
+fn refuses_everything_for_a_source_sheet_the_workbook_does_not_hold() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Gone" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert!(parsed.package.reference_naming_sheet("Report").is_some());
+    assert!(parsed.package.reference_naming_sheet("Data").is_some());
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
+    );
+}
+
+/// A relationships part that will not parse costs the ownership it carried, not
+/// the open: the workbook still opens and whatever could not be followed names
+/// everything.
+#[test]
+fn opens_a_workbook_whose_pivot_relationships_do_not_parse() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        b"<Relationships><Relationship Id=".to_vec(),
+    ));
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition cacheId="1"><location ref="C3:E8"/></pivotTableDefinition>"#
+            .to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).expect("the workbook still opens");
+    let package = &parsed.package;
+
+    assert_eq!(package.unpatchable_references().len(), 3);
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 3),
+        Some("xl/pivotcache/pivotCacheDefinition1.xml"),
+        "the cache itself still resolves"
+    );
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "records whose ownership could not be followed name everything"
+    );
+    assert!(
+        package
+            .unpatchable_references()
+            .iter()
+            .any(|reference| reference.part().ends_with("pivotTable1.xml")
+                && reference.names_sheet("Data")),
+        "a pivot table no sheet relationship anchors names everything"
+    );
+}
+
+/// A pivot table is laid out on the sheet whose relationships anchor it, and
+/// an edit above or left of that block moves it.
+#[test]
+fn resolves_the_grid_a_pivot_table_is_laid_out_on() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition cacheId="1"><location ref="C3:E8"/></pivotTableDefinition>"#
+            .to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.reference_naming_sheet("Report"),
+        Some("xl/pivottables/pivotTable1.xml")
+    );
+    assert!(package.reference_moved_by_rows("Report", 7).is_some());
+    assert_eq!(package.reference_moved_by_rows("Report", 8), None);
+    assert!(package.reference_moved_by_cols("Report", 4).is_some());
+    assert_eq!(package.reference_moved_by_cols("Report", 5), None);
+}
+
+/// `ref` covers the body; the filter area sits beside it and is occupied just
+/// as much, so the page counts widen what an edit has to stay clear of.
+#[test]
+fn counts_the_filter_area_a_pivot_table_reserves() {
+    let package = |location: &str| {
+        let mut parts = pivoted_package();
+        parts.push((
+            "xl/pivottables/pivotTable1.xml".to_owned(),
+            format!(r#"<pivotTableDefinition cacheId="1">{location}</pivotTableDefinition>"#)
+                .into_bytes(),
+        ));
+        parts.push((
+            "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+            br#"<Relationships><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+        ));
+        parse_workbook_with_package(&parts).unwrap().package
+    };
+
+    let paged = package(r#"<location ref="A10:B20" rowPageCount="1" colPageCount="4"/>"#);
+    assert!(paged.reference_moved_by_cols("Report", 2).is_some());
+    assert!(paged.reference_moved_by_cols("Report", 5).is_some());
+    assert_eq!(paged.reference_moved_by_cols("Report", 6), None);
+    assert!(paged.reference_moved_by_rows("Report", 20).is_some());
+    assert_eq!(paged.reference_moved_by_rows("Report", 21), None);
+
+    let unreadable = package(r#"<location ref="A10:B20" colPageCount="lots"/>"#);
+    assert!(unreadable.reference_moved_by_cols("Report", 999).is_some());
+}
+
+/// One pivot table part two sheets anchor is laid out on both of them, and
+/// neither may quietly lose its claim to the other.
+#[test]
+fn keeps_every_sheet_a_shared_pivot_table_is_anchored_by() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition cacheId="1"><location ref="C3:E8"/></pivotTableDefinition>"#
+            .to_vec(),
+    ));
+    let anchor = br#"<Relationships><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#;
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+        anchor.to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        anchor.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert!(package.reference_moved_by_rows("Report", 7).is_some());
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 7),
+        Some("xl/pivottables/pivotTable1.xml")
+    );
+    assert_eq!(package.reference_moved_by_rows("Data", 8), None);
+}
+
+/// Cached records hold the source range's values, so they move with the range
+/// the definition that owns them names.
+#[test]
+fn carries_a_cache_source_range_to_its_records() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords9.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdStale" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords9.xml"/></Relationships>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(package.unpatchable_references().len(), 3);
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 3),
+        Some("xl/pivotcache/pivotCacheDefinition1.xml")
+    );
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 4),
+        Some("xl/pivotcache/pivotCacheRecords9.xml"),
+        "only the records the definition's own r:id names inherit its range"
+    );
+    assert_eq!(
+        package.reference_naming_sheet("Report"),
+        Some("xl/pivotcache/pivotCacheRecords9.xml")
+    );
+}
+
+/// Records the definition does not point its own `r:id` at are not its records,
+/// so they inherit nothing and name everything.
+#[test]
+fn refuses_everything_for_records_no_definition_claims() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(parsed.package.unpatchable_references().len(), 2);
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
     );
 }
 

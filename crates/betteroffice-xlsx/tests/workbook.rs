@@ -3809,6 +3809,179 @@ fn refuses_structural_ops_that_would_strand_pivot_references() {
     Workbook::open(&workbook.save().unwrap()).unwrap();
 }
 
+/// `Data` feeds a pivot cache over `A1:B4`, `Report` hosts the pivot table at
+/// `D1:F10`, and `Notes` is named by neither.
+fn pivoted_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    for name in ["Data", "Report", "Notes"] {
+        model.sheets.push(Sheet::new(name));
+    }
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    parts.push((
+        "xl/pivotCache/pivotCacheDefinition1.xml".to_owned(),
+        br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="Data"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/pivotTables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" cacheId="1"><location ref="D1:F10" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/></pivotTableDefinition>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Sheet ids in a batch mean what the ops before them left behind. A batch
+/// that drops a sheet ahead of the pivot source and then edits by the id the
+/// source has slid into must be read against the shifted list, not the one the
+/// workbook opened with.
+#[test]
+fn resolves_batched_ops_against_the_sheets_the_batch_leaves() {
+    let mut model = WorkbookModel::default();
+    for name in ["Notes", "Data", "Other"] {
+        model.sheets.push(Sheet::new(name));
+    }
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    parts.push((
+        "xl/pivotCache/pivotCacheDefinition1.xml".to_owned(),
+        br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="Data"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+
+    let mut workbook = Workbook::open(&original).unwrap();
+    let error = workbook
+        .apply_ops(
+            vec![
+                Op::RemoveSheet { index: 0 },
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+                Op::AddSheet {
+                    index: 0,
+                    name: "Scratch".to_owned(),
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message)
+            if message.contains("pivotCacheDefinition1.xml")),
+        "the batch was allowed: {error:?}"
+    );
+}
+
+/// The veto is per reference, not per workbook: an edit a pivot's source range
+/// and its own location both survive must go through.
+#[test]
+fn allows_structural_ops_no_pivot_reference_names() {
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(2),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(2),
+            at: 0,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(2),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet: SheetId(2),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(2),
+            name: "Scratch".to_owned(),
+        },
+        Op::RemoveSheet { index: 2 },
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 4,
+            count: 3,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 2,
+            count: 1,
+        },
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 10,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(1),
+            at: 6,
+            count: 1,
+        },
+    ] {
+        let mut workbook = Workbook::open(&pivoted_fixture()).unwrap();
+        workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_or_else(|error| panic!("{op:?} was refused: {error:?}"));
+        Workbook::open(&workbook.save().unwrap())
+            .unwrap_or_else(|error| panic!("{op:?} would not save: {error:?}"));
+    }
+}
+
+/// What the cache source and the pivot table's own location name still moves
+/// out from under a part nothing can rewrite.
+#[test]
+fn still_refuses_structural_ops_a_pivot_reference_names() {
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet: SheetId(0),
+            at: 3,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+        Op::RemoveSheet { index: 0 },
+        Op::InsertRows {
+            sheet: SheetId(1),
+            at: 9,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet: SheetId(1),
+            at: 5,
+            count: 1,
+        },
+        Op::RemoveSheet { index: 1 },
+    ] {
+        let mut workbook = Workbook::open(&pivoted_fixture()).unwrap();
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message) if message.contains("pivot")),
+            "{op:?} was allowed: {error:?}"
+        );
+    }
+}
+
 #[test]
 fn refuses_structural_ops_that_would_strand_unclaimed_chart_parts() {
     let mut parts = ooxml_opc::unzip_parts(&preservation_fixture()).unwrap();
