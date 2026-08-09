@@ -258,7 +258,13 @@ impl<'a> Resolver<'a> {
                         })
                     }
                     None if matches!(connect.to_cell.as_deref(), Some("PinX") | Some("PinY")) => {
-                        shape_pin(target).map(|(position, x_provenance, y_provenance)| {
+                        shape_pin(
+                            target,
+                            transforms
+                                .get(&connect.to_sheet)
+                                .map(|transform| transform.scene),
+                        )
+                        .map(|(position, x_provenance, y_provenance)| {
                             ConnectionPoint {
                                 row: 0,
                                 position,
@@ -336,6 +342,11 @@ fn number_from_cell(
         .map(|value| (value, NumericProvenance::CachedValue))
 }
 
+/// Evaluates only finite numeric literals, one binary `+`, `-`, `*`, or `/` expression (with
+/// recursive operands), and local cell-name references. It intentionally does not implement
+/// ShapeSheet functions, units, parentheses, cross-sheet references, or general ShapeSheet
+/// syntax because `vsdx-eval` depends on this crate. If a formula is unsupported, callers fall
+/// back to a finite cached `V`; a supported formula always wins over a conflicting cache.
 fn formula_number(shape: &ResolvedShape, formula: &str) -> Option<f64> {
     let formula = formula.trim_start_matches('=').trim();
     let value = formula
@@ -502,8 +513,11 @@ fn shape_bounds(
     })
 }
 
-fn shape_pin(shape: &ResolvedShape) -> Option<(ScenePoint, NumericProvenance, NumericProvenance)> {
-    let (x, x_provenance) = number_with_provenance(shape, "PinX")?;
-    let (y, y_provenance) = number_with_provenance(shape, "PinY")?;
-    Some((ScenePoint { x, y }, x_provenance, y_provenance))
+fn shape_pin(
+    shape: &ResolvedShape,
+    transform: Option<SceneAffine>,
+) -> Option<(ScenePoint, NumericProvenance, NumericProvenance)> {
+    let (x, x_provenance) = number_with_provenance(shape, "LocPinX")?;
+    let (y, y_provenance) = number_with_provenance(shape, "LocPinY")?;
+    Some((transform?.apply_point(x, y), x_provenance, y_provenance))
 }

@@ -190,6 +190,82 @@ fn resolves_glue_connection_points_and_part_fields() {
 }
 
 #[test]
+fn glue_numeric_provenance_prefers_supported_formulas_and_falls_back_to_cached_values() {
+    let mut package = package();
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![
+                SheetChild::Shapes(vec![
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        1,
+                        vec![ShapeChild::Cell(cell("OneD", "1"))],
+                    )),
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        2,
+                        vec![
+                            ShapeChild::Cell(cell("Width", "1")),
+                            ShapeChild::Cell(cell("Height", "1")),
+                            ShapeChild::Cell(cell("PinX", "0")),
+                            ShapeChild::Cell(cell("PinY", "0")),
+                            ShapeChild::Cell(cell("LocPinX", "0")),
+                            ShapeChild::Cell(cell("LocPinY", "0")),
+                            ShapeChild::Section(section(
+                                "Connection",
+                                vec![row(
+                                    1,
+                                    vec![
+                                        Cell {
+                                            name: "X".into(),
+                                            formula: Some("2+3".into()),
+                                            value: Some("99".into()),
+                                            unit: None,
+                                            del: false,
+                                            other_attrs: vec![],
+                                        },
+                                        Cell {
+                                            name: "Y".into(),
+                                            formula: Some("GUARD(4)".into()),
+                                            value: Some("7".into()),
+                                            unit: None,
+                                            del: false,
+                                            other_attrs: vec![],
+                                        },
+                                    ],
+                                )],
+                            )),
+                        ],
+                    )),
+                ]),
+                SheetChild::Connects(vec![ConnectsChild::Connect(Connect {
+                    from_sheet: 1,
+                    from_cell: Some("BeginX".into()),
+                    from_part: None,
+                    to_sheet: 2,
+                    to_cell: Some("Connections.X1".into()),
+                    to_part: None,
+                    other_attrs: vec![],
+                })]),
+            ],
+        ),
+    );
+    let connectivity = Resolver::new(&package)
+        .resolve_page_connectivity("page")
+        .unwrap();
+    let point = connectivity.connectors[&1].glue[0]
+        .to
+        .as_ref()
+        .unwrap()
+        .connection_point
+        .as_ref()
+        .unwrap();
+    assert_eq!(point.position, crate::ScenePoint { x: 5.0, y: 7.0 });
+    assert_eq!(point.x_provenance, crate::NumericProvenance::Formula);
+    assert_eq!(point.y_provenance, crate::NumericProvenance::CachedValue);
+}
+
+#[test]
 fn reports_dangling_connects_without_dropping_them() {
     let mut package = package();
     package.page_contents.insert(
@@ -236,6 +312,7 @@ fn grouped_glue_connection_points_use_scene_transforms() {
     let points = connectivity.connectors[&1]
         .glue
         .iter()
+        .filter(|glue| glue.to.as_ref().unwrap().cell.as_deref() != Some("PinX"))
         .map(|glue| {
             let target = glue.to.as_ref().unwrap();
             (
@@ -255,6 +332,24 @@ fn grouped_glue_connection_points_use_scene_transforms() {
     assert_eq!(points[&21].y, 11.0);
     assert_eq!(points[&32].x, 32.0);
     assert_eq!(points[&32].y, 2.0);
+
+    let direct_pins = connectivity.connectors[&1]
+        .glue
+        .iter()
+        .filter(|glue| glue.to.as_ref().unwrap().cell.as_deref() == Some("PinX"))
+        .map(|glue| {
+            let target = glue.to.as_ref().unwrap();
+            (
+                target.shape_id,
+                target.connection_point.as_ref().unwrap().position,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    // A target pin is its local LocPin transformed through every containing group.
+    assert_eq!(direct_pins[&11], crate::ScenePoint { x: 10.0, y: 10.0 });
+    assert_eq!(direct_pins[&21], crate::ScenePoint { x: 20.0, y: 10.0 });
+    assert_eq!(direct_pins[&32], crate::ScenePoint { x: 30.0, y: 0.0 });
 }
 
 #[test]
@@ -1389,6 +1484,31 @@ fn corpus_connectivity_accounts_for_every_glue_record() {
         let resolver = Resolver::new(&package);
         for page in &package.page_part_paths {
             let connectivity = resolver.resolve_page_connectivity(page).unwrap();
+            if file == "soundplan.vsdx" && page.ends_with("page1.xml") {
+                let glue = connectivity.connectors[&1306]
+                    .glue
+                    .iter()
+                    .find(|glue| {
+                        glue.endpoint == ConnectorEndpoint::Begin
+                            && glue.to.as_ref().is_some_and(|target| {
+                                target.shape_id == 1159 && target.cell.as_deref() == Some("PinX")
+                            })
+                    })
+                    .unwrap();
+                assert_eq!(
+                    glue.to
+                        .as_ref()
+                        .unwrap()
+                        .connection_point
+                        .as_ref()
+                        .unwrap()
+                        .position,
+                    crate::ScenePoint {
+                        x: 16.872_047_239_024_92,
+                        y: 16.281_496_360_318_24,
+                    }
+                );
+            }
             for connector in connectivity.connectors.values() {
                 total += connector.glue.len();
                 resolved += connector

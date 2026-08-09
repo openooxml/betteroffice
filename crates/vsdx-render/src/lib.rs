@@ -598,6 +598,9 @@ impl Renderer {
         if resolved.deleted {
             return Ok(());
         }
+        if paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0) {
+            return Ok(());
+        }
         if connectivity
             .connectors
             .get(&shape.id)
@@ -631,9 +634,6 @@ impl Renderer {
                 &resolved,
                 state,
             );
-        }
-        if paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0) {
-            return Ok(());
         }
         let Some(bounds) = bounds(package, references, &resolved, shape.id) else {
             return self.placeholder(shape, state, "unresolvable transform");
@@ -3066,6 +3066,20 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(z_orders.len(), 3);
         assert_eq!(z_orders.into_iter().collect::<Vec<_>>(), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn hidden_one_d_connector_emits_no_primitives() {
+        let mut connector = shape(1, 1.0, 1.0);
+        connector.children.extend([
+            ShapeChild::Cell(cell("OneD", "1")),
+            ShapeChild::Cell(cell("BeginX", "1")),
+            ShapeChild::Cell(cell("BeginY", "1")),
+            ShapeChild::Cell(cell("EndX", "4")),
+            ShapeChild::Cell(cell("EndY", "1")),
+            ShapeChild::Cell(cell("NoShow", "1")),
+        ]);
+        assert!(render(vec![connector]).primitives.is_empty());
     }
 
     #[test]
