@@ -343,11 +343,9 @@ fn number_from_cell(
         .map(|value| (value, NumericProvenance::CachedValue))
 }
 
-/// Evaluates only finite numeric literals, one binary `+`, `-`, `*`, or `/` expression (with
-/// recursive operands), and local cell-name references. It intentionally does not implement
-/// ShapeSheet functions, units, parentheses, cross-sheet references, or general ShapeSheet
-/// syntax because `vsdx-eval` depends on this crate. If a formula is unsupported, callers fall
-/// back to a finite cached `V`; a supported formula always wins over a conflicting cache.
+/// Uses the shared formula parser and numeric evaluation core with connectivity's deliberately
+/// narrow local-reference context. `vsdx-eval` depends on this crate, so connectivity cannot use
+/// its display evaluator. Cache fallback is owned by `number_from_cell`, not this evaluator.
 fn formula_number(shape: &ResolvedShape, formula: &str) -> Option<f64> {
     evaluate_number(
         formula,

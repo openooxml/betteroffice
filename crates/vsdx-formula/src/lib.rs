@@ -350,32 +350,50 @@ pub fn evaluate_number(
     limits: Limits,
     resolve: &mut impl FnMut(&str) -> Option<String>,
 ) -> Option<f64> {
-    fn eval(
-        expr: &Expr,
-        limits: Limits,
-        resolve: &mut impl FnMut(&str) -> Option<String>,
-        active: &mut HashSet<String>,
-        depth: usize,
-    ) -> Option<f64> {
-        if depth > limits.max_depth {
+    parse(input.trim_start_matches('='), limits)
+        .ok()
+        .and_then(|expr| NumberEngine::new(limits, resolve).evaluate(&expr))
+}
+
+struct NumberEngine<'a, F> {
+    limits: Limits,
+    resolve: &'a mut F,
+    active: HashSet<String>,
+}
+
+impl<'a, F: FnMut(&str) -> Option<String>> NumberEngine<'a, F> {
+    fn new(limits: Limits, resolve: &'a mut F) -> Self {
+        Self {
+            limits,
+            resolve,
+            active: HashSet::new(),
+        }
+    }
+
+    fn evaluate(&mut self, expr: &Expr) -> Option<f64> {
+        self.evaluate_at(expr, 0)
+    }
+
+    fn evaluate_at(&mut self, expr: &Expr, depth: usize) -> Option<f64> {
+        if depth > self.limits.max_depth {
             return None;
         }
         match expr {
             Expr::Number(value, Unit::Number) => Some(*value),
             Expr::Reference(name) => {
-                if !active.insert(name.clone()) {
+                if !self.active.insert(name.clone()) {
                     return None;
                 }
-                let value = resolve(name)
-                    .and_then(|formula| parse(formula.trim_start_matches('='), limits).ok())
-                    .and_then(|formula| eval(&formula, limits, resolve, active, depth + 1));
-                active.remove(name);
+                let value = (self.resolve)(name)
+                    .and_then(|formula| parse(formula.trim_start_matches('='), self.limits).ok())
+                    .and_then(|formula| self.evaluate_at(&formula, depth + 1));
+                self.active.remove(name);
                 value
             }
-            Expr::Unary(value) => Some(-eval(value, limits, resolve, active, depth + 1)?),
+            Expr::Unary(value) => Some(-self.evaluate_at(value, depth + 1)?),
             Expr::Binary(left, op, right) => {
-                let left = eval(left, limits, resolve, active, depth + 1)?;
-                let right = eval(right, limits, resolve, active, depth + 1)?;
+                let left = self.evaluate_at(left, depth + 1)?;
+                let right = self.evaluate_at(right, depth + 1)?;
                 match op {
                     Op::Add => Some(left + right),
                     Op::Sub => Some(left - right),
@@ -389,7 +407,4 @@ pub fn evaluate_number(
         }
         .filter(|value| value.is_finite())
     }
-    parse(input.trim_start_matches('='), limits)
-        .ok()
-        .and_then(|expr| eval(&expr, limits, resolve, &mut HashSet::new(), 0))
 }
