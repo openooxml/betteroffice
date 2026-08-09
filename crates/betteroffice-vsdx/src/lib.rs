@@ -7,7 +7,7 @@ use vsdx_eval::{
 pub use vsdx_parse::StructuralEdit;
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
-use vsdx_resolve::{ResolveError, ResolvedShape, Resolver};
+use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver};
 
 #[derive(Debug)]
 pub enum Error {
@@ -407,6 +407,9 @@ impl<'a> Page<'a> {
         self.diagram.package.page_contents[self.part]
             .shapes()
             .map(move |shape| ShapeView { page: self, shape })
+    }
+    pub fn connectivity(&self) -> Result<PageConnectivity> {
+        Ok(Resolver::new(&self.diagram.package).resolve_page_connectivity(self.part)?)
     }
 }
 
