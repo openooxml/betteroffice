@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/vsdx",
   "version": "0.0.1",
-  "description": "Visio-faithful VSDX editor and viewer core (Rust/Wasm).",
+  "description": "In-development VSDX parsing, editing, and rendering core for Rust and WebAssembly.",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",
