@@ -1873,9 +1873,10 @@ mod tests {
             measurement.oracle_agreement as f64 * 100.0 / oracle_compared as f64
         };
         eprintln!(
-            "VSDX corpus @V oracle (Visio-produced, potentially stale): agreement={} disagreement={} no-cache-available={} agreement-rate={agreement_rate:.2}%",
+            "VSDX corpus @V oracle (Visio-produced, potentially stale): agreement={} disagreement={} excluded-stale={} no-cache-available={} agreement-rate={agreement_rate:.2}%",
             measurement.oracle_agreement,
             measurement.oracle_disagreement,
+            measurement.oracle_excluded_stale,
             measurement.oracle_no_cache,
         );
         measurement.oracle_disagreements.sort_by(|left, right| {
@@ -1924,6 +1925,20 @@ mod tests {
             .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         top_references.truncate(20);
         eprintln!("VSDX corpus top unresolved references: {top_references:?}");
+        let mut oracle_histogram = measurement
+            .oracle_disagreement_kinds
+            .into_iter()
+            .collect::<Vec<_>>();
+        oracle_histogram
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        eprintln!("VSDX corpus @V disagreement histogram: {oracle_histogram:?}");
+        let mut stale_histogram = measurement
+            .oracle_stale_kinds
+            .into_iter()
+            .collect::<Vec<_>>();
+        stale_histogram
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        eprintln!("VSDX corpus @V excluded-stale histogram: {stale_histogram:?}");
         assert_eq!(
             measurement.total, 6_992,
             "corpus formula denominator changed"
@@ -1953,7 +1968,10 @@ mod tests {
         unresolved_references: BTreeMap<String, usize>,
         oracle_agreement: usize,
         oracle_disagreement: usize,
+        oracle_excluded_stale: usize,
         oracle_no_cache: usize,
+        oracle_disagreement_kinds: BTreeMap<String, usize>,
+        oracle_stale_kinds: BTreeMap<String, usize>,
         oracle_disagreements: Vec<OracleDisagreement>,
     }
     struct OracleDisagreement {
@@ -2009,8 +2027,15 @@ mod tests {
             };
             if oracle_values_agree(computed.value, cached_value.value) {
                 self.oracle_agreement += 1;
+            } else if let Some(kind) = stale_oracle_cache(formula, cached, computed.value) {
+                self.oracle_excluded_stale += 1;
+                *self.oracle_stale_kinds.entry(kind.into()).or_default() += 1;
             } else {
                 self.oracle_disagreement += 1;
+                *self
+                    .oracle_disagreement_kinds
+                    .entry(format!("{name}: {formula}"))
+                    .or_default() += 1;
                 self.oracle_disagreements.push(OracleDisagreement {
                     name: name.into(),
                     formula: formula.into(),
@@ -2019,6 +2044,19 @@ mod tests {
                 });
             }
         }
+    }
+
+    fn stale_oracle_cache(formula: &str, cached: &str, computed: Value) -> Option<&'static str> {
+        if formula.eq_ignore_ascii_case("Inh") {
+            return Some("Inh cache from a prior inheritance context");
+        }
+        let Value::Number(computed) = computed else {
+            return None;
+        };
+        let cached = cached.parse::<f64>().ok()?;
+        ((cached - computed.number).abs()
+            <= 1e-9_f64.max(cached.abs().max(computed.number.abs()) * 1e-9))
+        .then_some("cache value conflicts with its display unit")
     }
 
     fn oracle_values_agree(computed: Value, cached: Value) -> bool {

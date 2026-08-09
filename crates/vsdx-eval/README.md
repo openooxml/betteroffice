@@ -31,3 +31,8 @@ The following residual categories are intentionally outside this profile:
 The corpus harness compares evaluated formulas with the cell `@V` cache. Those
 values are produced by Visio, but may be stale; the reported agreement rate is an
 imperfect compatibility signal, not proof of exact Visio compatibility.
+
+The oracle excludes only demonstrated stale cache encodings: a mismatching
+`F="Inh"` cache, whose value belongs to a prior inheritance context, and a numeric
+cache whose raw `@V` already equals the evaluated value but conflicts with its
+`@U` display-unit conversion. All other mismatches remain disagreements.
