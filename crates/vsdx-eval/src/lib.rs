@@ -307,24 +307,30 @@ impl References for BTreeMap<String, String> {
 }
 
 pub fn parse(input: &str, limits: &ParseLimits) -> Result<Expr, Diagnostic> {
-    let _ = vsdx_formula::parse(
+    let parsed = vsdx_formula::parse(
         input,
         vsdx_formula::Limits {
             max_depth: limits.max_formula_depth,
             max_nodes: limits.max_formula_nodes,
             max_tokens: limits.max_formula_tokens,
         },
-    );
-    if input.trim().eq_ignore_ascii_case("No Formula") {
-        return Ok(Expr::Call("No Formula".into(), Vec::new()));
-    }
-    Parser::new(
-        input,
-        limits.max_formula_depth,
-        limits.max_formula_nodes,
-        limits.max_formula_tokens,
     )
-    .parse()
+    .map_err(|error| Diagnostic {
+        message: error.message,
+    })?;
+    if !input.trim().eq_ignore_ascii_case("No Formula") {
+        debug_assert_eq!(
+            Parser::new(
+                input,
+                limits.max_formula_depth,
+                limits.max_formula_nodes,
+                limits.max_formula_tokens,
+            )
+            .parse(),
+            Ok(parsed.clone())
+        );
+    }
+    Ok(parsed)
 }
 pub fn evaluate(input: &str, refs: &impl References, limits: &ParseLimits) -> Evaluation {
     evaluate_with_theme(input, refs, limits, None)
