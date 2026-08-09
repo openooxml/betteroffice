@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use vsdx_eval::{Evaluation, PageShapeReferences, Value, evaluate_cell_with_shape_package_theme};
 use vsdx_parse::{ParseLimits, Shape, VsdxPackage};
-use vsdx_resolve::{Lookup, ResolvedShape, Resolver, ScenePoint, realize_geometry};
+use vsdx_resolve::{Lookup, ResolvedShape, Resolver, ScenePoint, SceneTransform, realize_geometry};
 
 const MAX_RECURSION_DEPTH: usize = 64;
 
@@ -509,6 +509,10 @@ impl Renderer {
         let resolver = Resolver::new(package);
         let connectivity = resolver.resolve_page_connectivity(page_part)?;
         let references = PageShapeReferences::new(&resolver, page_part).ok();
+        let shapes = resolver.resolve_page_shapes(page_part)?;
+        let transforms = vsdx_resolve::scene_transforms(page, &shapes, |id, shape, name| {
+            evaluated(package, references.as_ref(), shape, id, name)
+        });
         let page_height = page_dimension(&resolver, package, page_part, "PageHeight")
             .ok_or_else(|| RenderError::PageDimensions("PageHeight is unavailable".into()))?;
         let page_width = page_dimension(&resolver, package, page_part, "PageWidth")
@@ -539,6 +543,7 @@ impl Renderer {
                 &resolver,
                 &connectivity,
                 references.as_ref(),
+                &transforms,
                 page_part,
                 shape,
                 0,
@@ -574,6 +579,7 @@ impl Renderer {
         resolver: &Resolver<'_>,
         connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
+        transforms: &BTreeMap<u32, SceneTransform>,
         page_part: &str,
         shape: &Shape,
         depth: usize,
@@ -612,6 +618,9 @@ impl Renderer {
         let Some(bounds) = bounds(package, references, &resolved, shape.id) else {
             return self.placeholder(shape, state, "unresolvable transform");
         };
+        let Some(transform) = transforms.get(&shape.id) else {
+            return self.placeholder_at(id, z_order, bounds, state, "unresolvable transform");
+        };
         if !bounds_finite(bounds) {
             return self.placeholder_at(
                 id,
@@ -624,16 +633,7 @@ impl Renderer {
         let geometry = resolved.sections.get("Geometry").map(realize_geometry);
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
-            let group_transform = bounds_affine(
-                bounds,
-                child_coordinate_extent(
-                    package,
-                    resolver,
-                    references,
-                    page_part,
-                    child_shapes.iter().copied(),
-                ),
-            );
+            let group_transform = affine(transform.local);
             let start = state.primitives.len();
             for child in child_shapes {
                 self.layout_shape(
@@ -641,6 +641,7 @@ impl Renderer {
                     resolver,
                     connectivity,
                     references,
+                    transforms,
                     page_part,
                     child,
                     depth + 1,
@@ -687,7 +688,7 @@ impl Renderer {
                     y: 0.0,
                     width: bounds.width as f32,
                     height: bounds.height as f32,
-                    transform: bounds_affine(bounds, None),
+                    transform: affine(transform.local),
                 });
                 return Ok(());
             }
@@ -721,7 +722,7 @@ impl Renderer {
             .commands
             .into_iter()
             .map(|mut command| {
-                transform_command(&mut command, bounds);
+                transform_affine(&mut command, affine(transform.local));
                 command
             })
             .collect::<Vec<_>>();
@@ -1343,8 +1344,15 @@ fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, m
     *width = max_x - min_x;
     *height = max_y - min_y;
 }
-fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, bounds: Bounds) {
-    transform_affine(command, bounds_affine(bounds, None));
+fn affine(transform: vsdx_resolve::SceneAffine) -> Affine {
+    Affine {
+        a: transform.a as f32,
+        b: transform.b as f32,
+        c: transform.c as f32,
+        d: transform.d as f32,
+        e: transform.e as f32,
+        f: transform.f as f32,
+    }
 }
 fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: Affine) {
     use ooxml_drawingml::GeometryPathCommand::*;
@@ -1373,70 +1381,6 @@ fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: 
         Close => {}
     }
 }
-fn bounds_affine(group: Bounds, child_extent: Option<ChildCoordinateExtent>) -> Affine {
-    let transform = vsdx_resolve::bounds_affine(
-        vsdx_resolve::ShapeBounds {
-            x: group.x,
-            y: group.y,
-            width: group.width,
-            height: group.height,
-            loc_pin_x: group.loc_pin_x,
-            loc_pin_y: group.loc_pin_y,
-            angle: group.angle,
-            flip_x: group.flip_x,
-            flip_y: group.flip_y,
-        },
-        child_extent.map(|extent| (extent.x, extent.y, extent.width, extent.height)),
-    );
-    Affine {
-        a: transform.a as f32,
-        b: transform.b as f32,
-        c: transform.c as f32,
-        d: transform.d as f32,
-        e: transform.e as f32,
-        f: transform.f as f32,
-    }
-}
-struct ChildCoordinateExtent {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-fn child_coordinate_extent<'a>(
-    package: &VsdxPackage,
-    resolver: &Resolver<'_>,
-    references: Option<&PageShapeReferences>,
-    page_part: &str,
-    shapes: impl Iterator<Item = &'a Shape>,
-) -> Option<ChildCoordinateExtent> {
-    let bounds = shapes
-        .filter_map(|shape| {
-            resolver
-                .resolve_shape(page_part, shape.id)
-                .ok()
-                .and_then(|resolved| bounds(package, references, &resolved, shape.id))
-        })
-        .collect::<Vec<_>>();
-    let min_x = bounds.iter().map(|bounds| bounds.x).reduce(f64::min)?;
-    let min_y = bounds.iter().map(|bounds| bounds.y).reduce(f64::min)?;
-    let max_x = bounds
-        .iter()
-        .map(|bounds| bounds.x + bounds.width)
-        .reduce(f64::max)?;
-    let max_y = bounds
-        .iter()
-        .map(|bounds| bounds.y + bounds.height)
-        .reduce(f64::max)?;
-    let width = max_x - min_x;
-    let height = max_y - min_y;
-    (width > 0.0 && height > 0.0).then_some(ChildCoordinateExtent {
-        x: min_x,
-        y: min_y,
-        width,
-        height,
-    })
-}
 struct State {
     count: usize,
     z_order: u32,
@@ -1462,8 +1406,6 @@ struct Bounds {
     loc_pin_x: f64,
     loc_pin_y: f64,
     angle: f64,
-    flip_x: bool,
-    flip_y: bool,
 }
 /// Deterministic dynamic-connector policy: `RoutStyle != 0` uses one horizontal-first
 /// orthogonal bend; every other connector uses a direct segment. This deliberately does not
@@ -1554,8 +1496,6 @@ fn bounds(
         loc_pin_x,
         loc_pin_y,
         angle: value("Angle").unwrap_or(0.0),
-        flip_x: value("FlipX").unwrap_or(0.0) != 0.0,
-        flip_y: value("FlipY").unwrap_or(0.0) != 0.0,
     })
 }
 fn evaluated(
@@ -2547,21 +2487,20 @@ mod tests {
 
     #[test]
     fn group_child_extent_origin_maps_to_the_group_lower_left_corner() {
-        let matrix = bounds_affine(
-            Bounds {
+        let matrix = affine(vsdx_resolve::bounds_affine(
+            vsdx_resolve::ShapeBounds {
                 x: 10.0,
                 y: 20.0,
                 width: 8.0,
                 height: 12.0,
-                ..Default::default()
+                loc_pin_x: 0.0,
+                loc_pin_y: 0.0,
+                angle: 0.0,
+                flip_x: false,
+                flip_y: false,
             },
-            Some(ChildCoordinateExtent {
-                x: 2.0,
-                y: 3.0,
-                width: 4.0,
-                height: 6.0,
-            }),
-        );
+            Some((2.0, 3.0, 4.0, 6.0)),
+        ));
         assert_point_close(matrix.apply_point(2.0, 3.0), (10.0, 20.0));
         assert_point_close(matrix.apply_point(6.0, 9.0), (18.0, 32.0));
     }

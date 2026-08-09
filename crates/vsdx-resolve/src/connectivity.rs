@@ -67,6 +67,12 @@ pub struct ShapeBounds {
     pub flip_y: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SceneTransform {
+    pub local: SceneAffine,
+    pub scene: SceneAffine,
+}
+
 pub fn bounds_affine(
     bounds: ShapeBounds,
     child_extent: Option<(f64, f64, f64, f64)>,
@@ -173,7 +179,7 @@ impl<'a> Resolver<'a> {
                 );
             }
         }
-        let transforms = scene_transforms(page, &shapes);
+        let transforms = scene_transforms(page, &shapes, |_, shape, name| number(shape, name));
         for connect in page.connects() {
             self.add_connectivity_record(connect, &shapes, &transforms, &mut out);
         }
@@ -184,7 +190,7 @@ impl<'a> Resolver<'a> {
         &self,
         connect: &Connect,
         shapes: &BTreeMap<u32, ResolvedShape>,
-        transforms: &BTreeMap<u32, SceneAffine>,
+        transforms: &BTreeMap<u32, SceneTransform>,
         out: &mut PageConnectivity,
     ) {
         let mut diagnostics = Vec::new();
@@ -231,7 +237,9 @@ impl<'a> Resolver<'a> {
                         let point = connection_point(
                             target,
                             row,
-                            transforms.get(&connect.to_sheet).copied(),
+                            transforms
+                                .get(&connect.to_sheet)
+                                .map(|transform| transform.scene),
                         );
                         point.or_else(|| {
                             diagnostics.push(ConnectivityDiagnostic::MissingConnectionPoint {
@@ -377,13 +385,20 @@ fn connection_point(
     })
 }
 
-fn scene_transforms(
+pub fn scene_transforms(
     page: &vsdx_parse::Sheet,
     shapes: &BTreeMap<u32, ResolvedShape>,
-) -> BTreeMap<u32, SceneAffine> {
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
+) -> BTreeMap<u32, SceneTransform> {
     let mut transforms = BTreeMap::new();
     for shape in page.shapes() {
-        add_scene_transforms(shape, SceneAffine::identity(), shapes, &mut transforms);
+        add_scene_transforms(
+            shape,
+            SceneAffine::identity(),
+            shapes,
+            value,
+            &mut transforms,
+        );
     }
     transforms
 }
@@ -392,30 +407,37 @@ fn add_scene_transforms(
     shape: &Shape,
     parent: SceneAffine,
     shapes: &BTreeMap<u32, ResolvedShape>,
-    transforms: &mut BTreeMap<u32, SceneAffine>,
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
+    transforms: &mut BTreeMap<u32, SceneTransform>,
 ) {
     let Some(resolved) = shapes.get(&shape.id) else {
         return;
     };
-    let Some(bounds) = shape_bounds(resolved) else {
+    let Some(bounds) = shape_bounds(shape.id, resolved, value) else {
         return;
     };
     let children = shape.shapes().collect::<Vec<_>>();
-    let extent = child_extent(&children, shapes);
-    let transform = parent.compose(bounds_affine(bounds, extent));
-    transforms.insert(shape.id, transform);
+    let extent = child_extent(&children, shapes, value);
+    let local = bounds_affine(bounds, extent);
+    let scene = parent.compose(local);
+    transforms.insert(shape.id, SceneTransform { local, scene });
     for child in children {
-        add_scene_transforms(child, transform, shapes, transforms);
+        add_scene_transforms(child, scene, shapes, value, transforms);
     }
 }
 
 fn child_extent(
     children: &[&Shape],
     shapes: &BTreeMap<u32, ResolvedShape>,
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64> + Copy,
 ) -> Option<(f64, f64, f64, f64)> {
     let bounds = children
         .iter()
-        .filter_map(|shape| shapes.get(&shape.id).and_then(shape_bounds))
+        .filter_map(|source| {
+            shapes
+                .get(&source.id)
+                .and_then(|shape| shape_bounds(source.id, shape, value))
+        })
         .collect::<Vec<_>>();
     let min_x = bounds.iter().map(|bounds| bounds.x).reduce(f64::min)?;
     let min_y = bounds.iter().map(|bounds| bounds.y).reduce(f64::min)?;
@@ -432,21 +454,25 @@ fn child_extent(
     (width > 0.0 && height > 0.0).then_some((min_x, min_y, width, height))
 }
 
-fn shape_bounds(shape: &ResolvedShape) -> Option<ShapeBounds> {
-    let width = number(shape, "Width")?;
-    let height = number(shape, "Height")?;
-    let loc_pin_x = number(shape, "LocPinX").unwrap_or(width / 2.0);
-    let loc_pin_y = number(shape, "LocPinY").unwrap_or(height / 2.0);
+fn shape_bounds(
+    id: u32,
+    shape: &ResolvedShape,
+    value: impl Fn(u32, &ResolvedShape, &str) -> Option<f64>,
+) -> Option<ShapeBounds> {
+    let width = value(id, shape, "Width")?;
+    let height = value(id, shape, "Height")?;
+    let loc_pin_x = value(id, shape, "LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = value(id, shape, "LocPinY").unwrap_or(height / 2.0);
     Some(ShapeBounds {
-        x: number(shape, "PinX")? - loc_pin_x,
-        y: number(shape, "PinY")? - loc_pin_y,
+        x: value(id, shape, "PinX")? - loc_pin_x,
+        y: value(id, shape, "PinY")? - loc_pin_y,
         width,
         height,
         loc_pin_x,
         loc_pin_y,
-        angle: number(shape, "Angle").unwrap_or(0.0),
-        flip_x: number(shape, "FlipX").unwrap_or(0.0) != 0.0,
-        flip_y: number(shape, "FlipY").unwrap_or(0.0) != 0.0,
+        angle: value(id, shape, "Angle").unwrap_or(0.0),
+        flip_x: value(id, shape, "FlipX").unwrap_or(0.0) != 0.0,
+        flip_y: value(id, shape, "FlipY").unwrap_or(0.0) != 0.0,
     })
 }
 

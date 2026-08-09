@@ -240,6 +240,9 @@ impl PageShapeReferences {
     pub fn shape(&self, id: u32) -> Option<&ResolvedShape> {
         self.shapes.get(&id)
     }
+    pub fn shapes(&self) -> &BTreeMap<u32, ResolvedShape> {
+        &self.shapes
+    }
 }
 
 pub struct ShapeReferences<'a> {
