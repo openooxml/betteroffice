@@ -1,4 +1,6 @@
 //! Bounded baseline ShapeSheet evaluation. Unsupported formulas never use cached values.
+//!
+//! See the crate README for the supported profile and explicit non-goals.
 
 mod colour;
 #[path = "tests.rs"]
@@ -1716,32 +1718,46 @@ mod tests {
             {
                 let refs = sheet_references(sheet);
                 let refs = DocumentReferences::new(&refs, document.as_ref());
-                for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(
+                for (name, cell) in sheet_formula_cells(sheet) {
+                    let formula = cell.formula.as_deref().unwrap();
+                    let evaluation = evaluate_cell_with_package_theme(
+                        &name,
                         formula,
-                        evaluate_cell_with_package_theme(
-                            &name,
-                            formula,
-                            &refs,
-                            &limits(),
-                            &package,
-                        ),
+                        &refs,
+                        &limits(),
+                        &package,
+                    );
+                    measurement.record(formula, evaluation.clone());
+                    measurement.record_oracle(
+                        &name,
+                        formula,
+                        cell.value
+                            .as_deref()
+                            .map(|value| (value, cell.unit.as_deref())),
+                        &evaluation,
                     );
                 }
             }
             for (page, sheet) in &package.page_contents {
                 let refs = sheet_references(sheet);
                 let refs = DocumentReferences::new(&refs, document.as_ref());
-                for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(
+                for (name, cell) in sheet_formula_cells(sheet) {
+                    let formula = cell.formula.as_deref().unwrap();
+                    let evaluation = evaluate_cell_with_package_theme(
+                        &name,
                         formula,
-                        evaluate_cell_with_package_theme(
-                            &name,
-                            formula,
-                            &refs,
-                            &limits(),
-                            &package,
-                        ),
+                        &refs,
+                        &limits(),
+                        &package,
+                    );
+                    measurement.record(formula, evaluation.clone());
+                    measurement.record_oracle(
+                        &name,
+                        formula,
+                        cell.value
+                            .as_deref()
+                            .map(|value| (value, cell.unit.as_deref())),
+                        &evaluation,
                     );
                 }
                 let page_refs =
@@ -1749,17 +1765,24 @@ mod tests {
                 for shape in shapes(sheet) {
                     let refs = page_refs.for_shape(shape.id);
                     let resolved = page_refs.shape(shape.id).expect("resolve corpus shape");
-                    for (name, formula) in shape_formulas(shape) {
-                        measurement.record(
+                    for (name, cell) in shape_formula_cells(shape) {
+                        let formula = cell.formula.as_deref().unwrap();
+                        let evaluation = evaluate_cell_with_shape_package_theme(
+                            &name,
                             formula,
-                            evaluate_cell_with_shape_package_theme(
-                                &name,
-                                formula,
-                                &refs,
-                                &limits(),
-                                resolved,
-                                &package,
-                            ),
+                            &refs,
+                            &limits(),
+                            resolved,
+                            &package,
+                        );
+                        measurement.record(formula, evaluation.clone());
+                        measurement.record_oracle(
+                            &name,
+                            formula,
+                            cell.value
+                                .as_deref()
+                                .map(|value| (value, cell.unit.as_deref())),
+                            &evaluation,
                         );
                     }
                 }
@@ -1767,33 +1790,47 @@ mod tests {
             for sheet in package.master_contents.values() {
                 let refs = sheet_references(sheet);
                 let refs = DocumentReferences::new(&refs, document.as_ref());
-                for (name, formula) in sheet_formulas(sheet) {
-                    measurement.record(
+                for (name, cell) in sheet_formula_cells(sheet) {
+                    let formula = cell.formula.as_deref().unwrap();
+                    let evaluation = evaluate_cell_with_package_theme(
+                        &name,
                         formula,
-                        evaluate_cell_with_package_theme(
-                            &name,
-                            formula,
-                            &refs,
-                            &limits(),
-                            &package,
-                        ),
+                        &refs,
+                        &limits(),
+                        &package,
+                    );
+                    measurement.record(formula, evaluation.clone());
+                    measurement.record_oracle(
+                        &name,
+                        formula,
+                        cell.value
+                            .as_deref()
+                            .map(|value| (value, cell.unit.as_deref())),
+                        &evaluation,
                     );
                 }
                 for shape in shapes(sheet) {
                     let resolved = resolver
                         .resolve_shape_in_sheet(shape, sheet)
                         .expect("resolve corpus master shape");
-                    for (name, formula) in shape_formulas(shape) {
-                        measurement.record(
+                    for (name, cell) in shape_formula_cells(shape) {
+                        let formula = cell.formula.as_deref().unwrap();
+                        let evaluation = evaluate_cell_with_shape_package_theme(
+                            &name,
                             formula,
-                            evaluate_cell_with_shape_package_theme(
-                                &name,
-                                formula,
-                                &DocumentReferences::new(&resolved, document.as_ref()),
-                                &limits(),
-                                &resolved,
-                                &package,
-                            ),
+                            &DocumentReferences::new(&resolved, document.as_ref()),
+                            &limits(),
+                            &resolved,
+                            &package,
+                        );
+                        measurement.record(formula, evaluation.clone());
+                        measurement.record_oracle(
+                            &name,
+                            formula,
+                            cell.value
+                                .as_deref()
+                                .map(|value| (value, cell.unit.as_deref())),
+                            &evaluation,
                         );
                     }
                 }
@@ -1809,6 +1846,38 @@ mod tests {
             measurement.error,
             measurement.total,
         );
+        let oracle_compared = measurement.oracle_agreement + measurement.oracle_disagreement;
+        let agreement_rate = if oracle_compared == 0 {
+            0.0
+        } else {
+            measurement.oracle_agreement as f64 * 100.0 / oracle_compared as f64
+        };
+        eprintln!(
+            "VSDX corpus @V oracle (Visio-produced, potentially stale): agreement={} disagreement={} no-cache-available={} agreement-rate={agreement_rate:.2}%",
+            measurement.oracle_agreement,
+            measurement.oracle_disagreement,
+            measurement.oracle_no_cache,
+        );
+        measurement.oracle_disagreements.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.formula.cmp(&right.formula))
+                .then_with(|| left.computed.cmp(&right.computed))
+                .then_with(|| left.cached.cmp(&right.cached))
+        });
+        measurement.oracle_disagreements.dedup_by(|left, right| {
+            left.name == right.name
+                && left.formula == right.formula
+                && left.computed == right.computed
+                && left.cached == right.cached
+        });
+        measurement.oracle_disagreements.truncate(20);
+        for disagreement in &measurement.oracle_disagreements {
+            eprintln!(
+                "VSDX corpus @V disagreement: cell={} formula={:?} computed={} cached={}",
+                disagreement.name, disagreement.formula, disagreement.computed, disagreement.cached,
+            );
+        }
         let mut top_unsupported = measurement
             .unsupported_names
             .into_iter()
@@ -1862,6 +1931,16 @@ mod tests {
         unsupported_other_kinds: BTreeMap<String, usize>,
         error_kinds: BTreeMap<String, usize>,
         unresolved_references: BTreeMap<String, usize>,
+        oracle_agreement: usize,
+        oracle_disagreement: usize,
+        oracle_no_cache: usize,
+        oracle_disagreements: Vec<OracleDisagreement>,
+    }
+    struct OracleDisagreement {
+        name: String,
+        formula: String,
+        computed: String,
+        cached: String,
     }
     impl CorpusMeasurement {
         fn record(&mut self, formula: &str, evaluation: Evaluation) {
@@ -1888,6 +1967,56 @@ mod tests {
                     let kind = classify_error(&error.message, &mut self.unresolved_references);
                     *self.error_kinds.entry(kind).or_default() += 1;
                 }
+            }
+        }
+        fn record_oracle(
+            &mut self,
+            name: &str,
+            formula: &str,
+            cached: Option<(&str, Option<&str>)>,
+            evaluation: &Evaluation,
+        ) {
+            let Evaluation::Evaluated(computed) = evaluation else {
+                return;
+            };
+            let Some((cached, unit)) = cached else {
+                self.oracle_no_cache += 1;
+                return;
+            };
+            let Evaluation::Evaluated(cached_value) = cell_value(cached, unit) else {
+                self.oracle_no_cache += 1;
+                return;
+            };
+            if oracle_values_agree(computed.value, cached_value.value) {
+                self.oracle_agreement += 1;
+            } else {
+                self.oracle_disagreement += 1;
+                self.oracle_disagreements.push(OracleDisagreement {
+                    name: name.into(),
+                    formula: formula.into(),
+                    computed: format_value(computed.value),
+                    cached: cached.into(),
+                });
+            }
+        }
+    }
+
+    fn oracle_values_agree(computed: Value, cached: Value) -> bool {
+        match (computed, cached) {
+            (Value::Number(computed), Value::Number(cached)) => {
+                (computed.number - cached.number).abs()
+                    <= 1e-9_f64.max(computed.number.abs().max(cached.number.abs()) * 1e-9)
+            }
+            (Value::Color(computed), Value::Color(cached)) => computed == cached,
+            _ => false,
+        }
+    }
+
+    fn format_value(value: Value) -> String {
+        match value {
+            Value::Number(value) => format!("{} {:?}", value.number, value.unit),
+            Value::Color(value) => {
+                format!("#{:02X}{:02X}{:02X}", value.red, value.green, value.blue)
             }
         }
     }
@@ -2069,6 +2198,23 @@ mod tests {
         }
         values
     }
+    fn sheet_formula_cells(sheet: &Sheet) -> Vec<(String, &Cell)> {
+        let mut values = sheet
+            .cells()
+            .filter(|cell| cell.formula.is_some())
+            .map(|cell| (cell.name.clone(), cell))
+            .collect::<Vec<_>>();
+        for section in sheet.sections() {
+            for row in section.rows() {
+                values.extend(
+                    row.cells()
+                        .filter(|cell| cell.formula.is_some())
+                        .map(|cell| (section_cell_name(section, row, cell), cell)),
+                );
+            }
+        }
+        values
+    }
     fn shape_formulas(shape: &Shape) -> Vec<(String, &str)> {
         let mut values = shape
             .cells()
@@ -2085,6 +2231,23 @@ mod tests {
                         .as_deref()
                         .map(|formula| (section_cell_name(section, row, cell), formula))
                 }));
+            }
+        }
+        values
+    }
+    fn shape_formula_cells(shape: &Shape) -> Vec<(String, &Cell)> {
+        let mut values = shape
+            .cells()
+            .filter(|cell| cell.formula.is_some())
+            .map(|cell| (cell.name.clone(), cell))
+            .collect::<Vec<_>>();
+        for section in shape.sections() {
+            for row in section.rows() {
+                values.extend(
+                    row.cells()
+                        .filter(|cell| cell.formula.is_some())
+                        .map(|cell| (section_cell_name(section, row, cell), cell)),
+                );
             }
         }
         values
