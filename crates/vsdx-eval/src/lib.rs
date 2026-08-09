@@ -2015,6 +2015,14 @@ mod tests {
             "published corpus oracle agreement count changed"
         );
         assert_eq!(
+            measurement.oracle_disagreement, 0,
+            "published corpus oracle disagreement count changed"
+        );
+        assert_eq!(
+            oracle_compared, 3_670,
+            "published corpus comparable-oracle count changed"
+        );
+        assert_eq!(
             measurement.oracle_excluded_stale, 9,
             "published corpus stale-oracle exclusion count changed"
         );
