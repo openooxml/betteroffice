@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use vsdx_parse::Connect;
+use vsdx_parse::{Connect, Shape};
 
 use crate::{Lookup, ResolvedShape, Resolver};
 
@@ -12,6 +12,84 @@ use crate::{Lookup, ResolvedShape, Resolver};
 pub struct ScenePoint {
     pub x: f64,
     pub y: f64,
+}
+
+/// An affine transform in Visio scene coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneAffine {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+}
+
+impl SceneAffine {
+    pub const fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+    pub fn compose(self, other: Self) -> Self {
+        Self {
+            a: self.a * other.a + self.c * other.b,
+            b: self.b * other.a + self.d * other.b,
+            c: self.a * other.c + self.c * other.d,
+            d: self.b * other.c + self.d * other.d,
+            e: self.a * other.e + self.c * other.f + self.e,
+            f: self.b * other.e + self.d * other.f + self.f,
+        }
+    }
+    pub fn apply_point(self, x: f64, y: f64) -> ScenePoint {
+        ScenePoint {
+            x: self.a * x + self.c * y + self.e,
+            y: self.b * x + self.d * y + self.f,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShapeBounds {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub loc_pin_x: f64,
+    pub loc_pin_y: f64,
+    pub angle: f64,
+    pub flip_x: bool,
+    pub flip_y: bool,
+}
+
+pub fn bounds_affine(
+    bounds: ShapeBounds,
+    child_extent: Option<(f64, f64, f64, f64)>,
+) -> SceneAffine {
+    let (origin_x, origin_y, scale_x, scale_y) = child_extent
+        .map(|(x, y, width, height)| (x, y, bounds.width / width, bounds.height / height))
+        .unwrap_or((0.0, 0.0, 1.0, 1.0));
+    let (sin, cos) = bounds.angle.sin_cos();
+    let sx = scale_x * if bounds.flip_x { -1.0 } else { 1.0 };
+    let sy = scale_y * if bounds.flip_y { -1.0 } else { 1.0 };
+    let pin_x = bounds.x + bounds.loc_pin_x;
+    let pin_y = bounds.y + bounds.loc_pin_y;
+    SceneAffine {
+        a: cos * sx,
+        b: sin * sx,
+        c: -sin * sy,
+        d: cos * sy,
+        e: pin_x - cos * sx * (bounds.loc_pin_x + origin_x)
+            + sin * sy * (bounds.loc_pin_y + origin_y),
+        f: pin_y
+            - sin * sx * (bounds.loc_pin_x + origin_x)
+            - cos * sy * (bounds.loc_pin_y + origin_y),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +104,7 @@ pub enum ConnectivityDiagnostic {
     MissingToShape { shape_id: u32 },
     MissingConnectionPoint { shape_id: u32, row: u32 },
     UnsupportedFromCell { shape_id: u32, cell: String },
+    UnsupportedToCell { shape_id: u32, cell: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -94,8 +173,9 @@ impl<'a> Resolver<'a> {
                 );
             }
         }
+        let transforms = scene_transforms(page, &shapes);
         for connect in page.connects() {
-            self.add_connectivity_record(connect, &shapes, &mut out);
+            self.add_connectivity_record(connect, &shapes, &transforms, &mut out);
         }
         Ok(out)
     }
@@ -104,6 +184,7 @@ impl<'a> Resolver<'a> {
         &self,
         connect: &Connect,
         shapes: &BTreeMap<u32, ResolvedShape>,
+        transforms: &BTreeMap<u32, SceneAffine>,
         out: &mut PageConnectivity,
     ) {
         let mut diagnostics = Vec::new();
@@ -114,7 +195,7 @@ impl<'a> Resolver<'a> {
             out.diagnostics.extend(diagnostics);
             return;
         };
-        let Some(endpoint) = connect.from_cell.as_deref().and_then(endpoint_name) else {
+        let Some(glue_endpoint) = connect.from_cell.as_deref().and_then(endpoint_name) else {
             diagnostics.push(ConnectivityDiagnostic::UnsupportedFromCell {
                 shape_id: connect.from_sheet,
                 cell: connect.from_cell.clone().unwrap_or_default(),
@@ -128,6 +209,15 @@ impl<'a> Resolver<'a> {
                 cell: connect.from_cell.clone().unwrap_or_default(),
             });
         }
+        out.connectors
+            .entry(connect.from_sheet)
+            .or_insert_with(|| ResolvedConnector {
+                shape_id: connect.from_sheet,
+                is_1d: is_one_d(source),
+                begin: endpoint(source, "BeginX", "BeginY"),
+                end: endpoint(source, "EndX", "EndY"),
+                glue: Vec::new(),
+            });
         let to = match shapes.get(&connect.to_sheet) {
             None => {
                 diagnostics.push(ConnectivityDiagnostic::MissingToShape {
@@ -136,19 +226,32 @@ impl<'a> Resolver<'a> {
                 None
             }
             Some(target) => {
-                let point = connect
-                    .to_cell
-                    .as_deref()
-                    .and_then(connection_row)
-                    .and_then(|row| {
-                        connection_point(target, row).or_else(|| {
+                let point = match connect.to_cell.as_deref().and_then(connection_row) {
+                    Some(row) => {
+                        let point = connection_point(
+                            target,
+                            row,
+                            transforms.get(&connect.to_sheet).copied(),
+                        );
+                        point.or_else(|| {
                             diagnostics.push(ConnectivityDiagnostic::MissingConnectionPoint {
                                 shape_id: connect.to_sheet,
                                 row,
                             });
                             None
                         })
-                    });
+                    }
+                    None if matches!(connect.to_cell.as_deref(), Some("PinX") | Some("PinY")) => {
+                        shape_pin(target).map(|position| ConnectionPoint { row: 0, position })
+                    }
+                    None => {
+                        diagnostics.push(ConnectivityDiagnostic::UnsupportedToCell {
+                            shape_id: connect.to_sheet,
+                            cell: connect.to_cell.clone().unwrap_or_default(),
+                        });
+                        None
+                    }
+                };
                 Some(GluedEnd {
                     shape_id: connect.to_sheet,
                     cell: connect.to_cell.clone(),
@@ -159,7 +262,7 @@ impl<'a> Resolver<'a> {
         };
         let glue = ResolvedGlue {
             connector_id: connect.from_sheet,
-            endpoint,
+            endpoint: glue_endpoint,
             from_part: connect.from_part,
             to,
             diagnostics: diagnostics.clone(),
@@ -184,6 +287,14 @@ fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {
     let Lookup::Found(value) = shape.cell(name)? else {
         return None;
     };
+    if let Some(number) = value
+        .cell
+        .formula
+        .as_deref()
+        .and_then(|formula| formula_number(shape, formula))
+    {
+        return Some(number);
+    }
     value
         .cell
         .value
@@ -191,6 +302,48 @@ fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite())
+}
+
+fn formula_number(shape: &ResolvedShape, formula: &str) -> Option<f64> {
+    let formula = formula.trim_start_matches('=').trim();
+    let value = formula
+        .parse::<f64>()
+        .ok()
+        .or_else(|| {
+            ['+', '-', '*', '/'].into_iter().find_map(|operator| {
+                formula.rfind(operator).and_then(|index| {
+                    (index > 0)
+                        .then(|| {
+                            let (left, right) = formula.split_at(index);
+                            let left = formula_number(shape, left)?;
+                            let right = formula_number(shape, &right[operator.len_utf8()..])?;
+                            Some(match operator {
+                                '+' => left + right,
+                                '-' => left - right,
+                                '*' => left * right,
+                                '/' => left / right,
+                                _ => unreachable!(),
+                            })
+                        })
+                        .flatten()
+                })
+            })
+        })
+        .or_else(|| number_from_value(shape, formula));
+    value.filter(|value| value.is_finite())
+}
+
+fn number_from_value(shape: &ResolvedShape, name: &str) -> Option<f64> {
+    let Lookup::Found(value) = shape.cell(name.trim())? else {
+        return None;
+    };
+    value
+        .cell
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
 }
 fn endpoint_name(name: &str) -> Option<ConnectorEndpoint> {
     match name {
@@ -202,32 +355,104 @@ fn endpoint_name(name: &str) -> Option<ConnectorEndpoint> {
 fn connection_row(name: &str) -> Option<u32> {
     name.strip_prefix("Connections.X")?.parse().ok()
 }
-fn connection_point(shape: &ResolvedShape, row: u32) -> Option<ConnectionPoint> {
+fn connection_point(
+    shape: &ResolvedShape,
+    row: u32,
+    transform: Option<SceneAffine>,
+) -> Option<ConnectionPoint> {
     let section = shape.sections.get("Connection")?;
     let resolved_row = section.rows.get(&format!("IX:{row}"))?;
+    if resolved_row.deleted {
+        return None;
+    }
     let value = |name: &str| match resolved_row.cells.get(name)? {
         Lookup::Found(cell) => cell.cell.value.as_deref()?.parse::<f64>().ok(),
         _ => None,
     };
     let x = value("X")?;
     let y = value("Y")?;
-    let width = number(shape, "Width")?;
-    let height = number(shape, "Height")?;
-    let pin_x = number(shape, "PinX")?;
-    let pin_y = number(shape, "PinY")?;
-    let loc_x = number(shape, "LocPinX").unwrap_or(width / 2.0);
-    let loc_y = number(shape, "LocPinY").unwrap_or(height / 2.0);
-    let angle = number(shape, "Angle").unwrap_or(0.0);
-    let flip_x = number(shape, "FlipX").unwrap_or(0.0) != 0.0;
-    let flip_y = number(shape, "FlipY").unwrap_or(0.0) != 0.0;
-    let (sin, cos) = angle.sin_cos();
-    let x = (x - loc_x) * if flip_x { -1.0 } else { 1.0 };
-    let y = (y - loc_y) * if flip_y { -1.0 } else { 1.0 };
     Some(ConnectionPoint {
         row,
-        position: ScenePoint {
-            x: pin_x + cos * x - sin * y,
-            y: pin_y + sin * x + cos * y,
-        },
+        position: transform?.apply_point(x, y),
+    })
+}
+
+fn scene_transforms(
+    page: &vsdx_parse::Sheet,
+    shapes: &BTreeMap<u32, ResolvedShape>,
+) -> BTreeMap<u32, SceneAffine> {
+    let mut transforms = BTreeMap::new();
+    for shape in page.shapes() {
+        add_scene_transforms(shape, SceneAffine::identity(), shapes, &mut transforms);
+    }
+    transforms
+}
+
+fn add_scene_transforms(
+    shape: &Shape,
+    parent: SceneAffine,
+    shapes: &BTreeMap<u32, ResolvedShape>,
+    transforms: &mut BTreeMap<u32, SceneAffine>,
+) {
+    let Some(resolved) = shapes.get(&shape.id) else {
+        return;
+    };
+    let Some(bounds) = shape_bounds(resolved) else {
+        return;
+    };
+    let children = shape.shapes().collect::<Vec<_>>();
+    let extent = child_extent(&children, shapes);
+    let transform = parent.compose(bounds_affine(bounds, extent));
+    transforms.insert(shape.id, transform);
+    for child in children {
+        add_scene_transforms(child, transform, shapes, transforms);
+    }
+}
+
+fn child_extent(
+    children: &[&Shape],
+    shapes: &BTreeMap<u32, ResolvedShape>,
+) -> Option<(f64, f64, f64, f64)> {
+    let bounds = children
+        .iter()
+        .filter_map(|shape| shapes.get(&shape.id).and_then(shape_bounds))
+        .collect::<Vec<_>>();
+    let min_x = bounds.iter().map(|bounds| bounds.x).reduce(f64::min)?;
+    let min_y = bounds.iter().map(|bounds| bounds.y).reduce(f64::min)?;
+    let max_x = bounds
+        .iter()
+        .map(|bounds| bounds.x + bounds.width)
+        .reduce(f64::max)?;
+    let max_y = bounds
+        .iter()
+        .map(|bounds| bounds.y + bounds.height)
+        .reduce(f64::max)?;
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    (width > 0.0 && height > 0.0).then_some((min_x, min_y, width, height))
+}
+
+fn shape_bounds(shape: &ResolvedShape) -> Option<ShapeBounds> {
+    let width = number(shape, "Width")?;
+    let height = number(shape, "Height")?;
+    let loc_pin_x = number(shape, "LocPinX").unwrap_or(width / 2.0);
+    let loc_pin_y = number(shape, "LocPinY").unwrap_or(height / 2.0);
+    Some(ShapeBounds {
+        x: number(shape, "PinX")? - loc_pin_x,
+        y: number(shape, "PinY")? - loc_pin_y,
+        width,
+        height,
+        loc_pin_x,
+        loc_pin_y,
+        angle: number(shape, "Angle").unwrap_or(0.0),
+        flip_x: number(shape, "FlipX").unwrap_or(0.0) != 0.0,
+        flip_y: number(shape, "FlipY").unwrap_or(0.0) != 0.0,
+    })
+}
+
+fn shape_pin(shape: &ResolvedShape) -> Option<ScenePoint> {
+    Some(ScenePoint {
+        x: number(shape, "PinX")?,
+        y: number(shape, "PinY")?,
     })
 }

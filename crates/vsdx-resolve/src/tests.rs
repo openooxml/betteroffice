@@ -1325,3 +1325,47 @@ fn corpus_shapes_resolve_without_silent_empty_results() {
         }
     }
 }
+
+#[test]
+fn corpus_connectivity_accounts_for_every_glue_record() {
+    let Some(dir) = std::env::var_os("VSDX_CORPUS_DIR") else {
+        eprintln!("warning: VSDX_CORPUS_DIR is unset; skipping corpus connectivity test");
+        return;
+    };
+    let mut total = 0;
+    let mut resolved = 0;
+    let mut missing = 0;
+    for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+        let package =
+            parse_vsdx(&fs::read(std::path::Path::new(&dir).join(file)).unwrap()).unwrap();
+        let resolver = Resolver::new(&package);
+        for page in &package.page_part_paths {
+            let connectivity = resolver.resolve_page_connectivity(page).unwrap();
+            for connector in connectivity.connectors.values() {
+                total += connector.glue.len();
+                resolved += connector
+                    .glue
+                    .iter()
+                    .filter(|glue| {
+                        glue.to
+                            .as_ref()
+                            .and_then(|target| target.connection_point.as_ref())
+                            .is_some()
+                    })
+                    .count();
+            }
+            missing += connectivity
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    matches!(
+                        diagnostic,
+                        ConnectivityDiagnostic::MissingConnectionPoint { .. }
+                    )
+                })
+                .count();
+        }
+    }
+    // Formula-first resolution recovers one valid target; 30 records still lack Connection rows.
+    assert_eq!((total, resolved, missing), (151, 121, 30));
+}

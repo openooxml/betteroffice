@@ -507,6 +507,7 @@ impl Renderer {
             .get(page_part)
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let resolver = Resolver::new(package);
+        let connectivity = resolver.resolve_page_connectivity(page_part)?;
         let references = PageShapeReferences::new(&resolver, page_part).ok();
         let page_height = page_dimension(&resolver, package, page_part, "PageHeight")
             .ok_or_else(|| RenderError::PageDimensions("PageHeight is unavailable".into()))?;
@@ -536,6 +537,7 @@ impl Renderer {
             self.layout_shape(
                 package,
                 &resolver,
+                &connectivity,
                 references.as_ref(),
                 page_part,
                 shape,
@@ -570,6 +572,7 @@ impl Renderer {
         &self,
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
+        connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
         page_part: &str,
         shape: &Shape,
@@ -594,7 +597,16 @@ impl Renderer {
         }
         if paint::number(&resolved, "OneD").is_some_and(|value| value != 0.0) {
             return self.layout_connector(
-                package, resolver, references, page_part, shape, id, z_order, &resolved, state,
+                package,
+                resolver,
+                connectivity,
+                references,
+                page_part,
+                shape,
+                id,
+                z_order,
+                &resolved,
+                state,
             );
         }
         let Some(bounds) = bounds(package, references, &resolved, shape.id) else {
@@ -627,6 +639,7 @@ impl Renderer {
                 self.layout_shape(
                     package,
                     resolver,
+                    connectivity,
                     references,
                     page_part,
                     child,
@@ -741,32 +754,37 @@ impl Renderer {
     fn layout_connector(
         &self,
         package: &VsdxPackage,
-        resolver: &Resolver<'_>,
+        _resolver: &Resolver<'_>,
+        connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
-        page_part: &str,
+        _page_part: &str,
         shape: &Shape,
         id: String,
         z_order: u32,
         resolved: &ResolvedShape,
         state: &mut State,
     ) -> Result<(), RenderError> {
-        let connectivity = resolver.resolve_page_connectivity(page_part)?;
         let Some(connector) = connectivity.connectors.get(&shape.id) else {
             return self.placeholder(shape, state, "1D shape is missing connector state");
         };
         let mut begin = connector.begin;
         let mut end = connector.end;
         for glue in &connector.glue {
-            if let Some(point) = glue
+            let Some(point) = glue
                 .to
                 .as_ref()
                 .and_then(|target| target.connection_point.as_ref())
                 .map(|point| point.position)
-            {
-                match glue.endpoint {
-                    vsdx_resolve::ConnectorEndpoint::Begin => begin = Some(point),
-                    vsdx_resolve::ConnectorEndpoint::End => end = Some(point),
-                }
+            else {
+                let reason = glue.diagnostics.first().map_or_else(
+                    || "connector route cannot be computed: unresolved glued endpoint".into(),
+                    |diagnostic| format!("connector route cannot be computed: unresolved glued endpoint: {diagnostic:?}"),
+                );
+                return self.placeholder(shape, state, &reason);
+            };
+            match glue.endpoint {
+                vsdx_resolve::ConnectorEndpoint::Begin => begin = Some(point),
+                vsdx_resolve::ConnectorEndpoint::End => end = Some(point),
             }
         }
         let (Some(begin), Some(end)) = (begin, end) else {
@@ -1356,32 +1374,27 @@ fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: 
     }
 }
 fn bounds_affine(group: Bounds, child_extent: Option<ChildCoordinateExtent>) -> Affine {
-    let loc_x = group.loc_pin_x;
-    let loc_y = group.loc_pin_y;
-    let pin_x = group.x + group.loc_pin_x;
-    let pin_y = group.y + group.loc_pin_y;
-    let (sin, cos) = group.angle.sin_cos();
-    // Visio documents the lower-left local origin, but not how to derive a group child scale.
-    // Use the conservative selection-extent ratio and translate that documented origin.
-    let (origin_x, origin_y, scale_x, scale_y) = child_extent
-        .map(|extent| {
-            (
-                extent.x,
-                extent.y,
-                group.width / extent.width,
-                group.height / extent.height,
-            )
-        })
-        .unwrap_or((0.0, 0.0, 1.0, 1.0));
-    let sx = scale_x * if group.flip_x { -1.0 } else { 1.0 };
-    let sy = scale_y * if group.flip_y { -1.0 } else { 1.0 };
+    let transform = vsdx_resolve::bounds_affine(
+        vsdx_resolve::ShapeBounds {
+            x: group.x,
+            y: group.y,
+            width: group.width,
+            height: group.height,
+            loc_pin_x: group.loc_pin_x,
+            loc_pin_y: group.loc_pin_y,
+            angle: group.angle,
+            flip_x: group.flip_x,
+            flip_y: group.flip_y,
+        },
+        child_extent.map(|extent| (extent.x, extent.y, extent.width, extent.height)),
+    );
     Affine {
-        a: (cos * sx) as f32,
-        b: (sin * sx) as f32,
-        c: (-sin * sy) as f32,
-        d: (cos * sy) as f32,
-        e: (pin_x - cos * sx * (loc_x + origin_x) + sin * sy * (loc_y + origin_y)) as f32,
-        f: (pin_y - sin * sx * (loc_x + origin_x) - cos * sy * (loc_y + origin_y)) as f32,
+        a: transform.a as f32,
+        b: transform.b as f32,
+        c: transform.c as f32,
+        d: transform.d as f32,
+        e: transform.e as f32,
+        f: transform.f as f32,
     }
 }
 struct ChildCoordinateExtent {
