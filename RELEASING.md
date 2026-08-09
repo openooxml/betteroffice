@@ -6,7 +6,7 @@ Changesets drive npm and crates.io releases through the same release PR.
 
 Run `bun changeset` and select every affected npm package. Select
 `@betteroffice/rust-crates` when a change affects the published Rust API or
-implementation. The fifteen Rust crates version and publish in lockstep,
+implementation. The Rust crates registered in `scripts/rust-crates.mjs` version and publish in lockstep,
 independently from npm versions.
 
 Merging a changeset opens or updates `chore: release`. Merging that release PR
@@ -21,7 +21,7 @@ Publishing can only be configured after a crate exists.
 1. Create a short-lived crates.io token authorized to publish new crates.
 2. Add it to the repository as `CRATES_IO_BOOTSTRAP_TOKEN` before merging the
    initial release PR.
-3. Merge the release PR and confirm all fifteen crates were published.
+3. Merge the release PR and confirm every registered Rust crate was published.
 4. Add a GitHub Trusted Publisher to each crate with owner `openooxml`,
    repository `betteroffice`, and workflow `release.yml`.
 5. Remove the GitHub secret and revoke the bootstrap token.
