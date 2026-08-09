@@ -1400,6 +1400,9 @@ fn corpus_connectivity_accounts_for_every_glue_record() {
                 .count();
         }
     }
-    // Formula-first resolution recovers one valid target; 30 records still lack Connection rows.
+    // Record 121 is soundplan.vsdx visio/pages/page1.xml's Connect FromSheet=1306,
+    // FromCell=BeginX, ToSheet=1159, ToCell=PinX. Its target's PinX/PinY resolve to
+    // (16.87204723902492, 16.28149636031824), so it is a valid direct-pin glue record;
+    // the remaining 30 records lack Connection rows.
     assert_eq!((total, resolved, missing), (151, 121, 30));
 }
