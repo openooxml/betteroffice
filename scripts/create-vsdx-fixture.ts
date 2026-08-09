@@ -40,6 +40,16 @@ const nestedZip = new JSZip();
 for (const [name, contents] of Object.entries(nestedParts)) nestedZip.file(name, contents, { date: zipDate, createFolders: false });
 fs.writeFileSync(nestedOutput, await nestedZip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }));
 
+const groupedGlue = new JSZip();
+for (const [part, contents] of Object.entries({
+  ...parts,
+  'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(1, 1, 0, 0, 0, 0, 0, 0, 0)}<Cell N='OneD' V='1'/><Cell N='BeginX' V='0'/><Cell N='BeginY' V='0'/><Cell N='EndX' V='1'/><Cell N='EndY' V='0'/></Shape><Shape ID='10' Type='Group'>${xform(2, 2, 10, 10, 0, 0, 1.5707963267948966, 0, 0)}<Shapes><Shape ID='11' Type='Shape'>${xform(1, 1, 0, 0, 0, 0, 0, 0, 0)}<Section N='Connection'><Row IX='1' T='Connection'><Cell N='X' V='0.5'/><Cell N='Y' V='0.5'/></Row></Section></Shape></Shapes></Shape><Shape ID='20' Type='Group'>${xform(6, 2, 20, 10, 0, 0, 0, 0, 0)}<Shapes><Shape ID='21' Type='Shape'>${xform(3, 1, 0, 0, 0, 0, 0, 0, 0)}<Section N='Connection'><Row IX='1' T='Connection'><Cell N='X' V='0.5'/><Cell N='Y' V='0.5'/></Row></Section></Shape></Shapes></Shape><Shape ID='30' Type='Group'>${xform(4, 4, 30, 0, 0, 0, 0, 0, 0)}<Shapes><Shape ID='31' Type='Group'>${xform(2, 2, 1, 1, 0, 0, 0, 0, 0)}<Shapes><Shape ID='32' Type='Shape'>${xform(1, 1, 0, 0, 0, 0, 0, 0, 0)}<Section N='Connection'><Row IX='1' T='Connection'><Cell N='X' V='0.5'/><Cell N='Y' V='0.5'/></Row></Section></Shape></Shapes></Shape></Shapes></Shape></Shapes><Connects><Connect FromSheet='1' FromCell='BeginX' FromPart='9' ToSheet='11' ToCell='Connections.X1' ToPart='100'/><Connect FromSheet='1' FromCell='EndX' FromPart='9' ToSheet='21' ToCell='Connections.X1' ToPart='100'/><Connect FromSheet='1' FromCell='BeginY' FromPart='9' ToSheet='32' ToCell='Connections.X1' ToPart='100'/></Connects></PageContents>`,
+})) groupedGlue.file(part, contents, { date: zipDate, createFolders: false });
+fs.writeFileSync(
+  path.join(root, 'crates/vsdx-parse/tests/fixtures/grouped-glue.vsdx'),
+  await groupedGlue.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', platform: 'DOS' }),
+);
+
 for (const [name, rows] of [
   ['geometry-anonymous-rows', "<Row T='MoveTo'><Cell N='X' V='1'/><Cell N='Y' V='2'/></Row><Row T='LineTo'><Cell N='X' V='3'/><Cell N='Y' V='4'/></Row>"],
   ['geometry-duplicate-ix-rows', "<Row IX='0' T='MoveTo'><Cell N='X' V='1'/><Cell N='Y' V='2'/></Row><Row IX='0' T='LineTo'><Cell N='X' V='3'/><Cell N='Y' V='4'/></Row>"],

@@ -210,6 +210,40 @@ fn reports_dangling_connects_without_dropping_them() {
 }
 
 #[test]
+fn grouped_glue_connection_points_use_scene_transforms() {
+    let package = parse_vsdx(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/grouped-glue.vsdx"
+    ))
+    .unwrap();
+    let page = &package.page_part_paths[0];
+    let connectivity = Resolver::new(&package)
+        .resolve_page_connectivity(page)
+        .unwrap();
+    let points = connectivity.connectors[&1]
+        .glue
+        .iter()
+        .map(|glue| {
+            let target = glue.to.as_ref().unwrap();
+            (
+                target.shape_id,
+                target.connection_point.as_ref().unwrap().position,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    // Target 11: rotate the local (0.5, 0.5) by +90° and scale by 2 around (10, 10):
+    // (-1, 1) + (10, 10) = (9, 11). Target 21 scales (0.5, 0.5) by (2, 2) at
+    // (20, 10) = (21, 11). Target 32 is scaled by 2 in each nested group: (0.5, 0.5)
+    // becomes (2, 2), then the outer group's origin maps it to (32, 2).
+    assert_eq!(points[&11].x, 9.0);
+    assert_eq!(points[&11].y, 11.0);
+    assert_eq!(points[&21].x, 21.0);
+    assert_eq!(points[&21].y, 11.0);
+    assert_eq!(points[&32].x, 32.0);
+    assert_eq!(points[&32].y, 2.0);
+}
+
+#[test]
 fn deleted_style_rows_do_not_contribute_cells() {
     let mut package = package();
     package.style_sheets = vec![sheet(

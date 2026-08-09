@@ -598,10 +598,27 @@ impl Renderer {
         if resolved.deleted {
             return Ok(());
         }
-        if paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0) {
-            return Ok(());
-        }
-        if paint::number(&resolved, "OneD").is_some_and(|value| value != 0.0) {
+        if connectivity
+            .connectors
+            .get(&shape.id)
+            .is_some_and(|connector| {
+                connector.is_1d
+                    && connector.glue.iter().all(|glue| {
+                        !glue.diagnostics.iter().any(|diagnostic| {
+                            matches!(
+                                diagnostic,
+                                vsdx_resolve::ConnectivityDiagnostic::UnsupportedFromCell { .. }
+                            )
+                        })
+                    })
+                    || (connector.begin.is_some() || connector.end.is_some())
+                        && connector.glue.iter().any(|glue| {
+                            glue.to
+                                .as_ref()
+                                .is_some_and(|target| target.connection_point.is_none())
+                        })
+            })
+        {
             return self.layout_connector(
                 package,
                 resolver,
@@ -614,6 +631,9 @@ impl Renderer {
                 &resolved,
                 state,
             );
+        }
+        if paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0) {
+            return Ok(());
         }
         let Some(bounds) = bounds(package, references, &resolved, shape.id) else {
             return self.placeholder(shape, state, "unresolvable transform");
@@ -781,7 +801,7 @@ impl Renderer {
                     || "connector route cannot be computed: unresolved glued endpoint".into(),
                     |diagnostic| format!("connector route cannot be computed: unresolved glued endpoint: {diagnostic:?}"),
                 );
-                return self.placeholder(shape, state, &reason);
+                return self.placeholder_at(id, z_order, Bounds::default(), state, &reason);
             };
             match glue.endpoint {
                 vsdx_resolve::ConnectorEndpoint::Begin => begin = Some(point),
@@ -789,8 +809,10 @@ impl Renderer {
             }
         }
         let (Some(begin), Some(end)) = (begin, end) else {
-            return self.placeholder(
-                shape,
+            return self.placeholder_at(
+                id,
+                z_order,
+                Bounds::default(),
                 state,
                 "connector route cannot be computed: unresolved endpoint",
             );
@@ -3422,6 +3444,79 @@ mod tests {
                 position: 0,
             })
         );
+    }
+
+    #[test]
+    fn corpus_dangling_glue_renders_placeholders() {
+        let Ok(directory) = std::env::var("VSDX_CORPUS_DIR") else {
+            eprintln!(
+                "warning: skipping corpus dangling-glue render test; VSDX_CORPUS_DIR is unset"
+            );
+            return;
+        };
+        let mut dangling = 0;
+        let mut expected = std::collections::BTreeSet::new();
+        let mut placeholders = std::collections::BTreeSet::new();
+        let mut painted = std::collections::BTreeSet::new();
+        for file in ["lichtsysteme.vsdx", "soundplan.vsdx"] {
+            let package = vsdx_parse::parse_vsdx(
+                &std::fs::read(std::path::Path::new(&directory).join(file)).unwrap(),
+            )
+            .unwrap();
+            let resolver = Resolver::new(&package);
+            let renderer = Renderer::default();
+            for page in &package.page_part_paths {
+                let connectivity = resolver.resolve_page_connectivity(page).unwrap();
+                for connector in connectivity.connectors.values() {
+                    let unresolved = connector
+                        .glue
+                        .iter()
+                        .filter(|glue| {
+                            glue.to
+                                .as_ref()
+                                .and_then(|target| target.connection_point.as_ref())
+                                .is_none()
+                        })
+                        .count();
+                    dangling += unresolved;
+                    if unresolved != 0 {
+                        expected.insert(format!("{page}:{}", connector.shape_id));
+                    }
+                }
+                collect_connector_primitives(
+                    &renderer.layout_page(&package, page).unwrap().primitives,
+                    &mut placeholders,
+                    &mut painted,
+                );
+            }
+        }
+        assert_eq!(dangling, 30, "corpus dangling-glue record count changed");
+        assert_eq!(placeholders, expected);
+        assert!(painted.is_disjoint(&expected));
+    }
+
+    fn collect_connector_primitives(
+        primitives: &[Primitive],
+        placeholders: &mut std::collections::BTreeSet<String>,
+        painted: &mut std::collections::BTreeSet<String>,
+    ) {
+        for primitive in primitives {
+            match primitive {
+                Primitive::Placeholder { id, reason, .. } => {
+                    if reason.starts_with("connector route cannot be computed:") {
+                        assert!(!reason.is_empty());
+                        placeholders.insert(id.clone());
+                    }
+                }
+                Primitive::Shape { id, .. } => {
+                    painted.insert(id.clone());
+                }
+                Primitive::Group { primitives, .. } => {
+                    collect_connector_primitives(primitives, placeholders, painted);
+                }
+                Primitive::Image { .. } | Primitive::TextBox { .. } => {}
+            }
+        }
     }
 
     #[test]
