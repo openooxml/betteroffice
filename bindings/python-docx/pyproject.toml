@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "betteroffice-docx"
+dynamic = ["version"]
+description = "Read, edit, lay out, and render DOCX documents. Rust engine, no Word and no LibreOffice."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md"]
+requires-python = ">=3.9"
+authors = [{ name = "OpenOOXML" }]
+keywords = [
+  "docx",
+  "word",
+  "document",
+  "ooxml",
+  "wordprocessingml",
+  "layout",
+  "pagination",
+  "python-docx",
+  "rust",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Rust",
+  "Topic :: Office/Business :: Office Suites",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://betteroffice.dev"
+Documentation = "https://docs.betteroffice.dev/docs/python"
+Changelog = "https://github.com/openooxml/betteroffice/blob/main/bindings/python-docx/CHANGELOG.md"
+Source = "https://github.com/openooxml/betteroffice"
+Issues = "https://github.com/openooxml/betteroffice/issues"
+
+[tool.maturin]
+module-name = "betteroffice_docx._betteroffice_docx"
+python-source = "python"
+features = ["pyo3/extension-module"]
+strip = true
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
