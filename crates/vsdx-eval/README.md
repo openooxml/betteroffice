@@ -9,7 +9,7 @@ values.
 
 The evaluator supports bounded parsing and evaluation of numeric arithmetic,
 comparisons, references, conditional and boolean expressions, common numeric and
-trigonometric functions, units, `GUARD`, `SETATREF`, RGB colours and documented
+trigonometric functions, units, `GUARD`, RGB colours and documented
 colour transforms. It resolves shape, page, document and sheet references through
 the VSDX resolver, and evaluates `THEMEVAL` when the required host context and
 theme are present.
@@ -28,11 +28,20 @@ The following residual categories are intentionally outside this profile:
 - `SHADE` and `LUMDIFF`: their Visio semantics are undocumented, so they remain
   unsupported rather than guessed.
 
-The corpus harness compares evaluated formulas with the cell `@V` cache. Those
-values are produced by Visio, but may be stale; the reported agreement rate is an
-imperfect compatibility signal, not proof of exact Visio compatibility.
+`SETATREF` is mutation policy, not formula evaluation: edits redirect only a
+root-level, single local-cell target. Nested, multiple, missing, guarded, and
+unsupported cross-sheet redirects are rejected.
 
-The oracle excludes only demonstrated stale cache encodings: a mismatching
-`F="Inh"` cache, whose value belongs to a prior inheritance context, and a numeric
-cache whose raw `@V` already equals the evaluated value but conflicts with its
-`@U` display-unit conversion. All other mismatches remain disagreements.
+The corpus harness compares evaluated formulas with Visio's cell `@V` cache,
+interpreting `@V` using its `@U` display unit before comparison. Numeric agreement
+requires both equal canonical magnitudes and equal dimensions. Those cache values
+may be stale; the reported agreement rate is an imperfect compatibility signal,
+not proof of exact Visio compatibility. The current rate is 96.70% (3,549/3,670
+comparable evaluated formulas), while evaluator coverage is 3,679/6,992 corpus
+formulas (52.62%).
+
+The oracle excludes only nine demonstrated stale cache encodings, pinned to their
+corpus source parts and shapes: four `LineWeight` `F="Inh"` values from a prior
+inheritance context, and five `LineWeight` `THEMEVAL("LineWeight",0.24PT)` values
+whose raw `@V` was retained across a display-unit conversion. All other mismatches
+remain disagreements.

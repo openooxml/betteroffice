@@ -1749,6 +1749,7 @@ mod tests {
                     );
                     measurement.record(formula, evaluation.clone());
                     measurement.record_oracle(
+                        &format!("{file}:sheet"),
                         &name,
                         formula,
                         cell.value
@@ -1772,6 +1773,7 @@ mod tests {
                     );
                     measurement.record(formula, evaluation.clone());
                     measurement.record_oracle(
+                        &format!("{file}:page:{page}:sheet"),
                         &name,
                         formula,
                         cell.value
@@ -1797,6 +1799,7 @@ mod tests {
                         );
                         measurement.record(formula, evaluation.clone());
                         measurement.record_oracle(
+                            &format!("{file}:page:{page}:shape:{}", shape.id),
                             &name,
                             formula,
                             cell.value
@@ -1807,7 +1810,7 @@ mod tests {
                     }
                 }
             }
-            for sheet in package.master_contents.values() {
+            for (master, sheet) in &package.master_contents {
                 let refs = sheet_references(sheet);
                 let refs = DocumentReferences::new(&refs, document.as_ref());
                 for (name, cell) in sheet_formula_cells(sheet) {
@@ -1821,6 +1824,7 @@ mod tests {
                     );
                     measurement.record(formula, evaluation.clone());
                     measurement.record_oracle(
+                        &format!("{file}:master:{master}:sheet"),
                         &name,
                         formula,
                         cell.value
@@ -1845,6 +1849,7 @@ mod tests {
                         );
                         measurement.record(formula, evaluation.clone());
                         measurement.record_oracle(
+                            &format!("{file}:master:{master}:shape:{}", shape.id),
                             &name,
                             formula,
                             cell.value
@@ -1873,11 +1878,14 @@ mod tests {
             measurement.oracle_agreement as f64 * 100.0 / oracle_compared as f64
         };
         eprintln!(
-            "VSDX corpus @V oracle (Visio-produced, potentially stale): agreement={} disagreement={} excluded-stale={} no-cache-available={} agreement-rate={agreement_rate:.2}%",
+            "VSDX corpus @V oracle (Visio-produced, potentially stale): agreement={} disagreement={} excluded-stale={} no-cache-available={} agreement-rate={agreement_rate:.2}% ({oracle_compared} comparable evaluated formulas; evaluated={}/{} corpus formulas, {:.2}% coverage)",
             measurement.oracle_agreement,
             measurement.oracle_disagreement,
             measurement.oracle_excluded_stale,
             measurement.oracle_no_cache,
+            measurement.evaluated,
+            measurement.total,
+            measurement.evaluated as f64 * 100.0 / measurement.total as f64,
         );
         measurement.oracle_disagreements.sort_by(|left, right| {
             left.name
@@ -2009,6 +2017,7 @@ mod tests {
         }
         fn record_oracle(
             &mut self,
+            origin: &str,
             name: &str,
             formula: &str,
             cached: Option<(&str, Option<&str>)>,
@@ -2027,7 +2036,7 @@ mod tests {
             };
             if oracle_values_agree(computed.value, cached_value.value) {
                 self.oracle_agreement += 1;
-            } else if let Some(kind) = stale_oracle_cache(formula, cached, computed.value) {
+            } else if let Some(kind) = stale_oracle_cache(origin, name, formula, cached, unit) {
                 self.oracle_excluded_stale += 1;
                 *self.oracle_stale_kinds.entry(kind.into()).or_default() += 1;
             } else {
@@ -2046,24 +2055,53 @@ mod tests {
         }
     }
 
-    fn stale_oracle_cache(formula: &str, cached: &str, computed: Value) -> Option<&'static str> {
-        if formula.eq_ignore_ascii_case("Inh") {
-            return Some("Inh cache from a prior inheritance context");
+    fn stale_oracle_cache(
+        origin: &str,
+        name: &str,
+        formula: &str,
+        cached: &str,
+        unit: Option<&str>,
+    ) -> Option<&'static str> {
+        let stale_inh = [
+            "lichtsysteme.vsdx:page:visio/pages/page1.xml:shape:387",
+            "lichtsysteme.vsdx:page:visio/pages/page1.xml:shape:504",
+            "soundplan.vsdx:page:visio/pages/page2.xml:shape:1",
+            "soundplan.vsdx:page:visio/pages/page2.xml:shape:2",
+        ];
+        if name == "LineWeight"
+            && formula.eq_ignore_ascii_case("Inh")
+            && cached
+                == if origin.starts_with("soundplan") {
+                    "0.003472222222222222"
+                } else {
+                    "0.01041666666666667"
+                }
+            && unit == Some("PT")
+            && stale_inh.contains(&origin)
+        {
+            return Some("four evidenced LineWeight Inh caches from prior inheritance contexts");
         }
-        let Value::Number(computed) = computed else {
-            return None;
-        };
-        let cached = cached.parse::<f64>().ok()?;
-        ((cached - computed.number).abs()
-            <= 1e-9_f64.max(cached.abs().max(computed.number.abs()) * 1e-9))
-        .then_some("cache value conflicts with its display unit")
+        let stale_theme = [
+            "lichtsysteme.vsdx:master:visio/masters/master1.xml:shape:5",
+            "lichtsysteme.vsdx:master:visio/masters/master3.xml:shape:5",
+            "lichtsysteme.vsdx:master:visio/masters/master4.xml:shape:5",
+            "soundplan.vsdx:master:visio/masters/master2.xml:shape:5",
+            "soundplan.vsdx:master:visio/masters/master3.xml:shape:5",
+        ];
+        (name == "LineWeight"
+            && formula == "THEMEVAL(\"LineWeight\",0.24PT)"
+            && cached == "0.003333333333333333"
+            && unit == Some("PT")
+            && stale_theme.contains(&origin))
+        .then_some("five evidenced LineWeight THEMEVAL display-unit caches")
     }
 
     fn oracle_values_agree(computed: Value, cached: Value) -> bool {
         match (computed, cached) {
             (Value::Number(computed), Value::Number(cached)) => {
-                (computed.number - cached.number).abs()
-                    <= 1e-9_f64.max(computed.number.abs().max(cached.number.abs()) * 1e-9)
+                computed.unit == cached.unit
+                    && (computed.number - cached.number).abs()
+                        <= 1e-9_f64.max(computed.number.abs().max(cached.number.abs()) * 1e-9)
             }
             (Value::Color(computed), Value::Color(cached)) => computed == cached,
             _ => false,
@@ -2077,6 +2115,43 @@ mod tests {
                 format!("#{:02X}{:02X}{:02X}", value.red, value.green, value.blue)
             }
         }
+    }
+
+    #[test]
+    fn oracle_requires_matching_numeric_units() {
+        let inches = Value::Number(Number {
+            number: 1.0,
+            unit: Unit::Inches,
+        });
+        let degrees = Value::Number(Number {
+            number: 1.0,
+            unit: Unit::Radians,
+        });
+        assert!(!oracle_values_agree(inches, degrees));
+    }
+
+    #[test]
+    fn stale_oracle_exclusions_are_limited_to_evidenced_cells() {
+        assert!(
+            stale_oracle_cache(
+                "unrelated.vsdx:page:page.xml:shape:1",
+                "PinX",
+                "Inh",
+                "1",
+                None,
+            )
+            .is_none()
+        );
+        assert!(
+            stale_oracle_cache(
+                "unrelated.vsdx:master:master.xml:shape:1",
+                "LineWeight",
+                "THEMEVAL(\"LineWeight\",0.24PT)",
+                "0.003333333333333333",
+                Some("PT"),
+            )
+            .is_none()
+        );
     }
 
     #[test]
