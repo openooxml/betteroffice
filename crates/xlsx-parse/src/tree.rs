@@ -24,6 +24,19 @@ pub(crate) struct Attribute {
     pub(crate) value: String,
 }
 
+impl Attribute {
+    pub(crate) fn local_name(&self) -> &str {
+        self.name.rsplit(':').next().unwrap_or(&self.name)
+    }
+}
+
+/// Whether a node belongs to `namespace` for the purpose of reading it by name.
+/// An unqualified node does: attributes are unqualified by schema, and a part
+/// that declares no namespace at all is still the vocabulary it looks like.
+fn answers_for(node: Option<&str>, namespace: &str) -> bool {
+    node.is_none_or(|node| node == namespace)
+}
+
 pub(crate) struct Element {
     /// the tag as authored, prefix included.
     pub(crate) name: String,
@@ -86,26 +99,35 @@ impl Element {
             .map(|attribute| attribute.value.as_str())
     }
 
-    /// how many attributes answer to a local name. More than one means
-    /// [`Element::attribute_local`] is picking between them by authoring order,
-    /// which markup compatibility makes an attacker's choice.
-    pub(crate) fn attributes_named(&self, name: &str) -> usize {
-        self.attributes
-            .iter()
-            .filter(|attribute| {
-                attribute.name.rsplit(':').next().unwrap_or(&attribute.name) == name
-            })
-            .count()
+    /// the attributes answering to a local name in `namespace`. A foreign one
+    /// spells the name the same way but is a different attribute, so it is
+    /// never among them.
+    pub(crate) fn attributes_in<'a>(
+        &'a self,
+        namespace: &'a str,
+        local: &'a str,
+    ) -> impl Iterator<Item = &'a Attribute> {
+        self.attributes.iter().filter(move |attribute| {
+            attribute.local_name() == local
+                && answers_for(attribute.namespace.as_deref(), namespace)
+        })
     }
 
-    /// the one child element with this local name, or `None` when several
-    /// could answer to it and a lookup would be picking by authoring order.
-    pub(crate) fn sole_child(&self, local: &str) -> Option<&Element> {
-        let mut matches = self
-            .child_elements()
-            .filter(|child| child.local_name() == local);
-        let only = matches.next()?;
-        matches.next().is_none().then_some(only)
+    /// the child elements answering to a local name in `namespace`.
+    pub(crate) fn children_in<'a>(
+        &'a self,
+        namespace: &'a str,
+        local: &'a str,
+    ) -> impl Iterator<Item = &'a Element> {
+        self.child_elements()
+            .filter(move |child| child.answers_to(namespace, local))
+    }
+
+    /// whether this element answers to a local name in `namespace`, counting
+    /// the unqualified form a part that declares no namespace is authored in.
+    /// A foreign element spells the name the same way but is a different one.
+    pub(crate) fn answers_to(&self, namespace: &str, local: &str) -> bool {
+        self.local_name() == local && answers_for(self.namespace(), namespace)
     }
 
     pub(crate) fn child_elements(&self) -> impl Iterator<Item = &Element> {

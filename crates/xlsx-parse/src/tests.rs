@@ -2026,23 +2026,19 @@ fn does_not_take_an_overridden_non_pivot_part_for_a_pivot() {
     assert_eq!(parsed.package.unpatchable_references().len(), 0);
 }
 
-/// Markup compatibility lets a part carry attributes a conforming consumer
-/// drops. Reading by local name alone would take the ignored `u:sheet` for the
-/// real one and fence off `Notes` while `Data` moved out from under the cache,
-/// so a name several attributes answer to resolves to nothing at all.
+/// Markup compatibility lets a part carry nodes a conforming consumer drops. A
+/// foreign namespace makes a node a different one that merely spells its name
+/// the same way, so the real `sheet` and `ref` are still what the cache is read
+/// from however a decoy is ordered around them.
 #[test]
-fn refuses_a_pivot_source_a_decoy_attribute_could_shadow() {
+fn reads_past_a_pivot_source_decoy_to_the_real_one() {
     for (label, worksheet_source) in [
         (
-            "shadowed sheet and ref",
+            "decoy first",
             r#"<worksheetSource xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" u:sheet="Report" u:ref="A1" sheet="Data" ref="A1:B4"/>"#,
         ),
         (
-            "shadowed sheet alone",
-            r#"<worksheetSource xmlns:u="urn:future" u:sheet="Report" sheet="Data" ref="A1:B4"/>"#,
-        ),
-        (
-            "real one authored first",
+            "decoy last",
             r#"<worksheetSource xmlns:u="urn:future" sheet="Data" ref="A1:B4" u:sheet="Report" u:ref="A1"/>"#,
         ),
     ] {
@@ -2055,46 +2051,182 @@ fn refuses_a_pivot_source_a_decoy_attribute_could_shadow() {
             )
             .as_bytes(),
         );
-        let parsed = parse_workbook_with_package(&parts).unwrap();
+        let package = parse_workbook_with_package(&parts).unwrap().package;
         assert!(
-            parsed.package.reference_naming_sheet("Data").is_some(),
+            package.reference_naming_sheet("Data").is_some(),
             "{label}: the cache stopped naming Data"
         );
+        assert_eq!(
+            package.reference_naming_sheet("Report"),
+            None,
+            "{label}: the decoy captured Report"
+        );
+        assert_eq!(
+            package.reference_moved_by_rows("Data", 4),
+            None,
+            "{label}: the decoy's A1 was read instead of A1:B4"
+        );
         assert!(
-            parsed
-                .package
-                .reference_moved_by_rows("Report", 999)
-                .is_some(),
-            "{label} was resolved"
+            package.reference_moved_by_rows("Data", 3).is_some(),
+            "{label}"
         );
     }
 }
 
-/// The same shadowing through an element name, which `cacheSource` and
-/// `location` are both reached by.
+/// The same, one level deeper: a name only a foreign node answers to is a name
+/// nothing answers to. Where the source cannot be read without it, that is
+/// unresolved — never the foreign node standing in for the real one.
 #[test]
-fn refuses_a_pivot_part_a_decoy_element_could_shadow() {
+fn refuses_a_pivot_source_only_a_foreign_node_answers_for() {
+    for (label, definition) in [
+        (
+            "foreign cacheSource",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><u:cacheSource><worksheetSource sheet="Report" ref="A1"/></u:cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign worksheetSource",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><u:worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign sheet and ref",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource u:sheet="Report" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign ref beside a real sheet",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource sheet="Data" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            definition.as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} was resolved"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// An `mc:AlternateContent` branch can supply the very node being read, and
+/// choosing between branches is markup-compatibility processing this crate does
+/// not do. A pivot part carrying one names everything rather than reading past
+/// it into whichever branch happens to sit first.
+#[test]
+fn refuses_a_pivot_part_carrying_alternate_content() {
+    for (label, definition) in [
+        (
+            "the source only a branch supplies",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u"><u:cacheSource><u:worksheetSource u:sheet="Report" u:ref="A1"/></u:cacheSource><mc:AlternateContent><mc:Choice Requires="u"><u:extension/></mc:Choice><mc:Fallback><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></mc:Fallback></mc:AlternateContent></pivotCacheDefinition>"#,
+        ),
+        (
+            "a branch beside a source that does resolve",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource><mc:AlternateContent><mc:Choice Requires="u"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></mc:Choice></mc:AlternateContent></pivotCacheDefinition>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            definition.as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} was resolved"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// A foreign decoy over an optional name reads as absent, which is what it is:
+/// the default still applies rather than the whole part going unresolved.
+#[test]
+fn defaults_optional_pivot_names_only_a_foreign_node_carries() {
     let mut parts = pivoted_package();
     set_part(
         &mut parts,
         "xl/pivotcache/pivotCacheDefinition1.xml",
-        br#"<pivotCacheDefinition xmlns:u="urn:future"><u:cacheSource><worksheetSource sheet="Report" ref="A1"/></u:cacheSource><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        br#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource u:type="external"><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
     );
-    let parsed = parse_workbook_with_package(&parts).unwrap();
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><location ref="C3:E8" u:colPageCount="9"/></pivotTableDefinition>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<Relationships><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
 
-    assert!(parsed.package.reference_naming_sheet("Data").is_some());
-    assert!(
-        parsed
-            .package
-            .reference_moved_by_rows("Report", 999)
-            .is_some()
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 4),
+        None,
+        "a foreign type must read as the worksheet default, not leave the cache unresolved"
+    );
+    assert!(package.reference_moved_by_cols("Report", 4).is_some());
+    assert_eq!(
+        package.reference_moved_by_cols("Report", 5),
+        None,
+        "a foreign page count must read as none, not widen the grid"
     );
 }
 
-/// A pivot table's own grid is reached by the same two lookups, so a decoy over
-/// `location` or its `ref` has to leave it unresolved too.
+/// Real parts declare the spreadsheetml namespace and hand-built ones declare
+/// none. Both are ours, and narrowing to expanded names must not quietly stop
+/// resolving either.
 #[test]
-fn refuses_a_pivot_location_a_decoy_could_shadow() {
+fn resolves_a_pivot_source_however_the_part_declares_its_namespace() {
+    for (label, definition) in [
+        (
+            "no namespace",
+            r#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "default namespace",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "prefixed namespace",
+            r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:worksheetSource sheet="Data" ref="A1:B4"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            definition.as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+        assert!(
+            package.reference_moved_by_rows("Data", 3).is_some(),
+            "{label}"
+        );
+        assert_eq!(
+            package.reference_moved_by_rows("Data", 4),
+            None,
+            "{label} stopped resolving"
+        );
+        assert_eq!(package.reference_naming_sheet("Report"), None, "{label}");
+    }
+}
+
+/// A pivot table's own grid is reached by the same lookups, so a decoy over
+/// `location` or its `ref` must not be read in place of the real one, and a
+/// `location` only a foreign node answers for leaves the table unresolved.
+#[test]
+fn reads_past_a_pivot_location_decoy_to_the_real_one() {
     let package = |definition: &str| {
         let mut parts = pivoted_package();
         parts.push((
@@ -2108,27 +2240,38 @@ fn refuses_a_pivot_location_a_decoy_could_shadow() {
         parse_workbook_with_package(&parts).unwrap().package
     };
 
-    let shadowed_ref = package(
-        r#"<pivotTableDefinition xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" cacheId="1"><location u:ref="A1" ref="C3:E8"/></pivotTableDefinition>"#,
-    );
-    assert!(shadowed_ref.reference_moved_by_rows("Data", 999).is_some());
+    for (label, definition) in [
+        (
+            "shadowed ref",
+            r#"<pivotTableDefinition xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" cacheId="1"><location u:ref="A1" ref="C3:E8"/></pivotTableDefinition>"#,
+        ),
+        (
+            "shadowed location",
+            r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><u:location ref="A1"/><location ref="C3:E8"/></pivotTableDefinition>"#,
+        ),
+        (
+            "shadowed page count",
+            r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><location ref="C3:E8" u:colPageCount="0" colPageCount="4"/></pivotTableDefinition>"#,
+        ),
+    ] {
+        let package = package(definition);
+        assert_eq!(
+            package.reference_moved_by_rows("Data", 999),
+            None,
+            "{label}: the pivot table stopped resolving"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 7).is_some(),
+            "{label}"
+        );
+    }
 
-    let shadowed_location = package(
-        r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><u:location ref="A1"/><location ref="C3:E8"/></pivotTableDefinition>"#,
+    let only_foreign = package(
+        r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><u:location ref="C3:E8"/></pivotTableDefinition>"#,
     );
     assert!(
-        shadowed_location
-            .reference_moved_by_rows("Data", 999)
-            .is_some()
-    );
-
-    let shadowed_page_count = package(
-        r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><location ref="C3:E8" u:colPageCount="0" colPageCount="4"/></pivotTableDefinition>"#,
-    );
-    assert!(
-        shadowed_page_count
-            .reference_moved_by_rows("Data", 999)
-            .is_some()
+        only_foreign.reference_moved_by_rows("Data", 999).is_some(),
+        "a location only a foreign node answers for must leave the table unresolved"
     );
 }
 

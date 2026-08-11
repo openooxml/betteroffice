@@ -22,7 +22,12 @@ use crate::chart::{
 };
 use crate::package::PartContentType;
 use crate::tree::{Element, parse_tree};
+use crate::write::NS_MAIN;
 use crate::xml::{find_part, local_name, next_event, reader, resolve_part_path};
+
+/// the markup-compatibility vocabulary, whose branches stand in for the element
+/// they wrap.
+const NS_MCE: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 /// A preserved part naming sheets and cells neither this crate nor the model
 /// rewrites.
@@ -207,11 +212,14 @@ fn root_local_name(bytes: &[u8]) -> Option<String> {
     }
 }
 
-/// A pivot part as an element tree. A part too large or too malformed to read
-/// resolves to nothing, which is treated as naming every cell rather than
-/// failing the open of a workbook that used to open.
+/// A pivot part as an element tree, or nothing when this crate declines to read
+/// it whole: too large or too malformed, or carrying a markup-compatibility
+/// choice it does not make. Declining is treated as naming every cell rather
+/// than failing the open of a workbook that used to open.
 fn tree(bytes: &[u8]) -> Option<Element> {
-    parse_tree(bytes).ok()
+    parse_tree(bytes)
+        .ok()
+        .filter(|root| !carries_alternate_content(root))
 }
 
 /// The worksheet ranges a pivot cache is built from. Only a source read whole
@@ -219,14 +227,14 @@ fn tree(bytes: &[u8]) -> Option<Element> {
 /// `extLst` carrying the real source among them — or a `rangeSet` it cannot
 /// read all of leaves the cache naming everything.
 fn source_areas(root: &Element) -> Option<Vec<NamedArea>> {
-    let source = root.sole_child("cacheSource")?;
+    let source = sole_child(root, "cacheSource")?;
     let children = source.child_elements().collect::<Vec<_>>();
     let [only] = children[..] else {
         return None;
     };
     match sole_attribute(source, "type")?.unwrap_or("worksheet") {
-        "worksheet" if only.local_name() == "worksheetSource" => Some(vec![named_area(only)?]),
-        "consolidation" if only.local_name() == "consolidation" => consolidated_areas(only),
+        "worksheet" if only.answers_to(NS_MAIN, "worksheetSource") => Some(vec![named_area(only)?]),
+        "consolidation" if only.answers_to(NS_MAIN, "consolidation") => consolidated_areas(only),
         _ => None,
     }
 }
@@ -234,15 +242,14 @@ fn source_areas(root: &Element) -> Option<Vec<NamedArea>> {
 fn consolidated_areas(consolidation: &Element) -> Option<Vec<NamedArea>> {
     if consolidation
         .child_elements()
-        .any(|child| !matches!(child.local_name(), "pages" | "rangeSets"))
+        .any(|child| !child.answers_to(NS_MAIN, "pages") && !child.answers_to(NS_MAIN, "rangeSets"))
     {
         return None;
     }
-    let areas = consolidation
-        .sole_child("rangeSets")?
+    let areas = sole_child(consolidation, "rangeSets")?
         .child_elements()
         .map(|set| {
-            (set.local_name() == "rangeSet")
+            set.answers_to(NS_MAIN, "rangeSet")
                 .then(|| named_area(set))
                 .flatten()
         })
@@ -254,7 +261,9 @@ fn consolidated_areas(consolidation: &Element) -> Option<Vec<NamedArea>> {
 /// instead: the schema allows exactly one of `ref` and `name`, and an `r:id`
 /// puts the range in another workbook.
 fn named_area(element: &Element) -> Option<NamedArea> {
-    if element.attributes_named("name") > 0 || element.attributes_named("id") > 0 {
+    if element.attributes_in(NS_MAIN, "name").next().is_some()
+        || element.attributes_in(NS_MAIN, "id").next().is_some()
+    {
         return None;
     }
     let sheet = sole_attribute(element, "sheet")??.to_owned();
@@ -266,7 +275,7 @@ fn named_area(element: &Element) -> Option<NamedArea> {
 /// body; the filter area sits beside it, so its page counts are padded onto the
 /// far corner rather than trusting `ref` to be the whole block.
 fn location_areas(root: &Element, hosts: Option<&Vec<String>>) -> Option<Vec<NamedArea>> {
-    let location = root.sole_child("location")?;
+    let location = sole_child(root, "location")?;
     let (_, end) = parse_area(sole_attribute(location, "ref")??)?;
     let end = CellRef::new(
         end.row
@@ -289,17 +298,39 @@ fn page_count(location: &Element, name: &str) -> Option<u32> {
     }
 }
 
-/// An attribute read by a name only one of them may answer to. The outer
-/// `None` is ambiguity — several attributes carry that local name, so markup
-/// compatibility could be hiding the real one behind an ignored prefix and a
-/// lookup would be choosing by authoring order — and the inner `None` is a
-/// plain absence, which an optional attribute may default.
-fn sole_attribute<'a>(element: &'a Element, name: &str) -> Option<Option<&'a str>> {
-    match element.attributes_named(name) {
-        0 => Some(None),
-        1 => Some(element.attribute_local(name)),
-        _ => None,
-    }
+/// An attribute read by a name only one of ours may answer to. The outer `None`
+/// is ambiguity — several carry that name, so a lookup would be choosing by
+/// authoring order — and the inner `None` is absence, which an optional
+/// attribute may default. A foreign attribute is not one of ours and so reads
+/// as absent, exactly as it does to a consumer that drops it.
+fn sole_attribute<'a>(element: &'a Element, name: &'a str) -> Option<Option<&'a str>> {
+    let mut candidates = element.attributes_in(NS_MAIN, name);
+    let Some(only) = candidates.next() else {
+        return Some(None);
+    };
+    candidates
+        .next()
+        .is_none()
+        .then_some(Some(only.value.as_str()))
+}
+
+/// The one child answering to a name, or `None` when none of ours does or
+/// several do. A name only a foreign node answers to is a name nothing answers
+/// to, which for a node the part cannot be read without is unresolved.
+fn sole_child<'a>(element: &'a Element, local: &'a str) -> Option<&'a Element> {
+    let mut candidates = element.children_in(NS_MAIN, local);
+    let only = candidates.next()?;
+    candidates.next().is_none().then_some(only)
+}
+
+/// Whether a part hands a consumer a choice this crate does not make. Choosing
+/// between `mc:Choice` and `mc:Fallback` is markup-compatibility processing,
+/// and a branch can supply the very node a lookup is after, so a pivot part
+/// carrying one is read as naming everything rather than as whichever branch
+/// happens to sit first.
+fn carries_alternate_content(element: &Element) -> bool {
+    element.is(NS_MCE, "AlternateContent")
+        || element.child_elements().any(carries_alternate_content)
 }
 
 /// The sheets each pivot table part is laid out on, followed from the worksheet
