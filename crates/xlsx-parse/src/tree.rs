@@ -86,6 +86,28 @@ impl Element {
             .map(|attribute| attribute.value.as_str())
     }
 
+    /// how many attributes answer to a local name. More than one means
+    /// [`Element::attribute_local`] is picking between them by authoring order,
+    /// which markup compatibility makes an attacker's choice.
+    pub(crate) fn attributes_named(&self, name: &str) -> usize {
+        self.attributes
+            .iter()
+            .filter(|attribute| {
+                attribute.name.rsplit(':').next().unwrap_or(&attribute.name) == name
+            })
+            .count()
+    }
+
+    /// the one child element with this local name, or `None` when several
+    /// could answer to it and a lookup would be picking by authoring order.
+    pub(crate) fn sole_child(&self, local: &str) -> Option<&Element> {
+        let mut matches = self
+            .child_elements()
+            .filter(|child| child.local_name() == local);
+        let only = matches.next()?;
+        matches.next().is_none().then_some(only)
+    }
+
     pub(crate) fn child_elements(&self) -> impl Iterator<Item = &Element> {
         self.children.iter().filter_map(|node| match node {
             Node::Element(element) => Some(element),

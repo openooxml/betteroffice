@@ -219,12 +219,12 @@ fn tree(bytes: &[u8]) -> Option<Element> {
 /// `extLst` carrying the real source among them — or a `rangeSet` it cannot
 /// read all of leaves the cache naming everything.
 fn source_areas(root: &Element) -> Option<Vec<NamedArea>> {
-    let source = root.child("cacheSource")?;
+    let source = root.sole_child("cacheSource")?;
     let children = source.child_elements().collect::<Vec<_>>();
     let [only] = children[..] else {
         return None;
     };
-    match source.attribute_local("type").unwrap_or("worksheet") {
+    match sole_attribute(source, "type")?.unwrap_or("worksheet") {
         "worksheet" if only.local_name() == "worksheetSource" => Some(vec![named_area(only)?]),
         "consolidation" if only.local_name() == "consolidation" => consolidated_areas(only),
         _ => None,
@@ -239,7 +239,7 @@ fn consolidated_areas(consolidation: &Element) -> Option<Vec<NamedArea>> {
         return None;
     }
     let areas = consolidation
-        .child("rangeSets")?
+        .sole_child("rangeSets")?
         .child_elements()
         .map(|set| {
             (set.local_name() == "rangeSet")
@@ -254,11 +254,11 @@ fn consolidated_areas(consolidation: &Element) -> Option<Vec<NamedArea>> {
 /// instead: the schema allows exactly one of `ref` and `name`, and an `r:id`
 /// puts the range in another workbook.
 fn named_area(element: &Element) -> Option<NamedArea> {
-    if element.attribute_local("name").is_some() || element.attribute_local("id").is_some() {
+    if element.attributes_named("name") > 0 || element.attributes_named("id") > 0 {
         return None;
     }
-    let sheet = element.attribute_local("sheet")?.to_owned();
-    let (_, end) = parse_area(element.attribute_local("ref")?)?;
+    let sheet = sole_attribute(element, "sheet")??.to_owned();
+    let (_, end) = parse_area(sole_attribute(element, "ref")??)?;
     Some((sheet, end))
 }
 
@@ -266,8 +266,8 @@ fn named_area(element: &Element) -> Option<NamedArea> {
 /// body; the filter area sits beside it, so its page counts are padded onto the
 /// far corner rather than trusting `ref` to be the whole block.
 fn location_areas(root: &Element, hosts: Option<&Vec<String>>) -> Option<Vec<NamedArea>> {
-    let location = root.child("location")?;
-    let (_, end) = parse_area(location.attribute_local("ref")?)?;
+    let location = root.sole_child("location")?;
+    let (_, end) = parse_area(sole_attribute(location, "ref")??)?;
     let end = CellRef::new(
         end.row
             .saturating_add(page_count(location, "rowPageCount")?)
@@ -283,9 +283,22 @@ fn location_areas(root: &Element, hosts: Option<&Vec<String>>) -> Option<Vec<Nam
 /// How far the filter area reaches past `ref`. Absent is none; anything that is
 /// not a count leaves the pivot table unresolved.
 fn page_count(location: &Element, name: &str) -> Option<u32> {
-    match location.attribute_local(name) {
+    match sole_attribute(location, name)? {
         None => Some(0),
         Some(value) => value.trim().parse().ok(),
+    }
+}
+
+/// An attribute read by a name only one of them may answer to. The outer
+/// `None` is ambiguity — several attributes carry that local name, so markup
+/// compatibility could be hiding the real one behind an ignored prefix and a
+/// lookup would be choosing by authoring order — and the inner `None` is a
+/// plain absence, which an optional attribute may default.
+fn sole_attribute<'a>(element: &'a Element, name: &str) -> Option<Option<&'a str>> {
+    match element.attributes_named(name) {
+        0 => Some(None),
+        1 => Some(element.attribute_local(name)),
+        _ => None,
     }
 }
 

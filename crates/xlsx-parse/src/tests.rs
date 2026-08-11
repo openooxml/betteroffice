@@ -2026,6 +2026,112 @@ fn does_not_take_an_overridden_non_pivot_part_for_a_pivot() {
     assert_eq!(parsed.package.unpatchable_references().len(), 0);
 }
 
+/// Markup compatibility lets a part carry attributes a conforming consumer
+/// drops. Reading by local name alone would take the ignored `u:sheet` for the
+/// real one and fence off `Notes` while `Data` moved out from under the cache,
+/// so a name several attributes answer to resolves to nothing at all.
+#[test]
+fn refuses_a_pivot_source_a_decoy_attribute_could_shadow() {
+    for (label, worksheet_source) in [
+        (
+            "shadowed sheet and ref",
+            r#"<worksheetSource xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" u:sheet="Report" u:ref="A1" sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "shadowed sheet alone",
+            r#"<worksheetSource xmlns:u="urn:future" u:sheet="Report" sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "real one authored first",
+            r#"<worksheetSource xmlns:u="urn:future" sheet="Data" ref="A1:B4" u:sheet="Report" u:ref="A1"/>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            format!(
+                "<pivotCacheDefinition><cacheSource>{worksheet_source}</cacheSource></pivotCacheDefinition>"
+            )
+            .as_bytes(),
+        );
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert!(
+            parsed.package.reference_naming_sheet("Data").is_some(),
+            "{label}: the cache stopped naming Data"
+        );
+        assert!(
+            parsed
+                .package
+                .reference_moved_by_rows("Report", 999)
+                .is_some(),
+            "{label} was resolved"
+        );
+    }
+}
+
+/// The same shadowing through an element name, which `cacheSource` and
+/// `location` are both reached by.
+#[test]
+fn refuses_a_pivot_part_a_decoy_element_could_shadow() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:u="urn:future"><u:cacheSource><worksheetSource sheet="Report" ref="A1"/></u:cacheSource><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert!(parsed.package.reference_naming_sheet("Data").is_some());
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
+    );
+}
+
+/// A pivot table's own grid is reached by the same two lookups, so a decoy over
+/// `location` or its `ref` has to leave it unresolved too.
+#[test]
+fn refuses_a_pivot_location_a_decoy_could_shadow() {
+    let package = |definition: &str| {
+        let mut parts = pivoted_package();
+        parts.push((
+            "xl/pivottables/pivotTable1.xml".to_owned(),
+            definition.as_bytes().to_vec(),
+        ));
+        parts.push((
+            "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+            br#"<Relationships><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+        ));
+        parse_workbook_with_package(&parts).unwrap().package
+    };
+
+    let shadowed_ref = package(
+        r#"<pivotTableDefinition xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" cacheId="1"><location u:ref="A1" ref="C3:E8"/></pivotTableDefinition>"#,
+    );
+    assert!(shadowed_ref.reference_moved_by_rows("Data", 999).is_some());
+
+    let shadowed_location = package(
+        r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><u:location ref="A1"/><location ref="C3:E8"/></pivotTableDefinition>"#,
+    );
+    assert!(
+        shadowed_location
+            .reference_moved_by_rows("Data", 999)
+            .is_some()
+    );
+
+    let shadowed_page_count = package(
+        r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><location ref="C3:E8" u:colPageCount="0" colPageCount="4"/></pivotTableDefinition>"#,
+    );
+    assert!(
+        shadowed_page_count
+            .reference_moved_by_rows("Data", 999)
+            .is_some()
+    );
+}
+
 /// A consolidated cache names one range per set, and all of them resolve or
 /// none do.
 #[test]
