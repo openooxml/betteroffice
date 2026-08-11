@@ -3445,6 +3445,58 @@ fn twin_anchor_charted_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// Two anchors stacked at the very same spot on two different chart parts,
+/// optionally behind a plain shape that shifts both ordinals. Geometry cannot
+/// tell these frames apart, so only the chart part does.
+fn stacked_charted_fixture(shifted: bool) -> Vec<u8> {
+    let anchor = |rel: &str| {
+        format!(
+            r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="{rel}"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor>"#
+        )
+    };
+    let shape = if shifted {
+        r#"<xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp/><xdr:clientData/></xdr:twoCellAnchor>"#
+    } else {
+        ""
+    };
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let header = test_part_text(&parts, "xl/drawings/drawing1.xml")
+        .split_once("<xdr:twoCellAnchor")
+        .expect("the charted drawing opens with an anchor")
+        .0
+        .to_owned();
+    set_test_part(
+        &mut parts,
+        "xl/drawings/drawing1.xml",
+        format!(
+            "{header}{shape}{}{}</xdr:wsDr>",
+            anchor("rIdChart"),
+            anchor("rIdChartTwo")
+        )
+        .into_bytes(),
+    );
+    let rels = test_part_text(&parts, "xl/drawings/_rels/drawing1.xml.rels").replace(
+        "</Relationships>",
+        r#"<Relationship Id="rIdChartTwo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/></Relationships>"#,
+    );
+    set_test_part(
+        &mut parts,
+        "xl/drawings/_rels/drawing1.xml.rels",
+        rels.into_bytes(),
+    );
+    parts.push(("xl/charts/chart2.xml".to_owned(), CHART_PART.to_vec()));
+    let content_types = test_part_text(&parts, "[Content_Types].xml").replace(
+        "</Types>",
+        r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#,
+    );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        content_types.into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 /// The twin-anchor fixture with a plain shape anchored ahead of both charts,
 /// as another editor would leave it. Every chart ordinal shifts by one.
 fn shifted_twin_anchor_charted_fixture() -> Vec<u8> {
@@ -4590,6 +4642,7 @@ fn a_stored_chart_move_refuses_a_drawing_whose_anchors_shifted() {
         Op::SetChartAnchor {
             sheet: SheetId(0),
             frame: right.frame_id(),
+            part: right.part.clone(),
             from: right.anchor,
             to: nudged_anchor(right.anchor),
         }
@@ -4610,9 +4663,11 @@ fn a_stored_chart_move_refuses_a_drawing_whose_anchors_shifted() {
     let error = shifted
         .apply_ops(vec![stored.clone()], CalculationOptions::default())
         .unwrap_err();
+    // typed, not prose: a host replaying a stored log must be able to drop
+    // this op and carry on without reading the message.
     assert!(
-        matches!(&error, Error::InvalidOperation(message)
-            if message.contains("xl/drawings/drawing1.xml#1")),
+        matches!(&error, Error::ChartFrameShifted { frame }
+            if frame == "xl/drawings/drawing1.xml#1"),
         "{error:?}"
     );
     assert_eq!(
@@ -4639,6 +4694,64 @@ fn a_stored_chart_move_refuses_a_drawing_whose_anchors_shifted() {
         unshifted.model().sheets[0].charts[1].anchor,
         before[1].1,
         "the frame the op named must have moved"
+    );
+}
+
+/// Two frames stacked at one spot are identical to the geometry guard, so the
+/// anchor alone cannot tell a shifted ordinal from the frame it was recorded
+/// against. The chart part carried beside it can, and must.
+#[test]
+fn a_stored_chart_move_refuses_a_shifted_ordinal_at_an_identical_anchor() {
+    let stored = {
+        let workbook = Workbook::open(&stacked_charted_fixture(false)).unwrap();
+        let charts = &workbook.model().sheets[0].charts;
+        assert_eq!(charts[0].anchor, charts[1].anchor, "the frames must stack");
+        assert_ne!(charts[0].part, charts[1].part);
+        let second = &charts[1];
+        assert_eq!(second.frame_id(), "xl/drawings/drawing1.xml#1");
+        Op::SetChartAnchor {
+            sheet: SheetId(0),
+            frame: second.frame_id(),
+            part: second.part.clone(),
+            from: second.anchor,
+            to: nudged_anchor(second.anchor),
+        }
+    };
+
+    let mut shifted = Workbook::open(&stacked_charted_fixture(true)).unwrap();
+    let before = shifted.model().sheets[0]
+        .charts
+        .iter()
+        .map(|chart| (chart.frame_id(), chart.part.clone(), chart.anchor))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        before
+            .iter()
+            .map(|(id, part, _)| (id.as_str(), part.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("xl/drawings/drawing1.xml#1", "xl/charts/chart1.xml"),
+            ("xl/drawings/drawing1.xml#2", "xl/charts/chart2.xml"),
+        ],
+        "the inserted shape must slide chart1 onto the ordinal chart2 held"
+    );
+
+    let error = shifted
+        .apply_ops(vec![stored], CalculationOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::ChartFrameShifted { frame }
+            if frame == "xl/drawings/drawing1.xml#1"),
+        "{error:?}"
+    );
+    assert_eq!(
+        shifted.model().sheets[0]
+            .charts
+            .iter()
+            .map(|chart| (chart.frame_id(), chart.part.clone(), chart.anchor))
+            .collect::<Vec<_>>(),
+        before,
+        "a refused replay must leave every anchor alone"
     );
 }
 
@@ -4743,11 +4856,13 @@ fn moving_refuses_an_absolute_anchor_and_an_unknown_frame() {
 fn set_chart_anchor_refuses_what_a_save_cannot_write() {
     let mut workbook = Workbook::open(&charted_fixture()).unwrap();
     let repin = |workbook: &mut Workbook, to| {
-        let from = workbook.model().sheets[0].charts[0].anchor;
+        let recorded = &workbook.model().sheets[0].charts[0];
+        let (part, from) = (recorded.part.clone(), recorded.anchor);
         workbook.apply_ops(
             vec![Op::SetChartAnchor {
                 sheet: SheetId(0),
                 frame: "xl/drawings/drawing1.xml#0".to_owned(),
+                part,
                 from,
                 to,
             }],

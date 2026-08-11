@@ -158,4 +158,11 @@ impl SheetChart {
     pub fn is_same_frame(&self, other: &Self) -> bool {
         self.drawing == other.drawing && self.anchor_index == other.anchor_index
     }
+
+    /// Whether this is the frame an op recorded when it saw `part` at `from`.
+    /// A frame id is an ordinal, and a drawing that gained, lost or reordered
+    /// an anchor renumbers it, so the id alone cannot say.
+    pub fn is_recorded_frame(&self, part: &str, from: ChartAnchor) -> bool {
+        self.part == part && self.anchor == from
+    }
 }

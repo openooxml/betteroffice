@@ -1442,7 +1442,7 @@ impl Workbook {
             .iter()
             .find(|chart| chart.frame_id() == frame)
             .ok_or_else(|| chart_frame_not_found(frame))?;
-        let from = chart.anchor;
+        let (part, from) = (chart.part.clone(), chart.anchor);
         let to = moved_chart_anchor(
             from,
             &GridGeometry::new(sheet_ref),
@@ -1458,6 +1458,7 @@ impl Workbook {
             vec![Op::SetChartAnchor {
                 sheet,
                 frame: frame.to_owned(),
+                part,
                 from,
                 to,
             }],
@@ -2297,6 +2298,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::SetChartAnchor {
             sheet,
             frame,
+            part,
             from,
             to,
         } => {
@@ -2306,10 +2308,10 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 .iter()
                 .find(|chart| chart.frame_id() == *frame)
                 .ok_or_else(|| chart_frame_not_found(frame))?;
-            if chart.anchor != *from {
-                return Err(Error::InvalidOperation(format!(
-                    "chart frame {frame} does not hold the anchor this op was recorded against; its drawing has changed"
-                )));
+            if !chart.is_recorded_frame(part, *from) {
+                return Err(Error::ChartFrameShifted {
+                    frame: frame.clone(),
+                });
             }
             validate_anchor_change(*from, *to, frame)?;
             resolve_chart_anchor(*to, &GridGeometry::new(sheet_ref), 0, 0)

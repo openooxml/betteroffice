@@ -58,7 +58,7 @@ impl fmt::Display for OpError {
             }
             OpError::ChartFrameShifted { frame } => write!(
                 f,
-                "chart frame {frame} does not hold the anchor this op was recorded against; its drawing has changed"
+                "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"
             ),
             OpError::InvalidStyle(message) => f.write_str(message),
         }
@@ -142,6 +142,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         Op::SetChartAnchor {
             sheet,
             frame,
+            part,
             from,
             to,
         } => {
@@ -153,7 +154,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 .ok_or_else(|| OpError::ChartNotFound {
                     frame: frame.clone(),
                 })?;
-            if chart.anchor != *from {
+            if !chart.is_recorded_frame(part, *from) {
                 return Err(OpError::ChartFrameShifted {
                     frame: frame.clone(),
                 });
@@ -162,6 +163,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
             Ok(InvertedOp(vec![Op::SetChartAnchor {
                 sheet: *sheet,
                 frame: frame.clone(),
+                part: part.clone(),
                 from: *to,
                 to: *from,
             }]))
@@ -1582,6 +1584,7 @@ mod tests {
         let op = Op::SetChartAnchor {
             sheet: SheetId(0),
             frame: "xl/drawings/drawing1.xml#0".into(),
+            part: "xl/charts/chart1.xml".into(),
             from: anchor(0, 0),
             to: anchor(3, 5),
         };
@@ -1597,6 +1600,7 @@ mod tests {
             &Op::SetChartAnchor {
                 sheet: SheetId(0),
                 frame: "xl/drawings/drawing9.xml#0".into(),
+                part: "xl/charts/chart1.xml".into(),
                 from: anchor(0, 0),
                 to: anchor(1, 1),
             },
@@ -1604,19 +1608,25 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, OpError::ChartNotFound { .. }));
 
-        // the frame is there but holds a different anchor: the ordinal now
-        // names something else, so the op is refused rather than replayed.
-        let error = apply(
-            &mut wb,
-            &Op::SetChartAnchor {
-                sheet: SheetId(0),
-                frame: "xl/drawings/drawing1.xml#0".into(),
-                from: anchor(7, 7),
-                to: anchor(1, 1),
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(error, OpError::ChartFrameShifted { .. }));
-        assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
+        // the frame is there but holds neither the anchor nor the part the op
+        // recorded: the ordinal now names something else, so it is refused.
+        for (part, from) in [
+            ("xl/charts/chart1.xml", anchor(7, 7)),
+            ("xl/charts/chart9.xml", anchor(0, 0)),
+        ] {
+            let error = apply(
+                &mut wb,
+                &Op::SetChartAnchor {
+                    sheet: SheetId(0),
+                    frame: "xl/drawings/drawing1.xml#0".into(),
+                    part: part.into(),
+                    from,
+                    to: anchor(1, 1),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, OpError::ChartFrameShifted { .. }));
+            assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
+        }
     }
 }
