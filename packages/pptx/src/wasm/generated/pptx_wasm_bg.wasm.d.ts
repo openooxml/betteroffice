@@ -35,6 +35,7 @@ export const pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c:
 export const pptxdocument_redoJson: (a: number) => [number, number, number, number];
 export const pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_saveBytes: (a: number) => [number, number, number, number];
 export const pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];

@@ -180,6 +180,7 @@ name = "betteroffice-pptx-edit"
 version = "0.0.4"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-opc",
  "betteroffice-pptx-parse",
  "js-sys",
  "serde",

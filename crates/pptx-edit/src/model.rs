@@ -284,6 +284,8 @@ pub enum EditError {
     Observer(String),
     #[error("JSON boundary error: {0}")]
     Json(String),
+    #[error("could not write PPTX: {0}")]
+    Write(String),
 }
 
 pub type EditResult<T> = Result<T, EditError>;

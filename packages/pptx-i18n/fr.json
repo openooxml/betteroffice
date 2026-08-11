@@ -2,6 +2,7 @@
   "_lang": "fr",
   "toolbar": {
     "label": null,
+    "save": "Enregistrer",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,6 +17,7 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "Fichier",
       "slides": null,
       "history": null,
       "zoom": null,

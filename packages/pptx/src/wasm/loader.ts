@@ -46,6 +46,8 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  /** serialize the presentation back to .pptx bytes, edits included. */
+  save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
@@ -256,6 +258,9 @@ export function openPresentation(
     },
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath).slice());
+    },
+    save(): Uint8Array {
+      return wasmCall(() => doc.saveBytes().slice());
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(

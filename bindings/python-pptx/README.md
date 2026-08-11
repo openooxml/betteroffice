@@ -187,36 +187,30 @@ an agent's write is not something the user undoes by accident.
 
 ## Writing
 
-**Edits do not reach a saved file yet.** The engine serializes the parsed
-package, not the edited model, so `save()` on a deck you have edited would
-silently drop every change. Rather than hand you a file that quietly lost your
-work, `save()` and `save_path()` refuse once anything has been edited:
+`save()` and `save_path()` serialize the deck with every accepted edit
+applied. Slides you did not touch keep their exact source part bytes; edited
+slides are patched at the XML level, so unmodeled markup survives:
 
 ```python
 deck = Presentation.open(data)
-deck.save_path("copy.pptx")        # fine: nothing was edited
-
 deck.insert_slide(1)
 deck.is_edited                     # True
-deck.save()                        # UnsupportedWriteError
+deck.save_path("copy.pptx")        # edits included
+
+reopened = Presentation.open_path("copy.pptx")
+reopened.slide_count               # one more than the source
 ```
 
-`UnsupportedWriteError` is its own `PptxError` subclass, so "cannot write edits
-yet" is distinguishable from a zip or filesystem failure without matching on a
-message, and `is_edited` lets a pipeline branch before it does expensive work
-rather than discovering the refusal at the end. Only an edit the engine
-*accepted* sets it: an edit that raised leaves the deck saveable.
-
-Reading, laying out, and collaborative editing are fully usable today; treat
-this release as read, render, and edit-in-memory. Write-back is the next thing
-to land, and the refusal disappears when it does.
+`is_edited` reports whether the engine has accepted an edit since the deck was
+opened. Only an edit the engine *accepted* sets it: an edit that raised leaves
+the flag untouched.
 
 ## Compared with python-pptx
 
 | | `python-pptx` | `betteroffice-pptx` |
 | --- | --- | --- |
 | Read shapes and text | yes | yes |
-| Write shapes and text back to a file | yes | not yet — see *Writing* |
+| Write shapes and text back to a file | yes | yes — see *Writing* |
 | Lay slides out (line breaking, text metrics) | no | yes, display list |
 | Collaborative editing (CRDT) | no | yes, Yrs |
 | Undo/redo | no | yes |
@@ -248,13 +242,13 @@ edits that merge across replicas, that is the gap this fills.
 | `register_font` / `render_slide` | layout |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
 | `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
-| `deck.is_edited` | whether an accepted edit has made `save` refuse |
+| `deck.is_edited` | whether the engine has accepted an edit since open |
 | `undo` / `redo` / `add_undo_barrier` / `can_undo` / `can_redo` | history |
 | `deck.save()` / `save_path(path)` | serialize to PPTX — see *Writing* |
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`, `UnsupportedWriteError`.
+`NotCollaborativeError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.
@@ -305,10 +299,9 @@ the file I/O releases it: `open_path`'s read, and the writes in `save_path`,
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. `save` re-zips the parts the
-model retained; part bytes survive unchanged but the container is rebuilt, so
-output is not byte-identical to the source, and it refuses on an edited deck —
-see *Writing*.
+`0.0.x`, and the API may change before `0.1.0`. `save` writes edits back at the
+XML level and copies untouched parts through byte for byte; the container is
+rebuilt, so output is not byte-identical to the source — see *Writing*.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.

@@ -2,6 +2,7 @@
   "_lang": "tr",
   "toolbar": {
     "label": null,
+    "save": "Kaydet",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,6 +17,7 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "Dosya",
       "slides": null,
       "history": null,
       "zoom": null,

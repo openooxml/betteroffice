@@ -85,6 +85,7 @@ export interface ToolbarProps {
   onInsertSlide?: (layoutPartPath?: string | null) => void;
   slideLayouts?: readonly SlideLayoutOption[];
   currentLayoutPartPath?: string | null;
+  onSave?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -162,6 +163,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     onInsertSlide,
     slideLayouts = [],
     currentLayoutPartPath,
+    onSave,
     onUndo,
     onRedo,
     canUndo = false,
@@ -223,6 +225,22 @@ export function Toolbar(explicitProps: ToolbarProps) {
   };
 
   const sections: ToolbarSection[] = [
+    {
+      key: 'file',
+      width: 40,
+      node: (
+        <ToolbarGroup label={t('toolbar.groups.file')}>
+          <ToolbarButton
+            title={t('toolbar.save')}
+            disabled={disabled || !onSave}
+            onClick={onSave}
+            testId="pptx-save"
+          >
+            <ToolbarIcon name="save" size={18} />
+          </ToolbarButton>
+        </ToolbarGroup>
+      ),
+    },
     {
       key: 'new-slide',
       width: 59,

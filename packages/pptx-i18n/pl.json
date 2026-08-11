@@ -2,6 +2,7 @@
   "_lang": "pl",
   "toolbar": {
     "label": null,
+    "save": "Zapisz",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,6 +17,7 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "Plik",
       "slides": null,
       "history": null,
       "zoom": null,

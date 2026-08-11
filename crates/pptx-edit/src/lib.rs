@@ -16,6 +16,7 @@ use yrs::{
 
 mod deck;
 mod model;
+mod save;
 mod story;
 mod undo;
 
@@ -36,7 +37,7 @@ pub(crate) const MIGRATE_ORIGIN: &str = "pptx:migrate";
 pub(crate) const PILCROW_KIND: &str = "pilcrow";
 pub(crate) const KIND: &str = "_kind";
 pub(crate) const PARA_ID: &str = "paraId";
-const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
+pub(crate) const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
@@ -220,7 +221,7 @@ impl DeckSession {
     }
 }
 
-fn doc_with_client_id(client_id: u64) -> Doc {
+pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
     Doc::with_options(options)

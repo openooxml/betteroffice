@@ -82,12 +82,11 @@ toolchain installed:
 pip install -e bindings/python-pptx
 ```
 
-It reads decks, edits shapes and text in memory, and lays slides out into the
-same display-list contract the canvas paints. `render_slide` fails until
-`register_font` has supplied at least one face — no font is compiled into that
-wheel — and `save()` raises `UnsupportedWriteError` once a deck has been edited,
-because the engine cannot write model edits back to PPTX yet. A `Presentation` is
-also pinned to the thread that opened it, and must be released there.
+It reads decks, edits shapes and text in memory, saves the edits back to
+`.pptx` bytes, and lays slides out into the same display-list contract the
+canvas paints. `render_slide` fails until `register_font` has supplied at least
+one face — no font is compiled into that wheel. A `Presentation` is also pinned
+to the thread that opened it, and must be released there.
 
 There is no DOCX binding for Python. Reach for
 [`betteroffice-docx`](./rust) in Rust, or

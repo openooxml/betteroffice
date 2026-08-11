@@ -52,6 +52,14 @@ fn opens_edits_renders_saves_and_reopens() {
     let reopened = Presentation::open(&saved).unwrap();
     assert_eq!(reopened.slides().len(), 3);
     assert_eq!(reopened.package().presentation.slides.len(), 3);
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(
+        (
+            snapshot.slides[0].shapes[0].x,
+            snapshot.slides[0].shapes[0].y
+        ),
+        (1_111_111, 2_222_222)
+    );
 }
 
 #[test]

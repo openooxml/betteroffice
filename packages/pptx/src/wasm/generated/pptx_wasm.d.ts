@@ -29,6 +29,10 @@ export class PptxDocument {
     redoJson(): string;
     removeShapeJson(args: string): string;
     resizeShapeJson(args: string): string;
+    /**
+     * Serializes the deck back to `.pptx` bytes, edits included.
+     */
+    saveBytes(): Uint8Array;
     setShapeAdjustJson(args: string): string;
     setShapeFillJson(args: string): string;
     setShapeStrokeJson(args: string): string;
@@ -105,6 +109,7 @@ export interface InitOutput {
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];

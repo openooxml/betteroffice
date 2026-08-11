@@ -2,6 +2,7 @@
   "_lang": "zh-CN",
   "toolbar": {
     "label": null,
+    "save": "保存",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,6 +17,7 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "文件",
       "slides": null,
       "history": null,
       "zoom": null,

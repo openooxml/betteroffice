@@ -207,6 +207,12 @@ impl PptxDocument {
             .ok_or_else(|| JsValue::from_str("media part was not found"))
     }
 
+    /// Serializes the deck back to `.pptx` bytes, edits included.
+    #[wasm_bindgen(js_name = saveBytes)]
+    pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
+        self.session.save().map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = encodeStateVector)]
     pub fn encode_state_vector(&self) -> Vec<u8> {
         self.session.encode_state_vector_v1()

@@ -143,6 +143,30 @@ describe('PPTX wasm boundary', () => {
     expect(cleared?.fill).toBeUndefined();
     expect(cleared?.stroke).toBeUndefined();
   });
+
+  test('edits survive a save and reopen', () => {
+    const source = openPresentation(fixture, { clientId: 9005 });
+    const slide = source.snapshot().slides[0];
+    const shape = slide.shapes.find((candidate) => candidate.sourceId !== 0)!;
+    source.moveShape(slide.id, shape.id, 1_234_000, 2_345_000);
+    const story = firstStory(slide.shapes);
+    source.insertText(story.id, 0, 'Saved: ');
+
+    const reopened = openPresentation(source.save(), { clientId: 9006 });
+    const snapshot = reopened.snapshot();
+    const moved = snapshot.slides[0].shapes.find(
+      (candidate) => candidate.sourceId === shape.sourceId
+    );
+    expect([moved?.x, moved?.y]).toEqual([1_234_000, 2_345_000]);
+    const text = snapshot.slides
+      .flatMap((candidate) => candidate.shapes)
+      .flatMap((candidate) => candidate.textStories)
+      .find((candidate) => candidate.id === story.id);
+    expect(text?.paragraphs[0]?.runs[0]?.text.startsWith('Saved: ')).toBe(true);
+
+    source.dispose();
+    reopened.dispose();
+  });
 });
 
 function shapeSnapshot(shapeId: string) {

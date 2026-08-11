@@ -46,9 +46,10 @@ Click text to place the Rust-computed caret, type to edit the yrs story and
 trigger Rust reflow, drag or resize shapes on the canvas, or use the toolbar
 for bold, italic, size, color, slides, and text boxes.
 
-Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `onReady`
-(exposes the core `PresentationHandle` and a `refresh` callback for host-driven
-edits), `onChange` (deck snapshots), `onError`.
+Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
+`onReady` (exposes the core `PresentationHandle`, a `refresh` callback for
+host-driven edits, and `save`), `onChange` (deck snapshots), `onError`, and
+`onSave` (receives the saved bytes; without it, saving downloads the file).
 
 ## What works today
 
@@ -56,6 +57,7 @@ edits), `onChange` (deck snapshots), `onError`.
 - Canvas interactions: shape selection, drag, and resize
 - Text editing with caret and selection computed by the engine
 - Slide management (add, delete), text boxes, undo/redo
+- Saving the deck back to `.pptx` — toolbar button, Ctrl/Cmd+S, or `api.save()`
 - Localized UI via the `i18n` prop
   ([`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n))
 - Real-time collaboration with people or agents; the deck is a CRDT
