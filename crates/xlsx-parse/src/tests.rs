@@ -1984,6 +1984,48 @@ fn refuses_everything_for_a_pivot_source_it_cannot_resolve() {
     }
 }
 
+/// A veto that reasons per part must find every part, because one it never
+/// discovers gets no cover at all — worse than the unresolved it would get for
+/// a source it could not read. A cache written outside the conventional
+/// directory is still typed as one, so its `Override` finds it.
+#[test]
+fn finds_a_pivot_part_outside_the_conventional_directory() {
+    let mut parts = pivoted_package();
+    let cache = parts
+        .iter()
+        .position(|(path, _)| path == "xl/pivotcache/pivotCacheDefinition1.xml")
+        .expect("the fixture holds a cache");
+    parts[cache].0 = "xl/pivotCacheDefinition1.xml".to_owned();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.reference_naming_sheet("Data"),
+        Some("xl/pivotCacheDefinition1.xml")
+    );
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+}
+
+/// An `Override` naming something other than a pivot is authoritative: the part
+/// is not a pivot part however it is pathed.
+#[test]
+fn does_not_take_an_overridden_non_pivot_part_for_a_pivot() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(parsed.package.unpatchable_references().len(), 0);
+}
+
 /// A consolidated cache names one range per set, and all of them resolve or
 /// none do.
 #[test]
@@ -3282,6 +3324,128 @@ fn still_covers_a_conventional_chart_a_default_types_as_plain_xml() {
     assert_eq!(
         parsed.package.unpatchable_reference_part(),
         Some("xl/charts/chart2.xml")
+    );
+}
+
+/// `charted_package` with the plotted values widened to an area no save can
+/// rebuild a cache from, which is what leaves the chart part unmodelled while
+/// its `c:f` references stay perfectly readable.
+fn unrebuildable_chart_package(
+    mut parts: Vec<(String, Vec<u8>)>,
+    values: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let chart = String::from_utf8(CHART.to_vec())
+        .unwrap()
+        .replace("Data!$B$2:$B$4", values);
+    set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+    parts
+}
+
+/// A chart the model does not cover is still only as wide as what its `c:f`
+/// name. The sheet it plots is fenced off to the far corner of those
+/// references; every other sheet, and everything past that corner, is free.
+#[test]
+fn resolves_what_an_unmodelled_chart_references() {
+    let parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml")
+    );
+    assert_eq!(
+        package.reference_naming_sheet("Data"),
+        Some("xl/charts/chart1.xml")
+    );
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert!(package.reference_moved_by_cols("Data", 1).is_some());
+    assert_eq!(package.reference_moved_by_cols("Data", 2), None);
+    assert_eq!(package.reference_moved_by_rows("Report", 0), None);
+}
+
+/// A `c:f` naming a sheet the workbook does not hold binds to nothing, so the
+/// chart names everything rather than a range some later rename could capture.
+#[test]
+fn refuses_everything_for_a_chart_naming_a_sheet_the_workbook_lost() {
+    let parts = unrebuildable_chart_package(charted_package(), "Gone!$A$2:$B$4");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert!(parsed.package.reference_naming_sheet("Report").is_some());
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
+    );
+}
+
+/// A chart part no sheet anchors is one this crate has not read the shape of —
+/// it has no owner to resolve an unqualified reference against — so it keeps
+/// the workbook-wide veto.
+#[test]
+fn refuses_everything_for_a_chart_no_sheet_claims() {
+    let mut parts = charted_package();
+    parts.push(("xl/charts/chart2.xml".to_owned(), CHART.to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(
+        parsed.package.reference_naming_sheet("Report"),
+        Some("xl/charts/chart2.xml")
+    );
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_cols("Report", 999)
+            .is_some()
+    );
+}
+
+/// The chart plots `Data` but hangs off the chartsheet, so nothing it names
+/// moves when that chartsheet goes. Dropping it is allowed, and the save takes
+/// the chart's whole part graph with it rather than leaving it behind.
+#[test]
+fn allows_dropping_the_sheet_an_unmodelled_chart_hangs_off() {
+    let mut parts = unrebuildable_chart_package(chartsheet_package(), "Data!$A$2:$B$4");
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec(),
+    ));
+    parts.push((
+        "_rels/.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdBook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml")
+    );
+    assert_eq!(package.reference_naming_sheet("Chart"), None);
+    assert_eq!(
+        package.reference_naming_sheet("Data"),
+        Some("xl/charts/chart1.xml")
+    );
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets.remove(1);
+    let saved = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        package,
+        &[Some(0)],
+        &[SharedStringCells::new()],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .expect("dropping the anchoring sheet strands nothing the chart names");
+    assert!(
+        !saved.iter().any(|(path, _)| path == "xl/charts/chart1.xml"),
+        "the chart part must not outlive the sheet that anchored it"
     );
 }
 

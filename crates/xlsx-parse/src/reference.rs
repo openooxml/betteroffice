@@ -85,7 +85,7 @@ pub(crate) fn unpatchable_references(
     workbook: &Workbook,
     sheet_paths: &[String],
 ) -> Result<Vec<UnpatchableReference>, ParseError> {
-    let mut references = pivot_references(parts, workbook, sheet_paths);
+    let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
     for chart in unmodelled_chart_parts(parts, content_types, workbook)? {
         let areas = match chart
             .claimed
@@ -129,19 +129,29 @@ fn names_one_sheet(workbook: &Workbook, sheet: &str) -> bool {
         == 1
 }
 
-/// The directories a pivot part lives in. A save rewrites neither the ranges a
-/// cache is built from nor the grid a pivot table is laid out on.
+/// The directories a pivot part conventionally lives in, which answer for a
+/// package that types its parts by extension alone.
 const PIVOT_DIRECTORIES: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
+
+/// content types that carry workbook references in a pivot vocabulary. A save
+/// rewrites neither the ranges a cache is built from nor the grid a pivot table
+/// is laid out on.
+const PIVOT_CONTENT_TYPES: [&str; 3] = [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml",
+];
 
 fn pivot_references(
     parts: &[(String, Vec<u8>)],
+    content_types: &[PartContentType],
     workbook: &Workbook,
     sheet_paths: &[String],
 ) -> Vec<UnpatchableReference> {
     let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
     let pivot_parts = parts
         .iter()
-        .filter(|(path, _)| is_pivot_part(path))
+        .filter(|(path, _)| is_pivot_part(path, content_types))
         .map(|(path, bytes)| (path, bytes, root_local_name(bytes)))
         .collect::<Vec<_>>();
 
@@ -322,12 +332,29 @@ fn related_parts(parts: &[(String, Vec<u8>)], path: &str, relationship: &str) ->
         .collect()
 }
 
-fn is_pivot_part(path: &str) -> bool {
+/// Whether a part holds a pivot cache or pivot table. Typed the way OPC types
+/// anything: an `Override` is authoritative, and the conventional directories
+/// answer only for a part a `Default` extension mapping left untyped. A pivot
+/// part written outside those directories is still found, because a veto that
+/// reasons per part gives a part it never discovers no cover at all.
+fn is_pivot_part(path: &str, content_types: &[PartContentType]) -> bool {
     let key = part_key(path);
-    !key.contains("/_rels/")
-        && PIVOT_DIRECTORIES
+    if key.contains("/_rels/") {
+        return false;
+    }
+    match content_types.iter().find(|part| part.path == key) {
+        Some(part)
+            if PIVOT_CONTENT_TYPES
+                .iter()
+                .any(|known| part.content_type.eq_ignore_ascii_case(known)) =>
+        {
+            true
+        }
+        Some(part) if part.overridden => false,
+        _ => PIVOT_DIRECTORIES
             .iter()
-            .any(|prefix| key.starts_with(prefix))
+            .any(|prefix| key.starts_with(prefix)),
+    }
 }
 
 fn part_key(path: &str) -> String {

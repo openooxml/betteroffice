@@ -3832,6 +3832,69 @@ fn pivoted_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// The blanket veto covered a mis-pathed pivot part for free, by firing on the
+/// mere presence of one. A veto that reasons per part has to actually find it,
+/// so a cache written outside the conventional directory is typed by its
+/// `Override` and still refuses the edits that would strand it.
+#[test]
+fn refuses_ops_that_would_strand_a_mis_pathed_pivot_cache() {
+    let mut model = WorkbookModel::default();
+    for name in ["Data", "Notes"] {
+        model.sheets.push(Sheet::new(name));
+    }
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    parts.push((
+        "xl/pivotCacheDefinition1.xml".to_owned(),
+        br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B4" sheet="Data"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    let content_types = test_part_text(&parts, "[Content_Types].xml").replace(
+        "</Types>",
+        r#"<Override PartName="/xl/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#,
+    );
+    set_test_part(
+        &mut parts,
+        "[Content_Types].xml",
+        content_types.into_bytes(),
+    );
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+
+    for op in [
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        },
+        Op::RemoveSheet { index: 0 },
+    ] {
+        let mut workbook = Workbook::open(&original).unwrap();
+        let error = workbook
+            .apply_ops(vec![op.clone()], CalculationOptions::default())
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidOperation(message)
+                if message.contains("pivotCacheDefinition1.xml")),
+            "{op:?} was allowed: {error:?}"
+        );
+    }
+
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(1),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .expect("an unrelated sheet is still free");
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
 /// Sheet ids in a batch mean what the ops before them left behind. A batch
 /// that drops a sheet ahead of the pivot source and then edits by the id the
 /// source has slid into must be read against the shifted list, not the one the
