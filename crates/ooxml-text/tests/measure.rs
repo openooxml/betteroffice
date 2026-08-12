@@ -291,6 +291,122 @@ fn line_rules_match_typography_semantics() {
     );
 }
 
+// 6a. the row invariant: every emitted line satisfies
+// ascent + descent <= lineHeight, so a baseline derived from those three
+// numbers can never land below its own line box.
+#[test]
+fn every_row_keeps_ascent_plus_descent_within_the_line_height() {
+    let rules = [
+        Value::Null,
+        json!({ "line": 20.0, "lineRule": "exact" }),
+        json!({ "line": 10.0, "lineRule": "exact" }),
+        json!({ "line": 2.0, "lineRule": "exact" }),
+        json!({ "line": 0.5, "lineUnit": "multiplier" }),
+        json!({ "line": 2.0, "lineUnit": "multiplier" }),
+        json!({ "line": 10.0, "lineRule": "atLeast" }),
+        json!({ "line": 50.0, "lineRule": "atLeast" }),
+    ];
+    let bodies = [
+        json!([]),
+        json!([{ "kind": "text", "text": "   " }]),
+        json!([{ "kind": "text", "text": "0" }]),
+        json!([{ "kind": "text", "text": "0 0 0 0 0 0 0 0" }]),
+        json!([{ "kind": "image", "width": 50.0, "height": 100.0 }]),
+        json!([
+            { "kind": "text", "text": "0" },
+            { "kind": "image", "width": 50.0, "height": 100.0 }
+        ]),
+    ];
+
+    for runs in &bodies {
+        for spacing in &rules {
+            let attrs = match spacing {
+                Value::Null => json!({}),
+                sp => json!({ "spacing": sp }),
+            };
+            let v = measure_with(
+                json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+                40.0,
+            )
+            .unwrap();
+            for (i, line) in v["lines"].as_array().unwrap().iter().enumerate() {
+                let ascent = line["ascent"].as_f64().unwrap();
+                let descent = line["descent"].as_f64().unwrap();
+                let height = line["lineHeight"].as_f64().unwrap();
+                assert!(
+                    ascent + descent <= height + 1e-3,
+                    "{runs} / {spacing} line {i}: ascent {ascent} + descent {descent} \
+                     exceeds lineHeight {height}"
+                );
+            }
+        }
+    }
+}
+
+// 6b. exact and sub-single auto emit the *ruled* box: the height is fixed and
+// the shrink eats the ascent side, so the baseline moves. Rules that only add
+// leading below the descent leave ascent/descent untouched.
+#[test]
+fn exact_and_sub_single_rules_emit_the_ruled_box() {
+    let row = |spacing: Value, runs: Value| {
+        measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": { "spacing": spacing } }),
+            200.0,
+        )
+        .unwrap()["lines"][0]
+            .clone()
+    };
+    let text = json!([{ "kind": "text", "text": "0" }]);
+    let ascent_of = |line: &Value| line["ascent"].as_f64().unwrap();
+    let descent_of = |line: &Value| line["descent"].as_f64().unwrap();
+
+    // taller than the content: the content descent is preserved bottom-up
+    let line = row(json!({ "line": 20.0, "lineRule": "exact" }), text.clone());
+    approx(ascent_of(&line), 20.0 - DESC, "exact 20 ascent");
+    approx(descent_of(&line), DESC, "exact 20 descent");
+
+    // shorter than the content: the box still wins, the ascent absorbs it
+    let line = row(json!({ "line": 10.0, "lineRule": "exact" }), text.clone());
+    approx(ascent_of(&line), 10.0 - DESC, "exact 10 ascent");
+    approx(descent_of(&line), DESC, "exact 10 descent");
+
+    // shorter than the content descent: descent clamps, ascent is zero
+    let line = row(json!({ "line": 2.0, "lineRule": "exact" }), text.clone());
+    approx(ascent_of(&line), 0.0, "exact 2 ascent");
+    approx(descent_of(&line), 2.0, "exact 2 descent");
+
+    // sub-single auto shrinks both proportionally and leaves no leading
+    let line = row(
+        json!({ "line": 0.5, "lineUnit": "multiplier" }),
+        text.clone(),
+    );
+    let scale = (LH / 2.0) / (ASC + DESC);
+    approx(ascent_of(&line), ASC * scale, "auto 0.5 ascent");
+    approx(descent_of(&line), DESC * scale, "auto 0.5 descent");
+    approx(
+        line["lineHeight"].as_f64().unwrap(),
+        LH / 2.0,
+        "auto 0.5 height",
+    );
+
+    // leading-bearing rules are untouched: the delta lands below the descent
+    for spacing in [
+        json!({ "line": 2.0, "lineUnit": "multiplier" }),
+        json!({ "line": 50.0, "lineRule": "atLeast" }),
+        json!({ "line": 10.0, "lineRule": "atLeast" }),
+    ] {
+        let what = spacing.to_string();
+        let line = row(spacing, text.clone());
+        approx(ascent_of(&line), ASC, &format!("{what} ascent"));
+        approx(descent_of(&line), DESC, &format!("{what} descent"));
+    }
+
+    // the empty-paragraph path rules identically
+    let line = row(json!({ "line": 10.0, "lineRule": "exact" }), json!([]));
+    approx(ascent_of(&line), 10.0 - DESC, "empty exact ascent");
+    approx(descent_of(&line), DESC, "empty exact descent");
+}
+
 // 7. empty paragraph: one line with the Word single-line floor
 #[test]
 fn empty_paragraph_floor_behavior() {
