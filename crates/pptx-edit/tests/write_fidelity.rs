@@ -47,7 +47,10 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="3" name="Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="1000" y="2000"/><a:ext cx="3000" cy="4000"/></a:xfrm>
 <a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 20000"/><a:gd name="adj2" fmla="*/ missing 2 3"/></a:avLst></a:prstGeom></p:spPr>
-<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Box</a:t></a:r></a:p></p:txBody></p:sp>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr><a:noFill/></a:rPr><a:t>Box</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="4" name="Halfway"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+<p:spPr><a:xfrm rot="1200000"><a:off x="123456" y="654321"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Halfway</a:t></a:r></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -64,6 +67,8 @@ const SLIDE2: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="2" name="Second"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:txBody></p:sp>
+<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="3" name="Trailing Connector"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+<p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom></p:spPr></p:cxnSp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE2_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -88,6 +93,9 @@ const LAYOUT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:grpSpPr/>
 <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
 <p:spPr><a:xfrm flipH="1" rot="2700000"><a:off x="762000" y="457200"/><a:ext cx="10668000" cy="1143000"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="1000000" y="2000000"/><a:ext cx="8000000" cy="3000000"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sldLayout>"#;
 
@@ -502,6 +510,99 @@ fn an_exhausted_slide_id_space_errors_instead_of_panicking() {
     session.insert_slide(&context(), 2, None).unwrap();
     let error = session.save().unwrap_err();
     assert!(matches!(error, EditError::Write(message) if message.contains("slide id")));
+}
+
+#[test]
+fn a_colour_write_replaces_an_existing_no_fill() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Box")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone();
+    session
+        .format_text(
+            &context(),
+            &story_id,
+            0,
+            3,
+            &pptx_edit::TextStylePatch {
+                color: Some("#FF0000".to_owned()),
+                ..pptx_edit::TextStylePatch::default()
+            },
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"srgbClr val="FF0000""#));
+    assert!(!slide.contains("<a:noFill/></a:rPr>"));
+}
+
+#[test]
+fn a_resize_keeps_a_partial_transforms_own_offset_and_rotation() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let halfway = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Halfway")
+        .unwrap();
+    session
+        .resize_shape(&context(), &slide.id, &halfway.id, 5_000_000, 900_000)
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:off x="123456" y="654321"/>"#));
+    assert!(slide.contains(r#"rot="1200000""#));
+    assert!(slide.contains(r#"<a:ext cx="5000000" cy="900000"/>"#));
+    assert!(!slide.contains(r#"<a:off x="1000000" y="2000000"/>"#));
+}
+
+#[test]
+fn a_shape_added_after_a_trailing_connector_lands_on_top() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .add_text_box(
+            &context(),
+            &slide_id,
+            &pptx_edit::ShapeDraft {
+                name: "OnTop".to_owned(),
+                rect: pptx_edit::ShapeRect {
+                    x: 1,
+                    y: 2,
+                    width: 300,
+                    height: 400,
+                },
+                text: "above the connector".to_owned(),
+                style: TextStyle::default(),
+            },
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide2.xml");
+    let second = slide.find("\"Second\"").unwrap();
+    let connector = slide.find("<p:cxnSp>").unwrap();
+    let added = slide.find("\"OnTop\"").unwrap();
+    assert!(second < connector && connector < added);
+}
+
+#[test]
+fn an_unknown_layout_is_rejected_at_insert_slide() {
+    let session = open();
+    let error = session
+        .insert_slide(&context(), 2, Some("ppt/slideLayouts/nope.xml"))
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidState(_)));
+    assert_eq!(parts(&session.save().unwrap()), parts(&fixture(256)));
 }
 
 #[test]

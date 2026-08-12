@@ -62,11 +62,12 @@ pub enum ShapeWrite {
 
 #[derive(Default)]
 pub struct ShapePatch {
+    /// The halves the edit changed. Transform pieces the source already
+    /// spells out and the edit did not touch are left as they are.
     pub offset: Option<(i64, i64)>,
     pub extent: Option<(i64, i64)>,
-    pub rotation_deg: Option<f64>,
-    pub flip_horizontal: Option<bool>,
-    pub flip_vertical: Option<bool>,
+    /// Fills in transform pieces the source never spelled out.
+    pub inherited: Option<InheritedTransform>,
     pub fill: Option<ShapeFill>,
     /// A default outline clears the stroke.
     pub outline: Option<ShapeOutline>,
@@ -74,6 +75,18 @@ pub struct ShapePatch {
     pub texts: Vec<TextWrite>,
     /// Non-empty only when a group's child list must be rebuilt.
     pub children: Vec<ShapeWrite>,
+}
+
+/// The transform a shape inherits from its layout or master placeholder.
+#[derive(Clone, Copy)]
+pub struct InheritedTransform {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub rotation_deg: f64,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
 }
 
 pub struct TextWrite {
@@ -197,12 +210,20 @@ pub fn write_pptx_with_edits(
                         })?,
                 };
                 minted_slide_id = Some(slide_id);
-                let layout = layout_part_path.clone().or_else(|| {
-                    package
-                        .layouts
-                        .first()
-                        .map(|layout| layout.part_path.clone())
-                });
+                let layout = layout_part_path
+                    .clone()
+                    .filter(|path| {
+                        package
+                            .layouts
+                            .iter()
+                            .any(|layout| &layout.part_path == path)
+                    })
+                    .or_else(|| {
+                        package
+                            .layouts
+                            .first()
+                            .map(|layout| layout.part_path.clone())
+                    });
                 new_parts.push((
                     part_path.clone(),
                     slide_xml(name.as_deref(), shapes, &part_path)?,
@@ -752,16 +773,23 @@ fn patch_shape_children(
         })
         .collect();
     let mut children = Vec::with_capacity(slots.len());
-    let prologue_end = shape_slots.first().copied().unwrap_or_else(|| {
+    let first_ext_list = |slots: &[Option<XmlNode>]| {
         slots
             .iter()
             .position(|slot| {
                 matches!(slot, Some(XmlNode::Element(element)) if element.local_name() == "extLst")
             })
             .unwrap_or(slots.len())
-    });
+    };
+    let prologue_end = shape_slots
+        .first()
+        .copied()
+        .unwrap_or_else(|| first_ext_list(&slots));
     emit_sibling_slots(&mut slots, &mut children, prologue_end);
-    for write in writes {
+    let last_kept = writes
+        .iter()
+        .rposition(|write| !matches!(write, ShapeWrite::Add(_)));
+    for (index, write) in writes.iter().enumerate() {
         match write {
             ShapeWrite::Keep { source_index } | ShapeWrite::Patch { source_index, .. } => {
                 let position = *shape_slots.get(*source_index).ok_or_else(|| {
@@ -783,6 +811,12 @@ fn patch_shape_children(
                 children.push(XmlNode::Element(element));
             }
             ShapeWrite::Add(add) => {
+                // A trailing add goes on top: after every remaining sibling
+                // except a final extLst.
+                if last_kept.is_none_or(|kept| index > kept) {
+                    let flush_end = first_ext_list(&slots);
+                    emit_sibling_slots(&mut slots, &mut children, flush_end);
+                }
                 children.push(XmlNode::Element(shape_element(
                     add,
                     next_shape_id,
@@ -866,13 +900,21 @@ fn shape_properties_mut<'a>(
         .ok_or_else(|| write_error(part, "shape has no properties element"))
 }
 
+/// Writes the edited transform halves. Pieces the source spells out and the
+/// edit did not change are left untouched; pieces the source lacks are
+/// materialized from the inherited transform, rotation and flips included.
 fn patch_transform(
     element: &mut XmlElement,
     patch: &ShapePatch,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<(), PptxError> {
-    let (offset, extent) = (patch.offset, patch.extent);
+    let offset = patch
+        .offset
+        .or(patch.inherited.map(|inherited| (inherited.x, inherited.y)));
+    let extent = patch.extent.or(patch
+        .inherited
+        .map(|inherited| (inherited.width, inherited.height)));
     let (container, transform_name) = match element.local_name() {
         "graphicFrame" => (None, prefixes.presentation("xfrm")),
         "grpSp" => (Some("grpSpPr"), prefixes.drawing("xfrm")),
@@ -898,68 +940,54 @@ fn patch_transform(
                 matches!(child, XmlNode::Element(element) if element.local_name() != "nvGraphicFramePr")
             })
             .unwrap_or(parent.children.len());
-        parent
-            .children
-            .insert(position, XmlNode::Element(XmlElement::new(transform_name)));
+        let mut created = XmlElement::new(transform_name);
+        if let Some(inherited) = patch.inherited {
+            if inherited.rotation_deg != 0.0 {
+                created.set_attribute("rot", format_fixed(inherited.rotation_deg * 60_000.0));
+            }
+            if inherited.flip_horizontal {
+                created.set_attribute("flipH", "1");
+            }
+            if inherited.flip_vertical {
+                created.set_attribute("flipV", "1");
+            }
+        }
+        parent.children.insert(position, XmlNode::Element(created));
     }
     let transform = parent.child_mut("xfrm").expect("transform ensured above");
-    if transform.child_mut("off").is_none() {
-        transform.children.insert(
-            0,
-            XmlNode::Element(
-                XmlElement::new(prefixes.drawing("off"))
-                    .with_attribute("x", "0")
-                    .with_attribute("y", "0"),
-            ),
-        );
-    }
-    if transform.child_mut("ext").is_none() {
-        let position = transform
-            .children
-            .iter()
-            .position(
-                |child| matches!(child, XmlNode::Element(element) if element.local_name() == "off"),
-            )
-            .map(|index| index + 1)
-            .unwrap_or(transform.children.len());
-        transform.children.insert(
-            position,
-            XmlNode::Element(
-                XmlElement::new(prefixes.drawing("ext"))
-                    .with_attribute("cx", "0")
-                    .with_attribute("cy", "0"),
-            ),
-        );
-    }
-    if let Some((x, y)) = offset {
+    if let Some((x, y)) = offset
+        && (patch.offset.is_some() || transform.child_mut("off").is_none())
+    {
+        if transform.child_mut("off").is_none() {
+            transform.children.insert(
+                0,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("off"))),
+            );
+        }
         let element = transform.child_mut("off").expect("offset ensured above");
         element.set_attribute("x", x.to_string());
         element.set_attribute("y", y.to_string());
     }
-    if let Some((width, height)) = extent {
+    if let Some((width, height)) = extent
+        && (patch.extent.is_some() || transform.child_mut("ext").is_none())
+    {
+        if transform.child_mut("ext").is_none() {
+            let position = transform
+                .children
+                .iter()
+                .position(
+                    |child| matches!(child, XmlNode::Element(element) if element.local_name() == "off"),
+                )
+                .map(|index| index + 1)
+                .unwrap_or(transform.children.len());
+            transform.children.insert(
+                position,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("ext"))),
+            );
+        }
         let element = transform.child_mut("ext").expect("extent ensured above");
         element.set_attribute("cx", width.to_string());
         element.set_attribute("cy", height.to_string());
-    }
-    if let Some(rotation) = patch.rotation_deg {
-        if rotation == 0.0 {
-            transform.attributes.remove("rot");
-        } else {
-            transform.set_attribute("rot", format_fixed(rotation * 60_000.0));
-        }
-    }
-    let flips = [
-        ("flipH", patch.flip_horizontal),
-        ("flipV", patch.flip_vertical),
-    ];
-    for (name, flip) in flips {
-        match flip {
-            Some(true) => transform.set_attribute(name, "1"),
-            Some(false) => {
-                transform.attributes.remove(name);
-            }
-            None => {}
-        }
     }
     Ok(())
 }
@@ -1511,10 +1539,17 @@ fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefi
             base.attributes.remove("u");
         }
     }
+    // A colour write replaces the whole fill choice; clearing the colour only
+    // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
+    let removed_fills: &[&str] = if properties.color.is_some() {
+        &FILL_ELEMENTS
+    } else {
+        &["solidFill"]
+    };
     base.children.retain(|child| {
         !matches!(
             child,
-            XmlNode::Element(element) if element.local_name() == "solidFill"
+            XmlNode::Element(element) if removed_fills.contains(&element.local_name())
         )
     });
     if let Some(color) = properties

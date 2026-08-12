@@ -93,6 +93,15 @@ fn collaborative_facade_exchanges_typed_updates() {
 }
 
 #[test]
+fn a_facade_seeded_update_accepts_the_source_file() {
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let update = presentation.encode_state_as_update_v1();
+    let replica = pptx_edit::DeckSession::open_from_update_with_source(&update, FIXTURE, 303)
+        .expect("the facade fingerprints the file bytes");
+    assert!(replica.save().is_ok());
+}
+
+#[test]
 fn reports_native_parse_errors() {
     assert!(matches!(
         Presentation::open(b"not a presentation"),

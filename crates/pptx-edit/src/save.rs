@@ -5,9 +5,9 @@ use std::collections::HashMap;
 
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
-    Bullet, DeckWrite, ParagraphWrite, Placeholder, PptxPackage, RunProperties, RunWrite, ShapeAdd,
-    ShapeNode, ShapePatch, ShapeTransform, ShapeWrite, Slide, SlideLayout, SlideMaster, SlideWrite,
-    TextTarget, TextWrite,
+    Bullet, DeckWrite, InheritedTransform, ParagraphWrite, Placeholder, PptxPackage, RunProperties,
+    RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite, SlideLayout,
+    SlideMaster, SlideWrite, TextTarget, TextWrite,
 };
 
 use crate::deck::{seed_doc, snapshot_doc};
@@ -18,17 +18,12 @@ use crate::{
 
 /// The parsed parts a slide's shapes may inherit geometry from.
 struct SlideContext<'a> {
-    slide: Option<&'a Slide>,
     layout: Option<&'a SlideLayout>,
     master: Option<&'a SlideMaster>,
 }
 
 impl<'a> SlideContext<'a> {
     fn new(package: &'a PptxPackage, snapshot: &SlideSnapshot) -> Self {
-        let slide = snapshot
-            .source_part_path
-            .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
         let layout = snapshot
             .layout_part_path
             .as_deref()
@@ -58,11 +53,7 @@ impl<'a> SlideContext<'a> {
                 })
             })
             .or_else(|| package.masters.first());
-        Self {
-            slide,
-            layout,
-            master,
-        }
+        Self { layout, master }
     }
 }
 
@@ -182,13 +173,33 @@ fn shape_patch(
     context: &SlideContext<'_>,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
-    if (shape.x, shape.y, shape.width, shape.height) != (base.x, base.y, base.width, base.height) {
-        let resolved = resolved_transform(shape, base, context);
-        patch.offset = Some((resolved.x, resolved.y));
-        patch.extent = Some((resolved.width, resolved.height));
-        patch.rotation_deg = Some(resolved.rotation_deg);
-        patch.flip_horizontal = Some(resolved.flip_h);
-        patch.flip_vertical = Some(resolved.flip_v);
+    let moved = (shape.x, shape.y) != (base.x, base.y);
+    let resized = (shape.width, shape.height) != (base.width, base.height);
+    if moved || resized {
+        patch.offset = moved.then_some((shape.x, shape.y));
+        patch.extent = resized.then_some((shape.width, shape.height));
+        let source_inherited = base.width <= 0 || base.height <= 0;
+        patch.inherited = source_inherited.then(|| {
+            inherited_transform(shape, context)
+                .map(|transform| InheritedTransform {
+                    x: transform.x,
+                    y: transform.y,
+                    width: transform.width,
+                    height: transform.height,
+                    rotation_deg: transform.rotation_deg,
+                    flip_horizontal: transform.flip_h,
+                    flip_vertical: transform.flip_v,
+                })
+                .unwrap_or(InheritedTransform {
+                    x: shape.x,
+                    y: shape.y,
+                    width: shape.width,
+                    height: shape.height,
+                    rotation_deg: shape.rotation_deg,
+                    flip_horizontal: shape.flip_h,
+                    flip_vertical: shape.flip_v,
+                })
+        });
     }
     if shape.fill != base.fill {
         patch.fill = Some(
@@ -225,56 +236,13 @@ fn shape_patch(
     Ok(patch)
 }
 
-/// The transform the renderer would draw the edited shape with. Halves the
-/// user edited win outright; halves the source never spelled out are
-/// inherited from the source shape, then the layout and master placeholders,
-/// rotation and flips included.
-fn resolved_transform(
-    shape: &ShapeSnapshot,
-    base: &ShapeSnapshot,
-    context: &SlideContext<'_>,
-) -> ShapeTransform {
-    let source_inherited = base.width <= 0 || base.height <= 0;
-    let inherited = source_inherited
-        .then(|| inherited_transform(shape, context))
-        .flatten();
-    let moved = (shape.x, shape.y) != (base.x, base.y);
-    let resized = (shape.width, shape.height) != (base.width, base.height);
-    let (x, y) = match inherited {
-        Some(transform) if !moved => (transform.x, transform.y),
-        _ => (shape.x, shape.y),
-    };
-    let (width, height) = match inherited {
-        Some(transform) if !resized => (transform.width, transform.height),
-        _ => (shape.width, shape.height),
-    };
-    let (rotation_deg, flip_h, flip_v) = match inherited {
-        Some(transform) => (transform.rotation_deg, transform.flip_h, transform.flip_v),
-        None => (shape.rotation_deg, shape.flip_h, shape.flip_v),
-    };
-    ShapeTransform {
-        x,
-        y,
-        width,
-        height,
-        rotation_deg,
-        flip_h,
-        flip_v,
-        ..ShapeTransform::default()
-    }
-}
-
+/// The transform a placeholder inherits: the layout's matching placeholder,
+/// then the master's. The shape's own parsed node cannot contribute — a
+/// positive extent there would already be in the snapshot.
 fn inherited_transform<'a>(
     shape: &ShapeSnapshot,
     context: &SlideContext<'a>,
 ) -> Option<&'a ShapeTransform> {
-    let original = (shape.source_id != 0)
-        .then(|| {
-            context
-                .slide
-                .and_then(|slide| find_node(&slide.shapes, shape.source_id))
-        })
-        .flatten();
     let layout = shape.placeholder.as_ref().and_then(|placeholder| {
         context
             .layout
@@ -285,25 +253,11 @@ fn inherited_transform<'a>(
             .master
             .and_then(|master| find_placeholder(&master.shapes, placeholder))
     });
-    [original, layout, master]
+    [layout, master]
         .into_iter()
         .flatten()
         .map(node_transform)
         .find(|transform| transform.width > 0 && transform.height > 0)
-}
-
-fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {
-    for node in nodes {
-        if node.id() == id {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_node(&group.children, id)
-        {
-            return Some(found);
-        }
-    }
-    None
 }
 
 fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {

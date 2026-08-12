@@ -54,15 +54,28 @@ impl DeckSession {
     pub fn open(bytes: &[u8], client_id: u64) -> EditResult<Self> {
         let package =
             pptx_parse::parse_pptx(bytes).map_err(|error| EditError::Parse(error.to_string()))?;
-        let fingerprint = format!("{:x}", Sha256::digest(bytes));
-        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+        Self::from_package_with_source(package, bytes, client_id)
     }
 
-    /// Opens an edit session from an already parsed package.
+    /// Opens an edit session from an already parsed package. The fingerprint
+    /// is taken from a re-zip of the package; prefer
+    /// [`Self::from_package_with_source`] when the file bytes are at hand, so
+    /// peers can match them against the update.
     pub fn from_package(package: PptxPackage, client_id: u64) -> EditResult<Self> {
         let bytes = pptx_parse::write_pptx(&package)
             .map_err(|error| EditError::Parse(error.to_string()))?;
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+    }
+
+    /// Opens an edit session from a parsed package, fingerprinting the file
+    /// bytes it was parsed from.
+    pub fn from_package_with_source(
+        package: PptxPackage,
+        source: &[u8],
+        client_id: u64,
+    ) -> EditResult<Self> {
+        let fingerprint = format!("{:x}", Sha256::digest(source));
         Self::from_package_with_fingerprint(package, fingerprint, client_id)
     }
 

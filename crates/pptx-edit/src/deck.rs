@@ -247,6 +247,17 @@ impl DeckSession {
         index: u32,
         layout_part_path: Option<&str>,
     ) -> EditResult<SlideReceipt> {
+        if let Some(path) = layout_part_path
+            && !self
+                .package
+                .layouts
+                .iter()
+                .any(|layout| layout.part_path == path)
+        {
+            return Err(EditError::InvalidState(format!(
+                "unknown slide layout {path:?}"
+            )));
+        }
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;

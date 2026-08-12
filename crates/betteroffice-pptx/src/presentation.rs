@@ -47,7 +47,7 @@ impl Presentation {
         client_id: u64,
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
-        let session = DeckSession::from_package(package, client_id)?;
+        let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
