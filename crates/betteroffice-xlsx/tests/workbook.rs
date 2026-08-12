@@ -5326,23 +5326,28 @@ fn honest_concurrent_drags_survive_undo_on_both_replicas() {
     );
 }
 
-/// A repin that no viewport can resolve would hide the chart on every replica
-/// while still saving a drawing Excel refuses. The open path must keep taking
-/// whatever real files hold, so this is refused where the update arrives.
+/// An anchor can be wrong on its own terms — a negative offset, one that is
+/// not a position at all, corners in the wrong order — and none of that
+/// depends on the grid it sits over. That is what a peer may not introduce.
+/// The open path must keep taking whatever real files carry, so this is
+/// refused where the update arrives rather than where the file is read.
 #[test]
-fn remote_updates_carrying_an_unresolvable_anchor_are_refused() {
+fn remote_updates_carrying_an_intrinsically_broken_anchor_are_refused() {
     let bytes = charted_fixture();
-    for (label, anchor) in [
+    for (label, reason, anchor) in [
         (
             "negative offset",
+            "offset is out of range",
             r#"{"kind":"twoCell","from":{"col":2,"colOff":-1,"row":4,"rowOff":0},"to":{"col":8,"colOff":0,"row":19,"rowOff":0},"edit_as":"oneCell"}"#,
         ),
         (
             "overflowing offset",
+            "offset is out of range",
             r#"{"kind":"twoCell","from":{"col":2,"colOff":9223372036854775807,"row":4,"rowOff":0},"to":{"col":8,"colOff":0,"row":19,"rowOff":0},"edit_as":"oneCell"}"#,
         ),
         (
             "inverted corners",
+            "inverted or coincident",
             r#"{"kind":"twoCell","from":{"col":20,"colOff":0,"row":4,"rowOff":0},"to":{"col":8,"colOff":0,"row":19,"rowOff":0},"edit_as":"oneCell"}"#,
         ),
     ] {
@@ -5356,10 +5361,76 @@ fn remote_updates_carrying_an_unresolvable_anchor_are_refused() {
             .apply_update_v1(&update, CalculationOptions::default())
             .expect_err(&format!("{label} must be refused"));
         assert!(
-            matches!(&error, Error::CollaborativeState(message) if message.contains("cannot be resolved")),
+            matches!(&error, Error::CollaborativeState(message) if message.contains(reason)),
             "{label}: {error:?}"
         );
         assert_eq!(target.model(), &before, "{label} must leave nothing behind");
+    }
+}
+
+/// Column widths and chart anchors are replicated independently, and both of
+/// these edits are ordinary. Collapsing the columns a chart spans leaves it
+/// with no room to draw, but that is a fact about one replica's grid, not
+/// about the anchor — so it cannot decide whether a peer's move is allowed.
+/// Judging it that way makes each replica reject what the other accepted.
+#[test]
+fn collapsing_columns_under_a_chart_does_not_block_a_peer_moving_it() {
+    let bytes = charted_fixture();
+    let collapse: Vec<Op> = (2..8)
+        .map(|col| Op::SetColWidth {
+            sheet: SheetId(0),
+            col,
+            width: Some(0.0),
+        })
+        .collect();
+
+    for forward_first in [true, false] {
+        let mut widener = Workbook::open_collaborative(&bytes, 870).unwrap();
+        let mut mover = Workbook::open_collaborative(&bytes, 871).unwrap();
+
+        widener
+            .apply_ops(collapse.clone(), CalculationOptions::default())
+            .expect("collapsing a column is an ordinary edit");
+        mover
+            .move_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                24.0,
+                0.0,
+                CalculationOptions::default(),
+            )
+            .expect("moving a chart is an ordinary edit");
+
+        let to_mover = widener
+            .encode_diff_v1(&mover.encode_state_vector_v1())
+            .unwrap();
+        let to_widener = mover
+            .encode_diff_v1(&widener.encode_state_vector_v1())
+            .unwrap();
+        if forward_first {
+            mover
+                .apply_update_v1(&to_mover, CalculationOptions::default())
+                .expect("a collapsed column must not be refused by the replica that moved");
+            widener
+                .apply_update_v1(&to_widener, CalculationOptions::default())
+                .expect("a moved chart must not be refused by the replica that collapsed");
+        } else {
+            widener
+                .apply_update_v1(&to_widener, CalculationOptions::default())
+                .expect("a moved chart must not be refused by the replica that collapsed");
+            mover
+                .apply_update_v1(&to_mover, CalculationOptions::default())
+                .expect("a collapsed column must not be refused by the replica that moved");
+        }
+
+        assert_eq!(
+            widener.model(),
+            mover.model(),
+            "both edits are supported, so the replicas must converge"
+        );
+        assert_eq!(widener.model().sheets[0].col_widths.get(&2), Some(&0.0));
+        assert!(widener.save().is_ok(), "the union must be saveable");
+        assert!(mover.save().is_ok());
     }
 }
 

@@ -473,24 +473,25 @@ impl Workbook {
         self.validate_incoming_anchors(model)
     }
 
-    /// A repinned chart has to land somewhere a save can write and a viewport
-    /// can draw. What the source package already held is exempt, however odd,
-    /// because refusing it would reject the workbook every replica opened —
-    /// and an undo may legitimately put it back. The exemption is the opened
-    /// baseline rather than the current projection: every replica agrees on
-    /// the former, so they all reach the same verdict on the same bytes.
+    /// A merge verdict may only rest on what is true of the anchor itself.
+    /// Whether it resolves to a drawable rectangle is a question about the
+    /// anchor *and* the column widths it spans, and widths are replicated
+    /// independently — so one replica can hold a combination the other does
+    /// not, and each would reject what the other accepted. Where a chart ends
+    /// up drawing is settled at the point of use instead.
+    ///
+    /// What the source package already held is exempt however odd, because
+    /// refusing it would reject the workbook every replica opened, and an undo
+    /// may legitimately put it back. The exemption is the opened baseline, not
+    /// the current projection: every replica agrees on the former.
     fn validate_incoming_anchors(&self, staged: &WorkbookModel) -> Result<()> {
         for sheet in &staged.sheets {
-            let geometry = GridGeometry::new(sheet);
             for chart in &sheet.charts {
                 if self.opened_anchors.get(&chart.frame_id()) == Some(&chart.anchor) {
                     continue;
                 }
-                resolve_chart_anchor(chart.anchor, &geometry, 0, 0).map_err(|error| {
-                    Error::InvalidOperation(format!(
-                        "remote update repins {} to an anchor that cannot be resolved: {error}",
-                        chart.part
-                    ))
+                validate_intrinsic_anchor(chart.anchor).map_err(|error| {
+                    Error::InvalidOperation(format!("remote update repins {}: {error}", chart.part))
                 })?;
             }
         }
@@ -2719,6 +2720,58 @@ fn validate_chart_anchor(anchor: ChartAnchor) -> Result<()> {
             return Err(Error::InvalidOperation(
                 "chart anchor is off the sheet grid".to_string(),
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Beyond any sheet: an offset this large is not a position, it is a number
+/// that got somewhere it should not have. Bounding it keeps the pixel
+/// arithmetic downstream finite.
+const MAX_ANCHOR_OFFSET_EMU: i64 = 1 << 40;
+
+/// What an anchor must satisfy on its own, whatever grid it sits over. These
+/// are the properties a peer cannot make true or false by resizing a column,
+/// so they are the only ones a merge may be decided on — and they are what the
+/// drawing writer needs, since it writes grid markers rather than pixels.
+fn validate_intrinsic_anchor(anchor: ChartAnchor) -> Result<()> {
+    let offset = |value: i64| {
+        (0..=MAX_ANCHOR_OFFSET_EMU)
+            .contains(&value)
+            .then_some(())
+            .ok_or_else(|| Error::InvalidOperation("anchor offset is out of range".to_string()))
+    };
+    let extent = |value: i64| {
+        (1..=MAX_ANCHOR_OFFSET_EMU)
+            .contains(&value)
+            .then_some(())
+            .ok_or_else(|| Error::InvalidOperation("anchor extent is not positive".to_string()))
+    };
+    match anchor {
+        ChartAnchor::TwoCell { from, to, .. } => {
+            for cell in [from, to] {
+                offset(cell.col_off)?;
+                offset(cell.row_off)?;
+            }
+            if (to.col, to.col_off) <= (from.col, from.col_off)
+                || (to.row, to.row_off) <= (from.row, from.row_off)
+            {
+                return Err(Error::InvalidOperation(
+                    "anchor corners are inverted or coincident".to_string(),
+                ));
+            }
+        }
+        ChartAnchor::OneCell { from, extent: size } => {
+            offset(from.col_off)?;
+            offset(from.row_off)?;
+            extent(size.cx)?;
+            extent(size.cy)?;
+        }
+        ChartAnchor::Absolute { pos, extent: size } => {
+            offset(pos.x)?;
+            offset(pos.y)?;
+            extent(size.cx)?;
+            extent(size.cy)?;
         }
     }
     Ok(())
