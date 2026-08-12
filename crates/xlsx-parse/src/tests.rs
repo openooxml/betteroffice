@@ -2124,6 +2124,26 @@ fn refuses_a_pivot_source_only_a_foreign_node_answers_for() {
             "foreign default namespace",
             r#"<pivotCacheDefinition xmlns="urn:future"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
         ),
+        (
+            "subtree that left the default namespace",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource xmlns=""><worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "source that left the default namespace",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource><worksheetSource xmlns="" sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "prefix bound to ours through an invalid qname",
+            r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:junk:worksheetSource sheet="Report" ref="A1"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+        (
+            "invalid qname on the attributes",
+            r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:worksheetSource x:junk:sheet="Report" x:junk:ref="A1"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+        (
+            "empty prefix on the source",
+            r#"<pivotCacheDefinition><cacheSource><:worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
     ] {
         let mut parts = pivoted_package();
         set_part(
@@ -2526,6 +2546,47 @@ fn carries_a_cache_source_range_to_its_records() {
         package.reference_naming_sheet("Report"),
         Some("xl/pivotcache/pivotCacheRecords9.xml")
     );
+}
+
+/// Classifying a part by its first tag says nothing about whether the rest of
+/// it parses. A records part that never closes, or that carries a second root
+/// beside the first, is not one this crate has read — it inherits nothing.
+#[test]
+fn refuses_records_whose_part_does_not_parse_whole() {
+    for (label, records) in [
+        ("unclosed root", "<pivotCacheRecords>"),
+        ("a second root", "<pivotCacheRecords/><secondRoot/>"),
+        (
+            "an unclosed child",
+            "<pivotCacheRecords><r></pivotCacheRecords>",
+        ),
+        ("trailing junk", "<pivotCacheRecords/></stray>"),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        );
+        parts.push((
+            "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+            records.as_bytes().to_vec(),
+        ));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            br#"<Relationships><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} inherited a narrow area"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
 }
 
 /// Records the definition does not point its own `r:id` at are not its records,

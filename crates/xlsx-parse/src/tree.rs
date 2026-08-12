@@ -31,16 +31,31 @@ impl Attribute {
 }
 
 /// Whether a node belongs to one of `namespaces` for the purpose of reading it
-/// by name. An unprefixed node carrying no namespace does: attributes are
-/// unqualified by schema, and a part that declares none at all is still the
-/// vocabulary it looks like. A prefix that resolved to nothing is not the same
-/// thing — the name comes from a vocabulary the part never declared, so it is
-/// foreign however it is spelled. `name` is the QName as authored, which is
-/// what tells the two apart once resolution has collapsed both to `None`.
-fn answers_for(name: &str, namespace: Option<&str>, namespaces: &[&str]) -> bool {
+/// by name. Three ways to carry no namespace have to be told apart, and only
+/// the first is ours: a part that declared none at all still looks like the
+/// vocabulary it spells, a prefix that resolved to nothing names a vocabulary
+/// the part never declared, and `cleared` — an `xmlns=""` in scope — is a
+/// subtree that declared its way out of the vocabulary it was in. Resolution
+/// collapses all three to `None`, so the QName as authored and the binding in
+/// scope are what separate them.
+fn answers_for(name: &str, namespace: Option<&str>, cleared: bool, namespaces: &[&str]) -> bool {
+    if !is_namespace_valid(name) {
+        return false;
+    }
     match namespace {
         Some(namespace) => namespaces.contains(&namespace),
-        None => split_prefix(name).0.is_empty(),
+        None => !cleared && split_prefix(name).0.is_empty(),
+    }
+}
+
+/// Whether a QName is one namespace resolution can be applied to at all: at
+/// most one colon, with neither side of it empty. Anything else is
+/// namespace-invalid, and a name that is not well formed is never ours however
+/// its prefix resolves.
+fn is_namespace_valid(name: &str) -> bool {
+    match name.split_once(':') {
+        None => !name.is_empty(),
+        Some((prefix, local)) => !prefix.is_empty() && !local.is_empty() && !local.contains(':'),
     }
 }
 
@@ -50,6 +65,10 @@ pub(crate) struct Element {
     /// the namespace the tag's prefix (or the default declaration) was bound
     /// to, so a part is read by expanded name rather than by literal prefix.
     pub(crate) namespace: Option<Rc<str>>,
+    /// whether an `xmlns=""` was in scope. Such a name carries no namespace
+    /// because its subtree declared its way out of one, which is not the same
+    /// as a part that never declared one.
+    pub(crate) default_cleared: bool,
     pub(crate) attributes: Vec<Attribute>,
     pub(crate) children: Vec<Node>,
     /// byte span of the content between the start and end tags; empty for a
@@ -116,7 +135,12 @@ impl Element {
     ) -> impl Iterator<Item = &'a Attribute> {
         self.attributes.iter().filter(move |attribute| {
             attribute.local_name() == local
-                && answers_for(&attribute.name, attribute.namespace.as_deref(), namespaces)
+                && answers_for(
+                    &attribute.name,
+                    attribute.namespace.as_deref(),
+                    false,
+                    namespaces,
+                )
         })
     }
 
@@ -144,7 +168,13 @@ impl Element {
     /// counting the unqualified form a part that declares none is authored in.
     /// A foreign element spells the name the same way but is a different one.
     pub(crate) fn answers_to(&self, namespaces: &[&str], local: &str) -> bool {
-        self.local_name() == local && answers_for(&self.name, self.namespace(), namespaces)
+        self.local_name() == local
+            && answers_for(
+                &self.name,
+                self.namespace(),
+                self.default_cleared,
+                namespaces,
+            )
     }
 
     pub(crate) fn child_elements(&self) -> impl Iterator<Item = &Element> {
@@ -215,6 +245,16 @@ impl Namespaces {
         if let Some(len) = self.scopes.pop() {
             self.bindings.truncate(len);
         }
+    }
+
+    /// whether an `xmlns=""` is in scope, taking every unprefixed name under it
+    /// out of the vocabulary rather than leaving it in none by omission.
+    fn default_cleared(&self) -> bool {
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound.is_empty())
+            .is_some_and(|(_, uri)| uri.is_empty())
     }
 
     fn resolve(&self, prefix: &str) -> Option<Rc<str>> {
@@ -530,6 +570,7 @@ fn open_element(
         });
     }
     Ok(Element {
+        default_cleared: namespaces.default_cleared(),
         name,
         namespace,
         attributes,

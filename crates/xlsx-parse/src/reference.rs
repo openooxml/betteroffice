@@ -12,12 +12,11 @@
 use std::collections::HashMap;
 
 use quick_xml::NsReader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRef, Workbook};
 
-use crate::ParseError;
 use crate::chart::{
     NS_RELATIONSHIPS, chart_reference_areas, directory_of, parse_area, parse_relationships,
     relationship_part_path, unmodelled_chart_parts,
@@ -26,6 +25,7 @@ use crate::package::PartContentType;
 use crate::tree::{Element, parse_tree};
 use crate::write::{NS_MAIN, NS_STRICT_MAIN};
 use crate::xml::{find_part, local_name, resolve_part_path};
+use crate::{MAX_DEPTH, ParseError};
 
 /// the spreadsheetml vocabulary a pivot part is read in. Transitional and
 /// Strict spell the same names in different namespaces and this crate reads
@@ -201,37 +201,58 @@ fn pivot_references(
     references
 }
 
-/// The local name of a part's root element when the root is one of ours, read
-/// without building a tree so a cached-records part running to megabytes costs
-/// nothing to classify. A root in a foreign vocabulary — including one behind a
-/// prefix the part never declared — answers to no name, which classifies the
-/// part as one this crate does not read and leaves it naming everything.
+/// The local name of a part's root element when the root is one of ours and the
+/// part parses whole. Streamed rather than built into a tree, so a cached-
+/// records part running to megabytes costs one pass and no memory — but the
+/// whole pass, because the first tag says nothing about whether the rest of the
+/// document closes. A foreign root, a root behind a prefix the part never
+/// declared, an element left open, or anything beside the root answers to no
+/// name, which leaves the part naming everything.
 fn root_local_name(bytes: &[u8]) -> Option<String> {
     let mut reader = NsReader::from_reader(bytes);
     let config = reader.config_mut();
     config.expand_empty_elements = true;
     config.check_end_names = true;
     let mut buf = Vec::new();
+    let mut depth = 0usize;
+    let mut root = None;
     loop {
         let (namespace, event) = reader.read_resolved_event_into(&mut buf).ok()?;
         match event {
             Event::Start(start) => {
-                let ours = match namespace {
-                    ResolveResult::Unbound => true,
-                    ResolveResult::Bound(namespace) => {
-                        OURS.contains(&String::from_utf8_lossy(namespace.as_ref()).as_ref())
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return None;
+                }
+                if depth == 1 {
+                    if root.is_some() {
+                        return None;
                     }
-                    ResolveResult::Unknown(_) => false,
-                };
-                return ours
-                    .then(|| String::from_utf8(local_name(&start)).ok())
-                    .flatten();
+                    root = Some(ours_local_name(namespace, &start)?);
+                }
             }
-            Event::Eof => return None,
+            Event::End(_) => depth = depth.checked_sub(1)?,
+            Event::Eof => break,
             _ => {}
         }
         buf.clear();
     }
+    (depth == 0).then_some(root).flatten()
+}
+
+/// The local name of a start tag whose expanded name is in our vocabulary.
+fn ours_local_name(namespace: ResolveResult<'_>, start: &BytesStart<'_>) -> Option<String> {
+    let ours = match namespace {
+        ResolveResult::Unbound => true,
+        ResolveResult::Bound(namespace) => {
+            OURS.contains(&String::from_utf8_lossy(namespace.as_ref()).as_ref())
+        }
+        ResolveResult::Unknown(_) => false,
+    };
+    let name = String::from_utf8(start.name().as_ref().to_vec()).ok()?;
+    (ours && name.matches(':').count() <= 1)
+        .then(|| String::from_utf8(local_name(start)).ok())
+        .flatten()
 }
 
 /// A pivot part as an element tree, or nothing when this crate declines to read
