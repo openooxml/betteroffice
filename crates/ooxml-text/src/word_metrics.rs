@@ -25,6 +25,32 @@
 //! top of the pitch). The `w:noLeading` compatibility flag (`w:compat`,
 //! ECMA-376 §17.15.3) drops that external leading entirely.
 //!
+//! ## 1a. GDI-compatible quantization — [`CompatFlags::gdi_line_metrics`]
+//!
+//! Word's text stack descends from GDI, whose per-font vertical metrics
+//! (`TEXTMETRIC`: `tmAscent`, `tmDescent`, `tmExternalLeading`) are whole
+//! logical units, not fractions — DirectWrite still exposes the same
+//! quantization as *GDI-compatible metrics* for a given em size.
+//! [`CompatFlags::gdi_line_metrics`] reproduces it in three steps:
+//!
+//! 1. the em size itself snaps to an integer ppem (`round(size_px)`; our
+//!    layout unit is already px at 96 DPI, so this is the layout grid);
+//! 2. the metric family is chosen — `OS/2` fsSelection **bit 7**
+//!    (USE_TYPO_METRICS) hands line spacing to sTypoAscender /
+//!    sTypoDescender / sTypoLineGap, otherwise the win/hhea pair above
+//!    governs (a font setting bit 7 measures several percent tall without
+//!    this, because its `usWin*` box is deliberately the clipping box);
+//! 3. ascent, descent and leading are each rounded to whole pixels at that
+//!    ppem **before** they are summed. Rounding the sum is not the same
+//!    number as summing the rounded parts, and the integer stack rounds the
+//!    parts — the difference is the per-line error that accumulates into a
+//!    pagination shift down a long document.
+//!
+//! Off by default: whether Word gates this on `w:compatibilityMode` is
+//! unmeasured, so the flag exists for an A/B harness rather than as a
+//! document-level policy. `w:spacing` line rules apply to the quantized box
+//! ([`apply_spacing_rule`] runs after, never before).
+//!
 //! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
 //!
 //! `w:spacing w:lineRule` (§17.3.1.33):
@@ -100,6 +126,10 @@ pub struct CompatFlags {
     pub no_leading: bool,
     /// w:doNotExpandShiftReturn — lines ended by a soft return are NOT justified.
     pub do_not_expand_shift_return: bool,
+    /// Quantize the single-spacing box to whole pixels at an integer ppem,
+    /// honoring `OS/2` USE_TYPO_METRICS (rule 1a). Not a settings.xml flag:
+    /// no document parses to it yet, and `false` keeps the float scaling.
+    pub gdi_line_metrics: bool,
 }
 
 /// w:spacing lineRule + line value, pre-converted to px by the host where applicable.
@@ -136,6 +166,9 @@ impl LineBox {
 /// - `leading` is GDI `tmExternalLeading`: `max(0, hhea(ascender − descender
 ///   + lineGap) − (usWinAscent + usWinDescent))` scaled, placed below the
 ///   descent. Dropped entirely under [`CompatFlags::no_leading`].
+/// - Under [`CompatFlags::gdi_line_metrics`] the box is instead quantized
+///   per rule 1a: integer ppem, USE_TYPO_METRICS family selection, and each
+///   component rounded to whole pixels before the three are summed.
 ///
 /// Panic-free on malformed metrics: a zero `units_per_em` (or a NaN /
 /// non-positive `size_px`) yields an all-zero box rather than NaN/negative
@@ -149,6 +182,9 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
             leading: 0.0,
         };
     }
+    if compat.gdi_line_metrics {
+        return gdi_line_box(m, size_px, compat.no_leading);
+    }
     let scale = size_px / m.units_per_em as f32;
 
     let ascent = m.os2_win_ascent as f32 * scale;
@@ -157,17 +193,68 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
     let leading = if compat.no_leading {
         0.0
     } else {
-        // i32 arithmetic: i16/u16 sums cannot overflow, and hhea descender
-        // is negative by convention (hence the subtraction).
-        let hhea_total = m.hhea_ascender as i32 - m.hhea_descender as i32 + m.hhea_line_gap as i32;
-        let win_total = m.os2_win_ascent as i32 + m.os2_win_descent as i32;
-        (hhea_total - win_total).max(0) as f32 * scale
+        win_external_leading(m) as f32 * scale
     };
 
     LineBox {
         ascent,
         descent,
         leading,
+    }
+}
+
+/// GDI `tmExternalLeading` in design units: the hhea line height's excess
+/// over the win box.
+///
+/// i32 arithmetic: i16/u16 sums cannot overflow, and hhea descender is
+/// negative by convention (hence the subtraction).
+fn win_external_leading(m: &FontMetrics) -> i32 {
+    let hhea_total = m.hhea_ascender as i32 - m.hhea_descender as i32 + m.hhea_line_gap as i32;
+    let win_total = m.os2_win_ascent as i32 + m.os2_win_descent as i32;
+    (hhea_total - win_total).max(0)
+}
+
+/// Design-space (ascent, descent, leading) of the family that governs line
+/// spacing: sTypo* when `OS/2` fsSelection bit 7 asks for it, else win/hhea.
+///
+/// A font can set the bit and still carry an empty or inverted typo box
+/// (absent values, or values that do not sum positive); those fall back to
+/// win/hhea rather than collapsing the line to nothing. Components clamp
+/// non-negative — a positively-signed sTypoDescender is malformed, not a
+/// license to emit negative geometry.
+fn line_metric_family(m: &FontMetrics) -> (i32, i32, i32) {
+    if m.use_typo_metrics() {
+        let ascent = m.os2_typo_ascender as i32;
+        let descent = -(m.os2_typo_descender as i32);
+        let leading = m.os2_typo_line_gap as i32;
+        if ascent + descent + leading > 0 {
+            return (ascent.max(0), descent.max(0), leading.max(0));
+        }
+    }
+    (
+        m.os2_win_ascent as i32,
+        m.os2_win_descent as i32,
+        win_external_leading(m),
+    )
+}
+
+/// Rule 1a: the single-spacing box on GDI's integer grid.
+///
+/// `no_leading` is applied before quantization, so a dropped leading
+/// contributes exactly zero rather than a rounded remainder. f64 keeps the
+/// `design × ppem` product exact for every representable design value, so
+/// each `round` sees the true ratio and not an accumulated float error.
+fn gdi_line_box(m: &FontMetrics, size_px: f32, no_leading: bool) -> LineBox {
+    let ppem = (size_px.round() as i32).max(1);
+    let (ascent, descent, leading) = line_metric_family(m);
+    let leading = if no_leading { 0 } else { leading };
+
+    let upm = m.units_per_em as f64;
+    let px = |design: i32| (design as f64 * ppem as f64 / upm).round() as f32;
+    LineBox {
+        ascent: px(ascent),
+        descent: px(descent),
+        leading: px(leading),
     }
 }
 

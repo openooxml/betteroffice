@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use skrifa::raw::TableProvider;
+use skrifa::raw::tables::os2::SelectionFlags;
 use skrifa::{FontRef, MetadataProvider};
 
 use crate::shape::ShapedGlyph;
@@ -172,6 +173,16 @@ pub struct FontMetrics {
     pub os2_typo_line_gap: i16,
     pub os2_win_ascent: u16,
     pub os2_win_descent: u16,
+    /// `OS/2` fsSelection, defined bits only (the parser drops reserved bits).
+    pub os2_fs_selection: u16,
+}
+
+impl FontMetrics {
+    /// `OS/2` fsSelection bit 7 (USE_TYPO_METRICS): the font asks for its
+    /// sTypo values to drive default line spacing.
+    pub fn use_typo_metrics(&self) -> bool {
+        self.os2_fs_selection & SelectionFlags::USE_TYPO_METRICS.bits() != 0
+    }
 }
 
 struct FontEntry {
@@ -225,6 +236,7 @@ impl FontStore {
             os2_typo_line_gap: os2.s_typo_line_gap(),
             os2_win_ascent: os2.us_win_ascent(),
             os2_win_descent: os2.us_win_descent(),
+            os2_fs_selection: os2.fs_selection().bits(),
         };
 
         let data: Box<[u8]> = bytes.into_boxed_slice();
