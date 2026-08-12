@@ -22,7 +22,9 @@ use crate::chart::{
     parse_relationships, relationship_part_path, unmodelled_chart_parts,
 };
 use crate::package::PartContentType;
-use crate::tree::{Element, Unqualified, Vocabulary, owned_local_name, parse_tree};
+use crate::tree::{
+    Element, Unqualified, Vocabulary, names_are_resolvable, owned_local_name, parse_tree,
+};
 use crate::write::{NS_MAIN, NS_STRICT_MAIN};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_DEPTH, ParseError};
@@ -44,6 +46,10 @@ const CONTENT_TYPES: [&str; 1] = ["http://schemas.openxmlformats.org/package/200
 const REL_PIVOT_CACHE_RECORDS: [&str; 2] = [
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords",
     "http://purl.oclc.org/ooxml/officeDocument/relationships/pivotCacheRecords",
+];
+const REL_DRAWING: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/drawing",
 ];
 const REL_PIVOT_TABLE: [&str; 2] = [
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable",
@@ -502,16 +508,55 @@ fn package_metadata_conforms(
     sheet_paths: &[String],
 ) -> bool {
     content_types_conform(parts)
-        && sheet_paths
+        && narrowing_relationship_owners(parts, content_types, sheet_paths)
             .iter()
-            .map(String::as_str)
-            .chain(
-                parts
-                    .iter()
-                    .map(|(path, _)| path.as_str())
-                    .filter(|path| is_pivot_part(path, content_types, true)),
-            )
             .all(|owner| relationships_conform(parts, owner))
+        && narrowing_drawings(parts, sheet_paths)
+            .iter()
+            .filter_map(|drawing| find_part(parts, drawing))
+            .all(|bytes| parse_tree(bytes).is_ok_and(|root| names_are_resolvable(&root)))
+}
+
+/// Every part whose relationships the narrowing decision reads, transitively.
+/// Stated in one place, with why each is here, so a change that makes this path
+/// follow something new shows up as a change to this list rather than as a hole
+/// nobody notices. A part whose relationships are absent is not in doubt; one
+/// whose relationships are read is only as good as they are.
+fn narrowing_relationship_owners(
+    parts: &[(String, Vec<u8>)],
+    content_types: &[PartContentType],
+    sheet_paths: &[String],
+) -> Vec<String> {
+    // the workbook, whose relationships resolve every `<sheet r:id>` to its
+    // part, and so decide which sheet hosts a pivot table and which sheet
+    // claims a chart
+    let mut owners = vec!["xl/workbook.xml".to_owned()];
+    for sheet in sheet_paths {
+        // a sheet's relationships anchor the pivot tables laid out on it and
+        // the drawings that claim its charts
+        owners.push(sheet.clone());
+    }
+    // a drawing's relationships name the chart parts its sheet claims, which is
+    // what makes a chart modelled and gives an unqualified reference its owner
+    owners.extend(narrowing_drawings(parts, sheet_paths));
+    // a cache definition's relationships name the records part that inherits
+    // its source range
+    owners.extend(
+        parts
+            .iter()
+            .map(|(path, _)| path.clone())
+            .filter(|path| is_pivot_part(path, content_types, true)),
+    );
+    owners
+}
+
+/// The drawing parts the narrowing decision reads, whose own markup decides
+/// which sheet claims which chart.
+fn narrowing_drawings(parts: &[(String, Vec<u8>)], sheet_paths: &[String]) -> Vec<String> {
+    sheet_paths
+        .iter()
+        .flat_map(|sheet| related_parts(parts, sheet, &REL_DRAWING))
+        .collect()
 }
 
 /// Whether every attribute a reader could take for `name` is the one this path
@@ -527,7 +572,7 @@ fn sole_and_ours(element: &Element, namespaces: &[&str], name: &str) -> bool {
 fn content_types_conform(parts: &[(String, Vec<u8>)]) -> bool {
     const NAMES: [&str; 3] = ["PartName", "ContentType", "Extension"];
     let Some(bytes) = find_part(parts, "[Content_Types].xml") else {
-        return true;
+        return false;
     };
     let Ok(root) = parse_tree(bytes) else {
         return false;
@@ -541,14 +586,20 @@ fn content_types_conform(parts: &[(String, Vec<u8>)]) -> bool {
             && NAMES
                 .iter()
                 .all(|name| sole_and_ours(entry, &CONTENT_TYPES, name))
-            && entry.attribute_local("ContentType").is_some()
+            && entry
+                .attribute_local("ContentType")
+                .is_some_and(|kind| !kind.trim().is_empty())
             && if entry.answers_to(&CONTENT_TYPES, "Override") {
                 entry
                     .attribute_local("PartName")
+                    .is_some_and(|part| part.len() > 1 && part.starts_with('/'))
+                    .then(|| entry.attribute_local("PartName"))
+                    .flatten()
                     .is_some_and(|part| overrides.insert(part_key(part)))
             } else if entry.answers_to(&CONTENT_TYPES, "Default") {
                 entry
                     .attribute_local("Extension")
+                    .filter(|extension| !extension.is_empty() && !extension.contains('/'))
                     .is_some_and(|extension| defaults.insert(extension.to_ascii_lowercase()))
             } else {
                 false
@@ -577,10 +628,17 @@ fn relationships_conform(parts: &[(String, Vec<u8>)], owner: &str) -> bool {
             && NAMES
                 .iter()
                 .all(|name| sole_and_ours(entry, &RELATIONSHIPS, name))
-            && entry.attribute_local("Type").is_some()
-            && entry.attribute_local("Target").is_some()
+            && ["Type", "Target"].iter().all(|name| {
+                entry
+                    .attribute_local(name)
+                    .is_some_and(|value| !value.is_empty())
+            })
+            && entry
+                .attribute_local("TargetMode")
+                .is_none_or(|mode| matches!(mode, "Internal" | "External"))
             && entry
                 .attribute_local("Id")
+                .filter(|id| !id.is_empty())
                 .is_some_and(|id| ids.insert(id.to_owned()))
     })
 }
