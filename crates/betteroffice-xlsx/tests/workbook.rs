@@ -5492,6 +5492,11 @@ fn sheets_sharing_a_drawing_anchor_may_not_disagree() {
         target.model().sheets[1].charts[0].anchor,
         "the projection must leave one anchor for the frame"
     );
+    assert_eq!(
+        target.model().sheets[1].charts[0].anchor,
+        moved,
+        "the first sheet in order donates the anchor, and it is the one written"
+    );
     assert!(
         target.save().is_ok(),
         "the projected workbook must still be saveable"
@@ -5563,6 +5568,90 @@ fn one_frame_converges_under_every_delivery_order_of_the_same_updates() {
     );
 }
 
+/// A replica may not accept an edit its peers will refuse. Publishing one is
+/// worse than losing it: the offending value stays the winner in every later
+/// diff, so the peer drops that update and every update after it, and the two
+/// part ways for the rest of the session. The local gate therefore has to hold
+/// the anchor to exactly what an arriving one is held to — the two once
+/// compared corners differently, one in pixels and one on the grid, and an
+/// offset large enough to cross a column told them apart.
+#[test]
+fn a_locally_accepted_repin_is_one_a_peer_can_take() {
+    let bytes = charted_fixture();
+    let mut local = Workbook::open_collaborative(&bytes, 940).unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 941).unwrap();
+    let from = local.model().sheets[0].charts[0].anchor;
+    let ChartAnchor::TwoCell { edit_as, .. } = from else {
+        panic!("two-cell anchor");
+    };
+
+    // corners that run backwards on the grid but forwards in pixels, because
+    // the offset more than covers the column it steps back over
+    let crossed = ChartAnchor::TwoCell {
+        from: AnchorCell {
+            col: 2,
+            col_off: 12_700,
+            row: 4,
+            row_off: 0,
+        },
+        to: AnchorCell {
+            col: 1,
+            col_off: 6_000_000,
+            row: 16,
+            row_off: 0,
+        },
+        edit_as,
+    };
+    let batch = vec![
+        Op::SetCell {
+            sheet: SheetId(0),
+            at: cell("A1"),
+            cell: CellState {
+                value: CellValue::Text {
+                    value: "important".to_owned(),
+                },
+                ..CellState::default()
+            },
+        },
+        Op::SetChartAnchor {
+            sheet: SheetId(0),
+            frame: "xl/drawings/drawing1.xml#0".to_owned(),
+            part: "xl/charts/chart1.xml".to_owned(),
+            from,
+            to: crossed,
+        },
+    ];
+
+    let refused = local
+        .apply_ops(batch, CalculationOptions::default())
+        .expect_err("an anchor no peer would take must not be accepted locally");
+    assert!(
+        matches!(&refused, Error::InvalidOperation(message) if message.contains("inverted or coincident")),
+        "{refused:?}"
+    );
+
+    // nothing was kept, and the session carries on in step
+    local
+        .edit_cell(
+            SheetId(0),
+            cell("A2"),
+            "later",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let update = local
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update, CalculationOptions::default())
+        .expect("a peer must still be able to take what this replica publishes");
+    assert_eq!(
+        peer.model(),
+        local.model(),
+        "the replicas must stay in step"
+    );
+    assert_eq!(peer.cell(SheetId(0), cell("A2")).unwrap().input, "later");
+}
+
 /// A snapshot is foreign bytes like any update, so it answers to the same
 /// checks. A pristine replica adopts a whole document instead of merging it,
 /// and if that door skipped the anchor check the two replicas would take
@@ -5610,7 +5699,7 @@ fn an_adopted_snapshot_answers_to_the_same_anchor_check_as_an_update() {
 /// anchor keeps the step working and the workbook saveable, and keeps the
 /// replica publishing something its peers can take.
 #[test]
-fn collaborative_undo_may_not_install_a_split_shared_drawing() {
+fn collaborative_undo_settles_a_split_shared_drawing() {
     let bytes = shared_drawing_fixture();
     let mut local = Workbook::open_collaborative(&bytes, 850).unwrap();
     let before = local.model().sheets[0].charts[0].anchor;

@@ -762,19 +762,15 @@ impl WorkbookAuthority {
         self.apply_history_change(true)
     }
 
-    /// Puts the document back when a history step turns out to be unreadable.
-    /// A peer can hide a malformed value behind a concurrent local one, so
-    /// undoing that local write can expose state no replica materializes;
-    /// leaving it in place would strand the authority ahead of the model the
-    /// caller still holds, with no update to send anyone.
+    /// Moves the document and both stacks. Every failure here leaves that half
+    /// done, so the caller holds a checkpoint and puts it back — one checkpoint
+    /// for the whole step rather than one here and another there, since this
+    /// runs on a keystroke and each costs a copy of the document.
     fn apply_history_change(
         &mut self,
         redo: bool,
     ) -> Result<Option<HistoryUpdate>, AuthorityError> {
         let state_vector = self.doc.transact().state_vector();
-        let restore = self.encode_state_as_update_v1();
-        let undo_stack = self.undo_stack.clone();
-        let redo_stack = self.redo_stack.clone();
         let mut undo =
             build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
                 .map_err(AuthorityError::InvalidState)?;
@@ -789,13 +785,9 @@ impl WorkbookAuthority {
         if !applied {
             return Ok(None);
         }
-        let (model, structure) = match self.strict_materialize() {
-            Ok(materialized) => materialized,
-            Err(error) => {
-                self.rollback(&restore, undo_stack, redo_stack)?;
-                return Err(AuthorityError::InvalidState(error));
-            }
-        };
+        let (model, structure) = self
+            .strict_materialize()
+            .map_err(AuthorityError::InvalidState)?;
         let update = self.doc.transact().encode_diff_v1(&state_vector);
         Ok(Some(HistoryUpdate {
             model,
@@ -804,10 +796,10 @@ impl WorkbookAuthority {
         }))
     }
 
-    /// Rebuilds the document from a state captured before a failed step. The
-    /// GUID is carried over because a history entry names the document it came
-    /// from: a fresh one orphans every restored entry, and the undo manager
-    /// discards orphans silently, one whole stack at a time.
+    /// Rebuilds the document from a checkpoint. The GUID is carried over
+    /// because a history entry names the document it came from: a fresh one
+    /// orphans every restored entry, and the undo manager discards orphans
+    /// silently, one whole stack at a time.
     fn rollback(
         &mut self,
         restore: &[u8],
@@ -2691,6 +2683,11 @@ fn materialize_sheet<T: ReadTxn>(
 /// in: refusing it would make integration depend on delivery order, and the
 /// replicas would never meet again. Sheet order is shared, so first-in-order
 /// wins is the same answer everywhere.
+///
+/// Removing a sheet is structural and refused while collaborative. Were that
+/// ever allowed, dropping the donor would hand the frame to whatever the
+/// surviving sheet's blob holds — which may be a value this has been quietly
+/// covering for, and which nothing has checked since it arrived.
 fn project_shared_frame_anchors(sheets: &mut [Sheet]) {
     let mut chosen = BTreeMap::new();
     for sheet in sheets.iter() {
@@ -4065,6 +4062,74 @@ mod tests {
         let update = peer_chart_update(&authority, 44, slid);
         let staged = authority.stage_updates_v1(&[&update]).unwrap();
         assert_eq!(staged.structure, frozen);
+    }
+
+    /// A checkpoint has to put back everything a history step moves: the
+    /// document, both stacks, and the identity the stacks name. Restoring into
+    /// a fresh document would look right and leave the history unusable — the
+    /// undo manager drops entries belonging to a document it does not know,
+    /// silently, a whole stack at a time — so the proof is that undo still
+    /// works afterwards.
+    #[test]
+    fn a_restored_checkpoint_brings_back_a_working_history() {
+        let model = sliding_model();
+        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 61).unwrap();
+        let commit = |authority: &mut WorkbookAuthority, to| {
+            let ops = [Op::SetChartAnchor {
+                sheet: SheetId(0),
+                frame: "xl/drawings/drawing1.xml#0".to_owned(),
+                part: "xl/charts/chart1.xml".to_owned(),
+                from: authority.materialize().unwrap().sheets[0].charts[0].anchor,
+                to,
+            }];
+            let staged = authority
+                .stage_local_ops_v1(&ops, SyncOrigin::User)
+                .unwrap();
+            authority
+                .apply_local_update_v1(&staged.update, SyncOrigin::User)
+                .unwrap();
+        };
+
+        commit(&mut authority, slid_anchor(2));
+        let checkpoint = authority.checkpoint();
+        let vector = authority.encode_state_vector_v1();
+        let anchor = authority.materialize().unwrap().sheets[0].charts[0].anchor;
+        let depth = authority.undo_depth();
+        assert!(depth > 0);
+
+        commit(&mut authority, slid_anchor(5));
+        assert_ne!(
+            authority.materialize().unwrap().sheets[0].charts[0].anchor,
+            anchor
+        );
+
+        authority.restore(checkpoint).unwrap();
+        assert_eq!(
+            authority.materialize().unwrap().sheets[0].charts[0].anchor,
+            anchor,
+            "restore must bring the document back"
+        );
+        assert_eq!(
+            authority.encode_state_vector_v1(),
+            vector,
+            "restore must wind the document back, not forward"
+        );
+        assert_eq!(
+            authority.undo_depth(),
+            depth,
+            "restore must bring back the stacks"
+        );
+
+        // the history still belongs to this document, so it can still be spent
+        let undone = authority
+            .undo()
+            .expect("a restored history must still apply")
+            .expect("the entry is on the stack");
+        assert_eq!(
+            undone.model.sheets[0].charts[0].anchor,
+            model.sheets[0].charts[0].anchor
+        );
+        assert_eq!(authority.undo_depth(), depth - 1);
     }
 
     /// A peer's chart write can lose the merge to a concurrent local one and

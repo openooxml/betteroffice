@@ -1197,21 +1197,29 @@ impl Workbook {
 
     /// A history step moves the shared document before anyone can see what it
     /// produced, so a rejected result has to put that document back. Leaving it
-    /// advanced would publish an undo the workbook itself refused: peers would
+    /// advanced would publish a step the workbook itself refused: peers would
     /// stage later updates onto state this replica does not hold.
+    ///
+    /// Nothing reaches the refusal today — the checks left after a step are
+    /// ones the projection settles rather than fails — so this is defensive,
+    /// and it is the only thing standing between a future check here and a
+    /// replica that has published what it would not keep.
     fn collaborative_history_step(
         &mut self,
         options: CalculationOptions,
         redo: bool,
     ) -> Result<MutationResult> {
         let checkpoint = self.authority.checkpoint();
-        let history = if redo {
+        let stepped = if redo {
             self.authority.redo()
         } else {
             self.authority.undo()
-        }
-        .map_err(authority_error)?;
-        match self.apply_collaborative_history(history, options) {
+        };
+        let outcome = match stepped {
+            Ok(history) => self.apply_collaborative_history(history, options),
+            Err(error) => Err(authority_error(error)),
+        };
+        match outcome {
             Ok(result) => Ok(result),
             Err(error) => {
                 self.authority
@@ -2443,6 +2451,10 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
                 });
             }
             validate_anchor_change(*from, *to, frame)?;
+            // a peer judges this anchor on its own terms, so this replica has
+            // to as well: anything it accepts that they refuse would be
+            // published and dropped, taking the rest of the session with it.
+            validate_intrinsic_anchor(*to)?;
             resolve_chart_anchor(*to, &GridGeometry::new(sheet_ref), 0, 0)
                 .map_err(|error| Error::InvalidOperation(error.to_string()))?;
         }
