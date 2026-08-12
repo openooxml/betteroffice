@@ -87,7 +87,7 @@ const LAYOUT: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
 <p:grpSpPr/>
 <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title Placeholder"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
-<p:spPr><a:xfrm><a:off x="762000" y="457200"/><a:ext cx="10668000" cy="1143000"/></a:xfrm></p:spPr>
+<p:spPr><a:xfrm flipH="1" rot="2700000"><a:off x="762000" y="457200"/><a:ext cx="10668000" cy="1143000"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sldLayout>"#;
 
@@ -254,7 +254,7 @@ fn a_connector_between_shapes_keeps_its_slot() {
 }
 
 #[test]
-fn an_inherited_placeholder_rect_is_written_whole() {
+fn a_moved_inherited_placeholder_keeps_its_rect_rotation_and_flip() {
     let session = open();
     let snapshot = session.snapshot().unwrap();
     let slide = &snapshot.slides[0];
@@ -269,8 +269,10 @@ fn an_inherited_placeholder_rect_is_written_whole() {
 
     let saved = parts(&session.save().unwrap());
     let slide = part_text(&saved, "ppt/slides/slide1.xml");
-    assert!(!slide.contains(r#"cx="0""#) || slide.contains("chExt"));
+    assert!(slide.contains(r#"<a:off x="900000" y="1000000"/>"#));
     assert!(slide.contains(r#"<a:ext cx="10668000" cy="1143000"/>"#));
+    assert!(slide.contains(r#"rot="2700000""#));
+    assert!(slide.contains(r#"flipH="1""#));
 
     let reopened = DeckSession::open(&session.save().unwrap(), 12).unwrap();
     let snapshot = reopened.snapshot().unwrap();
@@ -279,7 +281,124 @@ fn an_inherited_placeholder_rect_is_written_whole() {
         .iter()
         .find(|shape| shape.name == "Title")
         .unwrap();
+    assert_eq!((title.x, title.y), (900_000, 1_000_000));
     assert_eq!((title.width, title.height), (10_668_000, 1_143_000));
+    assert_eq!(title.rotation_deg, 45.0);
+    assert!(title.flip_h);
+}
+
+#[test]
+fn a_resized_inherited_placeholder_keeps_its_inherited_offset() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let title = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Title")
+        .unwrap();
+    session
+        .resize_shape(&context(), &slide.id, &title.id, 5_000_000, 900_000)
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:off x="762000" y="457200"/>"#));
+    assert!(slide.contains(r#"<a:ext cx="5000000" cy="900000"/>"#));
+}
+
+#[test]
+fn a_shape_added_to_an_emptied_slide_lands_after_the_group_properties() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = snapshot.slides[1].clone();
+    session
+        .remove_shape(&context(), &slide.id, &slide.shapes[0].id)
+        .unwrap();
+    session
+        .add_text_box(
+            &context(),
+            &slide.id,
+            &pptx_edit::ShapeDraft {
+                name: "Fresh".to_owned(),
+                rect: pptx_edit::ShapeRect {
+                    x: 100,
+                    y: 200,
+                    width: 3_000,
+                    height: 4_000,
+                },
+                text: "on an empty slide".to_owned(),
+                style: TextStyle::default(),
+            },
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let slide = part_text(&saved, "ppt/slides/slide2.xml");
+    let non_visual = slide.find("<p:nvGrpSpPr>").unwrap();
+    let group_properties = slide.find("<p:grpSpPr").unwrap();
+    let added = slide.find("<p:sp>").unwrap();
+    assert!(non_visual < group_properties && group_properties < added);
+}
+
+#[test]
+fn junk_style_values_are_rejected_at_the_edit() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = snapshot.slides[0].shapes[0].text_stories[0].id.clone();
+    let styles = [
+        TextStyle {
+            color: Some("rebeccapurple".to_owned()),
+            ..TextStyle::default()
+        },
+        TextStyle {
+            underline: Some("wobbly".to_owned()),
+            ..TextStyle::default()
+        },
+        TextStyle {
+            font_size_pt: Some(0.001),
+            ..TextStyle::default()
+        },
+    ];
+    for style in styles {
+        let error = session
+            .insert_text(&context(), &story_id, 0, "X", &style)
+            .unwrap_err();
+        assert!(matches!(error, EditError::InvalidText(_)));
+    }
+    assert_eq!(parts(&session.save().unwrap()), parts(&fixture(256)));
+}
+
+#[test]
+fn an_edit_inside_a_linked_run_keeps_the_link() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let story_id = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Title")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone();
+    session
+        .insert_text(&context(), &story_id, 8, "X", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>liXnk</a:t>"));
+    assert!(slide.contains("hlinkClick"));
+    assert!(slide.contains(r#"strike="sngStrike""#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert!(
+        reopened
+            .story(&story_id)
+            .unwrap()
+            .plain_text()
+            .starts_with("Hello liXnk")
+    );
 }
 
 #[test]

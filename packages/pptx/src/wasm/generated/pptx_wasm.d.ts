@@ -28,6 +28,8 @@ export class PptxDocument {
     /**
      * `source` is the file the update was seeded from; when it matches the
      * recorded fingerprint the session keeps its part bytes and can save.
+     * Bytes that parse as a deck but do not match fail the open; bytes that
+     * are not a deck at all fall back to the bare update session.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     redoJson(): string;

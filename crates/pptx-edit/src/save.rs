@@ -183,9 +183,12 @@ fn shape_patch(
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     if (shape.x, shape.y, shape.width, shape.height) != (base.x, base.y, base.width, base.height) {
-        let (x, y, width, height) = resolved_rect(shape, context);
-        patch.offset = Some((x, y));
-        patch.extent = Some((width, height));
+        let resolved = resolved_transform(shape, base, context);
+        patch.offset = Some((resolved.x, resolved.y));
+        patch.extent = Some((resolved.width, resolved.height));
+        patch.rotation_deg = Some(resolved.rotation_deg);
+        patch.flip_horizontal = Some(resolved.flip_h);
+        patch.flip_vertical = Some(resolved.flip_v);
     }
     if shape.fill != base.fill {
         patch.fill = Some(
@@ -222,13 +225,49 @@ fn shape_patch(
     Ok(patch)
 }
 
-/// The rect the renderer would draw the edited shape at: an explicit extent
-/// wins; otherwise geometry is inherited from the source shape, then the
-/// layout and master placeholders.
-fn resolved_rect(shape: &ShapeSnapshot, context: &SlideContext<'_>) -> (i64, i64, i64, i64) {
-    if shape.width > 0 && shape.height > 0 {
-        return (shape.x, shape.y, shape.width, shape.height);
+/// The transform the renderer would draw the edited shape with. Halves the
+/// user edited win outright; halves the source never spelled out are
+/// inherited from the source shape, then the layout and master placeholders,
+/// rotation and flips included.
+fn resolved_transform(
+    shape: &ShapeSnapshot,
+    base: &ShapeSnapshot,
+    context: &SlideContext<'_>,
+) -> ShapeTransform {
+    let source_inherited = base.width <= 0 || base.height <= 0;
+    let inherited = source_inherited
+        .then(|| inherited_transform(shape, context))
+        .flatten();
+    let moved = (shape.x, shape.y) != (base.x, base.y);
+    let resized = (shape.width, shape.height) != (base.width, base.height);
+    let (x, y) = match inherited {
+        Some(transform) if !moved => (transform.x, transform.y),
+        _ => (shape.x, shape.y),
+    };
+    let (width, height) = match inherited {
+        Some(transform) if !resized => (transform.width, transform.height),
+        _ => (shape.width, shape.height),
+    };
+    let (rotation_deg, flip_h, flip_v) = match inherited {
+        Some(transform) => (transform.rotation_deg, transform.flip_h, transform.flip_v),
+        None => (shape.rotation_deg, shape.flip_h, shape.flip_v),
+    };
+    ShapeTransform {
+        x,
+        y,
+        width,
+        height,
+        rotation_deg,
+        flip_h,
+        flip_v,
+        ..ShapeTransform::default()
     }
+}
+
+fn inherited_transform<'a>(
+    shape: &ShapeSnapshot,
+    context: &SlideContext<'a>,
+) -> Option<&'a ShapeTransform> {
     let original = (shape.source_id != 0)
         .then(|| {
             context
@@ -251,8 +290,6 @@ fn resolved_rect(shape: &ShapeSnapshot, context: &SlideContext<'_>) -> (i64, i64
         .flatten()
         .map(node_transform)
         .find(|transform| transform.width > 0 && transform.height > 0)
-        .map(|transform| (transform.x, transform.y, transform.width, transform.height))
-        .unwrap_or((shape.x, shape.y, shape.width, shape.height))
 }
 
 fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {

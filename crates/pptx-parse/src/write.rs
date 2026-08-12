@@ -64,6 +64,9 @@ pub enum ShapeWrite {
 pub struct ShapePatch {
     pub offset: Option<(i64, i64)>,
     pub extent: Option<(i64, i64)>,
+    pub rotation_deg: Option<f64>,
+    pub flip_horizontal: Option<bool>,
+    pub flip_vertical: Option<bool>,
     pub fill: Option<ShapeFill>,
     /// A default outline clears the stroke.
     pub outline: Option<ShapeOutline>,
@@ -749,6 +752,15 @@ fn patch_shape_children(
         })
         .collect();
     let mut children = Vec::with_capacity(slots.len());
+    let prologue_end = shape_slots.first().copied().unwrap_or_else(|| {
+        slots
+            .iter()
+            .position(|slot| {
+                matches!(slot, Some(XmlNode::Element(element)) if element.local_name() == "extLst")
+            })
+            .unwrap_or(slots.len())
+    });
+    emit_sibling_slots(&mut slots, &mut children, prologue_end);
     for write in writes {
         match write {
             ShapeWrite::Keep { source_index } | ShapeWrite::Patch { source_index, .. } => {
@@ -811,7 +823,7 @@ fn patch_shape(
     part: &str,
 ) -> Result<(), PptxError> {
     if patch.offset.is_some() || patch.extent.is_some() {
-        patch_transform(element, patch.offset, patch.extent, prefixes, part)?;
+        patch_transform(element, patch, prefixes, part)?;
     }
     if let Some(fill) = &patch.fill {
         let properties = shape_properties_mut(element, part)?;
@@ -856,11 +868,11 @@ fn shape_properties_mut<'a>(
 
 fn patch_transform(
     element: &mut XmlElement,
-    offset: Option<(i64, i64)>,
-    extent: Option<(i64, i64)>,
+    patch: &ShapePatch,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<(), PptxError> {
+    let (offset, extent) = (patch.offset, patch.extent);
     let (container, transform_name) = match element.local_name() {
         "graphicFrame" => (None, prefixes.presentation("xfrm")),
         "grpSp" => (Some("grpSpPr"), prefixes.drawing("xfrm")),
@@ -928,6 +940,26 @@ fn patch_transform(
         let element = transform.child_mut("ext").expect("extent ensured above");
         element.set_attribute("cx", width.to_string());
         element.set_attribute("cy", height.to_string());
+    }
+    if let Some(rotation) = patch.rotation_deg {
+        if rotation == 0.0 {
+            transform.attributes.remove("rot");
+        } else {
+            transform.set_attribute("rot", format_fixed(rotation * 60_000.0));
+        }
+    }
+    let flips = [
+        ("flipH", patch.flip_horizontal),
+        ("flipV", patch.flip_vertical),
+    ];
+    for (name, flip) in flips {
+        match flip {
+            Some(true) => transform.set_attribute(name, "1"),
+            Some(false) => {
+                transform.attributes.remove(name);
+            }
+            None => {}
+        }
     }
     Ok(())
 }
@@ -1387,13 +1419,22 @@ fn build_paragraph(
         back += 1;
     }
     let tail_start = source_runs.len() - back;
+    // An edit contained in a single source run keeps that run's unmodeled
+    // markup (hyperlink, strike, spacing) by rebuilding onto its rPr.
+    let template = (tail_start - front == 1 && source_runs[front].local_name() == "r")
+        .then(|| source_runs[front].child("rPr").cloned())
+        .flatten();
     let mut runs: Vec<XmlNode> = Vec::with_capacity(segments.len());
     let mut source_runs = source_runs.into_iter();
     for element in source_runs.by_ref().take(front) {
         runs.push(XmlNode::Element(element));
     }
     for segment in &segments[front..segments.len() - back] {
-        runs.push(XmlNode::Element(segment_element(segment, prefixes)));
+        runs.push(XmlNode::Element(segment_element(
+            segment,
+            template.as_ref(),
+            prefixes,
+        )));
     }
     for element in source_runs.skip(tail_start - front) {
         runs.push(XmlNode::Element(element));
@@ -1409,7 +1450,11 @@ fn build_paragraph(
     paragraph
 }
 
-fn segment_element(segment: &RunSegment<'_>, prefixes: &Prefixes) -> XmlElement {
+fn segment_element(
+    segment: &RunSegment<'_>,
+    template: Option<&XmlElement>,
+    prefixes: &Prefixes,
+) -> XmlElement {
     if segment.line_break {
         let mut line_break = XmlElement::new(prefixes.drawing("br"));
         if let Some(properties) = run_properties_element(segment.properties, prefixes) {
@@ -1417,11 +1462,104 @@ fn segment_element(segment: &RunSegment<'_>, prefixes: &Prefixes) -> XmlElement 
         }
         return line_break;
     }
+    let properties = match template {
+        Some(template) => {
+            let mut base = template.clone();
+            apply_run_properties(&mut base, segment.properties, prefixes);
+            Some(base)
+        }
+        None => run_properties_element(segment.properties, prefixes),
+    };
     let mut element = XmlElement::new(prefixes.drawing("r"));
-    if let Some(properties) = run_properties_element(segment.properties, prefixes) {
+    if let Some(properties) = properties {
         element = element.with_child(properties);
     }
     element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
+}
+
+const POST_LATIN_ELEMENTS: [&str; 7] = [
+    "ea",
+    "cs",
+    "sym",
+    "hlinkClick",
+    "hlinkMouseOver",
+    "rtl",
+    "extLst",
+];
+
+/// Overwrites the modeled styling on a cloned source `rPr`, leaving what the
+/// model does not carry (hyperlinks, strike, spacing, language) in place.
+fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefixes: &Prefixes) {
+    match properties.font_size_pt {
+        Some(size) => base.set_attribute("sz", format_fixed(size * 100.0)),
+        None => {
+            base.attributes.remove("sz");
+        }
+    }
+    let toggles = [("b", properties.bold), ("i", properties.italic)];
+    for (name, value) in toggles {
+        match value {
+            Some(value) => base.set_attribute(name, if value { "1" } else { "0" }),
+            None => {
+                base.attributes.remove(name);
+            }
+        }
+    }
+    match &properties.underline {
+        Some(underline) => base.set_attribute("u", underline.clone()),
+        None => {
+            base.attributes.remove("u");
+        }
+    }
+    base.children.retain(|child| {
+        !matches!(
+            child,
+            XmlNode::Element(element) if element.local_name() == "solidFill"
+        )
+    });
+    if let Some(color) = properties
+        .color
+        .as_ref()
+        .and_then(|color| color_element(color, prefixes))
+    {
+        let position = base
+            .children
+            .iter()
+            .position(
+                |child| !matches!(child, XmlNode::Element(element) if element.local_name() == "ln"),
+            )
+            .unwrap_or(base.children.len());
+        base.children.insert(
+            position,
+            XmlNode::Element(XmlElement::new(prefixes.drawing("solidFill")).with_child(color)),
+        );
+    }
+    base.children.retain(|child| {
+        !matches!(
+            child,
+            XmlNode::Element(element) if element.local_name() == "latin"
+        )
+    });
+    if let Some(family) = &properties.font_family {
+        let position = base
+            .children
+            .iter()
+            .position(|child| {
+                matches!(
+                    child,
+                    XmlNode::Element(element)
+                        if POST_LATIN_ELEMENTS.contains(&element.local_name())
+                )
+            })
+            .unwrap_or(base.children.len());
+        base.children.insert(
+            position,
+            XmlNode::Element(
+                XmlElement::new(prefixes.drawing("latin"))
+                    .with_attribute("typeface", family.clone()),
+            ),
+        );
+    }
 }
 
 fn apply_paragraph_properties(

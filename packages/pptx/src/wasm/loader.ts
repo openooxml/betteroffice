@@ -38,7 +38,8 @@ export interface OpenPresentationOptions {
   /**
    * Opens from a collaboration update instead of parsing the file bytes.
    * When the bytes are the file the update was seeded from, the session
-   * keeps them and `save()` works; otherwise `save()` throws.
+   * keeps them and `save()` works. A different deck fails the open; bytes
+   * that are not a deck open without a source and `save()` throws.
    */
   initialUpdate?: Uint8Array;
 }

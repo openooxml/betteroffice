@@ -6,8 +6,8 @@ use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeStroke, TextStyle,
-    TextStylePatch, UpdateEvent, UpdateOrigin,
+    DeckSession, DeckSnapshot, EditCtx, EditError, PresetShapeDraft, ShapeDraft, ShapeStroke,
+    TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -168,6 +168,8 @@ impl PptxDocument {
 
     /// `source` is the file the update was seeded from; when it matches the
     /// recorded fingerprint the session keeps its part bytes and can save.
+    /// Bytes that parse as a deck but do not match fail the open; bytes that
+    /// are not a deck at all fall back to the bare update session.
     #[wasm_bindgen(js_name = openCollaborativeFromUpdate)]
     pub fn open_collaborative_from_update(
         update: &[u8],
@@ -175,12 +177,18 @@ impl PptxDocument {
         source: Option<Vec<u8>>,
     ) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
-        let session = source
-            .and_then(|source| {
-                DeckSession::open_from_update_with_source(update, &source, client_id).ok()
-            })
-            .map_or_else(|| DeckSession::open_from_update(update, client_id), Ok)
-            .map_err(js_error)?;
+        let session = match source {
+            Some(source) => {
+                match DeckSession::open_from_update_with_source(update, &source, client_id) {
+                    Ok(session) => session,
+                    Err(error @ EditError::Parse(_)) if pptx_parse::parse_pptx(&source).is_ok() => {
+                        return Err(js_error(error));
+                    }
+                    Err(_) => DeckSession::open_from_update(update, client_id).map_err(js_error)?,
+                }
+            }
+            None => DeckSession::open_from_update(update, client_id).map_err(js_error)?,
+        };
         Ok(Self {
             session,
             update_observer: None,

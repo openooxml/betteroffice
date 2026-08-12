@@ -326,10 +326,11 @@ impl DeckSession {
         validate_rect(draft.rect)?;
         crate::model::validate_xml_text(&draft.name)?;
         crate::model::validate_xml_text(&draft.text)?;
-        crate::story::validate_style_text(
+        crate::story::validate_style_values(
             draft.style.font_family.as_deref(),
             draft.style.underline.as_deref(),
             draft.style.color.as_deref(),
+            draft.style.font_size_pt,
         )?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
