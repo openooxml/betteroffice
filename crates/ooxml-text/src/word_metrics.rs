@@ -36,10 +36,11 @@
 //! 1. the em size itself snaps to an integer ppem (`round(size_px)`; our
 //!    layout unit is already px at 96 DPI, so this is the layout grid);
 //! 2. the metric family is chosen — `OS/2` fsSelection **bit 7**
-//!    (USE_TYPO_METRICS) hands line spacing to sTypoAscender /
-//!    sTypoDescender / sTypoLineGap, otherwise the win/hhea pair above
-//!    governs (a font setting bit 7 measures several percent tall without
-//!    this, because its `usWin*` box is deliberately the clipping box);
+//!    (USE_TYPO_METRICS, defined from table version 4 and reserved before
+//!    it) hands line spacing to sTypoAscender / sTypoDescender /
+//!    sTypoLineGap, otherwise the win/hhea pair above governs (a font
+//!    setting bit 7 measures several percent tall without this, because its
+//!    `usWin*` box is deliberately the clipping box);
 //! 3. ascent, descent and leading are each rounded to whole pixels at that
 //!    ppem **before** they are summed. Rounding the sum is not the same
 //!    number as summing the rounded parts, and the integer stack rounds the
@@ -170,37 +171,61 @@ impl LineBox {
 ///   per rule 1a: integer ppem, USE_TYPO_METRICS family selection, and each
 ///   component rounded to whole pixels before the three are summed.
 ///
-/// Panic-free on malformed metrics: a zero `units_per_em` (or a NaN /
-/// non-positive `size_px`) yields an all-zero box rather than NaN/negative
-/// geometry — font bytes are attacker-controlled and a degenerate line box
-/// is the safe downstream value.
+/// Panic-free on malformed metrics: a zero `units_per_em`, or a `size_px`
+/// that is not finite and positive, yields an all-zero box rather than
+/// NaN/negative/infinite geometry. Font bytes are attacker-controlled, so
+/// design values are additionally clamped to [`MAX_METRIC_EMS`] before
+/// scaling and the em size to [`MAX_PPEM`] — a degenerate line box is the
+/// safe downstream value, an unbounded one is not.
 pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> LineBox {
-    if m.units_per_em == 0 || size_px.is_nan() || size_px <= 0.0 {
+    if m.units_per_em == 0 || !size_px.is_finite() || size_px <= 0.0 {
         return LineBox {
             ascent: 0.0,
             descent: 0.0,
             leading: 0.0,
         };
     }
+    let (ascent, descent, leading) = line_metric_family(m, compat.gdi_line_metrics);
+    let leading = if compat.no_leading { 0 } else { leading };
+
     if compat.gdi_line_metrics {
-        return gdi_line_box(m, size_px, compat.no_leading);
-    }
-    let scale = size_px / m.units_per_em as f32;
-
-    let ascent = m.os2_win_ascent as f32 * scale;
-    let descent = m.os2_win_descent as f32 * scale;
-
-    let leading = if compat.no_leading {
-        0.0
+        // f64 keeps `design × ppem` exact for every clamped design value, so
+        // each round sees the true ratio and not an accumulated float error.
+        let ppem = quantized_ppem(size_px) as f64;
+        let upm = m.units_per_em as f64;
+        let px = |design: i32| (design as f64 * ppem / upm).round() as f32;
+        LineBox {
+            ascent: px(ascent),
+            descent: px(descent),
+            leading: px(leading),
+        }
     } else {
-        win_external_leading(m) as f32 * scale
-    };
-
-    LineBox {
-        ascent,
-        descent,
-        leading,
+        let scale = size_px / m.units_per_em as f32;
+        LineBox {
+            ascent: ascent as f32 * scale,
+            descent: descent as f32 * scale,
+            leading: leading as f32 * scale,
+        }
     }
+}
+
+/// Per-component design ceiling, in ems. Real fonts keep every vertical
+/// metric near one em; this is far above any of them and exists so a font
+/// declaring a tiny `unitsPerEm` beside extreme `usWin*` values cannot scale
+/// an ordinary font size into a line box the height of a document.
+const MAX_METRIC_EMS: i32 = 16;
+
+/// ppem ceiling: 1638pt at 96 DPI, Word's own font-size cap, which
+/// `measure::input::validate_pt_size` already enforces on the measurement
+/// surface. Repeated here because callers may reach this function directly.
+const MAX_PPEM: i32 = 2184;
+
+/// Rule 1a step 1: the em size on GDI's integer grid.
+///
+/// Floored at 1 so a positive sub-pixel size still measures something, and
+/// capped so a saturating cast cannot hand the scaler an absurd multiplier.
+fn quantized_ppem(size_px: f32) -> i32 {
+    (size_px.round() as i32).clamp(1, MAX_PPEM)
 }
 
 /// GDI `tmExternalLeading` in design units: the hhea line height's excess
@@ -215,47 +240,35 @@ fn win_external_leading(m: &FontMetrics) -> i32 {
 }
 
 /// Design-space (ascent, descent, leading) of the family that governs line
-/// spacing: sTypo* when `OS/2` fsSelection bit 7 asks for it, else win/hhea.
+/// spacing. `allow_typo` opens the sTypo family to fonts whose `OS/2`
+/// fsSelection bit 7 asks for it (rule 1a); without it the win/hhea family
+/// governs unconditionally, as it always has.
 ///
 /// A font can set the bit and still carry an empty or inverted typo box
 /// (absent values, or values that do not sum positive); those fall back to
-/// win/hhea rather than collapsing the line to nothing. Components clamp
-/// non-negative — a positively-signed sTypoDescender is malformed, not a
-/// license to emit negative geometry.
-fn line_metric_family(m: &FontMetrics) -> (i32, i32, i32) {
-    if m.use_typo_metrics() {
+/// win/hhea rather than collapsing the line to nothing.
+///
+/// Every component is widened to `i32` before negation — `-sTypoDescender`
+/// overflows in `i16` for `i16::MIN` — and clamped into
+/// `0..=MAX_METRIC_EMS × upm`: a positively-signed sTypoDescender is
+/// malformed, not a license to emit negative geometry.
+fn line_metric_family(m: &FontMetrics, allow_typo: bool) -> (i32, i32, i32) {
+    let cap = MAX_METRIC_EMS * m.units_per_em as i32;
+    let clamp = |v: i32| v.clamp(0, cap);
+
+    if allow_typo && m.use_typo_metrics() {
         let ascent = m.os2_typo_ascender as i32;
         let descent = -(m.os2_typo_descender as i32);
         let leading = m.os2_typo_line_gap as i32;
         if ascent + descent + leading > 0 {
-            return (ascent.max(0), descent.max(0), leading.max(0));
+            return (clamp(ascent), clamp(descent), clamp(leading));
         }
     }
     (
-        m.os2_win_ascent as i32,
-        m.os2_win_descent as i32,
-        win_external_leading(m),
+        clamp(m.os2_win_ascent as i32),
+        clamp(m.os2_win_descent as i32),
+        clamp(win_external_leading(m)),
     )
-}
-
-/// Rule 1a: the single-spacing box on GDI's integer grid.
-///
-/// `no_leading` is applied before quantization, so a dropped leading
-/// contributes exactly zero rather than a rounded remainder. f64 keeps the
-/// `design × ppem` product exact for every representable design value, so
-/// each `round` sees the true ratio and not an accumulated float error.
-fn gdi_line_box(m: &FontMetrics, size_px: f32, no_leading: bool) -> LineBox {
-    let ppem = (size_px.round() as i32).max(1);
-    let (ascent, descent, leading) = line_metric_family(m);
-    let leading = if no_leading { 0 } else { leading };
-
-    let upm = m.units_per_em as f64;
-    let px = |design: i32| (design as f64 * ppem as f64 / upm).round() as f32;
-    LineBox {
-        ascent: px(ascent),
-        descent: px(descent),
-        leading: px(leading),
-    }
 }
 
 /// Apply `w:spacing` lineRule to a measured content line box (rule 2).

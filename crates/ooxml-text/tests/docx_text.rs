@@ -42,6 +42,7 @@ fn metrics_match_hand_computed_table_values() {
     assert_eq!(m.os2_win_ascent, 1854);
     assert_eq!(m.os2_win_descent, 434);
     assert_eq!(m.os2_fs_selection, 0x40); // REGULAR, USE_TYPO_METRICS clear
+    assert_eq!(m.os2_version, 3); // predates the bit-7 definition anyway
 }
 
 // hand-computed from cmap format-4 + hmtx: (char, glyph id, advance in font units)
@@ -348,6 +349,7 @@ fn synthetic_metrics() -> FontMetrics {
         os2_win_ascent: 620,
         os2_win_descent: 170,
         os2_fs_selection: 0,
+        os2_version: 4,
     }
 }
 
@@ -432,6 +434,31 @@ fn use_typo_metrics_bit_selects_the_typographic_family() {
     );
     // a full pixel shorter than the win box the same font would get otherwise
     assert_eq!(single_line_box(&win, 20.0, &gdi_flags()).height(), 16.0);
+
+    // the family choice belongs to rule 1a: the float path never consults
+    // the bit, so the same font measures on win metrics there
+    assert_eq!(
+        single_line_box(&typo, 20.0, &CompatFlags::default()),
+        single_line_box(&win, 20.0, &CompatFlags::default())
+    );
+}
+
+#[test]
+fn use_typo_metrics_is_ignored_before_os2_version_4() {
+    // bit 7 is reserved in OS/2 versions 0-3, so a set bit there says nothing
+    for version in [0u16, 1, 2, 3] {
+        let old = FontMetrics {
+            os2_fs_selection: USE_TYPO_METRICS,
+            os2_version: version,
+            ..synthetic_metrics()
+        };
+        assert!(!old.use_typo_metrics(), "version {version}");
+        assert_eq!(
+            single_line_box(&old, 20.0, &gdi_flags()).height(),
+            16.0,
+            "version {version} measures on win metrics"
+        );
+    }
 }
 
 #[test]
@@ -486,7 +513,7 @@ fn gdi_no_leading_drops_the_leading_and_nothing_else() {
 }
 
 #[test]
-fn gdi_metrics_keep_the_degenerate_input_guards() {
+fn degenerate_sizes_yield_a_zero_box_on_both_paths() {
     let zero = LineBox {
         ascent: 0.0,
         descent: 0.0,
@@ -496,11 +523,22 @@ fn gdi_metrics_keep_the_degenerate_input_guards() {
         units_per_em: 0,
         ..synthetic_metrics()
     };
-    assert_eq!(single_line_box(&broken_upem, 20.0, &gdi_flags()), zero);
-
-    for size_px in [f32::NAN, 0.0, -20.0, f32::NEG_INFINITY] {
-        let line = single_line_box(&synthetic_metrics(), size_px, &gdi_flags());
-        assert_eq!(line, zero, "{size_px}");
+    // +INFINITY is the one that used to slip through: it is neither NaN nor
+    // <= 0, and scaling by it produced an infinite line box
+    let sizes = [
+        f32::NAN,
+        0.0,
+        -20.0,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        -f32::MIN_POSITIVE,
+    ];
+    for compat in [CompatFlags::default(), gdi_flags()] {
+        assert_eq!(single_line_box(&broken_upem, 20.0, &compat), zero);
+        for size_px in sizes {
+            let line = single_line_box(&synthetic_metrics(), size_px, &compat);
+            assert_eq!(line, zero, "{size_px} / gdi={}", compat.gdi_line_metrics);
+        }
     }
 
     // a positive but sub-pixel size still measures at ppem 1: small, never
@@ -508,6 +546,66 @@ fn gdi_metrics_keep_the_degenerate_input_guards() {
     let tiny = single_line_box(&synthetic_metrics(), 0.2, &gdi_flags());
     assert_eq!(tiny.height(), 1.0);
     assert!(tiny.ascent >= 0.0 && tiny.descent >= 0.0 && tiny.leading >= 0.0);
+}
+
+#[test]
+fn hostile_metrics_stay_bounded_and_non_negative() {
+    // sTypoDescender = i16::MIN: negating it in i16 would overflow, and the
+    // 32768-unit descent it implies is 32 ems of descent
+    let extreme_typo = FontMetrics {
+        os2_fs_selection: USE_TYPO_METRICS,
+        os2_typo_descender: i16::MIN,
+        ..synthetic_metrics()
+    };
+    assert_eq!(
+        single_line_box(&extreme_typo, 20.0, &gdi_flags()),
+        LineBox {
+            ascent: 11.0,
+            descent: 320.0, // clamped to 16 ems: 16000 * 20 / 1000
+            leading: 1.0,
+        }
+    );
+
+    // a tiny em beside a huge win ascent: 65535 units at upem 16 is 4095 ems,
+    // which unclamped turns a 16px font into a 65535px line box
+    let tiny_em = FontMetrics {
+        units_per_em: 16,
+        os2_win_ascent: u16::MAX,
+        os2_win_descent: u16::MAX,
+        hhea_ascender: i16::MAX,
+        hhea_descender: i16::MIN,
+        hhea_line_gap: i16::MAX,
+        ..synthetic_metrics()
+    };
+    for compat in [CompatFlags::default(), gdi_flags()] {
+        let line = single_line_box(&tiny_em, 16.0, &compat);
+        for part in [line.ascent, line.descent, line.leading] {
+            assert!(
+                (0.0..=256.0).contains(&part), // 16 ems at 16px
+                "{part} / gdi={}",
+                compat.gdi_line_metrics
+            );
+        }
+    }
+
+    // an absurd but finite size caps at Word's own 1638pt ceiling (2184px),
+    // so every size past it measures identically
+    let capped = single_line_box(&synthetic_metrics(), 2184.0, &gdi_flags());
+    assert_eq!(
+        capped,
+        LineBox {
+            ascent: 1354.0, // 620 * 2184 / 1000 = 1354.08
+            descent: 371.0, // 170 * 2184 / 1000 = 371.28
+            leading: 153.0, // 70  * 2184 / 1000 = 152.88
+        }
+    );
+    for size_px in [1.0e9, f32::MAX] {
+        assert_eq!(
+            single_line_box(&synthetic_metrics(), size_px, &gdi_flags()),
+            capped,
+            "{size_px}"
+        );
+    }
 }
 
 #[test]

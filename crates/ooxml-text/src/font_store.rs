@@ -175,13 +175,19 @@ pub struct FontMetrics {
     pub os2_win_descent: u16,
     /// `OS/2` fsSelection, defined bits only (the parser drops reserved bits).
     pub os2_fs_selection: u16,
+    /// `OS/2` table version, which decides how much of the table is defined.
+    pub os2_version: u16,
 }
 
 impl FontMetrics {
     /// `OS/2` fsSelection bit 7 (USE_TYPO_METRICS): the font asks for its
     /// sTypo values to drive default line spacing.
+    ///
+    /// Only defined from table version 4. Versions 0-3 reserve the bit, so a
+    /// set bit there is meaningless and must not select the typo family.
     pub fn use_typo_metrics(&self) -> bool {
-        self.os2_fs_selection & SelectionFlags::USE_TYPO_METRICS.bits() != 0
+        self.os2_version >= 4
+            && self.os2_fs_selection & SelectionFlags::USE_TYPO_METRICS.bits() != 0
     }
 }
 
@@ -237,6 +243,7 @@ impl FontStore {
             os2_win_ascent: os2.us_win_ascent(),
             os2_win_descent: os2.us_win_descent(),
             os2_fs_selection: os2.fs_selection().bits(),
+            os2_version: os2.version(),
         };
 
         let data: Box<[u8]> = bytes.into_boxed_slice();
