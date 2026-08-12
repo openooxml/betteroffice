@@ -209,6 +209,46 @@ impl Paginator {
         self.margins.left + column_index as f64 * (self.column_width + self.columns.gap)
     }
 
+    /// Space this page's footnotes take out of its content area.
+    fn footnote_reservation(&self, page_number: u32) -> f64 {
+        self.footnote_reserved_heights
+            .as_ref()
+            .and_then(|m| m.get(&page_number.to_string()).copied())
+            .unwrap_or(0.0)
+    }
+
+    /// The current state, when nothing has been committed to its page. A
+    /// forced break has nothing to do there, and the page has not yet
+    /// committed to its geometry either.
+    fn pristine_page(&self) -> Option<usize> {
+        let idx = self.states.len().checked_sub(1)?;
+        let state = &self.states[idx];
+        (self.pages[state.page_index].fragments.is_empty() && state.pen_y == state.content_top)
+            .then_some(idx)
+    }
+
+    /// Re-forms an untouched page around the geometry now in force. Without
+    /// this an immediate change that lands on a pristine page — a section
+    /// break promoted to a page break that then finds nothing to break away
+    /// from — would leave the sheet reporting the old size and content bounds
+    /// while its content is laid out to the new ones.
+    fn restamp_pristine_page(&mut self) {
+        let Some(idx) = self.pristine_page() else {
+            return;
+        };
+        let page_index = self.states[idx].page_index;
+        let content_top = self.margins.top;
+        let content_limit =
+            self.get_content_bottom() - self.footnote_reservation(self.pages[page_index].number);
+        self.pages[page_index].size = self.page_size.clone();
+        self.pages[page_index].margins = self.margins.clone();
+        let state = &mut self.states[idx];
+        state.pen_y = content_top;
+        state.content_top = content_top;
+        state.content_limit = content_limit;
+        self.column_region_top = content_top;
+    }
+
     /// Opens the next page, promoting any deferred geometry first, and returns
     /// its state index.
     fn create_new_page(&mut self) -> usize {
@@ -236,15 +276,8 @@ impl Paginator {
         }
         let page_number = self.start_page_number + self.pages.len() as u32;
         let content_top = self.margins.top;
-        let content_limit = self.get_content_bottom();
-
-        // reduce content bottom by the footnote reserved height for this page
-        let footnote_height = self
-            .footnote_reserved_heights
-            .as_ref()
-            .and_then(|m| m.get(&page_number.to_string()).copied())
-            .unwrap_or(0.0);
-        let page_content_bottom = content_limit - footnote_height;
+        let footnote_height = self.footnote_reservation(page_number);
+        let page_content_bottom = self.get_content_bottom() - footnote_height;
 
         let page = Page {
             number: page_number,
@@ -408,15 +441,10 @@ impl Paginator {
 
     /// Forces a page break and is idempotent on a pristine page.
     pub fn force_page_break(&mut self) -> usize {
-        if let Some(idx) = self.states.len().checked_sub(1) {
-            let current = &self.states[idx];
-            if self.pages[current.page_index].fragments.is_empty()
-                && current.pen_y == current.content_top
-            {
-                return idx;
-            }
+        match self.pristine_page() {
+            Some(idx) => idx,
+            None => self.create_new_page(),
         }
-        self.create_new_page()
     }
 
     /// Non-idempotent page creation for the truly blank sheet required by an
@@ -496,6 +524,7 @@ impl Paginator {
         // a pending swap is superseded by this immediate swap
         self.pending_page_size = None;
         self.pending_margins = None;
+        self.restamp_pristine_page();
         Ok(())
     }
 
@@ -534,13 +563,9 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
 
     fn advance_to_next_column(&mut self) -> bool {
         let idx = self.get_current();
-        let state = &self.states[idx];
         // already at a fresh region start: advancing would only add a blank
         // page, exactly what force_page_break declines to do
-        if state.column_index == 0
-            && state.pen_y == state.content_top
-            && self.pages[state.page_index].fragments.is_empty()
-        {
+        if self.pristine_page() == Some(idx) && self.states[idx].column_index == 0 {
             return true;
         }
         self.advance_column(idx).1

@@ -820,22 +820,34 @@ mod tests {
 
     struct MockPaginator {
         page_size: Size,
+        margins_top: f64,
         page_number: u32,
         pending_page_size: Option<Size>,
+        pending_margins_top: Option<f64>,
         columns: ColumnLayout,
         pending_columns: Option<ColumnLayout>,
         column_index: usize,
         /// Nothing placed on the page and the pen still at the content top.
         pristine: bool,
+        /// Geometry the current sheet was formed with, which is what the real
+        /// paginator reads back — not the globals above, which run ahead of it.
+        page: Size,
+        page_margins_top: f64,
         calls: Vec<Call>,
     }
+
+    const INITIAL_MARGIN_TOP: f64 = 96.0;
 
     impl MockPaginator {
         fn new(page_size: Size, page_number: u32) -> Self {
             MockPaginator {
+                page: page_size.clone(),
+                page_margins_top: INITIAL_MARGIN_TOP,
                 page_size,
+                margins_top: INITIAL_MARGIN_TOP,
                 page_number,
                 pending_page_size: None,
+                pending_margins_top: None,
                 columns: SINGLE_COLUMN,
                 pending_columns: None,
                 column_index: 0,
@@ -851,11 +863,19 @@ mod tests {
             }
         }
 
+        fn stamp_page(&mut self) {
+            self.page = self.page_size.clone();
+            self.page_margins_top = self.margins_top;
+        }
+
         // mirrors Paginator::create_new_page, which promotes deferred geometry
         // before the new page's size, margins and band are computed
         fn open_page(&mut self) {
             if let Some(size) = self.pending_page_size.take() {
                 self.page_size = size;
+            }
+            if let Some(top) = self.pending_margins_top.take() {
+                self.margins_top = top;
             }
             if let Some(columns) = self.pending_columns.take() {
                 self.columns = columns;
@@ -863,6 +883,7 @@ mod tests {
             self.page_number += 1;
             self.column_index = 0;
             self.pristine = true;
+            self.stamp_page();
         }
     }
 
@@ -882,9 +903,22 @@ mod tests {
                 if let Some(size) = page_size {
                     self.page_size = size.clone();
                 }
+                if let Some(margins) = margins {
+                    self.margins_top = margins.top;
+                }
                 self.pending_page_size = None;
-            } else if let Some(size) = page_size {
-                self.pending_page_size = Some(size.clone());
+                self.pending_margins_top = None;
+                // Paginator::update_page_layout re-forms an untouched sheet
+                if self.pristine {
+                    self.stamp_page();
+                }
+            } else {
+                if let Some(size) = page_size {
+                    self.pending_page_size = Some(size.clone());
+                }
+                if let Some(margins) = margins {
+                    self.pending_margins_top = Some(margins.top);
+                }
             }
             Ok(())
         }
@@ -924,7 +958,7 @@ mod tests {
         }
 
         fn current_page_size(&mut self) -> Size {
-            self.page_size.clone()
+            self.page.clone()
         }
 
         fn current_columns(&self) -> ColumnLayout {
@@ -1325,6 +1359,30 @@ mod tests {
         }
     }
 
+    // A promoted break with nothing placed keeps landing on the same pristine
+    // sheet, which must end up carrying the geometry of the section that last
+    // claimed it rather than the one it was originally formed with.
+    #[test]
+    fn promoted_breaks_on_a_pristine_page_re_form_it() {
+        let mut paginator = MockPaginator::new(PORTRAIT, 1);
+        paginator.pristine = true;
+        for (break_type, size) in [
+            (SectionBreakType::Continuous, LANDSCAPE),
+            (SectionBreakType::NextColumn, PORTRAIT),
+        ] {
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(size.clone(), None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, 1);
+            assert_eq!(paginator.current_page_size(), size);
+            assert_eq!(paginator.page_margins_top, 50.0);
+        }
+    }
+
     #[test]
     fn apply_next_column_break_advances_the_column_and_queues_columns() {
         let tracker = base_tracker();
@@ -1543,5 +1601,39 @@ mod tests {
         let layout = crate::compute_layout(&input.to_string()).unwrap();
         assert_eq!(layout.pages.len(), 1);
         assert_eq!(placements(&layout), vec![(1, 96.0, 96.0)]);
+    }
+
+    // A promotion that finds the page pristine keeps that page, so the sheet
+    // has to report the geometry its content was actually laid out to.
+    #[test]
+    fn promoted_break_on_a_pristine_page_reports_the_geometry_it_laid_out_to() {
+        let landscape = Size {
+            w: 1056.0,
+            h: 816.0,
+        };
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0, "columns": {"count": 2, "gap": 24}},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 1)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 24},
+                "finalPageSize": {"w": 1056, "h": 816},
+                "finalMargins": {"top": 48, "right": 96, "bottom": 96, "left": 96}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(layout.pages[0].size, landscape);
+        assert_eq!(layout.pages[0].margins.top, 48.0);
+        let crate::types::Fragment::Paragraph(paragraph) = &layout.pages[0].fragments[0] else {
+            panic!("expected a paragraph fragment");
+        };
+        assert_eq!(paragraph.width, landscape.w - 192.0);
+        assert_eq!(paragraph.y, 48.0);
     }
 }
