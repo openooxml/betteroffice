@@ -426,16 +426,26 @@ export interface FontAssetOptions {
 
 let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
+async function importCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
+  // Keep the SYNTACTIC try/catch around the await. Rewriting this as
+  // `import(…).catch()` or a two-argument `.then()` makes webpack (and so
+  // `next build`) fail hard instead of emitting a warning for the absent
+  // optional peer; only this shape is tolerated. esbuild recognises the
+  // opposite idiom and errors either way — see the bundler note in README.md.
+  try {
+    return (await import('@betteroffice/fonts-cjk')).CJK_FONT_ASSET_URLS;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Asset URLs of the optional CJK add-on, or `undefined` when it is not
  * installed. Memoized including the miss, so an absent package costs one
  * failed import per session.
  */
 function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
-  cjkAssetUrls ??= import('@betteroffice/fonts-cjk').then(
-    (module) => module.CJK_FONT_ASSET_URLS,
-    () => undefined
-  );
+  cjkAssetUrls ??= importCjkAssetUrls();
   return cjkAssetUrls;
 }
 

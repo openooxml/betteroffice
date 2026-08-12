@@ -94,9 +94,26 @@ Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rat
 
 ## Bundler note
 
-Both optional edges — `@betteroffice/docx` → `@betteroffice/fonts`, and `@betteroffice/fonts` → `@betteroffice/fonts-cjk` — are dynamic `import()`s of packages declared as optional peer dependencies. At runtime an absent package is caught and degraded. Some bundlers, however, resolve dynamic imports at **build** time and fail on a specifier they cannot find, rather than deferring it.
+Both optional edges — `@betteroffice/docx` → `@betteroffice/fonts`, and `@betteroffice/fonts` → `@betteroffice/fonts-cjk` — are dynamic `import()`s of packages declared as optional peer dependencies. At runtime an absent package is caught and degraded.
 
-If your build errors with `Failed to resolve import "@betteroffice/fonts-cjk"` (or the same for `@betteroffice/fonts`), either install the package, or tell the bundler it is external:
+Measured with the peer **not** installed:
+
+| Bundler | Result |
+| --- | --- |
+| **esbuild** | **build fails**, exit 1, no output |
+| Vite | clean, silent |
+| Next (Turbopack) | clean, silent |
+| Next (webpack), webpack, rollup | succeeds with a non-fatal warning |
+
+**esbuild is the one that breaks.** It resolves the specifier at build time and refuses to emit anything, so a consumer who has not installed `@betteroffice/fonts` cannot build at all. Mark the optional packages external:
+
+```sh
+esbuild app.js --bundle --packages=external
+# or, narrowly:
+esbuild app.js --bundle --external:@betteroffice/fonts --external:@betteroffice/fonts-cjk
+```
+
+Everything else needs no configuration. If you would rather silence the warning under Vite or rollup, marking the package external is harmless — the bare specifier stays in the bundle and still degrades cleanly:
 
 ```js
 // vite.config.js

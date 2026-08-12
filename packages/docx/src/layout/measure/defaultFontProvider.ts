@@ -64,6 +64,12 @@ export function configureDefaultFonts(next: DefaultFontOptions): void {
 
 async function load(): Promise<BundledFontProvider | undefined> {
   const { baseUrl, load: loader } = options;
+  // Keep the SYNTACTIC try/catch around the await. Measured across the bundler
+  // matrix: this shape makes webpack (and so `next build`) emit a warning and
+  // still succeed when the optional peer is absent, while `import(…).catch()`
+  // — which esbuild's own error text recommends — turns that into a hard
+  // failure. No shape satisfies both; this favours webpack/Next, and esbuild
+  // consumers pass `--packages=external` (see @betteroffice/fonts' README).
   try {
     const imported = await (loader ? loader() : import('@betteroffice/fonts'));
     const module = imported as BundledFontsModule;

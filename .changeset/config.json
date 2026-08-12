@@ -17,6 +17,10 @@
       "@betteroffice/docx",
       "@betteroffice/docx-react",
       "@betteroffice/docx-i18n"
+    ],
+    [
+      "@betteroffice/fonts",
+      "@betteroffice/fonts-cjk"
     ]
   ],
   "linked": [],
