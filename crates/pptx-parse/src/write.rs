@@ -4,9 +4,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::{ColorValue, ShapeFill, ShapeOutline};
+use ooxml_drawingml::{
+    ColorValue, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
+};
 
 use crate::PptxError;
+use crate::drawing::parse_run_properties;
 use crate::model::{Bullet, PptxPackage, RunProperties, SlideReference};
 use crate::xml::{ParseBudget, ParseLimits, XmlElement, XmlNode, parse_xml, serialize_xml};
 
@@ -21,6 +24,7 @@ const SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
 const SLIDE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
 const MIN_SLIDE_ID: u32 = 256;
+const MAX_SLIDE_ID: u32 = 2_147_483_647;
 
 /// The desired final deck, expressed against the parsed source package.
 pub struct DeckWrite {
@@ -144,14 +148,15 @@ pub fn write_pptx_with_edits(
                 .part_bytes(part_path)
                 .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
             let mut root = parse_xml(bytes, part_path, &mut budget)?;
-            patch_slide(&mut root, shapes, part_path)?;
+            let theme = slide_theme(package, part_path);
+            patch_slide(&mut root, shapes, theme, part_path)?;
             replacements.insert(part_path.clone(), serialize_xml(&root));
         }
     }
 
     let mut minted = Vec::new();
     let mut next_slide_number = next_slide_number(package);
-    let mut next_slide_id = next_slide_id(package);
+    let mut minted_slide_id: Option<u32> = None;
     let mut next_relationship = next_relationship_number(package);
     let mut structural = false;
     let mut final_order: Vec<FinalSlide<'_>> = Vec::new();
@@ -176,8 +181,19 @@ pub fn write_pptx_with_edits(
                 next_slide_number += 1;
                 let relationship_id = format!("rId{next_relationship}");
                 next_relationship += 1;
-                let slide_id = next_slide_id;
-                next_slide_id += 1;
+                let slide_id = match minted_slide_id {
+                    None => next_slide_id(package)?,
+                    Some(previous) => previous
+                        .checked_add(1)
+                        .filter(|id| *id <= MAX_SLIDE_ID)
+                        .ok_or_else(|| {
+                            write_error(
+                                &package.presentation.part_path,
+                                "the slide id space is exhausted",
+                            )
+                        })?,
+                };
+                minted_slide_id = Some(slide_id);
                 let layout = layout_part_path.clone().or_else(|| {
                     package
                         .layouts
@@ -218,21 +234,27 @@ pub fn write_pptx_with_edits(
         .collect();
     structural = structural || kept_paths != original_paths;
 
+    let mut removed_paths = HashSet::new();
+    for reference in &removed {
+        removed_paths.insert(reference.part_path.clone());
+        removed_paths.insert(slide_relationships_path(&reference.part_path));
+    }
+    let orphans = orphaned_parts(package, &removed);
+    for orphan in &orphans {
+        removed_paths.insert(orphan.clone());
+        removed_paths.insert(slide_relationships_path(orphan));
+    }
+
     if structural {
         patch_structure(
             package,
             &final_order,
             &minted,
             &removed,
+            &orphans,
             &mut replacements,
             &mut budget,
         )?;
-    }
-
-    let mut removed_paths = HashSet::new();
-    for reference in &removed {
-        removed_paths.insert(reference.part_path.clone());
-        removed_paths.insert(slide_relationships_path(&reference.part_path));
     }
     let mut parts = Vec::with_capacity(package.parts.len() + new_parts.len());
     for part in &package.parts {
@@ -293,8 +315,8 @@ fn next_slide_number(package: &PptxPackage) -> usize {
     number
 }
 
-fn next_slide_id(package: &PptxPackage) -> u32 {
-    package
+fn next_slide_id(package: &PptxPackage) -> Result<u32, PptxError> {
+    let next = package
         .presentation
         .slides
         .iter()
@@ -302,7 +324,14 @@ fn next_slide_id(package: &PptxPackage) -> u32 {
         .max()
         .unwrap_or(0)
         .max(MIN_SLIDE_ID - 1)
-        + 1
+        .checked_add(1)
+        .filter(|id| *id <= MAX_SLIDE_ID);
+    next.ok_or_else(|| {
+        write_error(
+            &package.presentation.part_path,
+            "the slide id space is exhausted",
+        )
+    })
 }
 
 fn next_relationship_number(package: &PptxPackage) -> usize {
@@ -322,6 +351,43 @@ fn slide_relationships_path(part_path: &str) -> String {
         Some((directory, name)) => format!("{directory}/_rels/{name}.rels"),
         None => format!("_rels/{part_path}.rels"),
     }
+}
+
+/// Parts that were reachable from the package root only through the removed
+/// slides (notes slides, media used nowhere else, ...), transitively.
+fn orphaned_parts(package: &PptxPackage, removed: &[&SlideReference]) -> Vec<String> {
+    if removed.is_empty() {
+        return Vec::new();
+    }
+    let excluded: HashSet<&str> = removed
+        .iter()
+        .map(|reference| reference.part_path.as_str())
+        .collect();
+    let before = reachable_parts(package, &HashSet::new());
+    let after = reachable_parts(package, &excluded);
+    before
+        .into_iter()
+        .filter(|part| !after.contains(part) && !excluded.contains(part.as_str()))
+        .collect()
+}
+
+fn reachable_parts(package: &PptxPackage, excluded: &HashSet<&str>) -> HashSet<String> {
+    let mut reachable = HashSet::new();
+    let mut queue = vec![String::new()];
+    while let Some(source) = queue.pop() {
+        for relationship in package.relationships.get(&source).into_iter().flatten() {
+            let Some(target) = &relationship.resolved_target else {
+                continue;
+            };
+            if excluded.contains(target.as_str()) {
+                continue;
+            }
+            if reachable.insert(target.clone()) {
+                queue.push(target.clone());
+            }
+        }
+    }
+    reachable
 }
 
 fn relative_target(from_part: &str, to_part: &str) -> String {
@@ -346,6 +412,7 @@ fn patch_structure(
     final_order: &[FinalSlide<'_>],
     minted: &[MintedSlide],
     removed: &[&SlideReference],
+    orphans: &[String],
     replacements: &mut HashMap<String, Vec<u8>>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
@@ -355,6 +422,7 @@ fn patch_structure(
         .ok_or_else(|| PptxError::MissingPart(presentation_path.to_owned()))?;
     let mut root = parse_xml(bytes, presentation_path, budget)?;
     patch_slide_id_list(&mut root, final_order, minted, presentation_path)?;
+    prune_slide_references(&mut root, removed);
     replacements.insert(presentation_path.to_owned(), serialize_xml(&root));
 
     let relationships_path = slide_relationships_path(presentation_path);
@@ -393,6 +461,7 @@ fn patch_structure(
     let removed_names: HashSet<String> = removed
         .iter()
         .map(|reference| format!("/{}", reference.part_path))
+        .chain(orphans.iter().map(|orphan| format!("/{orphan}")))
         .collect();
     root.children.retain(|child| match child {
         XmlNode::Element(element) if element.local_name() == "Override" => element
@@ -409,6 +478,54 @@ fn patch_structure(
     }
     replacements.insert(content_types_path.to_owned(), serialize_xml(&root));
     Ok(())
+}
+
+/// Drops references to removed slides from custom shows (`r:id`) and
+/// section lists (`p14:sldId` inside `extLst`).
+fn prune_slide_references(root: &mut XmlElement, removed: &[&SlideReference]) {
+    if removed.is_empty() {
+        return;
+    }
+    let removed_relationship_ids: HashSet<&str> = removed
+        .iter()
+        .map(|reference| reference.relationship_id.as_str())
+        .collect();
+    let removed_slide_ids: HashSet<String> = removed
+        .iter()
+        .map(|reference| reference.id.to_string())
+        .collect();
+    for child in root.children.iter_mut() {
+        let XmlNode::Element(element) = child else {
+            continue;
+        };
+        match element.local_name() {
+            "custShowLst" => remove_matching_descendants(element, &|candidate| {
+                candidate.local_name() == "sld"
+                    && candidate.attributes.iter().any(|(key, value)| {
+                        key.ends_with(":id") && removed_relationship_ids.contains(value.as_str())
+                    })
+            }),
+            "extLst" => remove_matching_descendants(element, &|candidate| {
+                candidate.local_name() == "sldId"
+                    && candidate
+                        .attribute("id")
+                        .is_some_and(|id| removed_slide_ids.contains(id))
+            }),
+            _ => {}
+        }
+    }
+}
+
+fn remove_matching_descendants(element: &mut XmlElement, matches: &dyn Fn(&XmlElement) -> bool) {
+    element.children.retain(|child| match child {
+        XmlNode::Element(candidate) => !matches(candidate),
+        _ => true,
+    });
+    for child in element.children.iter_mut() {
+        if let XmlNode::Element(child) = child {
+            remove_matching_descendants(child, matches);
+        }
+    }
 }
 
 fn patch_slide_id_list(
@@ -542,14 +659,60 @@ fn is_shape_element(local: &str) -> bool {
     matches!(local, "sp" | "pic" | "graphicFrame" | "grpSp")
 }
 
-fn patch_slide(root: &mut XmlElement, shapes: &[ShapeWrite], part: &str) -> Result<(), PptxError> {
+fn patch_slide(
+    root: &mut XmlElement,
+    shapes: &[ShapeWrite],
+    theme: Option<&Theme>,
+    part: &str,
+) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
     let mut next_shape_id = max_shape_id(root) + 1;
     let tree = root
         .child_mut("cSld")
         .and_then(|common| common.child_mut("spTree"))
         .ok_or_else(|| write_error(part, "slide has no shape tree"))?;
-    patch_shape_children(tree, shapes, &mut next_shape_id, &prefixes, part)
+    patch_shape_children(tree, shapes, &mut next_shape_id, theme, &prefixes, part)
+}
+
+/// The theme a slide's colours resolve against, via its layout's master.
+fn slide_theme<'a>(package: &'a PptxPackage, part_path: &str) -> Option<&'a Theme> {
+    let slide = package
+        .slides
+        .iter()
+        .find(|slide| slide.part_path == part_path);
+    let layout = slide
+        .and_then(|slide| slide.layout_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        })
+        .or_else(|| package.layouts.first());
+    let master = layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .masters
+                .iter()
+                .find(|master| master.part_path == path)
+        })
+        .or_else(|| {
+            layout.and_then(|layout| {
+                package.masters.iter().find(|master| {
+                    master
+                        .layout_part_paths
+                        .iter()
+                        .any(|path| path == &layout.part_path)
+                })
+            })
+        })
+        .or_else(|| package.masters.first());
+    master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .map(|part| &part.theme)
+        .or_else(|| package.themes.first().map(|part| &part.theme))
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {
@@ -560,69 +723,90 @@ fn max_shape_id(root: &XmlElement) -> u32 {
         .unwrap_or(1)
 }
 
+/// Rebuilds the shape run in place: non-shape siblings keep their slots
+/// relative to the shape that follows them, and elements trailing the last
+/// shape (`p:extLst` in particular) stay last.
 fn patch_shape_children(
     parent: &mut XmlElement,
     writes: &[ShapeWrite],
     next_shape_id: &mut u32,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<(), PptxError> {
-    let mut leading = Vec::new();
-    let mut originals: Vec<Option<XmlElement>> = Vec::new();
-    let mut trailing = Vec::new();
-    for child in std::mem::take(&mut parent.children) {
-        match child {
-            XmlNode::Element(element) if is_shape_element(element.local_name()) => {
-                originals.push(Some(element));
+    let mut slots: Vec<Option<XmlNode>> = std::mem::take(&mut parent.children)
+        .into_iter()
+        .map(Some)
+        .collect();
+    let shape_slots: Vec<usize> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(position, slot)| match slot {
+            Some(XmlNode::Element(element)) if is_shape_element(element.local_name()) => {
+                Some(position)
             }
-            XmlNode::Text(text) if text.trim().is_empty() => {}
-            other => {
-                if originals.is_empty() {
-                    leading.push(other);
-                } else {
-                    trailing.push(other);
+            _ => None,
+        })
+        .collect();
+    let mut children = Vec::with_capacity(slots.len());
+    for write in writes {
+        match write {
+            ShapeWrite::Keep { source_index } | ShapeWrite::Patch { source_index, .. } => {
+                let position = *shape_slots.get(*source_index).ok_or_else(|| {
+                    write_error(part, format!("shape index {source_index} is not available"))
+                })?;
+                emit_sibling_slots(&mut slots, &mut children, position);
+                let mut element = match slots[position].take() {
+                    Some(XmlNode::Element(element)) => element,
+                    _ => {
+                        return Err(write_error(
+                            part,
+                            format!("shape index {source_index} was already written"),
+                        ));
+                    }
+                };
+                if let ShapeWrite::Patch { patch, .. } = write {
+                    patch_shape(&mut element, patch, next_shape_id, theme, prefixes, part)?;
                 }
+                children.push(XmlNode::Element(element));
+            }
+            ShapeWrite::Add(add) => {
+                children.push(XmlNode::Element(shape_element(
+                    add,
+                    next_shape_id,
+                    prefixes,
+                    part,
+                )?));
             }
         }
     }
-    let mut children = leading;
-    for write in writes {
-        let node = match write {
-            ShapeWrite::Keep { source_index } => {
-                take_original(&mut originals, *source_index, part)?
-            }
-            ShapeWrite::Patch {
-                source_index,
-                patch,
-            } => {
-                let mut element = take_original(&mut originals, *source_index, part)?;
-                patch_shape(&mut element, patch, next_shape_id, prefixes, part)?;
-                element
-            }
-            ShapeWrite::Add(add) => shape_element(add, next_shape_id, prefixes, part)?,
-        };
-        children.push(XmlNode::Element(node));
+    for slot in slots.into_iter().flatten() {
+        if !matches!(&slot, XmlNode::Element(element) if is_shape_element(element.local_name())) {
+            children.push(slot);
+        }
     }
-    children.extend(trailing);
     parent.children = children;
     Ok(())
 }
 
-fn take_original(
-    originals: &mut [Option<XmlElement>],
-    index: usize,
-    part: &str,
-) -> Result<XmlElement, PptxError> {
-    originals
-        .get_mut(index)
-        .and_then(Option::take)
-        .ok_or_else(|| write_error(part, format!("shape index {index} is not available")))
+/// Emits the not-yet-written non-shape nodes that precede `position`.
+fn emit_sibling_slots(slots: &mut [Option<XmlNode>], children: &mut Vec<XmlNode>, position: usize) {
+    for slot in slots.iter_mut().take(position) {
+        let is_other = !matches!(
+            slot,
+            Some(XmlNode::Element(element)) if is_shape_element(element.local_name())
+        );
+        if is_other && let Some(node) = slot.take() {
+            children.push(node);
+        }
+    }
 }
 
 fn patch_shape(
     element: &mut XmlElement,
     patch: &ShapePatch,
     next_shape_id: &mut u32,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<(), PptxError> {
@@ -642,10 +826,17 @@ fn patch_shape(
         set_adjust_values(properties, adjust_values, prefixes);
     }
     for text in &patch.texts {
-        patch_text(element, text, prefixes, part)?;
+        patch_text(element, text, theme, prefixes, part)?;
     }
     if !patch.children.is_empty() {
-        patch_shape_children(element, &patch.children, next_shape_id, prefixes, part)?;
+        patch_shape_children(
+            element,
+            &patch.children,
+            next_shape_id,
+            theme,
+            prefixes,
+            part,
+        )?;
     }
     Ok(())
 }
@@ -682,6 +873,12 @@ fn patch_transform(
         None => element,
     };
     if parent.child_mut("xfrm").is_none() {
+        if offset.is_none() || extent.is_none() {
+            return Err(write_error(
+                part,
+                "cannot write half a transform onto a shape without one",
+            ));
+        }
         let position = parent
             .children
             .iter()
@@ -981,13 +1178,25 @@ fn set_adjust_values(
             .insert(0, XmlNode::Element(XmlElement::new(list_name)));
     }
     let list = geometry.child_mut("avLst").expect("list ensured above");
-    list.children.clear();
+    // Guides absent from the model (unevaluated formulas) are kept as-is.
     for (name, value) in adjust_values {
-        list.children.push(XmlNode::Element(
-            XmlElement::new(prefixes.drawing("gd"))
-                .with_attribute("name", name.clone())
-                .with_attribute("fmla", format!("val {}", format_fixed(value * 100_000.0))),
-        ));
+        let formula = format!("val {}", format_fixed(value * 100_000.0));
+        let existing = list.children.iter_mut().find_map(|child| match child {
+            XmlNode::Element(element)
+                if element.local_name() == "gd" && element.attribute("name") == Some(name) =>
+            {
+                Some(element)
+            }
+            _ => None,
+        });
+        match existing {
+            Some(guide) => guide.set_attribute("fmla", formula),
+            None => list.children.push(XmlNode::Element(
+                XmlElement::new(prefixes.drawing("gd"))
+                    .with_attribute("name", name.clone())
+                    .with_attribute("fmla", formula),
+            )),
+        }
     }
 }
 
@@ -996,6 +1205,7 @@ fn set_adjust_values(
 fn patch_text(
     element: &mut XmlElement,
     text: &TextWrite,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<(), PptxError> {
@@ -1010,7 +1220,7 @@ fn patch_text(
             .and_then(|table_cell| table_cell.child_mut("txBody")),
     };
     let body = body.ok_or_else(|| write_error(part, "text target has no body"))?;
-    rebuild_paragraphs(body, &text.paragraphs, prefixes);
+    rebuild_paragraphs(body, &text.paragraphs, theme, prefixes);
     Ok(())
 }
 
@@ -1029,7 +1239,12 @@ fn nth_child_mut<'a>(
         .nth(index)
 }
 
-fn rebuild_paragraphs(body: &mut XmlElement, paragraphs: &[ParagraphWrite], prefixes: &Prefixes) {
+fn rebuild_paragraphs(
+    body: &mut XmlElement,
+    paragraphs: &[ParagraphWrite],
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) {
     let mut preamble = Vec::new();
     let mut originals: Vec<Option<XmlElement>> = Vec::new();
     for child in std::mem::take(&mut body.children) {
@@ -1048,7 +1263,7 @@ fn rebuild_paragraphs(body: &mut XmlElement, paragraphs: &[ParagraphWrite], pref
             .and_then(|index| originals.get_mut(index).and_then(Option::take));
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
-            source => build_paragraph(paragraph, source, prefixes),
+            source => build_paragraph(paragraph, source, theme, prefixes),
         };
         children.push(XmlNode::Element(element));
     }
@@ -1061,31 +1276,127 @@ fn rebuild_paragraphs(body: &mut XmlElement, paragraphs: &[ParagraphWrite], pref
     body.children = children;
 }
 
+fn is_run_element(local: &str) -> bool {
+    matches!(local, "r" | "br" | "fld")
+}
+
+/// One piece of the paragraph's target text: a line break or a styled span.
+struct RunSegment<'a> {
+    line_break: bool,
+    text: &'a str,
+    properties: &'a RunProperties,
+}
+
+fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
+    let mut segments = Vec::new();
+    for run in runs {
+        for (index, piece) in run.text.split('\n').enumerate() {
+            if index > 0 {
+                segments.push(RunSegment {
+                    line_break: true,
+                    text: "",
+                    properties: &run.properties,
+                });
+            }
+            if !piece.is_empty() {
+                segments.push(RunSegment {
+                    line_break: false,
+                    text: piece,
+                    properties: &run.properties,
+                });
+            }
+        }
+    }
+    segments
+}
+
+/// Whether a source run element already carries the segment: same text and
+/// the same modeled styling once colours are resolved against the theme.
+/// Reused elements keep everything the model does not carry — hyperlinks,
+/// field bindings, spacing, strikethrough.
+fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option<&Theme>) -> bool {
+    if element.local_name() == "br" {
+        return segment.line_break;
+    }
+    if segment.line_break {
+        return false;
+    }
+    let text = element
+        .child("t")
+        .map(XmlElement::text_content)
+        .unwrap_or_default();
+    if text != segment.text {
+        return false;
+    }
+    let source = parse_run_properties(element.child("rPr"));
+    let target = segment.properties;
+    source.bold == target.bold
+        && source.italic == target.italic
+        && source.font_size_pt == target.font_size_pt
+        && source.underline == target.underline
+        && source.font_family == target.font_family
+        && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
+            == resolve_color_value_to_hex_with_theme(target.color.as_ref(), theme)
+}
+
 fn build_paragraph(
     write: &ParagraphWrite,
     source: Option<XmlElement>,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> XmlElement {
-    let mut paragraph = match source {
+    let (mut paragraph, source_runs) = match source {
         Some(mut element) => {
-            element.children.retain(|child| {
-                !matches!(
-                    child,
-                    XmlNode::Element(element)
-                        if matches!(element.local_name(), "r" | "br" | "fld")
-                ) && !matches!(child, XmlNode::Text(text) if text.trim().is_empty())
-            });
-            element
+            let mut runs = Vec::new();
+            let mut kept = Vec::new();
+            for child in std::mem::take(&mut element.children) {
+                match child {
+                    XmlNode::Element(child) if is_run_element(child.local_name()) => {
+                        runs.push(child);
+                    }
+                    XmlNode::Text(text) if text.trim().is_empty() => {}
+                    other => kept.push(other),
+                }
+            }
+            element.children = kept;
+            (element, runs)
         }
-        None => XmlElement::new(prefixes.drawing("p")),
+        None => (XmlElement::new(prefixes.drawing("p")), Vec::new()),
     };
     let fresh = write.source_index.is_none();
     if write.properties_changed || fresh {
         apply_paragraph_properties(&mut paragraph, write, prefixes);
     }
-    let mut runs = Vec::new();
-    for run in &write.runs {
-        runs.extend(run_nodes(run, prefixes));
+    let segments = run_segments(&write.runs);
+    let mut front = 0;
+    while front < source_runs.len()
+        && front < segments.len()
+        && segment_matches(&source_runs[front], &segments[front], theme)
+    {
+        front += 1;
+    }
+    let mut back = 0;
+    while back < source_runs.len() - front
+        && back < segments.len() - front
+        && segment_matches(
+            &source_runs[source_runs.len() - 1 - back],
+            &segments[segments.len() - 1 - back],
+            theme,
+        )
+    {
+        back += 1;
+    }
+    let tail_start = source_runs.len() - back;
+    let mut runs: Vec<XmlNode> = Vec::with_capacity(segments.len());
+    let mut source_runs = source_runs.into_iter();
+    for element in source_runs.by_ref().take(front) {
+        runs.push(XmlNode::Element(element));
+    }
+    for segment in &segments[front..segments.len() - back] {
+        runs.push(XmlNode::Element(segment_element(segment, prefixes)));
+    }
+    for element in source_runs.skip(tail_start - front) {
+        runs.push(XmlNode::Element(element));
     }
     let position = paragraph
         .children
@@ -1096,6 +1407,21 @@ fn build_paragraph(
         .unwrap_or(paragraph.children.len());
     paragraph.children.splice(position..position, runs);
     paragraph
+}
+
+fn segment_element(segment: &RunSegment<'_>, prefixes: &Prefixes) -> XmlElement {
+    if segment.line_break {
+        let mut line_break = XmlElement::new(prefixes.drawing("br"));
+        if let Some(properties) = run_properties_element(segment.properties, prefixes) {
+            line_break = line_break.with_child(properties);
+        }
+        return line_break;
+    }
+    let mut element = XmlElement::new(prefixes.drawing("r"));
+    if let Some(properties) = run_properties_element(segment.properties, prefixes) {
+        element = element.with_child(properties);
+    }
+    element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
 }
 
 fn apply_paragraph_properties(
@@ -1163,29 +1489,6 @@ fn apply_paragraph_properties(
             .children
             .insert(position, XmlNode::Element(bullet));
     }
-}
-
-fn run_nodes(run: &RunWrite, prefixes: &Prefixes) -> Vec<XmlNode> {
-    let mut nodes = Vec::new();
-    for (index, segment) in run.text.split('\n').enumerate() {
-        if index > 0 {
-            let mut line_break = XmlElement::new(prefixes.drawing("br"));
-            if let Some(properties) = run_properties_element(&run.properties, prefixes) {
-                line_break = line_break.with_child(properties);
-            }
-            nodes.push(XmlNode::Element(line_break));
-        }
-        if segment.is_empty() {
-            continue;
-        }
-        let mut element = XmlElement::new(prefixes.drawing("r"));
-        if let Some(properties) = run_properties_element(&run.properties, prefixes) {
-            element = element.with_child(properties);
-        }
-        element = element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment));
-        nodes.push(XmlNode::Element(element));
-    }
-    nodes
 }
 
 fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Option<XmlElement> {
@@ -1292,7 +1595,7 @@ fn shape_element(
             .with_child(XmlElement::new(prefixes.drawing("bodyPr")))
             .with_child(XmlElement::new(prefixes.drawing("lstStyle")));
         for paragraph in paragraphs {
-            body = body.with_child(build_paragraph(paragraph, None, prefixes));
+            body = body.with_child(build_paragraph(paragraph, None, None, prefixes));
         }
         if paragraphs.is_empty() {
             body = body.with_child(XmlElement::new(prefixes.drawing("p")));

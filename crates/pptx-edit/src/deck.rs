@@ -324,6 +324,13 @@ impl DeckSession {
         draft: &ShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
+        crate::model::validate_xml_text(&draft.text)?;
+        crate::story::validate_style_text(
+            draft.style.font_family.as_deref(),
+            draft.style.underline.as_deref(),
+            draft.style.color.as_deref(),
+        )?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
         let paragraph_id = self.next_id("para");
@@ -381,6 +388,7 @@ impl DeckSession {
         draft: &PresetShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
         let aspect_ratio = draft.rect.width as f64 / draft.rect.height as f64;
         if preset_geometry_to_path(&draft.geometry, &Default::default(), aspect_ratio).is_none() {
             return Err(EditError::InvalidGeometry(format!(
@@ -635,6 +643,13 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     let meta = required_map(&txn, META)?;
     validate_schema_version(&meta, &txn)?;
     package_from_meta(&meta, &txn)
+}
+
+pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    map_string(&meta, &txn, "fingerprint")
+        .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
 /// Rewrites a hydrated older document into the current schema and stamps it, so

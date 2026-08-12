@@ -70,7 +70,8 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
         }
         EditError::InvalidClientId(_)
         | EditError::InvalidGeometry(_)
-        | EditError::InvalidAdjustment(_) => PyValueError::new_err(message),
+        | EditError::InvalidAdjustment(_)
+        | EditError::InvalidText(_) => PyValueError::new_err(message),
         EditError::SlideNotFound(_) | EditError::ShapeNotFound(_) | EditError::StoryNotFound(_) => {
             PyKeyError::new_err(message)
         }

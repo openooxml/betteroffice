@@ -8,10 +8,22 @@ use yrs::{
     Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
 };
 
+use crate::model::validate_xml_text;
 use crate::{
     DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND, ParagraphSnapshot, STORIES,
     StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch,
 };
+
+pub(crate) fn validate_style_text(
+    font_family: Option<&str>,
+    underline: Option<&str>,
+    color: Option<&str>,
+) -> EditResult<()> {
+    for value in [font_family, underline, color].into_iter().flatten() {
+        validate_xml_text(value)?;
+    }
+    Ok(())
+}
 
 pub(crate) fn seed_story(
     stories: &MapRef,
@@ -105,6 +117,12 @@ impl DeckSession {
         text: &str,
         style: &TextStyle,
     ) -> EditResult<TextReceipt> {
+        validate_xml_text(text)?;
+        validate_style_text(
+            style.font_family.as_deref(),
+            style.underline.as_deref(),
+            style.color.as_deref(),
+        )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         let final_pilcrow = final_pilcrow_index(&story, &txn)?;
@@ -156,6 +174,11 @@ impl DeckSession {
         end: u32,
         patch: &TextStylePatch,
     ) -> EditResult<TextReceipt> {
+        validate_style_text(
+            patch.font_family.as_deref(),
+            patch.underline.as_deref(),
+            patch.color.as_deref(),
+        )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
         check_text_bounds(&story, &txn, start, end)?;

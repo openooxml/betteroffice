@@ -112,6 +112,30 @@ impl DeckSession {
         })
     }
 
+    /// Like [`Self::open_from_update`], but re-attaches the source file the
+    /// update was seeded from, so the session can save. The bytes must hash to
+    /// the fingerprint recorded in the update.
+    pub fn open_from_update_with_source(
+        update: &[u8],
+        source: &[u8],
+        client_id: u64,
+    ) -> EditResult<Self> {
+        let session = Self::open_from_update(update, client_id)?;
+        let recorded = deck::fingerprint_from_doc(&session.doc)?;
+        let actual = format!("{:x}", Sha256::digest(source));
+        if recorded != actual {
+            return Err(EditError::Parse(
+                "source bytes do not match the fingerprint recorded in the update".to_owned(),
+            ));
+        }
+        let package =
+            pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()))?;
+        Ok(Self {
+            package: Arc::new(package),
+            ..session
+        })
+    }
+
     pub fn client_id(&self) -> u64 {
         self.client_id
     }

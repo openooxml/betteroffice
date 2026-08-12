@@ -144,6 +144,26 @@ describe('PPTX wasm boundary', () => {
     expect(cleared?.stroke).toBeUndefined();
   });
 
+  test('a session opened from an update saves when the source file is attached', () => {
+    const seeded = openPresentation(fixture, { clientId: 9007 });
+    const seed = seeded.encodeStateAsUpdate();
+
+    const attached = openPresentation(fixture, { clientId: 9008, initialUpdate: seed });
+    const slide = attached.snapshot().slides[0];
+    attached.moveShape(slide.id, slide.shapes[0].id, 777_000, 888_000);
+    const reopened = openPresentation(attached.save(), { clientId: 9009 });
+    const moved = reopened.snapshot().slides[0].shapes[0];
+    expect([moved.x, moved.y]).toEqual([777_000, 888_000]);
+
+    const bare = openPresentation(Uint8Array.of(0xff), { clientId: 9010, initialUpdate: seed });
+    expect(() => bare.save()).toThrow(/source file bytes/);
+
+    seeded.dispose();
+    attached.dispose();
+    reopened.dispose();
+    bare.dispose();
+  });
+
   test('edits survive a save and reopen', () => {
     const source = openPresentation(fixture, { clientId: 9005 });
     const slide = source.snapshot().slides[0];

@@ -271,7 +271,9 @@ fn escape_into(value: &str, attribute: bool, output: &mut String) {
             '<' => output.push_str("&lt;"),
             '>' => output.push_str("&gt;"),
             '"' if attribute => output.push_str("&quot;"),
-            '\r' | '\n' | '\t' if attribute => {
+            // A literal CR would be normalized away on reparse.
+            '\r' => output.push_str("&#xD;"),
+            '\n' | '\t' if attribute => {
                 output.push_str(&format!("&#x{:X};", character as u32));
             }
             _ => output.push(character),

@@ -35,6 +35,11 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  /**
+   * Opens from a collaboration update instead of parsing the file bytes.
+   * When the bytes are the file the update was seeded from, the session
+   * keeps them and `save()` works; otherwise `save()` throws.
+   */
   initialUpdate?: Uint8Array;
 }
 
@@ -130,7 +135,8 @@ export function openPresentation(
       ? PptxDocument.openCollaborative(bytes, collaborationClientId)
       : PptxDocument.openCollaborativeFromUpdate(
           options.initialUpdate.slice(),
-          collaborationClientId
+          collaborationClientId,
+          bytes.slice()
         )
   );
   const renderer = construct(() => new PptxRenderer());
