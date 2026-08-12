@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -167,6 +167,10 @@ pub struct Workbook {
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
+    /// Where each chart frame sat in the source package, by `frame_id`. Every
+    /// replica opens the same bytes, so this is the one anchor baseline they
+    /// all agree on however far their own editing has since diverged.
+    opened_anchors: BTreeMap<String, ChartAnchor>,
 }
 
 impl Workbook {
@@ -277,6 +281,12 @@ impl Workbook {
         }
         let model = authority.materialize().map_err(authority_error)?;
         validate_model(&model)?;
+        let opened_anchors = model
+            .sheets
+            .iter()
+            .flat_map(|sheet| &sheet.charts)
+            .map(|chart| (chart.frame_id(), chart.anchor))
+            .collect();
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
             Some(_) => WorkbookMode::Collaborative {
@@ -315,6 +325,7 @@ impl Workbook {
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
+            opened_anchors,
         })
     }
 
@@ -414,8 +425,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
-        validate_model(&model)?;
-        validate_chart_source(&model, self.source_package.is_some())
+        self.gate_incoming(&model)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
@@ -424,7 +434,7 @@ impl Workbook {
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
         self.preserved.resize(model.sheets.len());
-        self.model = model;
+        self.install_model(model)?;
         self.graph = Some(graph);
         self.last_calculation = calculation;
         self.mode = WorkbookMode::Collaborative { structure };
@@ -449,10 +459,42 @@ impl Workbook {
             .stage_updates_v1(updates)
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
-        validate_model(&staged.model)
-            .and_then(|()| validate_chart_source(&staged.model, self.source_package.is_some()))
+        self.gate_incoming(&staged.model)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
+    }
+
+    /// Everything a model arriving from outside must satisfy before this
+    /// replica takes it on, whichever door it came through: a staged update and
+    /// an adopted snapshot are the same foreign bytes and get the same answer.
+    fn gate_incoming(&self, model: &WorkbookModel) -> Result<()> {
+        validate_model(model)?;
+        validate_chart_source(model, self.source_package.is_some())?;
+        self.validate_incoming_anchors(model)
+    }
+
+    /// A repinned chart has to land somewhere a save can write and a viewport
+    /// can draw. What the source package already held is exempt, however odd,
+    /// because refusing it would reject the workbook every replica opened —
+    /// and an undo may legitimately put it back. The exemption is the opened
+    /// baseline rather than the current projection: every replica agrees on
+    /// the former, so they all reach the same verdict on the same bytes.
+    fn validate_incoming_anchors(&self, staged: &WorkbookModel) -> Result<()> {
+        for sheet in &staged.sheets {
+            let geometry = GridGeometry::new(sheet);
+            for chart in &sheet.charts {
+                if self.opened_anchors.get(&chart.frame_id()) == Some(&chart.anchor) {
+                    continue;
+                }
+                resolve_chart_anchor(chart.anchor, &geometry, 0, 0).map_err(|error| {
+                    Error::InvalidOperation(format!(
+                        "remote update repins {} to an anchor that cannot be resolved: {error}",
+                        chart.part
+                    ))
+                })?;
+            }
+        }
+        Ok(())
     }
 
     fn resolve_pending_remote_updates(
@@ -531,7 +573,7 @@ impl Workbook {
         self.authority
             .apply_update_v1(&commit_update)
             .map_err(authority_error)?;
-        self.model = model;
+        self.install_model(model)?;
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
         self.undo.clear();
@@ -1018,8 +1060,9 @@ impl Workbook {
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
             xlsx_ops::apply(&mut preview, op)?;
-            validate_model(&preview)?;
+            validate_model_sheets(&preview)?;
         }
+        validate_shared_drawings(&preview)?;
         if preview == self.model {
             return Ok(MutationResult::default());
         }
@@ -1077,8 +1120,7 @@ impl Workbook {
 
     pub fn undo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
         if self.is_collaborative() {
-            let history = self.authority.undo().map_err(authority_error)?;
-            return self.apply_collaborative_history(history, options);
+            return self.collaborative_history_step(options, false);
         }
         let active_name = self.active_sheet_name();
         let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
@@ -1116,8 +1158,7 @@ impl Workbook {
 
     pub fn redo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
         if self.is_collaborative() {
-            let history = self.authority.redo().map_err(authority_error)?;
-            return self.apply_collaborative_history(history, options);
+            return self.collaborative_history_step(options, true);
         }
         let active_name = self.active_sheet_name();
         let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
@@ -1153,6 +1194,33 @@ impl Workbook {
         })
     }
 
+    /// A history step moves the shared document before anyone can see what it
+    /// produced, so a rejected result has to put that document back. Leaving it
+    /// advanced would publish an undo the workbook itself refused: peers would
+    /// stage later updates onto state this replica does not hold.
+    fn collaborative_history_step(
+        &mut self,
+        options: CalculationOptions,
+        redo: bool,
+    ) -> Result<MutationResult> {
+        let checkpoint = self.authority.checkpoint();
+        let history = if redo {
+            self.authority.redo()
+        } else {
+            self.authority.undo()
+        }
+        .map_err(authority_error)?;
+        match self.apply_collaborative_history(history, options) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                self.authority
+                    .restore(checkpoint)
+                    .map_err(authority_error)?;
+                Err(error)
+            }
+        }
+    }
+
     fn apply_collaborative_history(
         &mut self,
         history: Option<HistoryUpdate>,
@@ -1170,7 +1238,7 @@ impl Workbook {
         }
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
-        self.model = history.model;
+        self.install_model(history.model)?;
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
         self.preserved.forget_shared_strings();
@@ -1428,6 +1496,10 @@ impl Workbook {
     /// Slide the chart frame `frame` names — a `ChartRegion` id — by `dx`/`dy`
     /// content pixels, clamped to the grid. One undo step; the new anchor is
     /// written back on save.
+    ///
+    /// A frame is one element in one drawing part, and two sheets may both
+    /// anchor it. Every sheet holding it is repinned together, or the save
+    /// would refuse a drawing its sheets no longer agree on.
     pub fn move_chart(
         &mut self,
         sheet: SheetId,
@@ -1442,9 +1514,8 @@ impl Workbook {
             .iter()
             .find(|chart| chart.frame_id() == frame)
             .ok_or_else(|| chart_frame_not_found(frame))?;
-        let (part, from) = (chart.part.clone(), chart.anchor);
         let to = moved_chart_anchor(
-            from,
+            chart.anchor,
             &GridGeometry::new(sheet_ref),
             f64::from(dx),
             f64::from(dy),
@@ -1454,16 +1525,26 @@ impl Workbook {
                 "chart {frame} is pinned to the sheet and cannot be moved"
             ))
         })?;
-        self.apply_ops(
-            vec![Op::SetChartAnchor {
-                sheet,
-                frame: frame.to_owned(),
-                part,
-                from,
-                to,
-            }],
-            options,
-        )
+        let ops = self
+            .model
+            .sheets
+            .iter()
+            .enumerate()
+            .flat_map(|(index, sheet)| {
+                sheet
+                    .charts
+                    .iter()
+                    .filter(|held| held.frame_id() == frame)
+                    .map(move |held| Op::SetChartAnchor {
+                        sheet: SheetId(index as u32),
+                        frame: frame.to_owned(),
+                        part: held.part.clone(),
+                        from: held.anchor,
+                        to,
+                    })
+            })
+            .collect();
+        self.apply_ops(ops, options)
     }
 
     #[cfg(feature = "raster")]
@@ -1644,7 +1725,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);
-            self.model = model;
+            self.install_model(model)?;
             self.emit_update(UpdateEvent {
                 update: staged.update,
                 origin: UpdateOrigin::Local,
@@ -1684,7 +1765,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);
-            self.model = model;
+            self.install_model(model)?;
             self.emit_update(UpdateEvent {
                 update: staged.update,
                 origin: UpdateOrigin::Local,
@@ -2094,6 +2175,26 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
+    validate_model_sheets(model)?;
+    validate_shared_drawings(model)
+}
+
+impl Workbook {
+    /// The one way a model becomes this workbook's own. An op batch, a merge
+    /// and an undo each assemble a whole model out of parts that were checked
+    /// separately, so a combination none of them produced alone is caught here
+    /// rather than at whichever door the state came through.
+    fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
+        validate_shared_drawings(&model)?;
+        self.model = model;
+        Ok(())
+    }
+}
+
+/// Everything a single sheet must satisfy on its own. A batch of ops passes
+/// through states no finished model may hold, so the cross-sheet invariants
+/// are checked once the batch is whole rather than after every op.
+fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
     if model.sheets.is_empty() {
         return Err(Error::NoSheets);
     }
@@ -2190,6 +2291,31 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
                 return Err(Error::InvalidOperation(
                     "workbook contains overlapping merged ranges".to_string(),
                 ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One anchor in one drawing is a single element, whatever number of sheets
+/// point at it. Letting them disagree builds a workbook that converges
+/// everywhere and saves nowhere, so the disagreement is refused here instead.
+fn validate_shared_drawings(model: &WorkbookModel) -> Result<()> {
+    let mut claims: HashMap<(&str, usize), ChartAnchor> = HashMap::new();
+    for sheet in &model.sheets {
+        for chart in &sheet.charts {
+            match claims.entry((chart.drawing.as_str(), chart.anchor_index)) {
+                Entry::Vacant(slot) => {
+                    slot.insert(chart.anchor);
+                }
+                Entry::Occupied(slot) => {
+                    if *slot.get() != chart.anchor {
+                        return Err(Error::InvalidOperation(format!(
+                            "anchor {} of {} is held by two sheets that disagree on where it sits",
+                            chart.anchor_index, chart.drawing
+                        )));
+                    }
+                }
             }
         }
     }

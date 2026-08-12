@@ -31,3 +31,4 @@ yrs = "0.27.3"
 
 [dev-dependencies]
 png = "0.18"
+yrs = "0.27.3"

@@ -3399,6 +3399,31 @@ fn charted_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+/// The charted fixture with a second sheet pointing at the *same* drawing, so
+/// one anchor element is held by two sheets at once.
+fn shared_drawing_fixture() -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let workbook = test_part_text(&parts, "xl/workbook.xml").replace(
+        "</sheets>",
+        r#"<sheet name="Mirror" sheetId="9" r:id="rIdMirror"/></sheets>"#,
+    );
+    set_test_part(&mut parts, "xl/workbook.xml", workbook.into_bytes());
+    let rels = test_part_text(&parts, "xl/_rels/workbook.xml.rels").replace(
+        "</Relationships>",
+        r#"<Relationship Id="rIdMirror" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+    );
+    set_test_part(&mut parts, "xl/_rels/workbook.xml.rels", rels.into_bytes());
+    parts.push((
+        "xl/worksheets/sheet2.xml".to_owned(),
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rIdDrawing"/></worksheet>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 /// The charted fixture with a second sheet the chart plots, so removing that
 /// sheet strands a reference a chart on another sheet owns.
 fn cross_sheet_charted_fixture() -> Vec<u8> {
@@ -4920,24 +4945,93 @@ fn set_chart_anchor_refuses_what_a_save_cannot_write() {
     assert_eq!(reopened.model().sheets[0].charts[0].anchor, resized);
 }
 
-/// Chart state lives in the shared document as one blob per sheet, so repinning
-/// one is structural and a collaborative session refuses it outright — the same
-/// answer freeze panes and hyperlinks give. Moving a chart is a standalone-only
-/// edit, and nothing partial is left behind by the refusal.
+/// A chart anchor is replicated content, not workbook structure: the freeze
+/// pins which drawing anchors which part, and where that anchor sits travels
+/// through the document like any other edit.
 #[test]
-fn collaborative_sessions_refuse_a_chart_move() {
+fn collaborative_sessions_move_a_chart_and_converge() {
     let bytes = charted_fixture();
-    let mut workbook = Workbook::open_collaborative(&bytes, 303).unwrap();
-    let before = workbook.model().clone();
+    let mut left = Workbook::open_collaborative(&bytes, 303).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 304).unwrap();
+    let before = left.model().sheets[0].charts[0].anchor;
 
-    let error = workbook
-        .move_chart(
+    assert!(
+        left.move_chart(
             SheetId(0),
             "xl/drawings/drawing1.xml#0",
             12.0,
             8.0,
             CalculationOptions::default(),
         )
+        .unwrap()
+        .applied
+    );
+    let moved = left.model().sheets[0].charts[0].anchor;
+    assert_ne!(moved, before);
+
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    assert!(
+        right
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(right.model().sheets[0].charts[0].anchor, moved);
+    assert_eq!(right.model(), left.model());
+
+    // the move survives a save, and a later peer edit still merges.
+    let reopened = Workbook::open(&left.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, moved);
+    right
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "after",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let update = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    left.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(left.model().sheets[0].charts[0].anchor, moved);
+    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "after");
+
+    // the mover can take the drag back, and the peer follows it home.
+    assert!(left.can_undo());
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(left.model().sheets[0].charts[0].anchor, before);
+    let update = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(right.model().sheets[0].charts[0].anchor, before);
+}
+
+/// Letting an anchor travel does not unfreeze the rest of a chart: an op that
+/// remaps what a chart reads is still structural, refused locally and refused
+/// again when a standalone peer offers it. This rides on the structure
+/// generation every structural op bumps; the identity fields themselves are
+/// pinned by `a_peer_cannot_disguise_a_chart_remap_as_a_move`, which leaves
+/// that counter alone.
+#[test]
+fn collaborative_sessions_still_refuse_a_chart_remap() {
+    let bytes = charted_fixture();
+    let mut workbook = Workbook::open_collaborative(&bytes, 305).unwrap();
+    let before = workbook.model().clone();
+    let insert_rows = Op::InsertRows {
+        sheet: SheetId(0),
+        at: 0,
+        count: 1,
+    };
+
+    let error = workbook
+        .apply_ops(vec![insert_rows.clone()], CalculationOptions::default())
         .unwrap_err();
     assert!(
         matches!(&error, Error::CollaborativeStructureOperation),
@@ -4945,20 +5039,635 @@ fn collaborative_sessions_refuse_a_chart_move() {
     );
     assert_eq!(workbook.model(), &before);
 
-    // the same move on a standalone session is accepted, so the refusal is the
-    // collaboration guard and not a broken op.
     let mut standalone = Workbook::open(&bytes).unwrap();
+    standalone
+        .apply_ops(vec![insert_rows], CalculationOptions::default())
+        .unwrap();
+    assert_ne!(
+        standalone.model().sheets[0].charts[0].refs,
+        before.sheets[0].charts[0].refs
+    );
+    let update = standalone
+        .encode_diff_v1(&workbook.encode_state_vector_v1())
+        .unwrap();
     assert!(
-        standalone
+        matches!(
+            workbook.apply_update_v1(&update, CalculationOptions::default()),
+            Err(Error::CollaborativeStructureChanged)
+        ),
+        "a chart remap must not slip past the freeze"
+    );
+    assert_eq!(workbook.model(), &before);
+}
+
+/// Two replicas dragging the same chart at once must land on one anchor, and
+/// on the same one whichever order the updates arrive in.
+#[test]
+fn concurrent_chart_moves_converge_in_either_delivery_order() {
+    let bytes = charted_fixture();
+    let settle = |first_wins: bool| {
+        let mut left = Workbook::open_collaborative(&bytes, 401).unwrap();
+        let mut right = Workbook::open_collaborative(&bytes, 402).unwrap();
+        left.move_chart(
+            SheetId(0),
+            "xl/drawings/drawing1.xml#0",
+            16.0,
+            0.0,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+        right
             .move_chart(
                 SheetId(0),
                 "xl/drawings/drawing1.xml#0",
-                12.0,
-                8.0,
-                CalculationOptions::default()
+                0.0,
+                24.0,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let to_right = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let to_left = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        if first_wins {
+            right
+                .apply_update_v1(&to_right, CalculationOptions::default())
+                .unwrap();
+            left.apply_update_v1(&to_left, CalculationOptions::default())
+                .unwrap();
+        } else {
+            left.apply_update_v1(&to_left, CalculationOptions::default())
+                .unwrap();
+            right
+                .apply_update_v1(&to_right, CalculationOptions::default())
+                .unwrap();
+        }
+        let anchor = left.model().sheets[0].charts[0].anchor;
+        assert_eq!(
+            right.model().sheets[0].charts[0].anchor,
+            anchor,
+            "concurrent moves must converge"
+        );
+        anchor
+    };
+    assert_eq!(
+        settle(true),
+        settle(false),
+        "the winning anchor must not depend on delivery order"
+    );
+}
+
+/// One drawing anchor held by two sheets is one element in one part, so a drag
+/// repins every sheet holding it. Repinning only the dragged sheet would leave
+/// the two disagreeing and the save would refuse the drawing outright.
+#[test]
+fn a_drag_repins_every_sheet_sharing_the_drawing() {
+    let bytes = shared_drawing_fixture();
+    let mut workbook = Workbook::open_collaborative(&bytes, 403).unwrap();
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].drawing,
+        workbook.model().sheets[0].charts[0].drawing,
+        "the fixture must share one drawing"
+    );
+    let before = workbook.model().sheets[0].charts[0].anchor;
+
+    assert!(
+        workbook
+            .move_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                18.0,
+                9.0,
+                CalculationOptions::default(),
             )
             .unwrap()
             .applied
+    );
+    let moved = workbook.model().sheets[0].charts[0].anchor;
+    assert_ne!(moved, before);
+    assert_eq!(
+        workbook.model().sheets[1].charts[0].anchor,
+        moved,
+        "the sheet sharing the anchor must follow it"
+    );
+
+    let saved = workbook
+        .save()
+        .expect("a shared drawing both sheets agree on must save");
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(reopened.model().sheets[0].charts[0].anchor, moved);
+    assert_eq!(reopened.model().sheets[1].charts[0].anchor, moved);
+
+    // one undo takes both sheets back together.
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, before);
+    assert_eq!(workbook.model().sheets[1].charts[0].anchor, before);
+}
+
+/// The chart references `charted_fixture` parses, so a handcrafted peer update
+/// can leave the chart's identity alone and change only its anchor.
+const CHARTED_FIXTURE_REFS: &str = r#"[{"kind":"seriesName","formula":"Data!$B$1"},{"kind":"categories","formula":"Data!$A$2:$A$4"},{"kind":"values","formula":"Data!$B$2:$B$4"},{"kind":"dataLabels","formula":"Data!$C$2:$C$4"}]"#;
+
+/// A whole document, as a persisted snapshot would be, forked from `target`
+/// and carrying a handcrafted chart state on one sheet.
+fn peer_snapshot_with_charts(
+    target: &Workbook,
+    client_id: u64,
+    sheet_key: &str,
+    charts: &str,
+) -> Vec<u8> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, MapRef, ReadTxn, StateVector, Transact, Update};
+
+    let peer = Doc::with_client_id(client_id);
+    let update = Update::decode_v1(&target.encode_state_as_update_v1()).unwrap();
+    peer.transact_mut().apply_update(update).unwrap();
+    {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map("xlsx:sheets").unwrap();
+        let sheet = sheets
+            .get(&txn, sheet_key)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .unwrap();
+        sheet.try_update(&mut txn, "charts", charts);
+    }
+    peer.transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
+
+/// A drawing whose anchor runs backwards — `to` before `from`. Real files
+/// carry such things and open fine, but nothing can resolve them, so they are
+/// grandfathered rather than accepted as a new repin.
+fn unresolvable_anchor_fixture() -> Vec<u8> {
+    const INVERTED_DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/drawings/drawing1.xml",
+        INVERTED_DRAWING.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A drawing whose two anchors both point at one chart part, so a sheet holds
+/// that part twice and naming it alone cannot say which anchor is meant.
+fn two_anchor_fixture() -> Vec<u8> {
+    const TWO_ANCHOR_DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>10</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/drawings/drawing1.xml",
+        TWO_ANCHOR_DRAWING.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// A peer's update assigning one sheet's chart state, built by forking the
+/// target's own document. Mirrors the shared-document key names.
+fn peer_sheet_charts_update(
+    target: &Workbook,
+    client_id: u64,
+    sheet_key: &str,
+    charts: &str,
+) -> Vec<u8> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, MapRef, ReadTxn, Transact, Update};
+
+    let peer = Doc::with_client_id(client_id);
+    let update = Update::decode_v1(&target.encode_state_as_update_v1()).unwrap();
+    peer.transact_mut().apply_update(update).unwrap();
+    let before = peer.transact().state_vector();
+    {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map("xlsx:sheets").unwrap();
+        let sheet = sheets
+            .get(&txn, sheet_key)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .unwrap();
+        sheet.try_update(&mut txn, "charts", charts);
+    }
+    peer.transact().encode_diff_v1(&before)
+}
+
+/// Two people dragging the same chart is ordinary use, not an attack. Once the
+/// two moves merge, the assignment that lost is a tombstone, and undoing the
+/// one that won must not take the whole sheet's chart state with it: the loser
+/// keeps a readable workbook, the winner gets its drag back, and neither is
+/// left holding history it can no longer apply.
+#[test]
+fn honest_concurrent_drags_survive_undo_on_both_replicas() {
+    let bytes = charted_fixture();
+    let mut left = Workbook::open_collaborative(&bytes, 800).unwrap();
+    let mut right = Workbook::open_collaborative(&bytes, 801).unwrap();
+    let before = left.model().sheets[0].charts[0].anchor;
+
+    left.move_chart(
+        SheetId(0),
+        "xl/drawings/drawing1.xml#0",
+        16.0,
+        0.0,
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    right
+        .move_chart(
+            SheetId(0),
+            "xl/drawings/drawing1.xml#0",
+            0.0,
+            24.0,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let to_right = left
+        .encode_diff_v1(&right.encode_state_vector_v1())
+        .unwrap();
+    let to_left = right
+        .encode_diff_v1(&left.encode_state_vector_v1())
+        .unwrap();
+    right
+        .apply_update_v1(&to_right, CalculationOptions::default())
+        .unwrap();
+    left.apply_update_v1(&to_left, CalculationOptions::default())
+        .unwrap();
+    let converged = left.model().sheets[0].charts[0].anchor;
+    assert_eq!(right.model().sheets[0].charts[0].anchor, converged);
+
+    // whichever replica owns the surviving assignment can take it back, and
+    // neither replica may fail the step or lose the workbook doing it.
+    for (label, workbook) in [("left", &mut left), ("right", &mut right)] {
+        let undone = workbook
+            .undo(CalculationOptions::default())
+            .unwrap_or_else(|error| {
+                panic!("{label} could not undo after a concurrent drag: {error}")
+            });
+        assert!(
+            workbook.save().is_ok(),
+            "{label} must still hold a saveable workbook"
+        );
+        assert!(
+            !workbook.model().sheets[0].charts.is_empty(),
+            "{label} must not lose its chart"
+        );
+        let _ = undone;
+    }
+    assert_eq!(
+        right.model().sheets[0].charts[0].anchor,
+        before,
+        "the replica whose drag survived the merge must get it back"
+    );
+}
+
+/// A repin that no viewport can resolve would hide the chart on every replica
+/// while still saving a drawing Excel refuses. The open path must keep taking
+/// whatever real files hold, so this is refused where the update arrives.
+#[test]
+fn remote_updates_carrying_an_unresolvable_anchor_are_refused() {
+    let bytes = charted_fixture();
+    for (label, anchor) in [
+        (
+            "negative offset",
+            r#"{"kind":"twoCell","from":{"col":2,"colOff":-1,"row":4,"rowOff":0},"to":{"col":8,"colOff":0,"row":19,"rowOff":0},"edit_as":"oneCell"}"#,
+        ),
+        (
+            "overflowing offset",
+            r#"{"kind":"twoCell","from":{"col":2,"colOff":9223372036854775807,"row":4,"rowOff":0},"to":{"col":8,"colOff":0,"row":19,"rowOff":0},"edit_as":"oneCell"}"#,
+        ),
+        (
+            "inverted corners",
+            r#"{"kind":"twoCell","from":{"col":20,"colOff":0,"row":4,"rowOff":0},"to":{"col":8,"colOff":0,"row":19,"rowOff":0},"edit_as":"oneCell"}"#,
+        ),
+    ] {
+        let mut target = Workbook::open_collaborative(&bytes, 820).unwrap();
+        let before = target.model().clone();
+        let charts = format!(
+            r#"[{{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{anchor},"refs":{CHARTED_FIXTURE_REFS}}}]"#
+        );
+        let update = peer_sheet_charts_update(&target, 821, "sheet:0", &charts);
+        let error = target
+            .apply_update_v1(&update, CalculationOptions::default())
+            .expect_err(&format!("{label} must be refused"));
+        assert!(
+            matches!(&error, Error::CollaborativeState(message) if message.contains("cannot be resolved")),
+            "{label}: {error:?}"
+        );
+        assert_eq!(target.model(), &before, "{label} must leave nothing behind");
+    }
+}
+
+/// Sheets sharing one drawing anchor must agree on it in the model itself, not
+/// only in whatever path happened to build it. A raw op batch is a shipped API
+/// and a remote update arrives unvetted, so both have to be refused.
+#[test]
+fn sheets_sharing_a_drawing_anchor_may_not_disagree() {
+    let bytes = shared_drawing_fixture();
+    let before = Workbook::open(&bytes).unwrap().model().sheets[0].charts[0].anchor;
+    let moved = {
+        let mut source = Workbook::open(&bytes).unwrap();
+        source
+            .move_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                18.0,
+                9.0,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        source.model().sheets[0].charts[0].anchor
+    };
+
+    // a raw op batch that repins only one of the two sheets
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let error = workbook
+        .apply_ops(
+            vec![Op::SetChartAnchor {
+                sheet: SheetId(0),
+                frame: "xl/drawings/drawing1.xml#0".to_owned(),
+                part: "xl/charts/chart1.xml".to_owned(),
+                from: before,
+                to: moved,
+            }],
+            CalculationOptions::default(),
+        )
+        .expect_err("a half-repinned shared drawing must be refused");
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("disagree")),
+        "{error:?}"
+    );
+
+    // and the same disagreement arriving as a remote update
+    let mut target = Workbook::open_collaborative(&bytes, 830).unwrap();
+    let before = target.model().clone();
+    let charts = format!(
+        r#"[{{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{},"refs":{}}}]"#,
+        serde_json::to_string(&moved).unwrap(),
+        CHARTED_FIXTURE_REFS
+    );
+    let update = peer_sheet_charts_update(&target, 831, "sheet:0", &charts);
+    let error = target
+        .apply_update_v1(&update, CalculationOptions::default())
+        .expect_err("a remote half-repin must be refused");
+    assert!(
+        matches!(&error, Error::CollaborativeState(message) if message.contains("disagree")),
+        "{error:?}"
+    );
+    assert_eq!(target.model(), &before);
+}
+
+/// A snapshot is foreign bytes like any update, so it answers to the same
+/// checks. A pristine replica adopts a whole document instead of merging it,
+/// and if that door skipped the anchor check the two replicas would take
+/// opposite decisions on identical bytes and drift apart for good.
+#[test]
+fn an_adopted_snapshot_answers_to_the_same_anchor_check_as_an_update() {
+    let bytes = charted_fixture();
+    let hostile = {
+        let donor = Workbook::open_collaborative(&bytes, 840).unwrap();
+        let charts = format!(
+            r#"[{{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{{"kind":"twoCell","from":{{"col":20,"colOff":0,"row":4,"rowOff":0}},"to":{{"col":8,"colOff":0,"row":19,"rowOff":0}},"edit_as":"oneCell"}},"refs":{}}}]"#,
+            CHARTED_FIXTURE_REFS
+        );
+        peer_snapshot_with_charts(&donor, 841, "sheet:0", &charts)
+    };
+
+    let mut pristine = Workbook::open_collaborative(&bytes, 842).unwrap();
+    let pristine_result = pristine.apply_update_v1(&hostile, CalculationOptions::default());
+
+    let mut touched = Workbook::open_collaborative(&bytes, 842).unwrap();
+    touched
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "typed",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let touched_result = touched.apply_update_v1(&hostile, CalculationOptions::default());
+
+    assert!(
+        pristine_result.is_err(),
+        "a pristine replica must not adopt a snapshot it would reject as an update"
+    );
+    assert_eq!(
+        pristine_result.is_err(),
+        touched_result.is_err(),
+        "the same bytes must get the same answer whether or not the replica is pristine"
+    );
+}
+
+/// An undo assembles a model out of parts that each passed on their own way
+/// in. It can still land a pair no single edit produced: one sheet repinned,
+/// the sheet sharing its drawing anchor left behind. That is a workbook no
+/// replica can save, so the step is refused rather than installed.
+#[test]
+fn collaborative_undo_may_not_install_a_split_shared_drawing() {
+    let bytes = shared_drawing_fixture();
+    let mut local = Workbook::open_collaborative(&bytes, 850).unwrap();
+    let before = local.model().sheets[0].charts[0].anchor;
+
+    local
+        .move_chart(
+            SheetId(0),
+            "xl/drawings/drawing1.xml#0",
+            18.0,
+            9.0,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let moved = local.model().sheets[0].charts[0].anchor;
+    assert_eq!(local.model().sheets[1].charts[0].anchor, moved);
+
+    // a peer causally overwrites only the second sheet with the same anchor it
+    // already holds, tombstoning the local insertion there but not on the first
+    // same model, different bytes, so the write lands and tombstones the
+    // local insertion on this sheet only
+    let charts = format!(
+        r#"[ {{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{},"refs":{}}} ]"#,
+        serde_json::to_string(&moved).unwrap(),
+        CHARTED_FIXTURE_REFS
+    );
+    let update = peer_sheet_charts_update(&local, 851, "sheet:1", &charts);
+    assert!(
+        local
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap()
+            .applied
+            || local.model().sheets[1].charts[0].anchor == moved,
+        "the peer write must land, or the split never forms"
+    );
+    assert_eq!(local.model().sheets[0].charts[0].anchor, moved);
+    assert_eq!(local.model().sheets[1].charts[0].anchor, moved);
+
+    // undoing the move reverts only the sheet whose insertion survived, which
+    // is a workbook no replica could save, so the step is refused whole.
+    let vector_before = local.encode_state_vector_v1();
+    let history_before = local.history_state();
+    let error = local
+        .undo(CalculationOptions::default())
+        .expect_err("an undo may not install two sheets disagreeing on one anchor");
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("disagree")),
+        "{error:?}"
+    );
+    assert_eq!(local.model().sheets[0].charts[0].anchor, moved);
+    assert_eq!(local.model().sheets[1].charts[0].anchor, moved);
+    assert!(
+        local.save().is_ok(),
+        "a refused undo must leave a saveable workbook"
+    );
+
+    // the projection is only half of it. What the replica publishes has to be
+    // unchanged too, or peers pick up an undo this workbook refused — so ask a
+    // peer what the shared document now says.
+    assert_eq!(
+        local.encode_state_vector_v1(),
+        vector_before,
+        "a refused undo must not advance the shared document"
+    );
+    assert_eq!(
+        local.history_state(),
+        history_before,
+        "a refused undo must not spend a history entry"
+    );
+    let mut peer = Workbook::open_collaborative(&bytes, 852).unwrap();
+    let catch_up = local
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&catch_up, CalculationOptions::default())
+        .expect("a peer must be able to take what this replica publishes");
+    assert_eq!(
+        peer.model().sheets[0].charts[0].anchor,
+        moved,
+        "the authority must not be publishing the refused undo"
+    );
+    assert_eq!(peer.model().sheets[1].charts[0].anchor, moved);
+
+    assert_ne!(moved, before);
+}
+
+/// Whether an anchor is exempt from the resolvability check must be a question
+/// every replica answers the same way. Judging it against the replica's own
+/// current projection makes the answer depend on local editing history: a
+/// grandfathered source anchor reads as "unchanged" on a replica that still
+/// holds it and as "newly introduced" on one that has moved on, so an undo
+/// restoring it is accepted by one peer and refused by the other, and they
+/// never converge again.
+#[test]
+fn an_undo_restoring_a_grandfathered_anchor_is_not_judged_by_local_history() {
+    let bytes = unresolvable_anchor_fixture();
+    let mut local = Workbook::open_collaborative(&bytes, 860).unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 861).unwrap();
+    let opened = local.model().sheets[0].charts[0].anchor;
+
+    // a repin away from it is ordinary and accepted
+    let ChartAnchor::TwoCell { from, to, edit_as } = opened else {
+        panic!("two-cell anchor");
+    };
+    let ordinary = ChartAnchor::TwoCell {
+        from: to,
+        to: from,
+        edit_as,
+    };
+    local
+        .apply_ops(
+            vec![Op::SetChartAnchor {
+                sheet: SheetId(0),
+                frame: "xl/drawings/drawing1.xml#0".to_owned(),
+                part: "xl/charts/chart1.xml".to_owned(),
+                from: opened,
+                to: ordinary,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let moved = local.model().sheets[0].charts[0].anchor;
+    assert_ne!(moved, opened);
+    let update = local
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(peer.model().sheets[0].charts[0].anchor, moved);
+
+    // undo puts the grandfathered anchor back and tells the peer
+    assert!(local.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(local.model().sheets[0].charts[0].anchor, opened);
+    let undo_update = local
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&undo_update, CalculationOptions::default())
+        .expect("a peer must accept an undo restoring the anchor it opened with");
+    assert_eq!(
+        peer.model().sheets[0].charts[0].anchor,
+        local.model().sheets[0].charts[0].anchor,
+        "the replicas must not part ways over a grandfathered anchor"
+    );
+}
+
+/// One chart part may back two anchors in a drawing, so naming the part alone
+/// cannot say which to repin. The op carries a frame and the anchor it saw
+/// there, so the sibling sharing that part is left where it is, and a repin
+/// whose recorded anchor has moved on is refused rather than applied blind.
+#[test]
+fn a_repin_moves_only_the_frame_it_names_when_a_part_backs_two() {
+    let bytes = two_anchor_fixture();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let charts = &workbook.model().sheets[0].charts;
+    assert_eq!(charts.len(), 2);
+    assert_eq!(
+        charts[0].part, charts[1].part,
+        "the fixture must share a part"
+    );
+    let (first, second) = (charts[0].anchor, charts[1].anchor);
+    let ChartAnchor::TwoCell { from, to, edit_as } = first else {
+        panic!("two-cell anchor");
+    };
+    let moved = ChartAnchor::TwoCell {
+        from: AnchorCell {
+            col: from.col + 1,
+            ..from
+        },
+        to: AnchorCell {
+            col: to.col + 1,
+            ..to
+        },
+        edit_as,
+    };
+    let repin = |anchor_index: usize, from: ChartAnchor, to: ChartAnchor| Op::SetChartAnchor {
+        sheet: SheetId(0),
+        frame: format!("xl/drawings/drawing1.xml#{anchor_index}"),
+        part: "xl/charts/chart1.xml".to_owned(),
+        from,
+        to,
+    };
+
+    assert!(
+        workbook
+            .apply_ops(vec![repin(0, first, moved)], CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(workbook.model().sheets[0].charts[0].anchor, moved);
+    assert_eq!(
+        workbook.model().sheets[0].charts[1].anchor,
+        second,
+        "the frame sharing the part must stay where it was"
+    );
+
+    let error = workbook
+        .apply_ops(vec![repin(0, first, moved)], CalculationOptions::default())
+        .expect_err("a repin whose recorded anchor has moved on must be refused");
+    assert!(
+        matches!(&error, Error::ChartFrameShifted { frame } if frame.ends_with("#0")),
+        "{error:?}"
     );
 }
 
