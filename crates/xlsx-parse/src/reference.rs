@@ -22,9 +22,9 @@ use crate::chart::{
     relationship_part_path, unmodelled_chart_parts,
 };
 use crate::package::PartContentType;
-use crate::tree::{Element, parse_tree};
+use crate::tree::{Element, Unqualified, Vocabulary, owned_local_name, parse_tree};
 use crate::write::{NS_MAIN, NS_STRICT_MAIN};
-use crate::xml::{find_part, local_name, resolve_part_path};
+use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_DEPTH, ParseError};
 
 /// the spreadsheetml vocabulary a pivot part is read in. Transitional and
@@ -232,6 +232,12 @@ fn root_local_name(bytes: &[u8]) -> Option<String> {
                 }
             }
             Event::End(_) => depth = depth.checked_sub(1)?,
+            Event::Text(text) if depth == 0 => {
+                if !text.iter().all(u8::is_ascii_whitespace) {
+                    return None;
+                }
+            }
+            Event::CData(_) | Event::GeneralRef(_) if depth == 0 => return None,
             Event::Eof => break,
             _ => {}
         }
@@ -240,19 +246,32 @@ fn root_local_name(bytes: &[u8]) -> Option<String> {
     (depth == 0).then_some(root).flatten()
 }
 
-/// The local name of a start tag whose expanded name is in our vocabulary.
+/// The local name of a start tag whose expanded name is in our vocabulary,
+/// decided by the same rule the tree readers use. `NsReader` reports a default
+/// declared away as `Unbound`, exactly as it reports a part that declared none,
+/// so the tag's own `xmlns` is what tells those two apart here.
 fn ours_local_name(namespace: ResolveResult<'_>, start: &BytesStart<'_>) -> Option<String> {
-    let ours = match namespace {
-        ResolveResult::Unbound => true,
-        ResolveResult::Bound(namespace) => {
-            OURS.contains(&String::from_utf8_lossy(namespace.as_ref()).as_ref())
-        }
-        ResolveResult::Unknown(_) => false,
+    let resolved = String::from_utf8_lossy(match namespace {
+        ResolveResult::Bound(ref namespace) => namespace.as_ref(),
+        _ => b"",
+    })
+    .into_owned();
+    let vocabulary = match namespace {
+        ResolveResult::Bound(_) => Vocabulary::Bound(&resolved),
+        ResolveResult::Unbound if declares_empty_default(start) => Vocabulary::Cleared,
+        ResolveResult::Unbound | ResolveResult::Unknown(_) => Vocabulary::Absent,
     };
-    let name = String::from_utf8(start.name().as_ref().to_vec()).ok()?;
-    (ours && name.matches(':').count() <= 1)
-        .then(|| String::from_utf8(local_name(start)).ok())
+    let qname = String::from_utf8(start.name().as_ref().to_vec()).ok()?;
+    owned_local_name(&qname, vocabulary, &OURS, Unqualified::Owned).map(str::to_owned)
+}
+
+/// Whether a start tag carries `xmlns=""`, which takes it out of every
+/// vocabulary rather than leaving it in none by omission.
+fn declares_empty_default(start: &BytesStart<'_>) -> bool {
+    start
+        .attributes()
         .flatten()
+        .any(|attribute| attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref().is_empty())
 }
 
 /// A pivot part as an element tree, or nothing when this crate declines to read

@@ -28,34 +28,69 @@ impl Attribute {
     pub(crate) fn local_name(&self) -> &str {
         self.name.rsplit(':').next().unwrap_or(&self.name)
     }
-}
 
-/// Whether a node belongs to one of `namespaces` for the purpose of reading it
-/// by name. Three ways to carry no namespace have to be told apart, and only
-/// the first is ours: a part that declared none at all still looks like the
-/// vocabulary it spells, a prefix that resolved to nothing names a vocabulary
-/// the part never declared, and `cleared` — an `xmlns=""` in scope — is a
-/// subtree that declared its way out of the vocabulary it was in. Resolution
-/// collapses all three to `None`, so the QName as authored and the binding in
-/// scope are what separate them.
-fn answers_for(name: &str, namespace: Option<&str>, cleared: bool, namespaces: &[&str]) -> bool {
-    if !is_namespace_valid(name) {
-        return false;
-    }
-    match namespace {
-        Some(namespace) => namespaces.contains(&namespace),
-        None => !cleared && split_prefix(name).0.is_empty(),
+    /// A default declaration never reaches an attribute, so an unprefixed one
+    /// is unqualified however its element was declared.
+    fn vocabulary(&self) -> Vocabulary<'_> {
+        match self.namespace.as_deref() {
+            Some(namespace) => Vocabulary::Bound(namespace),
+            None => Vocabulary::Absent,
+        }
     }
 }
 
-/// Whether a QName is one namespace resolution can be applied to at all: at
-/// most one colon, with neither side of it empty. Anything else is
-/// namespace-invalid, and a name that is not well formed is never ours however
-/// its prefix resolves.
-fn is_namespace_valid(name: &str) -> bool {
+/// What a name's prefix, or the default declaration over it, resolved to.
+/// Three ways to carry no namespace have to be told apart and resolution
+/// collapses all of them, so every reader reports which one it saw.
+#[derive(Clone, Copy)]
+pub(crate) enum Vocabulary<'a> {
+    Bound(&'a str),
+    /// nothing in scope declares one, which is how a part authored without
+    /// namespaces spells the vocabulary it looks like
+    Absent,
+    /// an `xmlns=""` in scope: this name declared its way out of every
+    /// vocabulary, which is not the same as never having declared one
+    Cleared,
+}
+
+/// Whether an unqualified name is read as a vocabulary's own.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Unqualified {
+    /// spreadsheetml, whose parts are sometimes authored bare
+    Owned,
+    /// relationships and friends, where a bare `id` is a different attribute
+    /// rather than an unqualified `r:id`
+    Foreign,
+}
+
+/// The one ownership rule in this crate. Every reader of a name — tree
+/// elements, tree attributes, the streaming root sniff — decides here and
+/// nowhere else, so a reader added later cannot answer it differently. Returns
+/// the local name the QName answers to when it belongs to `namespaces`.
+pub(crate) fn owned_local_name<'a>(
+    qname: &'a str,
+    vocabulary: Vocabulary<'_>,
+    namespaces: &[&str],
+    unqualified: Unqualified,
+) -> Option<&'a str> {
+    let (prefix, local) = valid_qname(qname)?;
+    let ours = match vocabulary {
+        Vocabulary::Bound(namespace) => namespaces.contains(&namespace),
+        Vocabulary::Absent => prefix.is_empty() && unqualified == Unqualified::Owned,
+        Vocabulary::Cleared => false,
+    };
+    ours.then_some(local)
+}
+
+/// A QName namespace resolution can be applied to at all — at most one colon,
+/// with neither side of it empty — split into its prefix and local name. A
+/// name that is not well formed answers to nothing, however its prefix
+/// resolves, so no reader may derive a local name any other way.
+fn valid_qname(name: &str) -> Option<(&str, &str)> {
     match name.split_once(':') {
-        None => !name.is_empty(),
-        Some((prefix, local)) => !prefix.is_empty() && !local.is_empty() && !local.contains(':'),
+        None => (!name.is_empty()).then_some(("", name)),
+        Some((prefix, local)) => (!prefix.is_empty() && !local.is_empty() && !local.contains(':'))
+            .then_some((prefix, local)),
     }
 }
 
@@ -106,13 +141,18 @@ impl Element {
             .map(|attribute| attribute.value.as_str())
     }
 
-    /// the attribute with this expanded name, whatever prefix carries it.
+    /// the attribute with this expanded name, whatever prefix carries it. An
+    /// unqualified attribute is a different one, never this vocabulary's.
     pub(crate) fn attribute_ns(&self, namespace: &str, local: &str) -> Option<&str> {
         self.attributes
             .iter()
             .find(|attribute| {
-                attribute.namespace.as_deref() == Some(namespace)
-                    && attribute.name.rsplit(':').next() == Some(local)
+                owned_local_name(
+                    &attribute.name,
+                    attribute.vocabulary(),
+                    &[namespace],
+                    Unqualified::Foreign,
+                ) == Some(local)
             })
             .map(|attribute| attribute.value.as_str())
     }
@@ -134,13 +174,12 @@ impl Element {
         local: &'a str,
     ) -> impl Iterator<Item = &'a Attribute> {
         self.attributes.iter().filter(move |attribute| {
-            attribute.local_name() == local
-                && answers_for(
-                    &attribute.name,
-                    attribute.namespace.as_deref(),
-                    false,
-                    namespaces,
-                )
+            owned_local_name(
+                &attribute.name,
+                attribute.vocabulary(),
+                namespaces,
+                Unqualified::Owned,
+            ) == Some(local)
         })
     }
 
@@ -168,13 +207,20 @@ impl Element {
     /// counting the unqualified form a part that declares none is authored in.
     /// A foreign element spells the name the same way but is a different one.
     pub(crate) fn answers_to(&self, namespaces: &[&str], local: &str) -> bool {
-        self.local_name() == local
-            && answers_for(
-                &self.name,
-                self.namespace(),
-                self.default_cleared,
-                namespaces,
-            )
+        owned_local_name(
+            &self.name,
+            self.vocabulary(),
+            namespaces,
+            Unqualified::Owned,
+        ) == Some(local)
+    }
+
+    fn vocabulary(&self) -> Vocabulary<'_> {
+        match self.namespace() {
+            Some(namespace) => Vocabulary::Bound(namespace),
+            None if self.default_cleared => Vocabulary::Cleared,
+            None => Vocabulary::Absent,
+        }
     }
 
     pub(crate) fn child_elements(&self) -> impl Iterator<Item = &Element> {

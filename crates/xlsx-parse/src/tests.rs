@@ -2561,6 +2561,13 @@ fn refuses_records_whose_part_does_not_parse_whole() {
             "<pivotCacheRecords><r></pivotCacheRecords>",
         ),
         ("trailing junk", "<pivotCacheRecords/></stray>"),
+        ("trailing text", "<pivotCacheRecords/>garbage"),
+        ("trailing cdata", "<pivotCacheRecords/><![CDATA[garbage]]>"),
+        ("leading text", "garbage<pivotCacheRecords/>"),
+        (
+            "a root that declared its way out",
+            r#"<pivotCacheRecords xmlns=""/>"#,
+        ),
     ] {
         let mut parts = pivoted_package();
         set_part(
@@ -2581,6 +2588,45 @@ fn refuses_records_whose_part_does_not_parse_whole() {
         assert!(
             package.reference_moved_by_rows("Report", 999).is_some(),
             "{label} inherited a narrow area"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// A definition claims its records through `r:id`, and a qname namespace
+/// resolution cannot be applied to is not that attribute however its prefix is
+/// bound. Records claimed only that way are not claimed at all.
+#[test]
+fn refuses_records_a_definition_claims_through_an_invalid_qname() {
+    for (label, id) in [
+        ("second colon", r#"r:junk:id="rIdRecords""#),
+        ("empty prefix", r#":id="rIdRecords""#),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            format!(
+                r#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" {id}><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#
+            )
+            .as_bytes(),
+        );
+        parts.push((
+            "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+            b"<pivotCacheRecords/>".to_vec(),
+        ));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            br#"<Relationships><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} claimed the records"
         );
         assert!(
             package.reference_naming_sheet("Data").is_some(),
