@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 
+use quick_xml::NsReader;
 use quick_xml::events::Event;
+use quick_xml::name::ResolveResult;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRef, Workbook};
 
@@ -22,12 +24,14 @@ use crate::chart::{
 };
 use crate::package::PartContentType;
 use crate::tree::{Element, parse_tree};
-use crate::write::NS_MAIN;
-use crate::xml::{find_part, local_name, next_event, reader, resolve_part_path};
+use crate::write::{NS_MAIN, NS_STRICT_MAIN};
+use crate::xml::{find_part, local_name, resolve_part_path};
 
-/// the markup-compatibility vocabulary, whose branches stand in for the element
-/// they wrap.
-const NS_MCE: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+/// the spreadsheetml vocabulary a pivot part is read in. Transitional and
+/// Strict spell the same names in different namespaces and this crate reads
+/// both; an unprefixed name with no namespace at all is read as ours too,
+/// because a part that declares none is still the vocabulary it looks like.
+const OURS: [&str; 2] = [NS_MAIN, NS_STRICT_MAIN];
 
 /// A preserved part naming sheets and cells neither this crate nor the model
 /// rewrites.
@@ -197,18 +201,36 @@ fn pivot_references(
     references
 }
 
-/// The local name of a part's root element, read without building a tree so a
-/// cached-records part running to megabytes costs nothing to classify.
+/// The local name of a part's root element when the root is one of ours, read
+/// without building a tree so a cached-records part running to megabytes costs
+/// nothing to classify. A root in a foreign vocabulary — including one behind a
+/// prefix the part never declared — answers to no name, which classifies the
+/// part as one this crate does not read and leaves it naming everything.
 fn root_local_name(bytes: &[u8]) -> Option<String> {
-    let mut reader = reader(bytes);
+    let mut reader = NsReader::from_reader(bytes);
+    let config = reader.config_mut();
+    config.expand_empty_elements = true;
+    config.check_end_names = true;
     let mut buf = Vec::new();
-    let mut depth = 0;
     loop {
-        match next_event(&mut reader, &mut buf, &mut depth).ok()? {
-            Event::Start(start) => return String::from_utf8(local_name(&start)).ok(),
+        let (namespace, event) = reader.read_resolved_event_into(&mut buf).ok()?;
+        match event {
+            Event::Start(start) => {
+                let ours = match namespace {
+                    ResolveResult::Unbound => true,
+                    ResolveResult::Bound(namespace) => {
+                        OURS.contains(&String::from_utf8_lossy(namespace.as_ref()).as_ref())
+                    }
+                    ResolveResult::Unknown(_) => false,
+                };
+                return ours
+                    .then(|| String::from_utf8(local_name(&start)).ok())
+                    .flatten();
+            }
             Event::Eof => return None,
             _ => {}
         }
+        buf.clear();
     }
 }
 
@@ -233,8 +255,8 @@ fn source_areas(root: &Element) -> Option<Vec<NamedArea>> {
         return None;
     };
     match sole_attribute(source, "type")?.unwrap_or("worksheet") {
-        "worksheet" if only.answers_to(NS_MAIN, "worksheetSource") => Some(vec![named_area(only)?]),
-        "consolidation" if only.answers_to(NS_MAIN, "consolidation") => consolidated_areas(only),
+        "worksheet" if only.answers_to(&OURS, "worksheetSource") => Some(vec![named_area(only)?]),
+        "consolidation" if only.answers_to(&OURS, "consolidation") => consolidated_areas(only),
         _ => None,
     }
 }
@@ -242,14 +264,14 @@ fn source_areas(root: &Element) -> Option<Vec<NamedArea>> {
 fn consolidated_areas(consolidation: &Element) -> Option<Vec<NamedArea>> {
     if consolidation
         .child_elements()
-        .any(|child| !child.answers_to(NS_MAIN, "pages") && !child.answers_to(NS_MAIN, "rangeSets"))
+        .any(|child| !child.answers_to(&OURS, "pages") && !child.answers_to(&OURS, "rangeSets"))
     {
         return None;
     }
     let areas = sole_child(consolidation, "rangeSets")?
         .child_elements()
         .map(|set| {
-            set.answers_to(NS_MAIN, "rangeSet")
+            set.answers_to(&OURS, "rangeSet")
                 .then(|| named_area(set))
                 .flatten()
         })
@@ -261,9 +283,7 @@ fn consolidated_areas(consolidation: &Element) -> Option<Vec<NamedArea>> {
 /// instead: the schema allows exactly one of `ref` and `name`, and an `r:id`
 /// puts the range in another workbook.
 fn named_area(element: &Element) -> Option<NamedArea> {
-    if element.attributes_in(NS_MAIN, "name").next().is_some()
-        || element.attributes_in(NS_MAIN, "id").next().is_some()
-    {
+    if element.any_attribute_named("name") || element.any_attribute_named("id") {
         return None;
     }
     let sheet = sole_attribute(element, "sheet")??.to_owned();
@@ -304,7 +324,7 @@ fn page_count(location: &Element, name: &str) -> Option<u32> {
 /// attribute may default. A foreign attribute is not one of ours and so reads
 /// as absent, exactly as it does to a consumer that drops it.
 fn sole_attribute<'a>(element: &'a Element, name: &'a str) -> Option<Option<&'a str>> {
-    let mut candidates = element.attributes_in(NS_MAIN, name);
+    let mut candidates = element.attributes_in(&OURS, name);
     let Some(only) = candidates.next() else {
         return Some(None);
     };
@@ -318,7 +338,7 @@ fn sole_attribute<'a>(element: &'a Element, name: &'a str) -> Option<Option<&'a 
 /// several do. A name only a foreign node answers to is a name nothing answers
 /// to, which for a node the part cannot be read without is unresolved.
 fn sole_child<'a>(element: &'a Element, local: &'a str) -> Option<&'a Element> {
-    let mut candidates = element.children_in(NS_MAIN, local);
+    let mut candidates = element.children_in(&OURS, local);
     let only = candidates.next()?;
     candidates.next().is_none().then_some(only)
 }
@@ -327,9 +347,10 @@ fn sole_child<'a>(element: &'a Element, local: &'a str) -> Option<&'a Element> {
 /// between `mc:Choice` and `mc:Fallback` is markup-compatibility processing,
 /// and a branch can supply the very node a lookup is after, so a pivot part
 /// carrying one is read as naming everything rather than as whichever branch
-/// happens to sit first.
+/// happens to sit first. Matched by local name alone, because a branch behind a
+/// prefix the part never declared still hides whatever it wraps.
 fn carries_alternate_content(element: &Element) -> bool {
-    element.is(NS_MCE, "AlternateContent")
+    element.local_name() == "AlternateContent"
         || element.child_elements().any(carries_alternate_content)
 }
 

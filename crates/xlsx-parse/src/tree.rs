@@ -30,11 +30,18 @@ impl Attribute {
     }
 }
 
-/// Whether a node belongs to `namespace` for the purpose of reading it by name.
-/// An unqualified node does: attributes are unqualified by schema, and a part
-/// that declares no namespace at all is still the vocabulary it looks like.
-fn answers_for(node: Option<&str>, namespace: &str) -> bool {
-    node.is_none_or(|node| node == namespace)
+/// Whether a node belongs to one of `namespaces` for the purpose of reading it
+/// by name. An unprefixed node carrying no namespace does: attributes are
+/// unqualified by schema, and a part that declares none at all is still the
+/// vocabulary it looks like. A prefix that resolved to nothing is not the same
+/// thing — the name comes from a vocabulary the part never declared, so it is
+/// foreign however it is spelled. `name` is the QName as authored, which is
+/// what tells the two apart once resolution has collapsed both to `None`.
+fn answers_for(name: &str, namespace: Option<&str>, namespaces: &[&str]) -> bool {
+    match namespace {
+        Some(namespace) => namespaces.contains(&namespace),
+        None => split_prefix(name).0.is_empty(),
+    }
 }
 
 pub(crate) struct Element {
@@ -104,30 +111,40 @@ impl Element {
     /// never among them.
     pub(crate) fn attributes_in<'a>(
         &'a self,
-        namespace: &'a str,
+        namespaces: &'a [&'a str],
         local: &'a str,
     ) -> impl Iterator<Item = &'a Attribute> {
         self.attributes.iter().filter(move |attribute| {
             attribute.local_name() == local
-                && answers_for(attribute.namespace.as_deref(), namespace)
+                && answers_for(&attribute.name, attribute.namespace.as_deref(), namespaces)
         })
     }
 
-    /// the child elements answering to a local name in `namespace`.
+    /// whether any attribute answers to a local name, in whatever namespace.
+    /// For a name that disqualifies rather than supplies, a foreign match costs
+    /// only a refusal while a missed real one costs correctness, so the wider
+    /// question is the safe one to ask.
+    pub(crate) fn any_attribute_named(&self, local: &str) -> bool {
+        self.attributes
+            .iter()
+            .any(|attribute| attribute.local_name() == local)
+    }
+
+    /// the child elements answering to a local name in one of `namespaces`.
     pub(crate) fn children_in<'a>(
         &'a self,
-        namespace: &'a str,
+        namespaces: &'a [&'a str],
         local: &'a str,
     ) -> impl Iterator<Item = &'a Element> {
         self.child_elements()
-            .filter(move |child| child.answers_to(namespace, local))
+            .filter(move |child| child.answers_to(namespaces, local))
     }
 
-    /// whether this element answers to a local name in `namespace`, counting
-    /// the unqualified form a part that declares no namespace is authored in.
+    /// whether this element answers to a local name in one of `namespaces`,
+    /// counting the unqualified form a part that declares none is authored in.
     /// A foreign element spells the name the same way but is a different one.
-    pub(crate) fn answers_to(&self, namespace: &str, local: &str) -> bool {
-        self.local_name() == local && answers_for(self.namespace(), namespace)
+    pub(crate) fn answers_to(&self, namespaces: &[&str], local: &str) -> bool {
+        self.local_name() == local && answers_for(&self.name, self.namespace(), namespaces)
     }
 
     pub(crate) fn child_elements(&self) -> impl Iterator<Item = &Element> {

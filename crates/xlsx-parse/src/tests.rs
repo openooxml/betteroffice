@@ -1940,6 +1940,11 @@ fn refuses_everything_for_a_pivot_source_it_cannot_resolve() {
         (
             "another book",
             "",
+            r#"<worksheetSource xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" sheet="Data" ref="A1:B4" r:id="rIdBook"/>"#,
+        ),
+        (
+            "another book, undeclared prefix",
+            "",
             r#"<worksheetSource sheet="Data" ref="A1:B4" r:id="rIdBook"/>"#,
         ),
         (
@@ -2095,6 +2100,30 @@ fn refuses_a_pivot_source_only_a_foreign_node_answers_for() {
             "foreign ref beside a real sheet",
             r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource sheet="Data" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
         ),
+        (
+            "undeclared cacheSource prefix",
+            r#"<pivotCacheDefinition><u:cacheSource><worksheetSource sheet="Report" ref="A1"/></u:cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared worksheetSource prefix",
+            r#"<pivotCacheDefinition><cacheSource><u:worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared attribute prefix",
+            r#"<pivotCacheDefinition><cacheSource><worksheetSource u:sheet="Report" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign root",
+            r#"<u:pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></u:pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared root prefix",
+            r#"<u:pivotCacheDefinition><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></u:pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign default namespace",
+            r#"<pivotCacheDefinition xmlns="urn:future"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
     ] {
         let mut parts = pivoted_package();
         set_part(
@@ -2200,6 +2229,14 @@ fn resolves_a_pivot_source_however_the_part_declares_its_namespace() {
         (
             "prefixed namespace",
             r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:worksheetSource sheet="Data" ref="A1:B4"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+        (
+            "strict default namespace",
+            r#"<pivotCacheDefinition xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "strict prefixed namespace",
+            r#"<x:pivotCacheDefinition xmlns:x="http://purl.oclc.org/ooxml/spreadsheetml/main"><x:cacheSource><x:worksheetSource x:sheet="Data" x:ref="A1:B4"/></x:cacheSource></x:pivotCacheDefinition>"#,
         ),
     ] {
         let mut parts = pivoted_package();
