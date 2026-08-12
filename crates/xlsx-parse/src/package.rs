@@ -317,7 +317,6 @@ impl ContentTypeEntry {
 
 pub(crate) struct ResolvedContentType<'a> {
     pub(crate) value: &'a str,
-    pub(crate) overridden: bool,
 }
 
 /// Resolves a part's effective content type.
@@ -336,16 +335,8 @@ pub(crate) fn effective_content_type<'a>(
             .then(|| entry.attribute("ContentType"))
             .flatten()
         })
-        .map(|value| ResolvedContentType {
-            value,
-            overridden: true,
-        })
-        .or_else(|| {
-            default_content_type(entries, path).map(|value| ResolvedContentType {
-                value,
-                overridden: false,
-            })
-        })
+        .map(|value| ResolvedContentType { value })
+        .or_else(|| default_content_type(entries, path).map(|value| ResolvedContentType { value }))
 }
 
 fn default_content_type<'a>(entries: &'a [ContentTypeEntry], path: &str) -> Option<&'a str> {
@@ -1028,7 +1019,6 @@ fn part_content_types(
             Some(PartContentType {
                 path: normalized_part_name(path),
                 content_type: resolved.value.to_owned(),
-                overridden: resolved.overridden,
             })
         })
         .collect()
@@ -1037,7 +1027,6 @@ fn part_content_types(
 pub(crate) struct PartContentType {
     pub(crate) path: String,
     pub(crate) content_type: String,
-    pub(crate) overridden: bool,
 }
 
 struct SheetEntry {

@@ -1206,27 +1206,46 @@ fn normalize_part_path(path: &str) -> &str {
     path.trim_start_matches('/')
 }
 
-/// Whether a part holds a chart. An `Override` is authoritative; a type a
-/// `Default` extension mapping resolved names a chart when it is a chart type
-/// and otherwise leaves the conventional layout to answer, so a package that
-/// types its charts by extension alone is still covered.
+/// Whether a part holds a chart. Monotonic over the blanket veto the way
+/// pivot discovery is: the conventional layout always answers, and conforming
+/// typing may only add parts beside it. Typing that cannot be read must never
+/// take a chart away, because a chart nobody looks at vetoes nothing.
 fn is_chart_part(path: &str, content_types: &[PartContentType]) -> bool {
     let normalized = normalize_part_path(path).to_ascii_lowercase();
-    match content_types.iter().find(|part| part.path == normalized) {
-        Some(part)
-            if CHART_CONTENT_TYPES
-                .iter()
-                .any(|known| part.content_type.eq_ignore_ascii_case(known)) =>
-        {
-            true
-        }
-        Some(part) if part.overridden => false,
-        _ => {
-            normalized.starts_with("xl/charts/chart")
-                && normalized.ends_with(".xml")
-                && !normalized.contains("/_rels/")
-        }
+    (normalized.starts_with("xl/charts/chart")
+        && normalized.ends_with(".xml")
+        && !normalized.contains("/_rels/"))
+        || content_types.iter().any(|part| {
+            part.path == normalized
+                && CHART_CONTENT_TYPES
+                    .iter()
+                    .any(|known| part.content_type.eq_ignore_ascii_case(known))
+        })
+}
+
+/// Whether every anchor in a drawing claims at most one chart. The claim is
+/// followed by taking the first `c:chart` descendant of an anchor, so a second
+/// one lets two anchors swap which chart each is taken to hold — both still
+/// claimed once, so nothing looks unknown, while an unqualified reference
+/// resolves against the wrong sheet.
+pub(crate) fn drawing_claims_are_unambiguous(root: &Element) -> bool {
+    if !root.is(NS_SPREADSHEET_DRAWING, "wsDr") {
+        return true;
     }
+    root.child_elements()
+        .filter(is_anchor)
+        .all(|anchor| chart_descendants(anchor, 0) <= 1)
+}
+
+fn chart_descendants(element: &Element, depth: usize) -> usize {
+    if depth > MAX_DEPTH {
+        return usize::MAX;
+    }
+    usize::from(element.is(NS_CHART, "chart"))
+        + element
+            .child_elements()
+            .map(|child| chart_descendants(child, depth + 1))
+            .sum::<usize>()
 }
 
 /// Whether a chart part carries a reference this crate cannot rewrite. Only a

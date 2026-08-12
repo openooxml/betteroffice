@@ -18,8 +18,9 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRef, Workbook};
 
 use crate::chart::{
-    NS_PACKAGE_RELATIONSHIPS, NS_RELATIONSHIPS, chart_reference_areas, directory_of, parse_area,
-    parse_relationships, relationship_part_path, unmodelled_chart_parts,
+    NS_PACKAGE_RELATIONSHIPS, NS_RELATIONSHIPS, chart_reference_areas, directory_of,
+    drawing_claims_are_unambiguous, parse_area, parse_relationships, relationship_part_path,
+    unmodelled_chart_parts,
 };
 use crate::package::PartContentType;
 use crate::tree::{
@@ -50,6 +51,10 @@ const REL_PIVOT_CACHE_RECORDS: [&str; 2] = [
 const REL_DRAWING: [&str; 2] = [
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",
     "http://purl.oclc.org/ooxml/officeDocument/relationships/drawing",
+];
+const REL_CHART: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/chart",
 ];
 const REL_PIVOT_TABLE: [&str; 2] = [
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable",
@@ -183,7 +188,7 @@ fn pivot_references(
 ) -> Vec<UnpatchableReference> {
     let pivot_parts = parts
         .iter()
-        .filter(|(path, _)| is_pivot_part(path, content_types, conforming))
+        .filter(|(path, _)| is_pivot_part(path, content_types))
         .collect::<Vec<_>>();
     if !conforming {
         return pivot_parts
@@ -514,7 +519,12 @@ fn package_metadata_conforms(
         && narrowing_drawings(parts, sheet_paths)
             .iter()
             .filter_map(|drawing| find_part(parts, drawing))
-            .all(|bytes| parse_tree(bytes).is_ok_and(|root| names_are_resolvable(&root)))
+            .all(|bytes| {
+                parse_tree(bytes).is_ok_and(|root| {
+                    names_are_resolvable(&root) && drawing_claims_are_unambiguous(&root)
+                })
+            })
+        && sheet_relationships_are_unambiguous(parts)
 }
 
 /// Every part whose relationships the narrowing decision reads, transitively.
@@ -545,7 +555,7 @@ fn narrowing_relationship_owners(
         parts
             .iter()
             .map(|(path, _)| path.clone())
-            .filter(|path| is_pivot_part(path, content_types, true)),
+            .filter(|path| is_pivot_part(path, content_types)),
     );
     owners
 }
@@ -618,16 +628,20 @@ fn relationships_conform(parts: &[(String, Vec<u8>)], owner: &str) -> bool {
     let Ok(root) = parse_tree(bytes) else {
         return false;
     };
-    if !root.answers_to(&RELATIONSHIPS, "Relationships") {
+    if root.namespace() != Some(NS_PACKAGE_RELATIONSHIPS) || root.local_name() != "Relationships" {
         return false;
     }
     let mut ids = HashSet::new();
     root.child_elements().all(|entry| {
-        entry.answers_to(&RELATIONSHIPS, "Relationship")
+        entry.namespace() == Some(NS_PACKAGE_RELATIONSHIPS)
+            && entry.local_name() == "Relationship"
             && entry.child_elements().next().is_none()
             && NAMES
                 .iter()
                 .all(|name| sole_and_ours(entry, &RELATIONSHIPS, name))
+            && entry
+                .attribute_local("Type")
+                .is_some_and(followed_type_is_exact)
             && ["Type", "Target"].iter().all(|name| {
                 entry
                     .attribute_local(name)
@@ -643,35 +657,70 @@ fn relationships_conform(parts: &[(String, Vec<u8>)], owner: &str) -> bool {
     })
 }
 
-/// Whether a part holds a pivot cache or pivot table. Typed the way OPC types
-/// anything: an `Override` is authoritative, and the conventional directories
-/// answer only for a part a `Default` extension mapping left untyped. Metadata
-/// that does not conform is not read at all, leaving the conventional
-/// directories the blanket veto always used.
-fn is_pivot_part(path: &str, content_types: &[PartContentType], conforming: bool) -> bool {
+/// Whether each `<sheet>` in the workbook names its part unambiguously. The
+/// entry is read by taking the first attribute whose local name is `id`, so a
+/// foreign one before the real `r:id` swaps which part a sheet resolves to —
+/// leaving every sheet claimed while a pivot table is attributed to the wrong
+/// one, which is a narrow reading of a workbook nobody can read that way.
+fn sheet_relationships_are_unambiguous(parts: &[(String, Vec<u8>)]) -> bool {
+    let Some(bytes) = find_part(parts, "xl/workbook.xml") else {
+        return false;
+    };
+    let Ok(root) = parse_tree(bytes) else {
+        return false;
+    };
+    let Some(sheets) = sole_child(&root, "sheets") else {
+        return true;
+    };
+    sheets.child_elements().all(|sheet| {
+        !sheet.answers_to(&OURS, "sheet")
+            || (sheet.attributes_named("id") == 1
+                && sheet
+                    .attributes_in(&[NS_RELATIONSHIPS], "id")
+                    .next()
+                    .is_some()
+                && sole_and_ours(sheet, &OURS, "name")
+                && sole_and_ours(sheet, &OURS, "sheetId"))
+    })
+}
+
+/// Whether a relationship type is one the shared readers follow. Those match
+/// on the segment after the last slash, so a type merely ending in one of them
+/// steers chart ownership or a pivot claim without being the standard type this
+/// path enumerated. Such a package is not one to read relationships from.
+fn followed_type_is_exact(kind: &str) -> bool {
+    const FOLLOWED: [(&str, &[&str]); 4] = [
+        ("drawing", &REL_DRAWING),
+        ("chart", &REL_CHART),
+        ("pivotTable", &REL_PIVOT_TABLE),
+        ("pivotCacheRecords", &REL_PIVOT_CACHE_RECORDS),
+    ];
+    FOLLOWED.iter().all(|(segment, standard)| {
+        kind.rsplit('/').next() != Some(segment) || standard.contains(&kind)
+    })
+}
+
+/// Whether a part holds a pivot cache or pivot table.
+///
+/// Discovery is monotonic over the blanket veto: a part the conventional
+/// directories name is always looked at, and conforming metadata may only ADD
+/// parts beside them. Never a choice between the two — typing this path cannot
+/// read must not be able to take a part away, because a part nobody looks at
+/// vetoes nothing, which is the one outcome worse than a spurious refusal.
+fn is_pivot_part(path: &str, content_types: &[PartContentType]) -> bool {
     let key = part_key(path);
     if key.contains("/_rels/") {
         return false;
     }
-    let conventional = || {
-        PIVOT_DIRECTORIES
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
-    };
-    if !conforming {
-        return conventional();
-    }
-    match content_types.iter().find(|part| part.path == key) {
-        Some(part)
-            if PIVOT_CONTENT_TYPES
-                .iter()
-                .any(|known| part.content_type.eq_ignore_ascii_case(known)) =>
-        {
-            true
-        }
-        Some(part) if part.overridden => false,
-        _ => conventional(),
-    }
+    PIVOT_DIRECTORIES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+        || content_types.iter().any(|part| {
+            part.path == key
+                && PIVOT_CONTENT_TYPES
+                    .iter()
+                    .any(|known| part.content_type.eq_ignore_ascii_case(known))
+        })
 }
 
 fn part_key(path: &str) -> String {
