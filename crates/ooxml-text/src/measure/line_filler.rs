@@ -896,8 +896,8 @@ fn to_flags(compat: &CompatIn) -> wm::CompatFlags {
     wm::CompatFlags {
         no_leading: compat.no_leading,
         do_not_expand_shift_return: compat.do_not_expand_shift_return,
-        // no settings.xml element maps here yet — see rule 1a
-        ..wm::CompatFlags::default()
+        gdi_line_metrics: false,
+        typo_line_spacing: false,
     }
 }
 
