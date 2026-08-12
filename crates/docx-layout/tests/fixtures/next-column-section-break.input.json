@@ -1,0 +1,200 @@
+{
+  "measured": [
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Section one column one",
+            "pmStart": 1,
+            "pmEnd": 23
+          }
+        ],
+        "attrs": {},
+        "pmStart": 1,
+        "pmEnd": 24
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 22,
+            "width": 240,
+            "ascent": 320,
+            "descent": 80,
+            "lineHeight": 400
+          }
+        ],
+        "totalHeight": 400
+      }
+    },
+    {
+      "block": {
+        "kind": "sectionBreak",
+        "id": 1,
+        "type": "nextColumn",
+        "columns": {
+          "count": 2,
+          "gap": 24
+        }
+      },
+      "measure": {
+        "kind": "sectionBreak"
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 2,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Section two body 0",
+            "pmStart": 30,
+            "pmEnd": 48
+          }
+        ],
+        "attrs": {},
+        "pmStart": 30,
+        "pmEnd": 49
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 18,
+            "width": 240,
+            "ascent": 320,
+            "descent": 80,
+            "lineHeight": 400
+          }
+        ],
+        "totalHeight": 400
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 3,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Section two body 1",
+            "pmStart": 50,
+            "pmEnd": 68
+          }
+        ],
+        "attrs": {},
+        "pmStart": 50,
+        "pmEnd": 69
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 18,
+            "width": 240,
+            "ascent": 320,
+            "descent": 80,
+            "lineHeight": 400
+          }
+        ],
+        "totalHeight": 400
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 4,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Section two body 2",
+            "pmStart": 70,
+            "pmEnd": 88
+          }
+        ],
+        "attrs": {},
+        "pmStart": 70,
+        "pmEnd": 89
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 18,
+            "width": 240,
+            "ascent": 320,
+            "descent": 80,
+            "lineHeight": 400
+          }
+        ],
+        "totalHeight": 400
+      }
+    },
+    {
+      "block": {
+        "kind": "paragraph",
+        "id": 5,
+        "runs": [
+          {
+            "kind": "text",
+            "text": "Section two body 3",
+            "pmStart": 90,
+            "pmEnd": 108
+          }
+        ],
+        "attrs": {},
+        "pmStart": 90,
+        "pmEnd": 109
+      },
+      "measure": {
+        "kind": "paragraph",
+        "lines": [
+          {
+            "headRun": 0,
+            "headChar": 0,
+            "tailRun": 0,
+            "tailChar": 18,
+            "width": 240,
+            "ascent": 320,
+            "descent": 80,
+            "lineHeight": 400
+          }
+        ],
+        "totalHeight": 400
+      }
+    }
+  ],
+  "options": {
+    "pageSize": {
+      "w": 816,
+      "h": 1056
+    },
+    "margins": {
+      "top": 96,
+      "right": 96,
+      "bottom": 96,
+      "left": 96
+    },
+    "pageGap": 20,
+    "columns": {
+      "count": 2,
+      "gap": 120
+    }
+  }
+}

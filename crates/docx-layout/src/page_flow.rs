@@ -23,9 +23,10 @@
 //! Columns live in a *region* starting at `column_region_top`. A new page
 //! resets that to the content top; [`Paginator::update_columns`] sets it to the
 //! current pen and returns to column zero, so a continuous section break stacks
-//! its new column band below content already on the page. Page geometry a
-//! continuous break defers is held as pending and applied when the next page is
-//! created.
+//! its new column band below content already on the page. Geometry a break
+//! cannot apply to the sheet in progress — page size, margins, or a column band
+//! a `nextColumn` section must wait out — is held as pending and applied when
+//! the next page is created.
 
 use crate::LayoutError;
 use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
@@ -41,6 +42,7 @@ pub struct PageFlowGeometry {
     pub columns: ColumnLayout,
     pub pending_page_size: Option<Size>,
     pub pending_margins: Option<PageMargins>,
+    pub pending_columns: Option<ColumnLayout>,
 }
 
 /// Current state of a page being laid out.
@@ -80,6 +82,7 @@ pub struct Paginator {
     columns: ColumnLayout,
     pending_page_size: Option<Size>,
     pending_margins: Option<PageMargins>,
+    pending_columns: Option<ColumnLayout>,
     column_width: f64,
     column_region_top: f64,
     footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
@@ -112,6 +115,7 @@ impl Paginator {
             columns,
             pending_page_size: None,
             pending_margins: None,
+            pending_columns: None,
             column_width,
             column_region_top,
             footnote_reserved_heights,
@@ -137,6 +141,7 @@ impl Paginator {
         )?;
         paginator.pending_page_size = geometry.pending_page_size.clone();
         paginator.pending_margins = geometry.pending_margins.clone();
+        paginator.pending_columns = geometry.pending_columns.clone();
         paginator.start_page_number = start_page_number;
         Ok(paginator)
     }
@@ -154,6 +159,7 @@ impl Paginator {
             columns: self.columns.clone(),
             pending_page_size: self.pending_page_size.clone(),
             pending_margins: self.pending_margins.clone(),
+            pending_columns: self.pending_columns.clone(),
         }
     }
 
@@ -206,14 +212,20 @@ impl Paginator {
     /// Opens the next page, promoting any deferred geometry first, and returns
     /// its state index.
     fn create_new_page(&mut self) -> usize {
-        // apply any geometry queued by a continuous section break before
-        // computing the new page's size / margins
-        if self.pending_page_size.is_some() || self.pending_margins.is_some() {
+        // apply any geometry a section break deferred before computing the new
+        // page's size / margins / columns
+        if self.pending_page_size.is_some()
+            || self.pending_margins.is_some()
+            || self.pending_columns.is_some()
+        {
             if let Some(size) = self.pending_page_size.take() {
                 self.page_size = size;
             }
             if let Some(margins) = self.pending_margins.take() {
                 self.margins = margins;
+            }
+            if let Some(columns) = self.pending_columns.take() {
+                self.columns = columns;
             }
             self.column_width = calculate_column_width(
                 self.page_size.w,
@@ -322,17 +334,17 @@ impl Paginator {
     }
 
     /// Moves to the next column of the current region, or opens a new page once
-    /// the region's columns are spent.
-    fn advance_column(&mut self, idx: usize) -> usize {
+    /// the region's columns are spent, reporting which of the two it did.
+    fn advance_column(&mut self, idx: usize) -> (usize, bool) {
         if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
             let region_top = self.column_region_top;
             let state = &mut self.states[idx];
             state.column_index += 1;
             state.pen_y = region_top;
             state.deferred_spacing = 0.0;
-            return idx;
+            return (idx, false);
         }
-        self.create_new_page()
+        (self.create_new_page(), true)
     }
 
     /// Advances until a height fits or an oversized fragment can overflow.
@@ -350,11 +362,11 @@ impl Paginator {
             let column_capacity = self.states[idx].content_limit - self.states[idx].content_top;
             if safe_height > column_capacity {
                 if self.states[idx].pen_y != self.states[idx].content_top {
-                    idx = self.advance_column(idx);
+                    idx = self.advance_column(idx).0;
                 }
                 return idx;
             }
-            idx = self.advance_column(idx);
+            idx = self.advance_column(idx).0;
         }
 
         idx
@@ -416,11 +428,12 @@ impl Paginator {
     /// Moves to the next column, or the next page from the last column.
     pub fn force_column_break(&mut self) -> usize {
         let idx = self.get_current();
-        self.advance_column(idx)
+        self.advance_column(idx).0
     }
 
     /// Applies a column layout below content already placed in the region.
     pub fn update_columns(&mut self, new_columns: ColumnLayout) {
+        self.pending_columns = None;
         self.columns = new_columns;
         self.column_width = calculate_column_width(
             self.page_size.w,
@@ -439,6 +452,12 @@ impl Paginator {
 
         self.column_region_top = self.states[idx].pen_y;
         self.states[idx].column_index = 0;
+    }
+
+    /// Queues a column layout for the next page, leaving the band in force to
+    /// finish the sheet in progress.
+    pub fn queue_columns(&mut self, new_columns: ColumnLayout) {
+        self.pending_columns = Some(new_columns);
     }
 
     /// Applies or queues page geometry for subsequently created pages.
@@ -513,10 +532,18 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
         self.pages[self.states[idx].page_index].number
     }
 
-    fn force_column_break(&mut self) -> bool {
-        let pages_before = self.pages.len();
-        Paginator::force_column_break(self);
-        self.pages.len() > pages_before
+    fn advance_to_next_column(&mut self) -> bool {
+        let idx = self.get_current();
+        let state = &self.states[idx];
+        // already at a fresh region start: advancing would only add a blank
+        // page, exactly what force_page_break declines to do
+        if state.column_index == 0
+            && state.pen_y == state.content_top
+            && self.pages[state.page_index].fragments.is_empty()
+        {
+            return true;
+        }
+        self.advance_column(idx).1
     }
 
     fn insert_blank_page(&mut self) -> u32 {
@@ -529,8 +556,16 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
         self.pages[self.states[idx].page_index].size.clone()
     }
 
+    fn current_columns(&self) -> ColumnLayout {
+        self.columns.clone()
+    }
+
     fn update_columns(&mut self, columns: &ColumnLayout) {
         Paginator::update_columns(self, columns.clone());
+    }
+
+    fn queue_columns(&mut self, columns: &ColumnLayout) {
+        Paginator::queue_columns(self, columns.clone());
     }
 }
 
