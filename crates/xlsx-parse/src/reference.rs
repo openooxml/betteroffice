@@ -9,7 +9,7 @@
 //! sheet, which refuses everything, rather than a narrow area that would let a
 //! stranding edit through.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use quick_xml::NsReader;
 use quick_xml::events::{BytesStart, Event};
@@ -18,8 +18,8 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRef, Workbook};
 
 use crate::chart::{
-    NS_RELATIONSHIPS, chart_reference_areas, directory_of, parse_area, parse_relationships,
-    relationship_part_path, unmodelled_chart_parts,
+    NS_PACKAGE_RELATIONSHIPS, NS_RELATIONSHIPS, chart_reference_areas, directory_of, parse_area,
+    parse_relationships, relationship_part_path, unmodelled_chart_parts,
 };
 use crate::package::PartContentType;
 use crate::tree::{Element, Unqualified, Vocabulary, owned_local_name, parse_tree};
@@ -32,6 +32,12 @@ use crate::{MAX_DEPTH, ParseError};
 /// both; an unprefixed name with no namespace at all is read as ours too,
 /// because a part that declares none is still the vocabulary it looks like.
 const OURS: [&str; 2] = [NS_MAIN, NS_STRICT_MAIN];
+
+/// the package-relationships vocabulary a `.rels` part is written in.
+const RELATIONSHIPS: [&str; 1] = [NS_PACKAGE_RELATIONSHIPS];
+
+/// the vocabulary `[Content_Types].xml` is written in.
+const CONTENT_TYPES: [&str; 1] = ["http://schemas.openxmlformats.org/package/2006/content-types"];
 
 /// A preserved part naming sheets and cells neither this crate nor the model
 /// rewrites.
@@ -157,10 +163,11 @@ fn pivot_references(
     workbook: &Workbook,
     sheet_paths: &[String],
 ) -> Vec<UnpatchableReference> {
+    let typed = content_types_are_ours(parts);
     let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
     let pivot_parts = parts
         .iter()
-        .filter(|(path, _)| is_pivot_part(path, content_types))
+        .filter(|(path, _)| is_pivot_part(path, content_types, typed))
         .map(|(path, bytes)| (path, bytes, root_local_name(bytes)))
         .collect::<Vec<_>>();
 
@@ -196,7 +203,11 @@ fn pivot_references(
                 .and_then(|root| location_areas(root, hosts.get(&part_key(path)))),
             _ => None,
         };
-        references.push(bound(path.clone(), areas, workbook));
+        references.push(bound(
+            path.clone(),
+            typed.then_some(areas).flatten(),
+            workbook,
+        ));
     }
     references
 }
@@ -224,11 +235,12 @@ fn root_local_name(bytes: &[u8]) -> Option<String> {
                 if depth > MAX_DEPTH {
                     return None;
                 }
+                let cleared = declares_empty_default(&start)?;
                 if depth == 1 {
                     if root.is_some() {
                         return None;
                     }
-                    root = Some(ours_local_name(namespace, &start)?);
+                    root = Some(ours_local_name(namespace, &start, cleared)?);
                 }
             }
             Event::End(_) => depth = depth.checked_sub(1)?,
@@ -250,7 +262,11 @@ fn root_local_name(bytes: &[u8]) -> Option<String> {
 /// decided by the same rule the tree readers use. `NsReader` reports a default
 /// declared away as `Unbound`, exactly as it reports a part that declared none,
 /// so the tag's own `xmlns` is what tells those two apart here.
-fn ours_local_name(namespace: ResolveResult<'_>, start: &BytesStart<'_>) -> Option<String> {
+fn ours_local_name(
+    namespace: ResolveResult<'_>,
+    start: &BytesStart<'_>,
+    cleared: bool,
+) -> Option<String> {
     let resolved = String::from_utf8_lossy(match namespace {
         ResolveResult::Bound(ref namespace) => namespace.as_ref(),
         _ => b"",
@@ -258,7 +274,7 @@ fn ours_local_name(namespace: ResolveResult<'_>, start: &BytesStart<'_>) -> Opti
     .into_owned();
     let vocabulary = match namespace {
         ResolveResult::Bound(_) => Vocabulary::Bound(&resolved),
-        ResolveResult::Unbound if declares_empty_default(start) => Vocabulary::Cleared,
+        ResolveResult::Unbound if cleared => Vocabulary::Cleared,
         ResolveResult::Unbound | ResolveResult::Unknown(_) => Vocabulary::Absent,
     };
     let qname = String::from_utf8(start.name().as_ref().to_vec()).ok()?;
@@ -266,12 +282,16 @@ fn ours_local_name(namespace: ResolveResult<'_>, start: &BytesStart<'_>) -> Opti
 }
 
 /// Whether a start tag carries `xmlns=""`, which takes it out of every
-/// vocabulary rather than leaving it in none by omission.
-fn declares_empty_default(start: &BytesStart<'_>) -> bool {
-    start
-        .attributes()
-        .flatten()
-        .any(|attribute| attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref().is_empty())
+/// vocabulary rather than leaving it in none by omission. `None` when its
+/// attributes do not parse — quick-xml reads those lazily, so a tag only proves
+/// itself well formed once they are walked.
+fn declares_empty_default(start: &BytesStart<'_>) -> Option<bool> {
+    let mut cleared = false;
+    for attribute in start.attributes() {
+        let attribute = attribute.ok()?;
+        cleared |= attribute.key.as_ref() == b"xmlns" && attribute.value.as_ref().is_empty();
+    }
+    Some(cleared)
 }
 
 /// A pivot part as an element tree, or nothing when this crate declines to read
@@ -410,9 +430,45 @@ fn pivot_table_hosts(
     hosts
 }
 
+/// The relationships declared for `path`, when they are ones this path may be
+/// read from. [`parse_relationships`] is shared code that matches `Id`, `Type`
+/// and `Target` by local name and takes the first of each, so a foreign
+/// attribute could answer for a real one and a repeated id could shadow the
+/// relationship it names. Rather than reach into that reader, the pivot path
+/// declines the whole part when it holds either, which costs a refusal and
+/// never a wrong claim.
+fn trusted_relationships<'a>(parts: &'a [(String, Vec<u8>)], path: &str) -> Option<&'a [u8]> {
+    const NAMES: [&str; 4] = ["Id", "Type", "Target", "TargetMode"];
+    let rels = find_part(parts, &relationship_part_path(path))?;
+    let root = parse_tree(rels).ok()?;
+    let mut ids = HashSet::new();
+    for child in root
+        .child_elements()
+        .filter(|child| child.local_name() == "Relationship")
+    {
+        if !child.answers_to(&RELATIONSHIPS, "Relationship") {
+            return None;
+        }
+        for name in NAMES {
+            let mut carried = child.attributes_in(&RELATIONSHIPS, name);
+            if carried.next().is_some() != child.any_attribute_named(name)
+                || carried.next().is_some()
+            {
+                return None;
+            }
+        }
+        if let Some(id) = child.attributes_in(&RELATIONSHIPS, "Id").next()
+            && !ids.insert(id.value.as_str())
+        {
+            return None;
+        }
+    }
+    Some(rels)
+}
+
 /// The part a relationship id on `path` points at, by lookup key.
 fn related_part(parts: &[(String, Vec<u8>)], path: &str, id: &str) -> Option<String> {
-    let rels = find_part(parts, &relationship_part_path(path))?;
+    let rels = trusted_relationships(parts, path)?;
     let directory = directory_of(path).to_owned();
     parse_relationships(rels)
         .ok()?
@@ -425,7 +481,7 @@ fn related_part(parts: &[(String, Vec<u8>)], path: &str, id: &str) -> Option<Str
 /// relationships part that will not parse relates nothing, which leaves what
 /// depended on it unresolved rather than failing the open.
 fn related_parts(parts: &[(String, Vec<u8>)], path: &str, relationship: &str) -> Vec<String> {
-    let Some(rels) = find_part(parts, &relationship_part_path(path)) else {
+    let Some(rels) = trusted_relationships(parts, path) else {
         return Vec::new();
     };
     let directory = directory_of(path).to_owned();
@@ -437,15 +493,44 @@ fn related_parts(parts: &[(String, Vec<u8>)], path: &str, relationship: &str) ->
         .collect()
 }
 
+/// Whether `[Content_Types].xml` is one a pivot part may be typed from. OPC
+/// typing is shared code that matches `Override`, `PartName` and `ContentType`
+/// by local name, so a foreign one could answer for a real one and rule a pivot
+/// part out. Rather than reach into that reader, the pivot path stops trusting
+/// the typing when the part holds anything it cannot read as ours.
+fn content_types_are_ours(parts: &[(String, Vec<u8>)]) -> bool {
+    const NAMES: [&str; 3] = ["PartName", "ContentType", "Extension"];
+    let Some(bytes) = find_part(parts, "[Content_Types].xml") else {
+        return true;
+    };
+    let Ok(root) = parse_tree(bytes) else {
+        return false;
+    };
+    root.child_elements().all(|child| {
+        (child.answers_to(&CONTENT_TYPES, "Override")
+            || child.answers_to(&CONTENT_TYPES, "Default"))
+            && NAMES.iter().all(|name| {
+                child.attributes_in(&CONTENT_TYPES, name).count()
+                    == usize::from(child.any_attribute_named(name))
+            })
+    })
+}
+
 /// Whether a part holds a pivot cache or pivot table. Typed the way OPC types
 /// anything: an `Override` is authoritative, and the conventional directories
 /// answer only for a part a `Default` extension mapping left untyped. A pivot
 /// part written outside those directories is still found, because a veto that
-/// reasons per part gives a part it never discovers no cover at all.
-fn is_pivot_part(path: &str, content_types: &[PartContentType]) -> bool {
+/// reasons per part gives a part it never discovers no cover at all. Typing
+/// this path cannot trust never rules a part out; it only stops ruling one in.
+fn is_pivot_part(path: &str, content_types: &[PartContentType], typed: bool) -> bool {
     let key = part_key(path);
     if key.contains("/_rels/") {
         return false;
+    }
+    if !typed {
+        return PIVOT_DIRECTORIES
+            .iter()
+            .any(|prefix| key.starts_with(prefix));
     }
     match content_types.iter().find(|part| part.path == key) {
         Some(part)

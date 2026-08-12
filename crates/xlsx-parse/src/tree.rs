@@ -82,6 +82,20 @@ pub(crate) fn owned_local_name<'a>(
     ours.then_some(local)
 }
 
+/// Whether every element and attribute name in a subtree is one namespace
+/// resolution can be applied to. [`Element::is`] and its callers resolve a
+/// prefix at the first colon while comparing a local name after the last, so a
+/// name carrying a second colon can be read as one it is not. A reader that
+/// matches expanded names that way asks this first and declines the part.
+pub(crate) fn names_are_resolvable(element: &Element) -> bool {
+    valid_qname(&element.name).is_some()
+        && element
+            .attributes
+            .iter()
+            .all(|attribute| valid_qname(&attribute.name).is_some())
+        && element.child_elements().all(names_are_resolvable)
+}
+
 /// A QName namespace resolution can be applied to at all — at most one colon,
 /// with neither side of it empty — split into its prefix and local name. A
 /// name that is not well formed answers to nothing, however its prefix

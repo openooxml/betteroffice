@@ -17,7 +17,9 @@ use xlsx_model::{
 };
 
 use crate::package::PartContentType;
-use crate::tree::{Edit, Element, Part, Replacement, escape_text, parse_tree};
+use crate::tree::{
+    Edit, Element, Part, Replacement, escape_text, names_are_resolvable, parse_tree,
+};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
@@ -25,7 +27,7 @@ use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 pub(crate) const NS_RELATIONSHIPS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 /// the `.rels` part vocabulary itself.
-const NS_PACKAGE_RELATIONSHIPS: &str =
+pub(crate) const NS_PACKAGE_RELATIONSHIPS: &str =
     "http://schemas.openxmlformats.org/package/2006/relationships";
 /// classic `c:chartSpace`.
 const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
@@ -1111,7 +1113,10 @@ pub(crate) fn unmodelled_chart_parts(
         let claimed = owners.is_some();
         if claimed {
             let root = parse_tree(bytes)?;
-            if !unsupported_reference_form(&root, 0) && !holds_an_unrebuildable_cache(&root)? {
+            if names_are_resolvable(&root)
+                && !unsupported_reference_form(&root, 0)
+                && !holds_an_unrebuildable_cache(&root)?
+            {
                 continue;
             }
         }
@@ -1144,7 +1149,7 @@ pub(crate) fn chart_reference_areas(
     owner: Option<&str>,
 ) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
     let root = parse_tree(part)?;
-    if unsupported_reference_form(&root, 0) {
+    if !names_are_resolvable(&root) || unsupported_reference_form(&root, 0) {
         return Ok(None);
     }
     let mut areas = Vec::new();

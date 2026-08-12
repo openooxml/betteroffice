@@ -2562,6 +2562,14 @@ fn refuses_records_whose_part_does_not_parse_whole() {
         ),
         ("trailing junk", "<pivotCacheRecords/></stray>"),
         ("trailing text", "<pivotCacheRecords/>garbage"),
+        (
+            "an attribute that does not parse",
+            "<pivotCacheRecords broken/>",
+        ),
+        (
+            "a broken attribute deeper in",
+            "<pivotCacheRecords><r broken/></pivotCacheRecords>",
+        ),
         ("trailing cdata", "<pivotCacheRecords/><![CDATA[garbage]]>"),
         ("leading text", "garbage<pivotCacheRecords/>"),
         (
@@ -2633,6 +2641,75 @@ fn refuses_records_a_definition_claims_through_an_invalid_qname() {
             "{label}: Data was left unprotected"
         );
     }
+}
+
+/// Relationships are read by local name by shared code this path does not own,
+/// so the pivot path checks the part before it trusts the lookup: a foreign
+/// `Id`, or two relationships answering to the same one, buys no claim.
+#[test]
+fn refuses_records_claimed_through_relationships_it_cannot_trust() {
+    for (label, relationships) in [
+        (
+            "foreign id",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship u:Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "duplicate ids",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="elsewhere.xml"/></Relationships>"#,
+        ),
+        (
+            "foreign target beside a real id",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" u:Target="elsewhere.xml" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "foreign relationship element",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><u:Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        );
+        parts.push((
+            "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+            b"<pivotCacheRecords/>".to_vec(),
+        ));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            relationships.as_bytes().to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} claimed the records"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// OPC types parts by local name, so a foreign `Override` could answer for a
+/// real one and rule a pivot part out entirely. A content-type part this path
+/// cannot trust leaves the pivot part vetoing everything, never untyped.
+#[test]
+fn refuses_a_pivot_part_a_foreign_override_would_rule_out() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><u:Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert_eq!(package.unpatchable_references().len(), 1);
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "a cache typed by a part this path cannot trust must name everything"
+    );
 }
 
 /// Records the definition does not point its own `r:id` at are not its records,
@@ -3757,6 +3834,43 @@ fn resolves_what_an_unmodelled_chart_references() {
     assert!(package.reference_moved_by_cols("Data", 1).is_some());
     assert_eq!(package.reference_moved_by_cols("Data", 2), None);
     assert_eq!(package.reference_moved_by_rows("Report", 0), None);
+}
+
+/// The chart walk matches expanded names through shared code that resolves a
+/// prefix at the first colon and compares the local name after the last, so a
+/// qname carrying a second colon could be read as a `c:f`. A chart part holding
+/// one is not read at all.
+#[test]
+fn refuses_a_chart_holding_a_name_resolution_cannot_be_applied_to() {
+    for (label, chart) in [
+        (
+            "invalid reference element",
+            String::from_utf8(CHART.to_vec()).unwrap().replace(
+                "<c:f>Data!$B$2:$B$4</c:f>",
+                "<c:junk:f>Data!$B$2:$B$4</c:junk:f>",
+            ),
+        ),
+        (
+            "invalid attribute name",
+            String::from_utf8(CHART.to_vec())
+                .unwrap()
+                .replace(r#"<c:idx val="0"/>"#, r#"<c:idx c:junk:val="0"/>"#),
+        ),
+    ] {
+        let mut parts = charted_package();
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert_eq!(
+            package.unpatchable_reference_part(),
+            Some("xl/charts/chart1.xml"),
+            "{label}"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} was read"
+        );
+    }
 }
 
 /// A `c:f` naming a sheet the workbook does not hold binds to nothing, so the
