@@ -2757,30 +2757,152 @@ fn refuses_a_pivot_part_a_foreign_override_would_rule_out() {
     }
 }
 
-/// Typing this path cannot trust must never lose a pivot part. A cache found
-/// only through its override, beside a foreign sibling that makes the typing
-/// untrustworthy, still has to be discovered — an undiscovered part vetoes
-/// nothing, which is the one outcome worse than a refusal.
+/// Narrowing the veto rests on reading the package's own metadata. When any of
+/// it is not exactly what OPC specifies, the whole workbook falls back to the
+/// blanket veto that shipped before narrowing existed, rather than this crate
+/// reconstructing trust over readers more permissive than the format.
 #[test]
-fn keeps_an_out_of_directory_pivot_when_the_typing_cannot_be_trusted() {
-    let mut parts = pivoted_package();
-    let cache = parts
-        .iter()
-        .position(|(path, _)| path == "xl/pivotcache/pivotCacheDefinition1.xml")
-        .expect("the fixture holds a cache");
-    parts[cache].0 = "xl/pivotCacheDefinition1.xml".to_owned();
+fn falls_back_to_the_blanket_veto_when_the_package_metadata_does_not_conform() {
+    const TYPES: &str = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+    const RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#;
+
+    for (label, types, rels) in [
+        (
+            "a foreign name in the content types",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default u:Extension="xml" Extension="xml" ContentType="application/xml"/></Types>"#,
+            RELS,
+        ),
+        (
+            "an element the content types should not hold",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><wrapper><Override PartName="/x.xml" ContentType="application/xml"/></wrapper></Types>"#,
+            RELS,
+        ),
+        (
+            "a content-type root that is not Types",
+            r#"<wrapper xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></wrapper>"#,
+            RELS,
+        ),
+        (
+            "two defaults for one extension",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="xml" ContentType="application/other"/></Types>"#,
+            RELS,
+        ),
+        (
+            "a default carrying no content type",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml"/></Types>"#,
+            RELS,
+        ),
+        (
+            "a relationships root that is not Relationships",
+            TYPES,
+            r#"<wrapper xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></wrapper>"#,
+        ),
+        (
+            "a relationship carrying no type",
+            TYPES,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign name on a relationship",
+            TYPES,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" u:Target="a.xml" Target="pivotCacheRecords1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords"/></Relationships>"#,
+        ),
+        (
+            "two relationships answering to one id",
+            TYPES,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="elsewhere.xml"/></Relationships>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        parts.push(("[Content_Types].xml".to_owned(), types.as_bytes().to_vec()));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            rels.as_bytes().to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert_eq!(
+            package.unpatchable_reference_part(),
+            Some("xl/pivotcache/pivotCacheDefinition1.xml"),
+            "{label}: the pivot stopped being vetoed"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} narrowed on metadata it could not read"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// The fallback is workbook-wide: an unmodelled chart stops narrowing too,
+/// exactly as it did before narrowing existed.
+#[test]
+fn falls_back_to_the_blanket_veto_for_charts_too() {
+    let mut parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
     parts.push((
         "[Content_Types].xml".to_owned(),
-        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/><u:Override PartName="/xl/unrelated.xml" ContentType="application/xml"/></Types>"#.to_vec(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default u:Extension="xml" Extension="xml" ContentType="application/xml"/></Types>"#.to_vec(),
     ));
     let package = parse_workbook_with_package(&parts).unwrap().package;
 
     assert_eq!(
         package.unpatchable_reference_part(),
-        Some("xl/pivotCacheDefinition1.xml"),
-        "the pivot disappeared instead of becoming unresolved"
+        Some("xl/charts/chart1.xml")
     );
-    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "the chart narrowed on metadata this crate could not read"
+    );
+}
+
+/// A conforming package still narrows, which is the whole point of the change.
+#[test]
+fn still_narrows_when_the_package_metadata_conforms() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "[Content_Types].xml".to_owned(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+}
+
+/// A relationship claims records by its type, not by pointing at them. With
+/// conforming metadata the exact type can be required, so a relationship of
+/// another kind carrying the cache's own id claims nothing.
+#[test]
+fn refuses_records_claimed_by_a_relationship_of_another_type() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "an image relationship handed the records a narrow range"
+    );
+    assert!(package.reference_naming_sheet("Data").is_some());
 }
 
 /// Records the definition does not point its own `r:id` at are not its records,

@@ -39,6 +39,17 @@ const RELATIONSHIPS: [&str; 1] = [NS_PACKAGE_RELATIONSHIPS];
 /// the vocabulary `[Content_Types].xml` is written in.
 const CONTENT_TYPES: [&str; 1] = ["http://schemas.openxmlformats.org/package/2006/content-types"];
 
+/// the relationship types the pivot path follows, in both the Transitional and
+/// Strict spellings a package may use.
+const REL_PIVOT_CACHE_RECORDS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/pivotCacheRecords",
+];
+const REL_PIVOT_TABLE: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/pivotTable",
+];
+
 /// A preserved part naming sheets and cells neither this crate nor the model
 /// rewrites.
 #[derive(Clone, Debug)]
@@ -100,10 +111,10 @@ pub(crate) fn unpatchable_references(
     workbook: &Workbook,
     sheet_paths: &[String],
 ) -> Result<Vec<UnpatchableReference>, ParseError> {
-    let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
+    let conforming = package_metadata_conforms(parts, content_types, sheet_paths);
+    let mut references = pivot_references(parts, content_types, workbook, sheet_paths, conforming);
     for chart in unmodelled_chart_parts(parts, content_types, workbook)? {
-        let areas = match chart
-            .claimed
+        let areas = match (conforming && chart.claimed)
             .then(|| find_part(parts, &chart.path))
             .flatten()
         {
@@ -162,17 +173,27 @@ fn pivot_references(
     content_types: &[PartContentType],
     workbook: &Workbook,
     sheet_paths: &[String],
+    conforming: bool,
 ) -> Vec<UnpatchableReference> {
-    let typing = content_type_typing(parts);
-    let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
     let pivot_parts = parts
         .iter()
-        .filter(|(path, _)| is_pivot_part(path, content_types, &typing))
+        .filter(|(path, _)| is_pivot_part(path, content_types, conforming))
+        .collect::<Vec<_>>();
+    if !conforming {
+        return pivot_parts
+            .into_iter()
+            .map(|(path, _)| bound(path.clone(), None, workbook))
+            .collect();
+    }
+
+    let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
+    let pivot_parts = pivot_parts
+        .into_iter()
         .map(|(path, bytes)| (path, bytes, root_local_name(bytes)))
         .collect::<Vec<_>>();
 
     let mut cache_areas: HashMap<String, Option<Vec<NamedArea>>> = HashMap::new();
-    let mut record_owners: HashMap<String, String> = HashMap::new();
+    let mut record_owners: HashMap<String, Option<String>> = HashMap::new();
     for (path, bytes) in pivot_parts
         .iter()
         .filter(|(_, _, root)| root.as_deref() == Some("pivotCacheDefinition"))
@@ -183,9 +204,12 @@ fn pivot_references(
         if let Some(records) = root
             .as_ref()
             .and_then(|root| root.attribute_ns(NS_RELATIONSHIPS, "id"))
-            .and_then(|id| related_part(parts, path, id))
+            .and_then(|id| related_part(parts, path, id, &REL_PIVOT_CACHE_RECORDS))
         {
-            record_owners.insert(records, part_key(path));
+            record_owners
+                .entry(records)
+                .and_modify(|owner| *owner = None)
+                .or_insert_with(|| Some(part_key(path)));
         }
     }
 
@@ -195,6 +219,7 @@ fn pivot_references(
             Some("pivotCacheDefinition") => cache_areas.get(&part_key(path)).cloned().flatten(),
             Some("pivotCacheRecords") => record_owners
                 .get(&part_key(path))
+                .and_then(Option::as_ref)
                 .and_then(|owner| cache_areas.get(owner))
                 .cloned()
                 .flatten(),
@@ -203,7 +228,6 @@ fn pivot_references(
                 .and_then(|root| location_areas(root, hosts.get(&part_key(path)))),
             _ => None,
         };
-        let areas = matches!(typing, Typing::Trusted).then_some(areas).flatten();
         references.push(bound(path.clone(), areas, workbook));
     }
     references
@@ -420,180 +444,153 @@ fn pivot_table_hosts(
 ) -> HashMap<String, Vec<String>> {
     let mut hosts: HashMap<String, Vec<String>> = HashMap::new();
     for (sheet, path) in workbook.sheets.iter().zip(sheet_paths) {
-        for table in related_parts(parts, path, "pivotTable") {
+        for table in related_parts(parts, path, &REL_PIVOT_TABLE) {
             hosts.entry(table).or_default().push(sheet.name.clone());
         }
     }
     hosts
 }
 
-/// The relationships declared for `path`, when they are ones this path may be
-/// read from. [`parse_relationships`] is shared code that matches `Id`, `Type`
-/// and `Target` by local name and takes the first of each, so a foreign
-/// attribute could answer for a real one and a repeated id could shadow the
-/// relationship it names. Rather than reach into that reader, the pivot path
-/// declines the whole part when it holds either, which costs a refusal and
-/// never a wrong claim.
-/// Whether every attribute a reader could take for `name` is the one this path
-/// would read: at most one carries that local name, and it is ours. Counting
-/// only the ours-namespaced ones would pass a foreign attribute sitting beside
-/// a real one, which is the one the reader takes first.
-fn sole_and_ours(element: &Element, namespaces: &[&str], name: &str) -> bool {
-    element.attributes_named(name) <= 1
-        && element.attributes_in(namespaces, name).count() == element.attributes_named(name)
+/// The part a relationship id on `path` points at, under an exact type. Only
+/// reached once the package metadata has been found conforming, so the shared
+/// reader's loose matching has nothing left to be fooled by and the type can be
+/// required exactly rather than by its final segment.
+fn related_part(
+    parts: &[(String, Vec<u8>)],
+    path: &str,
+    id: &str,
+    types: &[&str],
+) -> Option<String> {
+    related(parts, path)
+        .into_iter()
+        .find(|(rel_id, kind, _)| rel_id == id && types.contains(&kind.as_str()))
+        .map(|(_, _, target)| target)
 }
 
-fn trusted_relationships<'a>(parts: &'a [(String, Vec<u8>)], path: &str) -> Option<&'a [u8]> {
-    const NAMES: [&str; 4] = ["Id", "Type", "Target", "TargetMode"];
-    let rels = find_part(parts, &relationship_part_path(path))?;
-    let root = parse_tree(rels).ok()?;
-    let mut ids = HashSet::new();
-    for child in root
-        .child_elements()
-        .filter(|child| child.local_name() == "Relationship")
-    {
-        if !child.answers_to(&RELATIONSHIPS, "Relationship") {
-            return None;
-        }
-        for name in NAMES {
-            if !sole_and_ours(child, &RELATIONSHIPS, name) {
-                return None;
-            }
-        }
-        if let Some(id) = child.attributes_in(&RELATIONSHIPS, "Id").next()
-            && !ids.insert(id.value.as_str())
-        {
-            return None;
-        }
-    }
-    Some(rels)
+/// Every part `path` relates to under an exact relationship type.
+fn related_parts(parts: &[(String, Vec<u8>)], path: &str, types: &[&str]) -> Vec<String> {
+    related(parts, path)
+        .into_iter()
+        .filter(|(_, kind, _)| types.contains(&kind.as_str()))
+        .map(|(_, _, target)| target)
+        .collect()
 }
 
-/// The part a relationship id on `path` points at, by lookup key.
-fn related_part(parts: &[(String, Vec<u8>)], path: &str, id: &str) -> Option<String> {
-    let rels = trusted_relationships(parts, path)?;
-    let directory = directory_of(path).to_owned();
-    parse_relationships(rels)
-        .ok()?
-        .iter()
-        .find(|(rel_id, _, _)| rel_id == id)
-        .map(|(_, _, target)| part_key(&resolve_part_path(&directory, target)))
-}
-
-/// Every part `path` relates to under a relationship type, by lookup key. A
-/// relationships part that will not parse relates nothing, which leaves what
-/// depended on it unresolved rather than failing the open.
-fn related_parts(parts: &[(String, Vec<u8>)], path: &str, relationship: &str) -> Vec<String> {
-    let Some(rels) = trusted_relationships(parts, path) else {
+/// The relationships declared for `path`, with targets resolved to lookup keys.
+fn related(parts: &[(String, Vec<u8>)], path: &str) -> Vec<(String, String, String)> {
+    let Some(rels) = find_part(parts, &relationship_part_path(path)) else {
         return Vec::new();
     };
     let directory = directory_of(path).to_owned();
     parse_relationships(rels)
         .unwrap_or_default()
-        .iter()
-        .filter(|(_, kind, _)| kind.rsplit('/').next() == Some(relationship))
-        .map(|(_, _, target)| part_key(&resolve_part_path(&directory, target)))
+        .into_iter()
+        .map(|(id, kind, target)| (id, kind, part_key(&resolve_part_path(&directory, &target))))
         .collect()
 }
 
-/// How far `[Content_Types].xml` may be trusted to type a pivot part.
-enum Typing {
-    /// every entry reads unambiguously, so an override may rule a part in or
-    /// out the way OPC says it does
-    Trusted,
-    /// something in it cannot be read as ours, so an override may only add a
-    /// part to look at, never take one away, and nothing it typed resolves
-    Untrusted(HashSet<String>),
+/// Whether the package metadata this path reads is exactly what OPC specifies.
+/// Narrowing the veto means trusting readers that match names loosely, and this
+/// crate cannot reconstruct that trust one hole at a time. So it asks once, of
+/// the whole package: does the content-type part conform, and does every
+/// relationships part this path follows conform? A no returns the workbook to
+/// the blanket veto that shipped before narrowing existed — safe by
+/// construction, because it is the behaviour already in people's hands.
+fn package_metadata_conforms(
+    parts: &[(String, Vec<u8>)],
+    content_types: &[PartContentType],
+    sheet_paths: &[String],
+) -> bool {
+    content_types_conform(parts)
+        && sheet_paths
+            .iter()
+            .map(String::as_str)
+            .chain(
+                parts
+                    .iter()
+                    .map(|(path, _)| path.as_str())
+                    .filter(|path| is_pivot_part(path, content_types, true)),
+            )
+            .all(|owner| relationships_conform(parts, owner))
 }
 
-/// How far the content types may be trusted, and failing that, every part any
-/// override could have been naming as a pivot. OPC typing is shared code that
-/// matches `Override`, `PartName` and `ContentType` by local name at every
-/// depth and takes the first of each, so a foreign one could answer for a real
-/// one. This gate walks what that reader walks — the whole tree, root included
-/// — rather than an approximation of it.
-fn content_type_typing(parts: &[(String, Vec<u8>)]) -> Typing {
+/// Whether every attribute a reader could take for `name` is the one this path
+/// would read: at most one carries that local name, and it is ours.
+fn sole_and_ours(element: &Element, namespaces: &[&str], name: &str) -> bool {
+    element.attributes_named(name) <= 1
+        && element.attributes_in(namespaces, name).count() == element.attributes_named(name)
+}
+
+/// Whether `[Content_Types].xml` holds only what OPC allows: a `Types` root
+/// over `Default` and `Override` entries, each carrying its required names once
+/// and unambiguously, no extension or part name typed twice.
+fn content_types_conform(parts: &[(String, Vec<u8>)]) -> bool {
     const NAMES: [&str; 3] = ["PartName", "ContentType", "Extension"];
     let Some(bytes) = find_part(parts, "[Content_Types].xml") else {
-        return Typing::Trusted;
+        return true;
     };
     let Ok(root) = parse_tree(bytes) else {
-        return Typing::Untrusted(HashSet::new());
+        return false;
     };
-    let mut entries = Vec::new();
-    collect_content_type_entries(&root, 0, &mut entries);
-    let mut typed = HashSet::new();
-    let trusted = entries.iter().all(|(depth, entry)| {
-        *depth == 1
-            && (entry.answers_to(&CONTENT_TYPES, "Override")
-                || entry.answers_to(&CONTENT_TYPES, "Default"))
+    if !root.answers_to(&CONTENT_TYPES, "Types") {
+        return false;
+    }
+    let (mut overrides, mut defaults) = (HashSet::new(), HashSet::new());
+    root.child_elements().all(|entry| {
+        entry.child_elements().next().is_none()
             && NAMES
                 .iter()
                 .all(|name| sole_and_ours(entry, &CONTENT_TYPES, name))
-    }) && entries
-        .iter()
-        .filter(|(_, entry)| entry.local_name() == "Override")
-        .all(|(_, entry)| match entry.attribute_local("PartName") {
-            Some(part) => typed.insert(part_key(part)),
-            None => true,
-        });
-    if trusted {
-        return Typing::Trusted;
-    }
-    Typing::Untrusted(pivot_candidates(&entries))
+            && entry.attribute_local("ContentType").is_some()
+            && if entry.answers_to(&CONTENT_TYPES, "Override") {
+                entry
+                    .attribute_local("PartName")
+                    .is_some_and(|part| overrides.insert(part_key(part)))
+            } else if entry.answers_to(&CONTENT_TYPES, "Default") {
+                entry
+                    .attribute_local("Extension")
+                    .is_some_and(|extension| defaults.insert(extension.to_ascii_lowercase()))
+            } else {
+                false
+            }
+    })
 }
 
-/// Every element the OPC reader would take for an entry, with its depth:
-/// matched by local name at any depth, the root included, exactly as
-/// [`crate::package`] reads them. The depth comes back because that reader
-/// honours an entry the schema only allows directly under `Types`, and one
-/// sitting anywhere else is a reading no conforming consumer shares.
-fn collect_content_type_entries<'a>(
-    element: &'a Element,
-    depth: usize,
-    out: &mut Vec<(usize, &'a Element)>,
-) {
-    if matches!(element.local_name(), "Override" | "Default") {
-        out.push((depth, element));
+/// Whether the relationships declared for a part hold only what OPC allows: a
+/// `Relationships` root over `Relationship` entries, each carrying its required
+/// names once and unambiguously, no id declared twice.
+fn relationships_conform(parts: &[(String, Vec<u8>)], owner: &str) -> bool {
+    const NAMES: [&str; 4] = ["Id", "Type", "Target", "TargetMode"];
+    let Some(bytes) = find_part(parts, &relationship_part_path(owner)) else {
+        return true;
+    };
+    let Ok(root) = parse_tree(bytes) else {
+        return false;
+    };
+    if !root.answers_to(&RELATIONSHIPS, "Relationships") {
+        return false;
     }
-    for child in element.child_elements() {
-        collect_content_type_entries(child, depth + 1, out);
-    }
-}
-
-/// Every part an override could have been typing as a pivot, however the entry
-/// spells its names. Used only when the typing is not trustworthy, where the
-/// answer has to be inclusive: a part left undiscovered vetoes nothing.
-fn pivot_candidates(entries: &[(usize, &Element)]) -> HashSet<String> {
-    entries
-        .iter()
-        .map(|(_, entry)| entry)
-        .filter(|entry| entry.local_name() == "Override")
-        .filter(|entry| {
-            entry.attributes.iter().any(|attribute| {
-                attribute.local_name() == "ContentType"
-                    && PIVOT_CONTENT_TYPES
-                        .iter()
-                        .any(|known| attribute.value.eq_ignore_ascii_case(known))
-            })
-        })
-        .flat_map(|entry| {
-            entry
-                .attributes
+    let mut ids = HashSet::new();
+    root.child_elements().all(|entry| {
+        entry.answers_to(&RELATIONSHIPS, "Relationship")
+            && entry.child_elements().next().is_none()
+            && NAMES
                 .iter()
-                .filter(|attribute| attribute.local_name() == "PartName")
-                .map(|attribute| part_key(&attribute.value))
-        })
-        .collect()
+                .all(|name| sole_and_ours(entry, &RELATIONSHIPS, name))
+            && entry.attribute_local("Type").is_some()
+            && entry.attribute_local("Target").is_some()
+            && entry
+                .attribute_local("Id")
+                .is_some_and(|id| ids.insert(id.to_owned()))
+    })
 }
 
 /// Whether a part holds a pivot cache or pivot table. Typed the way OPC types
 /// anything: an `Override` is authoritative, and the conventional directories
-/// answer only for a part a `Default` extension mapping left untyped. A pivot
-/// part written outside those directories is still found, because a veto that
-/// reasons per part gives a part it never discovers no cover at all. Typing
-/// this path cannot trust never rules a part out; it only stops ruling one in.
-fn is_pivot_part(path: &str, content_types: &[PartContentType], typing: &Typing) -> bool {
+/// answer only for a part a `Default` extension mapping left untyped. Metadata
+/// that does not conform is not read at all, leaving the conventional
+/// directories the blanket veto always used.
+fn is_pivot_part(path: &str, content_types: &[PartContentType], conforming: bool) -> bool {
     let key = part_key(path);
     if key.contains("/_rels/") {
         return false;
@@ -603,13 +600,10 @@ fn is_pivot_part(path: &str, content_types: &[PartContentType], typing: &Typing)
             .iter()
             .any(|prefix| key.starts_with(prefix))
     };
-    let typed = match typing {
-        Typing::Trusted => content_types.iter().find(|part| part.path == key),
-        Typing::Untrusted(candidates) => {
-            return conventional() || candidates.contains(&key);
-        }
-    };
-    match typed {
+    if !conforming {
+        return conventional();
+    }
+    match content_types.iter().find(|part| part.path == key) {
         Some(part)
             if PIVOT_CONTENT_TYPES
                 .iter()
