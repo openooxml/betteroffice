@@ -1,3 +1,9 @@
+Copyright 2014-2021 Adobe (https://adobe.com/), with Reserved Font Name 'Source'.
+  Covers Noto Sans SC, Noto Sans TC, Noto Sans JP and Noto Sans KR.
+
+Copyright 2017-2024 Adobe (https://adobe.com/), with Reserved Font Name 'Source'.
+  Covers Noto Serif SC.
+
 This Font Software is licensed under the SIL Open Font License,
 Version 1.1.
 

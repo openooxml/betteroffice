@@ -22,10 +22,13 @@
 
 import type { BundledFontProvider } from './fontRegistry';
 
-/** Module shape this file depends on — kept minimal so the peer stays optional. */
-interface BundledFontsModule {
-  createFontProvider(options?: { baseUrl?: string | URL }): BundledFontProvider;
-}
+/**
+ * The real module type, so a signature change in `@betteroffice/fonts` breaks
+ * this file at compile time rather than at a consumer's first layout pass. The
+ * package is a devDependency for exactly this; it stays an optional peer at
+ * runtime, and this type is local so it never reaches the published `.d.ts`.
+ */
+type BundledFontsModule = typeof import('@betteroffice/fonts');
 
 /** @public */
 export interface DefaultFontOptions {

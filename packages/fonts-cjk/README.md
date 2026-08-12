@@ -6,7 +6,9 @@ Optional CJK font binaries for [`@betteroffice/fonts`](https://www.npmjs.com/pac
 npm install @betteroffice/fonts @betteroffice/fonts-cjk
 ```
 
-Nothing else is required. `@betteroffice/fonts` picks these faces up through an optional dynamic import, so the CJK script-fallback chain starts resolving as soon as the package is present, and keeps working without it — CJK runs just fall back to synthetic metrics.
+Nothing else is required. `@betteroffice/fonts` picks these faces up through an optional dynamic import, so the CJK script-fallback chain starts resolving as soon as the package is present.
+
+Without it nothing breaks: a CJK face resolves to a loader that rejects, the engine logs it once and measures the run with the Latin last-resort face instead. That keeps pagination on the native path, but the ideographs are measured with a font that has no glyphs for them, so CJK line breaking will be wrong.
 
 ## Why a separate package
 
@@ -47,4 +49,4 @@ import { CJK_FONT_ASSET_URLS } from '@betteroffice/fonts-cjk';
 
 ## Licensing
 
-The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed under the SIL Open Font License 1.1; the full text with per-family copyright notices is in `LICENSES/OFL-NotoCJK.txt` — © 2014-2021 Adobe (Noto Sans CJK), © 2017-2024 Adobe (Noto Serif SC). Static `SubsetOTF` Regulars vendored from [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk) at commit `f8d157532fbfaeda587e826d4cd5b21a49186f7c` (`Sans/SubsetOTF/{SC,TC,JP,KR}/`, `Serif/SubsetOTF/SC/`).
+The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed under the SIL Open Font License 1.1; `LICENSES/OFL-NotoCJK.txt` carries the full licence text preceded by the copyright notices it applies to — Copyright 2014-2021 Adobe for Noto Sans SC/TC/JP/KR, and Copyright 2017-2024 Adobe for Noto Serif SC, both with Reserved Font Name "Source". Static `SubsetOTF` Regulars vendored from [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk) at commit `f8d157532fbfaeda587e826d4cd5b21a49186f7c` (`Sans/SubsetOTF/{SC,TC,JP,KR}/`, `Serif/SubsetOTF/SC/`).

@@ -465,12 +465,16 @@ export class TextMeasureFontRegistry {
         try {
           const bytes = await loader();
           return await this.registerBuffer(bytes);
-        } catch {
+        } catch (error) {
           // Failed fetch or unparseable bundled face: memoized as a miss for
           // this registry's lifetime (clear() resets), so a broken loader is
-          // not re-hit on every measurement.
+          // not re-hit on every measurement. The message carries the actionable
+          // part — this is the path a CJK family reaches when the add-on is
+          // missing, since SimHei/Meiryo and friends map through
+          // `metricCompatWith` rather than the script-fallback chain.
           console.warn(
-            `[fontRegistry] bundled face for "${family}" failed to load or register; falling back`
+            `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
+              `falling back: ${error instanceof Error ? error.message : String(error)}`
           );
           return null;
         }
@@ -524,7 +528,7 @@ export class TextMeasureFontRegistry {
             const bytes = await loader();
             id = await this.registerBuffer(bytes);
           } catch (error) {
-            // The cause carries the actionable part for the CJK buckets —
+            // The message carries the actionable part for the CJK buckets —
             // "install @betteroffice/fonts-cjk" — so surface it.
             console.warn(
               `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +

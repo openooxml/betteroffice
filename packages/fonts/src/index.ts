@@ -462,6 +462,50 @@ async function assetUrl(file: string, baseUrl: string | URL | undefined): Promis
   throw new Error(`Unknown bundled font asset: ${file}`);
 }
 
+interface NodeFsLike {
+  readFileSync(path: string): Uint8Array;
+}
+interface NodeUrlLike {
+  fileURLToPath(url: string): string;
+}
+
+function builtinModule<T>(name: string): T | undefined {
+  const proc = (
+    globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }
+  ).process;
+  if (typeof proc?.getBuiltinModule !== 'function') return undefined;
+  try {
+    return proc.getBuiltinModule(name) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read a `file:` asset off disk, or `undefined` when that is not possible.
+ *
+ * Node's `fetch` does not implement the `file:` scheme — only Bun's does — so
+ * a server-side host importing this package from `node_modules` would get
+ * nothing at all from a bare `fetch`. Mirrors `readWasmSync` in
+ * `@betteroffice/docx`'s wasm loader, which solves the same problem.
+ */
+function readFileAsset(url: URL): ArrayBuffer | undefined {
+  if (url.protocol !== 'file:') return undefined;
+  const fs = builtinModule<NodeFsLike>('node:fs');
+  const nodeUrl = builtinModule<NodeUrlLike>('node:url');
+  if (!fs || !nodeUrl) return undefined;
+  try {
+    // `.href` and not the URL object: fileURLToPath brand-checks its argument.
+    const bytes = fs.readFileSync(nodeUrl.fileURLToPath(url.href));
+    return bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+  } catch {
+    return undefined;
+  }
+}
+
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
 /**
@@ -482,14 +526,15 @@ export function loadBundledFontBytes(
   const key = `${options?.baseUrl === undefined ? '' : assetBase(options.baseUrl)}\n${face.file}`;
   const cached = bytesCache.get(key);
   if (cached) return cached;
-  const promise = assetUrl(face.file, options?.baseUrl)
-    .then((url) => fetch(url))
-    .then((response) => {
-      if (!response.ok) {
-        throw new Error(`Failed to fetch bundled font ${face.file}: HTTP ${response.status}`);
-      }
-      return response.arrayBuffer();
-    });
+  const promise = assetUrl(face.file, options?.baseUrl).then(async (url) => {
+    const onDisk = readFileAsset(url);
+    if (onDisk) return onDisk;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch bundled font ${face.file}: HTTP ${response.status}`);
+    }
+    return response.arrayBuffer();
+  });
   promise.catch(() => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);
   });

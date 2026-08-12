@@ -88,6 +88,8 @@ configureDefaultFonts({ baseUrl: 'https://cdn.example.com/betteroffice-fonts/' }
 
 or by building the provider yourself with `createFontProvider({ baseUrl })`. The base URL is joined with each face's asset filename, so serve the contents of `assets/` at that path.
 
+**A base URL bypasses package resolution entirely, including the CJK add-on.** Every face — Latin, RTL and CJK alike — is then fetched from that one base, so if your documents contain CJK you must serve `@betteroffice/fonts-cjk`'s `assets/` from the same directory. Filenames do not collide, so copying both packages' `assets/` into one folder is enough.
+
 Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rather than woff2 (see above), and transport compression recovers most of the difference: the Latin set is 7,252 KB raw and 3,602 KB gzipped.
 
 ## Bundler note
@@ -131,6 +133,6 @@ The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed un
 - `LICENSES/OFL-Carlito.txt` — Copyright 2013 The Carlito Project Authors, Reserved Font Name "Carlito". Vendored from [google/fonts `ofl/carlito`](https://github.com/google/fonts/tree/main/ofl/carlito) (upstream: [googlefonts/carlito](https://github.com/googlefonts/carlito)).
 - `LICENSES/OFL-Caladea.txt` — Copyright 2012 The Caladea Project Authors. Vendored from [google/fonts `ofl/caladea`](https://github.com/google/fonts/tree/main/ofl/caladea) (upstream: [huertatipografica/Caladea](https://github.com/huertatipografica/Caladea)).
 - `LICENSES/OFL-Liberation.txt` — Digitized data copyright (c) 2010 Google Corporation; Copyright (c) 2012 Red Hat, Inc., Reserved Font Name Liberation. Vendored unmodified from the [Liberation Fonts 2.1.5 release](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5).
-- `LICENSES/OFL-NotoSansHebrew.txt` — Copyright 2024 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).
+- `LICENSES/OFL-NotoSansHebrew.txt` — Copyright 2022 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).
 - `LICENSES/OFL-NotoArabic.txt` — Copyright 2022 The Noto Project Authors; covers Noto Sans Arabic and Noto Naskh Arabic. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansArabic/hinted/ttf/`, `fonts/NotoNaskhArabic/hinted/ttf/`); upstream project [notofonts/arabic](https://github.com/notofonts/arabic).
 The CJK binaries and their `OFL-NotoCJK.txt` license text ship in [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).
