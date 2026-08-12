@@ -163,11 +163,11 @@ fn pivot_references(
     workbook: &Workbook,
     sheet_paths: &[String],
 ) -> Vec<UnpatchableReference> {
-    let typed = content_types_are_ours(parts);
+    let typing = content_type_typing(parts);
     let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
     let pivot_parts = parts
         .iter()
-        .filter(|(path, _)| is_pivot_part(path, content_types, typed))
+        .filter(|(path, _)| is_pivot_part(path, content_types, &typing))
         .map(|(path, bytes)| (path, bytes, root_local_name(bytes)))
         .collect::<Vec<_>>();
 
@@ -203,11 +203,8 @@ fn pivot_references(
                 .and_then(|root| location_areas(root, hosts.get(&part_key(path)))),
             _ => None,
         };
-        references.push(bound(
-            path.clone(),
-            typed.then_some(areas).flatten(),
-            workbook,
-        ));
+        let areas = matches!(typing, Typing::Trusted).then_some(areas).flatten();
+        references.push(bound(path.clone(), areas, workbook));
     }
     references
 }
@@ -437,6 +434,15 @@ fn pivot_table_hosts(
 /// relationship it names. Rather than reach into that reader, the pivot path
 /// declines the whole part when it holds either, which costs a refusal and
 /// never a wrong claim.
+/// Whether every attribute a reader could take for `name` is the one this path
+/// would read: at most one carries that local name, and it is ours. Counting
+/// only the ours-namespaced ones would pass a foreign attribute sitting beside
+/// a real one, which is the one the reader takes first.
+fn sole_and_ours(element: &Element, namespaces: &[&str], name: &str) -> bool {
+    element.attributes_named(name) <= 1
+        && element.attributes_in(namespaces, name).count() == element.attributes_named(name)
+}
+
 fn trusted_relationships<'a>(parts: &'a [(String, Vec<u8>)], path: &str) -> Option<&'a [u8]> {
     const NAMES: [&str; 4] = ["Id", "Type", "Target", "TargetMode"];
     let rels = find_part(parts, &relationship_part_path(path))?;
@@ -450,10 +456,7 @@ fn trusted_relationships<'a>(parts: &'a [(String, Vec<u8>)], path: &str) -> Opti
             return None;
         }
         for name in NAMES {
-            let mut carried = child.attributes_in(&RELATIONSHIPS, name);
-            if carried.next().is_some() != child.any_attribute_named(name)
-                || carried.next().is_some()
-            {
+            if !sole_and_ours(child, &RELATIONSHIPS, name) {
                 return None;
             }
         }
@@ -493,27 +496,95 @@ fn related_parts(parts: &[(String, Vec<u8>)], path: &str, relationship: &str) ->
         .collect()
 }
 
-/// Whether `[Content_Types].xml` is one a pivot part may be typed from. OPC
-/// typing is shared code that matches `Override`, `PartName` and `ContentType`
-/// by local name, so a foreign one could answer for a real one and rule a pivot
-/// part out. Rather than reach into that reader, the pivot path stops trusting
-/// the typing when the part holds anything it cannot read as ours.
-fn content_types_are_ours(parts: &[(String, Vec<u8>)]) -> bool {
+/// How far `[Content_Types].xml` may be trusted to type a pivot part.
+enum Typing {
+    /// every entry reads unambiguously, so an override may rule a part in or
+    /// out the way OPC says it does
+    Trusted,
+    /// something in it cannot be read as ours, so an override may only add a
+    /// part to look at, never take one away, and nothing it typed resolves
+    Untrusted(HashSet<String>),
+}
+
+/// How far the content types may be trusted, and failing that, every part any
+/// override could have been naming as a pivot. OPC typing is shared code that
+/// matches `Override`, `PartName` and `ContentType` by local name at every
+/// depth and takes the first of each, so a foreign one could answer for a real
+/// one. This gate walks what that reader walks — the whole tree, root included
+/// — rather than an approximation of it.
+fn content_type_typing(parts: &[(String, Vec<u8>)]) -> Typing {
     const NAMES: [&str; 3] = ["PartName", "ContentType", "Extension"];
     let Some(bytes) = find_part(parts, "[Content_Types].xml") else {
-        return true;
+        return Typing::Trusted;
     };
     let Ok(root) = parse_tree(bytes) else {
-        return false;
+        return Typing::Untrusted(HashSet::new());
     };
-    root.child_elements().all(|child| {
-        (child.answers_to(&CONTENT_TYPES, "Override")
-            || child.answers_to(&CONTENT_TYPES, "Default"))
-            && NAMES.iter().all(|name| {
-                child.attributes_in(&CONTENT_TYPES, name).count()
-                    == usize::from(child.any_attribute_named(name))
+    let mut entries = Vec::new();
+    collect_content_type_entries(&root, 0, &mut entries);
+    let mut typed = HashSet::new();
+    let trusted = entries.iter().all(|(depth, entry)| {
+        *depth == 1
+            && (entry.answers_to(&CONTENT_TYPES, "Override")
+                || entry.answers_to(&CONTENT_TYPES, "Default"))
+            && NAMES
+                .iter()
+                .all(|name| sole_and_ours(entry, &CONTENT_TYPES, name))
+    }) && entries
+        .iter()
+        .filter(|(_, entry)| entry.local_name() == "Override")
+        .all(|(_, entry)| match entry.attribute_local("PartName") {
+            Some(part) => typed.insert(part_key(part)),
+            None => true,
+        });
+    if trusted {
+        return Typing::Trusted;
+    }
+    Typing::Untrusted(pivot_candidates(&entries))
+}
+
+/// Every element the OPC reader would take for an entry, with its depth:
+/// matched by local name at any depth, the root included, exactly as
+/// [`crate::package`] reads them. The depth comes back because that reader
+/// honours an entry the schema only allows directly under `Types`, and one
+/// sitting anywhere else is a reading no conforming consumer shares.
+fn collect_content_type_entries<'a>(
+    element: &'a Element,
+    depth: usize,
+    out: &mut Vec<(usize, &'a Element)>,
+) {
+    if matches!(element.local_name(), "Override" | "Default") {
+        out.push((depth, element));
+    }
+    for child in element.child_elements() {
+        collect_content_type_entries(child, depth + 1, out);
+    }
+}
+
+/// Every part an override could have been typing as a pivot, however the entry
+/// spells its names. Used only when the typing is not trustworthy, where the
+/// answer has to be inclusive: a part left undiscovered vetoes nothing.
+fn pivot_candidates(entries: &[(usize, &Element)]) -> HashSet<String> {
+    entries
+        .iter()
+        .map(|(_, entry)| entry)
+        .filter(|entry| entry.local_name() == "Override")
+        .filter(|entry| {
+            entry.attributes.iter().any(|attribute| {
+                attribute.local_name() == "ContentType"
+                    && PIVOT_CONTENT_TYPES
+                        .iter()
+                        .any(|known| attribute.value.eq_ignore_ascii_case(known))
             })
-    })
+        })
+        .flat_map(|entry| {
+            entry
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.local_name() == "PartName")
+                .map(|attribute| part_key(&attribute.value))
+        })
+        .collect()
 }
 
 /// Whether a part holds a pivot cache or pivot table. Typed the way OPC types
@@ -522,17 +593,23 @@ fn content_types_are_ours(parts: &[(String, Vec<u8>)]) -> bool {
 /// part written outside those directories is still found, because a veto that
 /// reasons per part gives a part it never discovers no cover at all. Typing
 /// this path cannot trust never rules a part out; it only stops ruling one in.
-fn is_pivot_part(path: &str, content_types: &[PartContentType], typed: bool) -> bool {
+fn is_pivot_part(path: &str, content_types: &[PartContentType], typing: &Typing) -> bool {
     let key = part_key(path);
     if key.contains("/_rels/") {
         return false;
     }
-    if !typed {
-        return PIVOT_DIRECTORIES
+    let conventional = || {
+        PIVOT_DIRECTORIES
             .iter()
-            .any(|prefix| key.starts_with(prefix));
-    }
-    match content_types.iter().find(|part| part.path == key) {
+            .any(|prefix| key.starts_with(prefix))
+    };
+    let typed = match typing {
+        Typing::Trusted => content_types.iter().find(|part| part.path == key),
+        Typing::Untrusted(candidates) => {
+            return conventional() || candidates.contains(&key);
+        }
+    };
+    match typed {
         Some(part)
             if PIVOT_CONTENT_TYPES
                 .iter()
@@ -541,9 +618,7 @@ fn is_pivot_part(path: &str, content_types: &[PartContentType], typed: bool) -> 
             true
         }
         Some(part) if part.overridden => false,
-        _ => PIVOT_DIRECTORIES
-            .iter()
-            .any(|prefix| key.starts_with(prefix)),
+        _ => conventional(),
     }
 }
 

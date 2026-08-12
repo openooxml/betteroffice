@@ -202,9 +202,17 @@ impl Element {
     /// only a refusal while a missed real one costs correctness, so the wider
     /// question is the safe one to ask.
     pub(crate) fn any_attribute_named(&self, local: &str) -> bool {
+        self.attributes_named(local) > 0
+    }
+
+    /// how many attributes answer to a local name, in whatever namespace. A
+    /// gate over a reader that matches local names counts these, because the
+    /// reader will see every one of them and take the first.
+    pub(crate) fn attributes_named(&self, local: &str) -> usize {
         self.attributes
             .iter()
-            .any(|attribute| attribute.local_name() == local)
+            .filter(|attribute| attribute.local_name() == local)
+            .count()
     }
 
     /// the child elements answering to a local name in one of `namespaces`.

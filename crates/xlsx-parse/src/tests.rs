@@ -2658,8 +2658,16 @@ fn refuses_records_claimed_through_relationships_it_cannot_trust() {
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="elsewhere.xml"/></Relationships>"#,
         ),
         (
-            "foreign target beside a real id",
-            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" u:Target="elsewhere.xml" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+            "a foreign target the shared reader takes first",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" u:Target="pivotCacheRecords1.xml" Target="elsewhere.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign id the shared reader takes first",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship u:Id="rIdRecords" Id="rIdOther" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign type the shared reader takes first",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" u:Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Type="urn:not-records" Target="pivotCacheRecords1.xml"/></Relationships>"#,
         ),
         (
             "foreign relationship element",
@@ -2698,18 +2706,81 @@ fn refuses_records_claimed_through_relationships_it_cannot_trust() {
 /// cannot trust leaves the pivot part vetoing everything, never untyped.
 #[test]
 fn refuses_a_pivot_part_a_foreign_override_would_rule_out() {
+    const THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
+    for (label, types) in [
+        (
+            "a foreign override",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><u:Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/></Types>"#
+            ),
+        ),
+        (
+            "a foreign part name the shared reader takes first",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override u:PartName="/xl/pivotcache/pivotCacheDefinition1.xml" PartName="/xl/elsewhere.xml" ContentType="{THEME}"/></Types>"#
+            ),
+        ),
+        (
+            "a foreign content type the shared reader takes first",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" u:ContentType="{THEME}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#
+            ),
+        ),
+        (
+            "an override at the root, where the shared reader still reads it",
+            format!(
+                r#"<u:Override xmlns:u="urn:future" PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/>"#
+            ),
+        ),
+        (
+            "an override nested where only the shared reader looks",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><wrapper><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/></wrapper></Types>"#
+            ),
+        ),
+        (
+            "two overrides that disagree",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#
+            ),
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        parts.push(("[Content_Types].xml".to_owned(), types.into_bytes()));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert_eq!(package.unpatchable_references().len(), 1, "{label}");
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label}: a cache typed by a part this path cannot trust must name everything"
+        );
+    }
+}
+
+/// Typing this path cannot trust must never lose a pivot part. A cache found
+/// only through its override, beside a foreign sibling that makes the typing
+/// untrustworthy, still has to be discovered — an undiscovered part vetoes
+/// nothing, which is the one outcome worse than a refusal.
+#[test]
+fn keeps_an_out_of_directory_pivot_when_the_typing_cannot_be_trusted() {
     let mut parts = pivoted_package();
+    let cache = parts
+        .iter()
+        .position(|(path, _)| path == "xl/pivotcache/pivotCacheDefinition1.xml")
+        .expect("the fixture holds a cache");
+    parts[cache].0 = "xl/pivotCacheDefinition1.xml".to_owned();
     parts.push((
         "[Content_Types].xml".to_owned(),
-        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><u:Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#.to_vec(),
+        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/><u:Override PartName="/xl/unrelated.xml" ContentType="application/xml"/></Types>"#.to_vec(),
     ));
     let package = parse_workbook_with_package(&parts).unwrap().package;
 
-    assert_eq!(package.unpatchable_references().len(), 1);
-    assert!(
-        package.reference_moved_by_rows("Report", 999).is_some(),
-        "a cache typed by a part this path cannot trust must name everything"
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/pivotCacheDefinition1.xml"),
+        "the pivot disappeared instead of becoming unresolved"
     );
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
 }
 
 /// Records the definition does not point its own `r:id` at are not its records,
