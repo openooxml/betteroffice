@@ -38,7 +38,6 @@ fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String
             worksheet.into_bytes(),
         ),
     ];
-    set_or_push_part(&mut parts, "[Content_Types].xml", CONFORMING_TYPES);
     if !shared.is_empty() {
         let items: String = shared
             .iter()
@@ -910,7 +909,6 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
     let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
     vec![
-        ("[Content_Types].xml".to_owned(), CONFORMING_TYPES.to_vec()),
         ("xl/workbook.xml".to_owned(), workbook.as_bytes().to_vec()),
         (
             "xl/_rels/workbook.xml.rels".to_owned(),
@@ -3088,6 +3086,49 @@ fn falls_back_to_the_blanket_veto_when_a_sheet_names_its_part_ambiguously() {
     assert!(package.reference_moved_by_rows("Report", 999).is_some());
 }
 
+/// Metadata this path cannot read costs a workbook nothing when the package
+/// holds nothing a save could strand. Such a workbook is edited and saved
+/// exactly as it was before narrowing existed — the fallback is a veto over
+/// references, not a penalty for imperfect typing.
+#[test]
+fn leaves_a_package_bearing_no_references_alone() {
+    let mut parts = two_sheet_package(r#"<sheetData/>"#, r#"<sheetData/>"#);
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default u:Extension="xml" Extension="xml" ContentType="application/xml"/></Types>"#);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(parsed.package.unpatchable_reference_part(), None);
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].name = "Renamed".to_owned();
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package)
+        .expect("a workbook with nothing to strand still saves a rename");
+    assert!(
+        String::from_utf8(part_bytes(&saved, "xl/workbook.xml"))
+            .unwrap()
+            .contains(r#"name="Renamed""#)
+    );
+}
+
+/// The trigger is read loosely on purpose: a decoy attribute cannot hide a
+/// reference-bearing part, because the genuine content type still answers to
+/// "any attribute anywhere".
+#[test]
+fn triggers_the_fallback_on_a_content_type_a_decoy_would_hide() {
+    let mut parts = two_sheet_package(r#"<sheetData/>"#, r#"<sheetData/>"#);
+    parts.push((
+        "custom/cache.pvt".to_owned(),
+        br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Sheet1" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/custom/cache.pvt" u:ContentType="application/xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.unpatchable_reference_part().is_some(),
+        "a decoy content type hid the part that should have triggered the veto"
+    );
+    assert!(package.reference_moved_by_rows("Sheet2", 999).is_some());
+}
+
 /// The fallback is workbook-wide: an unmodelled chart stops narrowing too,
 /// exactly as it did before narrowing existed.
 #[test]
@@ -4585,7 +4626,7 @@ fn encode_utf16(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {
 
 /// The conforming package metadata the narrowing path requires before it will
 /// read a package's typing or relationships at all.
-const CONFORMING_TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>"#;
+const CONFORMING_TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
 
 fn set_or_push_part(parts: &mut Vec<(String, Vec<u8>)>, path: &str, bytes: &[u8]) {
     match parts.iter_mut().find(|(name, _)| name == path) {

@@ -18,9 +18,9 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRef, Workbook};
 
 use crate::chart::{
-    NS_PACKAGE_RELATIONSHIPS, NS_RELATIONSHIPS, chart_reference_areas, directory_of,
-    drawing_claims_are_unambiguous, parse_area, parse_relationships, relationship_part_path,
-    unmodelled_chart_parts,
+    CHART_CONTENT_TYPES, NS_PACKAGE_RELATIONSHIPS, NS_RELATIONSHIPS, chart_reference_areas,
+    directory_of, drawing_claims_are_unambiguous, parse_area, parse_relationships,
+    relationship_part_path, unmodelled_chart_parts,
 };
 use crate::package::PartContentType;
 use crate::tree::{
@@ -127,10 +127,16 @@ pub(crate) fn unpatchable_references(
         // decided it cannot trust, so here it stops being a function of any
         // reader: every part names everything. Nothing can drop out of a set
         // that is the whole package, whatever a future reader does with it.
-        return Ok(parts
-            .iter()
-            .map(|(path, _)| bound(path.clone(), None, workbook))
-            .collect());
+        // A package holding nothing reference-bearing has nothing to strand,
+        // and gets the veto it always got: none.
+        return Ok(if package_bears_references(parts) {
+            parts
+                .iter()
+                .map(|(path, _)| bound(path.clone(), None, workbook))
+                .collect()
+        } else {
+            Vec::new()
+        });
     }
     let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
     for chart in unmodelled_chart_parts(parts, content_types, workbook)? {
@@ -145,6 +151,37 @@ pub(crate) fn unpatchable_references(
         references.push(bound(chart.path, areas, workbook));
     }
     Ok(references)
+}
+
+/// Whether the package holds anything a save could strand. Read as loosely as
+/// it can be: a conventional directory, or a content type named by any
+/// attribute anywhere in the typing part. Over-reading a trigger only ever
+/// vetoes more, and reading it this loosely is what stops a decoy attribute
+/// from hiding a real part behind a reader that takes the first match.
+fn package_bears_references(parts: &[(String, Vec<u8>)]) -> bool {
+    const DIRECTORIES: [&str; 3] = ["xl/pivottables/", "xl/pivotcache/", "xl/charts/"];
+    if parts.iter().any(|(path, _)| {
+        let key = part_key(path);
+        DIRECTORIES.iter().any(|prefix| key.starts_with(prefix))
+    }) {
+        return true;
+    }
+    let Some(bytes) = find_part(parts, "[Content_Types].xml") else {
+        return false;
+    };
+    parse_tree(bytes).is_ok_and(|root| names_a_reference_bearing_type(&root, 0))
+}
+
+fn names_a_reference_bearing_type(element: &Element, depth: usize) -> bool {
+    depth <= MAX_DEPTH
+        && (element.attributes.iter().any(|attribute| {
+            PIVOT_CONTENT_TYPES
+                .iter()
+                .chain(CHART_CONTENT_TYPES.iter())
+                .any(|known| attribute.value.eq_ignore_ascii_case(known))
+        }) || element
+            .child_elements()
+            .any(|child| names_a_reference_bearing_type(child, depth + 1)))
 }
 
 /// Binds resolved areas to the workbook. A sheet it does not hold exactly one

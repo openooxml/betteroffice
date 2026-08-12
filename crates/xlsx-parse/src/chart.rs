@@ -1077,7 +1077,7 @@ fn marker_markup(element: &Element, cell: AnchorCell) -> String {
 
 /// content types that carry workbook references in a chart vocabulary. the
 /// style and colour-style parts under `xl/charts/` carry none.
-const CHART_CONTENT_TYPES: [&str; 2] = [
+pub(crate) const CHART_CONTENT_TYPES: [&str; 2] = [
     "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
     "application/vnd.ms-office.chartex+xml",
 ];
