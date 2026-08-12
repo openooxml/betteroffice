@@ -1024,6 +1024,7 @@ impl WorkbookAuthority {
                 },
             )?);
         }
+        project_shared_frame_anchors(&mut model.sheets);
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -2681,6 +2682,29 @@ fn materialize_sheet<T: ReadTxn>(
         _ => return Err("sheet is missing merges".to_string()),
     };
     Ok(sheet)
+}
+
+/// One drawing anchor is one element however many sheets point at it, but each
+/// sheet's chart state is assigned on its own. Two replicas can each write a
+/// legal value for a different sheet and only disagree once the two are merged,
+/// so the disagreement is settled on the way out rather than refused on the way
+/// in: refusing it would make integration depend on delivery order, and the
+/// replicas would never meet again. Sheet order is shared, so first-in-order
+/// wins is the same answer everywhere.
+fn project_shared_frame_anchors(sheets: &mut [Sheet]) {
+    let mut chosen = BTreeMap::new();
+    for sheet in sheets.iter() {
+        for chart in &sheet.charts {
+            chosen.entry(chart.frame_id()).or_insert(chart.anchor);
+        }
+    }
+    for sheet in sheets.iter_mut() {
+        for chart in &mut sheet.charts {
+            if let Some(anchor) = chosen.get(&chart.frame_id()) {
+                chart.anchor = *anchor;
+            }
+        }
+    }
 }
 
 fn nested_map<T: ReadTxn>(parent: &MapRef, txn: &T, key: &str) -> Result<MapRef, String> {

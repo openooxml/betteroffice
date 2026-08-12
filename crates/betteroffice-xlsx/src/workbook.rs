@@ -2176,17 +2176,14 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
 }
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
-    validate_model_sheets(model)?;
-    validate_shared_drawings(model)
+    validate_model_sheets(model)
 }
 
 impl Workbook {
-    /// The one way a model becomes this workbook's own. An op batch, a merge
-    /// and an undo each assemble a whole model out of parts that were checked
-    /// separately, so a combination none of them produced alone is caught here
-    /// rather than at whichever door the state came through.
+    /// The one way a model becomes this workbook's own. Everything arriving
+    /// from the shared document is projected on the way out, so what is left to
+    /// check here is what a local batch can still get wrong.
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
-        validate_shared_drawings(&model)?;
         self.model = model;
         Ok(())
     }
@@ -2299,8 +2296,13 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
 }
 
 /// One anchor in one drawing is a single element, whatever number of sheets
-/// point at it. Letting them disagree builds a workbook that converges
-/// everywhere and saves nowhere, so the disagreement is refused here instead.
+/// point at it. A local batch that repins only some of them would build a
+/// workbook that saves nowhere, so it is refused before it is committed.
+///
+/// This is a local decision about a local edit. It cannot be asked of an
+/// arriving update: two replicas can each hold a legal half and only disagree
+/// once merged, and a merge that can be refused is a merge that depends on
+/// delivery order. What arrives is projected instead.
 fn validate_shared_drawings(model: &WorkbookModel) -> Result<()> {
     let mut claims: HashMap<(&str, usize), ChartAnchor> = HashMap::new();
     for sheet in &model.sheets {

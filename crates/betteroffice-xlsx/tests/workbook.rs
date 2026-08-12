@@ -5434,9 +5434,11 @@ fn collapsing_columns_under_a_chart_does_not_block_a_peer_moving_it() {
     }
 }
 
-/// Sheets sharing one drawing anchor must agree on it in the model itself, not
-/// only in whatever path happened to build it. A raw op batch is a shipped API
-/// and a remote update arrives unvetted, so both have to be refused.
+/// A local batch that repins only one of two sheets sharing an anchor is
+/// refused: it is this replica's own edit and it can simply be told no. The
+/// same disagreement arriving as an update cannot be refused — a peer may hold
+/// the other half legally — so it is projected onto one anchor instead, the
+/// same way on every replica.
 #[test]
 fn sheets_sharing_a_drawing_anchor_may_not_disagree() {
     let bytes = shared_drawing_fixture();
@@ -5474,23 +5476,91 @@ fn sheets_sharing_a_drawing_anchor_may_not_disagree() {
         "{error:?}"
     );
 
-    // and the same disagreement arriving as a remote update
+    // the same disagreement arriving as an update is taken and projected
     let mut target = Workbook::open_collaborative(&bytes, 830).unwrap();
-    let before = target.model().clone();
     let charts = format!(
         r#"[{{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{},"refs":{}}}]"#,
         serde_json::to_string(&moved).unwrap(),
         CHARTED_FIXTURE_REFS
     );
     let update = peer_sheet_charts_update(&target, 831, "sheet:0", &charts);
-    let error = target
+    target
         .apply_update_v1(&update, CalculationOptions::default())
-        .expect_err("a remote half-repin must be refused");
-    assert!(
-        matches!(&error, Error::CollaborativeState(message) if message.contains("disagree")),
-        "{error:?}"
+        .expect("a half-repin from a peer must integrate rather than be refused");
+    assert_eq!(
+        target.model().sheets[0].charts[0].anchor,
+        target.model().sheets[1].charts[0].anchor,
+        "the projection must leave one anchor for the frame"
     );
-    assert_eq!(target.model(), &before);
+    assert!(
+        target.save().is_ok(),
+        "the projected workbook must still be saveable"
+    );
+}
+
+/// Three concurrent updates, the same three, delivered in two orders. A gate
+/// that can reject one of them rejects a different one on each replica —
+/// whichever arrives when the sheets happen to disagree — and the two never
+/// meet again. Integration therefore has to take all three whatever the order,
+/// and settle the disagreement on the way out.
+#[test]
+fn one_frame_converges_under_every_delivery_order_of_the_same_updates() {
+    let bytes = shared_drawing_fixture();
+    let baseline = Workbook::open_collaborative(&bytes, 880).unwrap();
+    let baseline_vector = baseline.encode_state_vector_v1();
+
+    // an engine move writes both sheets holding the frame; the handcrafted one
+    // writes a single sheet. Yrs settles a tie by client id, so these ids fix
+    // the priority at handcrafted > later move > earlier move.
+    let engine_move = |client_id: u64, dx: f32| {
+        let mut replica = Workbook::open_collaborative(&bytes, client_id).unwrap();
+        replica
+            .move_chart(
+                SheetId(0),
+                "xl/drawings/drawing1.xml#0",
+                dx,
+                0.0,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        (
+            replica.encode_diff_v1(&baseline_vector).unwrap(),
+            replica.model().sheets[0].charts[0].anchor,
+        )
+    };
+    let (update_b, anchor_b) = engine_move(881, 12.0);
+    let (update_c, _) = engine_move(890, 30.0);
+    let half = format!(
+        r#"[{{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{},"refs":{}}}]"#,
+        serde_json::to_string(&anchor_b).unwrap(),
+        CHARTED_FIXTURE_REFS
+    );
+    let update_h = peer_sheet_charts_update(&baseline, 899, "sheet:1", &half);
+
+    let settle = |order: [&Vec<u8>; 3], client_id: u64| {
+        let mut replica = Workbook::open_collaborative(&bytes, client_id).unwrap();
+        for update in order {
+            replica
+                .apply_update_v1(update, CalculationOptions::default())
+                .unwrap_or_else(|error| {
+                    panic!("integration must not depend on delivery order: {error}")
+                });
+        }
+        assert_eq!(
+            replica.model().sheets[0].charts[0].anchor,
+            replica.model().sheets[1].charts[0].anchor,
+            "one frame must end up with one anchor"
+        );
+        assert!(replica.save().is_ok(), "the settled workbook must save");
+        replica.model().clone()
+    };
+
+    let first = settle([&update_b, &update_h, &update_c], 870);
+    let second = settle([&update_h, &update_b, &update_c], 871);
+    assert_eq!(
+        first, second,
+        "the same updates in a different order must land on the same workbook"
+    );
 }
 
 /// A snapshot is foreign bytes like any update, so it answers to the same
@@ -5534,10 +5604,11 @@ fn an_adopted_snapshot_answers_to_the_same_anchor_check_as_an_update() {
     );
 }
 
-/// An undo assembles a model out of parts that each passed on their own way
-/// in. It can still land a pair no single edit produced: one sheet repinned,
-/// the sheet sharing its drawing anchor left behind. That is a workbook no
-/// replica can save, so the step is refused rather than installed.
+/// An undo assembles a model out of parts that each arrived on their own. It
+/// can land a pair no single edit produced: one sheet repinned, the sheet
+/// sharing its drawing anchor left behind. Projecting that back onto one
+/// anchor keeps the step working and the workbook saveable, and keeps the
+/// replica publishing something its peers can take.
 #[test]
 fn collaborative_undo_may_not_install_a_split_shared_drawing() {
     let bytes = shared_drawing_fixture();
@@ -5577,50 +5648,30 @@ fn collaborative_undo_may_not_install_a_split_shared_drawing() {
     assert_eq!(local.model().sheets[0].charts[0].anchor, moved);
     assert_eq!(local.model().sheets[1].charts[0].anchor, moved);
 
-    // undoing the move reverts only the sheet whose insertion survived, which
-    // is a workbook no replica could save, so the step is refused whole.
-    let vector_before = local.encode_state_vector_v1();
+    // the split the undo would leave is projected back onto one anchor
     let history_before = local.history_state();
-    let error = local
-        .undo(CalculationOptions::default())
-        .expect_err("an undo may not install two sheets disagreeing on one anchor");
     assert!(
-        matches!(&error, Error::InvalidOperation(message) if message.contains("disagree")),
-        "{error:?}"
+        local
+            .undo(CalculationOptions::default())
+            .expect("an undo must not be refused over a split a projection can settle")
+            .applied
     );
-    assert_eq!(local.model().sheets[0].charts[0].anchor, moved);
-    assert_eq!(local.model().sheets[1].charts[0].anchor, moved);
-    assert!(
-        local.save().is_ok(),
-        "a refused undo must leave a saveable workbook"
+    assert_eq!(
+        local.model().sheets[0].charts[0].anchor,
+        local.model().sheets[1].charts[0].anchor,
+        "an undo must not leave two sheets disagreeing on one drawing anchor"
     );
+    assert!(local.save().is_ok(), "an installed model must be saveable");
+    assert_ne!(local.history_state(), history_before, "the undo must count");
 
-    // the projection is only half of it. What the replica publishes has to be
-    // unchanged too, or peers pick up an undo this workbook refused — so ask a
-    // peer what the shared document now says.
-    assert_eq!(
-        local.encode_state_vector_v1(),
-        vector_before,
-        "a refused undo must not advance the shared document"
-    );
-    assert_eq!(
-        local.history_state(),
-        history_before,
-        "a refused undo must not spend a history entry"
-    );
+    // and what the replica publishes is what a peer ends up holding
     let mut peer = Workbook::open_collaborative(&bytes, 852).unwrap();
     let catch_up = local
         .encode_diff_v1(&peer.encode_state_vector_v1())
         .unwrap();
     peer.apply_update_v1(&catch_up, CalculationOptions::default())
         .expect("a peer must be able to take what this replica publishes");
-    assert_eq!(
-        peer.model().sheets[0].charts[0].anchor,
-        moved,
-        "the authority must not be publishing the refused undo"
-    );
-    assert_eq!(peer.model().sheets[1].charts[0].anchor, moved);
-
+    assert_eq!(peer.model(), local.model(), "the replicas must agree");
     assert_ne!(moved, before);
 }
 
