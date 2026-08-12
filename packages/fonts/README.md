@@ -1,8 +1,32 @@
-# @betteroffice/docx-fonts
+# @betteroffice/fonts
 
-Bundled open fonts for the [@betteroffice/docx](https://betteroffice.dev/) editor, plus a small lazy loader: metric-compatible Latin replacements for the MS core fonts, and script-coverage faces for CJK and RTL text.
+Bundled open fonts for the [BetterOffice](https://betteroffice.dev/) engine, plus a small lazy loader: metric-compatible Latin replacements for the MS core fonts, and script-coverage faces for CJK and RTL text.
 
 Word documents overwhelmingly reference the MS core fonts (Calibri, Cambria, Arial, Times New Roman, Courier New), whose binaries cannot be redistributed. This package ships the open fonts the LibreOffice/ChromeOS ecosystem uses as drop-in metric replacements: same advance widths, so line breaks and pagination match Word even where glyph outlines differ slightly.
+
+## Why it matters
+
+Measured across 813 real-world documents, scored against Word's own page count in `docProps/app.xml <Pages>`:
+
+|                            | exact page-count match | within ±1 | mean abs error |
+| -------------------------- | ---------------------- | --------- | -------------- |
+| This package installed     | **61.9%**              | 84.6%     | 0.80           |
+| No font provider at all    | 46.5%                  | 70.8%     | 2.47           |
+
+## Install
+
+```sh
+npm install @betteroffice/fonts
+```
+
+That is the whole setup. `@betteroffice/docx` picks the package up through an optional dynamic import, so measurement starts using real font metrics with no wiring. Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) when your documents contain Chinese, Japanese or Korean text — those five faces are 33 MB and ship separately so nobody installs them unnecessarily.
+
+| Package                   | Faces | Size on disk | Contents                                     |
+| ------------------------- | ----- | ------------ | -------------------------------------------- |
+| `@betteroffice/fonts`     | 25    | 7.9 MB       | Latin metric-compatible set + Hebrew/Arabic  |
+| `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC         |
+
+Faces are fetched per face, lazily, so a typical English document pulls only Carlito Regular + Bold — about 1.25 MB raw, ~620 KB over a `Content-Encoding: gzip` connection.
 
 ## Metric-compatibility mapping (Latin)
 
@@ -19,6 +43,8 @@ Each Latin family ships four faces: Regular, Bold, Italic, BoldItalic — 20 TTF
 ## Script-coverage mapping (CJK + RTL)
 
 These faces exist so the Rust text engine (and the browser) has real glyphs for scripts the Latin faces cannot cover. **They are coverage fallbacks first, metric approximations second** — unlike Carlito/Calibri, the Noto CJK faces do NOT share advance widths with SimSun/MS Gothic/Malgun Gothic et al. (fullwidth ideographs are uniformly 1 em everywhere, but proportional Latin runs and line heights differ), so CJK pagination approximates Word rather than matching it.
+
+The CJK rows below are **resolvable only with `@betteroffice/fonts-cjk` installed**; their manifest entries live here (resolution policy belongs in one place) but the binaries do not. Without the add-on, a CJK request resolves to a loader that rejects, and the caller falls back — the RTL faces below ship in this package and always work.
 
 | Bundled family    | Substitutes for (Word families)                                                                                   | Script bucket | License | Version |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------- | ------------- | ------- | ------- |
@@ -50,22 +76,52 @@ Byte-identity across both consumers is a hard requirement: the two measurement p
 
 Importing this package performs **no network activity and no font registration**. Font binaries are fetched lazily, per face, on the first `loadBundledFontBytes()` / `registerBundledFontFace()` call. The fetch is same-origin: asset URLs are derived with `new URL(..., import.meta.url)` so bundlers (Vite) emit the files alongside the module — nothing is loaded from a CDN or any remote host.
 
+## Serving the faces from a CDN
+
+Same-origin is the default deliberately: a CDN default would leak document-font usage to a third party and break offline and strict-CSP deployments. Opt in explicitly, either through the engine:
+
+```ts
+import { configureDefaultFonts } from '@betteroffice/docx/layout';
+
+configureDefaultFonts({ baseUrl: 'https://cdn.example.com/betteroffice-fonts/' });
+```
+
+or by building the provider yourself with `createFontProvider({ baseUrl })`. The base URL is joined with each face's asset filename, so serve the contents of `assets/` at that path.
+
+Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rather than woff2 (see above), and transport compression recovers most of the difference: the Latin set is 7,252 KB raw and 3,602 KB gzipped.
+
+## Bundler note
+
+Both optional edges — `@betteroffice/docx` → `@betteroffice/fonts`, and `@betteroffice/fonts` → `@betteroffice/fonts-cjk` — are dynamic `import()`s of packages declared as optional peer dependencies. At runtime an absent package is caught and degraded. Some bundlers, however, resolve dynamic imports at **build** time and fail on a specifier they cannot find, rather than deferring it.
+
+If your build errors with `Failed to resolve import "@betteroffice/fonts-cjk"` (or the same for `@betteroffice/fonts`), either install the package, or tell the bundler it is external:
+
+```js
+// vite.config.js
+export default { build: { rollupOptions: { external: ['@betteroffice/fonts-cjk'] } } };
+```
+
+For the engine edge specifically, `configureDefaultFonts({ load })` replaces the import entirely, so you can point it at your own module and keep the specifier out of your graph.
+
 ## Deterministic resolution
 
 Measurement never consults OS-installed fonts. Font resolution is embedded document faces first, then the bundled metric-compatible substitutes, then the always-available last-resort base face — so the same document with the same provider measures identically on every machine.
 
 ## API
 
+Most hosts need none of this — installing the package is enough. It is here for custom byte sources, non-docx consumers, and browser-side `FontFace` registration.
+
 ```ts
 import {
+  createFontProvider, // ({ baseUrl }?) -> the provider the measurement engine consumes
   BUNDLED_FONTS, // BundledFontFace[] — the full manifest (single source of truth)
   resolveMetricCompatFamily, // "calibri" -> "Carlito" (case-insensitive, aliases included)
   resolveMetricCompatFace, // ("SimHei", bold, italic) -> concrete face (Regular fallback)
   resolveScriptFallbackFace, // ('cjk-sc' | 'arabic' | ..., bold, italic) -> coverage face
   resolveLastResortFace, // always-available base face for any (family, bold, italic)
-  loadBundledFontBytes, // face -> Promise<ArrayBuffer> (cached per face)
+  loadBundledFontBytes, // (face, { baseUrl }?) -> Promise<ArrayBuffer> (cached per face + base)
   registerBundledFontFace, // face -> FontFace registration (no-op outside the DOM)
-} from '@betteroffice/docx-fonts';
+} from '@betteroffice/fonts';
 ```
 
 ## Licensing
@@ -77,4 +133,4 @@ The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed un
 - `LICENSES/OFL-Liberation.txt` — Digitized data copyright (c) 2010 Google Corporation; Copyright (c) 2012 Red Hat, Inc., Reserved Font Name Liberation. Vendored unmodified from the [Liberation Fonts 2.1.5 release](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5).
 - `LICENSES/OFL-NotoSansHebrew.txt` — Copyright 2024 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).
 - `LICENSES/OFL-NotoArabic.txt` — Copyright 2022 The Noto Project Authors; covers Noto Sans Arabic and Noto Naskh Arabic. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansArabic/hinted/ttf/`, `fonts/NotoNaskhArabic/hinted/ttf/`); upstream project [notofonts/arabic](https://github.com/notofonts/arabic).
-- `LICENSES/OFL-NotoCJK.txt` — © 2014-2021 Adobe (Noto Sans CJK), © 2017-2024 Adobe (Noto Serif SC). Static `SubsetOTF` Regulars vendored from [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk) at commit `f8d157532fbfaeda587e826d4cd5b21a49186f7c` (`Sans/SubsetOTF/{SC,TC,JP,KR}/`, `Serif/SubsetOTF/SC/`).
+The CJK binaries and their `OFL-NotoCJK.txt` license text ship in [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).

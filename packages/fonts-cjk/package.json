@@ -1,7 +1,7 @@
 {
-  "name": "@betteroffice/fonts",
+  "name": "@betteroffice/fonts-cjk",
   "version": "0.0.1",
-  "description": "Bundled open fonts for the BetterOffice engine: metric-compatible Latin faces (Carlito, Caladea, Liberation) plus Noto RTL script-coverage faces, with a lazy same-origin loader. CJK faces ship separately in @betteroffice/fonts-cjk.",
+  "description": "Optional CJK font binaries for @betteroffice/fonts: Noto Sans SC/TC/JP/KR and Noto Serif SC coverage faces for Chinese, Japanese and Korean documents.",
   "sideEffects": false,
   "type": "module",
   "main": "./src/index.ts",
@@ -24,29 +24,18 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
-  "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:*"
-  },
-  "peerDependenciesMeta": {
-    "@betteroffice/fonts-cjk": {
-      "optional": true
-    }
-  },
   "devDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:*",
     "typescript": "^6.0.3"
   },
   "keywords": [
-    "docx",
-    "xlsx",
-    "pptx",
     "fonts",
-    "metric-compatible",
-    "carlito",
-    "caladea",
-    "liberation",
+    "cjk",
     "noto",
-    "rtl"
+    "chinese",
+    "japanese",
+    "korean",
+    "docx",
+    "ooxml"
   ],
   "author": "OpenOOXML",
   "license": "(Apache-2.0 AND OFL-1.1)",
@@ -54,7 +43,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/openooxml/betteroffice.git",
-    "directory": "packages/fonts"
+    "directory": "packages/fonts-cjk"
   },
   "publishConfig": {
     "access": "public"

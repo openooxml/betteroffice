@@ -1,6 +1,13 @@
 /**
- * Bundled fonts for the DOCX editor: metric-compatible Latin faces plus
- * script-coverage faces for CJK and RTL text.
+ * Bundled fonts for the BetterOffice engine: metric-compatible Latin faces
+ * plus script-coverage faces for CJK and RTL text.
+ *
+ * This package ships the Latin and RTL binaries (25 faces, 7.9 MB). The five
+ * CJK faces are 33 MB on their own and live in the optional
+ * `@betteroffice/fonts-cjk` add-on; their manifest entries stay here (policy
+ * belongs in one place) and {@link loadBundledFontBytes} reaches the bytes
+ * through an optional dynamic import. Without the add-on installed, a CJK
+ * loader rejects and the caller falls back — nothing else changes.
  *
  * Metric-compatible set — the open fonts the LibreOffice/ChromeOS ecosystem
  * uses as drop-in metric replacements for the MS core fonts (same advance
@@ -45,8 +52,9 @@
  * `FontFace`, so DOM measurement uses these exact bytes) and the Rust/WASM
  * `FontStore` (which parses raw sfnt). Both consumers require identical bytes.
  *
- * Fonts are fetched lazily and same-origin (`new URL(..., import.meta.url)`
- * so bundlers emit the assets). Importing this module performs no network
+ * Fonts are fetched lazily and same-origin by default (`new URL(...,
+ * import.meta.url)` so bundlers emit the assets); a host that wants a CDN
+ * passes an explicit `baseUrl`. Importing this module performs no network
  * activity; zero-click fetches on package import are forbidden (see the
  * security section in the repo security guidelines).
  */
@@ -374,7 +382,8 @@ export function resolveLastResortFace(
 // Per-file LITERAL asset URLs. Bundlers only statically resolve `new URL()`
 // when the specifier is a string literal — a template expression works under
 // Vite's directory glob but collapses to a single (wrong) asset under
-// webpack/Turbopack. Every bundled face must have a row here.
+// webpack/Turbopack. Every face this package ships must have a row here; the
+// CJK faces resolve through `@betteroffice/fonts-cjk` instead.
 const FONT_ASSET_URLS: Record<string, () => URL> = {
   'Caladea-Bold.ttf': () => new URL('../assets/Caladea-Bold.ttf', import.meta.url),
   'Caladea-BoldItalic.ttf': () => new URL('../assets/Caladea-BoldItalic.ttf', import.meta.url),
@@ -401,42 +410,90 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
   'NotoSansArabic-Regular.ttf': () => new URL('../assets/NotoSansArabic-Regular.ttf', import.meta.url),
   'NotoSansHebrew-Bold.ttf': () => new URL('../assets/NotoSansHebrew-Bold.ttf', import.meta.url),
   'NotoSansHebrew-Regular.ttf': () => new URL('../assets/NotoSansHebrew-Regular.ttf', import.meta.url),
-  'NotoSansJP-Regular.otf': () => new URL('../assets/NotoSansJP-Regular.otf', import.meta.url),
-  'NotoSansKR-Regular.otf': () => new URL('../assets/NotoSansKR-Regular.otf', import.meta.url),
-  'NotoSansSC-Regular.otf': () => new URL('../assets/NotoSansSC-Regular.otf', import.meta.url),
-  'NotoSansTC-Regular.otf': () => new URL('../assets/NotoSansTC-Regular.otf', import.meta.url),
-  'NotoSerifSC-Regular.otf': () => new URL('../assets/NotoSerifSC-Regular.otf', import.meta.url),
 };
+
+/** Where a face's bytes are served from. */
+export interface FontAssetOptions {
+  /**
+   * Serve the faces from here instead of this package's own assets. Same-origin
+   * (the package's own assets) is the default on purpose: a CDN default would
+   * leak document-font usage to a third party and break offline and strict-CSP
+   * deployments. A trailing slash is optional; a relative base resolves against
+   * the document.
+   */
+  baseUrl?: string | URL;
+}
+
+let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
+
+/**
+ * Asset URLs of the optional CJK add-on, or `undefined` when it is not
+ * installed. Memoized including the miss, so an absent package costs one
+ * failed import per session.
+ */
+function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
+  cjkAssetUrls ??= import('@betteroffice/fonts-cjk').then(
+    (module) => module.CJK_FONT_ASSET_URLS,
+    () => undefined
+  );
+  return cjkAssetUrls;
+}
+
+function assetBase(baseUrl: string | URL): string {
+  const href = typeof baseUrl === 'string' ? baseUrl : baseUrl.href;
+  return href.endsWith('/') ? href : `${href}/`;
+}
+
+async function assetUrl(file: string, baseUrl: string | URL | undefined): Promise<URL> {
+  if (baseUrl !== undefined) {
+    const base = assetBase(baseUrl);
+    return new URL(file, typeof location === 'undefined' ? base : new URL(base, location.href));
+  }
+  const local = FONT_ASSET_URLS[file];
+  if (local) return local();
+  const cjk = await loadCjkAssetUrls();
+  const resolveCjk = cjk?.[file];
+  if (resolveCjk) return resolveCjk();
+  if (!cjk) {
+    throw new Error(
+      `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`
+    );
+  }
+  throw new Error(`Unknown bundled font asset: ${file}`);
+}
 
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
 /**
- * Lazily fetch the raw sfnt bytes for a face. The fetch is same-origin: the
- * asset URL is derived with `new URL(..., import.meta.url)` so bundlers
- * (Vite) emit the file and serve it alongside the module. Results are cached
- * per face (the same promise is returned for concurrent callers, and the
- * same `ArrayBuffer` instance is handed to every consumer — byte-identity
- * lets registries deduplicate registrations); a failed fetch is evicted so
- * it can be retried.
+ * Lazily fetch the raw sfnt bytes for a face. The fetch is same-origin by
+ * default: the asset URL is derived with `new URL(..., import.meta.url)` so
+ * bundlers (Vite) emit the file and serve it alongside the module. Pass
+ * `baseUrl` to serve the faces from a CDN instead.
+ *
+ * Results are cached per (face, base URL) — the same promise is returned for
+ * concurrent callers, and the same `ArrayBuffer` instance is handed to every
+ * consumer, so byte-identity lets registries deduplicate registrations. A
+ * failed fetch is evicted so it can be retried.
  */
-export function loadBundledFontBytes(face: BundledFontFace): Promise<ArrayBuffer> {
-  const cached = bytesCache.get(face.file);
+export function loadBundledFontBytes(
+  face: BundledFontFace,
+  options?: FontAssetOptions
+): Promise<ArrayBuffer> {
+  const key = `${options?.baseUrl === undefined ? '' : assetBase(options.baseUrl)}\n${face.file}`;
+  const cached = bytesCache.get(key);
   if (cached) return cached;
-  const resolveUrl = FONT_ASSET_URLS[face.file];
-  if (!resolveUrl) {
-    return Promise.reject(new Error(`Unknown bundled font asset: ${face.file}`));
-  }
-  const url = resolveUrl();
-  const promise = fetch(url).then((response) => {
-    if (!response.ok) {
-      throw new Error(`Failed to fetch bundled font ${face.file}: HTTP ${response.status}`);
-    }
-    return response.arrayBuffer();
-  });
+  const promise = assetUrl(face.file, options?.baseUrl)
+    .then((url) => fetch(url))
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to fetch bundled font ${face.file}: HTTP ${response.status}`);
+      }
+      return response.arrayBuffer();
+    });
   promise.catch(() => {
-    if (bytesCache.get(face.file) === promise) bytesCache.delete(face.file);
+    if (bytesCache.get(key) === promise) bytesCache.delete(key);
   });
-  bytesCache.set(face.file, promise);
+  bytesCache.set(key, promise);
   return promise;
 }
 
@@ -449,7 +506,11 @@ const registeredFaces = new Map<string, Promise<void>>();
  * (cssFamily, weight, style); a failed registration is evicted so it can be
  * retried. Resolves as a no-op in non-DOM environments.
  */
-export function registerBundledFontFace(face: BundledFontFace, cssFamily?: string): Promise<void> {
+export function registerBundledFontFace(
+  face: BundledFontFace,
+  cssFamily?: string,
+  options?: FontAssetOptions
+): Promise<void> {
   if (
     typeof document === 'undefined' ||
     typeof FontFace === 'undefined' ||
@@ -462,7 +523,7 @@ export function registerBundledFontFace(face: BundledFontFace, cssFamily?: strin
   const existing = registeredFaces.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const bytes = await loadBundledFontBytes(face);
+    const bytes = await loadBundledFontBytes(face, options);
     // The family name goes through the FontFace API as a value, never
     // interpolated into a CSS string, so there is no CSS-injection sink here.
     const fontFace = new FontFace(family, bytes, {
@@ -477,4 +538,48 @@ export function registerBundledFontFace(face: BundledFontFace, cssFamily?: strin
   });
   registeredFaces.set(key, promise);
   return promise;
+}
+
+/**
+ * A resolver of bundled font bytes, shaped exactly like the measurement
+ * engine's `BundledFontProvider` (`@betteroffice/docx`'s
+ * `layout/measure/fontRegistry`). Declared structurally rather than imported
+ * so this package stays independent of the engine packages.
+ */
+export interface BundledFontSource {
+  /** Bundled metric-compatible face for a Word family, or undefined. */
+  resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
+  /** Per-script coverage face (CJK/RTL), or undefined. */
+  resolveScriptFallback(
+    script: BundledFontScript,
+    bold: boolean,
+    italic: boolean
+  ): (() => Promise<ArrayBuffer>) | undefined;
+  /** The always-available last-resort base face — never undefined. */
+  resolveLastResort(family: string, bold: boolean, italic: boolean): () => Promise<ArrayBuffer>;
+}
+
+/**
+ * Build the provider the measurement engine consumes. This is what
+ * `@betteroffice/docx` instantiates when a host injects no provider of its
+ * own, and what a host should use when it wants the bundled faces served from
+ * somewhere other than its own origin.
+ *
+ * Loaders are lazy: nothing is fetched until a document actually needs a face.
+ */
+export function createFontProvider(options?: FontAssetOptions): BundledFontSource {
+  const load = (face: BundledFontFace) => () => loadBundledFontBytes(face, options);
+  return {
+    resolve(family, bold, italic) {
+      const face = resolveMetricCompatFace(family, bold, italic);
+      return face ? load(face) : undefined;
+    },
+    resolveScriptFallback(script, bold, italic) {
+      const face = resolveScriptFallbackFace(script, bold, italic);
+      return face ? load(face) : undefined;
+    },
+    resolveLastResort(family, bold, italic) {
+      return load(resolveLastResortFace(family, bold, italic));
+    },
+  };
 }
