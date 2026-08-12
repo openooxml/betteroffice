@@ -2103,6 +2103,34 @@ mod tests {
         assert_eq!(engine.stats().retained_pages, 1);
     }
 
+    // A `nextColumn` section start used to fail the request envelope outright,
+    // so the whole document never reached layout.
+    #[test]
+    fn region_layout_accepts_a_next_column_section_start() {
+        let engine = EngineSession::new(132);
+        let request = serde_json::json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "properties": {"sectionStart": "nextColumn", "columnCount": 2}
+                }]
+            }
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["options"]["bodyBreakType"], "nextColumn");
+    }
+
     /// One 200x120 page (10px margins, so a content box of x 10..190 /
     /// y 10..110) whose single paragraph carries a footnote reference.
     fn note_area_layout_request() -> serde_json::Value {

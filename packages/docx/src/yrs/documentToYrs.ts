@@ -839,7 +839,8 @@ function paragraphAttrs(
       start === 'nextPage' ||
       start === 'continuous' ||
       start === 'oddPage' ||
-      start === 'evenPage'
+      start === 'evenPage' ||
+      start === 'nextColumn'
     ) {
       attrs.sectionBreakType = start;
     }

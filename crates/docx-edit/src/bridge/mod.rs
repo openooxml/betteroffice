@@ -1958,7 +1958,7 @@ fn section_break_type(value: &str) -> Option<SectionBreakType> {
         "nextPage" => Some(SectionBreakType::NextPage),
         "evenPage" => Some(SectionBreakType::EvenPage),
         "oddPage" => Some(SectionBreakType::OddPage),
-        // `nextColumn` has no variant in the layout engine's enum.
+        "nextColumn" => Some(SectionBreakType::NextColumn),
         _ => None,
     }
 }
@@ -4109,6 +4109,34 @@ mod tests {
         assert_eq!(
             value[1],
             json!({ "kind": "sectionBreak", "id": format!("sect:{para}"), "type": "oddPage" })
+        );
+    }
+
+    #[test]
+    fn next_column_section_start_reaches_the_layout_block() {
+        let doc = EditingDoc::new(49);
+        let para = doc.create_story("body", "end", "Normal", "left").unwrap();
+        doc.set_paragraph_attr(
+            &para,
+            "sectPr",
+            any_map([
+                ("sectionStart", Any::from("nextColumn")),
+                ("columnCount", Any::Number(2.0)),
+                ("columnSpace", Any::Number(360.0)),
+            ]),
+        )
+        .unwrap();
+
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let value = serde_json::to_value(&blocks).unwrap();
+        assert_eq!(
+            value[1],
+            json!({
+                "kind": "sectionBreak",
+                "id": format!("sect:{para}"),
+                "type": "nextColumn",
+                "columns": { "count": 2.0, "gap": 24.0, "equalWidth": true }
+            })
         );
     }
 }

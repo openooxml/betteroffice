@@ -513,6 +513,12 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
         self.pages[self.states[idx].page_index].number
     }
 
+    fn force_column_break(&mut self) -> bool {
+        let pages_before = self.pages.len();
+        Paginator::force_column_break(self);
+        self.pages.len() > pages_before
+    }
+
     fn insert_blank_page(&mut self) -> u32 {
         let idx = Paginator::insert_blank_page(self);
         self.pages[self.states[idx].page_index].number

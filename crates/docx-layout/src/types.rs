@@ -90,6 +90,7 @@ pub enum SectionBreakType {
     NextPage,
     EvenPage,
     OddPage,
+    NextColumn,
 }
 
 // ---------------------------------------------------------------------------

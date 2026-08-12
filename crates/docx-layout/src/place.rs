@@ -648,14 +648,16 @@ fn place(
                     .cloned()
                     .unwrap_or_else(|| initial_config.clone());
                 paginator.set_section_index(section_idx + 1);
-                hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
+                let opened_column_region =
+                    hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();
-                if next_section_config
-                    .columns
-                    .as_ref()
-                    .map_or(1.0, |c| c.count)
-                    > 1.0
+                if opened_column_region
+                    && next_section_config
+                        .columns
+                        .as_ref()
+                        .map_or(1.0, |c| c.count)
+                        > 1.0
                 {
                     hooks::balance_terminal_continuous_text_columns(
                         measured,

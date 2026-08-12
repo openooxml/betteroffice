@@ -1583,7 +1583,7 @@ export type LayoutOptions = {
   /** Per-page footnote reserved heights (pageNumber → height in pixels). */
   footnoteReservedHeights?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
-  bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage';
+  bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
   /** Effective section states, indexed by section. Undefined = legacy globals. */
   sections?: Array<{
     sectionId?: string;

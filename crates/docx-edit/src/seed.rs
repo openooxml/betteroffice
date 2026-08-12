@@ -1774,7 +1774,7 @@ fn paragraph_attrs(
     }
     if let Some(section) = field(Some(paragraph), "sectionProperties") {
         attrs.insert("_sectionProperties".to_owned(), section.clone());
-        if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage")) =
+        if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage" | "nextColumn")) =
             string(field(Some(section), "sectionStart"))
         {
             attrs.insert(

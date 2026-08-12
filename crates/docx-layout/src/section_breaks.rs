@@ -13,9 +13,13 @@
 //!   next natural page break — unless the page size changes, which Word and
 //!   LibreOffice promote to a page break because two page sizes cannot share
 //!   one physical sheet. Sizes are compared after rounding.
+//! - `nextColumn` continues in the column band already in force, deferring the
+//!   new geometry like `continuous`; from the last column it falls through to a
+//!   new page, which is also what a single-column section does.
 //!
-//! Column layout is applied for every break kind, defaulting to a single
-//! full-width column when the section declares none.
+//! Column layout is applied whenever a break opens a fresh column region — that
+//! is, for every break kind except a `nextColumn` that stayed inside its band —
+//! defaulting to a single full-width column when the section declares none.
 //!
 //! The tracker half ([`SectionLayoutTracker`] and the `apply` / `promote` /
 //! `resolve_next_*` functions) models the same rules as a two-stage schedule:
@@ -92,6 +96,8 @@ pub struct SectionBreakOutcome {
     pub page_parity: Option<PageParity>,
     /// Begin a new column region on the current page (continuous column change).
     pub open_column_region: bool,
+    /// Move to the next column of the region in force (`nextColumn`).
+    pub advance_column: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +117,8 @@ pub trait SectionBreakPaginator {
     ) -> Result<(), LayoutError>;
     /// Forces a page break and returns the new page number.
     fn force_page_break(&mut self) -> u32;
+    /// Moves to the next column, reporting whether that opened a new page.
+    fn force_column_break(&mut self) -> bool;
     /// Create a new page even when the current page is pristine.
     fn insert_blank_page(&mut self) -> u32;
     /// Returns the current page size, creating the first page if needed.
@@ -199,9 +207,10 @@ pub fn create_section_layout_tracker(
 ///
 /// The tracker is never mutated in place, so a caller can discard the result.
 /// `nextPage` / `evenPage` / `oddPage` always break and queue their columns.
-/// A `continuous` break opens a new column region on the current page only
-/// when its column count or gap differs from the columns in force; a section
-/// declaring no columns resolves to a single full-width column.
+/// `nextColumn` advances within the region in force and queues its columns for
+/// the boundary. A `continuous` break opens a new column region on the current
+/// page only when its column count or gap differs from the columns in force; a
+/// section declaring no columns resolves to a single full-width column.
 pub fn apply_section_break(
     block: &SectionBreakBlock,
     tracker: &SectionLayoutTracker,
@@ -235,6 +244,7 @@ pub fn apply_section_break(
             break_to_new_page: true,
             page_parity: None,
             open_column_region: false,
+            advance_column: false,
         };
         if break_kind == SectionBreakType::EvenPage {
             outcome.page_parity = Some(PageParity::Even);
@@ -244,6 +254,19 @@ pub fn apply_section_break(
         }
         return ApplySectionBreakResult {
             outcome,
+            tracker: updated,
+        };
+    }
+
+    if break_kind == SectionBreakType::NextColumn {
+        updated.queued.columns = Some(incoming_columns);
+        return ApplySectionBreakResult {
+            outcome: SectionBreakOutcome {
+                break_to_new_page: false,
+                page_parity: None,
+                open_column_region: false,
+                advance_column: true,
+            },
             tracker: updated,
         };
     }
@@ -258,6 +281,7 @@ pub fn apply_section_break(
                 break_to_new_page: false,
                 page_parity: None,
                 open_column_region: true,
+                advance_column: false,
             },
             tracker: updated,
         };
@@ -268,6 +292,7 @@ pub fn apply_section_break(
             break_to_new_page: false,
             page_parity: None,
             open_column_region: false,
+            advance_column: false,
         },
         tracker: updated,
     }
@@ -347,7 +372,8 @@ pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
     }
 }
 
-/// Drives the paginator through a section break, per the module rules.
+/// Drives the paginator through a section break, per the module rules, and
+/// reports whether the break opened a fresh column region.
 ///
 /// `next_section_config` and `next_section_type` describe the section being
 /// entered, not the one ending; the block itself carries no geometry the
@@ -357,12 +383,13 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
     paginator: &mut P,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
-) -> Result<(), LayoutError> {
+) -> Result<bool, LayoutError> {
     // ECMA-376 §17.6.22: w:type specifies how the NEXT section starts relative
     // to this one. Default is 'nextPage' when w:type is absent.
     let break_type = next_section_type.unwrap_or(SectionBreakType::NextPage);
     let page_size = Some(&next_section_config.page_size);
     let margins = Some(&next_section_config.margins);
+    let mut opened_column_region = true;
 
     match break_type {
         SectionBreakType::NextPage => {
@@ -407,17 +434,28 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
                     .update_page_layout(page_size, margins, /* apply_immediately */ false)?;
             }
         }
+
+        SectionBreakType::NextColumn => {
+            // ECMA-376 §17.18.77: the next section starts at the top of the next
+            // column, so it shares the current sheet and defers its geometry like
+            // `continuous`. Out of the last column — always, in a single-column
+            // section — it falls through to a page, the only place new columns
+            // can take effect.
+            paginator.update_page_layout(page_size, margins, /* apply_immediately */ false)?;
+            opened_column_region = paginator.force_column_break();
+        }
     }
 
-    // Update column layout for the next section
-    let default_cols = default_columns();
-    paginator.update_columns(
-        next_section_config
-            .columns
-            .as_ref()
-            .unwrap_or(&default_cols),
-    );
-    Ok(())
+    if opened_column_region {
+        let default_cols = default_columns();
+        paginator.update_columns(
+            next_section_config
+                .columns
+                .as_ref()
+                .unwrap_or(&default_cols),
+        );
+    }
+    Ok(opened_column_region)
 }
 
 #[cfg(test)]
@@ -727,6 +765,9 @@ mod tests {
         InsertBlankPage {
             new_page_number: u32,
         },
+        ForceColumnBreak {
+            opened_page: bool,
+        },
         UpdateColumns {
             count: f64,
             gap: f64,
@@ -737,6 +778,8 @@ mod tests {
         page_size: Size,
         page_number: u32,
         pending_page_size: Option<Size>,
+        column_count: usize,
+        column_index: usize,
         calls: Vec<Call>,
     }
 
@@ -746,7 +789,16 @@ mod tests {
                 page_size,
                 page_number,
                 pending_page_size: None,
+                column_count: 1,
+                column_index: 0,
                 calls: Vec::new(),
+            }
+        }
+
+        fn with_columns(page_size: Size, page_number: u32, column_count: usize) -> Self {
+            MockPaginator {
+                column_count,
+                ..MockPaginator::new(page_size, page_number)
             }
         }
     }
@@ -791,6 +843,21 @@ mod tests {
                 new_page_number: self.page_number,
             });
             self.page_number
+        }
+
+        fn force_column_break(&mut self) -> bool {
+            let opened_page = self.column_index + 1 >= self.column_count;
+            if opened_page {
+                if let Some(size) = self.pending_page_size.take() {
+                    self.page_size = size;
+                }
+                self.page_number += 1;
+                self.column_index = 0;
+            } else {
+                self.column_index += 1;
+            }
+            self.calls.push(Call::ForceColumnBreak { opened_page });
+            opened_page
         }
 
         fn current_page_size(&mut self) -> Size {
@@ -1025,6 +1092,188 @@ mod tests {
                 count: 2.0,
                 gap: 20.0
             })
+        );
+    }
+
+    const TWO_COLUMNS: ColumnLayout = ColumnLayout {
+        count: 2.0,
+        gap: 24.0,
+        equal_width: None,
+        separator: None,
+        columns: None,
+    };
+
+    #[test]
+    fn next_column_break_stays_in_the_band_and_defers_geometry() {
+        let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, 2);
+        let opened_region = handle_section_break(
+            &empty_break(),
+            &mut paginator,
+            &config(PORTRAIT, Some(TWO_COLUMNS)),
+            Some(SectionBreakType::NextColumn),
+        )
+        .unwrap();
+        assert!(!opened_region);
+        assert_eq!(paginator.page_number, 1);
+        assert_eq!(paginator.column_index, 1);
+        // no UpdateColumns: the band in force keeps its region and column x
+        assert_eq!(
+            paginator.calls,
+            vec![
+                Call::UpdatePageLayout {
+                    page_size: Some(PORTRAIT),
+                    margins_top: Some(50.0),
+                    apply_immediately: false,
+                },
+                Call::ForceColumnBreak { opened_page: false },
+            ]
+        );
+    }
+
+    // Out of the last column there is no next column, so the break falls
+    // through to a page and the new section's columns take effect there.
+    #[test]
+    fn next_column_break_from_the_last_column_opens_a_page() {
+        let mut paginator = MockPaginator::with_columns(PORTRAIT, 1, 2);
+        paginator.column_index = 1;
+        let opened_region = handle_section_break(
+            &empty_break(),
+            &mut paginator,
+            &config(LANDSCAPE, Some(TWO_COLUMNS)),
+            Some(SectionBreakType::NextColumn),
+        )
+        .unwrap();
+        assert!(opened_region);
+        assert_eq!(paginator.page_number, 2);
+        assert_eq!(paginator.column_index, 0);
+        // the deferred geometry is promoted by the page the break opened
+        assert_eq!(paginator.current_page_size(), LANDSCAPE);
+        assert_eq!(
+            paginator.calls.last(),
+            Some(&Call::UpdateColumns {
+                count: 2.0,
+                gap: 24.0
+            })
+        );
+    }
+
+    // A single-column section has no next column, so nextColumn behaves as
+    // nextPage — the same fall-through the ColumnBreak block takes.
+    #[test]
+    fn next_column_break_in_a_single_column_section_starts_a_page() {
+        let mut paginator = MockPaginator::new(PORTRAIT, 1);
+        let opened_region = handle_section_break(
+            &empty_break(),
+            &mut paginator,
+            &config(PORTRAIT, None),
+            Some(SectionBreakType::NextColumn),
+        )
+        .unwrap();
+        assert!(opened_region);
+        assert_eq!(paginator.page_number, 2);
+        assert!(
+            paginator
+                .calls
+                .contains(&Call::ForceColumnBreak { opened_page: true })
+        );
+    }
+
+    #[test]
+    fn apply_next_column_break_advances_the_column_and_queues_columns() {
+        let tracker = base_tracker();
+        let result = apply_section_break(
+            &SectionBreakBlock {
+                break_type: Some(SectionBreakType::NextColumn),
+                columns: Some(TWO_COLUMNS),
+                ..empty_break()
+            },
+            &tracker,
+        );
+        assert!(result.outcome.advance_column);
+        assert!(!result.outcome.break_to_new_page);
+        assert!(!result.outcome.open_column_region);
+        assert_eq!(result.tracker.queued.columns, Some(TWO_COLUMNS));
+    }
+
+    // Two sections split by one break, on an 816-wide page with 96 margins.
+    // `columns` is the `w:cols` both sections declare: at `{count: 2, gap: 24}`
+    // the band is two 300px columns at x 96 and x 420.
+    fn two_section_layout_input(body_break_type: &str, columns: Option<&str>) -> String {
+        let break_columns = columns.map_or(String::new(), |c| format!(r#", "columns": {c}"#));
+        let option_columns = columns.map_or(String::new(), |c| format!(r#", "columns": {c}"#));
+        format!(
+            r#"{{
+              "measured": [
+                {{
+                  "block": {{"kind": "paragraph", "id": 0, "runs": [{{"kind": "text", "text": "one"}}], "attrs": {{}}}},
+                  "measure": {{"kind": "paragraph", "lines": [{{"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 3, "width": 200, "ascent": 19.2, "descent": 4.8, "lineHeight": 24}}], "totalHeight": 24}}
+                }},
+                {{"block": {{"kind": "sectionBreak", "id": 1{break_columns}}}, "measure": {{"kind": "sectionBreak"}}}},
+                {{
+                  "block": {{"kind": "paragraph", "id": 2, "runs": [{{"kind": "text", "text": "two"}}], "attrs": {{}}}},
+                  "measure": {{"kind": "paragraph", "lines": [{{"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 3, "width": 200, "ascent": 19.2, "descent": 4.8, "lineHeight": 24}}], "totalHeight": 24}}
+                }}
+              ],
+              "options": {{
+                "pageSize": {{"w": 816, "h": 1056}},
+                "margins": {{"top": 96, "right": 96, "bottom": 96, "left": 96}},
+                "bodyBreakType": "{body_break_type}"{option_columns}
+              }}
+            }}"#
+        )
+    }
+
+    const TWO_COLUMN_COLS: &str = r#"{"count": 2, "gap": 24}"#;
+
+    fn paragraph_placements(layout: &crate::types::Layout) -> Vec<(u32, f64, f64)> {
+        layout
+            .pages
+            .iter()
+            .flat_map(|page| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let crate::types::Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    Some((page.number, paragraph.x, paragraph.y))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn next_column_section_break_places_the_next_section_in_the_next_column() {
+        let layout = crate::compute_layout(&two_section_layout_input(
+            "nextColumn",
+            Some(TWO_COLUMN_COLS),
+        ))
+        .unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(
+            paragraph_placements(&layout),
+            vec![(1, 96.0, 96.0), (1, 420.0, 96.0)]
+        );
+    }
+
+    #[test]
+    fn next_column_section_break_without_columns_starts_a_new_page() {
+        let layout = crate::compute_layout(&two_section_layout_input("nextColumn", None)).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            paragraph_placements(&layout),
+            vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]
+        );
+    }
+
+    // The same band under nextPage: a second sheet, not the second column.
+    #[test]
+    fn next_page_section_break_leaves_the_band_for_a_new_page() {
+        let layout =
+            crate::compute_layout(&two_section_layout_input("nextPage", Some(TWO_COLUMN_COLS)))
+                .unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            paragraph_placements(&layout),
+            vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]
         );
     }
 }
