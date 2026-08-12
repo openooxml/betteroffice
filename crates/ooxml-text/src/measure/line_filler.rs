@@ -20,9 +20,11 @@
 //!   so even a text run with no characters raises the line box. A line with
 //!   no font-bearing run at all falls back to a 0.8/0.2 em ascent/descent
 //!   split on a [`DEFAULT_SINGLE_LINE_RATIO`] basis.
-//! - The emitted `ascent`/`descent` are the *spacing-ruled* pair, never the
-//!   raw content metrics, so `ascent + descent <= lineHeight` always holds:
-//!   an `exact` or sub-single box shrinks them instead of overflowing.
+//! - The emitted `ascent`/`descent` are the *spacing-ruled* pair, not the raw
+//!   content metrics, so `ascent + descent <= lineHeight` always holds: an
+//!   `exact`, floored `atLeast` or sub-single box moves the pair rather than
+//!   overflowing the box. An image-grown line overrides both and the
+//!   identity still holds.
 //! - An image taller than the ruled text height grows the line box. Alone on
 //!   the line it takes the text descent as a buffer above and below; flowing
 //!   with text it seats on the baseline — full height above, only the text
@@ -627,14 +629,18 @@ impl Filler<'_> {
         };
         let ruled = wm::apply_spacing_rule(content, &self.rule);
         let mut ascent = ruled.ascent;
-        let descent = ruled.descent;
+        let mut descent = ruled.descent;
         let text_line_height = ruled.height();
         let mut line_height = text_line_height;
 
-        // Image-only lines receive descent on both sides; inline images sit on the baseline.
+        // Image-only lines receive descent on both sides; inline images sit on
+        // the baseline. The image dictates the whole box, so it takes its
+        // buffer from the content descent and reports it as the row descent —
+        // the spacing rule no longer describes this line.
         if self.cur.max_image_height_px > line_height {
             let image_h = self.cur.max_image_height_px;
-            let buffer = descent;
+            let buffer = content.descent;
+            descent = buffer;
             if self.cur.head_run == self.cur.tail_run {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;

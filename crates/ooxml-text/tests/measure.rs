@@ -343,9 +343,10 @@ fn every_row_keeps_ascent_plus_descent_within_the_line_height() {
     }
 }
 
-// 6b. exact and sub-single auto emit the *ruled* box: the height is fixed and
-// the shrink eats the ascent side, so the baseline moves. Rules that only add
-// leading below the descent leave ascent/descent untouched.
+// 6b. rows carry the *ruled* box: exact splits it 80/20 about the baseline
+// whatever the font, a floored atLeast puts its slack above the ascent, and
+// sub-single auto shrinks both. Rules that only add leading below the descent
+// leave ascent/descent untouched.
 #[test]
 fn exact_and_sub_single_rules_emit_the_ruled_box() {
     let row = |spacing: Value, runs: Value| {
@@ -360,20 +361,27 @@ fn exact_and_sub_single_rules_emit_the_ruled_box() {
     let ascent_of = |line: &Value| line["ascent"].as_f64().unwrap();
     let descent_of = |line: &Value| line["descent"].as_f64().unwrap();
 
-    // taller than the content: the content descent is preserved bottom-up
-    let line = row(json!({ "line": 20.0, "lineRule": "exact" }), text.clone());
-    approx(ascent_of(&line), 20.0 - DESC, "exact 20 ascent");
-    approx(descent_of(&line), DESC, "exact 20 descent");
+    // exact splits the fixed box 80/20 whatever the content is
+    for h in [20.0, 10.0, 2.0] {
+        let line = row(json!({ "line": h, "lineRule": "exact" }), text.clone());
+        approx(ascent_of(&line), 0.8 * h, &format!("exact {h} ascent"));
+        approx(descent_of(&line), 0.2 * h, &format!("exact {h} descent"));
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            h,
+            &format!("exact {h} height"),
+        );
+    }
 
-    // shorter than the content: the box still wins, the ascent absorbs it
-    let line = row(json!({ "line": 10.0, "lineRule": "exact" }), text.clone());
-    approx(ascent_of(&line), 10.0 - DESC, "exact 10 ascent");
-    approx(descent_of(&line), DESC, "exact 10 descent");
+    // a floored atLeast puts its slack above the ascent, keeping the descent
+    let line = row(json!({ "line": 50.0, "lineRule": "atLeast" }), text.clone());
+    approx(ascent_of(&line), 50.0 - DESC, "atLeast 50 ascent");
+    approx(descent_of(&line), DESC, "atLeast 50 descent");
 
-    // shorter than the content descent: descent clamps, ascent is zero
-    let line = row(json!({ "line": 2.0, "lineRule": "exact" }), text.clone());
-    approx(ascent_of(&line), 0.0, "exact 2 ascent");
-    approx(descent_of(&line), 2.0, "exact 2 descent");
+    // below the natural height the content box passes through untouched
+    let line = row(json!({ "line": 10.0, "lineRule": "atLeast" }), text.clone());
+    approx(ascent_of(&line), ASC, "atLeast 10 ascent");
+    approx(descent_of(&line), DESC, "atLeast 10 descent");
 
     // sub-single auto shrinks both proportionally and leaves no leading
     let line = row(
@@ -389,11 +397,10 @@ fn exact_and_sub_single_rules_emit_the_ruled_box() {
         "auto 0.5 height",
     );
 
-    // leading-bearing rules are untouched: the delta lands below the descent
+    // auto at or above single is untouched: the delta lands below the descent
     for spacing in [
+        json!({ "line": 1.0, "lineUnit": "multiplier" }),
         json!({ "line": 2.0, "lineUnit": "multiplier" }),
-        json!({ "line": 50.0, "lineRule": "atLeast" }),
-        json!({ "line": 10.0, "lineRule": "atLeast" }),
     ] {
         let what = spacing.to_string();
         let line = row(spacing, text.clone());
@@ -403,8 +410,43 @@ fn exact_and_sub_single_rules_emit_the_ruled_box() {
 
     // the empty-paragraph path rules identically
     let line = row(json!({ "line": 10.0, "lineRule": "exact" }), json!([]));
-    approx(ascent_of(&line), 10.0 - DESC, "empty exact ascent");
-    approx(descent_of(&line), DESC, "empty exact descent");
+    approx(ascent_of(&line), 8.0, "empty exact ascent");
+    approx(descent_of(&line), 2.0, "empty exact descent");
+}
+
+// 6c. both fixed rules leave no leading, so the row's ascent + descent is the
+// whole box: a consumer that centers half-leading and one that hangs the
+// baseline off the top of the box land on the same baseline.
+#[test]
+fn fixed_rules_agree_under_either_baseline_model() {
+    for spacing in [
+        json!({ "line": 20.0, "lineRule": "exact" }),
+        json!({ "line": 10.0, "lineRule": "exact" }),
+        json!({ "line": 50.0, "lineRule": "atLeast" }),
+        json!({ "line": 0.5, "lineUnit": "multiplier" }),
+    ] {
+        for runs in [json!([{ "kind": "text", "text": "0" }]), json!([])] {
+            let v = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": runs,
+                    "attrs": { "spacing": spacing }
+                }),
+                200.0,
+            )
+            .unwrap();
+            let line = &v["lines"][0];
+            let (a, d, h) = (
+                line["ascent"].as_f64().unwrap(),
+                line["descent"].as_f64().unwrap(),
+                line["lineHeight"].as_f64().unwrap(),
+            );
+            // the empty-paragraph floor can raise h above the ruled box
+            if (a + d - h).abs() < 1e-3 {
+                approx(((h - a - d) / 2.0).max(0.0) + a, a, &spacing.to_string());
+            }
+        }
+    }
 }
 
 // 7. empty paragraph: one line with the Word single-line floor
