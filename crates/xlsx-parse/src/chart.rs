@@ -1234,18 +1234,33 @@ pub(crate) fn drawing_claims_are_unambiguous(root: &Element) -> bool {
     }
     root.child_elements()
         .filter(is_anchor)
-        .all(|anchor| chart_descendants(anchor, 0) <= 1)
+        .all(|anchor| chart_claims(anchor, 0) <= 1)
 }
 
-fn chart_descendants(element: &Element, depth: usize) -> usize {
+/// How many claims an anchor could be read as carrying. A `c:chart` is one; so
+/// is a second relationships-namespace `id` on it, since the claim is followed
+/// by taking the first such attribute and either could answer.
+fn chart_claims(element: &Element, depth: usize) -> usize {
     if depth > MAX_DEPTH {
         return usize::MAX;
     }
-    usize::from(element.is(NS_CHART, "chart"))
-        + element
-            .child_elements()
-            .map(|child| chart_descendants(child, depth + 1))
-            .sum::<usize>()
+    let here = if element.is(NS_CHART, "chart") {
+        element
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                attribute.local_name() == "id"
+                    && attribute.namespace.as_deref() == Some(NS_RELATIONSHIPS)
+            })
+            .count()
+            .max(1)
+    } else {
+        0
+    };
+    here + element
+        .child_elements()
+        .map(|child| chart_claims(child, depth + 1))
+        .sum::<usize>()
 }
 
 /// Whether a chart part carries a reference this crate cannot rewrite. Only a

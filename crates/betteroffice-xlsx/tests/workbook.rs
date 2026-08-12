@@ -3832,10 +3832,9 @@ fn pivoted_fixture() -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
-/// The blanket veto covered a mis-pathed pivot part for free, by firing on the
-/// mere presence of one. A veto that reasons per part has to actually find it,
-/// so a cache written outside the conventional directory is typed by its
-/// `Override` and still refuses the edits that would strand it.
+/// A veto that reasons per part has to find a cache the conventional directory
+/// scan misses, so one written outside it is typed by its `Override` and still
+/// refuses the edits that would strand it.
 #[test]
 fn refuses_ops_that_would_strand_a_mis_pathed_pivot_cache() {
     let mut model = WorkbookModel::default();

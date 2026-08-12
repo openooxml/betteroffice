@@ -122,10 +122,20 @@ pub(crate) fn unpatchable_references(
     workbook: &Workbook,
     sheet_paths: &[String],
 ) -> Result<Vec<UnpatchableReference>, ParseError> {
-    let conforming = package_metadata_conforms(parts, content_types, sheet_paths);
-    let mut references = pivot_references(parts, content_types, workbook, sheet_paths, conforming);
+    if !package_metadata_conforms(parts, content_types, sheet_paths) {
+        // Discovery must not be a function of a reader this path has just
+        // decided it cannot trust, so here it stops being a function of any
+        // reader: every part names everything. Nothing can drop out of a set
+        // that is the whole package, whatever a future reader does with it.
+        return Ok(parts
+            .iter()
+            .map(|(path, _)| bound(path.clone(), None, workbook))
+            .collect());
+    }
+    let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
     for chart in unmodelled_chart_parts(parts, content_types, workbook)? {
-        let areas = match (conforming && chart.claimed)
+        let areas = match chart
+            .claimed
             .then(|| find_part(parts, &chart.path))
             .flatten()
         {
@@ -184,22 +194,11 @@ fn pivot_references(
     content_types: &[PartContentType],
     workbook: &Workbook,
     sheet_paths: &[String],
-    conforming: bool,
 ) -> Vec<UnpatchableReference> {
+    let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
     let pivot_parts = parts
         .iter()
         .filter(|(path, _)| is_pivot_part(path, content_types))
-        .collect::<Vec<_>>();
-    if !conforming {
-        return pivot_parts
-            .into_iter()
-            .map(|(path, _)| bound(path.clone(), None, workbook))
-            .collect();
-    }
-
-    let hosts = pivot_table_hosts(parts, workbook, sheet_paths);
-    let pivot_parts = pivot_parts
-        .into_iter()
         .map(|(path, bytes)| (path, bytes, root_local_name(bytes)))
         .collect::<Vec<_>>();
 
@@ -670,18 +669,42 @@ fn sheet_relationships_are_unambiguous(parts: &[(String, Vec<u8>)]) -> bool {
         return false;
     };
     let Some(sheets) = sole_child(&root, "sheets") else {
-        return true;
+        return false;
     };
-    sheets.child_elements().all(|sheet| {
-        !sheet.answers_to(&OURS, "sheet")
-            || (sheet.attributes_named("id") == 1
-                && sheet
-                    .attributes_in(&[NS_RELATIONSHIPS], "id")
-                    .next()
-                    .is_some()
-                && sole_and_ours(sheet, &OURS, "name")
-                && sole_and_ours(sheet, &OURS, "sheetId"))
+    let canonical = sheets
+        .child_elements()
+        .filter(|sheet| sheet.local_name() == "sheet")
+        .collect::<Vec<_>>();
+    // The model is built by a streaming reader that takes every `sheet` by
+    // local name wherever it sits, while the sheet-to-part mapping records only
+    // these children. One more anywhere else shifts the two out of step, and a
+    // pivot table is then attributed to whichever sheet moved into its slot.
+    if named_sheet_elements(&root, 0) != canonical.len() {
+        return false;
+    }
+    canonical.iter().all(|sheet| {
+        sheet.answers_to(&OURS, "sheet")
+            && sheet.attributes_named("id") == 1
+            && sheet
+                .attributes_in(&[NS_RELATIONSHIPS], "id")
+                .next()
+                .is_some()
+            && sole_and_ours(sheet, &OURS, "name")
+            && sole_and_ours(sheet, &OURS, "sheetId")
     })
+}
+
+/// How many elements the streaming model reader would take for a sheet: local
+/// name `sheet`, at any depth.
+fn named_sheet_elements(element: &Element, depth: usize) -> usize {
+    if depth > MAX_DEPTH {
+        return usize::MAX;
+    }
+    usize::from(element.local_name() == "sheet")
+        + element
+            .child_elements()
+            .map(|child| named_sheet_elements(child, depth + 1))
+            .sum::<usize>()
 }
 
 /// Whether a relationship type is one the shared readers follow. Those match
@@ -709,12 +732,15 @@ fn followed_type_is_exact(kind: &str) -> bool {
 /// vetoes nothing, which is the one outcome worse than a spurious refusal.
 fn is_pivot_part(path: &str, content_types: &[PartContentType]) -> bool {
     let key = part_key(path);
-    if key.contains("/_rels/") {
-        return false;
-    }
-    PIVOT_DIRECTORIES
-        .iter()
-        .any(|prefix| key.starts_with(prefix))
+    // A `.rels` part names parts, never cells. The blanket scan swept the ones
+    // under these directories in, but only ever to veto a workbook that holds
+    // the pivot part they describe — which is itself conventional, so leaving
+    // them out here cannot lose a veto. An explicitly typed part is a pivot
+    // part wherever it sits.
+    (!key.contains("/_rels/")
+        && PIVOT_DIRECTORIES
+            .iter()
+            .any(|prefix| key.starts_with(prefix)))
         || content_types.iter().any(|part| {
             part.path == key
                 && PIVOT_CONTENT_TYPES
