@@ -298,11 +298,16 @@ export interface DocxEditorProps {
   i18n?: Translations;
   /**
    * Bundled metric-compatible font bytes (e.g. Carlito for Calibri) for
-   * families the document does not embed. Injected as an interface so the
-   * editor never depends on a font bundle — build one from
-   * `@betteroffice/docx-fonts` or any custom source. Without it, families with
-   * no embedded bytes measure with deterministic synthetic metrics — wire a
-   * provider with `resolveLastResort` for faithful output.
+   * families the document does not embed.
+   *
+   * Optional: with `@betteroffice/fonts` installed, core resolves it by
+   * default through an optional dynamic import, so this prop is only needed to
+   * override that with a custom byte source. Set it and the default is never
+   * loaded. With neither, families the document does not embed measure with
+   * deterministic synthetic metrics and pagination will not match Word.
+   *
+   * To keep the default faces but serve them from a CDN, leave this unset and
+   * call `configureDefaultFonts({ baseUrl })` instead.
    */
   measurementFontProvider?: BundledFontProvider;
 }

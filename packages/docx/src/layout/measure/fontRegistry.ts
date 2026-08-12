@@ -7,21 +7,21 @@
  * ids, never font names, so this registry owns byte sourcing.
  *
  * Chain order (the documented contract — deterministic by construction: the
- * same document + the same injected provider produce the same chain on every
- * machine; no OS/local-font source ever participates):
+ * same document + the same provider produce the same chain on every machine;
+ * no OS/local-font source ever participates):
  *  1. The embedded face exactly matching (family, bold, italic), extracted
  *     from the open document (`utils/embeddedFonts.ts` vocabulary).
  *  2. Otherwise the embedded regular (normal/normal) face of the same family
  *     — synthesizing bold/italic from the regular outlines is the engine's
  *     problem, not the registry's; we only guarantee byte availability.
- *  3. The bundled metric-compatible face resolved by the injected provider,
- *     appended after any embedded face as a coverage net — essential when the
- *     embedded face is subsetted (it may lack glyphs the document acquires
- *     through editing), harmless otherwise — or standing alone when the
- *     document embeds nothing for the family.
+ *  3. The bundled metric-compatible face resolved by the provider, appended
+ *     after any embedded face as a coverage net — essential when the embedded
+ *     face is subsetted (it may lack glyphs the document acquires through
+ *     editing), harmless otherwise — or standing alone when the document
+ *     embeds nothing for the family.
  *  4. The always-available last-resort base face
  *     ({@link BundledFontProvider.resolveLastResort} — broad-coverage
- *     Liberation Sans/Serif from `@betteroffice/docx-fonts`), appended as the
+ *     Liberation Sans/Serif from `@betteroffice/fonts`), appended as the
  *     TERMINAL link so the chain is NEVER empty. This is the policy that keeps
  *     a run whose family has no embedded/bundled match on the native
  *     measurement path (measured with the base font's real metrics) instead of
@@ -29,10 +29,11 @@
  *     an accepted width divergence for truly-unknown fonts. Deduplicated by
  *     engine id (a family whose metric-compat already IS the base face, e.g.
  *     Arial→Liberation Sans, contributes one id, not two).
- *  5. Empty array — ONLY when no bundled provider is injected, or the provider
- *     omits `resolveLastResort` (mock/partial providers). Real hosts wiring the
- *     bundled fonts always supply it, so the chain terminates non-empty and the
- *     caller never browser-falls-back a run for lack of bytes.
+ *  5. Empty array — ONLY when no provider resolves at all (`@betteroffice/fonts`
+ *     absent and nothing injected), or the provider omits `resolveLastResort`
+ *     (mock/partial providers). The engine then measures the family with
+ *     synthetic metrics, which paginates wrong while looking plausible, so the
+ *     registry says so once per instance ({@link warnSynthetic}).
  *
  * Separately from the per-family chains, the registry resolves per-script
  * coverage fallbacks ({@link FontScript}: CJK regions, Arabic, Hebrew).
@@ -43,11 +44,14 @@
  * outside the family chain makes the engine refuse the whole block.
  *
  * Both dependencies are injected: the sink because the wasm FontStore is
- * built in a parallel workstream, the bundled provider so core never imports
- * a fonts package. Registration is lazy (first request), memoized per face
- * (concurrent requests share one in-flight promise, so bytes are registered
- * exactly once), and failure-tolerant: a corrupt embedded face is dropped
- * from the chain instead of rejecting it. Byte buffers are additionally
+ * built in a parallel workstream, the bundled provider so a host can supply
+ * its own bytes. The provider may be a factory returning a promise — that is
+ * how the default resolves `@betteroffice/fonts` through an optional dynamic
+ * import, so core never takes a static dependency on a font bundle (see
+ * `defaultFontProvider.ts`). Registration is lazy (first request), memoized
+ * per face (concurrent requests share one in-flight promise, so bytes are
+ * registered exactly once), and failure-tolerant: a corrupt embedded face is
+ * dropped from the chain instead of rejecting it. Byte buffers are additionally
  * deduplicated by identity — providers that serve the same `ArrayBuffer` for
  * several families (aliases, bold-falls-back-to-regular) get one engine id,
  * which matters for the multi-megabyte CJK faces.
@@ -104,7 +108,7 @@ export interface BundledFontProvider {
    * The always-available last-resort base face (broad-coverage Latin —
    * Liberation Sans/Serif per serif-ness). Unlike {@link
    * BundledFontProvider.resolve}, a conforming provider (e.g.
-   * `@betteroffice/docx-fonts`'s `resolveLastResortFace`) returns a loader for
+   * `@betteroffice/fonts`'s `resolveLastResortFace`) returns a loader for
    * EVERY family, so the chain this registry builds is guaranteed non-empty
    * and a run never routes to the browser measurer for want of font bytes. The
    * face's metrics are the base font's, not the requested family's — the
@@ -157,9 +161,29 @@ function chainKey(family: string, bold: boolean, italic: boolean): string {
   return `${familyKey(family)}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
 }
 
+/**
+ * Either the provider itself, or a factory resolving one asynchronously (the
+ * default path dynamic-imports `@betteroffice/fonts`, so it cannot be
+ * synchronous). A factory resolving `undefined` means no bundled bytes exist.
+ *
+ * @public
+ */
+export type BundledFontProviderSource =
+  | BundledFontProvider
+  | (() => Promise<BundledFontProvider | undefined>);
+
 export class TextMeasureFontRegistry {
   private readonly sink: TextEngineFontSink;
-  private readonly bundled: BundledFontProvider | undefined;
+  private readonly bundledSource: BundledFontProviderSource | undefined;
+  /** Memoized provider resolution — the factory runs at most once. */
+  private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
+  /**
+   * Whether this registry has already reported a synthetic-metrics fallback.
+   * Scoped per registry rather than per module so two editors with different
+   * providers each report their own state, and so one misconfigured editor is
+   * not silenced by a healthy one.
+   */
+  private warnedSynthetic = false;
 
   /** Normalized family → embedded faces of the current document. */
   private facesByFamily = new Map<string, EmbeddedFaceInput[]>();
@@ -201,9 +225,18 @@ export class TextMeasureFontRegistry {
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
-  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProvider }) {
+  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource }) {
     this.sink = sink;
-    this.bundled = opts?.bundled;
+    this.bundledSource = opts?.bundled;
+  }
+
+  /** Resolve the bundled provider once, tolerating a factory that rejects. */
+  private bundled(): Promise<BundledFontProvider | undefined> {
+    this.bundledPromise ??=
+      typeof this.bundledSource === 'function'
+        ? this.bundledSource().catch(() => undefined)
+        : Promise.resolve(this.bundledSource);
+    return this.bundledPromise;
   }
 
   /**
@@ -323,7 +356,8 @@ export class TextMeasureFontRegistry {
       if (id !== null) ids.push(id);
     }
 
-    const loader = this.bundled?.resolve(family, bold, italic);
+    const bundled = await this.bundled();
+    const loader = bundled?.resolve(family, bold, italic);
     if (loader) {
       const id = await this.registerBundled(key, loader, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
@@ -335,15 +369,33 @@ export class TextMeasureFontRegistry {
     // bytes to measure with, keeping the block on the native path instead of the
     // browser fallback. Deduped by engine id (a family whose metric-compat IS
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
-    const lastResort = this.bundled?.resolveLastResort?.(family, bold, italic);
+    const lastResort = bundled?.resolveLastResort?.(family, bold, italic);
     if (lastResort) {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
     }
 
+    if (ids.length === 0) this.warnSynthetic(family);
+
     // Only publish into the sync view if nothing invalidated us mid-flight.
     if (generation === this.generation) this.chainResults.set(key, ids);
     return ids;
+  }
+
+  /**
+   * An empty chain means the engine measures this family with synthetic
+   * metrics — plausible-looking output that paginates wrong. Silence is the
+   * worst failure mode here, so say it once (the first family; not per face,
+   * which would be one line per style of every family in the document).
+   */
+  private warnSynthetic(family: string): void {
+    if (this.warnedSynthetic) return;
+    this.warnedSynthetic = true;
+    console.warn(
+      `[fontRegistry] no font bytes for "${family}" — measuring with synthetic metrics, so ` +
+        'pagination will not match Word. Install @betteroffice/fonts, or pass your own ' +
+        'measurementFontProvider. Reported once; other families are affected too.'
+    );
   }
 
   /**
@@ -465,15 +517,18 @@ export class TextMeasureFontRegistry {
       const results = this.scriptResults;
       pending = (async () => {
         let id: number | null = null;
-        const loader = this.bundled?.resolveScriptFallback?.(script, false, false);
+        const bundled = await this.bundled();
+        const loader = bundled?.resolveScriptFallback?.(script, false, false);
         if (loader) {
           try {
             const bytes = await loader();
             id = await this.registerBuffer(bytes);
-          } catch {
+          } catch (error) {
+            // The cause carries the actionable part for the CJK buckets —
+            // "install @betteroffice/fonts-cjk" — so surface it.
             console.warn(
               `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +
-                'falling back'
+                `falling back: ${error instanceof Error ? error.message : String(error)}`
             );
           }
         }
