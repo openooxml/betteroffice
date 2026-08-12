@@ -105,7 +105,15 @@ Measured with the peer **not** installed:
 | Next (Turbopack) | clean, silent |
 | Next (webpack), webpack, rollup | succeeds with a non-fatal warning |
 
-**esbuild is the one that breaks.** It resolves the specifier at build time and refuses to emit anything, so a consumer who has not installed `@betteroffice/fonts` cannot build at all. Mark the optional packages external:
+**esbuild is the one that breaks.** It resolves the specifier at build time and refuses to emit anything, so a consumer who has not installed `@betteroffice/fonts` cannot build at all.
+
+### rollup and esbuild must not bundle this package
+
+Separately from the above, and **regardless of whether the CJK add-on is installed**: rollup and esbuild have no asset pipeline for `new URL('../assets/…', import.meta.url)`, which is how every face locates its binary. If they inline `@betteroffice/fonts` into your output, `import.meta.url` starts pointing at your bundle, `../assets/` misses, and **every font load fails** — while the provider itself still resolves.
+
+That half-working state is the worst of both worlds: pagination silently falls back to synthetic metrics, and the engine reports it as a missing package to someone who has installed it. Vite and Turbopack handle these URLs correctly and need nothing.
+
+**Under rollup or esbuild, marking the font packages external is required for working font bytes — it is not cosmetic.**
 
 ```sh
 esbuild app.js --bundle --packages=external
@@ -113,14 +121,16 @@ esbuild app.js --bundle --packages=external
 esbuild app.js --bundle --external:@betteroffice/fonts --external:@betteroffice/fonts-cjk
 ```
 
-Everything else needs no configuration. If you would rather silence the warning under Vite or rollup, marking the package external is harmless — the bare specifier stays in the bundle and still degrades cleanly:
-
 ```js
-// vite.config.js
-export default { build: { rollupOptions: { external: ['@betteroffice/fonts-cjk'] } } };
+// rollup.config.js — also fixes Vite builds that inline the package
+export default {
+  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk'],
+};
 ```
 
-For the engine edge specifically, `configureDefaultFonts({ load })` replaces the import entirely, so you can point it at your own module and keep the specifier out of your graph.
+Externalizing resolves both problems at once: the absent-peer build failure and the asset-URL breakage. Verified against the published tarballs — externalized, both bundlers load 628,032 bytes of Carlito and 8,331,336 bytes of Noto Sans SC; inlined, both fail every load.
+
+For the engine edge specifically, `configureDefaultFonts({ load })` replaces the import entirely, so you can point it at your own module and keep the specifier out of your graph. `configureDefaultFonts({ baseUrl })` sidesteps asset URLs altogether by fetching every face over HTTP.
 
 ## Deterministic resolution
 

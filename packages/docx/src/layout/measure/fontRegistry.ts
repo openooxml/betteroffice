@@ -375,7 +375,7 @@ export class TextMeasureFontRegistry {
       if (id !== null && !ids.includes(id)) ids.push(id);
     }
 
-    if (ids.length === 0) this.warnSynthetic(family);
+    if (ids.length === 0) this.warnSynthetic(family, bundled !== undefined);
 
     // Only publish into the sync view if nothing invalidated us mid-flight.
     if (generation === this.generation) this.chainResults.set(key, ids);
@@ -387,14 +387,24 @@ export class TextMeasureFontRegistry {
    * metrics — plausible-looking output that paginates wrong. Silence is the
    * worst failure mode here, so say it once (the first family; not per face,
    * which would be one line per style of every family in the document).
+   *
+   * A provider that resolved but yielded nothing gets a different message:
+   * telling someone who has installed the fonts to install them sends them
+   * hunting for the wrong problem. The usual cause is a bundler that inlined
+   * the package, which breaks the `import.meta.url` asset URLs.
    */
-  private warnSynthetic(family: string): void {
+  private warnSynthetic(family: string, providerResolved: boolean): void {
     if (this.warnedSynthetic) return;
     this.warnedSynthetic = true;
     console.warn(
-      `[fontRegistry] no font bytes for "${family}" — measuring with synthetic metrics, so ` +
-        'pagination will not match Word. Install @betteroffice/fonts, or pass your own ' +
-        'measurementFontProvider. Reported once; other families are affected too.'
+      providerResolved
+        ? `[fontRegistry] no font bytes for "${family}" — the font provider resolved but every ` +
+            'face failed to load, so pagination will not match Word. If a bundler inlined ' +
+            '@betteroffice/fonts, mark it external so its asset URLs resolve. Reported once; ' +
+            'other families are affected too.'
+        : `[fontRegistry] no font bytes for "${family}" — measuring with synthetic metrics, so ` +
+            'pagination will not match Word. Install @betteroffice/fonts, or pass your own ' +
+            'measurementFontProvider. Reported once; other families are affected too.'
     );
   }
 

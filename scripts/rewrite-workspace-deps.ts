@@ -14,6 +14,7 @@ interface PackageManifest {
   name?: string;
   version?: string;
   dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
   peerDependencies?: Record<string, unknown>;
   optionalDependencies?: Record<string, unknown>;
 }
@@ -24,8 +25,12 @@ interface ManifestEntry {
 }
 
 const PKG_DIR = 'packages';
+// devDependencies included for completeness: npm ignores a dependency's
+// devDeps, but an unrewritten `workspace:*` left anywhere in the manifest makes
+// the tarball fail `npm install` with EUNSUPPORTEDPROTOCOL if it is ever read.
 const DEPENDENCY_FIELDS = [
   'dependencies',
+  'devDependencies',
   'peerDependencies',
   'optionalDependencies',
 ] as const;

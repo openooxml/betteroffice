@@ -119,6 +119,35 @@ describe('default font provider', () => {
     }
   });
 
+  /**
+   * What a bundler that inlined `@betteroffice/fonts` produces: the provider
+   * resolves, but its `import.meta.url` asset URLs miss and every load fails.
+   * The advice must not be "install the package" — it already is installed.
+   */
+  test('warns differently when a provider resolves but every face fails to load', async () => {
+    const broken: BundledFontProvider = {
+      resolve: () => () => Promise.reject(new Error('fetch failed')),
+      resolveLastResort: () => () => Promise.reject(new Error('fetch failed')),
+    };
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const { sink } = recordingSink();
+      const registry = new TextMeasureFontRegistry(sink, { bundled: broken });
+
+      expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([]);
+
+      const synthetic = warn.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('no font bytes'));
+      expect(synthetic).toHaveLength(1);
+      expect(synthetic[0]).toContain('mark it external');
+      expect(synthetic[0]).not.toContain('Install @betteroffice/fonts');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test('does not warn when the default provider covers the family', async () => {
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
 

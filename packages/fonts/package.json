@@ -22,6 +22,7 @@
     "README.md"
   ],
   "scripts": {
+    "prebuild": "bun run --filter '@betteroffice/fonts-cjk' build",
     "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
