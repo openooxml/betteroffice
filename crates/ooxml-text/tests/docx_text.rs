@@ -338,9 +338,7 @@ fn auto_240_is_identity_and_480_doubles_height_into_leading() {
     assert_eq!(double.leading, 18.921875); // 36.796875 - 14.484375 - 3.390625
 }
 
-/// Word splits an `exact` box 80/20 about the baseline whatever the content —
-/// measured against Word 16.112 across four families at three sizes, whose
-/// win-metric ratios span 0.780–0.810 yet produce one baseline per box height.
+/// Word splits an `exact` box 80/20 about the baseline whatever the content.
 #[test]
 fn exact_rule_splits_the_fixed_box_by_a_font_independent_constant() {
     let single = liberation_single_16px();
@@ -387,8 +385,9 @@ fn at_least_rule_floors_but_never_shrinks() {
     assert_eq!(floored.leading, 0.0);
 }
 
-/// Neither fixed rule leaves leading, so `ascent + descent` is the whole box
-/// and every baseline model agrees on the result.
+/// `Exact` and a floor-active `AtLeast` leave no leading, so `ascent +
+/// descent` is the whole box and every baseline model agrees on the result.
+/// A content-winning `AtLeast` keeps the content's natural leading.
 #[test]
 fn fixed_rules_leave_no_leading() {
     let single = liberation_single_16px();

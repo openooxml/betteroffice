@@ -244,7 +244,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
 
 /// Measures an empty or whitespace-only paragraph as one zero-width line at
 /// the ruled height of `font` at `size_pt`, floored at
-/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under `auto`/`atLeast`.
+/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`.
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
@@ -257,9 +257,10 @@ pub(super) fn empty_paragraph_extent(
         .map_err(|e| MeasureError::Invalid(e.to_string()))?;
     let size_px = pt_to_px(size_pt);
     let content = wm::single_line_box(metrics, size_px, &to_flags(compat));
-    let ruled = wm::apply_spacing_rule(content, &rule_from_spacing(spacing));
+    let rule = rule_from_spacing(spacing);
+    let ruled = wm::apply_spacing_rule(content, &rule);
     let mut line_height = ruled.height();
-    if floor_applies(spacing) {
+    if floor_applies(&rule) {
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
     }
 
@@ -930,12 +931,11 @@ fn rule_from_spacing(spacing: Option<&SpacingIn>) -> wm::LineSpacingRule {
     }
 }
 
-/// Tests whether the empty-paragraph line-height floor applies.
-fn floor_applies(spacing: Option<&SpacingIn>) -> bool {
-    matches!(
-        spacing.and_then(|sp| sp.line_rule.as_deref()),
-        None | Some("auto") | Some("atLeast")
-    )
+/// Tests whether the empty-paragraph line-height floor applies. It reads the
+/// *resolved* rule, not the raw `lineRule` string, so `lineUnit: "px"` — which
+/// resolves to `exact` — is not floored above the box it asked for.
+fn floor_applies(rule: &wm::LineSpacingRule) -> bool {
+    !matches!(rule, wm::LineSpacingRule::Exact { .. })
 }
 
 #[cfg(test)]

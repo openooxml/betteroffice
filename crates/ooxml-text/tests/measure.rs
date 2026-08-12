@@ -21,6 +21,9 @@
 //! The numbered sections run from the core wrap and spacing rules through
 //! tabs, fields, list markers, images, small caps, bidi, indents and float
 //! exclusion zones.
+//!
+//! `tests/fixtures/line-spacing-baseline.docx` carries the line rules that
+//! sections 6a–6c pin, for opening in Word beside these expectations.
 
 use ooxml_text::{FontStore, measure_paragraph_json};
 use serde_json::{Value, json};
@@ -414,16 +417,18 @@ fn exact_and_sub_single_rules_emit_the_ruled_box() {
     approx(descent_of(&line), 2.0, "empty exact descent");
 }
 
-// 6c. both fixed rules leave no leading, so the row's ascent + descent is the
-// whole box: a consumer that centers half-leading and one that hangs the
-// baseline off the top of the box land on the same baseline.
+// 6c. `exact` and a floor-active `atLeast` leave no leading, so the row's
+// ascent + descent is the whole box and a consumer centering half-leading
+// lands on the same baseline as one hanging it off the box top. Asserted
+// unconditionally — a skip here would hide exactly the rows that disagree.
 #[test]
 fn fixed_rules_agree_under_either_baseline_model() {
     for spacing in [
         json!({ "line": 20.0, "lineRule": "exact" }),
         json!({ "line": 10.0, "lineRule": "exact" }),
+        json!({ "line": 2.0, "lineRule": "exact" }),
+        json!({ "line": 10.0, "lineUnit": "px" }),
         json!({ "line": 50.0, "lineRule": "atLeast" }),
-        json!({ "line": 0.5, "lineUnit": "multiplier" }),
     ] {
         for runs in [json!([{ "kind": "text", "text": "0" }]), json!([])] {
             let v = measure_with(
@@ -441,10 +446,13 @@ fn fixed_rules_agree_under_either_baseline_model() {
                 line["descent"].as_f64().unwrap(),
                 line["lineHeight"].as_f64().unwrap(),
             );
-            // the empty-paragraph floor can raise h above the ruled box
-            if (a + d - h).abs() < 1e-3 {
-                approx(((h - a - d) / 2.0).max(0.0) + a, a, &spacing.to_string());
-            }
+            let what = format!("{spacing} / {runs}");
+            approx(a + d, h, &format!("{what}: box is fully split"));
+            approx(
+                ((h - a - d) / 2.0).max(0.0) + a,
+                a,
+                &format!("{what}: baseline"),
+            );
         }
     }
 }
@@ -467,21 +475,58 @@ fn empty_paragraph_floor_behavior() {
         "totalHeight",
     );
 
-    // no floor under an exact rule
-    let v = measure_with(
-        json!({
-            "kind": "paragraph",
-            "runs": [],
-            "attrs": { "spacing": { "line": 10.0, "lineRule": "exact" } }
-        }),
-        200.0,
-    )
-    .unwrap();
-    approx(
-        v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        10.0,
-        "exact empty",
-    );
+    // no floor under an exact box, however the caller spelled it — the floor
+    // rides the resolved rule, so `lineUnit: "px"` is exact too
+    for spacing in [
+        json!({ "line": 10.0, "lineRule": "exact" }),
+        json!({ "line": 10.0, "lineUnit": "px" }),
+    ] {
+        let v = measure_with(
+            json!({ "kind": "paragraph", "runs": [], "attrs": { "spacing": spacing } }),
+            200.0,
+        )
+        .unwrap();
+        let line = &v["lines"][0];
+        let what = spacing.to_string();
+        approx(line["lineHeight"].as_f64().unwrap(), 10.0, &what);
+        approx(
+            line["ascent"].as_f64().unwrap(),
+            8.0,
+            &format!("{what} ascent"),
+        );
+        approx(
+            line["descent"].as_f64().unwrap(),
+            2.0,
+            &format!("{what} descent"),
+        );
+    }
+
+    // KNOWN GAP: a floored sub-single `auto` keeps its shrunken ascent/descent
+    // inside a taller floored box, so the floor slack behaves as leading and
+    // the two baseline models disagree there. Empty paragraphs paint no text,
+    // only a caret. Asserted so the gap is visible rather than skipped.
+    for spacing in [
+        json!({ "line": 0.5, "lineUnit": "multiplier" }),
+        json!({ "line": 0.5, "lineUnit": "multiplier", "lineRule": "auto" }),
+    ] {
+        let v = measure_with(
+            json!({ "kind": "paragraph", "runs": [], "attrs": { "spacing": spacing } }),
+            200.0,
+        )
+        .unwrap();
+        let line = &v["lines"][0];
+        let (a, d, h) = (
+            line["ascent"].as_f64().unwrap(),
+            line["descent"].as_f64().unwrap(),
+            line["lineHeight"].as_f64().unwrap(),
+        );
+        approx(h, 16.0 * 1.15, &format!("{spacing} floored"));
+        approx(a + d, LH / 2.0, &format!("{spacing} ruled box"));
+        assert!(
+            a + d < h,
+            "{spacing}: floor slack is leading, {a}+{d} vs {h}"
+        );
+    }
 
     // a single whitespace-only run measures like an empty paragraph
     let v = measure(json!([{ "kind": "text", "text": "   " }]), 200.0).unwrap();

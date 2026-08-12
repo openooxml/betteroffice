@@ -38,19 +38,18 @@
 //!   that undercut ascent+descent shrink ascent/descent proportionally.
 //! - `exact`: fixes the line box at the given height regardless of content —
 //!   taller glyphs are *clipped* (at render time; measurement never grows
-//!   the line). Word puts the baseline at [`EXACT_BASELINE_RATIO`] of the
-//!   box, a constant that depends on neither the font nor the size.
+//!   the line). The baseline sits at [`EXACT_BASELINE_RATIO`] of the box, a
+//!   constant depending on neither the font nor the size.
 //! - `atLeast`: a floor — the measured content height wins when larger;
 //!   when the floor wins the slack lands *above* the ascent, so the content
 //!   descent is preserved from the bottom of the box.
 //!
-//! Both fixed rules are measured behavior, not inference: Word 16.112
-//! rendered to PDF, true glyph baselines read back with `pymupdf`, probes at
-//! the top margin of their own page so the line box top needs no reference
-//! line. Across Times New Roman, Calibri, Arial and Georgia at 12/24/36pt,
-//! `exact` produced byte-identical baselines for a given box height even
-//! though those families' win-metric ratios span 0.780–0.810, which excludes
-//! every font-derived model. Residuals are Word's own 0.25pt device grid.
+//! Both fixed rules are measured against Word 16.112 (PDF glyph baselines;
+//! four families at 12/24/36pt gave one baseline per box height despite win
+//! ratios spanning 0.780–0.810, excluding font-derived models). Word then
+//! quantizes to a 0.25pt device grid; this is a continuous model and does
+//! not, so a box height whose split is off-grid differs from Word's raster
+//! by up to an eighth of a point.
 //!
 //! Both fixed rules interact with inline objects (images taller than an
 //! exact box also clip).
@@ -200,9 +199,10 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 ///   otherwise the slack goes *above* the ascent and the content descent is
 ///   preserved from the bottom of the box.
 ///
-/// Both fixed rules leave no leading: `ascent + descent == px` exactly, so a
-/// consumer centering half-leading and one hanging the baseline off the top
-/// of the box agree on where the baseline lands.
+/// `Exact` and a floor-active `AtLeast` leave no leading — `ascent + descent
+/// == px` exactly — so a consumer centering half-leading and one hanging the
+/// baseline off the box top agree. A content-winning `AtLeast` returns the
+/// content box untouched, natural leading included.
 pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     match *rule {
         LineSpacingRule::Auto { line_240ths } => {
