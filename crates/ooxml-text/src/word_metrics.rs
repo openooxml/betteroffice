@@ -10,12 +10,9 @@
 //! selects version-4 `USE_TYPO_METRICS`, retaining signed `sTypoLineGap`.
 //! Both default to `false`, and paragraph input cannot enable either one.
 //!
-//! Direct AppleScript/PDF measurements of Word 16.112 rejected metric
-//! quantization in compatibility modes 14 and 15. Across four fonts, seven
-//! sizes, and 20-line spans, float line pitch matched within ±0.019pt while
-//! per-component quantization missed by up to ±0.49pt, with sign varying by
-//! size. Across 10–40-character runs, float advances matched within
-//! ±0.0145pt while whole-pixel advances missed by up to 0.348pt.
+//! Measurement against Word 16.112 rejected quantization in compatibility
+//! modes 14 and 15 — the float default tracks Word an order of magnitude
+//! closer in both axes — so both experiments stay off.
 //!
 //! Justification stretches space clusters only. [`kern_enabled`] implements
 //! the `w:kern` size threshold. Document-grid snapping is not applied because
