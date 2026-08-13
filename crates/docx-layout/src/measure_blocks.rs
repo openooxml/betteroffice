@@ -492,18 +492,25 @@ fn measure_paragraph_with_context(
         .or_else(|_| Ok(synthetic_paragraph_extent(paragraph, content_width)))
 }
 
+/// Per-code-unit advance the fallback bills when no face is available.
+const SYNTHETIC_ADVANCE_EM: f64 = 0.5;
+
+/// Stand-in extent for a paragraph the measure engine refused (typically no
+/// registered face). It fills lines to `content_width` at a flat per-code-unit
+/// advance and reports each line's own estimated width, because the display
+/// list shares a line's width out over its runs: a line billed less than its
+/// own estimate hands every run a slot narrower than the text it holds, and the
+/// runs then paint over one another.
 fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) -> ParagraphExtent {
     let mut font_size = paragraph
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.default_font_size)
         .unwrap_or(11.0);
-    let mut character_count = 0;
     for run in &paragraph.runs {
         let Run::Text(text) = run else {
             continue;
         };
-        character_count += text.text.encode_utf16().count();
         if let Some(size) = text.fmt.font_size.filter(|size| size.is_finite()) {
             font_size = font_size.max(size);
         }
@@ -513,34 +520,69 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
     }
     let font_size_px = font_size * 96.0 / 72.0;
     let line_height = font_size_px * 1.15;
+    let advance = font_size_px * SYNTHETIC_ADVANCE_EM;
+    let usable = (content_width.is_finite() && content_width > 0.0).then_some(content_width);
+
+    let row = |head_run: usize, head_char: usize, tail_run: usize, tail_char: usize, width: f64| {
+        crate::types::TypesetRow {
+            head_run,
+            head_char,
+            tail_run,
+            tail_char,
+            width,
+            ascent: font_size_px * 0.8,
+            descent: font_size_px * 0.2,
+            line_height,
+            ..crate::types::TypesetRow::default()
+        }
+    };
+
+    let mut lines: Vec<crate::types::TypesetRow> = Vec::new();
+    let mut head_run = 0usize;
+    let mut head_char = 0usize;
+    let mut line_width = 0.0f64;
+    for (run_index, run) in paragraph.runs.iter().enumerate() {
+        let Run::Text(text) = run else {
+            continue;
+        };
+        let mut consumed = 0usize;
+        for character in text.text.chars() {
+            let units = character.len_utf16();
+            let width = units as f64 * advance;
+            // A line always takes one character, or a character wider than the
+            // column would never place.
+            if usable.is_some_and(|usable| line_width > 0.0 && line_width + width > usable) {
+                lines.push(row(head_run, head_char, run_index, consumed, line_width));
+                head_run = run_index;
+                head_char = consumed;
+                line_width = 0.0;
+            }
+            line_width += width;
+            consumed += units;
+        }
+    }
     let tail_run = paragraph.runs.len().saturating_sub(1);
     let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
         Run::Text(text) => text.text.encode_utf16().count(),
         _ => 0,
     });
+    lines.push(row(
+        head_run,
+        head_char,
+        tail_run,
+        tail_char,
+        if usable.is_some() { line_width } else { 0.0 },
+    ));
+
     let spacing = paragraph
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref());
     ParagraphExtent {
-        lines: vec![crate::types::TypesetRow {
-            head_run: 0,
-            head_char: 0,
-            tail_run,
-            tail_char,
-            width: if content_width.is_finite() && content_width > 0.0 {
-                content_width.min(character_count as f64 * font_size_px * 0.5)
-            } else {
-                0.0
-            },
-            ascent: font_size_px * 0.8,
-            descent: font_size_px * 0.2,
-            line_height,
-            ..crate::types::TypesetRow::default()
-        }],
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
-            + line_height
+            + line_height * lines.len() as f64
             + spacing.and_then(|value| value.after).unwrap_or(0.0),
+        lines,
     }
 }
 
