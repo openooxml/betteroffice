@@ -1,62 +1,26 @@
 /**
- * The default measurement font provider — how core gets real font bytes when
- * a host injects no provider of its own.
- *
- * Without this, a family the document does not embed has no bytes to measure
- * with and the engine falls back to synthetic metrics. Measured across 813
- * real-world documents scored against Word's own `docProps/app.xml <Pages>`,
- * that costs 15.4 points of exact page-count accuracy (61.9% -> 46.5%).
- *
- * `@betteroffice/fonts` is resolved through an OPTIONAL DYNAMIC `import()`,
- * never a static one. The bundled faces are 7.9 MB (33 MB more with the CJK
- * add-on); a static edge would put them in every consumer's dependency graph,
- * including consumers who inject their own provider. Dynamic keeps the cost on
- * the hosts that actually use it, and the package is declared an optional peer
- * so npm never installs it uninvited.
- *
- * Resolution is memoized including the miss, so an absent package costs one
- * failed import per session, not one per family.
- *
+ * Resolves the default provider through a memoized dynamic import of the
+ * optional `@betteroffice/fonts` peer.
  * @packageDocumentation
  */
 
 import type { BundledFontProvider } from './fontRegistry';
 
-/**
- * The real module type, so a signature change in `@betteroffice/fonts` breaks
- * this file at compile time rather than at a consumer's first layout pass. The
- * package is a devDependency for exactly this; it stays an optional peer at
- * runtime, and this type is local so it never reaches the published `.d.ts`.
- */
+/** Compile-time contract for the optional peer. */
 type BundledFontsModule = typeof import('@betteroffice/fonts');
 
 /** @public */
 export interface DefaultFontOptions {
-  /**
-   * Serve the bundled faces from here instead of the package's own assets.
-   *
-   * Same-origin is the default on purpose: a CDN default would leak
-   * document-font usage to a third party and break offline and strict-CSP
-   * deployments. Point this at a CDN deliberately, or not at all.
-   */
+  /** Serve bundled faces from this base URL instead of package assets. */
   baseUrl?: string | URL;
-  /**
-   * Override how `@betteroffice/fonts` is loaded. The escape hatch for hosts
-   * whose bundler cannot leave an uninstalled optional peer unresolved, and
-   * the seam tests use to simulate the package's absence.
-   */
+  /** Override loading of the optional `@betteroffice/fonts` peer. */
   load?: () => Promise<unknown>;
 }
 
 let options: DefaultFontOptions = {};
 let resolved: Promise<BundledFontProvider | undefined> | undefined;
 
-/**
- * Configure the default provider. Call before the first layout pass; it resets
- * the memoized resolution, so a later call re-resolves.
- *
- * @public
- */
+/** Configure the default provider and reset its memoized resolution. @public */
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next };
   resolved = undefined;
@@ -64,12 +28,8 @@ export function configureDefaultFonts(next: DefaultFontOptions): void {
 
 async function load(): Promise<BundledFontProvider | undefined> {
   const { baseUrl, load: loader } = options;
-  // Keep the SYNTACTIC try/catch around the await. Measured across the bundler
-  // matrix: this shape makes webpack (and so `next build`) emit a warning and
-  // still succeed when the optional peer is absent, while `import(…).catch()`
-  // — which esbuild's own error text recommends — turns that into a hard
-  // failure. No shape satisfies both; this favours webpack/Next, and esbuild
-  // consumers pass `--packages=external` (see @betteroffice/fonts' README).
+  // Keep this syntactic try/catch: webpack tolerates a missing optional peer
+  // here but fails the build when the import uses `.catch()`.
   try {
     const imported = await (loader ? loader() : import('@betteroffice/fonts'));
     const module = imported as BundledFontsModule;
@@ -79,13 +39,7 @@ async function load(): Promise<BundledFontProvider | undefined> {
   }
 }
 
-/**
- * The bundled provider, or `undefined` when `@betteroffice/fonts` is not
- * installed. Never throws — an absent package degrades to synthetic metrics
- * (loudly, see the registry's chain warning), it does not break rendering.
- *
- * @public
- */
+/** Resolve the bundled provider, or `undefined` when its optional peer is absent. @public */
 export function resolveDefaultFontProvider(): Promise<BundledFontProvider | undefined> {
   resolved ??= load();
   return resolved;

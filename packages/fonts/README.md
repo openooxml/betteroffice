@@ -128,7 +128,7 @@ export default {
 };
 ```
 
-Externalizing resolves both problems at once: the absent-peer build failure and the asset-URL breakage. Verified against the published tarballs — externalized, both bundlers load 628,032 bytes of Carlito and 8,331,336 bytes of Noto Sans SC; inlined, both fail every load.
+Externalizing resolves both problems at once: the absent-peer build failure and the asset-URL breakage. Verified against the packed tarballs — externalized, both bundlers load 628,032 bytes of Carlito and 8,331,336 bytes of Noto Sans SC; inlined, both fail every load.
 
 For the engine edge specifically, `configureDefaultFonts({ load })` replaces the import entirely, so you can point it at your own module and keep the specifier out of your graph. `configureDefaultFonts({ baseUrl })` sidesteps asset URLs altogether by fetching every face over HTTP.
 
