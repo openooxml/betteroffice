@@ -1636,4 +1636,100 @@ mod tests {
         assert_eq!(paragraph.width, landscape.w - 192.0);
         assert_eq!(paragraph.y, 48.0);
     }
+
+    #[test]
+    fn restamped_pristine_page_uses_the_new_content_limit() {
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 30)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextPage",
+                "finalPageSize": {"w": 816, "h": 816},
+                "finalMargins": {"top": 48, "right": 96, "bottom": 96, "left": 96}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        let fragments: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| {
+                page.fragments.iter().filter_map(move |fragment| {
+                    let crate::types::Fragment::Paragraph(paragraph) = fragment else {
+                        return None;
+                    };
+                    Some((
+                        page.number,
+                        paragraph.from_line,
+                        paragraph.to_line,
+                        paragraph.y,
+                    ))
+                })
+            })
+            .collect();
+
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(fragments, vec![(1, 0, 28, 48.0), (2, 28, 30, 48.0)]);
+    }
+
+    #[test]
+    fn restamped_pristine_page_uses_the_new_section_furniture() {
+        let input = json!({
+            "measured": [
+                {"block": {"kind": "sectionBreak", "id": 0},
+                 "measure": {"kind": "sectionBreak"}},
+                measured_paragraph(1, 1)
+            ],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": "nextPage",
+                "finalPageSize": {"w": 1056, "h": 816},
+                "finalMargins": {"top": 48, "right": 96, "bottom": 96, "left": 96}
+            }
+        });
+        let mut layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages[0].region_section_index, 1);
+
+        let regions: crate::regions::DocumentRegions = serde_json::from_value(json!({
+            "sections": [
+                {
+                    "sectionId": "old",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-old",
+                        "footerDefault": "footer-old"
+                    },
+                    "pageBorders": {"source": "old"},
+                    "watermark": {"source": "old"},
+                    "pageNumbering": {"start": 9}
+                },
+                {
+                    "sectionId": "new",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-new",
+                        "footerDefault": "footer-new"
+                    },
+                    "pageBorders": {"source": "new"},
+                    "watermark": {"source": "new"},
+                    "pageNumbering": {"start": 3}
+                }
+            ]
+        }))
+        .unwrap();
+        crate::regions::apply_document_regions(&mut layout, &regions);
+
+        let page = &layout.pages[0];
+        let refs = page.header_footer_refs.as_ref().unwrap();
+        assert_eq!(page.section_index, Some(1));
+        assert_eq!(page.section_id.as_deref(), Some("new"));
+        assert_eq!(refs.header_default.as_deref(), Some("header-new"));
+        assert_eq!(refs.footer_default.as_deref(), Some("footer-new"));
+        assert_eq!(page.page_borders, Some(json!({"source": "new"})));
+        assert_eq!(page.watermark, Some(json!({"source": "new"})));
+        assert_eq!(page.section_page_number, Some(3));
+    }
 }

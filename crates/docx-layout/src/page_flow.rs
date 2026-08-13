@@ -242,6 +242,8 @@ impl Paginator {
             self.get_content_bottom() - self.footnote_reservation(self.pages[page_index].number);
         self.pages[page_index].size = self.page_size.clone();
         self.pages[page_index].margins = self.margins.clone();
+        self.pages[page_index].region_section_index = self.section_index;
+        // Immediate section changes must next call update_columns() to refresh page.columns and column_index.
         let state = &mut self.states[idx];
         state.pen_y = content_top;
         state.content_top = content_top;
