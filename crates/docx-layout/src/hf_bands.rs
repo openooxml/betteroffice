@@ -37,7 +37,7 @@
 //! # Band geometry
 //!
 //! The distance resolves as the envelope override, then the page's
-//! `margins.header` / `margins.footer`, then [`DEFAULT_HF_DISTANCE_PX`]. Both
+//! `margins.header` / `margins.footer`, then `DEFAULT_HF_DISTANCE_PX`. Both
 //! kinds take the interactive height `max(flowHeight - min(0, visualTop), 24)`.
 //! A header band sits at `distance + visualTop` and flows content from
 //! `distance`. A footer band is bottom-anchored: it sits at

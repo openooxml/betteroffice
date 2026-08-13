@@ -20,6 +20,8 @@
 //! Justification stretches space clusters only. [`kern_enabled`] implements
 //! the `w:kern` size threshold. Document-grid snapping is not applied because
 //! paragraph measurement receives no grid pitch.
+//! No rule reads modes 12/14/15, `w:useWord97LineBreakRules`, or `w:balanceSingleByteDoubleByteWidth`; they measure as off.
+//! `w:jc="distribute"` is not implemented.
 
 use crate::font_store::FontMetrics;
 use crate::shape::ShapeFeature;
@@ -31,9 +33,9 @@ pub struct CompatFlags {
     pub no_leading: bool,
     /// w:doNotExpandShiftReturn — lines ended by a soft return are NOT justified.
     pub do_not_expand_shift_return: bool,
-    /// Disabled experiment that quantizes ppem and metric components.
+    /// Off-by-default experiment that quantizes ppem and metric components.
     pub gdi_line_metrics: bool,
-    /// Disabled experiment that selects version-4 `USE_TYPO_METRICS`.
+    /// Off-by-default experiment that selects version-4 `USE_TYPO_METRICS`.
     pub typo_line_spacing: bool,
 }
 
@@ -68,7 +70,8 @@ impl LineBox {
 ///
 /// The default float path preserves every design metric. Opt-in experiment
 /// paths bound components to 16 ems. All paths reject degenerate inputs and
-/// cap direct callers at Word's 1638pt size limit.
+/// cap line boxes at Word's 1638pt size limit. Glyph advances remain uncapped,
+/// so larger requests produce line boxes and advances at different scales.
 pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> LineBox {
     if m.units_per_em == 0 || !size_px.is_finite() || size_px <= 0.0 {
         return LineBox {

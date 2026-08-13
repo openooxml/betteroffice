@@ -6,7 +6,7 @@
 //!
 //! A point is resolved in a fixed order. A direct hit inside a text or glyph
 //! primitive's box wins first (its vertical band is padded by
-//! [`BAND_SLACK`] so a click just above or below the glyphs still lands). Next
+//! `BAND_SLACK` so a click just above or below the glyphs still lands). Next
 //! comes a direct hit on an image that carries a document position, where the
 //! caret parks at its start. Failing both, the nearest line by vertical-centre
 //! distance is chosen, then the nearest primitive on that line — inside a run
@@ -43,7 +43,7 @@
 //! pointer cursor needs and a position cannot give: the nearest-line fallback
 //! answers everywhere on a page carrying any text. The target instead names
 //! what a click would act on, in the pointer path's own order — a selectable
-//! image, then a run's own box, then [`in_typeable_area`].
+//! image, then a run's own box, then `in_typeable_area`.
 
 use crate::display_list::{
     DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, Primitive, TableCellRef,

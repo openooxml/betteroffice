@@ -21,7 +21,7 @@
 //! Anchored images and floating text boxes overlay the page and never move the
 //! pen; inline images, shapes, charts and inline text boxes consume their
 //! measured bbox in flow. Paragraph placement is described on
-//! [`layout_paragraph`].
+//! `layout_paragraph`.
 //!
 //! Checkpoints are resume bookmarks at pristine page starts. They stay resident
 //! and never appear in a serialized `Layout`. [`layout_document_incremental`]

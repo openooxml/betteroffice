@@ -516,7 +516,7 @@ impl EditingDoc {
 
     /// Builds a local-origin undo manager scoped to one story.
     ///
-    /// Routed through the WASM-safe constructor in [`crate::undo`] — `UndoManager::new` and
+    /// Routed through the WASM-safe constructor in `crate::undo` — `UndoManager::new` and
     /// `Options::default()` do not exist on `wasm32-unknown-unknown`.
     pub fn undo_manager(&self, story_id: &str) -> EditResult<yrs::undo::UndoManager<()>> {
         let txn = self.doc.transact();
