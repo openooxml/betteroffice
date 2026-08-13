@@ -6,6 +6,7 @@ use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::{SheetId, Workbook};
 
 use crate::read::SharedStringCells;
+use crate::reference::UnpatchableReference;
 use crate::xml::{attr, find_part, local_name, next_event, reader, resolve_part_path, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
@@ -29,7 +30,7 @@ pub struct PreservedPackage {
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
     pub(crate) active_sheet: SheetId,
-    pub(crate) unmodelled_chart_part: Option<String>,
+    pub(crate) unpatchable_references: Vec<UnpatchableReference>,
 }
 
 impl PreservedPackage {
@@ -136,10 +137,14 @@ impl PreservedPackage {
             .map(parse_content_types)
             .transpose()?
             .unwrap_or_default();
-        let unmodelled_chart_part = crate::chart::unmodelled_chart_part(
+        let unpatchable_references = crate::reference::unpatchable_references(
             parts,
             &part_content_types(&content_types, parts),
             workbook,
+            &sheets
+                .iter()
+                .map(|sheet| sheet.path.clone())
+                .collect::<Vec<_>>(),
         )?;
 
         Ok(Self {
@@ -163,7 +168,7 @@ impl PreservedPackage {
             stylesheet_template,
             original_workbook: workbook.clone(),
             active_sheet,
-            unmodelled_chart_part,
+            unpatchable_references,
         })
     }
 
@@ -177,20 +182,46 @@ impl PreservedPackage {
         self.sheets.len()
     }
 
+    /// Every preserved part whose references cannot be patched, with the cells
+    /// each one names.
+    #[doc(hidden)]
+    pub fn unpatchable_references(&self) -> &[UnpatchableReference] {
+        &self.unpatchable_references
+    }
+
     /// Returns a preserved part whose references cannot be patched.
     #[doc(hidden)]
     pub fn unpatchable_reference_part(&self) -> Option<&str> {
-        const REFERENCE_BEARING: [&str; 2] = ["xl/pivottables/", "xl/pivotcache/"];
-        self.parts
+        self.unpatchable_references
+            .first()
+            .map(UnpatchableReference::part)
+    }
+
+    /// Returns a preserved part that renaming, dropping or reordering `sheet`
+    /// would strand.
+    #[doc(hidden)]
+    pub fn reference_naming_sheet(&self, sheet: &str) -> Option<&str> {
+        self.stranded(|reference| reference.names_sheet(sheet))
+    }
+
+    /// Returns a preserved part that inserting or deleting rows at `at` on
+    /// `sheet` would strand.
+    #[doc(hidden)]
+    pub fn reference_moved_by_rows(&self, sheet: &str, at: u32) -> Option<&str> {
+        self.stranded(|reference| reference.moved_by_rows(sheet, at))
+    }
+
+    /// The column-wise counterpart of [`Self::reference_moved_by_rows`].
+    #[doc(hidden)]
+    pub fn reference_moved_by_cols(&self, sheet: &str, at: u32) -> Option<&str> {
+        self.stranded(|reference| reference.moved_by_cols(sheet, at))
+    }
+
+    fn stranded(&self, disturbed: impl Fn(&UnpatchableReference) -> bool) -> Option<&str> {
+        self.unpatchable_references
             .iter()
-            .find_map(|(path, _)| {
-                let normalized = path.trim_start_matches('/').to_ascii_lowercase();
-                REFERENCE_BEARING
-                    .iter()
-                    .any(|prefix| normalized.starts_with(prefix))
-                    .then_some(path.as_str())
-            })
-            .or(self.unmodelled_chart_part.as_deref())
+            .find(|reference| disturbed(reference))
+            .map(UnpatchableReference::part)
     }
 
     /// The shared-string entries a source sheet's cells were authored against.
@@ -286,7 +317,6 @@ impl ContentTypeEntry {
 
 pub(crate) struct ResolvedContentType<'a> {
     pub(crate) value: &'a str,
-    pub(crate) overridden: bool,
 }
 
 /// Resolves a part's effective content type.
@@ -305,16 +335,8 @@ pub(crate) fn effective_content_type<'a>(
             .then(|| entry.attribute("ContentType"))
             .flatten()
         })
-        .map(|value| ResolvedContentType {
-            value,
-            overridden: true,
-        })
-        .or_else(|| {
-            default_content_type(entries, path).map(|value| ResolvedContentType {
-                value,
-                overridden: false,
-            })
-        })
+        .map(|value| ResolvedContentType { value })
+        .or_else(|| default_content_type(entries, path).map(|value| ResolvedContentType { value }))
 }
 
 fn default_content_type<'a>(entries: &'a [ContentTypeEntry], path: &str) -> Option<&'a str> {
@@ -997,7 +1019,6 @@ fn part_content_types(
             Some(PartContentType {
                 path: normalized_part_name(path),
                 content_type: resolved.value.to_owned(),
-                overridden: resolved.overridden,
             })
         })
         .collect()
@@ -1006,7 +1027,6 @@ fn part_content_types(
 pub(crate) struct PartContentType {
     pub(crate) path: String,
     pub(crate) content_type: String,
-    pub(crate) overridden: bool,
 }
 
 struct SheetEntry {

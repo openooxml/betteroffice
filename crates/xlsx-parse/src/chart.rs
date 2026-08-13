@@ -17,15 +17,17 @@ use xlsx_model::{
 };
 
 use crate::package::PartContentType;
-use crate::tree::{Edit, Element, Part, Replacement, escape_text, parse_tree};
+use crate::tree::{
+    Edit, Element, Part, Replacement, escape_text, names_are_resolvable, parse_tree,
+};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
 /// relationship references inside a part (`r:id`).
-const NS_RELATIONSHIPS: &str =
+pub(crate) const NS_RELATIONSHIPS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 /// the `.rels` part vocabulary itself.
-const NS_PACKAGE_RELATIONSHIPS: &str =
+pub(crate) const NS_PACKAGE_RELATIONSHIPS: &str =
     "http://schemas.openxmlformats.org/package/2006/relationships";
 /// classic `c:chartSpace`.
 const NS_CHART: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
@@ -907,7 +909,7 @@ fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
 }
 
 /// `$A$1:$A$5` or `$A$1` as an inclusive corner pair.
-fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
+pub(crate) fn parse_area(source: &str) -> Option<(CellRef, CellRef)> {
     let (start, end) = match source.split_once(':') {
         Some((start, end)) => (start, end),
         None => (source, source),
@@ -1075,7 +1077,7 @@ fn marker_markup(element: &Element, cell: AnchorCell) -> String {
 
 /// content types that carry workbook references in a chart vocabulary. the
 /// style and colour-style parts under `xl/charts/` carry none.
-const CHART_CONTENT_TYPES: [&str; 2] = [
+pub(crate) const CHART_CONTENT_TYPES: [&str; 2] = [
     "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
     "application/vnd.ms-office.chartex+xml",
 ];
@@ -1083,32 +1085,91 @@ const CHART_CONTENT_TYPES: [&str; 2] = [
 /// A chart part in the package that the model does not fully cover: one no
 /// sheet claims, one that is not a classic `c:chartSpace`, one carrying a
 /// reference form the remapper cannot rewrite, or one whose cache sits beside
-/// a reference this crate cannot rebuild it from. Structural edits are refused
-/// while such a part is present, because moving cells would strand it.
-pub(crate) fn unmodelled_chart_part(
+/// a reference this crate cannot rebuild it from. Structural edits that would
+/// move what such a part names are refused, because nothing rewrites it.
+///
+/// Each part comes with the sheet an unqualified reference in it resolves
+/// against: the one sheet claiming it, absent when no sheet or several do.
+pub(crate) fn unmodelled_chart_parts(
     parts: &[(String, Vec<u8>)],
     content_types: &[PartContentType],
     workbook: &xlsx_model::Workbook,
-) -> Result<Option<String>, ParseError> {
-    let modelled = workbook
-        .sheets
-        .iter()
-        .flat_map(|sheet| sheet.charts.iter())
-        .map(|chart| normalize_part_path(&chart.part))
-        .collect::<std::collections::HashSet<_>>();
+) -> Result<Vec<UnmodelledChart>, ParseError> {
+    let mut claims: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for sheet in &workbook.sheets {
+        for chart in &sheet.charts {
+            claims
+                .entry(normalize_part_path(&chart.part))
+                .or_default()
+                .push(sheet.name.as_str());
+        }
+    }
+    let mut unmodelled = Vec::new();
     for (path, bytes) in parts {
         if !is_chart_part(path, content_types) {
             continue;
         }
-        if !modelled.contains(normalize_part_path(path)) {
-            return Ok(Some(path.clone()));
+        let owners = claims.get(normalize_part_path(path));
+        let claimed = owners.is_some();
+        if claimed {
+            let root = parse_tree(bytes)?;
+            if names_are_resolvable(&root)
+                && !unsupported_reference_form(&root, 0)
+                && !holds_an_unrebuildable_cache(&root)?
+            {
+                continue;
+            }
         }
-        let root = parse_tree(bytes)?;
-        if unsupported_reference_form(&root, 0) || holds_an_unrebuildable_cache(&root)? {
-            return Ok(Some(path.clone()));
-        }
+        unmodelled.push(UnmodelledChart {
+            path: path.clone(),
+            owner: owners
+                .filter(|owners| owners.len() == 1)
+                .map(|owners| owners[0].to_owned()),
+            claimed,
+        });
     }
-    Ok(None)
+    Ok(unmodelled)
+}
+
+/// A chart part no save rewrites, with the sheet its unqualified references
+/// resolve against.
+pub(crate) struct UnmodelledChart {
+    pub(crate) path: String,
+    pub(crate) owner: Option<String>,
+    /// whether a sheet anchors it. A part nothing anchors is one this crate
+    /// has not read the shape of, so what it names is not resolved from it.
+    pub(crate) claimed: bool,
+}
+
+/// The areas a chart part names, or `None` when one of its references is not a
+/// form this crate reads and every cell has to be assumed named. `owner` is the
+/// sheet an unqualified reference resolves against.
+pub(crate) fn chart_reference_areas(
+    part: &[u8],
+    owner: Option<&str>,
+) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
+    let root = parse_tree(part)?;
+    if !names_are_resolvable(&root) || unsupported_reference_form(&root, 0) {
+        return Ok(None);
+    }
+    let mut areas = Vec::new();
+    for site in ref_sites(&root)? {
+        let formula = site.formula.trim();
+        if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
+            continue;
+        }
+        let Some((qualifier, area)) = split_qualifier(formula) else {
+            return Ok(None);
+        };
+        let (Some(sheet), Some((_, end))) = (
+            qualifier.or_else(|| owner.map(str::to_owned)),
+            parse_area(area),
+        ) else {
+            return Ok(None);
+        };
+        areas.push((sheet, end));
+    }
+    Ok(Some(areas))
 }
 
 /// Whether a cache sits beside a reference this crate could not rebuild it
@@ -1145,27 +1206,61 @@ fn normalize_part_path(path: &str) -> &str {
     path.trim_start_matches('/')
 }
 
-/// Whether a part holds a chart. An `Override` is authoritative; a type a
-/// `Default` extension mapping resolved names a chart when it is a chart type
-/// and otherwise leaves the conventional layout to answer, so a package that
-/// types its charts by extension alone is still covered.
+/// Whether a part holds a chart. Monotonic over the blanket veto the way
+/// pivot discovery is: the conventional layout always answers, and conforming
+/// typing may only add parts beside it. Typing that cannot be read must never
+/// take a chart away, because a chart nobody looks at vetoes nothing.
 fn is_chart_part(path: &str, content_types: &[PartContentType]) -> bool {
     let normalized = normalize_part_path(path).to_ascii_lowercase();
-    match content_types.iter().find(|part| part.path == normalized) {
-        Some(part)
-            if CHART_CONTENT_TYPES
-                .iter()
-                .any(|known| part.content_type.eq_ignore_ascii_case(known)) =>
-        {
-            true
-        }
-        Some(part) if part.overridden => false,
-        _ => {
-            normalized.starts_with("xl/charts/chart")
-                && normalized.ends_with(".xml")
-                && !normalized.contains("/_rels/")
-        }
+    (normalized.starts_with("xl/charts/chart")
+        && normalized.ends_with(".xml")
+        && !normalized.contains("/_rels/"))
+        || content_types.iter().any(|part| {
+            part.path == normalized
+                && CHART_CONTENT_TYPES
+                    .iter()
+                    .any(|known| part.content_type.eq_ignore_ascii_case(known))
+        })
+}
+
+/// Whether every anchor in a drawing claims at most one chart. The claim is
+/// followed by taking the first `c:chart` descendant of an anchor, so a second
+/// one lets two anchors swap which chart each is taken to hold — both still
+/// claimed once, so nothing looks unknown, while an unqualified reference
+/// resolves against the wrong sheet.
+pub(crate) fn drawing_claims_are_unambiguous(root: &Element) -> bool {
+    if !root.is(NS_SPREADSHEET_DRAWING, "wsDr") {
+        return true;
     }
+    root.child_elements()
+        .filter(is_anchor)
+        .all(|anchor| chart_claims(anchor, 0) <= 1)
+}
+
+/// How many claims an anchor could be read as carrying. A `c:chart` is one; so
+/// is a second relationships-namespace `id` on it, since the claim is followed
+/// by taking the first such attribute and either could answer.
+fn chart_claims(element: &Element, depth: usize) -> usize {
+    if depth > MAX_DEPTH {
+        return usize::MAX;
+    }
+    let here = if element.is(NS_CHART, "chart") {
+        element
+            .attributes
+            .iter()
+            .filter(|attribute| {
+                attribute.local_name() == "id"
+                    && attribute.namespace.as_deref() == Some(NS_RELATIONSHIPS)
+            })
+            .count()
+            .max(1)
+    } else {
+        0
+    };
+    here + element
+        .child_elements()
+        .map(|child| chart_claims(child, depth + 1))
+        .sum::<usize>()
 }
 
 /// Whether a chart part carries a reference this crate cannot rewrite. Only a

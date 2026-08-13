@@ -73,7 +73,8 @@ provider.connect();
 ## Development
 
 The generated `.wasm` binary is intentionally not committed. From the repository
-root, install `wasm-pack` 0.15.0 and run `bun scripts/build-pptx-wasm.ts`.
+root, install `wasm-pack` 0.15.0 and `binaryen`, then run
+`bun scripts/build-pptx-wasm.ts`.
 Package builds copy the binary into `dist/generated`.
 
 Docs: https://betteroffice.dev · Apache-2.0.
