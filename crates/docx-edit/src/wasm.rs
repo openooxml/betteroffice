@@ -105,8 +105,18 @@ fn parse_any_object(json: &str, label: &str) -> Result<HashMap<String, Any>, JsV
 struct ParaSpan {
     /// Story index of the paragraph's first unit (after the previous pilcrow).
     start: u32,
+    /// Story index of the paragraph's first inline unit: `start` plus the block
+    /// embeds ahead of it, which the layout gives display nodes of their own.
+    inline_start: u32,
     /// Story index of the paragraph's own pilcrow embed.
     pilcrow: u32,
+}
+
+/// Whether the layout lowers this embed kind to a block of its own rather than
+/// to a unit of the paragraph around it — see `bridge::lower_story`. Such an
+/// embed still sits in the following paragraph's `Loc` span.
+fn is_block_embed(kind: &str) -> bool {
+    matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
 }
 
 /// Resolves a paragraph to its story span by walking the public segment view.
@@ -114,6 +124,7 @@ struct ParaSpan {
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
     let mut offset: u32 = 0;
     let mut para_start: u32 = 0;
+    let mut inline_start: u32 = 0;
     for segment in doc.story_segments(story).map_err(js_err)? {
         match segment.content {
             SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
@@ -121,18 +132,38 @@ fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSp
                 if properties.para_id == para_id {
                     return Ok(ParaSpan {
                         start: para_start,
+                        inline_start,
                         pilcrow: offset,
                     });
                 }
                 offset += 1;
                 para_start = offset;
+                inline_start = offset;
             }
-            SegmentContent::OtherEmbed { .. } => offset += 1,
+            SegmentContent::OtherEmbed { ref kind, .. } => {
+                if offset == inline_start && is_block_embed(kind) {
+                    inline_start = offset + 1;
+                }
+                offset += 1;
+            }
         }
     }
     Err(js_err(format!(
         "paragraph {para_id:?} was not found in story {story:?}"
     )))
+}
+
+/// A `Loc` offset rebased onto the paragraph's display node, which the layout
+/// opens at its `pm_start`. Block embeds fall inside the paragraph's `Loc` span
+/// but outside that node, so they must not carry the caret along.
+fn offset_in_para_node(
+    doc: &EditingDoc,
+    story: &str,
+    para_id: &str,
+    offset: u32,
+) -> Result<u32, JsValue> {
+    let span = find_para_span(doc, story, para_id)?;
+    Ok(offset.saturating_sub(span.inline_start - span.start))
 }
 
 /// `Loc { story, paraId, offset }` -> transient story-global index.
@@ -1193,6 +1224,12 @@ impl EditSession {
                     (Some(anchor), Some(head)) if anchor == head => {
                         let (para_id, offset) =
                             index_loc(self.engine.doc(), &selection.story, head)?;
+                        let offset = offset_in_para_node(
+                            self.engine.doc(),
+                            &selection.story,
+                            &para_id,
+                            offset,
+                        )?;
                         Some((para_id, offset))
                     }
                     _ => None,
@@ -3287,5 +3324,69 @@ impl EditSession {
             )
             .collect();
         serde_json::to_string(&items).map_err(js_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EditCtx, RawOp};
+
+    /// story: "Alpha"(0..5) pilcrow p0(5) [table](6) "Bravo"(7..12) pilcrow p1(12)
+    fn doc_with_a_table_between_paragraphs() -> EditingDoc {
+        let doc = EditingDoc::new(7);
+        doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
+            .unwrap();
+        let ctx = EditCtx::local(String::new(), String::new());
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::InsertEmbed {
+                    index: 6,
+                    kind: "table".into(),
+                    payload: vec![("rows".into(), Any::Array(Default::default()))],
+                    attrs: Default::default(),
+                },
+                RawOp::Insert {
+                    index: 7,
+                    text: "Bravo".into(),
+                    attrs: Default::default(),
+                },
+                RawOp::InsertEmbed {
+                    index: 12,
+                    kind: "pilcrow".into(),
+                    payload: vec![
+                        ("paraId".into(), Any::from("p1")),
+                        ("pStyle".into(), Any::from("Normal")),
+                        ("alignment".into(), Any::from("left")),
+                    ],
+                    attrs: Default::default(),
+                },
+            ],
+            &ctx,
+        )
+        .unwrap();
+        doc
+    }
+
+    #[test]
+    fn a_block_embed_opens_the_span_but_not_the_display_node() {
+        let doc = doc_with_a_table_between_paragraphs();
+
+        let first = find_para_span(&doc, "body", "p0").unwrap();
+        assert_eq!((first.start, first.inline_start, first.pilcrow), (0, 0, 5));
+
+        // the table sits inside p1's Loc span, ahead of its own text
+        let second = find_para_span(&doc, "body", "p1").unwrap();
+        assert_eq!(
+            (second.start, second.inline_start, second.pilcrow),
+            (6, 7, 12)
+        );
+
+        // Loc offset 1 is the caret before "Bravo", which opens p1's display node
+        assert_eq!(offset_in_para_node(&doc, "body", "p1", 1).unwrap(), 0);
+        assert_eq!(offset_in_para_node(&doc, "body", "p1", 4).unwrap(), 3);
+        // a paragraph with no block embed ahead of it is unshifted
+        assert_eq!(offset_in_para_node(&doc, "body", "p0", 3).unwrap(), 3);
     }
 }
