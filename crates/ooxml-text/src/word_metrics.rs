@@ -1,24 +1,106 @@
-//! Word-specific line metrics, spacing, justification, and kerning rules.
+//! Word-specific measurement rules — the places where reproducing Word
+//! demands something a generic text engine would not do.
 //!
-//! The default line box scales `OS/2` win ascent/descent and hhea external
-//! leading as floats. `w:noLeading` drops the leading. [`apply_spacing_rule`]
-//! then applies `auto`, `exact`, or `atLeast` spacing.
+//! Each rule is a free function taking its inputs explicitly, including the
+//! compat flags, so nothing here reads global state. ECMA-376 references are
+//! to Part 1 (WordprocessingML); element semantics are summarized in
+//! `reference/quick-ref/wordprocessingml.md` ("Spacing (w:spacing)" section
+//! for line-rule value semantics and the twips/240ths unit table).
 //!
-//! [`CompatFlags::gdi_line_metrics`] and
-//! [`CompatFlags::typo_line_spacing`] are independent, opt-in experiments.
-//! The first rounds ppem and metric components to whole pixels; the second
-//! selects version-4 `USE_TYPO_METRICS`, retaining signed `sTypoLineGap`.
-//! Both default to `false`, and paragraph input cannot enable either one.
+//! # 1. Font-unit line height (single spacing) — [`single_line_box`]
 //!
-//! Measurement against Word 16.112 rejected quantization in compatibility
-//! modes 14 and 15 — the float default tracks Word an order of magnitude
-//! closer in both axes — so both experiments stay off.
+//! Word derives the default line height from `OS/2` **usWinAscent +
+//! usWinDescent** (the GDI `tmHeight` lineage), *not* from hhea
+//! ascender/descender and *not* from sTypo values — which is why
+//! [`crate::font_store::FontMetrics`] carries all three families. External
+//! leading follows GDI's `tmExternalLeading`:
 //!
-//! Justification stretches space clusters only. [`kern_enabled`] implements
-//! the `w:kern` size threshold. Document-grid snapping is not applied because
-//! paragraph measurement receives no grid pitch.
-//! No rule reads modes 12/14/15, `w:useWord97LineBreakRules`, or `w:balanceSingleByteDoubleByteWidth`; they measure as off.
-//! `w:jc="distribute"` is not implemented.
+//! ```text
+//! tmExternalLeading = MAX(0, hhea(ascender − descender + lineGap)
+//!                            − (usWinAscent + usWinDescent))
+//! ```
+//!
+//! scaled to the requested size, and Word places it *below* the descent
+//! (line pitch = ascent + descent + external leading, baseline hugging the
+//! top of the pitch). The `w:noLeading` compatibility flag (`w:compat`,
+//! ECMA-376 §17.15.3) drops that external leading entirely.
+//!
+//! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
+//!
+//! `w:spacing w:lineRule` (§17.3.1.33):
+//!
+//! - `auto`: `w:line` is in 240ths of a line (240 = single, 276 = the 1.15
+//!   default of recent Word styles, 480 = double). Word scales the *full*
+//!   single-spacing pitch — including external leading — by `line/240`.
+//!   Ascent and descent stay put; the delta lands in the leading below the
+//!   descent, so cursor/selection rects hug the text at the top of the line
+//!   box for spacing > single (observable Word behavior). Sub-single values
+//!   that undercut ascent+descent shrink ascent/descent proportionally.
+//! - `exact`: fixes the line box at the given height regardless of content —
+//!   taller glyphs are *clipped* (at render time; measurement never grows
+//!   the line). The baseline sits at [`EXACT_BASELINE_RATIO`] of the box, a
+//!   constant depending on neither the font nor the size.
+//! - `atLeast`: a floor — the measured content height wins when larger;
+//!   when the floor wins the slack lands *above* the ascent, so the content
+//!   descent is preserved from the bottom of the box.
+//!
+//! Both fixed rules are measured against Word 16.112. Word quantizes to a
+//! 0.25pt device grid; this model is continuous, so an off-grid split differs
+//! from Word's raster by up to an eighth of a point.
+//!
+//! Both fixed rules interact with inline objects (images taller than an
+//! exact box also clip).
+//!
+//! # 3. Justification — [`line_is_justified`], [`stretch_spaces`]
+//!
+//! `w:jc w:val="both"` (§17.3.1.13) stretches **space clusters only** —
+//! never inter-letter gaps — distributing the line's slack in equal shares
+//! per expandable space cluster (`"distribute"` is the East Asian variant
+//! that does stretch inter-character; not implemented here). The final line
+//! of a paragraph is not justified, but a line ended by a soft return
+//! (shift-enter, `w:br`) *is* — unless the `w:doNotExpandShiftReturn`
+//! compat flag (§17.15.3) restores the non-stretching behavior. The
+//! soft-return test takes precedence over the last-line flag. Space stretch
+//! happens at line layout, after shaping: shaped cluster advances stay
+//! fixed, only space-cluster advances grow.
+//!
+//! # 4. Snap-to-grid — not applied
+//!
+//! Where a section defines a document grid (`w:docGrid`, §17.6.5), Word snaps
+//! each line's height up to the next grid multiple unless the paragraph or
+//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2). Measurement
+//! here never snaps: the input carries no grid pitch, so a line's height is
+//! whatever rules 1 and 2 compute and nothing more. CJK documents relying on
+//! the grid measure slightly short as a result.
+//!
+//! # 5. Kerning threshold — [`kern_enabled`], [`kern_features`]
+//!
+//! Word applies pair kerning only when the run's `w:kern` half-point
+//! threshold (rPr, §17.3.2) is nonzero and the font size is at or above it.
+//! [`mod@crate::shape`] applies default OpenType features (which include GPOS
+//! pair kerning via the `kern` feature) unconditionally; callers gate it
+//! per run by passing [`kern_features`]`(kern_enabled(..))` as the feature
+//! list. rustybuzz honors `kern=0` for GPOS-carried kerning (proven against
+//! the Liberation Sans fixture in `tests/ooxml_text.rs`), so no shaping-side
+//! switch is needed.
+//!
+//! # 6. Compatibility flags from `settings.xml` — [`CompatFlags`]
+//!
+//! `w:compat` / `w:compatSetting` (§17.15.3) select metric eras. The two
+//! flags rules 1 and 3 consume — `w:noLeading` and
+//! `w:doNotExpandShiftReturn` — are carried by [`CompatFlags`], parsed from
+//! `settings.xml` host-side and threaded in as inputs. No rule here reads
+//! `compatibilityMode` (12/14/15), `w:useWord97LineBreakRules` or
+//! `w:balanceSingleByteDoubleByteWidth`, so a document setting them measures
+//! as though they were off.
+
+//!
+//! [`CompatFlags::gdi_line_metrics`] and [`CompatFlags::typo_line_spacing`]
+//! are independent, opt-in experiments — the first rounds ppem and metric
+//! components to whole pixels, the second selects version-4
+//! `USE_TYPO_METRICS` and keeps a signed `sTypoLineGap`. Both default to
+//! `false` and paragraph input cannot enable either: measurement against
+//! Word 16.112 rejected quantization in compatibility modes 14 and 15.
 
 use crate::font_store::FontMetrics;
 use crate::shape::ShapeFeature;
@@ -46,6 +128,10 @@ pub enum LineSpacingRule {
     /// lineRule="atLeast": floor in px; measured height wins when larger.
     AtLeast { px: f32 },
 }
+
+/// Fraction of an `exact` line box that sits above the baseline. Constant in
+/// Word — neither the font nor the size moves it.
+pub const EXACT_BASELINE_RATIO: f32 = 0.8;
 
 /// One line box in px: total height = ascent + descent + leading. Leading
 /// always sits *below* the descent, so the baseline hugs the top of the box.
@@ -157,15 +243,22 @@ fn experimental_metric_family(m: &FontMetrics, allow_typo: bool) -> (i32, i32, i
 /// - `Auto`: target height = `content.height() × line_240ths / 240` — the
 ///   *full* box including leading is scaled (Word scales line pitch).
 ///   Ascent/descent are preserved and the delta goes to leading below the
-///   descent. Single spacing is an identity. A sub-single target that
-///   undercuts ascent + descent shrinks both proportionally.
-/// - `Exact`: the box is fixed at `px` regardless of content; the baseline
-///   is placed so the content **descent is preserved bottom-up** (Word's
-///   behavior — shrinking eats the ascent side first) and clipping happens
-///   at render time. A box smaller than the descent clamps descent to the
-///   box and zeroes the ascent; leading is always 0.
+///   descent, so the baseline stays at the top of a taller line box exactly
+///   as Word places it (cursor/selection rects hug the text). Single spacing
+///   is an identity. If the target undercuts ascent + descent (sub-single
+///   spacing), ascent and descent shrink proportionally and leading is 0.
+/// - `Exact`: the box is fixed at `px` regardless of content and split
+///   [`EXACT_BASELINE_RATIO`] above the baseline, the rest below. The split
+///   is a constant of Word's, not a property of the content, so the box
+///   ignores the font entirely; clipping happens at render time.
 /// - `AtLeast`: floor — the content box passes through when taller,
-///   otherwise the shortfall is added as leading below the descent.
+///   otherwise the slack goes *above* the ascent and the content descent is
+///   preserved from the bottom of the box.
+///
+/// `Exact` and a floor-active `AtLeast` leave no leading — `ascent + descent
+/// == px` exactly — so a consumer centering half-leading and one hanging the
+/// baseline off the box top agree. A content-winning `AtLeast` returns the
+/// content box untouched, natural leading included.
 pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     match *rule {
         LineSpacingRule::Auto { line_240ths } => {
@@ -191,10 +284,9 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
         }
         LineSpacingRule::Exact { px } => {
             let px = px.max(0.0);
-            let descent = content.descent.min(px);
             LineBox {
-                ascent: px - descent,
-                descent,
+                ascent: px * EXACT_BASELINE_RATIO,
+                descent: px - px * EXACT_BASELINE_RATIO,
                 leading: 0.0,
             }
         }
@@ -203,8 +295,9 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
                 content
             } else {
                 LineBox {
-                    leading: content.leading + (px - content.height()),
-                    ..content
+                    ascent: px - content.descent,
+                    descent: content.descent,
+                    leading: 0.0,
                 }
             }
         }
