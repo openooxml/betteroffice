@@ -26,7 +26,7 @@ That is the whole setup. `@betteroffice/docx` picks the package up through an op
 | `@betteroffice/fonts`     | 25    | 7.9 MB       | Latin metric-compatible set + Hebrew/Arabic  |
 | `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC         |
 
-Faces are fetched per face, lazily, so a typical English document pulls only Carlito Regular + Bold — about 1.25 MB raw, ~620 KB over a `Content-Encoding: gzip` connection.
+Faces are fetched per face, lazily, so a typical English document pulls only Carlito Regular + Bold — about 1.25 MB raw, 547,603 bytes (535 KiB) at gzip -9.
 
 ## Metric-compatibility mapping (Latin)
 
@@ -162,4 +162,5 @@ The loader code is Apache-2.0 (see `LICENSE`). The font binaries are licensed un
 - `LICENSES/OFL-Liberation.txt` — Digitized data copyright (c) 2010 Google Corporation; Copyright (c) 2012 Red Hat, Inc., Reserved Font Name Liberation. Vendored unmodified from the [Liberation Fonts 2.1.5 release](https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5).
 - `LICENSES/OFL-NotoSansHebrew.txt` — Copyright 2022 The Noto Project Authors. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansHebrew/hinted/ttf/`); upstream project [notofonts/hebrew](https://github.com/notofonts/hebrew).
 - `LICENSES/OFL-NotoArabic.txt` — Copyright 2022 The Noto Project Authors; covers Noto Sans Arabic and Noto Naskh Arabic. Hinted statics vendored from [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) at commit `cd06befda260d2abb6e5db96cf5530f80ea5180d` (`fonts/NotoSansArabic/hinted/ttf/`, `fonts/NotoNaskhArabic/hinted/ttf/`); upstream project [notofonts/arabic](https://github.com/notofonts/arabic).
+
 The CJK binaries and their `OFL-NotoCJK.txt` license text ship in [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk).

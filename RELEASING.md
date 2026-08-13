@@ -43,20 +43,26 @@ npm depending on a name that 404s.
 
 1. Confirm the name is new and unclaimed: `npm view <name>` returns E404.
 2. Build the publishable artifacts: `bun run build:packages`.
-3. From the package directory, publish the current version by hand with an
+3. Pin workspace dependency ranges: `bun scripts/rewrite-workspace-deps.ts`.
+   This publish-path-only script rewrites the source package manifests in
+   place, so run it from a clean checkout and restore them after publishing.
+4. From the package directory, publish the current version by hand with an
    account that has `publish` rights on the `@betteroffice` scope:
    `npm publish --access public --provenance`.
-4. Add a Trusted Publisher to the new package on npmjs.com with owner
+5. From the repository root, restore the rewritten source manifests with
+   `git restore -- packages/*/package.json`, then confirm the worktree is clean.
+6. Add a Trusted Publisher to the new package on npmjs.com with owner
    `openooxml`, repository `betteroffice`, and workflow `release.yml`.
-5. Verify: `npm view <name> version` matches, and the package page shows the
+7. Verify: `npm view <name> version` matches, and the package page shows the
    provenance attestation.
-6. Only then merge the release PR. Subsequent versions publish through OIDC
+8. Only then merge the release PR. Subsequent versions publish through OIDC
    like every other package.
 
-If step 3 is skipped and a release runs anyway, republish the dependent as soon
-as the new package exists — a dependent whose optional dynamic import resolves
-to a missing package degrades silently, which is the failure this pairing
-exists to prevent.
+An optional peer that 404s does not make installation fail: npm silently omits
+it. Consumers then fall back to synthetic metrics while being told to install a
+package that does not exist. Nothing in CI enforces this bootstrap ordering. If
+the manual publish is skipped and a release runs anyway, publish the missing
+package and republish the dependent as soon as possible.
 
 ## Python bindings
 

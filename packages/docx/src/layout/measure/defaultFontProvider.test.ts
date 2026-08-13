@@ -96,6 +96,34 @@ describe('default font provider', () => {
     expect(defaultLoaded).toBe(false);
   });
 
+  test('clear re-resolves a reconfigured default provider', async () => {
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () => Promise.resolve(bytesOf('first-provider')),
+          }),
+        }),
+    });
+    const { registered, sink } = recordingSink();
+    const registry = new TextMeasureFontRegistry(sink, { bundled: resolveDefaultFontProvider });
+
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () => Promise.resolve(bytesOf('second-provider')),
+          }),
+        }),
+    });
+    registry.clear();
+
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([2]);
+    expect(new TextDecoder().decode(registered[1])).toBe('second-provider');
+  });
+
   test('warns once when neither an injected nor a bundled provider is available', async () => {
     configureDefaultFonts({ load: () => Promise.reject(new Error('package not installed')) });
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
@@ -143,6 +171,30 @@ describe('default font provider', () => {
       expect(synthetic).toHaveLength(1);
       expect(synthetic[0]).toContain('mark it external');
       expect(synthetic[0]).not.toContain('Install @betteroffice/fonts');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('does not blame bundling when a partial provider has no matching face', async () => {
+    const partial: BundledFontProvider = {
+      resolve: (family) =>
+        family === 'Calibri' ? () => Promise.resolve(bytesOf('calibri')) : undefined,
+    };
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const { sink } = recordingSink();
+      const registry = new TextMeasureFontRegistry(sink, { bundled: partial });
+
+      expect(await registry.getFontIdChain('Wingdings', false, false)).toEqual([]);
+
+      const synthetic = warn.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.includes('no font bytes'));
+      expect(synthetic).toHaveLength(1);
+      expect(synthetic[0]).not.toContain('mark it external');
+      expect(synthetic[0]).toContain('synthetic metrics');
     } finally {
       warn.mockRestore();
     }

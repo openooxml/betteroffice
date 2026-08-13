@@ -47,14 +47,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # The font packages ship built ESM (Node cannot type-strip under
-      # node_modules), so their .d.ts must exist before anything type checks
-      # against them.
-      - name: Build font packages
-        run: bun run build:fonts
-
       - name: Type check
-        run: bun run --filter './packages/*' typecheck
+        run: bun run typecheck:packages
 
       - name: Test
         run: bun run test

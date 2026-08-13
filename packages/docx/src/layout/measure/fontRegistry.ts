@@ -175,7 +175,7 @@ export type BundledFontProviderSource =
 export class TextMeasureFontRegistry {
   private readonly sink: TextEngineFontSink;
   private readonly bundledSource: BundledFontProviderSource | undefined;
-  /** Memoized provider resolution — the factory runs at most once. */
+  /** Memoized provider resolution, reset with the other registrations by `clear()`. */
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
   /**
    * Whether this registry has already reported a synthetic-metrics fallback.
@@ -230,7 +230,7 @@ export class TextMeasureFontRegistry {
     this.bundledSource = opts?.bundled;
   }
 
-  /** Resolve the bundled provider once, tolerating a factory that rejects. */
+  /** Resolve the bundled provider once per cache lifetime, tolerating a rejected factory. */
   private bundled(): Promise<BundledFontProvider | undefined> {
     this.bundledPromise ??=
       typeof this.bundledSource === 'function'
@@ -331,6 +331,7 @@ export class TextMeasureFontRegistry {
    */
   clear(): void {
     this.generation++;
+    this.bundledPromise = undefined;
     this.faceIds = new WeakMap();
     this.bundledIds = new Map();
     this.lastResortIds = new Map();
@@ -375,7 +376,9 @@ export class TextMeasureFontRegistry {
       if (id !== null && !ids.includes(id)) ids.push(id);
     }
 
-    if (ids.length === 0) this.warnSynthetic(family, bundled !== undefined);
+    if (ids.length === 0) {
+      this.warnSynthetic(family, loader !== undefined || lastResort !== undefined);
+    }
 
     // Only publish into the sync view if nothing invalidated us mid-flight.
     if (generation === this.generation) this.chainResults.set(key, ids);
