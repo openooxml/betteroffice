@@ -338,22 +338,34 @@ fn auto_240_is_identity_and_480_doubles_height_into_leading() {
     assert_eq!(double.leading, 18.921875); // 36.796875 - 14.484375 - 3.390625
 }
 
+/// Word splits an `exact` box 80/20 about the baseline whatever the content.
 #[test]
-fn exact_rule_fixes_height_and_preserves_descent_bottom_up() {
+fn exact_rule_splits_the_fixed_box_by_a_font_independent_constant() {
     let single = liberation_single_16px();
 
-    // smaller than content: clips (measurement just fixes the box), the
-    // baseline keeps the content descent from the bottom, ascent absorbs it
+    // smaller than content: clips (measurement just fixes the box)
     let clipped = apply_spacing_rule(single, &LineSpacingRule::Exact { px: 10.0 });
     assert_eq!(clipped.height(), 10.0);
-    assert_eq!(clipped.descent, single.descent);
-    assert_eq!(clipped.ascent, 10.0 - single.descent);
+    assert_eq!(clipped.ascent, 8.0);
+    assert_eq!(clipped.descent, 2.0);
     assert_eq!(clipped.leading, 0.0);
 
-    // taller than content: still exactly the fixed height
+    // taller than content: same split, still exactly the fixed height
     let padded = apply_spacing_rule(single, &LineSpacingRule::Exact { px: 40.0 });
     assert_eq!(padded.height(), 40.0);
-    assert_eq!(padded.descent, single.descent);
+    assert_eq!(padded.ascent, 32.0);
+    assert_eq!(padded.descent, 8.0);
+
+    // the split ignores the content box entirely
+    let other = LineBox {
+        ascent: 1.0,
+        descent: 9.0,
+        leading: 4.0,
+    };
+    assert_eq!(
+        apply_spacing_rule(other, &LineSpacingRule::Exact { px: 40.0 }),
+        padded
+    );
 }
 
 #[test]
@@ -364,12 +376,36 @@ fn at_least_rule_floors_but_never_shrinks() {
     let unchanged = apply_spacing_rule(single, &LineSpacingRule::AtLeast { px: 10.0 });
     assert_eq!(unchanged, single);
 
-    // floor above: height is exactly the floor, extra goes to leading
+    // floor above: height is exactly the floor and the slack lands above the
+    // ascent, so the content descent is preserved from the bottom
     let floored = apply_spacing_rule(single, &LineSpacingRule::AtLeast { px: 30.0 });
     assert_eq!(floored.height(), 30.0);
-    assert_eq!(floored.ascent, single.ascent);
     assert_eq!(floored.descent, single.descent);
-    assert_eq!(floored.leading, 30.0 - single.ascent - single.descent);
+    assert_eq!(floored.ascent, 30.0 - single.descent);
+    assert_eq!(floored.leading, 0.0);
+}
+
+/// `Exact` and a floor-active `AtLeast` leave no leading, so `ascent +
+/// descent` is the whole box and every baseline model agrees on the result.
+/// A content-winning `AtLeast` keeps the content's natural leading.
+#[test]
+fn fixed_rules_leave_no_leading() {
+    let single = liberation_single_16px();
+    for px in [1.0, 10.0, 18.0, 40.0, 500.0] {
+        for rule in [
+            LineSpacingRule::Exact { px },
+            LineSpacingRule::AtLeast { px },
+        ] {
+            let box_ = apply_spacing_rule(single, &rule);
+            assert!(
+                box_.ascent + box_.descent <= box_.height() + 1e-4,
+                "{rule:?} at {px}: {box_:?}"
+            );
+            if box_.height() == px {
+                assert_eq!(box_.leading, 0.0, "{rule:?} at {px}");
+            }
+        }
+    }
 }
 
 #[test]

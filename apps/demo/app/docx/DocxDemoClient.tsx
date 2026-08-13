@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import type { BundledFontProvider } from "@betteroffice/docx-react";
@@ -18,9 +18,11 @@ import {
   useCollabRoom,
   useDemoIdentity,
   useDemoRoom,
+  useLeaveRoom,
   type CollaborationReplica,
   type CollaborationTransport,
 } from "../collab";
+import { planDemoSession } from "../../lib/demoSession";
 
 // The editor is browser-only (canvas + wasm + worker); keep it out of SSR.
 const DocxEditor = dynamic(
@@ -30,10 +32,19 @@ const DocxEditor = dynamic(
 
 const SHOWCASE = { url: "/betteroffice-demo.docx", name: "betteroffice-demo.docx" };
 
+/** `id` keys the editor, so each loaded document gets its own session. */
+interface DemoSource {
+  id: number;
+  buffer: ArrayBuffer;
+  name: string;
+  seed: Uint8Array | null;
+}
+
 export function DocxDemoClient() {
-  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
-  const [seed, setSeed] = useState<Uint8Array | null>(null);
-  const room = useDemoRoom();
+  const [source, setSource] = useState<DemoSource | null>(null);
+  const openSequence = useRef(0);
+  const room = useDemoRoom(source ? source.seed !== null : true);
+  const leaveRoom = useLeaveRoom();
   const user = useDemoIdentity();
   const createProvider = useCallback(
     (replica: CollaborationReplica, transport: CollaborationTransport) =>
@@ -85,9 +96,13 @@ export function DocxDemoClient() {
         ]);
       })
       .then(([documentBytes, seedBytes]) => {
-        if (cancelled) return;
-        setBuffer(documentBytes);
-        setSeed(new Uint8Array(seedBytes));
+        if (cancelled || openSequence.current !== 0) return;
+        setSource({
+          id: 0,
+          buffer: documentBytes,
+          name: SHOWCASE.name,
+          seed: new Uint8Array(seedBytes),
+        });
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -97,18 +112,48 @@ export function DocxDemoClient() {
     };
   }, []);
 
+  const session = useMemo(
+    () =>
+      planDemoSession({
+        document: source,
+        room,
+        clientId: collab.clientId,
+        identified: user !== null,
+      }),
+    [collab.clientId, room, source, user],
+  );
+
   const collaboration = useMemo(
     () =>
-      room && seed && collab.clientId && user
+      session.status === "shared" && source?.seed && user
         ? {
-            clientId: collab.clientId,
-            initialUpdate: seed,
+            clientId: session.clientId,
+            initialUpdate: source.seed,
             user,
             onReplica: collab.onReplica,
             presence: collab.provider ?? undefined,
           }
         : undefined,
-    [collab.clientId, collab.onReplica, collab.provider, room, seed, user],
+    [collab.onReplica, collab.provider, session, source, user],
+  );
+
+  // Ordered by selection, not by completion: a slower earlier pick must not
+  // land on top of a later one.
+  const handleOpen = useCallback(
+    async (file: File) => {
+      const sequence = (openSequence.current += 1);
+      try {
+        const buffer = await file.arrayBuffer();
+        if (sequence !== openSequence.current) return;
+        leaveRoom();
+        setError(null);
+        setSource({ id: sequence, buffer, name: file.name, seed: null });
+      } catch (cause) {
+        if (sequence !== openSequence.current) return;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [leaveRoom],
   );
 
   return (
@@ -129,9 +174,9 @@ export function DocxDemoClient() {
 
         <div className="flex-1" />
 
-        {buffer && (
+        {source && (
           <span className="max-w-[180px] overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">
-            {SHOWCASE.name}
+            {source.name}
           </span>
         )}
 
@@ -141,6 +186,7 @@ export function DocxDemoClient() {
             synced={collab.synced}
             peerCount={collab.peerCount}
             error={collab.error}
+            shared={session.status === "shared"}
           />
           <a
             className="inline-flex size-8 items-center justify-center rounded-[5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg"
@@ -170,11 +216,15 @@ export function DocxDemoClient() {
           <p className="m-auto text-mute" role="alert">
             Failed to load the demo document: {error}
           </p>
-        ) : buffer ? (
+        ) : source && session.status !== "loading" ? (
           <DocxEditor
-            documentBuffer={buffer}
+            key={source.id}
+            documentBuffer={source.buffer}
             collaboration={collaboration}
             measurementFontProvider={measurementFontProvider}
+            documentName={source.name}
+            onOpen={handleOpen}
+            onError={(cause) => setError(cause.message)}
             showToolbar
             showRuler
             showZoomControl
