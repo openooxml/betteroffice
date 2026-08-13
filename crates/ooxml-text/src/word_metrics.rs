@@ -44,12 +44,9 @@
 //!   when the floor wins the slack lands *above* the ascent, so the content
 //!   descent is preserved from the bottom of the box.
 //!
-//! Both fixed rules are measured against Word 16.112 (PDF glyph baselines;
-//! four families at 12/24/36pt gave one baseline per box height despite win
-//! ratios spanning 0.780–0.810, excluding font-derived models). Word then
-//! quantizes to a 0.25pt device grid; this is a continuous model and does
-//! not, so a box height whose split is off-grid differs from Word's raster
-//! by up to an eighth of a point.
+//! Both fixed rules are measured against Word 16.112. Word quantizes to a
+//! 0.25pt device grid; this model is continuous, so an off-grid split differs
+//! from Word's raster by up to an eighth of a point.
 //!
 //! Both fixed rules interact with inline objects (images taller than an
 //! exact box also clip).

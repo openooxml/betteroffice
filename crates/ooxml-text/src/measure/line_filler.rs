@@ -634,10 +634,9 @@ impl Filler<'_> {
         let text_line_height = ruled.height();
         let mut line_height = text_line_height;
 
-        // Image-only lines receive descent on both sides; inline images sit on
-        // the baseline. The image dictates the whole box, so it takes its
-        // buffer from the content descent and reports it as the row descent —
-        // the spacing rule no longer describes this line.
+        // An image dictates the whole box, so it buffers from the content
+        // descent and reports that as the row descent; the spacing rule no
+        // longer describes this line.
         if self.cur.max_image_height_px > line_height {
             let image_h = self.cur.max_image_height_px;
             let buffer = content.descent;
