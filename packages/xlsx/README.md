@@ -112,7 +112,8 @@ they have stable axis identities and a Yrs-aware undo manager.
 ## Development
 
 The generated `.wasm` binary is intentionally not committed. From the repository
-root, install `wasm-pack` 0.15.0 and run `bun run build:xlsx-wasm`. Package builds,
-tests, demo startup, and CI run this step automatically.
+root, install `wasm-pack` 0.15.0 and `binaryen`, then run
+`bun run build:xlsx-wasm`. Package builds, tests, demo startup, and CI run this
+step automatically.
 
 Docs: https://betteroffice.dev · Apache-2.0.
