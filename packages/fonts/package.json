@@ -27,7 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@betteroffice/fonts-cjk": "workspace:^"
+    "@betteroffice/fonts-cjk": "workspace:^0"
   },
   "peerDependenciesMeta": {
     "@betteroffice/fonts-cjk": {
