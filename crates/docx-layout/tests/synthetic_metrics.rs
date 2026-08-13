@@ -1,34 +1,41 @@
-//! Geometry of the no-face measurement fallback (issue #185).
-//!
-//! Published packages register no measurement font unless the host supplies
-//! one, so the measure engine refuses every paragraph and `measure_blocks`
-//! substitutes an estimated extent. The canvas still paints each run with a
-//! real face, so the estimate has to leave every run a slot at least as wide
-//! as its own estimated advance — otherwise consecutive runs overprint. A
-//! tracked replacement puts two runs (the deletion and its insertion) on one
-//! paragraph, which is where the collision becomes visible.
+//! No-face measurement fallback geometry (issue #185).
 
 use docx_layout::display_list::Primitive;
 use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
-use docx_layout::types::{Input, LayoutBlock, MeasuredBlock};
+use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, ParagraphExtent};
 
 const CONTENT_WIDTH: f64 = 624.0;
 const FONT_SIZE_PT: f64 = 11.0;
 const FONT_SIZE_PX: f64 = FONT_SIZE_PT * 96.0 / 72.0;
-/// The per-code-unit advance the fallback bills, mirrored from the engine.
 const ESTIMATED_ADVANCE: f64 = FONT_SIZE_PX * 0.5;
+const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
 const INSERTED: &str = "Vielen Dank für Ihre Bestellung Nr. 4711. Wir freuen uns, Ihnen bestätigen zu können, dass wir Ihre Zahlung erhalten haben.";
 const DELETED: &str =
     "Thank you for your order #4711. We are pleased to confirm that we have received your payment.";
 
-fn utf16_len(text: &str) -> f64 {
-    text.encode_utf16().count() as f64
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
 }
 
-/// One paragraph holding a tracked deletion and its replacement insertion.
+fn estimated_width(text: &str, font_size_pt: f64) -> f64 {
+    utf16_len(text) as f64 * font_size_pt * 96.0 / 72.0 * 0.5
+}
+
+fn fallback_config() -> MeasurementConfig {
+    MeasurementConfig {
+        font_chains: Default::default(),
+        defaults: serde_json::json!({
+            "fontSize": FONT_SIZE_PT,
+            "fontFamily": "Liberation Sans"
+        }),
+        compat: serde_json::Value::Null,
+        authoritative_shaping: true,
+    }
+}
+
 fn revision_paragraph() -> serde_json::Value {
-    let inserted_end = 1.0 + utf16_len(INSERTED);
+    let inserted_end = 1 + utf16_len(INSERTED);
     serde_json::json!({
         "kind": "paragraph",
         "id": 0,
@@ -36,7 +43,7 @@ fn revision_paragraph() -> serde_json::Value {
             {
                 "kind": "text",
                 "text": INSERTED,
-                "pmStart": 1.0,
+                "pmStart": 1,
                 "pmEnd": inserted_end,
                 "fontSize": FONT_SIZE_PT,
                 "isInsertion": true,
@@ -54,22 +61,50 @@ fn revision_paragraph() -> serde_json::Value {
                 "changeRevisionId": 11
             }
         ],
-        "pmStart": 0.0,
-        "pmEnd": inserted_end + utf16_len(DELETED) + 1.0
+        "pmStart": 0,
+        "pmEnd": inserted_end + utf16_len(DELETED) + 1
     })
 }
 
-fn layout_page() -> serde_json::Value {
+fn mixed_size_paragraph() -> serde_json::Value {
     serde_json::json!({
-        "pages": [{
-            "size": { "w": 816.0, "h": 1056.0 },
-            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 },
-            "number": 1
-        }]
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+            {
+                "kind": "text",
+                "text": "X",
+                "fontFamily": "Liberation Sans",
+                "fontSize": 72.0
+            },
+            {
+                "kind": "text",
+                "text": "iiiiiiiiii",
+                "fontFamily": "Liberation Sans",
+                "fontSize": FONT_SIZE_PT
+            }
+        ],
+        "attrs": {
+            "defaultFontFamily": "Liberation Sans",
+            "defaultFontSize": FONT_SIZE_PT
+        }
     })
 }
 
-/// Text primitives as `(baseline, x, width, text)`, in paint order.
+fn measure_paragraph(
+    paragraph: serde_json::Value,
+    width: f64,
+    config: &MeasurementConfig,
+) -> Result<ParagraphExtent, String> {
+    let block: LayoutBlock = serde_json::from_value(paragraph).expect("block parses");
+    let mut blocks = vec![block];
+    let mut extents = measure_blocks(&mut blocks, width, config)?;
+    match extents.pop() {
+        Some(BlockExtent::Paragraph(extent)) => Ok(extent),
+        _ => panic!("paragraph extent expected"),
+    }
+}
+
 fn text_runs(list: &docx_layout::display_list::DisplayList) -> Vec<(f64, f64, f64, String)> {
     list.pages[0]
         .primitives
@@ -86,42 +121,39 @@ fn text_runs(list: &docx_layout::display_list::DisplayList) -> Vec<(f64, f64, f6
         .collect()
 }
 
-fn display_list_without_faces() -> docx_layout::display_list::DisplayList {
+fn display_list_without_faces(
+    paragraph: serde_json::Value,
+    width: f64,
+) -> docx_layout::display_list::DisplayList {
     docx_layout::clear_measure_fonts();
-    let block: LayoutBlock = serde_json::from_value(revision_paragraph()).expect("block parses");
+    let block: LayoutBlock = serde_json::from_value(paragraph).expect("block parses");
     let mut blocks = vec![block];
-    let config = MeasurementConfig {
-        font_chains: Default::default(),
-        defaults: serde_json::json!({ "fontSize": FONT_SIZE_PT, "fontFamily": "Calibri" }),
-        compat: serde_json::Value::Null,
-        authoritative_shaping: true,
-    };
-    let extents = measure_blocks(&mut blocks, CONTENT_WIDTH, &config).expect("fallback measures");
+    let extents =
+        measure_blocks(&mut blocks, width, &fallback_config()).expect("fallback measures");
     let mut input = Input {
         measured: blocks
             .into_iter()
             .zip(extents)
             .map(|(block, measure)| MeasuredBlock { block, measure })
             .collect(),
-        options: serde_json::from_value(serde_json::json!({ "layout": layout_page() }))
-            .unwrap_or_default(),
+        options: serde_json::from_value(serde_json::json!({
+            "pageSize": { "w": width + 192.0, "h": 1056.0 },
+            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 }
+        }))
+        .expect("options parse"),
     };
     let layout = docx_layout::compute_layout_input(&mut input).expect("paginates");
     docx_layout::build_display_list(&input, &layout).expect("display list builds")
 }
 
-/// Without a face the estimate is all the engine has, so every run must be
-/// allotted the width that estimate implies. Billing a line less than its own
-/// estimate — the old `min(content_width, …)` clamp — shrinks every slot on it
-/// by the overflow ratio, and the next run starts inside the previous one.
 #[test]
 fn tracked_replacement_runs_do_not_overprint_without_a_measured_face() {
-    let list = display_list_without_faces();
+    let list = display_list_without_faces(revision_paragraph(), CONTENT_WIDTH);
     let runs = text_runs(&list);
     assert!(!runs.is_empty(), "the paragraph paints text");
 
     for (baseline, x, width, text) in &runs {
-        let estimated = utf16_len(text) * ESTIMATED_ADVANCE;
+        let estimated = estimated_width(text, FONT_SIZE_PT);
         assert!(
             *width + 0.01 >= estimated,
             "run {text:?} at ({x}, {baseline}) got a {width}px slot for {estimated}px of estimated text",
@@ -134,7 +166,7 @@ fn tracked_replacement_runs_do_not_overprint_without_a_measured_face() {
         by_baseline
             .entry((baseline * 100.0).round() as i64)
             .or_default()
-            .push((x, utf16_len(&text) * ESTIMATED_ADVANCE, text));
+            .push((x, estimated_width(&text, FONT_SIZE_PT), text));
     }
     for (baseline, mut row) in by_baseline {
         row.sort_by(|left, right| left.0.total_cmp(&right.0));
@@ -151,11 +183,9 @@ fn tracked_replacement_runs_do_not_overprint_without_a_measured_face() {
     }
 }
 
-/// The single unwrapped line the fallback used to emit ran the paragraph off
-/// the page instead of breaking it.
 #[test]
-fn the_fallback_breaks_a_long_paragraph_into_column_wide_lines() {
-    let list = display_list_without_faces();
+fn fallback_breaks_a_long_paragraph_into_column_wide_lines() {
+    let list = display_list_without_faces(revision_paragraph(), CONTENT_WIDTH);
     let runs = text_runs(&list);
     let baselines: std::collections::BTreeSet<i64> = runs
         .iter()
@@ -163,16 +193,103 @@ fn the_fallback_breaks_a_long_paragraph_into_column_wide_lines() {
         .collect();
     assert!(
         baselines.len() > 1,
-        "a paragraph {} code units long must wrap inside a {CONTENT_WIDTH}px column, got one line",
-        utf16_len(INSERTED) + utf16_len(DELETED),
+        "a paragraph {} scalars long must wrap inside a {CONTENT_WIDTH}px column",
+        INSERTED.chars().count() + DELETED.chars().count(),
     );
 
     let right_edge = 96.0 + CONTENT_WIDTH;
     for (baseline, x, width, text) in &runs {
         assert!(
             x + width <= right_edge + 0.01,
-            "run {text:?} on baseline {baseline} ends at {} past the {right_edge}px column edge",
+            "run {text:?} on baseline {baseline} ends at {} past {right_edge}",
             x + width,
         );
     }
+}
+
+#[test]
+fn fallback_rejects_more_than_one_hundred_thousand_lines() {
+    docx_layout::clear_measure_fonts();
+    let paragraph = serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [{
+            "kind": "text",
+            "text": "a".repeat(100_001),
+            "fontSize": FONT_SIZE_PT
+        }]
+    });
+    let error = match measure_paragraph(paragraph, 1.0, &fallback_config()) {
+        Ok(extent) => panic!("expected line cap, got {} lines", extent.lines.len()),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("too many lines (> 100000)"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn astral_and_bmp_runs_use_the_same_utf16_unit() {
+    let paragraph = serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+            {
+                "kind": "text",
+                "text": "😀",
+                "pmStart": 1,
+                "pmEnd": 3,
+                "fontSize": FONT_SIZE_PT
+            },
+            {
+                "kind": "text",
+                "text": "a",
+                "pmStart": 3,
+                "pmEnd": 4,
+                "fontSize": FONT_SIZE_PT
+            }
+        ],
+        "pmStart": 0,
+        "pmEnd": 5
+    });
+    let list = display_list_without_faces(paragraph, 100.0);
+    let runs = text_runs(&list);
+    assert_eq!(runs.len(), 2);
+    assert!((runs[0].2 - ESTIMATED_ADVANCE * 2.0).abs() < 0.01);
+    assert!((runs[1].2 - ESTIMATED_ADVANCE).abs() < 0.01);
+    assert!((runs[1].1 - runs[0].1 - ESTIMATED_ADVANCE * 2.0).abs() < 0.01);
+}
+
+#[test]
+fn mixed_font_sizes_stay_close_to_a_registered_face_control() {
+    docx_layout::clear_measure_fonts();
+    let fallback = measure_paragraph(mixed_size_paragraph(), 120.0, &fallback_config())
+        .expect("fallback measures");
+    let fallback_runs = text_runs(&display_list_without_faces(mixed_size_paragraph(), 120.0));
+
+    docx_layout::clear_measure_fonts();
+    let font_id = docx_layout::register_measure_font(LIBERATION).expect("font registers");
+    let control_config: MeasurementConfig = serde_json::from_value(serde_json::json!({
+        "fontChains": { "liberation sans|0|0": [font_id] },
+        "defaults": { "fontSize": FONT_SIZE_PT, "fontFamily": "Liberation Sans" }
+    }))
+    .expect("config parses");
+    let control = measure_paragraph(mixed_size_paragraph(), 120.0, &control_config)
+        .expect("control measures");
+    docx_layout::clear_measure_fonts();
+
+    assert_eq!(control.lines.len(), 1);
+    assert_eq!(fallback.lines.len(), 2);
+    assert_eq!(fallback.lines[0].tail_run, 1);
+    assert_eq!(fallback.lines[0].tail_char, 9);
+    assert!((fallback.lines[0].width - 114.0).abs() < 0.01);
+    assert!(fallback.total_height <= control.total_height * 1.2);
+    assert_eq!(fallback_runs.len(), 3);
+    assert_eq!(fallback_runs[0].3, "X");
+    assert!((fallback_runs[0].2 - estimated_width("X", 72.0)).abs() < 0.01);
+    assert_eq!(fallback_runs[1].3, "iiiiiiiii");
+    assert!((fallback_runs[1].2 - estimated_width("iiiiiiiii", FONT_SIZE_PT)).abs() < 0.01);
+    assert_eq!(fallback_runs[2].3, "i");
+    assert!((fallback_runs[2].2 - ESTIMATED_ADVANCE).abs() < 0.01);
 }

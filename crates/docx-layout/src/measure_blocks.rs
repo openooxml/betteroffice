@@ -460,7 +460,7 @@ fn measure_paragraph_with_context(
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
     if !content_width.is_finite() || content_width <= 0.0 {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
+        return synthetic_paragraph_extent(paragraph, content_width);
     }
     let mut envelope = json!({
         "block": LayoutBlock::Paragraph(paragraph.clone()),
@@ -485,54 +485,67 @@ fn measure_paragraph_with_context(
         fields.insert("paragraphYOffset".to_owned(), json!(cumulative_y));
     }
     let Ok(extent) = crate::measure_paragraph_json_resident(&envelope.to_string()) else {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
+        return synthetic_paragraph_extent(paragraph, content_width);
     };
     serde_json::from_str(&extent)
         .map_err(|error| format!("parse paragraph extent: {error}"))
-        .or_else(|_| Ok(synthetic_paragraph_extent(paragraph, content_width)))
+        .or_else(|_| synthetic_paragraph_extent(paragraph, content_width))
 }
 
-/// Per-code-unit advance the fallback bills when no face is available.
 const SYNTHETIC_ADVANCE_EM: f64 = 0.5;
+const MAX_SYNTHETIC_LINES: usize = 100_000;
 
-/// Stand-in extent for a paragraph the measure engine refused (typically no
-/// registered face). It fills lines to `content_width` at a flat per-code-unit
-/// advance and reports each line's own estimated width, because the display
-/// list shares a line's width out over its runs: a line billed less than its
-/// own estimate hands every run a slot narrower than the text it holds, and the
-/// runs then paint over one another.
-fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) -> ParagraphExtent {
-    let mut font_size = paragraph
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.default_font_size)
-        .unwrap_or(11.0);
-    for run in &paragraph.runs {
-        let Run::Text(text) = run else {
-            continue;
-        };
-        if let Some(size) = text.fmt.font_size.filter(|size| size.is_finite()) {
-            font_size = font_size.max(size);
+fn valid_font_size(size: Option<f64>, fallback: f64) -> f64 {
+    size.filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(fallback)
+}
+
+fn synthetic_font_px(run: &crate::types::RunFormatting, default_font_size: f64) -> f64 {
+    let size = valid_font_size(run.font_size, default_font_size);
+    let script_scale = if run.superscript == Some(true) || run.subscript == Some(true) {
+        0.75
+    } else {
+        1.0
+    };
+    size * 96.0 / 72.0 * script_scale
+}
+
+fn synthetic_paragraph_extent(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+) -> Result<ParagraphExtent, String> {
+    let default_font_size = valid_font_size(
+        paragraph
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.default_font_size),
+        11.0,
+    );
+    let default_font_px = default_font_size * 96.0 / 72.0;
+    let resolved_line_font_px = |font_px: f64| {
+        if font_px > 0.0 {
+            font_px
+        } else {
+            default_font_px
         }
-    }
-    if !font_size.is_finite() || font_size <= 0.0 {
-        font_size = 11.0;
-    }
-    let font_size_px = font_size * 96.0 / 72.0;
-    let line_height = font_size_px * 1.15;
-    let advance = font_size_px * SYNTHETIC_ADVANCE_EM;
+    };
     let usable = (content_width.is_finite() && content_width > 0.0).then_some(content_width);
 
-    let row = |head_run: usize, head_char: usize, tail_run: usize, tail_char: usize, width: f64| {
+    let row = |head_run: usize,
+               head_char: usize,
+               tail_run: usize,
+               tail_char: usize,
+               width: f64,
+               font_px: f64| {
         crate::types::TypesetRow {
             head_run,
             head_char,
             tail_run,
             tail_char,
             width,
-            ascent: font_size_px * 0.8,
-            descent: font_size_px * 0.2,
-            line_height,
+            ascent: font_px * 0.8,
+            descent: font_px * 0.2,
+            line_height: font_px * 1.15,
             ..crate::types::TypesetRow::default()
         }
     };
@@ -541,23 +554,38 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
     let mut head_run = 0usize;
     let mut head_char = 0usize;
     let mut line_width = 0.0f64;
+    let mut line_font_px = 0.0f64;
     for (run_index, run) in paragraph.runs.iter().enumerate() {
         let Run::Text(text) = run else {
             continue;
         };
+        let font_px = synthetic_font_px(&text.fmt, default_font_size);
+        let advance = font_px * SYNTHETIC_ADVANCE_EM;
         let mut consumed = 0usize;
         for character in text.text.chars() {
             let units = character.len_utf16();
             let width = units as f64 * advance;
-            // A line always takes one character, or a character wider than the
-            // column would never place.
             if usable.is_some_and(|usable| line_width > 0.0 && line_width + width > usable) {
-                lines.push(row(head_run, head_char, run_index, consumed, line_width));
+                if lines.len() >= MAX_SYNTHETIC_LINES {
+                    return Err(format!(
+                        "UNSUPPORTED: too many lines (> {MAX_SYNTHETIC_LINES})"
+                    ));
+                }
+                lines.push(row(
+                    head_run,
+                    head_char,
+                    run_index,
+                    consumed,
+                    line_width,
+                    resolved_line_font_px(line_font_px),
+                ));
                 head_run = run_index;
                 head_char = consumed;
                 line_width = 0.0;
+                line_font_px = 0.0;
             }
             line_width += width;
+            line_font_px = line_font_px.max(font_px);
             consumed += units;
         }
     }
@@ -566,24 +594,31 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         Run::Text(text) => text.text.encode_utf16().count(),
         _ => 0,
     });
+    if lines.len() >= MAX_SYNTHETIC_LINES {
+        return Err(format!(
+            "UNSUPPORTED: too many lines (> {MAX_SYNTHETIC_LINES})"
+        ));
+    }
     lines.push(row(
         head_run,
         head_char,
         tail_run,
         tail_char,
         if usable.is_some() { line_width } else { 0.0 },
+        resolved_line_font_px(line_font_px),
     ));
 
     let spacing = paragraph
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref());
-    ParagraphExtent {
+    let line_height: f64 = lines.iter().map(|line| line.line_height).sum();
+    Ok(ParagraphExtent {
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
-            + line_height * lines.len() as f64
+            + line_height
             + spacing.and_then(|value| value.after).unwrap_or(0.0),
         lines,
-    }
+    })
 }
 
 fn extract_floating_zones(
