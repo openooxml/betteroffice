@@ -57,6 +57,11 @@ const TABLE = `<w:tbl>
 /** A break after visible text seeds a block-level `pageBreak` embed behind it. */
 const PAGE_BREAK = `<w:p><w:r><w:t>Beta</w:t><w:br w:type="page"/></w:r></w:p>`;
 
+const BLOCK_SDT = `<w:sdt>
+  <w:sdtPr><w:alias w:val="Control"/><w:tag w:val="control"/></w:sdtPr>
+  <w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent>
+</w:sdt>`;
+
 /** The pointer path: a display-list position to the yrs Loc typing inserts at. */
 function clickToLoc(session: YrsSession, projection: YrsPositionProjection, position: number) {
   const target = projection.targetAt(position);
@@ -78,6 +83,7 @@ describe('a body story carrying a block embed', () => {
   for (const [name, embed] of [
     ['table', TABLE],
     ['page break', PAGE_BREAK],
+    ['block content control', BLOCK_SDT],
   ] as const) {
     test(`types where the click landed after a ${name}`, async () => {
       const session = await createYrsSession({ clientId: 71001 });
@@ -101,6 +107,40 @@ describe('a body story carrying a block embed', () => {
       }
     });
   }
+
+  test('accumulates table, page, column, and block-SDT units before text', async () => {
+    const session = await createYrsSession({ clientId: 71003 });
+    try {
+      session.seedFromDocx(bodyDocx(''));
+      const bravo = session.paragraphs('body').find((entry) => entry.text === 'Bravo');
+      expect(bravo).toBeDefined();
+      const start = session.locateParagraph('body', bravo!.paraId).start;
+      session.createStory('body:sdt-regression', 'control');
+      session.applyRawOps('body', [
+        { op: 'insertEmbed', index: start, kind: 'table', payload: { grid: [], rows: [] } },
+        { op: 'insertEmbed', index: start + 1, kind: 'pageBreak' },
+        { op: 'insertEmbed', index: start + 2, kind: 'columnBreak' },
+        {
+          op: 'insertEmbed',
+          index: start + 3,
+          kind: 'blockSdt',
+          payload: { story: 'body:sdt-regression' },
+        },
+      ]);
+      const projection = new YrsPositionProjection(session, 'body');
+      const clicked = paragraphStart(projection, bravo!.paraId) + 4;
+      const loc = clickToLoc(session, projection, clicked);
+
+      expect(loc).toEqual({ story: 'body', paraId: bravo!.paraId, offset: 7 });
+      expect(projection.positionForLoc(loc!)).toBe(clicked);
+      session.insertText(loc!, 'X');
+      expect(session.paragraphs('body').find((entry) => entry.paraId === bravo!.paraId)?.text).toBe(
+        'BraXvo'
+      );
+    } finally {
+      session.destroy();
+    }
+  });
 
   test('round-trips every clickable position back to the position clicked', async () => {
     const session = await createYrsSession({ clientId: 71002 });
