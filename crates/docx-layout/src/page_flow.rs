@@ -146,8 +146,13 @@ impl Paginator {
         Ok(paginator)
     }
 
+    /// Sets ownership for future pages and the untouched current page.
     pub fn set_section_index(&mut self, section_index: usize) {
         self.section_index = section_index;
+        if let Some(idx) = self.pristine_page() {
+            let page_index = self.states[idx].page_index;
+            self.pages[page_index].region_section_index = section_index;
+        }
     }
 
     /// Snapshot the page-to-page state. This is sound as a resume bookmark
@@ -243,7 +248,6 @@ impl Paginator {
         self.pages[page_index].size = self.page_size.clone();
         self.pages[page_index].margins = self.margins.clone();
         self.pages[page_index].region_section_index = self.section_index;
-        // Immediate section changes must next call update_columns() to refresh page.columns and column_index.
         let state = &mut self.states[idx];
         state.pen_y = content_top;
         state.content_top = content_top;

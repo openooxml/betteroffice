@@ -7,8 +7,8 @@
 //!
 //! - `nextPage` applies the next section's page size and margins immediately,
 //!   then forces a page.
-//! - `evenPage` / `oddPage` do the same and then insert one blank page if the
-//!   forced break landed on the wrong parity.
+//! - `evenPage` / `oddPage` advance under the preceding section until reaching
+//!   the requested parity, then apply the next section's page geometry.
 //! - `continuous` keeps the current sheet and defers the new geometry to the
 //!   next natural page break — unless the page size changes, which Word and
 //!   LibreOffice promote to a page break because two page sizes cannot share
@@ -423,21 +423,21 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
         }
 
         SectionBreakType::EvenPage => {
-            paginator.update_page_layout(page_size, margins, true)?;
             let page_number = paginator.force_page_break();
             // If landed on odd page, add another page
             if page_number % 2 != 0 {
                 paginator.insert_blank_page();
             }
+            paginator.update_page_layout(page_size, margins, true)?;
         }
 
         SectionBreakType::OddPage => {
-            paginator.update_page_layout(page_size, margins, true)?;
             let page_number = paginator.force_page_break();
             // If landed on even page, add another page
             if page_number % 2 == 0 {
                 paginator.insert_blank_page();
             }
+            paginator.update_page_layout(page_size, margins, true)?;
         }
 
         SectionBreakType::Continuous => {
@@ -1480,6 +1480,109 @@ mod tests {
             .collect()
     }
 
+    fn parity_mismatch_layout(break_type: &str, leading: bool) -> crate::types::Layout {
+        let mut measured = Vec::new();
+        if !leading {
+            measured.push(measured_paragraph(0, 1));
+        }
+        measured.push(json!({
+            "block": {
+                "kind": "sectionBreak",
+                "id": 1,
+                "columns": {"count": 2, "gap": 24}
+            },
+            "measure": {"kind": "sectionBreak"}
+        }));
+        measured.push(measured_paragraph(2, 1));
+        let input = json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "bodyBreakType": break_type,
+                "columns": {"count": 3, "gap": 48},
+                "finalPageSize": {"w": 1056, "h": 816},
+                "finalMargins": {"top": 48, "right": 72, "bottom": 64, "left": 80}
+            }
+        });
+        crate::compute_layout(&input.to_string()).unwrap()
+    }
+
+    fn page_spine(layout: &crate::types::Layout) -> Vec<(u32, f64, f64, f64, f64, usize, usize)> {
+        layout
+            .pages
+            .iter()
+            .map(|page| {
+                let columns = page.columns.as_ref().unwrap_or(&SINGLE_COLUMN);
+                (
+                    page.number,
+                    page.size.w,
+                    page.size.h,
+                    columns.count,
+                    columns.gap,
+                    page.fragments.len(),
+                    page.region_section_index,
+                )
+            })
+            .collect()
+    }
+
+    fn distinct_section_furniture() -> crate::regions::DocumentRegions {
+        serde_json::from_value(json!({
+            "sections": [
+                {
+                    "sectionId": "old",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-old",
+                        "footerDefault": "footer-old"
+                    },
+                    "pageBorders": {"source": "old"},
+                    "watermark": {"source": "old"},
+                    "pageNumbering": {"start": 9}
+                },
+                {
+                    "sectionId": "new",
+                    "headerFooterRefs": {
+                        "headerDefault": "header-new",
+                        "footerDefault": "footer-new"
+                    },
+                    "pageBorders": {"source": "new"},
+                    "watermark": {"source": "new"},
+                    "pageNumbering": {"start": 3}
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn assert_section_furniture(
+        page: &crate::types::Page,
+        section_index: u64,
+        section_id: &str,
+        section_page_number: u64,
+    ) {
+        let refs = page.header_footer_refs.as_ref().unwrap();
+        assert_eq!(page.section_index, Some(section_index));
+        assert_eq!(page.section_id.as_deref(), Some(section_id));
+        assert_eq!(
+            refs.header_default.as_deref(),
+            Some(format!("header-{section_id}").as_str())
+        );
+        assert_eq!(
+            refs.footer_default.as_deref(),
+            Some(format!("footer-{section_id}").as_str())
+        );
+        assert_eq!(
+            page.page_borders.as_ref(),
+            Some(&json!({"source": section_id}))
+        );
+        assert_eq!(
+            page.watermark.as_ref(),
+            Some(&json!({"source": section_id}))
+        );
+        assert_eq!(page.section_page_number, Some(section_page_number));
+    }
+
     #[test]
     fn next_column_section_break_places_the_next_section_in_the_next_column() {
         let layout = layout_of(
@@ -1581,6 +1684,40 @@ mod tests {
         );
         assert_eq!(layout.pages.len(), 2);
         assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (2, 96.0, 96.0)]);
+    }
+
+    #[test]
+    fn leading_even_page_mismatch_preserves_the_filler_section() {
+        let mut layout = parity_mismatch_layout("evenPage", true);
+        assert_eq!(
+            page_spine(&layout),
+            vec![
+                (1, 816.0, 1056.0, 2.0, 24.0, 0, 0),
+                (2, 1056.0, 816.0, 3.0, 48.0, 1, 1),
+            ]
+        );
+
+        crate::regions::apply_document_regions(&mut layout, &distinct_section_furniture());
+        assert_section_furniture(&layout.pages[0], 0, "old", 9);
+        assert_section_furniture(&layout.pages[1], 1, "new", 3);
+    }
+
+    #[test]
+    fn odd_page_mismatch_preserves_the_filler_section() {
+        let mut layout = parity_mismatch_layout("oddPage", false);
+        assert_eq!(
+            page_spine(&layout),
+            vec![
+                (1, 816.0, 1056.0, 2.0, 24.0, 1, 0),
+                (2, 816.0, 1056.0, 2.0, 24.0, 0, 0),
+                (3, 1056.0, 816.0, 3.0, 48.0, 1, 1),
+            ]
+        );
+
+        crate::regions::apply_document_regions(&mut layout, &distinct_section_furniture());
+        assert_section_furniture(&layout.pages[0], 0, "old", 9);
+        assert_section_furniture(&layout.pages[1], 0, "old", 10);
+        assert_section_furniture(&layout.pages[2], 1, "new", 3);
     }
 
     #[test]

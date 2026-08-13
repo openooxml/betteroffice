@@ -647,9 +647,9 @@ fn place(
                     .get(section_idx + 1)
                     .cloned()
                     .unwrap_or_else(|| initial_config.clone());
-                paginator.set_section_index(section_idx + 1);
                 let opened_column_region =
                     hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
+                paginator.set_section_index(section_idx + 1);
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();
                 if opened_column_region
