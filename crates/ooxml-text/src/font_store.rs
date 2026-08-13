@@ -159,9 +159,8 @@ impl std::error::Error for FontError {}
 
 /// Design-space metrics extracted at registration time, in font units.
 ///
-/// Both the `hhea` and `OS/2` variants are kept because Word derives line
-/// height from `OS/2` usWinAscent/usWinDescent while typographic spacing
-/// uses the sTypo values — see [`crate::word_metrics`].
+/// Both the `hhea` and `OS/2` variants support the line-metric experiments in
+/// [`crate::word_metrics`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontMetrics {
     pub units_per_em: u16,
@@ -268,6 +267,20 @@ impl FontStore {
     /// Per-font design-space metrics captured at registration.
     pub fn metrics(&self, id: FontId) -> Result<&FontMetrics, FontError> {
         self.entry(id).map(|e| &e.metrics)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_metrics_for_test(
+        &mut self,
+        id: FontId,
+        metrics: FontMetrics,
+    ) -> Result<(), FontError> {
+        let entry = self
+            .fonts
+            .get_mut(id.0 as usize)
+            .ok_or(FontError::UnknownFont)?;
+        entry.metrics = metrics;
+        Ok(())
     }
 
     /// Raw bytes of a registered font (for shaping / outline extraction).

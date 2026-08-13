@@ -127,6 +127,12 @@ pub struct CompatIn {
     pub no_leading: bool,
     #[serde(default)]
     pub do_not_expand_shift_return: bool,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(super) gdi_line_metrics: bool,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(super) typo_line_spacing: bool,
 }
 
 /// One run. `kind` is an open string so unknown kinds parse and come back

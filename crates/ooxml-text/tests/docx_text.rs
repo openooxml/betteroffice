@@ -384,6 +384,26 @@ fn gdi_typo_flags() -> CompatFlags {
 }
 
 #[test]
+fn default_path_does_not_clamp_spec_valid_vertical_metrics() {
+    let metrics = FontMetrics {
+        units_per_em: 1024,
+        os2_win_ascent: 20_480,
+        os2_win_descent: 0,
+        ..synthetic_metrics()
+    };
+
+    assert_eq!(
+        single_line_box(&metrics, 16.0, &CompatFlags::default()),
+        LineBox {
+            ascent: 320.0,
+            descent: 0.0,
+            leading: 0.0,
+        }
+    );
+    assert_eq!(single_line_box(&metrics, 16.0, &gdi_flags()).ascent, 256.0);
+}
+
+#[test]
 fn the_two_line_metric_flags_are_independent() {
     let m = typo_metrics();
     // ppem quantization is a GDI property, USE_TYPO_METRICS a DirectWrite
@@ -510,15 +530,6 @@ fn typo_line_gap_stays_signed() {
     );
     let single = single_line_box(&tamil, 16.0, &gdi_typo_flags());
     assert_eq!(single.height(), 16.0);
-
-    // A negative leading makes `height < ascent + descent`, which rule 2's
-    // Auto branch does not expect. The line *pitch* it produces is right at
-    // every multiplier — that is what pagination reads — but how it splits
-    // ascent/descent at single spacing is an open question; see the report.
-    for (line_240ths, height) in [(240u32, 16.0), (480, 32.0), (120, 8.0)] {
-        let ruled = apply_spacing_rule(single, &LineSpacingRule::Auto { line_240ths });
-        assert_eq!(ruled.height(), height, "auto {line_240ths}");
-    }
 }
 
 #[test]
@@ -631,7 +642,7 @@ fn degenerate_sizes_yield_a_zero_box_on_both_paths() {
 }
 
 #[test]
-fn hostile_metrics_stay_bounded_and_non_negative() {
+fn experimental_metrics_stay_bounded_and_non_negative() {
     // a tiny em beside a huge win ascent: 65535 units at upem 16 is 4095 ems,
     // which unclamped turns a 16px font into a 65535px line box
     let tiny_em = FontMetrics {
@@ -643,7 +654,7 @@ fn hostile_metrics_stay_bounded_and_non_negative() {
         hhea_line_gap: i16::MAX,
         ..synthetic_metrics()
     };
-    for compat in [CompatFlags::default(), gdi_flags()] {
+    for compat in [gdi_flags(), typo_flags(), gdi_typo_flags()] {
         let line = single_line_box(&tiny_em, 16.0, &compat);
         for part in [line.ascent, line.descent, line.leading] {
             assert!(
@@ -654,9 +665,8 @@ fn hostile_metrics_stay_bounded_and_non_negative() {
         }
     }
 
-    // a finite size can still overflow a bounded design value, so the em
-    // size is capped on the float path too — not only the quantized one
-    for compat in [CompatFlags::default(), gdi_flags()] {
+    // a finite size can still overflow a bounded design value
+    for compat in [gdi_flags(), typo_flags(), gdi_typo_flags()] {
         for size_px in [1.0e30, f32::MAX] {
             let line = single_line_box(&tiny_em, size_px, &compat);
             for part in [line.ascent, line.descent, line.leading] {
@@ -725,6 +735,34 @@ fn auto_240_is_identity_and_480_doubles_height_into_leading() {
     assert_eq!(double.ascent, single.ascent);
     assert_eq!(double.descent, single.descent);
     assert_eq!(double.leading, 18.921875); // 36.796875 - 14.484375 - 3.390625
+}
+
+#[test]
+fn auto_240_preserves_negative_leading_exactly() {
+    let content = LineBox {
+        ascent: 12.0,
+        descent: 6.0,
+        leading: -2.0,
+    };
+
+    assert_eq!(
+        apply_spacing_rule(content, &LineSpacingRule::Auto { line_240ths: 240 }),
+        content
+    );
+
+    let double = apply_spacing_rule(content, &LineSpacingRule::Auto { line_240ths: 480 });
+    assert_eq!(
+        double,
+        LineBox {
+            ascent: 12.0,
+            descent: 6.0,
+            leading: 14.0,
+        }
+    );
+
+    let half = apply_spacing_rule(content, &LineSpacingRule::Auto { line_240ths: 120 });
+    assert_eq!(half.height(), 8.0);
+    assert_eq!(half.leading, 0.0);
 }
 
 #[test]
