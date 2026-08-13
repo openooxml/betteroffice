@@ -38,11 +38,15 @@
 //!   that undercut ascent+descent shrink ascent/descent proportionally.
 //! - `exact`: fixes the line box at the given height regardless of content —
 //!   taller glyphs are *clipped* (at render time; measurement never grows
-//!   the line). The baseline is placed preserving the content descent from
-//!   the bottom of the fixed box, matching Word: shrink eats the ascent
-//!   side first.
+//!   the line). The baseline sits at [`EXACT_BASELINE_RATIO`] of the box, a
+//!   constant depending on neither the font nor the size.
 //! - `atLeast`: a floor — the measured content height wins when larger;
-//!   when the floor wins, the extra space is leading below the descent.
+//!   when the floor wins the slack lands *above* the ascent, so the content
+//!   descent is preserved from the bottom of the box.
+//!
+//! Both fixed rules are measured against Word 16.112. Word quantizes to a
+//! 0.25pt device grid; this model is continuous, so an off-grid split differs
+//! from Word's raster by up to an eighth of a point.
 //!
 //! Both fixed rules interact with inline objects (images taller than an
 //! exact box also clip).
@@ -113,6 +117,10 @@ pub enum LineSpacingRule {
     AtLeast { px: f32 },
 }
 
+/// Fraction of an `exact` line box that sits above the baseline. Constant in
+/// Word — neither the font nor the size moves it.
+pub const EXACT_BASELINE_RATIO: f32 = 0.8;
+
 /// One line box in px: total height = ascent + descent + leading. Leading
 /// always sits *below* the descent, so the baseline hugs the top of the box.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -180,13 +188,18 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 ///   as Word places it (cursor/selection rects hug the text). If the target
 ///   undercuts ascent + descent (sub-single spacing), ascent and descent
 ///   shrink proportionally and leading is 0.
-/// - `Exact`: the box is fixed at `px` regardless of content; the baseline
-///   is placed so the content **descent is preserved bottom-up** (Word's
-///   behavior — shrinking eats the ascent side first) and clipping happens
-///   at render time. A box smaller than the descent clamps descent to the
-///   box and zeroes the ascent; leading is always 0.
+/// - `Exact`: the box is fixed at `px` regardless of content and split
+///   [`EXACT_BASELINE_RATIO`] above the baseline, the rest below. The split
+///   is a constant of Word's, not a property of the content, so the box
+///   ignores the font entirely; clipping happens at render time.
 /// - `AtLeast`: floor — the content box passes through when taller,
-///   otherwise the shortfall is added as leading below the descent.
+///   otherwise the slack goes *above* the ascent and the content descent is
+///   preserved from the bottom of the box.
+///
+/// `Exact` and a floor-active `AtLeast` leave no leading — `ascent + descent
+/// == px` exactly — so a consumer centering half-leading and one hanging the
+/// baseline off the box top agree. A content-winning `AtLeast` returns the
+/// content box untouched, natural leading included.
 pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     match *rule {
         LineSpacingRule::Auto { line_240ths } => {
@@ -209,10 +222,9 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
         }
         LineSpacingRule::Exact { px } => {
             let px = px.max(0.0);
-            let descent = content.descent.min(px);
             LineBox {
-                ascent: px - descent,
-                descent,
+                ascent: px * EXACT_BASELINE_RATIO,
+                descent: px - px * EXACT_BASELINE_RATIO,
                 leading: 0.0,
             }
         }
@@ -221,8 +233,9 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
                 content
             } else {
                 LineBox {
-                    leading: content.leading + (px - content.height()),
-                    ..content
+                    ascent: px - content.descent,
+                    descent: content.descent,
+                    leading: 0.0,
                 }
             }
         }
