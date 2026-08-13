@@ -24,8 +24,8 @@ use crate::package::{
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
-const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+pub(crate) const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+pub(crate) const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const NS_PKG_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -191,8 +191,10 @@ pub struct SaveEdits {
     /// the caller guarantees an untouched model, which is returned as the
     /// source bytes; true drops the now-stale calculation chain.
     pub changed: bool,
-    /// an edit moved cell addresses, so every preserved part naming them must
-    /// be one this crate can rewrite.
+    /// an edit moved cells a preserved part names but this crate cannot
+    /// rewrite. The caller resolves that against
+    /// [`PreservedPackage::unpatchable_references`], because only it knows
+    /// which edits were applied.
     pub moved_references: bool,
 }
 
@@ -653,39 +655,58 @@ fn preflight_preserved_save(
 }
 
 /// Charts, pivot caches and their friends name sheets and cells this crate
-/// never patches. Moving cells, or dropping, reordering or renaming a source
-/// sheet while one of them is preserved strands it, so the serializer refuses
-/// that here instead of trusting every caller to have checked.
+/// never patches. Dropping, reordering or renaming a sheet one of them names —
+/// or moving cells it names, which the caller reports — strands it, so the
+/// serializer refuses that here instead of trusting every caller to have
+/// checked. A sheet no preserved reference names moves freely.
 fn ensure_preserved_references_stay_valid(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
     edits: SaveEdits,
 ) -> Result<(), ParseError> {
-    let Some(part) = package.unpatchable_reference_part() else {
-        return Ok(());
+    let refused = |part: &str| {
+        ParseError::UnsupportedEdit(format!(
+            "{part} references sheets or cells this save would move, and it cannot be rewritten"
+        ))
     };
-    let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
-    let kept_in_order = retained.len() == package.sheets.len()
-        && retained
-            .iter()
-            .enumerate()
-            .all(|(position, origin)| *origin == position);
-    let renamed = origins.iter().zip(&wb.sheets).any(|(origin, sheet)| {
-        origin.is_some_and(|origin| {
-            package
-                .original_workbook
-                .sheets
-                .get(origin)
-                .is_some_and(|original| original.name != sheet.name)
-        })
-    });
-    if kept_in_order && !renamed && !edits.moved_references {
-        return Ok(());
+    if edits.moved_references
+        && let Some(part) = package.unpatchable_reference_part()
+    {
+        return Err(refused(part));
     }
-    Err(ParseError::UnsupportedEdit(format!(
-        "{part} references sheets or cells this save would move, and it cannot be rewritten"
-    )))
+    for name in displaced_source_sheets(wb, package, origins) {
+        if let Some(part) = package.reference_naming_sheet(&name) {
+            return Err(refused(part));
+        }
+    }
+    Ok(())
+}
+
+/// The names of the source sheets this save does not leave where and as they
+/// were: one that is gone, one whose rank among the survivors changed, one
+/// renamed.
+fn displaced_source_sheets(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Vec<String> {
+    let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
+    let mut ranked = retained.clone();
+    ranked.sort_unstable();
+    let mut displaced = Vec::new();
+    for (index, original) in package.original_workbook.sheets.iter().enumerate() {
+        let rank = retained.iter().position(|origin| *origin == index);
+        let kept_in_place = rank.is_some_and(|rank| ranked.get(rank) == Some(&index))
+            && origins
+                .iter()
+                .zip(&wb.sheets)
+                .any(|(origin, sheet)| *origin == Some(index) && sheet.name == original.name);
+        if !kept_in_place {
+            displaced.push(original.name.clone());
+        }
+    }
+    displaced
 }
 
 /// This crate patches chart parts in place; it can neither create one nor
