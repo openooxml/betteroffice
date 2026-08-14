@@ -430,11 +430,16 @@ async function importCjkAssetUrls(): Promise<Record<string, () => URL> | undefin
 
 /**
  * Asset URLs of the optional CJK add-on, or `undefined` when it is not
- * installed. Memoized including the miss, so an absent package costs one
- * failed import per session.
+ * installed. In-flight and successful imports are shared; misses are retried.
  */
 function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
-  cjkAssetUrls ??= importCjkAssetUrls();
+  if (cjkAssetUrls === undefined) {
+    const promise = importCjkAssetUrls();
+    promise.then((urls) => {
+      if (urls === undefined && cjkAssetUrls === promise) cjkAssetUrls = undefined;
+    });
+    cjkAssetUrls = promise;
+  }
   return cjkAssetUrls;
 }
 

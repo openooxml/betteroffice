@@ -27,7 +27,7 @@ afterAll(async () => {
 });
 
 describe('useRustMeasurement default fonts', () => {
-  test('retained source retries provider resolution after a transient load failure', async () => {
+  test('retries the same chain after a transient default-provider failure', async () => {
     let attempts = 0;
     configureDefaultFonts({
       load: () => {
@@ -54,12 +54,6 @@ describe('useRustMeasurement default fonts', () => {
       bold: false,
       italic: false,
     };
-    const bold: ResidentFontRequirement = {
-      key: 'bold',
-      family: 'Calibri',
-      bold: true,
-      italic: false,
-    };
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
 
     try {
@@ -78,8 +72,8 @@ describe('useRustMeasurement default fonts', () => {
 
       await waitFor(() => {
         const recovered: ResidentMeasurementConfig | null =
-          result.current.residentMeasurementConfig([bold]);
-        expect(recovered?.fontChains).toEqual({ bold: [1] });
+          result.current.residentMeasurementConfig([regular]);
+        expect(recovered?.fontChains).toEqual({ regular: [1] });
       });
       expect(new TextDecoder().decode(registered[0])).toBe('recovered-provider');
       expect(attempts).toBe(2);

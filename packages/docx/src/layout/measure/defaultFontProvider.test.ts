@@ -136,7 +136,7 @@ describe('default font provider', () => {
       const registry = new TextMeasureFontRegistry(sink, { bundled: resolveDefaultFontProvider });
 
       expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([]);
-      expect(await registry.getFontIdChain('Calibri', true, false)).toEqual([1]);
+      expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
       expect(new TextDecoder().decode(registered[0])).toBe('recovered-provider');
       expect(attempts).toBe(2);
     } finally {
