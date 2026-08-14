@@ -42,6 +42,20 @@
           "width": 624,
           "x": 420,
           "y": 96
+        },
+        {
+          "blockId": 3,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 400,
+          "kind": "paragraph",
+          "pmEnd": 69,
+          "pmStart": 50,
+          "toLine": 1,
+          "width": 624,
+          "x": 420,
+          "y": 496
         }
       ],
       "margins": {
@@ -65,20 +79,6 @@
       },
       "fragments": [
         {
-          "blockId": 3,
-          "carriedFromPrev": false,
-          "carriedToNext": false,
-          "fromLine": 0,
-          "height": 400,
-          "kind": "paragraph",
-          "pmEnd": 69,
-          "pmStart": 50,
-          "toLine": 1,
-          "width": 624,
-          "x": 96,
-          "y": 96
-        },
-        {
           "blockId": 4,
           "carriedFromPrev": false,
           "carriedToNext": false,
@@ -90,7 +90,7 @@
           "toLine": 1,
           "width": 624,
           "x": 96,
-          "y": 496
+          "y": 96
         },
         {
           "blockId": 5,
@@ -103,8 +103,8 @@
           "pmStart": 90,
           "toLine": 1,
           "width": 624,
-          "x": 468,
-          "y": 96
+          "x": 96,
+          "y": 496
         }
       ],
       "margins": {

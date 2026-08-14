@@ -57,6 +57,23 @@
           "toLine": 1,
           "width": 240,
           "x": 420
+        },
+        {
+          "baselineY": 816,
+          "blockId": 3,
+          "color": "#000000",
+          "docEnd": 68,
+          "docStart": 50,
+          "font": "400 14.667px Calibri, sans-serif",
+          "fragmentDocEnd": 69,
+          "fragmentDocStart": 50,
+          "fromLine": 0,
+          "kind": "text",
+          "lineIndex": 0,
+          "text": "Section two body 1",
+          "toLine": 1,
+          "width": 240,
+          "x": 420
         }
       ],
       "width": 816
@@ -87,23 +104,6 @@
       "primitives": [
         {
           "baselineY": 416,
-          "blockId": 3,
-          "color": "#000000",
-          "docEnd": 68,
-          "docStart": 50,
-          "font": "400 14.667px Calibri, sans-serif",
-          "fragmentDocEnd": 69,
-          "fragmentDocStart": 50,
-          "fromLine": 0,
-          "kind": "text",
-          "lineIndex": 0,
-          "text": "Section two body 1",
-          "toLine": 1,
-          "width": 240,
-          "x": 96
-        },
-        {
-          "baselineY": 816,
           "blockId": 4,
           "color": "#000000",
           "docEnd": 88,
@@ -120,7 +120,7 @@
           "x": 96
         },
         {
-          "baselineY": 416,
+          "baselineY": 816,
           "blockId": 5,
           "color": "#000000",
           "docEnd": 108,
@@ -134,7 +134,7 @@
           "text": "Section two body 3",
           "toLine": 1,
           "width": 240,
-          "x": 468
+          "x": 96
         }
       ],
       "width": 816

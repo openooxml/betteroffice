@@ -13,7 +13,8 @@
 //! A section break reads the *next* section's configuration and break type,
 //! falling back to the current break's when the plan has no successor. Column
 //! balancing runs over the range up to the next section break, both at the start
-//! of the document and after each break that opens multi-column geometry.
+//! of the document and after each break that opens multi-column geometry, except
+//! when that range ends with `nextColumn` and its successor needs the full band.
 //!
 //! Unknown block and run kinds raise `Unsupported` rather than being silently
 //! dropped, and a measure whose kind disagrees with its block raises `Invalid`.
@@ -483,6 +484,24 @@ struct PlacementOutcome {
     converged: Option<(LayoutCheckpoint, LayoutCheckpoint)>,
 }
 
+fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<SectionBreakType> {
+    plan.section_break_types
+        .get(section_index + 1)
+        .copied()
+        .flatten()
+        .or_else(|| {
+            plan.section_break_types
+                .get(section_index)
+                .copied()
+                .flatten()
+        })
+}
+
+fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> bool {
+    plan.break_indices.get(section_index).is_some()
+        && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
+}
+
 /// The block walk itself, per the module's ordering rules. Returns early once
 /// a checkpoint matches the retained layout, which is how incremental placement
 /// detects convergence.
@@ -504,6 +523,7 @@ fn place(
         .as_ref()
         .map_or(1.0, |columns| columns.count)
         > 1.0
+        && !section_ends_with_next_column(plan, section_idx)
     {
         hooks::balance_terminal_continuous_text_columns(
             measured,
@@ -636,12 +656,7 @@ fn place(
             LayoutBlock::SectionBreak(block) => {
                 // use the NEXT section's columns; for break type, prefer the
                 // next section's but fall back to the current break's
-                let next_type: Option<SectionBreakType> = plan
-                    .section_break_types
-                    .get(section_idx + 1)
-                    .copied()
-                    .flatten()
-                    .or_else(|| plan.section_break_types.get(section_idx).copied().flatten());
+                let next_type = break_type_after_section(plan, section_idx);
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
@@ -658,6 +673,7 @@ fn place(
                         .as_ref()
                         .map_or(1.0, |c| c.count)
                         > 1.0
+                    && !section_ends_with_next_column(plan, section_idx + 1)
                 {
                     hooks::balance_terminal_continuous_text_columns(
                         measured,

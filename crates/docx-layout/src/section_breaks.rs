@@ -25,11 +25,11 @@
 //! A section declaring no columns resolves to a single full-width column.
 //!
 //! The tracker half ([`SectionLayoutTracker`] and the `apply` / `promote` /
-//! `resolve_next_*` functions) models the same rules as a two-stage schedule:
-//! a break writes into `queued`, and a page or region boundary folds `queued`
-//! onto `in_force`. Every queued field is optional, and an omitted field
-//! inherits the in-force value at the boundary — that is how a `w:sectPr` that
-//! overrides only some geometry keeps the rest.
+//! `resolve_next_*` functions) is not wired into placement. It is a two-stage
+//! scheduling model, and its `nextColumn` arm neither promotes incompatible
+//! geometry nor opens the live column region. Its unit tests cover bookkeeping,
+//! not the behavior of [`handle_section_break`]; the two must be reconciled
+//! before the tracker gains a consumer.
 //!
 //! Rounding uses ties-toward-`+∞` and NaN-propagating maximum so the values
 //! reaching the canonical JSON match the host's numeric semantics.
@@ -1403,7 +1403,7 @@ mod tests {
 
     // ---- whole-spine placement -------------------------------------------
 
-    fn measured_paragraph(id: u32, lines: usize) -> Value {
+    fn measured_paragraph_with_line_height(id: u32, lines: usize, line_height: f64) -> Value {
         json!({
             "block": {
                 "kind": "paragraph",
@@ -1416,12 +1416,19 @@ mod tests {
                 "lines": (0..lines)
                     .map(|_| json!({
                         "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
-                        "width": 200, "ascent": 19.2, "descent": 4.8, "lineHeight": 24
+                        "width": 200,
+                        "ascent": line_height * 0.8,
+                        "descent": line_height * 0.2,
+                        "lineHeight": line_height
                     }))
                     .collect::<Vec<_>>(),
-                "totalHeight": lines as f64 * 24.0
+                "totalHeight": lines as f64 * line_height
             }
         })
+    }
+
+    fn measured_paragraph(id: u32, lines: usize) -> Value {
+        measured_paragraph_with_line_height(id, lines, 24.0)
     }
 
     /// Two sections split by one break on an 816x1056 page with 96 margins, so
@@ -1597,6 +1604,95 @@ mod tests {
         assert_eq!(placements(&layout), vec![(1, 96.0, 96.0), (1, 420.0, 96.0)]);
     }
 
+    #[test]
+    fn next_column_section_does_not_inherit_the_outgoing_balance_limit() {
+        let mut measured = vec![
+            measured_paragraph_with_line_height(0, 2, 100.0),
+            json!({
+                "block": {
+                    "kind": "sectionBreak",
+                    "id": 1,
+                    "columns": {"count": 2, "gap": 20}
+                },
+                "measure": {"kind": "sectionBreak"}
+            }),
+        ];
+        measured.extend((2..8).map(|id| measured_paragraph_with_line_height(id, 1, 100.0)));
+        let input = json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 800, "h": 1000},
+                "margins": {"top": 100, "right": 100, "bottom": 100, "left": 100},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 20}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 100.0, 100.0),
+                (1, 410.0, 100.0),
+                (1, 410.0, 200.0),
+                (1, 410.0, 300.0),
+                (1, 410.0, 400.0),
+                (1, 410.0, 500.0),
+                (1, 410.0, 600.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn later_next_column_section_does_not_inherit_the_outgoing_balance_limit() {
+        let mut measured = vec![
+            measured_paragraph_with_line_height(0, 1, 100.0),
+            json!({
+                "block": {
+                    "kind": "sectionBreak",
+                    "id": 1,
+                    "columns": {"count": 2, "gap": 20}
+                },
+                "measure": {"kind": "sectionBreak"}
+            }),
+            measured_paragraph_with_line_height(2, 2, 100.0),
+            json!({
+                "block": {
+                    "kind": "sectionBreak",
+                    "id": 3,
+                    "type": "nextPage",
+                    "columns": {"count": 2, "gap": 20}
+                },
+                "measure": {"kind": "sectionBreak"}
+            }),
+        ];
+        measured.extend((4..10).map(|id| measured_paragraph_with_line_height(id, 1, 100.0)));
+        let input = json!({
+            "measured": measured,
+            "options": {
+                "pageSize": {"w": 800, "h": 1000},
+                "margins": {"top": 100, "right": 100, "bottom": 100, "left": 100},
+                "bodyBreakType": "nextColumn",
+                "columns": {"count": 2, "gap": 20}
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 100.0, 100.0),
+                (2, 100.0, 100.0),
+                (2, 410.0, 100.0),
+                (2, 410.0, 200.0),
+                (2, 410.0, 300.0),
+                (2, 410.0, 400.0),
+                (2, 410.0, 500.0),
+                (2, 410.0, 600.0),
+            ]
+        );
+    }
+
     // A gap change keeps the count, so the section still starts in the next
     // column of the old band; the new gap only reaches the following page.
     #[test]
@@ -1606,7 +1702,7 @@ mod tests {
             Scenario {
                 first: Some(cols(2.0, 24.0)),
                 second: Some(cols(2.0, 120.0)),
-                tail_lines: 40,
+                tail_lines: 74,
                 ..Scenario::default()
             },
         );

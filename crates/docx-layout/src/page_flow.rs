@@ -222,9 +222,10 @@ impl Paginator {
             .unwrap_or(0.0)
     }
 
-    /// The current state, when nothing has been committed to its page. A
-    /// forced break has nothing to do there, and the page has not yet
-    /// committed to its geometry either.
+    /// The current state, when nothing has been committed to its page. Column
+    /// index is deliberately excluded: a standalone column break can leave a
+    /// fragment-free sheet for a following section break to reclaim. Callers
+    /// that require column zero check it separately.
     fn pristine_page(&self) -> Option<usize> {
         let idx = self.states.len().checked_sub(1)?;
         let state = &self.states[idx];
