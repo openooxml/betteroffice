@@ -96,11 +96,9 @@
 
 //!
 //! [`CompatFlags::gdi_line_metrics`] and [`CompatFlags::typo_line_spacing`]
-//! are independent, opt-in experiments — the first rounds ppem and metric
-//! components to whole pixels, the second selects version-4
-//! `USE_TYPO_METRICS` and keeps a signed `sTypoLineGap`. Both default to
-//! `false` and paragraph input cannot enable either: measurement against
-//! Word 16.112 rejected quantization in compatibility modes 14 and 15.
+//! are independent, opt-in experiments. GDI rounds ppem and components; typo
+//! spacing selects version-4 `USE_TYPO_METRICS` with a signed gap. Both remain
+//! unavailable to paragraph input because observed Word output did not quantize.
 
 use crate::font_store::FontMetrics;
 use crate::shape::ShapeFeature;
@@ -151,10 +149,9 @@ impl LineBox {
 
 /// Word single-spacing line box for a font at `size_px`.
 ///
-/// The default float path preserves every design metric. Opt-in experiment
-/// paths bound components to 16 ems. All paths reject degenerate inputs and
-/// cap line boxes at Word's 1638pt size limit. Glyph advances remain uncapped,
-/// so larger requests produce line boxes and advances at different scales.
+/// The default path preserves design metrics; experiments bound them to 16 ems.
+/// All paths reject degenerate inputs and cap line boxes at Word's 1638pt limit;
+/// glyph advances remain uncapped.
 pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> LineBox {
     if m.units_per_em == 0 || !size_px.is_finite() || size_px <= 0.0 {
         return LineBox {

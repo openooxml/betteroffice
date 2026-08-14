@@ -41,8 +41,8 @@ fn metrics_match_hand_computed_table_values() {
     assert_eq!(m.os2_typo_line_gap, 307);
     assert_eq!(m.os2_win_ascent, 1854);
     assert_eq!(m.os2_win_descent, 434);
-    assert_eq!(m.os2_fs_selection, 0x40); // REGULAR, USE_TYPO_METRICS clear
-    assert_eq!(m.os2_version, 3); // predates the bit-7 definition anyway
+    assert_eq!(m.os2_fs_selection, 0x40);
+    assert_eq!(m.os2_version, 3);
 }
 
 // hand-computed from cmap format-4 + hmtx: (char, glyph id, advance in font units)
@@ -324,17 +324,6 @@ fn no_leading_compat_flag_drops_external_leading_only() {
     );
 }
 
-// --- rules 1a/1b: GDI quantization and typographic line spacing --------------
-//
-// These build FontMetrics by hand rather than from a font file: upem 1000
-// makes a design unit a milli-em, so every expected pixel below is decimal
-// arithmetic anyone can redo, and the quantized outputs are whole numbers
-// (exact in f32, so assert_eq! is legitimate).
-//
-// The win family scales at 20px/ppem 20 to ascent 12.4, descent 3.4, leading
-// 1.4 — three values that each round DOWN while their sum, 17.2, rounds UP.
-// The typo family scales to 11.1 / 3.1 / 1.3, likewise.
-
 const USE_TYPO_METRICS: u16 = 0x0080;
 
 fn synthetic_metrics() -> FontMetrics {
@@ -353,7 +342,6 @@ fn synthetic_metrics() -> FontMetrics {
     }
 }
 
-/// Same font with `OS/2` fsSelection bit 7 set.
 fn typo_metrics() -> FontMetrics {
     FontMetrics {
         os2_fs_selection: USE_TYPO_METRICS,
@@ -406,9 +394,6 @@ fn default_path_does_not_clamp_spec_valid_vertical_metrics() {
 #[test]
 fn the_two_line_metric_flags_are_independent() {
     let m = typo_metrics();
-    // ppem quantization is a GDI property, USE_TYPO_METRICS a DirectWrite
-    // one; all four combinations must be reachable and distinct so a corpus
-    // A/B can attribute a delta to one of them
     let float_win = single_line_box(&m, 20.0, &CompatFlags::default());
     let float_typo = single_line_box(&m, 20.0, &typo_flags());
     let gdi_win = single_line_box(&m, 20.0, &gdi_flags());
@@ -432,16 +417,13 @@ fn gdi_metrics_round_each_component_before_summing() {
     assert_eq!(
         quantized,
         LineBox {
-            ascent: 12.0, // 620 * 20 / 1000 = 12.4
-            descent: 3.0, // 170 * 20 / 1000 = 3.4
-            leading: 1.0, // (620+170+70 - 790) * 20 / 1000 = 1.4
+            ascent: 12.0,
+            descent: 3.0,
+            leading: 1.0,
         }
     );
     assert_eq!(quantized.height(), 16.0);
 
-    // the same inputs down the float path: 17.2 px, and 17 px if a naive
-    // implementation rounded that sum instead of its parts. Three distinct
-    // answers — this test fails under either of the other two.
     let float = single_line_box(&m, 20.0, &CompatFlags::default());
     assert!((float.height() - 17.2).abs() < 1e-4, "{}", float.height());
     assert_eq!(float.height().round(), 17.0);
@@ -451,19 +433,16 @@ fn gdi_metrics_round_each_component_before_summing() {
 fn gdi_metrics_snap_the_em_size_to_an_integer_ppem_first() {
     let m = synthetic_metrics();
 
-    // 11pt = 14.666… px, which is measured at ppem 15
     let eleven_pt = single_line_box(&m, 11.0 * 96.0 / 72.0, &gdi_flags());
     assert_eq!(
         eleven_pt,
         LineBox {
-            ascent: 9.0,  // 620 * 15 / 1000 = 9.30
-            descent: 3.0, // 170 * 15 / 1000 = 2.55
-            leading: 1.0, // 70  * 15 / 1000 = 1.05
+            ascent: 9.0,
+            descent: 3.0,
+            leading: 1.0,
         }
     );
 
-    // every size sharing that ppem measures identically — the box is a
-    // function of the rounded em, not of the fractional request
     for size_px in [14.5, 14.9, 15.0, 15.49] {
         assert_eq!(
             single_line_box(&m, size_px, &gdi_flags()),
@@ -484,19 +463,16 @@ fn use_typo_metrics_bit_selects_the_typographic_family() {
     assert_eq!(
         single_line_box(&typo, 20.0, &gdi_typo_flags()),
         LineBox {
-            ascent: 11.0, // 555 * 20 / 1000 = 11.1
-            descent: 3.0, // 155 * 20 / 1000 = 3.1
-            leading: 1.0, // 65  * 20 / 1000 = 1.3
+            ascent: 11.0,
+            descent: 3.0,
+            leading: 1.0,
         }
     );
-    // a full pixel shorter than the win box the same font would get otherwise
     assert_eq!(
         single_line_box(&win, 20.0, &gdi_typo_flags()).height(),
         16.0
     );
 
-    // the family choice belongs to rule 1b alone: without that flag the bit
-    // is never consulted, quantized or not
     for compat in [CompatFlags::default(), gdi_flags()] {
         assert_eq!(
             single_line_box(&typo, 20.0, &compat),
@@ -507,10 +483,8 @@ fn use_typo_metrics_bit_selects_the_typographic_family() {
 
 #[test]
 fn typo_line_gap_stays_signed() {
-    // Tamil Sangam MN (macOS): upem 2048, OS/2 v4, fsSelection 0xC0,
-    // sTypoAscender 1550, sTypoDescender -717, sTypoLineGap -210. The
-    // negative gap sets lines tighter than ascent + descent, and clamping it
-    // to zero would measure this shipping font 2px tall at 12pt.
+    // A real macOS font has a negative typo gap; clamping it would incorrectly
+    // loosen its lines.
     let tamil = FontMetrics {
         units_per_em: 2048,
         os2_typo_ascender: 1550,
@@ -523,9 +497,9 @@ fn typo_line_gap_stays_signed() {
     assert_eq!(
         single_line_box(&tamil, 16.0, &gdi_typo_flags()),
         LineBox {
-            ascent: 12.0,  // 1550 * 16 / 2048 = 12.109375
-            descent: 6.0,  //  717 * 16 / 2048 =  5.6015625
-            leading: -2.0, // -210 * 16 / 2048 = -1.640625
+            ascent: 12.0,
+            descent: 6.0,
+            leading: -2.0,
         }
     );
     let single = single_line_box(&tamil, 16.0, &gdi_typo_flags());
@@ -534,7 +508,6 @@ fn typo_line_gap_stays_signed() {
 
 #[test]
 fn use_typo_metrics_is_ignored_before_os2_version_4() {
-    // bit 7 is reserved in OS/2 versions 0-3, so a set bit there says nothing
     for version in [0u16, 1, 2, 3] {
         let old = FontMetrics {
             os2_version: version,
@@ -566,17 +539,10 @@ fn use_typo_metrics_falls_back_when_the_typo_box_is_unusable() {
         );
     };
 
-    // the whole box is absent — a zero-height line is never the answer
     fallback(0, 0, 0, "absent");
-    // a positively-signed sTypoDescender: a real authoring mistake, and
-    // taking it at face value gives a line with no room for descenders
     fallback(555, 155, 0, "positive descender");
     fallback(555, 555, 0, "positive descender summing to zero");
-    // an implausible magnitude: 32768 units at upem 1000 is 32 ems of
-    // descent, so the box is not merely tall, it is wrong
     fallback(555, i16::MIN, 65, "descent past the design ceiling");
-    // an ascent the font forgot to fill in, padded out by a huge gap: the
-    // total is positive but there is nothing above the baseline
     fallback(-100, 155, 900, "non-positive ascent");
 }
 
@@ -596,8 +562,7 @@ fn gdi_no_leading_drops_the_leading_and_nothing_else() {
         }
     );
 
-    // dropping happens before quantization, so the 1.4px leading contributes
-    // exactly nothing rather than a rounded remainder
+    // Drop leading before quantization so no rounded remainder survives.
     let both = CompatFlags {
         no_leading: true,
         ..gdi_typo_flags()
@@ -616,8 +581,6 @@ fn degenerate_sizes_yield_a_zero_box_on_both_paths() {
         units_per_em: 0,
         ..synthetic_metrics()
     };
-    // +INFINITY is the one that used to slip through: it is neither NaN nor
-    // <= 0, and scaling by it produced an infinite line box
     let sizes = [
         f32::NAN,
         0.0,
@@ -634,8 +597,6 @@ fn degenerate_sizes_yield_a_zero_box_on_both_paths() {
         }
     }
 
-    // a positive but sub-pixel size still measures at ppem 1: small, never
-    // zero-height and never negative
     let tiny = single_line_box(&synthetic_metrics(), 0.2, &gdi_flags());
     assert_eq!(tiny.height(), 1.0);
     assert!(tiny.ascent >= 0.0 && tiny.descent >= 0.0 && tiny.leading >= 0.0);
@@ -643,8 +604,6 @@ fn degenerate_sizes_yield_a_zero_box_on_both_paths() {
 
 #[test]
 fn experimental_metrics_stay_bounded_and_non_negative() {
-    // a tiny em beside a huge win ascent: 65535 units at upem 16 is 4095 ems,
-    // which unclamped turns a 16px font into a 65535px line box
     let tiny_em = FontMetrics {
         units_per_em: 16,
         os2_win_ascent: u16::MAX,
@@ -658,20 +617,19 @@ fn experimental_metrics_stay_bounded_and_non_negative() {
         let line = single_line_box(&tiny_em, 16.0, &compat);
         for part in [line.ascent, line.descent, line.leading] {
             assert!(
-                (0.0..=256.0).contains(&part), // 16 ems at 16px
+                (0.0..=256.0).contains(&part),
                 "{part} / gdi={}",
                 compat.gdi_line_metrics
             );
         }
     }
 
-    // a finite size can still overflow a bounded design value
     for compat in [gdi_flags(), typo_flags(), gdi_typo_flags()] {
         for size_px in [1.0e30, f32::MAX] {
             let line = single_line_box(&tiny_em, size_px, &compat);
             for part in [line.ascent, line.descent, line.leading] {
                 assert!(
-                    part.is_finite() && (0.0..=34_944.0).contains(&part), // 16 ems at 2184px
+                    part.is_finite() && (0.0..=34_944.0).contains(&part),
                     "{part} at {size_px} / gdi={}",
                     compat.gdi_line_metrics
                 );
@@ -679,15 +637,13 @@ fn experimental_metrics_stay_bounded_and_non_negative() {
         }
     }
 
-    // an absurd but finite size caps at Word's own 1638pt ceiling (2184px),
-    // so every size past it measures identically
     let capped = single_line_box(&synthetic_metrics(), 2184.0, &gdi_flags());
     assert_eq!(
         capped,
         LineBox {
-            ascent: 1354.0, // 620 * 2184 / 1000 = 1354.08
-            descent: 371.0, // 170 * 2184 / 1000 = 371.28
-            leading: 153.0, // 70  * 2184 / 1000 = 152.88
+            ascent: 1354.0,
+            descent: 371.0,
+            leading: 153.0,
         }
     );
     for size_px in [1.0e9, f32::MAX] {
@@ -705,19 +661,16 @@ fn gdi_metrics_quantize_the_fixture_font_read_at_runtime() {
     let m = store.metrics(id).unwrap();
     assert!(!m.use_typo_metrics(), "Liberation Sans leaves bit 7 clear");
 
-    // 12pt = 16px, ppem 16, upem 2048
     let line = single_line_box(m, 16.0, &gdi_flags());
     assert_eq!(
         line,
         LineBox {
-            ascent: 14.0, // 1854 * 16 / 2048 = 14.484375
-            descent: 3.0, // 434  * 16 / 2048 = 3.390625
-            leading: 1.0, // 67   * 16 / 2048 = 0.5234375
+            ascent: 14.0,
+            descent: 3.0,
+            leading: 1.0,
         }
     );
     assert_eq!(line.height(), 18.0);
-    // shorter than the float box by the same amount on every line set in this
-    // font and size, which is how the error accumulates down a page
     assert_eq!(liberation_single_16px().height() - line.height(), 0.3984375);
 }
 
