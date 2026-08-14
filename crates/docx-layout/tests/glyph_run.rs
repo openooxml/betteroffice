@@ -235,6 +235,7 @@ fn falls_back_to_text_run_without_fonts() {
         out_fallback.contains(r#""kind":"text""#),
         "TextRunPrimitive emitted"
     );
+    assert!(!out_fallback.contains("syntheticFallback"));
 
     let no_chains = build_input("Hello world", 60.0, None, false, None);
     let out_without_chains = build_display_list_json(&no_chains).expect("builds");
@@ -259,6 +260,44 @@ fn unresolved_family_falls_back_per_run() {
         "unresolved family ⇒ no GlyphRun: {json}"
     );
     assert!(json.contains(r#""kind":"text""#));
+}
+
+#[test]
+fn synthetic_measurement_provenance_reaches_browser_text() {
+    let store = store_with_liberation();
+    let mut input: serde_json::Value =
+        serde_json::from_str(&build_input("wide", 16.0, None, false, Some(&[0]))).unwrap();
+    input["measured"][0]["block"]["runs"][0]["textShadow"] = serde_json::json!(true);
+
+    let registered_json =
+        build_display_list_json_with_fonts(&input.to_string(), &store).expect("builds");
+    let registered: DisplayList = serde_json::from_str(&registered_json).unwrap();
+    let registered_run = registered.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(run) => Some(run),
+            _ => None,
+        })
+        .expect("browser text run");
+    assert!(!registered_run.synthetic_fallback);
+    assert!(!registered_json.contains("syntheticFallback"));
+
+    input["measured"][0]["measure"]["lines"][0]["syntheticFallback"] = serde_json::json!(true);
+    let empty = FontStore::new();
+    let fallback_json =
+        build_display_list_json_with_fonts(&input.to_string(), &empty).expect("builds");
+    let fallback: DisplayList = serde_json::from_str(&fallback_json).unwrap();
+    let fallback_run = fallback.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(run) => Some(run),
+            _ => None,
+        })
+        .expect("synthetic text run");
+    assert!(fallback_run.synthetic_fallback);
+    assert!(fallback_json.contains(r#""syntheticFallback":true"#));
 }
 
 #[test]

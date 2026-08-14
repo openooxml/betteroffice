@@ -345,6 +345,8 @@ export interface TextRunPrimitive extends DocAttrs {
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run
+  /** Paint came from the no-face synthetic measurement fallback. */
+  syntheticFallback?: boolean;
   font: string;
   color: string;
   letterSpacing?: number;

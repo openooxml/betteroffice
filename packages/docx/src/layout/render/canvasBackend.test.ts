@@ -19,7 +19,8 @@ function textRun(
   x: number,
   width: number,
   family: string,
-  rtl: boolean = false
+  rtl: boolean = false,
+  syntheticFallback: boolean = false
 ): TextRunPrimitive {
   return {
     kind: 'text',
@@ -30,6 +31,7 @@ function textRun(
     font: `16px "${family}"`,
     color: '#000000',
     rtl,
+    syntheticFallback,
   };
 }
 
@@ -110,13 +112,28 @@ describe('Canvas text-run slot clipping', () => {
 
       await drawPrimitive(
         ctx,
-        textRun(probe.text, 0, slotWidth, probe.family, probe.rtl)
+        textRun(probe.text, 0, slotWidth, probe.family, probe.rtl, true)
       );
-      await drawPrimitive(ctx, textRun('next', slotWidth, 16, probe.family));
+      await drawPrimitive(
+        ctx,
+        textRun('next', slotWidth, 16, probe.family, false, true)
+      );
 
       expect(paints).toHaveLength(2);
       expect(paints[0].naturalRight).toBeGreaterThan(paints[1].left);
       expect(paints[0].right).toBeLessThanOrEqual(paints[1].left);
     }
+  });
+
+  it('leaves registered-face browser effects unclipped', async () => {
+    const { ctx, paints } = recordingContext(new Map([['wide', 64]]));
+    const run = textRun('wide', 0, 16, 'Liberation Sans');
+    run.textShadow = 'shadow';
+
+    await drawPrimitive(ctx, run);
+
+    expect(paints).toHaveLength(1);
+    expect(paints[0].right).toBe(paints[0].naturalRight);
+    expect(paints[0].right).toBeGreaterThan(run.width);
   });
 });

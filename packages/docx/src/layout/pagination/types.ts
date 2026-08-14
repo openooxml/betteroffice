@@ -1027,6 +1027,8 @@ export type TypesetRow = {
   descent: number;
   /** Total line height in pixels. */
   lineHeight: number;
+  /** Deterministic line geometry produced without a measurement face. */
+  syntheticFallback?: boolean;
   /** Left offset from floating images (pixels from content left edge). */
   leftOffset?: number;
   /** Right offset from floating images (pixels from content right edge). */

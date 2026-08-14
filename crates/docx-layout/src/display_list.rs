@@ -711,6 +711,9 @@ pub struct TextRunPrimitive {
     pub baseline_y: Number,
     /// measured advance of the whole run
     pub width: Number,
+    /// Paint came from the no-face synthetic measurement fallback.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub synthetic_fallback: bool,
     /// CSS font shorthand.
     pub font: String,
     pub color: String,
@@ -2587,6 +2590,8 @@ pub(crate) struct LineIn {
     #[serde(default)]
     line_height: f64,
     #[serde(default)]
+    synthetic_fallback: bool,
+    #[serde(default)]
     left_offset: Option<f64>,
     #[serde(default)]
     right_offset: Option<f64>,
@@ -3516,6 +3521,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         x: px(x),
         baseline_y: px(baseline),
         width: px(width),
+        synthetic_fallback: false,
         font,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
@@ -5457,6 +5463,7 @@ pub(crate) fn emit_paragraph_fragment(
             x: px(glyph_x),
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
+            synthetic_fallback: false,
             font: css_font(&RunFormattingIn::default()),
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
@@ -5846,6 +5853,7 @@ fn emit_line(
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
+            synthetic_fallback: false,
             font: css_font(&marker_format),
             color: color.to_owned(),
             letter_spacing: None,
@@ -6039,6 +6047,7 @@ fn emit_line(
                     item.source_start,
                     item.source_end,
                     item.exact_advance,
+                    line.synthetic_fallback,
                     geom.line_top,
                     line_bottom,
                     block_ref,
@@ -6157,6 +6166,7 @@ fn emit_line(
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
                 baseline_y: px(baseline),
                 width: px(0.0),
+                synthetic_fallback: false,
                 font: css_font(&RunFormattingIn::default()),
                 color: "#000000".to_string(),
                 letter_spacing: None,
@@ -6259,6 +6269,7 @@ fn emit_tab_leader(
             x: px(x),
             baseline_y: px(baseline),
             width: px(width),
+            synthetic_fallback: false,
             font: css_font(&fmt),
             color: run_color(&fmt),
             letter_spacing: None,
@@ -6333,6 +6344,7 @@ fn emit_text_segment(
     source_start: usize,
     source_end: usize,
     exact_advance: bool,
+    synthetic_fallback: bool,
     line_top: f64,
     line_bottom: f64,
     block_ref: &BlockRef,
@@ -6509,6 +6521,7 @@ fn emit_text_segment(
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
+            synthetic_fallback,
             font: css_font(fmt),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
@@ -7988,6 +8001,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 x: px(x),
                 baseline_y: px(baseline_y),
                 width: px(width),
+                synthetic_fallback: false,
                 font: font.css(),
                 color,
                 letter_spacing: None,

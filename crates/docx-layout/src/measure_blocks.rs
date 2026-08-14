@@ -611,6 +611,7 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
             ascent: font_px * 0.8,
             descent: font_px * 0.2,
             line_height,
+            synthetic_fallback: Some(true),
             ..crate::types::TypesetRow::default()
         }],
     }

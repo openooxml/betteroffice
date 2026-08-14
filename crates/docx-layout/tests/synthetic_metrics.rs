@@ -187,11 +187,12 @@ fn text_runs(list: &docx_layout::display_list::DisplayList) -> Vec<(f64, f64, f6
 
 #[test]
 fn tracked_replacement_runs_tile_without_a_measured_face() {
-    let runs = text_runs(&display_list_without_faces(
-        revision_paragraph(),
-        CONTENT_WIDTH,
-    ));
+    let list = display_list_without_faces(revision_paragraph(), CONTENT_WIDTH);
+    let runs = text_runs(&list);
     assert_eq!(runs.len(), 2);
+    assert!(list.pages[0].primitives.iter().all(|primitive| {
+        !matches!(primitive, Primitive::Text(run) if !run.synthetic_fallback)
+    }));
     assert!((runs[0].0 - runs[1].0).abs() < 0.01);
 
     for (_, _, width, text) in &runs {
