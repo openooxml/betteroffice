@@ -13,16 +13,12 @@
 //!   next natural page break — unless the page size changes, which Word and
 //!   LibreOffice promote to a page break because two page sizes cannot share
 //!   one physical sheet. Sizes are compared after rounding.
-//! - `nextColumn` continues in the column band already in force, deferring the
-//!   new geometry like `continuous`; from the last column it falls through to a
-//!   new page, which is also what a single-column section does. A section whose
-//!   page size or column *count* differs cannot share the band at all, so Word
-//!   promotes those to a page break.
+//! - `nextColumn` advances in the current band and defers geometry until the
+//!   next page. A spent band falls through to a new page; page-size or
+//!   column-count changes are promoted because they cannot share the sheet.
 //!
-//! Column layout is applied whenever a break opens a fresh column region, and
-//! queued for the next page otherwise — the `nextColumn` case that stayed
-//! inside its band, where Word keeps the old band to the end of the sheet.
-//! A section declaring no columns resolves to a single full-width column.
+//! New column geometry is applied at a fresh region and otherwise queued. An
+//! omitted column layout resolves to one full-width column.
 //!
 //! The tracker half ([`SectionLayoutTracker`] and the `apply` / `promote` /
 //! `resolve_next_*` functions) is not wired into placement. It is a two-stage
@@ -127,7 +123,6 @@ pub trait SectionBreakPaginator {
     fn insert_blank_page(&mut self) -> u32;
     /// Returns the current page size, creating the first page if needed.
     fn current_page_size(&mut self) -> Size;
-    /// Returns the column band in force.
     fn current_columns(&self) -> ColumnLayout;
     /// Updates the active columns.
     fn update_columns(&mut self, columns: &ColumnLayout);
@@ -222,9 +217,8 @@ pub fn create_section_layout_tracker(
 ///
 /// The tracker is never mutated in place, so a caller can discard the result.
 /// `nextPage` / `evenPage` / `oddPage` always break and queue their columns.
-/// `nextColumn` advances within the region in force and queues its columns for
-/// the boundary; whether it is instead promoted to a page break needs the live
-/// page geometry, so that call belongs to [`handle_section_break`]. A
+/// `nextColumn` queues and advances here; live-geometry promotion remains in
+/// [`handle_section_break`]. A
 /// `continuous` break opens a new column region on the current page only when
 /// its column count or gap differs from the columns in force; a section
 /// declaring no columns resolves to a single full-width column.
@@ -391,9 +385,8 @@ pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
 
 /// Drives the paginator through a section break, per the module rules.
 ///
-/// Returns whether the new section starts a fresh column region. That is true
-/// for every break kind except a `nextColumn` that continued inside the band in
-/// force, whose columns are queued for the next page rather than applied here.
+/// Returns whether the new section opened a fresh column region. A same-band
+/// `nextColumn` queues its columns and returns false.
 ///
 /// `next_section_config` and `next_section_type` describe the section being
 /// entered, not the one ending; the block itself carries no geometry the
@@ -458,14 +451,9 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
         }
 
         SectionBreakType::NextColumn => {
-            // The next section starts at the top of the next column, so it
-            // shares the sheet in progress — but only when it can. Word
-            // promotes the break to a page break when the section's page size
-            // or column count differs, because neither can change mid-sheet.
-            // Otherwise the geometry defers like `continuous` and the band in
-            // force carries the section into its next column; out of the last
-            // column, and so always in a single-column section, that advance
-            // falls through to a new page on its own.
+            // Page size and column count cannot change mid-sheet, so Word
+            // promotes incompatible breaks. Otherwise geometry is deferred as
+            // the current band advances, falling through when it is spent.
             let current_size = paginator.current_page_size();
             let incompatible = page_size_differs(&current_size, &next_section_config.page_size)
                 || next_columns.count != paginator.current_columns().count;
@@ -783,14 +771,10 @@ mod tests {
         assert_eq!(js_math_round(0.49999999999999994), 0.0);
     }
 
-    /// Where a `nextColumn` advance put the pen.
     #[derive(Debug, PartialEq)]
     enum ColumnLanding {
-        /// Placement already sat at the top of a pristine page.
         AlreadyFresh,
-        /// The next column of the band in force.
         SameRegion,
-        /// The band was spent, so a page opened.
         NewPage,
     }
 
@@ -827,10 +811,8 @@ mod tests {
         columns: ColumnLayout,
         pending_columns: Option<ColumnLayout>,
         column_index: usize,
-        /// Nothing placed on the page and the pen still at the content top.
         pristine: bool,
-        /// Geometry the current sheet was formed with, which is what the real
-        /// paginator reads back — not the globals above, which run ahead of it.
+        /// Geometry stamped on the current sheet, distinct from pending state.
         page: Size,
         page_margins_top: f64,
         calls: Vec<Call>,
@@ -868,8 +850,6 @@ mod tests {
             self.page_margins_top = self.margins_top;
         }
 
-        // mirrors Paginator::create_new_page, which promotes deferred geometry
-        // before the new page's size, margins and band are computed
         fn open_page(&mut self) {
             if let Some(size) = self.pending_page_size.take() {
                 self.page_size = size;
@@ -908,7 +888,6 @@ mod tests {
                 }
                 self.pending_page_size = None;
                 self.pending_margins_top = None;
-                // Paginator::update_page_layout re-forms an untouched sheet
                 if self.pristine {
                     self.stamp_page();
                 }
@@ -1048,8 +1027,7 @@ mod tests {
             apply_immediately: true,
         }));
 
-        // sb2: back to portrait — promoted again, the section having placed
-        // content, without which the second break would find page 2 pristine
+        // Give the second break content to break away from.
         paginator.pristine = false;
         handle_section_break(
             &empty_break(),
@@ -1239,7 +1217,6 @@ mod tests {
         assert!(!opened_region);
         assert_eq!(paginator.page_number, 1);
         assert_eq!(paginator.column_index, 1);
-        // the sheet in progress keeps the old gap; the new band is only queued
         assert_eq!(paginator.columns.gap, 24.0);
         assert_eq!(
             paginator.calls,
@@ -1341,8 +1318,6 @@ mod tests {
         );
     }
 
-    // Placement already at the top of an empty page has nowhere to advance to;
-    // force_page_break declines the same way, so neither leaves a blank sheet.
     #[test]
     fn next_column_break_on_a_pristine_page_adds_no_blank_page() {
         for columns in [cols(1.0, 0.0), cols(2.0, 24.0)] {
@@ -1359,9 +1334,6 @@ mod tests {
         }
     }
 
-    // A promoted break with nothing placed keeps landing on the same pristine
-    // sheet, which must end up carrying the geometry of the section that last
-    // claimed it rather than the one it was originally formed with.
     #[test]
     fn promoted_breaks_on_a_pristine_page_re_form_it() {
         let mut paginator = MockPaginator::new(PORTRAIT, 1);
@@ -1401,8 +1373,6 @@ mod tests {
         assert_eq!(result.tracker.queued.columns, Some(columns));
     }
 
-    // ---- whole-spine placement -------------------------------------------
-
     fn measured_paragraph_with_line_height(id: u32, lines: usize, line_height: f64) -> Value {
         json!({
             "block": {
@@ -1431,10 +1401,6 @@ mod tests {
         measured_paragraph_with_line_height(id, lines, 24.0)
     }
 
-    /// Two sections split by one break on an 816x1056 page with 96 margins, so
-    /// a `{count: 2, gap: 24}` band is two 300px columns at x 96 and x 420 and
-    /// a column holds 36 lines. `first` is the band the opening section runs
-    /// in; `second` is the `w:cols` the entering section declares.
     #[derive(Default)]
     struct Scenario {
         first: Option<ColumnLayout>,
@@ -1471,7 +1437,6 @@ mod tests {
         crate::compute_layout(&input.to_string()).unwrap()
     }
 
-    /// `(page number, x, y)` of every paragraph fragment, in placement order.
     fn placements(layout: &crate::types::Layout) -> Vec<(u32, f64, f64)> {
         layout
             .pages
@@ -1693,8 +1658,6 @@ mod tests {
         );
     }
 
-    // A gap change keeps the count, so the section still starts in the next
-    // column of the old band; the new gap only reaches the following page.
     #[test]
     fn next_column_section_break_defers_a_gap_change_to_the_next_page() {
         let layout = layout_of(
@@ -1707,7 +1670,6 @@ mod tests {
             },
         );
         assert_eq!(layout.pages.len(), 2);
-        // page 1 column 2 at the old gap's x; page 2 at the new gap's
         assert_eq!(
             placements(&layout),
             vec![
@@ -1836,8 +1798,6 @@ mod tests {
         assert_eq!(placements(&layout), vec![(1, 96.0, 96.0)]);
     }
 
-    // A promotion that finds the page pristine keeps that page, so the sheet
-    // has to report the geometry its content was actually laid out to.
     #[test]
     fn promoted_break_on_a_pristine_page_reports_the_geometry_it_laid_out_to() {
         let landscape = Size {

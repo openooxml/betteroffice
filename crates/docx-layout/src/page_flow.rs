@@ -23,10 +23,8 @@
 //! Columns live in a *region* starting at `column_region_top`. A new page
 //! resets that to the content top; [`Paginator::update_columns`] sets it to the
 //! current pen and returns to column zero, so a continuous section break stacks
-//! its new column band below content already on the page. Geometry a break
-//! cannot apply to the sheet in progress — page size, margins, or a column band
-//! a `nextColumn` section must wait out — is held as pending and applied when
-//! the next page is created.
+//! its new column band below content already on the page. Geometry that cannot
+//! change mid-sheet is deferred until the next page.
 
 use crate::LayoutError;
 use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
@@ -214,7 +212,6 @@ impl Paginator {
         self.margins.left + column_index as f64 * (self.column_width + self.columns.gap)
     }
 
-    /// Space this page's footnotes take out of its content area.
     fn footnote_reservation(&self, page_number: u32) -> f64 {
         self.footnote_reserved_heights
             .as_ref()
@@ -222,10 +219,8 @@ impl Paginator {
             .unwrap_or(0.0)
     }
 
-    /// The current state, when nothing has been committed to its page. Column
-    /// index is deliberately excluded: a standalone column break can leave a
-    /// fragment-free sheet for a following section break to reclaim. Callers
-    /// that require column zero check it separately.
+    /// Returns the untouched current page. Column index is excluded because a
+    /// standalone column break can leave a blank sheet for a section to reclaim.
     fn pristine_page(&self) -> Option<usize> {
         let idx = self.states.len().checked_sub(1)?;
         let state = &self.states[idx];
@@ -233,11 +228,8 @@ impl Paginator {
             .then_some(idx)
     }
 
-    /// Re-forms an untouched page around the geometry now in force. Without
-    /// this an immediate change that lands on a pristine page — a section
-    /// break promoted to a page break that then finds nothing to break away
-    /// from — would leave the sheet reporting the old size and content bounds
-    /// while its content is laid out to the new ones.
+    /// Re-forms a pristine page when a promoted break remains on the blank sheet.
+    /// Callers must next call `update_columns` to refresh its columns and index.
     fn restamp_pristine_page(&mut self) {
         let Some(idx) = self.pristine_page() else {
             return;
@@ -259,8 +251,6 @@ impl Paginator {
     /// Opens the next page, promoting any deferred geometry first, and returns
     /// its state index.
     fn create_new_page(&mut self) -> usize {
-        // apply any geometry a section break deferred before computing the new
-        // page's size / margins / columns
         if self.pending_page_size.is_some()
             || self.pending_margins.is_some()
             || self.pending_columns.is_some()

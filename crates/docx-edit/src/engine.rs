@@ -2103,8 +2103,6 @@ mod tests {
         assert_eq!(engine.stats().retained_pages, 1);
     }
 
-    // A `nextColumn` section start used to fail the request envelope outright,
-    // so the whole document never reached layout.
     #[test]
     fn region_layout_accepts_a_next_column_section_start() {
         let engine = EngineSession::new(132);
