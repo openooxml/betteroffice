@@ -3,12 +3,13 @@
 use docx_layout::display_list::Primitive;
 use docx_layout::measure_blocks::{MeasurementConfig, measure_blocks};
 use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, ParagraphExtent};
+use std::collections::BTreeMap;
 
 const CONTENT_WIDTH: f64 = 624.0;
 const FONT_SIZE_PT: f64 = 11.0;
 const FONT_SIZE_PX: f64 = FONT_SIZE_PT * 96.0 / 72.0;
-const ESTIMATED_ADVANCE: f64 = FONT_SIZE_PX * 0.5;
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+const NOTO_SANS_SC: &[u8] = include_bytes!("../../../packages/fonts/assets/NotoSansSC-Regular.otf");
 
 const INSERTED: &str = "Vielen Dank für Ihre Bestellung Nr. 4711. Wir freuen uns, Ihnen bestätigen zu können, dass wir Ihre Zahlung erhalten haben.";
 const DELETED: &str =
@@ -18,8 +19,8 @@ fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
-fn estimated_width(text: &str, font_size_pt: f64) -> f64 {
-    utf16_len(text) as f64 * font_size_pt * 96.0 / 72.0 * 0.5
+fn fallback_width(text: &str, font_size_pt: f64) -> f64 {
+    text.chars().count() as f64 * font_size_pt * 96.0 / 72.0
 }
 
 fn fallback_config() -> MeasurementConfig {
@@ -28,6 +29,20 @@ fn fallback_config() -> MeasurementConfig {
         defaults: serde_json::json!({
             "fontSize": FONT_SIZE_PT,
             "fontFamily": "Liberation Sans"
+        }),
+        compat: serde_json::Value::Null,
+        authoritative_shaping: true,
+    }
+}
+
+fn registered_config(family: &str, font_id: u32) -> MeasurementConfig {
+    let mut font_chains = BTreeMap::new();
+    font_chains.insert(format!("{}|0|0", family.to_lowercase()), vec![font_id]);
+    MeasurementConfig {
+        font_chains,
+        defaults: serde_json::json!({
+            "fontSize": FONT_SIZE_PT,
+            "fontFamily": family
         }),
         compat: serde_json::Value::Null,
         authoritative_shaping: true,
@@ -91,6 +106,23 @@ fn mixed_size_paragraph() -> serde_json::Value {
     })
 }
 
+fn cjk_paragraph(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [{
+            "kind": "text",
+            "text": text,
+            "fontFamily": "Noto Sans SC",
+            "fontSize": FONT_SIZE_PT
+        }],
+        "attrs": {
+            "defaultFontFamily": "Noto Sans SC",
+            "defaultFontSize": FONT_SIZE_PT
+        }
+    })
+}
+
 fn measure_paragraph(
     paragraph: serde_json::Value,
     width: f64,
@@ -103,6 +135,38 @@ fn measure_paragraph(
         Some(BlockExtent::Paragraph(extent)) => Ok(extent),
         _ => panic!("paragraph extent expected"),
     }
+}
+
+fn display_list(
+    paragraph: serde_json::Value,
+    width: f64,
+    config: &MeasurementConfig,
+) -> docx_layout::display_list::DisplayList {
+    let block: LayoutBlock = serde_json::from_value(paragraph).expect("block parses");
+    let mut blocks = vec![block];
+    let extents = measure_blocks(&mut blocks, width, config).expect("paragraph measures");
+    let mut input = Input {
+        measured: blocks
+            .into_iter()
+            .zip(extents)
+            .map(|(block, measure)| MeasuredBlock { block, measure })
+            .collect(),
+        options: serde_json::from_value(serde_json::json!({
+            "pageSize": { "w": width + 192.0, "h": 1056.0 },
+            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 }
+        }))
+        .expect("options parse"),
+    };
+    let layout = docx_layout::compute_layout_input(&mut input).expect("paginates");
+    docx_layout::build_display_list(&input, &layout).expect("display list builds")
+}
+
+fn display_list_without_faces(
+    paragraph: serde_json::Value,
+    width: f64,
+) -> docx_layout::display_list::DisplayList {
+    docx_layout::clear_measure_fonts();
+    display_list(paragraph, width, &fallback_config())
 }
 
 fn text_runs(list: &docx_layout::display_list::DisplayList) -> Vec<(f64, f64, f64, String)> {
@@ -121,131 +185,137 @@ fn text_runs(list: &docx_layout::display_list::DisplayList) -> Vec<(f64, f64, f6
         .collect()
 }
 
-fn display_list_without_faces(
-    paragraph: serde_json::Value,
-    width: f64,
-) -> docx_layout::display_list::DisplayList {
-    docx_layout::clear_measure_fonts();
-    let block: LayoutBlock = serde_json::from_value(paragraph).expect("block parses");
-    let mut blocks = vec![block];
-    let extents =
-        measure_blocks(&mut blocks, width, &fallback_config()).expect("fallback measures");
-    let mut input = Input {
-        measured: blocks
-            .into_iter()
-            .zip(extents)
-            .map(|(block, measure)| MeasuredBlock { block, measure })
-            .collect(),
-        options: serde_json::from_value(serde_json::json!({
-            "pageSize": { "w": width + 192.0, "h": 1056.0 },
-            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 }
-        }))
-        .expect("options parse"),
-    };
-    let layout = docx_layout::compute_layout_input(&mut input).expect("paginates");
-    docx_layout::build_display_list(&input, &layout).expect("display list builds")
-}
-
 #[test]
-fn tracked_replacement_runs_do_not_overprint_without_a_measured_face() {
-    let list = display_list_without_faces(revision_paragraph(), CONTENT_WIDTH);
-    let runs = text_runs(&list);
-    assert!(!runs.is_empty(), "the paragraph paints text");
+fn tracked_replacement_runs_tile_without_a_measured_face() {
+    let runs = text_runs(&display_list_without_faces(
+        revision_paragraph(),
+        CONTENT_WIDTH,
+    ));
+    assert_eq!(runs.len(), 2);
+    assert!((runs[0].0 - runs[1].0).abs() < 0.01);
 
-    for (baseline, x, width, text) in &runs {
-        let estimated = estimated_width(text, FONT_SIZE_PT);
+    for (_, _, width, text) in &runs {
+        let slot = fallback_width(text, FONT_SIZE_PT);
         assert!(
-            *width + 0.01 >= estimated,
-            "run {text:?} at ({x}, {baseline}) got a {width}px slot for {estimated}px of estimated text",
+            (*width - slot).abs() < 0.01,
+            "run {text:?} got a {width}px slot instead of {slot}px"
         );
     }
-
-    let mut by_baseline: std::collections::BTreeMap<i64, Vec<(f64, f64, String)>> =
-        Default::default();
-    for (baseline, x, _, text) in runs {
-        by_baseline
-            .entry((baseline * 100.0).round() as i64)
-            .or_default()
-            .push((x, estimated_width(&text, FONT_SIZE_PT), text));
-    }
-    for (baseline, mut row) in by_baseline {
-        row.sort_by(|left, right| left.0.total_cmp(&right.0));
-        for pair in row.windows(2) {
-            let (x, estimated, text) = &pair[0];
-            let (next_x, _, next_text) = &pair[1];
-            assert!(
-                x + estimated <= next_x + 0.01,
-                "on baseline {}: {text:?} spans [{x}, {}] and overprints {next_text:?} at {next_x}",
-                baseline as f64 / 100.0,
-                x + estimated,
-            );
-        }
-    }
+    assert!(runs[0].1 + runs[0].2 <= runs[1].1 + 0.01);
 }
 
 #[test]
-fn fallback_breaks_a_long_paragraph_into_column_wide_lines() {
-    let list = display_list_without_faces(revision_paragraph(), CONTENT_WIDTH);
-    let runs = text_runs(&list);
-    let baselines: std::collections::BTreeSet<i64> = runs
-        .iter()
-        .map(|(baseline, ..)| (baseline * 100.0).round() as i64)
-        .collect();
-    assert!(
-        baselines.len() > 1,
-        "a paragraph {} scalars long must wrap inside a {CONTENT_WIDTH}px column",
-        INSERTED.chars().count() + DELETED.chars().count(),
+fn conservative_slots_exceed_a_registered_face_control() {
+    docx_layout::clear_measure_fonts();
+    let fallback_extent = measure_paragraph(mixed_size_paragraph(), 120.0, &fallback_config())
+        .expect("fallback measures");
+    let fallback_runs = text_runs(&display_list(
+        mixed_size_paragraph(),
+        120.0,
+        &fallback_config(),
+    ));
+
+    let font_id = docx_layout::register_measure_font(LIBERATION).expect("font registers");
+    let control_config = registered_config("Liberation Sans", font_id);
+    let control_extent = measure_paragraph(mixed_size_paragraph(), 120.0, &control_config)
+        .expect("control measures");
+    let control_runs = text_runs(&display_list(
+        mixed_size_paragraph(),
+        120.0,
+        &control_config,
+    ));
+    docx_layout::clear_measure_fonts();
+
+    assert_eq!(fallback_extent.lines.len(), 1);
+    assert_eq!(control_extent.lines.len(), 1);
+    assert!(fallback_extent.lines[0].width > 120.0);
+    assert_eq!(fallback_runs.len(), 2);
+    assert_eq!(
+        control_runs
+            .iter()
+            .map(|run| run.3.as_str())
+            .collect::<String>(),
+        "Xiiiiiiiiii"
     );
-
-    let right_edge = 96.0 + CONTENT_WIDTH;
-    for (baseline, x, width, text) in &runs {
-        assert!(
-            x + width <= right_edge + 0.01,
-            "run {text:?} on baseline {baseline} ends at {} past {right_edge}",
-            x + width,
-        );
-    }
+    let control_x_width = control_runs[0].2;
+    let control_i_width: f64 = control_runs[1..].iter().map(|run| run.2).sum();
+    assert!(fallback_runs[0].2 + 0.01 >= control_x_width);
+    assert!(fallback_runs[1].2 + 0.01 >= control_i_width);
+    assert!(fallback_runs[0].1 + control_x_width <= fallback_runs[1].1 + 0.01);
 }
 
 #[test]
-fn fallback_rejects_more_than_one_hundred_thousand_lines() {
-    docx_layout::clear_measure_fonts();
+fn fallback_never_splits_grapheme_clusters() {
     let paragraph = serde_json::json!({
         "kind": "paragraph",
         "id": 0,
         "runs": [{
             "kind": "text",
-            "text": "a".repeat(100_001),
+            "text": "e\u{301}x",
+            "fontFamily": "Liberation Sans",
             "fontSize": FONT_SIZE_PT
         }]
     });
-    let error = match measure_paragraph(paragraph, 1.0, &fallback_config()) {
-        Ok(extent) => panic!("expected line cap, got {} lines", extent.lines.len()),
-        Err(error) => error,
-    };
-    assert!(
-        error.contains("too many lines (> 100000)"),
-        "unexpected error: {error}"
+    docx_layout::clear_measure_fonts();
+    let fallback =
+        measure_paragraph(paragraph.clone(), 8.5, &fallback_config()).expect("fallback measures");
+
+    let font_id = docx_layout::register_measure_font(LIBERATION).expect("font registers");
+    let control = measure_paragraph(
+        paragraph,
+        8.5,
+        &registered_config("Liberation Sans", font_id),
+    )
+    .expect("control measures");
+    docx_layout::clear_measure_fonts();
+
+    assert_eq!(fallback.lines.len(), 1);
+    assert_eq!(
+        (fallback.lines[0].head_char, fallback.lines[0].tail_char),
+        (0, 3)
     );
+    assert_eq!(control.lines.len(), 2);
+    assert_eq!(
+        (control.lines[0].head_char, control.lines[0].tail_char),
+        (0, 2)
+    );
+    assert_eq!(
+        (control.lines[1].head_char, control.lines[1].tail_char),
+        (2, 3)
+    );
+
+    let zwj = "👩‍👩‍👧‍👧x";
+    let zwj_fallback = measure_paragraph(
+        serde_json::json!({
+            "kind": "paragraph",
+            "id": 0,
+            "runs": [{ "kind": "text", "text": zwj, "fontSize": FONT_SIZE_PT }]
+        }),
+        8.5,
+        &fallback_config(),
+    )
+    .expect("ZWJ fallback measures");
+    assert_eq!(zwj_fallback.lines.len(), 1);
+    assert_eq!(zwj_fallback.lines[0].tail_char, utf16_len(zwj));
 }
 
 #[test]
-fn astral_and_bmp_runs_use_the_same_utf16_unit() {
+fn bmp_and_astral_scalars_receive_the_same_slot() {
     let paragraph = serde_json::json!({
         "kind": "paragraph",
         "id": 0,
         "runs": [
             {
                 "kind": "text",
-                "text": "😀",
+                "text": "中",
                 "pmStart": 1,
-                "pmEnd": 3,
+                "pmEnd": 2,
                 "fontSize": FONT_SIZE_PT
             },
             {
                 "kind": "text",
-                "text": "a",
-                "pmStart": 3,
+                "text": "𠀀",
+                "pmStart": 2,
                 "pmEnd": 4,
                 "fontSize": FONT_SIZE_PT
             }
@@ -253,43 +323,57 @@ fn astral_and_bmp_runs_use_the_same_utf16_unit() {
         "pmStart": 0,
         "pmEnd": 5
     });
-    let list = display_list_without_faces(paragraph, 100.0);
-    let runs = text_runs(&list);
+    let runs = text_runs(&display_list_without_faces(paragraph, 100.0));
     assert_eq!(runs.len(), 2);
-    assert!((runs[0].2 - ESTIMATED_ADVANCE * 2.0).abs() < 0.01);
-    assert!((runs[1].2 - ESTIMATED_ADVANCE).abs() < 0.01);
-    assert!((runs[1].1 - runs[0].1 - ESTIMATED_ADVANCE * 2.0).abs() < 0.01);
+    assert!((runs[0].2 - FONT_SIZE_PX).abs() < 0.01);
+    assert!((runs[1].2 - FONT_SIZE_PX).abs() < 0.01);
+    assert!((runs[1].1 - runs[0].1 - FONT_SIZE_PX).abs() < 0.01);
 }
 
 #[test]
-fn mixed_font_sizes_stay_close_to_a_registered_face_control() {
+fn cjk_fallback_stays_unwrapped_against_a_registered_face_control() {
+    let paragraph = cjk_paragraph("中中中中中中中中中中中中");
     docx_layout::clear_measure_fonts();
-    let fallback = measure_paragraph(mixed_size_paragraph(), 120.0, &fallback_config())
-        .expect("fallback measures");
-    let fallback_runs = text_runs(&display_list_without_faces(mixed_size_paragraph(), 120.0));
+    let fallback =
+        measure_paragraph(paragraph.clone(), 100.0, &fallback_config()).expect("fallback measures");
 
-    docx_layout::clear_measure_fonts();
-    let font_id = docx_layout::register_measure_font(LIBERATION).expect("font registers");
-    let control_config: MeasurementConfig = serde_json::from_value(serde_json::json!({
-        "fontChains": { "liberation sans|0|0": [font_id] },
-        "defaults": { "fontSize": FONT_SIZE_PT, "fontFamily": "Liberation Sans" }
-    }))
-    .expect("config parses");
-    let control = measure_paragraph(mixed_size_paragraph(), 120.0, &control_config)
-        .expect("control measures");
+    let font_id = docx_layout::register_measure_font(NOTO_SANS_SC).expect("font registers");
+    let control = measure_paragraph(
+        paragraph,
+        100.0,
+        &registered_config("Noto Sans SC", font_id),
+    )
+    .expect("control measures");
     docx_layout::clear_measure_fonts();
 
-    assert_eq!(control.lines.len(), 1);
-    assert_eq!(fallback.lines.len(), 2);
-    assert_eq!(fallback.lines[0].tail_run, 1);
-    assert_eq!(fallback.lines[0].tail_char, 9);
-    assert!((fallback.lines[0].width - 114.0).abs() < 0.01);
-    assert!(fallback.total_height <= control.total_height * 1.2);
-    assert_eq!(fallback_runs.len(), 3);
-    assert_eq!(fallback_runs[0].3, "X");
-    assert!((fallback_runs[0].2 - estimated_width("X", 72.0)).abs() < 0.01);
-    assert_eq!(fallback_runs[1].3, "iiiiiiiii");
-    assert!((fallback_runs[1].2 - estimated_width("iiiiiiiii", FONT_SIZE_PT)).abs() < 0.01);
-    assert_eq!(fallback_runs[2].3, "i");
-    assert!((fallback_runs[2].2 - ESTIMATED_ADVANCE).abs() < 0.01);
+    assert_eq!(fallback.lines.len(), 1);
+    assert!((fallback.lines[0].width - FONT_SIZE_PX * 12.0).abs() < 0.01);
+    assert_eq!(control.lines.len(), 2);
+    let control_width: f64 = control.lines.iter().map(|line| line.width).sum();
+    assert!((fallback.lines[0].width - control_width).abs() < 0.01);
+}
+
+#[test]
+fn indented_fallback_accepts_overflow_instead_of_guessing_wraps() {
+    let paragraph = serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [{
+            "kind": "text",
+            "text": "中中中中中中中中中中中中",
+            "fontSize": FONT_SIZE_PT
+        }],
+        "attrs": {
+            "defaultFontSize": FONT_SIZE_PT,
+            "indent": { "left": 20.0, "right": 20.0 },
+            "listMarker": "•"
+        }
+    });
+    docx_layout::clear_measure_fonts();
+    let fallback =
+        measure_paragraph(paragraph, 100.0, &fallback_config()).expect("fallback measures");
+
+    assert_eq!(fallback.lines.len(), 1);
+    assert!(fallback.lines[0].width > 100.0);
+    assert!(fallback.lines[0].width > 60.0);
 }
