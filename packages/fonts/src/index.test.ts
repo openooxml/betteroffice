@@ -63,6 +63,67 @@ describe('loading', () => {
     expect(a).toBe(b);
   });
 
+  test('pins a relative provider base to the route where it is created', async () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+    const realFetch = globalThis.fetch;
+    const face = resolveMetricCompatFace('Calibri', false, true)!;
+    const expected = await Bun.file(new URL(`../assets/${face.file}`, import.meta.url)).arrayBuffer();
+    let requested = '';
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: new URL('https://example.test/docs/team/report/'),
+    });
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        requested = String(input);
+        return new Response(expected);
+      }) as unknown as typeof fetch;
+      const provider = createFontProvider({ baseUrl: 'fonts/' });
+      Object.defineProperty(globalThis, 'location', {
+        configurable: true,
+        value: new URL('https://example.test/'),
+      });
+
+      const bytes = await provider.resolve('Calibri', false, true)!();
+
+      expect(requested).toBe(`https://example.test/docs/team/report/fonts/${face.file}`);
+      expect(bytes.byteLength).toBe(face.byteLength);
+    } finally {
+      globalThis.fetch = realFetch;
+      if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation);
+      else delete (globalThis as { location?: Location }).location;
+    }
+  });
+
+  test('explains that server-side provider bases must be absolute', () => {
+    expect(() => createFontProvider({ baseUrl: 'fonts/' })).toThrow(
+      'baseUrl must be absolute when no browser location exists'
+    );
+  });
+
+  test('rejects truncated assets and retries the evicted load', async () => {
+    const realFetch = globalThis.fetch;
+    const face = resolveMetricCompatFace('Calibri', true, true)!;
+    const intact = await Bun.file(new URL(`../assets/${face.file}`, import.meta.url)).arrayBuffer();
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts++;
+      return new Response(
+        attempts === 1 ? intact.slice(0, Math.floor(intact.byteLength / 2)) : intact
+      );
+    }) as unknown as typeof fetch;
+    try {
+      const options = { baseUrl: 'https://length-check.example/assets/' };
+      await expect(loadBundledFontBytes(face, options)).rejects.toThrow(
+        `expected ${face.byteLength}`
+      );
+      expect((await loadBundledFontBytes(face, options)).byteLength).toBe(face.byteLength);
+      expect(attempts).toBe(2);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   /**
    * Node's `fetch` does not implement `file:` — only Bun's does — so the
    * loader must read `file:` assets off disk. Stubbing `fetch` to throw is the
@@ -115,6 +176,15 @@ describe('published shape', () => {
     expect(cjk.length).toBeGreaterThan(0);
     for (const face of cjk) {
       expect(existsSync(new URL(`../assets/${face.file}`, import.meta.url))).toBe(false);
+    }
+  });
+
+  test('records the exact byte length of every vendored face', () => {
+    for (const face of BUNDLED_FONTS) {
+      const directory = face.script?.startsWith('cjk-') ? '../../fonts-cjk/assets/' : '../assets/';
+      expect(Bun.file(new URL(`${directory}${face.file}`, import.meta.url)).size).toBe(
+        face.byteLength
+      );
     }
   });
 });

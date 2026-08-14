@@ -116,12 +116,12 @@ export class TextMeasureFontRegistry {
   /** Memoized provider resolution, reset with the other registrations by `clear()`. */
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
   /**
-   * Whether this registry has already reported a synthetic-metrics fallback.
+   * Whether this registry has already reported a native-measurement fallback.
    * Scoped per registry rather than per module so two editors with different
    * providers each report their own state, and so one misconfigured editor is
    * not silenced by a healthy one.
    */
-  private warnedSynthetic = false;
+  private warnedFallback = false;
 
   /** Normalized family → embedded faces of the current document. */
   private facesByFamily = new Map<string, EmbeddedFaceInput[]>();
@@ -315,7 +315,11 @@ export class TextMeasureFontRegistry {
     }
 
     if (ids.length === 0) {
-      this.warnSynthetic(family, loader !== undefined || lastResort !== undefined);
+      this.warnFallback(
+        family,
+        bundled !== undefined,
+        loader !== undefined || lastResort !== undefined
+      );
     }
 
     // Only publish into the sync view if nothing invalidated us mid-flight.
@@ -324,28 +328,30 @@ export class TextMeasureFontRegistry {
   }
 
   /**
-   * An empty chain means the engine measures this family with synthetic
-   * metrics — plausible-looking output that paginates wrong. Silence is the
-   * worst failure mode here, so say it once (the first family; not per face,
-   * which would be one line per style of every family in the document).
+   * An empty chain makes the native engine return `UNSUPPORTED`; browser hosts
+   * then measure the block with `measureText`, which may consult OS fonts.
+   * Report this once for the first affected family rather than once per style.
    *
-   * A provider that resolved but yielded nothing gets a different message:
-   * telling someone who has installed the fonts to install them sends them
-   * hunting for the wrong problem. The usual cause is a bundler that inlined
-   * the package, which breaks the `import.meta.url` asset URLs.
+   * Distinguish a failed loader from a partial provider with no matching face,
+   * and both from an absent default package, so each audience gets applicable
+   * guidance.
    */
-  private warnSynthetic(family: string, providerResolved: boolean): void {
-    if (this.warnedSynthetic) return;
-    this.warnedSynthetic = true;
+  private warnFallback(family: string, providerResolved: boolean, loaderResolved: boolean): void {
+    if (this.warnedFallback) return;
+    this.warnedFallback = true;
+    const consequence =
+      'Native measurement is unsupported; browser hosts fall back to measureText and may use ' +
+      'different OS fonts, so pagination can vary. Reported once per registry.';
     console.warn(
-      providerResolved
+      loaderResolved
         ? `[fontRegistry] no font bytes for "${family}" — the font provider resolved but every ` +
-            'face failed to load, so pagination will not match Word. If a bundler inlined ' +
-            '@betteroffice/fonts, mark it external so its asset URLs resolve. Reported once; ' +
-            'other families are affected too.'
-        : `[fontRegistry] no font bytes for "${family}" — measuring with synthetic metrics, so ` +
-            'pagination will not match Word. Install @betteroffice/fonts, or pass your own ' +
-            'measurementFontProvider. Reported once; other families are affected too.'
+            `matching face failed to load. ${consequence} If a bundler inlined ` +
+            '@betteroffice/fonts, mark it external so its asset URLs resolve.'
+        : providerResolved
+          ? `[fontRegistry] no font bytes for "${family}" — the configured font provider has ` +
+            `no matching face. Add coverage for this family. ${consequence}`
+          : `[fontRegistry] no font bytes for "${family}" — no font provider resolved. Install ` +
+            `@betteroffice/fonts. ${consequence}`
     );
   }
 

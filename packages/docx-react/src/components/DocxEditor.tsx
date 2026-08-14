@@ -303,11 +303,14 @@ export interface DocxEditorProps {
    * Optional: with `@betteroffice/fonts` installed, core resolves it by
    * default through an optional dynamic import, so this prop is only needed to
    * override that with a custom byte source. Set it and the default is never
-   * loaded. With neither, families the document does not embed measure with
-   * deterministic synthetic metrics and pagination will not match Word.
+   * loaded. With neither, native measurement is unsupported and browser hosts
+   * fall back to `measureText` and OS fonts, so pagination can vary and will not
+   * match Word.
    *
    * To keep the default faces but serve them from a CDN, leave this unset and
-   * call `configureDefaultFonts({ baseUrl })` instead.
+   * call `configureDefaultFonts({ baseUrl })` at module initialization before
+   * any editor loads; it is process-global, resolved registries keep their
+   * provider, and it cannot select a different URL per editor or server tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }

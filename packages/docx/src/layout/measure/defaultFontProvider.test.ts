@@ -96,6 +96,93 @@ describe('default font provider', () => {
     expect(defaultLoaded).toBe(false);
   });
 
+  test('retries a failed default-provider load', async () => {
+    let attempts = 0;
+    configureDefaultFonts({
+      load: () => {
+        attempts++;
+        if (attempts === 1) return Promise.reject(new Error('transient import failure'));
+        return Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () => Promise.resolve(bytesOf('recovered-provider')),
+          }),
+        });
+      },
+    });
+
+    expect(await resolveDefaultFontProvider()).toBeUndefined();
+    const recovered = await resolveDefaultFontProvider();
+    expect(recovered).toBeDefined();
+    expect(await resolveDefaultFontProvider()).toBe(recovered);
+    expect(attempts).toBe(2);
+  });
+
+  test('lets a cleared registry recover from a transient provider-load failure', async () => {
+    let attempts = 0;
+    configureDefaultFonts({
+      load: () => {
+        attempts++;
+        if (attempts === 1) return Promise.reject(new Error('transient import failure'));
+        return Promise.resolve({
+          createFontProvider: () => ({
+            resolve: () => () => Promise.resolve(bytesOf('recovered-provider')),
+          }),
+        });
+      },
+    });
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { registered, sink } = recordingSink();
+      const registry = new TextMeasureFontRegistry(sink, { bundled: resolveDefaultFontProvider });
+
+      expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([]);
+      registry.clear();
+      expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+      expect(new TextDecoder().decode(registered[0])).toBe('recovered-provider');
+      expect(attempts).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('pins a relative base URL when it is configured', async () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+    let receivedBaseUrl: string | URL | undefined;
+    Object.defineProperty(globalThis, 'location', {
+      configurable: true,
+      value: new URL('https://example.test/docs/team/report/'),
+    });
+    try {
+      configureDefaultFonts({
+        baseUrl: 'fonts/',
+        load: () =>
+          Promise.resolve({
+            createFontProvider: (providerOptions?: { baseUrl?: string | URL }) => {
+              receivedBaseUrl = providerOptions?.baseUrl;
+              return { resolve: () => undefined };
+            },
+          }),
+      });
+      Object.defineProperty(globalThis, 'location', {
+        configurable: true,
+        value: new URL('https://example.test/'),
+      });
+
+      await resolveDefaultFontProvider();
+
+      expect(String(receivedBaseUrl)).toBe('https://example.test/docs/team/report/fonts/');
+    } finally {
+      if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation);
+      else delete (globalThis as { location?: Location }).location;
+    }
+  });
+
+  test('explains that server-side base URLs must be absolute', () => {
+    expect(() => configureDefaultFonts({ baseUrl: 'fonts/' })).toThrow(
+      'baseUrl must be absolute when no browser location exists'
+    );
+  });
+
   test('clear re-resolves a reconfigured default provider', async () => {
     configureDefaultFonts({
       load: () =>
@@ -137,11 +224,11 @@ describe('default font provider', () => {
       expect(await registry.getFontIdChain('Arial', false, true)).toEqual([]);
       expect(registered).toHaveLength(0);
 
-      const synthetic = warn.mock.calls.filter((call) =>
-        String(call[0]).includes('synthetic metrics')
-      );
-      expect(synthetic).toHaveLength(1);
-      expect(String(synthetic[0]![0])).toContain('@betteroffice/fonts');
+      const fallbacks = warn.mock.calls.filter((call) => String(call[0]).includes('no font bytes'));
+      expect(fallbacks).toHaveLength(1);
+      expect(String(fallbacks[0]![0])).toContain('Install @betteroffice/fonts');
+      expect(String(fallbacks[0]![0])).toContain('measureText');
+      expect(String(fallbacks[0]![0])).toContain('OS fonts');
     } finally {
       warn.mockRestore();
     }
@@ -165,12 +252,13 @@ describe('default font provider', () => {
 
       expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([]);
 
-      const synthetic = warn.mock.calls
+      const fallbacks = warn.mock.calls
         .map((call) => String(call[0]))
         .filter((line) => line.includes('no font bytes'));
-      expect(synthetic).toHaveLength(1);
-      expect(synthetic[0]).toContain('mark it external');
-      expect(synthetic[0]).not.toContain('Install @betteroffice/fonts');
+      expect(fallbacks).toHaveLength(1);
+      expect(fallbacks[0]).toContain('mark it external');
+      expect(fallbacks[0]).not.toContain('Install @betteroffice/fonts');
+      expect(fallbacks[0]).toContain('measureText');
     } finally {
       warn.mockRestore();
     }
@@ -189,12 +277,14 @@ describe('default font provider', () => {
 
       expect(await registry.getFontIdChain('Wingdings', false, false)).toEqual([]);
 
-      const synthetic = warn.mock.calls
+      const fallbacks = warn.mock.calls
         .map((call) => String(call[0]))
         .filter((line) => line.includes('no font bytes'));
-      expect(synthetic).toHaveLength(1);
-      expect(synthetic[0]).not.toContain('mark it external');
-      expect(synthetic[0]).toContain('synthetic metrics');
+      expect(fallbacks).toHaveLength(1);
+      expect(fallbacks[0]).not.toContain('mark it external');
+      expect(fallbacks[0]).not.toContain('pass your own measurementFontProvider');
+      expect(fallbacks[0]).toContain('configured font provider has no matching face');
+      expect(fallbacks[0]).toContain('OS fonts');
     } finally {
       warn.mockRestore();
     }
@@ -210,7 +300,7 @@ describe('default font provider', () => {
       await registry.getFontIdChain('Totally Unknown Face', false, false);
 
       expect(
-        warn.mock.calls.filter((call) => String(call[0]).includes('synthetic metrics'))
+        warn.mock.calls.filter((call) => String(call[0]).includes('no font bytes'))
       ).toHaveLength(0);
     } finally {
       warn.mockRestore();

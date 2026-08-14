@@ -17,6 +17,8 @@ export interface BundledFontFace {
   style: 'normal' | 'italic';
   /** Asset filename under this package's `assets/` directory. */
   file: string;
+  /** Exact byte length of the vendored raw sfnt asset. */
+  byteLength: number;
   /** Present on faces that serve as per-script coverage fallbacks. */
   script?: BundledFontScript;
 }
@@ -24,13 +26,42 @@ export interface BundledFontFace {
 function familyFaces(
   family: string,
   metricCompatWith: string,
-  fileBase: string
+  fileBase: string,
+  byteLengths: readonly [number, number, number, number]
 ): BundledFontFace[] {
   return [
-    { family, metricCompatWith, weight: 400, style: 'normal', file: `${fileBase}-Regular.ttf` },
-    { family, metricCompatWith, weight: 700, style: 'normal', file: `${fileBase}-Bold.ttf` },
-    { family, metricCompatWith, weight: 400, style: 'italic', file: `${fileBase}-Italic.ttf` },
-    { family, metricCompatWith, weight: 700, style: 'italic', file: `${fileBase}-BoldItalic.ttf` },
+    {
+      family,
+      metricCompatWith,
+      weight: 400,
+      style: 'normal',
+      file: `${fileBase}-Regular.ttf`,
+      byteLength: byteLengths[0],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 700,
+      style: 'normal',
+      file: `${fileBase}-Bold.ttf`,
+      byteLength: byteLengths[1],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 400,
+      style: 'italic',
+      file: `${fileBase}-Italic.ttf`,
+      byteLength: byteLengths[2],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 700,
+      style: 'italic',
+      file: `${fileBase}-BoldItalic.ttf`,
+      byteLength: byteLengths[3],
+    },
   ];
 }
 
@@ -43,11 +74,17 @@ function familyFaces(
  * earlier entries on ties, so the sans face of each script comes first.
  */
 export const BUNDLED_FONTS: BundledFontFace[] = [
-  ...familyFaces('Carlito', 'Calibri', 'Carlito'),
-  ...familyFaces('Caladea', 'Cambria', 'Caladea'),
-  ...familyFaces('Liberation Sans', 'Arial', 'LiberationSans'),
-  ...familyFaces('Liberation Serif', 'Times New Roman', 'LiberationSerif'),
-  ...familyFaces('Liberation Mono', 'Courier New', 'LiberationMono'),
+  ...familyFaces('Carlito', 'Calibri', 'Carlito', [628032, 682468, 615236, 808508]),
+  ...familyFaces('Caladea', 'Cambria', 'Caladea', [81600, 84492, 83780, 83356]),
+  ...familyFaces('Liberation Sans', 'Arial', 'LiberationSans', [
+    410712, 414456, 415816, 408996,
+  ]),
+  ...familyFaces('Liberation Serif', 'Times New Roman', 'LiberationSerif', [
+    393576, 370096, 375632, 376772,
+  ]),
+  ...familyFaces('Liberation Mono', 'Courier New', 'LiberationMono', [
+    319508, 307996, 281536, 284068,
+  ]),
 
   // RTL script fallbacks. No metricCompatWith: Hebrew/Arabic documents mostly
   // name Latin families (Arial, Times New Roman, ...) whose mapping stays with
@@ -57,6 +94,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansHebrew-Regular.ttf',
+    byteLength: 26860,
     script: 'hebrew',
   },
   {
@@ -64,6 +102,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 700,
     style: 'normal',
     file: 'NotoSansHebrew-Bold.ttf',
+    byteLength: 26860,
     script: 'hebrew',
   },
   {
@@ -71,6 +110,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansArabic-Regular.ttf',
+    byteLength: 234892,
     script: 'arabic',
   },
   {
@@ -78,6 +118,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 700,
     style: 'normal',
     file: 'NotoSansArabic-Bold.ttf',
+    byteLength: 261460,
     script: 'arabic',
   },
   {
@@ -85,6 +126,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoNaskhArabic-Regular.ttf',
+    byteLength: 247336,
     script: 'arabic',
   },
 
@@ -96,6 +138,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansSC-Regular.otf',
+    byteLength: 8331336,
     script: 'cjk-sc',
   },
   {
@@ -104,6 +147,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSerifSC-Regular.otf',
+    byteLength: 11625800,
     script: 'cjk-sc',
   },
   {
@@ -112,6 +156,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansTC-Regular.otf',
+    byteLength: 5683368,
     script: 'cjk-tc',
   },
   {
@@ -120,6 +165,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansJP-Regular.otf',
+    byteLength: 4533028,
     script: 'cjk-jp',
   },
   {
@@ -128,6 +174,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansKR-Regular.otf',
+    byteLength: 4644748,
     script: 'cjk-kr',
   },
 ];
@@ -359,8 +406,9 @@ export interface FontAssetOptions {
    * Serve the faces from here instead of this package's own assets. Same-origin
    * (the package's own assets) is the default on purpose: a CDN default would
    * leak document-font usage to a third party and break offline and strict-CSP
-   * deployments. A trailing slash is optional; a relative base resolves against
-   * the document.
+   * deployments. A trailing slash is optional. A relative base is resolved
+   * against the current document when the provider is created; outside a
+   * browser the base must be absolute.
    */
   baseUrl?: string | URL;
 }
@@ -395,11 +443,17 @@ function assetBase(baseUrl: string | URL): string {
   return href.endsWith('/') ? href : `${href}/`;
 }
 
-async function assetUrl(file: string, baseUrl: string | URL | undefined): Promise<URL> {
-  if (baseUrl !== undefined) {
-    const base = assetBase(baseUrl);
-    return new URL(file, typeof location === 'undefined' ? base : new URL(base, location.href));
+function resolvedAssetBase(baseUrl: string | URL): URL {
+  const base = assetBase(baseUrl);
+  try {
+    return typeof location === 'undefined' ? new URL(base) : new URL(base, location.href);
+  } catch {
+    throw new TypeError(`Font baseUrl must be absolute when no browser location exists: ${base}`);
   }
+}
+
+async function assetUrl(file: string, baseUrl: URL | undefined): Promise<URL> {
+  if (baseUrl !== undefined) return new URL(file, baseUrl);
   const local = FONT_ASSET_URLS[file];
   if (local) return local();
   const cjk = await loadCjkAssetUrls();
@@ -459,6 +513,15 @@ function readFileAsset(url: URL): ArrayBuffer | undefined {
 
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
+function validateByteLength(face: BundledFontFace, bytes: ArrayBuffer): ArrayBuffer {
+  if (bytes.byteLength !== face.byteLength) {
+    throw new Error(
+      `Bundled font ${face.file} has ${bytes.byteLength} bytes; expected ${face.byteLength}`
+    );
+  }
+  return bytes;
+}
+
 /**
  * Lazily fetch the raw sfnt bytes for a face. The fetch is same-origin by
  * default: the asset URL is derived with `new URL(..., import.meta.url)` so
@@ -474,17 +537,18 @@ export function loadBundledFontBytes(
   face: BundledFontFace,
   options?: FontAssetOptions
 ): Promise<ArrayBuffer> {
-  const key = `${options?.baseUrl === undefined ? '' : assetBase(options.baseUrl)}\n${face.file}`;
+  const baseUrl = options?.baseUrl === undefined ? undefined : resolvedAssetBase(options.baseUrl);
+  const key = `${baseUrl?.href ?? ''}\n${face.file}`;
   const cached = bytesCache.get(key);
   if (cached) return cached;
-  const promise = assetUrl(face.file, options?.baseUrl).then(async (url) => {
+  const promise = assetUrl(face.file, baseUrl).then(async (url) => {
     const onDisk = readFileAsset(url);
-    if (onDisk) return onDisk;
+    if (onDisk) return validateByteLength(face, onDisk);
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch bundled font ${face.file}: HTTP ${response.status}`);
     }
-    return response.arrayBuffer();
+    return validateByteLength(face, await response.arrayBuffer());
   });
   promise.catch(() => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);
@@ -564,7 +628,9 @@ export interface BundledFontSource {
  * Loaders are lazy: nothing is fetched until a document actually needs a face.
  */
 export function createFontProvider(options?: FontAssetOptions): BundledFontSource {
-  const load = (face: BundledFontFace) => () => loadBundledFontBytes(face, options);
+  const resolvedOptions =
+    options?.baseUrl === undefined ? undefined : { baseUrl: resolvedAssetBase(options.baseUrl) };
+  const load = (face: BundledFontFace) => () => loadBundledFontBytes(face, resolvedOptions);
   return {
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);

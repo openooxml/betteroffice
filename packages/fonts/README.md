@@ -26,7 +26,7 @@ That is the whole setup. `@betteroffice/docx` picks the package up through an op
 | `@betteroffice/fonts`     | 25    | 7.9 MB       | Latin metric-compatible set + Hebrew/Arabic  |
 | `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC         |
 
-Faces are fetched per face, lazily, so a typical English document pulls only Carlito Regular + Bold — about 1.25 MB raw, 547,603 bytes (535 KiB) at gzip -9.
+Faces are fetched per face, lazily. A typical English document using regular and bold Calibri pulls Carlito Regular + Bold plus the chain's always-appended Liberation Sans Regular + Bold: 2,135,668 bytes (2.04 MiB) raw.
 
 ## Metric-compatibility mapping (Latin)
 
@@ -88,7 +88,13 @@ configureDefaultFonts({ baseUrl: 'https://cdn.example.com/betteroffice-fonts/' }
 
 or by building the provider yourself with `createFontProvider({ baseUrl })`. The base URL is joined with each face's asset filename, so serve the contents of `assets/` at that path.
 
+`configureDefaultFonts` is process-global: call it at module initialization before any editor resolves fonts, not from `useEffect`; existing registries retain their provider, and a multi-tenant server cannot use it to choose different base URLs per tenant.
+
+A relative base URL is pinned to the current browser route when configuration or provider creation runs; outside a browser, the base URL must be absolute.
+
 **A base URL bypasses package resolution entirely, including the CJK add-on.** Every face — Latin, RTL and CJK alike — is then fetched from that one base, so if your documents contain CJK you must serve `@betteroffice/fonts-cjk`'s `assets/` from the same directory. Filenames do not collide, so copying both packages' `assets/` into one folder is enough.
+
+Every loaded asset is checked against the vendored manifest's exact decoded byte length. This detects truncation, not same-length tampering, so the configured origin still needs to be trusted.
 
 Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rather than woff2 (see above), and transport compression recovers most of the difference: the Latin set is 7,252 KB raw and 3,602 KB gzipped.
 
@@ -111,7 +117,7 @@ Measured with the peer **not** installed:
 
 Separately from the above, and **regardless of whether the CJK add-on is installed**: rollup and esbuild have no asset pipeline for `new URL('../assets/…', import.meta.url)`, which is how every face locates its binary. If they inline `@betteroffice/fonts` into your output, `import.meta.url` starts pointing at your bundle, `../assets/` misses, and **every font load fails** — while the provider itself still resolves.
 
-That half-working state is the worst of both worlds: pagination silently falls back to synthetic metrics, and the engine reports it as a missing package to someone who has installed it. Vite and Turbopack handle these URLs correctly and need nothing.
+That half-working state is the worst of both worlds: native measurement becomes unsupported, browser hosts fall back to `measureText` and OS fonts, and pagination can vary even though the package is installed. Vite and Turbopack handle these URLs correctly and need nothing.
 
 **Under rollup or esbuild, marking the font packages external is required for working font bytes — it is not cosmetic.**
 
@@ -134,7 +140,7 @@ For the engine edge specifically, `configureDefaultFonts({ load })` replaces the
 
 ## Deterministic resolution
 
-Measurement never consults OS-installed fonts. Font resolution is embedded document faces first, then the bundled metric-compatible substitutes, then the always-available last-resort base face — so the same document with the same provider measures identically on every machine.
+With the bundled provider available, measurement never consults OS-installed fonts. Font resolution is embedded document faces first, then the bundled metric-compatible substitutes, then the always-available last-resort base face — so the same document with the same provider measures identically on every machine.
 
 ## API
 

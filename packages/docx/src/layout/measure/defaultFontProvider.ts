@@ -11,7 +11,7 @@ type BundledFontsModule = typeof import('@betteroffice/fonts');
 
 /** @public */
 export interface DefaultFontOptions {
-  /** Serve bundled faces from this base URL instead of package assets. */
+  /** Serve faces from a base URL pinned when this configuration is applied. */
   baseUrl?: string | URL;
   /** Override loading of the optional `@betteroffice/fonts` peer. */
   load?: () => Promise<unknown>;
@@ -20,9 +20,22 @@ export interface DefaultFontOptions {
 let options: DefaultFontOptions = {};
 let resolved: Promise<BundledFontProvider | undefined> | undefined;
 
+function configuredBaseUrl(baseUrl: string | URL | undefined): URL | undefined {
+  if (baseUrl === undefined) return undefined;
+  const href = typeof baseUrl === 'string' ? baseUrl : baseUrl.href;
+  const locationHref = typeof location === 'undefined' ? undefined : location.href;
+  try {
+    return new URL(href, locationHref);
+  } catch {
+    throw new TypeError(
+      `configureDefaultFonts baseUrl must be absolute when no browser location exists: ${href}`
+    );
+  }
+}
+
 /** Configure the default provider and reset its memoized resolution. @public */
 export function configureDefaultFonts(next: DefaultFontOptions): void {
-  options = { ...next };
+  options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };
   resolved = undefined;
 }
 
@@ -41,6 +54,12 @@ async function load(): Promise<BundledFontProvider | undefined> {
 
 /** Resolve the bundled provider, or `undefined` when its optional peer is absent. @public */
 export function resolveDefaultFontProvider(): Promise<BundledFontProvider | undefined> {
-  resolved ??= load();
+  if (resolved === undefined) {
+    const promise = load();
+    promise.then((provider) => {
+      if (provider === undefined && resolved === promise) resolved = undefined;
+    });
+    resolved = promise;
+  }
   return resolved;
 }
