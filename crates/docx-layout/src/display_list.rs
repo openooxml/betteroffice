@@ -711,9 +711,9 @@ pub struct TextRunPrimitive {
     pub baseline_y: Number,
     /// measured advance of the whole run
     pub width: Number,
-    /// Paint came from the no-face synthetic measurement fallback.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub synthetic_fallback: bool,
+    /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_clip: Option<ClipRect>,
     /// CSS font shorthand.
     pub font: String,
     pub color: String,
@@ -771,6 +771,9 @@ pub struct GlyphRunPrimitive {
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
     pub glyphs: Vec<PlacedGlyph>,
+    /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_clip: Option<ClipRect>,
     /// extra advance added after each U+0020 cluster on a justified line (px) —
     /// equivalent to [`TextRunPrimitive::word_spacing`]; the glyph `x` positions
     /// already fold this stretch in, so it is an interchange hint, not
@@ -3521,7 +3524,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         x: px(x),
         baseline_y: px(baseline),
         width: px(width),
-        synthetic_fallback: false,
+        paint_clip: None,
         font,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
@@ -5463,7 +5466,7 @@ pub(crate) fn emit_paragraph_fragment(
             x: px(glyph_x),
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
-            synthetic_fallback: false,
+            paint_clip: None,
             font: css_font(&RunFormattingIn::default()),
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
@@ -5853,7 +5856,7 @@ fn emit_line(
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
-            synthetic_fallback: false,
+            paint_clip: None,
             font: css_font(&marker_format),
             color: color.to_owned(),
             letter_spacing: None,
@@ -6166,7 +6169,7 @@ fn emit_line(
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
                 baseline_y: px(baseline),
                 width: px(0.0),
-                synthetic_fallback: false,
+                paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
                 color: "#000000".to_string(),
                 letter_spacing: None,
@@ -6269,7 +6272,7 @@ fn emit_tab_leader(
             x: px(x),
             baseline_y: px(baseline),
             width: px(width),
-            synthetic_fallback: false,
+            paint_clip: None,
             font: css_font(&fmt),
             color: run_color(&fmt),
             letter_spacing: None,
@@ -6493,6 +6496,12 @@ fn emit_text_segment(
     }
 
     let color = run_color(fmt);
+    let paint_clip = synthetic_fallback.then(|| ClipRect {
+        x: Some(px(x)),
+        y: None,
+        w: Some(px(width)),
+        h: None,
+    });
     // Unresolved or failed shaping falls back to a text primitive.
     let emitted_glyphs = match shape {
         Some(sf) => try_emit_glyph_runs(
@@ -6510,6 +6519,7 @@ fn emit_text_segment(
             logical_order,
             &attrs,
             &color,
+            &paint_clip,
         ),
         None => false,
     };
@@ -6521,7 +6531,7 @@ fn emit_text_segment(
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
-            synthetic_fallback,
+            paint_clip,
             font: css_font(fmt),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
@@ -6658,6 +6668,7 @@ fn try_emit_glyph_runs(
     logical_order: Option<u64>,
     attrs: &DocAttrs,
     color: &str,
+    paint_clip: &Option<ClipRect>,
 ) -> bool {
     if text.is_empty() {
         return false;
@@ -6835,6 +6846,7 @@ fn try_emit_glyph_runs(
             color: color.to_string(),
             text: sub_text,
             glyphs: placed,
+            paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),
             rtl,
             opacity: None,
@@ -8001,7 +8013,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 x: px(x),
                 baseline_y: px(baseline_y),
                 width: px(width),
-                synthetic_fallback: false,
+                paint_clip: None,
                 font: font.css(),
                 color,
                 letter_spacing: None,

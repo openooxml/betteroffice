@@ -191,7 +191,7 @@ fn tracked_replacement_runs_tile_without_a_measured_face() {
     let runs = text_runs(&list);
     assert_eq!(runs.len(), 2);
     assert!(list.pages[0].primitives.iter().all(|primitive| {
-        !matches!(primitive, Primitive::Text(run) if !run.synthetic_fallback)
+        !matches!(primitive, Primitive::Text(run) if run.paint_clip.is_none())
     }));
     assert!((runs[0].0 - runs[1].0).abs() < 0.01);
 
@@ -203,6 +203,106 @@ fn tracked_replacement_runs_tile_without_a_measured_face() {
         );
     }
     assert!(runs[0].1 + runs[0].2 <= runs[1].1 + 0.01);
+}
+
+#[test]
+fn synthetic_line_clips_shaped_and_unresolved_runs_to_their_slots() {
+    docx_layout::clear_measure_fonts();
+    let font_id = docx_layout::register_measure_font(LIBERATION).expect("font registers");
+    let paragraph = serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+            {
+                "kind": "text",
+                "text": "@@@@@@@@@@@@@@@@@@@@",
+                "pmStart": 1,
+                "pmEnd": 21,
+                "fontFamily": "Liberation Sans",
+                "fontSize": 12.0
+            },
+            {
+                "kind": "text",
+                "text": "next",
+                "pmStart": 21,
+                "pmEnd": 25,
+                "fontFamily": "Unregistered Face",
+                "fontSize": 12.0
+            }
+        ],
+        "attrs": {
+            "defaultFontFamily": "Liberation Sans",
+            "defaultFontSize": 12.0
+        },
+        "pmStart": 0,
+        "pmEnd": 26
+    });
+    let block: LayoutBlock = serde_json::from_value(paragraph).expect("block parses");
+    let mut blocks = vec![block];
+    let extents = measure_blocks(
+        &mut blocks,
+        CONTENT_WIDTH,
+        &registered_config("Liberation Sans", font_id),
+    )
+    .expect("paragraph measures");
+    let BlockExtent::Paragraph(extent) = &extents[0] else {
+        panic!("paragraph extent expected");
+    };
+    assert_eq!(extent.lines[0].synthetic_fallback, Some(true));
+
+    let mut input = Input {
+        measured: blocks
+            .into_iter()
+            .zip(extents)
+            .map(|(block, measure)| MeasuredBlock { block, measure })
+            .collect(),
+        options: serde_json::from_value(serde_json::json!({
+            "pageSize": { "w": 816.0, "h": 1056.0 },
+            "margins": { "top": 96.0, "right": 96.0, "bottom": 96.0, "left": 96.0 }
+        }))
+        .expect("options parse"),
+    };
+    let layout = docx_layout::compute_layout_input(&mut input).expect("paginates");
+    let extras = serde_json::json!({
+        "fontChains": { "liberation sans|0|0": [font_id] }
+    })
+    .to_string();
+    let list = docx_layout::build_display_list_value_from_resident(&input, &layout, &extras)
+        .expect("display list builds");
+    docx_layout::clear_measure_fonts();
+
+    let glyph_run = list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::GlyphRun(run) if run.text.starts_with('@') => Some(run),
+            _ => None,
+        })
+        .expect("registered run shapes");
+    let text_run = list.pages[0]
+        .primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Text(run) if run.text == "next" => Some(run),
+            _ => None,
+        })
+        .expect("unregistered run stays browser text");
+    let glyph_clip = glyph_run.paint_clip.as_ref().expect("glyph slot clip");
+    let text_clip = text_run.paint_clip.as_ref().expect("text slot clip");
+    let glyph_clip_right = glyph_clip.x.as_ref().unwrap().as_f64().unwrap()
+        + glyph_clip.w.as_ref().unwrap().as_f64().unwrap();
+    let shaped_right = glyph_run
+        .glyphs
+        .iter()
+        .map(|glyph| glyph.x + glyph.advance)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    assert!(shaped_right > glyph_clip_right);
+    assert!((glyph_clip_right - text_run.x.as_f64().unwrap()).abs() < 0.01);
+    assert_eq!(glyph_clip.y, None);
+    assert_eq!(glyph_clip.h, None);
+    assert_eq!(text_clip.y, None);
+    assert_eq!(text_clip.h, None);
 }
 
 #[test]

@@ -235,7 +235,7 @@ fn falls_back_to_text_run_without_fonts() {
         out_fallback.contains(r#""kind":"text""#),
         "TextRunPrimitive emitted"
     );
-    assert!(!out_fallback.contains("syntheticFallback"));
+    assert!(!out_fallback.contains("paintClip"));
 
     let no_chains = build_input("Hello world", 60.0, None, false, None);
     let out_without_chains = build_display_list_json(&no_chains).expect("builds");
@@ -263,7 +263,7 @@ fn unresolved_family_falls_back_per_run() {
 }
 
 #[test]
-fn synthetic_measurement_provenance_reaches_browser_text() {
+fn synthetic_measurement_emits_a_horizontal_paint_clip() {
     let store = store_with_liberation();
     let mut input: serde_json::Value =
         serde_json::from_str(&build_input("wide", 16.0, None, false, Some(&[0]))).unwrap();
@@ -280,8 +280,8 @@ fn synthetic_measurement_provenance_reaches_browser_text() {
             _ => None,
         })
         .expect("browser text run");
-    assert!(!registered_run.synthetic_fallback);
-    assert!(!registered_json.contains("syntheticFallback"));
+    assert!(registered_run.paint_clip.is_none());
+    assert!(!registered_json.contains("paintClip"));
 
     input["measured"][0]["measure"]["lines"][0]["syntheticFallback"] = serde_json::json!(true);
     let empty = FontStore::new();
@@ -296,8 +296,12 @@ fn synthetic_measurement_provenance_reaches_browser_text() {
             _ => None,
         })
         .expect("synthetic text run");
-    assert!(fallback_run.synthetic_fallback);
-    assert!(fallback_json.contains(r#""syntheticFallback":true"#));
+    let clip = fallback_run.paint_clip.as_ref().expect("paint clip");
+    assert_eq!(clip.x, Some(fallback_run.x.clone()));
+    assert_eq!(clip.w, Some(fallback_run.width.clone()));
+    assert_eq!(clip.y, None);
+    assert_eq!(clip.h, None);
+    assert!(fallback_json.contains(r#""paintClip":{"x":"#));
 }
 
 #[test]
