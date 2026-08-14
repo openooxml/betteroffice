@@ -3,14 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import type { BundledFontProvider } from "@betteroffice/docx-react";
 import { CollaborationProvider } from "@betteroffice/docx/collaboration";
-import {
-  loadBundledFontBytes,
-  resolveLastResortFace,
-  resolveMetricCompatFace,
-  resolveScriptFallbackFace,
-} from "@betteroffice/docx-fonts";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
@@ -57,24 +50,6 @@ export function DocxDemoClient() {
     COLLAB_RELAY_ORIGIN,
     room,
     createProvider,
-  );
-  // Bundled metric-compatible faces (Carlito↔Calibri, Liberation↔Arial, …) so
-  // the Rust measurement engine gets real bytes for documents that embed none.
-  const measurementFontProvider = useMemo<BundledFontProvider>(
-    () => ({
-      resolve(family, bold, italic) {
-        const face = resolveMetricCompatFace(family, bold, italic);
-        return face ? () => loadBundledFontBytes(face) : undefined;
-      },
-      resolveScriptFallback(script, bold, italic) {
-        const face = resolveScriptFallbackFace(script, bold, italic);
-        return face ? () => loadBundledFontBytes(face) : undefined;
-      },
-      resolveLastResort(family, bold, italic) {
-        return () => loadBundledFontBytes(resolveLastResortFace(family, bold, italic));
-      },
-    }),
-    []
   );
   const [error, setError] = useState<string | null>(null);
 
@@ -221,7 +196,6 @@ export function DocxDemoClient() {
             key={source.id}
             documentBuffer={source.buffer}
             collaboration={collaboration}
-            measurementFontProvider={measurementFontProvider}
             documentName={source.name}
             onOpen={handleOpen}
             onError={(cause) => setError(cause.message)}

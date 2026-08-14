@@ -1,7 +1,7 @@
 //! Integration tests against Liberation Sans Regular 2.1.5 (SIL OFL 1.1).
 
 use ooxml_text::{
-    BaseDirection, BreakOpportunity, CompatFlags, FontStore, LineBox, LineSpacingRule,
+    BaseDirection, BreakOpportunity, CompatFlags, FontMetrics, FontStore, LineBox, LineSpacingRule,
     ShapeDirection, ShapeFeature, apply_spacing_rule, bidi_paragraphs, break_opportunities,
     kern_enabled, kern_features, line_is_justified, shape, shape_with_direction, single_line_box,
     stretch_spaces,
@@ -41,6 +41,8 @@ fn metrics_match_hand_computed_table_values() {
     assert_eq!(m.os2_typo_line_gap, 307);
     assert_eq!(m.os2_win_ascent, 1854);
     assert_eq!(m.os2_win_descent, 434);
+    assert_eq!(m.os2_fs_selection, 0x40);
+    assert_eq!(m.os2_version, 3);
 }
 
 // hand-computed from cmap format-4 + hmtx: (char, glyph id, advance in font units)
@@ -322,6 +324,356 @@ fn no_leading_compat_flag_drops_external_leading_only() {
     );
 }
 
+const USE_TYPO_METRICS: u16 = 0x0080;
+
+fn synthetic_metrics() -> FontMetrics {
+    FontMetrics {
+        units_per_em: 1000,
+        hhea_ascender: 620,
+        hhea_descender: -170,
+        hhea_line_gap: 70,
+        os2_typo_ascender: 555,
+        os2_typo_descender: -155,
+        os2_typo_line_gap: 65,
+        os2_win_ascent: 620,
+        os2_win_descent: 170,
+        os2_fs_selection: 0,
+        os2_version: 4,
+    }
+}
+
+fn typo_metrics() -> FontMetrics {
+    FontMetrics {
+        os2_fs_selection: USE_TYPO_METRICS,
+        ..synthetic_metrics()
+    }
+}
+
+fn gdi_flags() -> CompatFlags {
+    CompatFlags {
+        gdi_line_metrics: true,
+        ..CompatFlags::default()
+    }
+}
+
+fn typo_flags() -> CompatFlags {
+    CompatFlags {
+        typo_line_spacing: true,
+        ..CompatFlags::default()
+    }
+}
+
+fn gdi_typo_flags() -> CompatFlags {
+    CompatFlags {
+        gdi_line_metrics: true,
+        typo_line_spacing: true,
+        ..CompatFlags::default()
+    }
+}
+
+#[test]
+fn default_path_does_not_clamp_spec_valid_vertical_metrics() {
+    let metrics = FontMetrics {
+        units_per_em: 1024,
+        os2_win_ascent: 20_480,
+        os2_win_descent: 0,
+        ..synthetic_metrics()
+    };
+
+    assert_eq!(
+        single_line_box(&metrics, 16.0, &CompatFlags::default()),
+        LineBox {
+            ascent: 320.0,
+            descent: 0.0,
+            leading: 0.0,
+        }
+    );
+    assert_eq!(single_line_box(&metrics, 16.0, &gdi_flags()).ascent, 256.0);
+}
+
+#[test]
+fn the_two_line_metric_flags_are_independent() {
+    let m = typo_metrics();
+    let float_win = single_line_box(&m, 20.0, &CompatFlags::default());
+    let float_typo = single_line_box(&m, 20.0, &typo_flags());
+    let gdi_win = single_line_box(&m, 20.0, &gdi_flags());
+    let gdi_typo = single_line_box(&m, 20.0, &gdi_typo_flags());
+
+    assert!((float_win.height() - 17.2).abs() < 1e-4, "{float_win:?}");
+    assert!((float_typo.height() - 15.5).abs() < 1e-4, "{float_typo:?}");
+    assert_eq!(gdi_win.height(), 16.0);
+    assert_eq!(gdi_typo.height(), 15.0);
+}
+
+#[test]
+fn gdi_metrics_round_each_component_before_summing() {
+    let m = synthetic_metrics();
+    assert!(
+        !CompatFlags::default().gdi_line_metrics,
+        "quantization is opt-in; the float path stays the default"
+    );
+
+    let quantized = single_line_box(&m, 20.0, &gdi_flags());
+    assert_eq!(
+        quantized,
+        LineBox {
+            ascent: 12.0,
+            descent: 3.0,
+            leading: 1.0,
+        }
+    );
+    assert_eq!(quantized.height(), 16.0);
+
+    let float = single_line_box(&m, 20.0, &CompatFlags::default());
+    assert!((float.height() - 17.2).abs() < 1e-4, "{}", float.height());
+    assert_eq!(float.height().round(), 17.0);
+}
+
+#[test]
+fn gdi_metrics_snap_the_em_size_to_an_integer_ppem_first() {
+    let m = synthetic_metrics();
+
+    let eleven_pt = single_line_box(&m, 11.0 * 96.0 / 72.0, &gdi_flags());
+    assert_eq!(
+        eleven_pt,
+        LineBox {
+            ascent: 9.0,
+            descent: 3.0,
+            leading: 1.0,
+        }
+    );
+
+    for size_px in [14.5, 14.9, 15.0, 15.49] {
+        assert_eq!(
+            single_line_box(&m, size_px, &gdi_flags()),
+            eleven_pt,
+            "{size_px}"
+        );
+    }
+    assert_ne!(single_line_box(&m, 15.5, &gdi_flags()), eleven_pt);
+}
+
+#[test]
+fn use_typo_metrics_bit_selects_the_typographic_family() {
+    let win = synthetic_metrics();
+    let typo = typo_metrics();
+    assert!(!win.use_typo_metrics());
+    assert!(typo.use_typo_metrics());
+
+    assert_eq!(
+        single_line_box(&typo, 20.0, &gdi_typo_flags()),
+        LineBox {
+            ascent: 11.0,
+            descent: 3.0,
+            leading: 1.0,
+        }
+    );
+    assert_eq!(
+        single_line_box(&win, 20.0, &gdi_typo_flags()).height(),
+        16.0
+    );
+
+    for compat in [CompatFlags::default(), gdi_flags()] {
+        assert_eq!(
+            single_line_box(&typo, 20.0, &compat),
+            single_line_box(&win, 20.0, &compat)
+        );
+    }
+}
+
+#[test]
+fn typo_line_gap_stays_signed() {
+    // A real macOS font has a negative typo gap; clamping it would incorrectly
+    // loosen its lines.
+    let tamil = FontMetrics {
+        units_per_em: 2048,
+        os2_typo_ascender: 1550,
+        os2_typo_descender: -717,
+        os2_typo_line_gap: -210,
+        os2_fs_selection: 0xC0,
+        os2_version: 4,
+        ..synthetic_metrics()
+    };
+    assert_eq!(
+        single_line_box(&tamil, 16.0, &gdi_typo_flags()),
+        LineBox {
+            ascent: 12.0,
+            descent: 6.0,
+            leading: -2.0,
+        }
+    );
+    let single = single_line_box(&tamil, 16.0, &gdi_typo_flags());
+    assert_eq!(single.height(), 16.0);
+}
+
+#[test]
+fn use_typo_metrics_is_ignored_before_os2_version_4() {
+    for version in [0u16, 1, 2, 3] {
+        let old = FontMetrics {
+            os2_version: version,
+            ..typo_metrics()
+        };
+        assert!(!old.use_typo_metrics(), "version {version}");
+        assert_eq!(
+            single_line_box(&old, 20.0, &gdi_typo_flags()).height(),
+            16.0,
+            "version {version} measures on win metrics"
+        );
+    }
+}
+
+#[test]
+fn use_typo_metrics_falls_back_when_the_typo_box_is_unusable() {
+    let win_box = single_line_box(&synthetic_metrics(), 20.0, &gdi_typo_flags());
+    let fallback = |ascender: i16, descender: i16, line_gap: i16, why: &str| {
+        let m = FontMetrics {
+            os2_typo_ascender: ascender,
+            os2_typo_descender: descender,
+            os2_typo_line_gap: line_gap,
+            ..typo_metrics()
+        };
+        assert_eq!(
+            single_line_box(&m, 20.0, &gdi_typo_flags()),
+            win_box,
+            "{why}"
+        );
+    };
+
+    fallback(0, 0, 0, "absent");
+    fallback(555, 155, 0, "positive descender");
+    fallback(555, 555, 0, "positive descender summing to zero");
+    fallback(555, i16::MIN, 65, "descent past the design ceiling");
+    fallback(-100, 155, 900, "non-positive ascent");
+}
+
+#[test]
+fn gdi_no_leading_drops_the_leading_and_nothing_else() {
+    let compat = CompatFlags {
+        no_leading: true,
+        ..gdi_flags()
+    };
+    let line = single_line_box(&synthetic_metrics(), 20.0, &compat);
+    assert_eq!(
+        line,
+        LineBox {
+            ascent: 12.0,
+            descent: 3.0,
+            leading: 0.0,
+        }
+    );
+
+    // Drop leading before quantization so no rounded remainder survives.
+    let both = CompatFlags {
+        no_leading: true,
+        ..gdi_typo_flags()
+    };
+    assert_eq!(single_line_box(&typo_metrics(), 20.0, &both).leading, 0.0);
+}
+
+#[test]
+fn degenerate_sizes_yield_a_zero_box_on_both_paths() {
+    let zero = LineBox {
+        ascent: 0.0,
+        descent: 0.0,
+        leading: 0.0,
+    };
+    let broken_upem = FontMetrics {
+        units_per_em: 0,
+        ..synthetic_metrics()
+    };
+    let sizes = [
+        f32::NAN,
+        0.0,
+        -20.0,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        -f32::MIN_POSITIVE,
+    ];
+    for compat in [CompatFlags::default(), gdi_flags(), gdi_typo_flags()] {
+        assert_eq!(single_line_box(&broken_upem, 20.0, &compat), zero);
+        for size_px in sizes {
+            let line = single_line_box(&synthetic_metrics(), size_px, &compat);
+            assert_eq!(line, zero, "{size_px} / gdi={}", compat.gdi_line_metrics);
+        }
+    }
+
+    let tiny = single_line_box(&synthetic_metrics(), 0.2, &gdi_flags());
+    assert_eq!(tiny.height(), 1.0);
+    assert!(tiny.ascent >= 0.0 && tiny.descent >= 0.0 && tiny.leading >= 0.0);
+}
+
+#[test]
+fn experimental_metrics_stay_bounded_and_non_negative() {
+    let tiny_em = FontMetrics {
+        units_per_em: 16,
+        os2_win_ascent: u16::MAX,
+        os2_win_descent: u16::MAX,
+        hhea_ascender: i16::MAX,
+        hhea_descender: i16::MIN,
+        hhea_line_gap: i16::MAX,
+        ..synthetic_metrics()
+    };
+    for compat in [gdi_flags(), typo_flags(), gdi_typo_flags()] {
+        let line = single_line_box(&tiny_em, 16.0, &compat);
+        for part in [line.ascent, line.descent, line.leading] {
+            assert!(
+                (0.0..=256.0).contains(&part),
+                "{part} / gdi={}",
+                compat.gdi_line_metrics
+            );
+        }
+    }
+
+    for compat in [gdi_flags(), typo_flags(), gdi_typo_flags()] {
+        for size_px in [1.0e30, f32::MAX] {
+            let line = single_line_box(&tiny_em, size_px, &compat);
+            for part in [line.ascent, line.descent, line.leading] {
+                assert!(
+                    part.is_finite() && (0.0..=34_944.0).contains(&part),
+                    "{part} at {size_px} / gdi={}",
+                    compat.gdi_line_metrics
+                );
+            }
+        }
+    }
+
+    let capped = single_line_box(&synthetic_metrics(), 2184.0, &gdi_flags());
+    assert_eq!(
+        capped,
+        LineBox {
+            ascent: 1354.0,
+            descent: 371.0,
+            leading: 153.0,
+        }
+    );
+    for size_px in [1.0e9, f32::MAX] {
+        assert_eq!(
+            single_line_box(&synthetic_metrics(), size_px, &gdi_flags()),
+            capped,
+            "{size_px}"
+        );
+    }
+}
+
+#[test]
+fn gdi_metrics_quantize_the_fixture_font_read_at_runtime() {
+    let (store, id) = store_with_font();
+    let m = store.metrics(id).unwrap();
+    assert!(!m.use_typo_metrics(), "Liberation Sans leaves bit 7 clear");
+
+    let line = single_line_box(m, 16.0, &gdi_flags());
+    assert_eq!(
+        line,
+        LineBox {
+            ascent: 14.0,
+            descent: 3.0,
+            leading: 1.0,
+        }
+    );
+    assert_eq!(line.height(), 18.0);
+    assert_eq!(liberation_single_16px().height() - line.height(), 0.3984375);
+}
+
 #[test]
 fn auto_240_is_identity_and_480_doubles_height_into_leading() {
     let single = liberation_single_16px();
@@ -339,6 +691,34 @@ fn auto_240_is_identity_and_480_doubles_height_into_leading() {
 }
 
 /// Word splits an `exact` box 80/20 about the baseline whatever the content.
+#[test]
+fn auto_240_preserves_negative_leading_exactly() {
+    let content = LineBox {
+        ascent: 12.0,
+        descent: 6.0,
+        leading: -2.0,
+    };
+
+    assert_eq!(
+        apply_spacing_rule(content, &LineSpacingRule::Auto { line_240ths: 240 }),
+        content
+    );
+
+    let double = apply_spacing_rule(content, &LineSpacingRule::Auto { line_240ths: 480 });
+    assert_eq!(
+        double,
+        LineBox {
+            ascent: 12.0,
+            descent: 6.0,
+            leading: 14.0,
+        }
+    );
+
+    let half = apply_spacing_rule(content, &LineSpacingRule::Auto { line_240ths: 120 });
+    assert_eq!(half.height(), 8.0);
+    assert_eq!(half.leading, 0.0);
+}
+
 #[test]
 fn exact_rule_splits_the_fixed_box_by_a_font_independent_constant() {
     let single = liberation_single_16px();

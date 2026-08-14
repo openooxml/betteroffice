@@ -1,55 +1,4 @@
-/**
- * Bundled fonts for the DOCX editor: metric-compatible Latin faces plus
- * script-coverage faces for CJK and RTL text.
- *
- * Metric-compatible set — the open fonts the LibreOffice/ChromeOS ecosystem
- * uses as drop-in metric replacements for the MS core fonts (same advance
- * widths, so line breaks and pagination match even where glyph outlines
- * differ slightly):
- *
- * - Carlito          <-> Calibri
- * - Caladea          <-> Cambria
- * - Liberation Sans  <-> Arial (and the Helvetica alias)
- * - Liberation Serif <-> Times New Roman (and the Times alias)
- * - Liberation Mono  <-> Courier New (and the Courier alias)
- *
- * Script-coverage set — Noto faces that give the Rust text engine (and the
- * browser) real glyphs for scripts the Latin faces cannot cover:
- *
- * - Noto Sans SC / Noto Serif SC  <- SimHei/YaHei/DengXian, SimSun/FangSong/KaiTi, ...
- * - Noto Sans TC                  <- Microsoft JhengHei, PMingLiU, MingLiU, ...
- * - Noto Sans JP                  <- MS Gothic/Mincho, Meiryo, Yu Gothic/Mincho, ...
- * - Noto Sans KR                  <- Malgun Gothic, Gulim, Dotum, Batang, ...
- * - Noto Sans Hebrew / Noto Sans Arabic / Noto Naskh Arabic (script fallbacks
- *   only — Latin families like Arial/Times keep their Liberation mapping and
- *   the per-script fallback chain supplies Hebrew/Arabic glyph coverage)
- *
- * IMPORTANT — the CJK mappings are **coverage fallbacks first, metric
- * approximations second**. Unlike Carlito/Calibri, the Noto CJK faces do NOT
- * share advance widths with SimSun/MS Gothic/Malgun Gothic etc. (fullwidth
- * ideographs are uniformly 1.0 em everywhere, but proportional Latin runs and
- * line heights differ), so pagination of CJK documents approximates Word
- * rather than matching it. The CJK faces ship as **Regular only** — a bold
- * CJK request resolves to the Regular face and bold falls back through the
- * font chain (the engine may synthesize; advances stay Regular).
- *
- * The CJK binaries are static CFF (OTTO) Regulars from noto-cjk's SubsetOTF
- * distribution, NOT the google/fonts variable TTFs: those VFs default to the
- * Thin (wght=100) instance, and the Rust engine reads default-instance
- * advances while the browser applies wght=400 — same bytes, different
- * numbers. The static Regulars keep both sides identical (the Rust FontStore
- * parses CFF via skrifa).
- *
- * All other binaries are raw TTF (sfnt). Nothing is woff2, because the same
- * bytes must be consumed by two sides at once: the browser (registered via
- * `FontFace`, so DOM measurement uses these exact bytes) and the Rust/WASM
- * `FontStore` (which parses raw sfnt). Both consumers require identical bytes.
- *
- * Fonts are fetched lazily and same-origin (`new URL(..., import.meta.url)`
- * so bundlers emit the assets). Importing this module performs no network
- * activity; zero-click fetches on package import are forbidden (see the
- * security section in the repo security guidelines).
- */
+/** Deterministic bundled-font resolution with lazy loading and optional CJK assets. */
 
 /** Script bucket a bundled face provides glyph coverage for. */
 export type BundledFontScript = 'cjk-sc' | 'cjk-tc' | 'cjk-jp' | 'cjk-kr' | 'arabic' | 'hebrew';
@@ -68,6 +17,7 @@ export interface BundledFontFace {
   style: 'normal' | 'italic';
   /** Asset filename under this package's `assets/` directory. */
   file: string;
+  byteLength: number;
   /** Present on faces that serve as per-script coverage fallbacks. */
   script?: BundledFontScript;
 }
@@ -75,13 +25,42 @@ export interface BundledFontFace {
 function familyFaces(
   family: string,
   metricCompatWith: string,
-  fileBase: string
+  fileBase: string,
+  byteLengths: readonly [number, number, number, number]
 ): BundledFontFace[] {
   return [
-    { family, metricCompatWith, weight: 400, style: 'normal', file: `${fileBase}-Regular.ttf` },
-    { family, metricCompatWith, weight: 700, style: 'normal', file: `${fileBase}-Bold.ttf` },
-    { family, metricCompatWith, weight: 400, style: 'italic', file: `${fileBase}-Italic.ttf` },
-    { family, metricCompatWith, weight: 700, style: 'italic', file: `${fileBase}-BoldItalic.ttf` },
+    {
+      family,
+      metricCompatWith,
+      weight: 400,
+      style: 'normal',
+      file: `${fileBase}-Regular.ttf`,
+      byteLength: byteLengths[0],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 700,
+      style: 'normal',
+      file: `${fileBase}-Bold.ttf`,
+      byteLength: byteLengths[1],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 400,
+      style: 'italic',
+      file: `${fileBase}-Italic.ttf`,
+      byteLength: byteLengths[2],
+    },
+    {
+      family,
+      metricCompatWith,
+      weight: 700,
+      style: 'italic',
+      file: `${fileBase}-BoldItalic.ttf`,
+      byteLength: byteLengths[3],
+    },
   ];
 }
 
@@ -94,11 +73,17 @@ function familyFaces(
  * earlier entries on ties, so the sans face of each script comes first.
  */
 export const BUNDLED_FONTS: BundledFontFace[] = [
-  ...familyFaces('Carlito', 'Calibri', 'Carlito'),
-  ...familyFaces('Caladea', 'Cambria', 'Caladea'),
-  ...familyFaces('Liberation Sans', 'Arial', 'LiberationSans'),
-  ...familyFaces('Liberation Serif', 'Times New Roman', 'LiberationSerif'),
-  ...familyFaces('Liberation Mono', 'Courier New', 'LiberationMono'),
+  ...familyFaces('Carlito', 'Calibri', 'Carlito', [628032, 682468, 615236, 808508]),
+  ...familyFaces('Caladea', 'Cambria', 'Caladea', [81600, 84492, 83780, 83356]),
+  ...familyFaces('Liberation Sans', 'Arial', 'LiberationSans', [
+    410712, 414456, 415816, 408996,
+  ]),
+  ...familyFaces('Liberation Serif', 'Times New Roman', 'LiberationSerif', [
+    393576, 370096, 375632, 376772,
+  ]),
+  ...familyFaces('Liberation Mono', 'Courier New', 'LiberationMono', [
+    319508, 307996, 281536, 284068,
+  ]),
 
   // RTL script fallbacks. No metricCompatWith: Hebrew/Arabic documents mostly
   // name Latin families (Arial, Times New Roman, ...) whose mapping stays with
@@ -108,6 +93,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansHebrew-Regular.ttf',
+    byteLength: 26860,
     script: 'hebrew',
   },
   {
@@ -115,6 +101,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 700,
     style: 'normal',
     file: 'NotoSansHebrew-Bold.ttf',
+    byteLength: 26860,
     script: 'hebrew',
   },
   {
@@ -122,6 +109,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansArabic-Regular.ttf',
+    byteLength: 234892,
     script: 'arabic',
   },
   {
@@ -129,6 +117,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 700,
     style: 'normal',
     file: 'NotoSansArabic-Bold.ttf',
+    byteLength: 261460,
     script: 'arabic',
   },
   {
@@ -136,6 +125,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoNaskhArabic-Regular.ttf',
+    byteLength: 247336,
     script: 'arabic',
   },
 
@@ -147,6 +137,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansSC-Regular.otf',
+    byteLength: 8331336,
     script: 'cjk-sc',
   },
   {
@@ -155,6 +146,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSerifSC-Regular.otf',
+    byteLength: 11625800,
     script: 'cjk-sc',
   },
   {
@@ -163,6 +155,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansTC-Regular.otf',
+    byteLength: 5683368,
     script: 'cjk-tc',
   },
   {
@@ -171,6 +164,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansJP-Regular.otf',
+    byteLength: 4533028,
     script: 'cjk-jp',
   },
   {
@@ -179,6 +173,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     weight: 400,
     style: 'normal',
     file: 'NotoSansKR-Regular.otf',
+    byteLength: 4644748,
     script: 'cjk-kr',
   },
 ];
@@ -374,7 +369,8 @@ export function resolveLastResortFace(
 // Per-file LITERAL asset URLs. Bundlers only statically resolve `new URL()`
 // when the specifier is a string literal — a template expression works under
 // Vite's directory glob but collapses to a single (wrong) asset under
-// webpack/Turbopack. Every bundled face must have a row here.
+// webpack/Turbopack. Every face this package ships must have a row here; the
+// CJK faces resolve through `@betteroffice/fonts-cjk` instead.
 const FONT_ASSET_URLS: Record<string, () => URL> = {
   'Caladea-Bold.ttf': () => new URL('../assets/Caladea-Bold.ttf', import.meta.url),
   'Caladea-BoldItalic.ttf': () => new URL('../assets/Caladea-BoldItalic.ttf', import.meta.url),
@@ -401,42 +397,147 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
   'NotoSansArabic-Regular.ttf': () => new URL('../assets/NotoSansArabic-Regular.ttf', import.meta.url),
   'NotoSansHebrew-Bold.ttf': () => new URL('../assets/NotoSansHebrew-Bold.ttf', import.meta.url),
   'NotoSansHebrew-Regular.ttf': () => new URL('../assets/NotoSansHebrew-Regular.ttf', import.meta.url),
-  'NotoSansJP-Regular.otf': () => new URL('../assets/NotoSansJP-Regular.otf', import.meta.url),
-  'NotoSansKR-Regular.otf': () => new URL('../assets/NotoSansKR-Regular.otf', import.meta.url),
-  'NotoSansSC-Regular.otf': () => new URL('../assets/NotoSansSC-Regular.otf', import.meta.url),
-  'NotoSansTC-Regular.otf': () => new URL('../assets/NotoSansTC-Regular.otf', import.meta.url),
-  'NotoSerifSC-Regular.otf': () => new URL('../assets/NotoSerifSC-Regular.otf', import.meta.url),
 };
+
+export interface FontAssetOptions {
+  /**
+   * Asset root. The default stays same-origin for privacy, offline use, and
+   * strict CSP. Relative roots pin to the current document; server roots must
+   * be absolute.
+   */
+  baseUrl?: string | URL;
+}
+
+let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
+
+async function importCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
+  // Keep the SYNTACTIC try/catch around the await. Rewriting this as
+  // `import(…).catch()` or a two-argument `.then()` makes webpack (and so
+  // `next build`) fail hard instead of emitting a warning for the absent
+  // optional peer; only this shape is tolerated. esbuild recognises the
+  // opposite idiom and errors either way — see the bundler note in README.md.
+  try {
+    return (await import('@betteroffice/fonts-cjk')).CJK_FONT_ASSET_URLS;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Shares in-flight or successful CJK imports while leaving misses retryable. */
+function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
+  if (cjkAssetUrls === undefined) {
+    const promise = importCjkAssetUrls();
+    promise.then((urls) => {
+      if (urls === undefined && cjkAssetUrls === promise) cjkAssetUrls = undefined;
+    });
+    cjkAssetUrls = promise;
+  }
+  return cjkAssetUrls;
+}
+
+function assetBase(baseUrl: string | URL): string {
+  const href = typeof baseUrl === 'string' ? baseUrl : baseUrl.href;
+  return href.endsWith('/') ? href : `${href}/`;
+}
+
+function resolvedAssetBase(baseUrl: string | URL): URL {
+  const base = assetBase(baseUrl);
+  try {
+    return typeof location === 'undefined' ? new URL(base) : new URL(base, location.href);
+  } catch {
+    throw new TypeError(`Font baseUrl must be absolute when no browser location exists: ${base}`);
+  }
+}
+
+async function assetUrl(file: string, baseUrl: URL | undefined): Promise<URL> {
+  if (baseUrl !== undefined) return new URL(file, baseUrl);
+  const local = FONT_ASSET_URLS[file];
+  if (local) return local();
+  const cjk = await loadCjkAssetUrls();
+  const resolveCjk = cjk?.[file];
+  if (resolveCjk) return resolveCjk();
+  if (!cjk) {
+    throw new Error(
+      `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`
+    );
+  }
+  throw new Error(`Unknown bundled font asset: ${file}`);
+}
+
+interface NodeFsLike {
+  readFileSync(path: string): Uint8Array;
+}
+interface NodeUrlLike {
+  fileURLToPath(url: string): string;
+}
+
+function builtinModule<T>(name: string): T | undefined {
+  const proc = (
+    globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }
+  ).process;
+  if (typeof proc?.getBuiltinModule !== 'function') return undefined;
+  try {
+    return proc.getBuiltinModule(name) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Node fetch cannot read file: package assets, so server imports use built-in I/O. */
+function readFileAsset(url: URL): ArrayBuffer | undefined {
+  if (url.protocol !== 'file:') return undefined;
+  const fs = builtinModule<NodeFsLike>('node:fs');
+  const nodeUrl = builtinModule<NodeUrlLike>('node:url');
+  if (!fs || !nodeUrl) return undefined;
+  try {
+    // `.href` and not the URL object: fileURLToPath brand-checks its argument.
+    const bytes = fs.readFileSync(nodeUrl.fileURLToPath(url.href));
+    return bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+  } catch {
+    return undefined;
+  }
+}
 
 const bytesCache = new Map<string, Promise<ArrayBuffer>>();
 
-/**
- * Lazily fetch the raw sfnt bytes for a face. The fetch is same-origin: the
- * asset URL is derived with `new URL(..., import.meta.url)` so bundlers
- * (Vite) emit the file and serve it alongside the module. Results are cached
- * per face (the same promise is returned for concurrent callers, and the
- * same `ArrayBuffer` instance is handed to every consumer — byte-identity
- * lets registries deduplicate registrations); a failed fetch is evicted so
- * it can be retried.
- */
-export function loadBundledFontBytes(face: BundledFontFace): Promise<ArrayBuffer> {
-  const cached = bytesCache.get(face.file);
-  if (cached) return cached;
-  const resolveUrl = FONT_ASSET_URLS[face.file];
-  if (!resolveUrl) {
-    return Promise.reject(new Error(`Unknown bundled font asset: ${face.file}`));
+function validateByteLength(face: BundledFontFace, bytes: ArrayBuffer): ArrayBuffer {
+  if (bytes.byteLength !== face.byteLength) {
+    throw new Error(
+      `Bundled font ${face.file} has ${bytes.byteLength} bytes; expected ${face.byteLength}`
+    );
   }
-  const url = resolveUrl();
-  const promise = fetch(url).then((response) => {
+  return bytes;
+}
+
+/**
+ * Lazily loads raw sfnt bytes from package assets or `baseUrl`. Literal
+ * `import.meta.url` assets keep defaults same-origin; loads share buffer
+ * identity per face/base and failures remain retryable.
+ */
+export function loadBundledFontBytes(
+  face: BundledFontFace,
+  options?: FontAssetOptions
+): Promise<ArrayBuffer> {
+  const baseUrl = options?.baseUrl === undefined ? undefined : resolvedAssetBase(options.baseUrl);
+  const key = `${baseUrl?.href ?? ''}\n${face.file}`;
+  const cached = bytesCache.get(key);
+  if (cached) return cached;
+  const promise = assetUrl(face.file, baseUrl).then(async (url) => {
+    const onDisk = readFileAsset(url);
+    if (onDisk) return validateByteLength(face, onDisk);
+    const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to fetch bundled font ${face.file}: HTTP ${response.status}`);
     }
-    return response.arrayBuffer();
+    return validateByteLength(face, await response.arrayBuffer());
   });
   promise.catch(() => {
-    if (bytesCache.get(face.file) === promise) bytesCache.delete(face.file);
+    if (bytesCache.get(key) === promise) bytesCache.delete(key);
   });
-  bytesCache.set(face.file, promise);
+  bytesCache.set(key, promise);
   return promise;
 }
 
@@ -449,7 +550,11 @@ const registeredFaces = new Map<string, Promise<void>>();
  * (cssFamily, weight, style); a failed registration is evicted so it can be
  * retried. Resolves as a no-op in non-DOM environments.
  */
-export function registerBundledFontFace(face: BundledFontFace, cssFamily?: string): Promise<void> {
+export function registerBundledFontFace(
+  face: BundledFontFace,
+  cssFamily?: string,
+  options?: FontAssetOptions
+): Promise<void> {
   if (
     typeof document === 'undefined' ||
     typeof FontFace === 'undefined' ||
@@ -462,7 +567,7 @@ export function registerBundledFontFace(face: BundledFontFace, cssFamily?: strin
   const existing = registeredFaces.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const bytes = await loadBundledFontBytes(face);
+    const bytes = await loadBundledFontBytes(face, options);
     // The family name goes through the FontFace API as a value, never
     // interpolated into a CSS string, so there is no CSS-injection sink here.
     const fontFace = new FontFace(family, bytes, {
@@ -477,4 +582,35 @@ export function registerBundledFontFace(face: BundledFontFace, cssFamily?: strin
   });
   registeredFaces.set(key, promise);
   return promise;
+}
+
+/** Structural provider contract keeps this package independent of the engine. */
+export interface BundledFontSource {
+  resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
+  resolveScriptFallback(
+    script: BundledFontScript,
+    bold: boolean,
+    italic: boolean
+  ): (() => Promise<ArrayBuffer>) | undefined;
+  resolveLastResort(family: string, bold: boolean, italic: boolean): () => Promise<ArrayBuffer>;
+}
+
+/** Creates a lazy provider, optionally serving assets from a custom base URL. */
+export function createFontProvider(options?: FontAssetOptions): BundledFontSource {
+  const resolvedOptions =
+    options?.baseUrl === undefined ? undefined : { baseUrl: resolvedAssetBase(options.baseUrl) };
+  const load = (face: BundledFontFace) => () => loadBundledFontBytes(face, resolvedOptions);
+  return {
+    resolve(family, bold, italic) {
+      const face = resolveMetricCompatFace(family, bold, italic);
+      return face ? load(face) : undefined;
+    },
+    resolveScriptFallback(script, bold, italic) {
+      const face = resolveScriptFallbackFace(script, bold, italic);
+      return face ? load(face) : undefined;
+    },
+    resolveLastResort(family, bold, italic) {
+      return load(resolveLastResortFace(family, bold, italic));
+    },
+  };
 }

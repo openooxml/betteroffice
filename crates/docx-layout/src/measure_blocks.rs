@@ -492,27 +492,98 @@ fn measure_paragraph_with_context(
         .or_else(|_| Ok(synthetic_paragraph_extent(paragraph, content_width)))
 }
 
+const SYNTHETIC_ADVANCE_EM: f64 = 1.0;
+
+fn valid_font_size(size: Option<f64>, fallback: f64) -> f64 {
+    size.filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(fallback)
+}
+
+fn synthetic_font_px(run: &crate::types::RunFormatting, default_font_size: f64) -> f64 {
+    let size = valid_font_size(run.font_size, default_font_size);
+    let script_scale = if run.superscript == Some(true) || run.subscript == Some(true) {
+        0.75
+    } else {
+        1.0
+    };
+    size * 96.0 / 72.0 * script_scale
+}
+
+fn synthetic_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
+    if all_caps == Some(true) {
+        text.chars().flat_map(char::to_uppercase).count()
+    } else {
+        text.chars().count()
+    }
+}
+
+fn synthetic_text_width(
+    text: &str,
+    run: &crate::types::RunFormatting,
+    default_font_size: f64,
+) -> f64 {
+    let scalars = synthetic_scalar_count(text, run.all_caps) as f64;
+    let letter_spacing = run
+        .letter_spacing
+        .filter(|spacing| spacing.is_finite() && *spacing > 0.0 && *spacing <= 1_000.0)
+        .unwrap_or(0.0);
+    let horizontal_scale = run
+        .horizontal_scale
+        .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 600.0)
+        .map(|scale| scale / 100.0)
+        .unwrap_or(1.0);
+    scalars
+        * (synthetic_font_px(run, default_font_size) * SYNTHETIC_ADVANCE_EM + letter_spacing)
+        * horizontal_scale
+}
+
+fn synthetic_inline_image_width(image: &crate::types::ImageRun) -> f64 {
+    let floating = matches!(
+        image.wrap_type.as_deref(),
+        Some("square" | "tight" | "through" | "behind" | "inFront")
+    ) || image.display_mode.as_deref() == Some("float");
+    if floating {
+        return 0.0;
+    }
+    rotation_bound(&image.rotation_bounds, "width")
+        .unwrap_or(image.width)
+        .max(0.0)
+}
+
 fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) -> ParagraphExtent {
-    let mut font_size = paragraph
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.default_font_size)
-        .unwrap_or(11.0);
-    let mut character_count = 0;
+    let default_font_size = valid_font_size(
+        paragraph
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.default_font_size),
+        11.0,
+    );
+    let default_font_px = default_font_size * 96.0 / 72.0;
+    let mut font_px = default_font_px;
+    let mut line_width = 0.0f64;
     for run in &paragraph.runs {
-        let Run::Text(text) = run else {
-            continue;
-        };
-        character_count += text.text.encode_utf16().count();
-        if let Some(size) = text.fmt.font_size.filter(|size| size.is_finite()) {
-            font_size = font_size.max(size);
+        match run {
+            Run::Text(text) => {
+                font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
+                line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+            }
+            Run::Tab(tab) => {
+                font_px = font_px.max(synthetic_font_px(&tab.fmt, default_font_size));
+                line_width += tab.width.unwrap_or(48.0).max(0.0);
+            }
+            Run::Image(image) => line_width += synthetic_inline_image_width(image),
+            Run::Field(field) => {
+                font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
+                let fallback = field
+                    .fallback
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("1");
+                line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
+            }
+            Run::LineBreak(_) | Run::Unsupported => {}
         }
     }
-    if !font_size.is_finite() || font_size <= 0.0 {
-        font_size = 11.0;
-    }
-    let font_size_px = font_size * 96.0 / 72.0;
-    let line_height = font_size_px * 1.15;
     let tail_run = paragraph.runs.len().saturating_sub(1);
     let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
         Run::Text(text) => text.text.encode_utf16().count(),
@@ -522,25 +593,27 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref());
+    let line_height = font_px * 1.15;
     ParagraphExtent {
+        total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
+            + line_height
+            + spacing.and_then(|value| value.after).unwrap_or(0.0),
         lines: vec![crate::types::TypesetRow {
             head_run: 0,
             head_char: 0,
             tail_run,
             tail_char,
             width: if content_width.is_finite() && content_width > 0.0 {
-                content_width.min(character_count as f64 * font_size_px * 0.5)
+                line_width
             } else {
                 0.0
             },
-            ascent: font_size_px * 0.8,
-            descent: font_size_px * 0.2,
+            ascent: font_px * 0.8,
+            descent: font_px * 0.2,
             line_height,
+            synthetic_fallback: Some(true),
             ..crate::types::TypesetRow::default()
         }],
-        total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
-            + line_height
-            + spacing.and_then(|value| value.after).unwrap_or(0.0),
     }
 }
 
@@ -1177,7 +1250,7 @@ mod tests {
             panic!("paragraph expected");
         };
 
-        assert_eq!(extent.lines[0].width, 32.0);
+        assert_eq!(extent.lines[0].width, 64.0);
         assert_eq!(extent.lines[0].ascent, 12.8);
         assert_eq!(extent.lines[0].descent, 3.2);
         assert_eq!(extent.total_height, 23.4);

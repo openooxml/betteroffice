@@ -3057,4 +3057,149 @@ mod tests {
         assert!(margin["pos"].is_i64());
         assert_eq!(margin["target"], "none");
     }
+
+    const LIBERATION: &[u8] =
+        include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"#;
+
+    const PACKAGE_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#;
+
+    const DOCUMENT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"#;
+
+    fn docx_bytes(styles_body: &str, document_body: &str) -> Vec<u8> {
+        let styles = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>
+{styles_body}
+</w:styles>"#
+        );
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>{document_body}</w:body>
+</w:document>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), CONTENT_TYPES.into()),
+            ("_rels/.rels".to_owned(), PACKAGE_RELS.into()),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                DOCUMENT_RELS.into(),
+            ),
+            ("word/styles.xml".to_owned(), styles.into_bytes()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .expect("zip the fixture")
+    }
+
+    fn layout_pages(bytes: &[u8], client_id: u64, content_height: f64) -> serde_json::Value {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(client_id);
+        crate::seed::seed_from_docx(engine.doc(), bytes).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "options": {
+                "pageSize": { "w": 400.0, "h": content_height + 40.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 20.0 },
+            },
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "pageSize": { "w": 400.0, "h": content_height + 40.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 20.0 },
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        serde_json::from_str(&output).expect("layout json")
+    }
+
+    fn paragraph_slices(layout: &serde_json::Value, block_index: usize) -> Vec<(usize, u64, u64)> {
+        let block_id = layout["measured"][block_index]["block"]["id"].clone();
+        layout["layout"]["pages"]
+            .as_array()
+            .expect("pages")
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page["fragments"]
+                    .as_array()
+                    .expect("fragments")
+                    .iter()
+                    .filter(|fragment| fragment["blockId"] == block_id)
+                    .map(move |fragment| {
+                        (
+                            page_index,
+                            fragment["fromLine"].as_u64().unwrap_or(0),
+                            fragment["toLine"].as_u64().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn line_height(layout: &serde_json::Value, block_index: usize) -> f64 {
+        layout["measured"][block_index]["measure"]["lines"][0]["lineHeight"]
+            .as_f64()
+            .expect("measured line height")
+    }
+
+    fn line_count(layout: &serde_json::Value, block_index: usize) -> usize {
+        layout["measured"][block_index]["measure"]["lines"]
+            .as_array()
+            .expect("measured lines")
+            .len()
+    }
+
+    const WIDOW_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Normal"/></w:style>"#;
+
+    fn widow_document(paragraph_ppr: &str) -> String {
+        let long = "Widow and orphan control decides where this paragraph may break \
+                    across a page boundary, so it has to be long enough to wrap onto \
+                    several lines of the narrow page this test lays out.";
+        format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr><w:r><w:t>Filler</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Body"/>{paragraph_ppr}</w:pPr><w:r><w:t>{long}</w:t></w:r></w:p>"#
+        )
+    }
+
+    #[test]
+    fn authored_widow_control_off_survives_a_docx_round_trip_into_pagination() {
+        let inherited = docx_bytes(WIDOW_STYLES, &widow_document(""));
+        let probe = layout_pages(&inherited, 201, 4000.0);
+        let line = line_height(&probe, 1);
+        assert!(line_count(&probe, 1) >= 4, "the rule needs four lines");
+        let content_height = line * 2.5;
+
+        let overridden = docx_bytes(WIDOW_STYLES, &widow_document("<w:widowControl/>"));
+        let off = layout_pages(&inherited, 202, content_height);
+        let on = layout_pages(&overridden, 203, content_height);
+
+        assert_eq!(paragraph_slices(&off, 1)[0], (0, 0, 1));
+        assert!(paragraph_slices(&on, 1).iter().all(|(page, ..)| *page > 0));
+        assert_eq!(paragraph_slices(&on, 1)[0].1, 0);
+    }
 }

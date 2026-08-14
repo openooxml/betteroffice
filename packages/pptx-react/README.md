@@ -37,7 +37,7 @@ export function Presentation({ file, fontBytes }: {
 ```
 
 Font bytes are supplied by the host and registered with the Rust shaper; pair
-with [`@betteroffice/docx-fonts`](https://www.npmjs.com/package/@betteroffice/docx-fonts)
+with [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts)
 for metric-compatible open faces.
 
 ## Edit

@@ -15,8 +15,9 @@
 //! - [`bidi_paragraphs`] — paragraph-level Unicode Bidirectional Algorithm
 //!   runs via `unicode-bidi`.
 //! - [`word_metrics`] — the Word-specific measurement rules: single-spacing
-//!   line boxes from OS/2 win metrics ([`single_line_box`]), auto/exact/
-//!   atLeast line rules ([`apply_spacing_rule`]), justification gating and
+//!   line boxes from OS/2 win metrics ([`single_line_box`], with disabled
+//!   metric experiments behind [`CompatFlags`]), auto/exact/atLeast line
+//!   rules ([`apply_spacing_rule`]), justification gating and
 //!   space-stretch ([`line_is_justified`], [`stretch_spaces`]), the w:kern
 //!   threshold ([`kern_enabled`], [`kern_features`]), and the settings.xml
 //!   compat flags that feed them ([`CompatFlags`]). Snap-to-grid (w:docGrid)

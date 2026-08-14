@@ -39,6 +39,12 @@ interface StoryProjection {
     displayStart: number;
     inputStart: number;
     length: number;
+    /**
+     * Story units between the previous pilcrow and this paragraph's inline
+     * content — the block embeds the engine counts inside its Loc offsets but
+     * the display domain gives node tokens of their own.
+     */
+    leading: number;
   }>;
   tables: YrsProjectedTable[];
 }
@@ -129,7 +135,7 @@ export class YrsPositionProjection {
       story.contentStart +
       paragraph.displayStart +
       1 +
-      Math.min(Math.max(0, loc.offset), paragraph.length)
+      Math.min(Math.max(0, loc.offset - paragraph.leading), paragraph.length)
     );
   }
 
@@ -176,6 +182,7 @@ export class YrsPositionProjection {
     const segments = this.session.storySegments(storyId);
     let cursor = 0;
     let inlineLength = 0;
+    let leading = 0;
     let paragraphStart = 0;
     let inputStart = 0;
     let tableIndex = 0;
@@ -200,11 +207,13 @@ export class YrsPositionProjection {
           displayStart: paragraphStart,
           inputStart,
           length: inlineLength,
+          leading,
         });
-        inputStart += nodeSize;
+        inputStart += nodeSize + leading;
         cursor = paragraphStart + nodeSize;
         paragraphStart = cursor;
         inlineLength = 0;
+        leading = 0;
         continue;
       }
 
@@ -216,6 +225,7 @@ export class YrsPositionProjection {
         tableIndex += 1;
         cursor += table.nodeSize;
         paragraphStart = cursor;
+        leading += 1;
         continue;
       }
       if (segment.embedKind === 'blockSdt') {
@@ -232,11 +242,15 @@ export class YrsPositionProjection {
         this.nodes.set(start, node);
         cursor += node.nodeSize;
         paragraphStart = cursor;
+        leading += 1;
         continue;
       }
-      if (segment.embedKind === 'pageBreak' && inlineLength === 0) {
+      if (
+        (segment.embedKind === 'pageBreak' || segment.embedKind === 'columnBreak') &&
+        inlineLength === 0
+      ) {
         const node: YrsProjectedNode = {
-          kind: 'pageBreak',
+          kind: segment.embedKind,
           start: contentStart + cursor,
           nodeSize: 1,
           attrs: segment.payload,
@@ -245,6 +259,7 @@ export class YrsPositionProjection {
         this.nodes.set(node.start, node);
         cursor += 1;
         paragraphStart = cursor;
+        leading += 1;
         continue;
       }
 
@@ -273,6 +288,7 @@ export class YrsPositionProjection {
     if (!paragraph) return 0;
     return (
       paragraph.inputStart +
+      paragraph.leading +
       Math.min(Math.max(0, projected - paragraph.displayStart), paragraph.length + 1)
     );
   }

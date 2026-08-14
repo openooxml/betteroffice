@@ -793,6 +793,7 @@ function paragraphAttrs(
     attrs.pageBreakBefore = formatting?.pageBreakBefore ?? stylePpr?.pageBreakBefore ?? null;
     attrs.keepNext = formatting?.keepNext ?? stylePpr?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
+    attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
@@ -827,6 +828,7 @@ function paragraphAttrs(
     attrs.pageBreakBefore = formatting?.pageBreakBefore ?? null;
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
+    attrs.widowControl = formatting?.widowControl ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;

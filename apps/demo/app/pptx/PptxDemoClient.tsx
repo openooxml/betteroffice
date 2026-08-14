@@ -12,7 +12,7 @@ import {
   loadBundledFontBytes,
   resolveLastResortFace,
   resolveMetricCompatFace,
-} from "@betteroffice/docx-fonts";
+} from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,

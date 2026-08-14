@@ -711,6 +711,9 @@ pub struct TextRunPrimitive {
     pub baseline_y: Number,
     /// measured advance of the whole run
     pub width: Number,
+    /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_clip: Option<ClipRect>,
     /// CSS font shorthand.
     pub font: String,
     pub color: String,
@@ -768,6 +771,9 @@ pub struct GlyphRunPrimitive {
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
     pub glyphs: Vec<PlacedGlyph>,
+    /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_clip: Option<ClipRect>,
     /// extra advance added after each U+0020 cluster on a justified line (px) —
     /// equivalent to [`TextRunPrimitive::word_spacing`]; the glyph `x` positions
     /// already fold this stretch in, so it is an interchange hint, not
@@ -2587,6 +2593,8 @@ pub(crate) struct LineIn {
     #[serde(default)]
     line_height: f64,
     #[serde(default)]
+    synthetic_fallback: bool,
+    #[serde(default)]
     left_offset: Option<f64>,
     #[serde(default)]
     right_offset: Option<f64>,
@@ -3093,6 +3101,32 @@ fn effective_font_px_of(fmt: &RunFormattingIn) -> f64 {
     font_px_of(fmt) * script_scale_of(fmt)
 }
 
+fn fallback_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
+    if all_caps == Some(true) {
+        text.chars().flat_map(char::to_uppercase).count()
+    } else {
+        text.chars().count()
+    }
+}
+
+fn fallback_text_width(text: &str, fmt: &RunFormattingIn, default_font_pt: f64) -> f64 {
+    let font_size = fmt
+        .font_size
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(default_font_pt);
+    let font_px = font_size * 96.0 / 72.0 * script_scale_of(fmt);
+    let letter_spacing = fmt
+        .letter_spacing
+        .filter(|spacing| spacing.is_finite() && *spacing > 0.0 && *spacing <= 1_000.0)
+        .unwrap_or(0.0);
+    let horizontal_scale = fmt
+        .horizontal_scale
+        .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 600.0)
+        .map(|scale| scale / 100.0)
+        .unwrap_or(1.0);
+    fallback_scalar_count(text, fmt.all_caps) as f64 * (font_px + letter_spacing) * horizontal_scale
+}
+
 /// Paint-only baseline offset. A positive `positionPx` raises the text, which
 /// is a smaller y coordinate.
 fn baseline_y_of(fmt: &RunFormattingIn, baseline: f64) -> f64 {
@@ -3490,6 +3524,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         x: px(x),
         baseline_y: px(baseline),
         width: px(width),
+        paint_clip: None,
         font,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
@@ -3931,6 +3966,14 @@ fn push_bidi_text_items<'a>(
     }
 
     let total_chars = chars.len();
+    let total_scalars = fallback_scalar_count(text, fmt.all_caps);
+    let mut utf16_offsets = Vec::with_capacity(total_chars + 1);
+    utf16_offsets.push(0usize);
+    let mut utf16_units = 0usize;
+    for character in &chars {
+        utf16_units += character.len_utf16();
+        utf16_offsets.push(utf16_units);
+    }
     let mut start = 0usize;
     while start < total_chars {
         let level = levels
@@ -3949,39 +3992,35 @@ fn push_bidi_text_items<'a>(
         }
 
         let slice: String = chars[start..end].iter().collect();
-        let slice_chars = end - start;
+        let slice_scalars = fallback_scalar_count(&slice, fmt.all_caps);
         let spaces = slice.chars().filter(|&ch| ch == ' ').count();
-        let base_width = if total_chars > 0 {
-            total_width * slice_chars as f64 / total_chars as f64
-        } else {
-            0.0
-        };
+        let base_width = total_width * slice_scalars as f64 / total_scalars as f64;
         let width = if word_space_extra > 0.0 {
             // `total_width` already includes the stretched spaces. Remove the
             // segment-level equal-share stretch and reapply it per bidi slice.
             let total_spaces = text.chars().filter(|&ch| ch == ' ').count();
             let unstretched = total_width - word_space_extra * total_spaces as f64;
-            (unstretched * slice_chars as f64 / total_chars as f64)
+            (unstretched * slice_scalars as f64 / total_scalars as f64)
                 + word_space_extra * spaces as f64
         } else {
             base_width
         };
 
         let slice_pm_end = if end == total_chars {
-            pm_end.or_else(|| pm_start.map(|p| p + end as i64))
+            pm_end.or_else(|| pm_start.map(|p| p + utf16_offsets[end] as i64))
         } else {
-            pm_start.map(|p| p + end as i64)
+            pm_start.map(|p| p + utf16_offsets[end] as i64)
         };
 
         out.push(LinePaintItem::Text(LineTextItem {
             text: slice,
             fmt,
-            pm_start: pm_start.map(|p| p + start as i64),
+            pm_start: pm_start.map(|p| p + utf16_offsets[start] as i64),
             pm_end: slice_pm_end,
             width,
             level,
-            source_start: start,
-            source_end: end,
+            source_start: utf16_offsets[start],
+            source_end: utf16_offsets[end],
             logical_order: fmt.logical_order,
             exact_advance: false,
             field,
@@ -5427,6 +5466,7 @@ pub(crate) fn emit_paragraph_fragment(
             x: px(glyph_x),
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
+            paint_clip: None,
             font: css_font(&RunFormattingIn::default()),
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
@@ -5710,11 +5750,15 @@ fn emit_line(
 
     // distribute the measured line width over runs whose advance we don't know
     // individually: fixed-width runs (tabs, inline images) subtract first, the
-    // rest splits across text-ish segments by character count.
+    // rest splits across text-ish segments by their fallback slots.
     //
-    // Per-page field widths are fixed and removed from the character pool.
+    // Per-page field widths are fixed and removed from the text pool.
     let mut fixed_width = 0.0;
-    let mut pool_chars: usize = 0;
+    let default_font_pt = attrs
+        .and_then(|attrs| attrs.default_font_size)
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(DEFAULT_FONT_PT);
+    let mut pool_estimate = 0.0;
     let mut field_fixed = 0.0; // Σ per-page resolved widths of supplied fields
     let mut field_fallback = 0.0; // Σ their fallback widths baked into line.width
     if authoritative_items.is_none() {
@@ -5726,21 +5770,26 @@ fn emit_line(
                         fixed_width += image_layout_width(imr);
                     }
                 }
-                RunIn::Text(_) => pool_chars += seg.text.chars().count(),
+                RunIn::Text(text) => {
+                    pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt)
+                }
                 RunIn::Field(f) => match ctx.field_width(seg.pm_start) {
                     Some((fallback, resolved)) => {
                         field_fallback += fallback;
                         field_fixed += resolved;
                     }
-                    None => pool_chars += field_text(f, ctx).chars().count(),
+                    None => {
+                        pool_estimate +=
+                            fallback_text_width(&field_text(f, ctx), &f.fmt, default_font_pt)
+                    }
                 },
                 _ => {}
             }
         }
     }
     let pool_width = (line.width - fixed_width - field_fallback).max(0.0);
-    let width_per_char = if pool_chars > 0 {
-        pool_width / pool_chars as f64
+    let width_per_estimate = if pool_estimate > 0.0 {
+        pool_width / pool_estimate
     } else {
         0.0
     };
@@ -5807,6 +5856,7 @@ fn emit_line(
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
+            paint_clip: None,
             font: css_font(&marker_format),
             color: color.to_owned(),
             letter_spacing: None,
@@ -5835,7 +5885,7 @@ fn emit_line(
         );
     let mut word_space_px: Option<Number> = None;
     let mut word_space_extra = 0.0_f64;
-    if justified && (pool_chars > 0 || authoritative_items.is_some()) {
+    if justified && (pool_estimate > 0.0 || authoritative_items.is_some()) {
         let slack = (usable_width - effective_line_width).max(0.0);
         if slack > 0.0 {
             let mut space_count = 0usize;
@@ -5849,7 +5899,7 @@ fn emit_line(
                     let text = match seg.run {
                         RunIn::Text(_) => seg.text.clone(),
                         // a field with a supplied per-page width is fixed-width, so
-                        // it's out of the char pool and never absorbs justify slack
+                        // it's out of the text pool and never absorbs justify slack
                         RunIn::Field(f) if ctx.field_width(seg.pm_start).is_none() => {
                             field_text(f, ctx)
                         }
@@ -5888,7 +5938,8 @@ fn emit_line(
                 // editing view paints them dimmed rather than suppressing them, so
                 // the display list keeps their primitives for hit-testing too
                 RunIn::Text(t) => {
-                    let w = width_per_char * seg.text.chars().count() as f64
+                    let w = width_per_estimate
+                        * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
                         + word_space_extra
                             * seg.text.chars().filter(|&ch| ch == ' ').count() as f64;
                     push_bidi_text_items(
@@ -5911,7 +5962,8 @@ fn emit_line(
                     let (w, item_word_space_extra) = match ctx.field_width(seg.pm_start) {
                         Some((_, resolved)) => (resolved, 0.0),
                         None => (
-                            width_per_char * text.chars().count() as f64
+                            width_per_estimate
+                                * fallback_text_width(&text, &f.fmt, default_font_pt)
                                 + word_space_extra
                                     * text.chars().filter(|&ch| ch == ' ').count() as f64,
                             word_space_extra,
@@ -5998,6 +6050,7 @@ fn emit_line(
                     item.source_start,
                     item.source_end,
                     item.exact_advance,
+                    line.synthetic_fallback,
                     geom.line_top,
                     line_bottom,
                     block_ref,
@@ -6116,6 +6169,7 @@ fn emit_line(
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
                 baseline_y: px(baseline),
                 width: px(0.0),
+                paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
                 color: "#000000".to_string(),
                 letter_spacing: None,
@@ -6218,6 +6272,7 @@ fn emit_tab_leader(
             x: px(x),
             baseline_y: px(baseline),
             width: px(width),
+            paint_clip: None,
             font: css_font(&fmt),
             color: run_color(&fmt),
             letter_spacing: None,
@@ -6292,6 +6347,7 @@ fn emit_text_segment(
     source_start: usize,
     source_end: usize,
     exact_advance: bool,
+    synthetic_fallback: bool,
     line_top: f64,
     line_bottom: f64,
     block_ref: &BlockRef,
@@ -6440,6 +6496,12 @@ fn emit_text_segment(
     }
 
     let color = run_color(fmt);
+    let paint_clip = synthetic_fallback.then(|| ClipRect {
+        x: Some(px(x)),
+        y: None,
+        w: Some(px(width)),
+        h: None,
+    });
     // Unresolved or failed shaping falls back to a text primitive.
     let emitted_glyphs = match shape {
         Some(sf) => try_emit_glyph_runs(
@@ -6457,6 +6519,7 @@ fn emit_text_segment(
             logical_order,
             &attrs,
             &color,
+            &paint_clip,
         ),
         None => false,
     };
@@ -6468,6 +6531,7 @@ fn emit_text_segment(
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
+            paint_clip,
             font: css_font(fmt),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
@@ -6604,6 +6668,7 @@ fn try_emit_glyph_runs(
     logical_order: Option<u64>,
     attrs: &DocAttrs,
     color: &str,
+    paint_clip: &Option<ClipRect>,
 ) -> bool {
     if text.is_empty() {
         return false;
@@ -6781,6 +6846,7 @@ fn try_emit_glyph_runs(
             color: color.to_string(),
             text: sub_text,
             glyphs: placed,
+            paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),
             rtl,
             opacity: None,
@@ -7947,6 +8013,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 x: px(x),
                 baseline_y: px(baseline_y),
                 width: px(width),
+                paint_clip: None,
                 font: font.css(),
                 color,
                 letter_spacing: None,

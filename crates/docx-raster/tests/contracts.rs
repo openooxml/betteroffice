@@ -107,6 +107,95 @@ fn glyph_run_uses_positioned_ids_without_reshaping_source_text() {
 }
 
 #[test]
+fn synthetic_text_run_clip_intersects_the_outer_mask() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitive = |clipped: bool| {
+        let mut run = json!({
+            "kind": "text",
+            "text": "@@@@@@@@@@",
+            "x": 4,
+            "baselineY": 31,
+            "width": 12,
+            "font": "400 28px Carlito, sans-serif",
+            "color": "#000000"
+        });
+        if clipped {
+            run["paintClip"] = json!({"x": 4, "w": 12});
+            run["clipGroup"] = json!({"clip": {"x": 8, "y": 0, "w": 72, "h": 40}});
+        }
+        run
+    };
+
+    let control = render_png(&list(80.0, 40.0, vec![primitive(false)]), 0, &resources)
+        .expect("control render");
+    let clipped = render_png(&list(80.0, 40.0, vec![primitive(true)]), 0, &resources)
+        .expect("clipped render");
+    let control_bounds = ink_bounds(&control).expect("control ink");
+    let clipped_bounds = ink_bounds(&clipped).expect("clipped ink");
+
+    assert!(control_bounds.0 < 8);
+    assert!(control_bounds.1 >= 16);
+    assert!(clipped_bounds.0 >= 8);
+    assert!(clipped_bounds.1 < 16);
+}
+
+#[test]
+fn synthetic_glyph_run_clip_intersects_the_outer_mask() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let shaped = shape(&fonts, font, "@@@@@@@@@@", 28.0, &[]).expect("shape");
+    let mut pen = 4.0_f64;
+    let glyphs: Vec<Value> = shaped
+        .into_iter()
+        .map(|glyph| {
+            let placed = json!({
+                "id": glyph.glyph_id,
+                "x": pen + f64::from(glyph.x_offset),
+                "y": 31.0 - f64::from(glyph.y_offset),
+                "cluster": glyph.cluster,
+                "advance": glyph.x_advance
+            });
+            pen += f64::from(glyph.x_advance);
+            placed
+        })
+        .collect();
+    let primitive = |clipped: bool| {
+        let mut run = json!({
+            "kind": "glyphRun",
+            "fontId": font.to_u32(),
+            "size": 28,
+            "color": "#000000",
+            "text": "@@@@@@@@@@",
+            "glyphs": glyphs
+        });
+        if clipped {
+            run["paintClip"] = json!({"x": 4, "w": 12});
+            run["clipGroup"] = json!({"clip": {"x": 8, "y": 0, "w": 72, "h": 40}});
+        }
+        run
+    };
+    let chains = FontChains::new();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+
+    let control = render_png(&list(80.0, 40.0, vec![primitive(false)]), 0, &resources)
+        .expect("control render");
+    let clipped = render_png(&list(80.0, 40.0, vec![primitive(true)]), 0, &resources)
+        .expect("clipped render");
+    let control_bounds = ink_bounds(&control).expect("control ink");
+    let clipped_bounds = ink_bounds(&clipped).expect("clipped ink");
+
+    assert!(control_bounds.0 < 8);
+    assert!(control_bounds.1 >= 16);
+    assert!(clipped_bounds.0 >= 8);
+    assert!(clipped_bounds.1 < 16);
+}
+
+#[test]
 fn text_requires_the_layout_font_chain() {
     let mut fonts = FontStore::new();
     fonts.register(FONT.to_vec()).expect("font");
@@ -301,6 +390,29 @@ fn pixel(png: &[u8], x: u32, y: u32) -> [u8; 4] {
     let info = reader.next_frame(&mut pixels).expect("png frame");
     let start = ((y * info.width + x) * 4) as usize;
     pixels[start..start + 4].try_into().expect("rgba pixel")
+}
+
+fn ink_bounds(png: &[u8]) -> Option<(u32, u32, u32, u32)> {
+    let mut reader = png::Decoder::new(Cursor::new(png))
+        .read_info()
+        .expect("png header");
+    let mut pixels = vec![0_u8; reader.output_buffer_size().expect("buffer size")];
+    let info = reader.next_frame(&mut pixels).expect("png frame");
+    let mut bounds = (u32::MAX, 0, u32::MAX, 0);
+    let mut found = false;
+    for y in 0..info.height {
+        for x in 0..info.width {
+            let start = ((y * info.width + x) * 4) as usize;
+            if pixels[start..start + 4] != [255, 255, 255, 255] {
+                bounds.0 = bounds.0.min(x);
+                bounds.1 = bounds.1.max(x);
+                bounds.2 = bounds.2.min(y);
+                bounds.3 = bounds.3.max(y);
+                found = true;
+            }
+        }
+    }
+    found.then_some(bounds)
 }
 
 /// An image past the pixel budget is skipped, not refused: a 9000x9000 scan is

@@ -466,6 +466,7 @@ fn paint_primitive_core<'k>(
 ) -> Result<(), String> {
     match primitive {
         Primitive::Text(run) => {
+            let retained_mask_bytes = scratch.masks.bytes;
             let mut context = PaintContext {
                 pixmap,
                 resources,
@@ -473,11 +474,13 @@ fn paint_primitive_core<'k>(
                 budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
+                retained_mask_bytes,
                 opacity,
             };
             font::paint_text(&mut context, run)
         }
         Primitive::GlyphRun(run) => {
+            let retained_mask_bytes = scratch.masks.bytes;
             let mut context = PaintContext {
                 pixmap,
                 resources,
@@ -485,6 +488,7 @@ fn paint_primitive_core<'k>(
                 budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
+                retained_mask_bytes,
                 opacity,
             };
             font::paint_glyph_run(&mut context, run)

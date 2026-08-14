@@ -451,6 +451,7 @@ fn regular_chain_head(
 #[cfg(test)]
 mod authoritative_tests {
     use super::*;
+    use crate::font_store::FontMetrics;
 
     const FIXTURE: &[u8] = include_bytes!("../../tests/fonts/LiberationSans-Regular.ttf");
 
@@ -492,6 +493,64 @@ mod authoritative_tests {
                 .any(|cluster| cluster.end_char - cluster.start_char > 1)
         );
         assert!(slices.iter().any(|slice| slice.bidi_level % 2 == 1));
+    }
+
+    #[test]
+    fn paragraph_input_cannot_enable_metric_experiments() {
+        let mut store = FontStore::new();
+        store.register(FIXTURE.to_vec()).unwrap();
+        let input: MeasureInput = serde_json::from_value(serde_json::json!({
+            "block": {
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "text" }]
+            },
+            "maxWidth": 1000.0,
+            "fontChains": { "liberation sans|0|0": [0] },
+            "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" },
+            "compat": { "gdiLineMetrics": true, "typoLineSpacing": true }
+        }))
+        .unwrap();
+
+        assert!(!input.compat.gdi_line_metrics);
+        assert!(!input.compat.typo_line_spacing);
+        let extent = measure_paragraph(&store, &input).unwrap();
+        assert_eq!(extent.lines[0].line_height, 18.398_438);
+    }
+
+    #[test]
+    fn paragraph_measurement_preserves_tamil_sangam_negative_leading() {
+        let mut store = FontStore::new();
+        let id = store.register(FIXTURE.to_vec()).unwrap();
+        let metrics = FontMetrics {
+            units_per_em: 2048,
+            os2_typo_ascender: 1550,
+            os2_typo_descender: -717,
+            os2_typo_line_gap: -210,
+            os2_fs_selection: 0x00c0,
+            os2_version: 4,
+            ..*store.metrics(id).unwrap()
+        };
+        store.replace_metrics_for_test(id, metrics).unwrap();
+
+        let mut input: MeasureInput = serde_json::from_value(serde_json::json!({
+            "block": {
+                "kind": "paragraph",
+                "runs": [{ "kind": "text", "text": "Tamil Sangam MN" }]
+            },
+            "maxWidth": 1000.0,
+            "fontChains": { "liberation sans|0|0": [0] },
+            "defaults": { "fontSize": 12.0, "fontFamily": "Liberation Sans" }
+        }))
+        .unwrap();
+        input.compat.gdi_line_metrics = true;
+        input.compat.typo_line_spacing = true;
+
+        let extent = measure_paragraph(&store, &input).unwrap();
+        assert_eq!(extent.lines.len(), 1);
+        assert_eq!(extent.lines[0].ascent, 12.0);
+        assert_eq!(extent.lines[0].descent, 6.0);
+        assert_eq!(extent.lines[0].line_height, 16.0);
+        assert_eq!(extent.total_height, 16.0);
     }
 
     #[test]

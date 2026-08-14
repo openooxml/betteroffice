@@ -1,62 +1,4 @@
-/**
- * TextMeasureFontRegistry — host-side font-byte plumbing for
- * `crates/ooxml-text`.
- *
- * Turns a Word font request (family + bold + italic) into an ordered chain of
- * font ids registered with the engine. The engine consumes font bytes and
- * ids, never font names, so this registry owns byte sourcing.
- *
- * Chain order (the documented contract — deterministic by construction: the
- * same document + the same injected provider produce the same chain on every
- * machine; no OS/local-font source ever participates):
- *  1. The embedded face exactly matching (family, bold, italic), extracted
- *     from the open document (`utils/embeddedFonts.ts` vocabulary).
- *  2. Otherwise the embedded regular (normal/normal) face of the same family
- *     — synthesizing bold/italic from the regular outlines is the engine's
- *     problem, not the registry's; we only guarantee byte availability.
- *  3. The bundled metric-compatible face resolved by the injected provider,
- *     appended after any embedded face as a coverage net — essential when the
- *     embedded face is subsetted (it may lack glyphs the document acquires
- *     through editing), harmless otherwise — or standing alone when the
- *     document embeds nothing for the family.
- *  4. The always-available last-resort base face
- *     ({@link BundledFontProvider.resolveLastResort} — broad-coverage
- *     Liberation Sans/Serif from `@betteroffice/docx-fonts`), appended as the
- *     TERMINAL link so the chain is NEVER empty. This is the policy that keeps
- *     a run whose family has no embedded/bundled match on the native
- *     measurement path (measured with the base font's real metrics) instead of
- *     routing the whole block to the browser measurer for want of font bytes —
- *     an accepted width divergence for truly-unknown fonts. Deduplicated by
- *     engine id (a family whose metric-compat already IS the base face, e.g.
- *     Arial→Liberation Sans, contributes one id, not two).
- *  5. Empty array — ONLY when no bundled provider is injected, or the provider
- *     omits `resolveLastResort` (mock/partial providers). Real hosts wiring the
- *     bundled fonts always supply it, so the chain terminates non-empty and the
- *     caller never browser-falls-back a run for lack of bytes.
- *
- * Separately from the per-family chains, the registry resolves per-script
- * coverage fallbacks ({@link FontScript}: CJK regions, Arabic, Hebrew).
- * Script faces are shared across families — one Noto face covers a script
- * for every chain — so they are registered once per script and the caller
- * (`rustMeasureSource.ts`) appends the ids after the family faces of every
- * chain it sends to the engine. Without them, a single CJK/RTL character
- * outside the family chain makes the engine refuse the whole block.
- *
- * Both dependencies are injected: the sink because the wasm FontStore is
- * built in a parallel workstream, the bundled provider so core never imports
- * a fonts package. Registration is lazy (first request), memoized per face
- * (concurrent requests share one in-flight promise, so bytes are registered
- * exactly once), and failure-tolerant: a corrupt embedded face is dropped
- * from the chain instead of rejecting it. Byte buffers are additionally
- * deduplicated by identity — providers that serve the same `ArrayBuffer` for
- * several families (aliases, bold-falls-back-to-regular) get one engine id,
- * which matters for the multi-megabyte CJK faces.
- *
- * The registry class itself stays internal; `rustMeasureSource.ts` owns the
- * instance, and only the injected-dependency types (`BundledFontProvider`,
- * `EmbeddedFaceInput`, `FontScript`) are exported through the measure entry
- * point.
- */
+/** Builds deterministic embedded, bundled, script, and last-resort font chains. */
 
 /** Byte sink of the wasm text engine (`crates/docx-text` FontStore). */
 export interface TextEngineFontSink {
@@ -104,7 +46,7 @@ export interface BundledFontProvider {
    * The always-available last-resort base face (broad-coverage Latin —
    * Liberation Sans/Serif per serif-ness). Unlike {@link
    * BundledFontProvider.resolve}, a conforming provider (e.g.
-   * `@betteroffice/docx-fonts`'s `resolveLastResortFace`) returns a loader for
+   * `@betteroffice/fonts`'s `resolveLastResortFace`) returns a loader for
    * EVERY family, so the chain this registry builds is guaranteed non-empty
    * and a run never routes to the browser measurer for want of font bytes. The
    * face's metrics are the base font's, not the requested family's — the
@@ -157,28 +99,65 @@ function chainKey(family: string, bold: boolean, italic: boolean): string {
   return `${familyKey(family)}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
 }
 
+/** A provider or async factory; `undefined` means no bundled bytes. @public */
+export type BundledFontProviderSource =
+  | BundledFontProvider
+  | (() => Promise<BundledFontProvider | undefined>);
+
+interface ChainResolution {
+  ids: number[];
+  retryable: boolean;
+}
+
+interface ScriptResolution {
+  id: number | null;
+  retryable: boolean;
+}
+
+interface PromiseMemo<K, V> {
+  get(key: K): Promise<V> | undefined;
+  delete(key: K): boolean;
+}
+
+function evictFailedPromise<K, V>(
+  memo: PromiseMemo<K, V>,
+  key: K,
+  pending: Promise<V>,
+  failed: (value: V) => boolean
+): void {
+  pending.then(
+    (value) => {
+      if (failed(value) && memo.get(key) === pending) memo.delete(key);
+    },
+    () => {
+      if (memo.get(key) === pending) memo.delete(key);
+    }
+  );
+}
+
 export class TextMeasureFontRegistry {
   private readonly sink: TextEngineFontSink;
-  private readonly bundled: BundledFontProvider | undefined;
+  private readonly bundledSource: BundledFontProviderSource | undefined;
+  private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
+  /** Per-registry so misconfigured editors warn independently. */
+  private warnedFallback = false;
 
   /** Normalized family → embedded faces of the current document. */
   private facesByFamily = new Map<string, EmbeddedFaceInput[]>();
   /**
    * Per-face registration memo, keyed by face object identity so re-feeding
    * the same faces (or sharing one face across several chains) never
-   * re-registers its bytes. `null` = registration failed (memoized too — a
-   * corrupt face stays corrupt). Weak so faces of a closed document can be
-   * collected.
+   * re-registers its bytes. Failed registrations are evicted. Weak so faces of
+   * a closed document can be collected.
    */
   private faceIds = new WeakMap<EmbeddedFaceInput, Promise<number | null>>();
-  /** Bundled registration memo, keyed by chain key. `null` = load/registration failed. */
   private bundledIds = new Map<string, Promise<number | null>>();
   /**
    * Last-resort base-face registration memo, keyed by chain key. Kept separate
    * from `bundledIds` so a family's metric-compat face and its (possibly
    * different) last-resort base face don't clobber each other's registration.
    * Document-independent like `bundledIds` — survives `setEmbeddedFaces`, reset
-   * by `clear()`. `null` = no face / load failed.
+   * by `clear()`. Failed registrations are evicted.
    */
   private lastResortIds = new Map<string, Promise<number | null>>();
   /**
@@ -186,24 +165,40 @@ export class TextMeasureFontRegistry {
    * their fetches, so the same face requested under several chain keys (or
    * as both a family face and a script fallback) resolves to one buffer —
    * and must produce one engine id, not one copy of the bytes per key.
-   * Rejections stay memoized (corrupt bytes stay corrupt). Weak so buffers
-   * of a cleared registry can be collected.
+   * Rejections are evicted. Weak so buffers of a cleared registry can be
+   * collected.
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
-  /** Per-script fallback registration memo. `null` = no face / failed. */
-  private scriptIds = new Map<FontScript, Promise<number | null>>();
+  private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();
   /** Settled per-script results for the synchronous view. */
-  private scriptResults = new Map<FontScript, number | null>();
+  private scriptResults = new Map<FontScript, ScriptResolution>();
   /** Chain memo — concurrent `getFontIdChain` calls share one resolution. */
-  private chains = new Map<string, Promise<number[]>>();
+  private chains = new Map<string, Promise<ChainResolution>>();
   /** Settled chains for the synchronous view. */
-  private chainResults = new Map<string, readonly number[]>();
+  private chainResults = new Map<string, ChainResolution>();
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
-  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProvider }) {
+  constructor(sink: TextEngineFontSink, opts?: { bundled?: BundledFontProviderSource }) {
     this.sink = sink;
-    this.bundled = opts?.bundled;
+    this.bundledSource = opts?.bundled;
+  }
+
+  /** Shares in-flight resolution but evicts misses for retry. */
+  private bundled(): Promise<BundledFontProvider | undefined> {
+    if (this.bundledPromise === undefined) {
+      const source = this.bundledSource;
+      const promise = Promise.resolve()
+        .then(() => (typeof source === 'function' ? source() : source))
+        .catch(() => undefined);
+      promise.then((provider) => {
+        if (provider === undefined && this.bundledPromise === promise) {
+          this.bundledPromise = undefined;
+        }
+      });
+      this.bundledPromise = promise;
+    }
+    return this.bundledPromise;
   }
 
   /**
@@ -227,64 +222,80 @@ export class TextMeasureFontRegistry {
   }
 
   /**
-   * Ordered font-id chain for a (family, bold, italic) request — see the
-   * module doc for the chain order. Lazily registers bytes with the sink on
-   * first request and memoizes both per-face registrations and whole chains,
-   * so concurrent callers trigger exactly one `registerFont` per face.
-   * Resolves to an empty array when neither an embedded nor a bundled face
-   * exists — the caller must browser-fallback that run.
+   * Lazily resolves and registers a font chain. Concurrent calls share work;
+   * failed registrations remain retryable.
    */
   getFontIdChain(family: string, bold: boolean, italic: boolean): Promise<number[]> {
     const key = chainKey(family, bold, italic);
     let chain = this.chains.get(key);
     if (!chain) {
-      chain = this.resolveChain(key, family, bold, italic);
-      this.chains.set(key, chain);
+      const chains = this.chains;
+      const results = this.chainResults;
+      const generation = this.generation;
+      const pending = this.resolveChain(family, bold, italic);
+      pending.then(
+        (resolution) => {
+          if (generation !== this.generation) return;
+          results.set(key, resolution);
+          if (resolution.retryable && chains.get(key) === pending) chains.delete(key);
+        },
+        () => {
+          if (chains.get(key) === pending) chains.delete(key);
+        }
+      );
+      chains.set(key, pending);
+      chain = pending;
     }
-    return chain;
+    return chain.then((resolution) => resolution.ids);
   }
 
-  /**
-   * Synchronous view of an already-resolved chain (for measurement cache
-   * keys); `undefined` while unresolved or never requested.
-   */
+  /** Synchronous settled view; retryable results are evicted after one read. */
   getCachedFontIdChain(
     family: string,
     bold: boolean,
     italic: boolean
   ): readonly number[] | undefined {
-    return this.chainResults.get(chainKey(family, bold, italic));
+    const key = chainKey(family, bold, italic);
+    const resolution = this.chainResults.get(key);
+    if (resolution?.retryable) {
+      const results = this.chainResults;
+      queueMicrotask(() => {
+        if (results.get(key) === resolution) results.delete(key);
+      });
+    }
+    return resolution?.ids;
   }
 
-  /**
-   * Resolve (and lazily register) the script-fallback faces for `scripts`,
-   * in input order, deduplicated. A script the provider has no face for —
-   * or whose face fails to load/register — contributes nothing; like the
-   * per-family chains this is failure-tolerant and memoized per script, so
-   * a broken loader is not re-hit on every layout pass.
-   */
+  /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
   getScriptFallbackIds(scripts: FontScript[]): Promise<number[]> {
     const unique = [...new Set(scripts)];
-    return Promise.all(unique.map((script) => this.resolveScript(script))).then((ids) => {
+    return Promise.all(unique.map((script) => this.resolveScript(script))).then((resolutions) => {
       const out: number[] = [];
-      for (const id of ids) {
+      for (const { id } of resolutions) {
         if (id !== null && !out.includes(id)) out.push(id);
       }
       return out;
     });
   }
 
-  /**
-   * Synchronous view of the script-fallback ids for `scripts`; `undefined`
-   * while ANY of them is still unresolved (the caller should fall back and
-   * let `prepareFonts` warm the set). Settled misses contribute nothing.
-   */
+  /** Synchronous settled view; retryable results are evicted after one pass. */
   getCachedScriptFallbackIds(scripts: FontScript[]): readonly number[] | undefined {
-    const out: number[] = [];
+    const results = this.scriptResults;
+    const resolutions: Array<[FontScript, ScriptResolution]> = [];
     for (const script of scripts) {
-      if (!this.scriptResults.has(script)) return undefined;
-      const id = this.scriptResults.get(script)!;
+      const resolution = results.get(script);
+      if (!resolution) return undefined;
+      resolutions.push([script, resolution]);
+    }
+    const out: number[] = [];
+    for (const [script, resolution] of resolutions) {
+      const { id } = resolution;
       if (id !== null && !out.includes(id)) out.push(id);
+      if (resolution.retryable) {
+        queueMicrotask(() => {
+          if (results.get(script) === resolution) results.delete(script);
+        });
+      }
     }
     return out;
   }
@@ -298,6 +309,7 @@ export class TextMeasureFontRegistry {
    */
   clear(): void {
     this.generation++;
+    this.bundledPromise = undefined;
     this.faceIds = new WeakMap();
     this.bundledIds = new Map();
     this.lastResortIds = new Map();
@@ -309,24 +321,37 @@ export class TextMeasureFontRegistry {
   }
 
   private async resolveChain(
-    key: string,
     family: string,
     bold: boolean,
     italic: boolean
-  ): Promise<number[]> {
-    const generation = this.generation;
+  ): Promise<ChainResolution> {
+    const key = chainKey(family, bold, italic);
     const ids: number[] = [];
+    let retryable = false;
 
     const face = this.pickEmbeddedFace(family, bold, italic);
     if (face) {
       const id = await this.registerFace(face);
       if (id !== null) ids.push(id);
+      else retryable = true;
     }
 
-    const loader = this.bundled?.resolve(family, bold, italic);
+    const bundled = await this.bundled();
+    if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
+    let loader: (() => Promise<ArrayBuffer>) | undefined;
+    try {
+      loader = bundled?.resolve(family, bold, italic);
+    } catch (error) {
+      retryable = true;
+      console.warn(
+        `[fontRegistry] bundled face resolver for "${family}" failed; falling back: ` +
+          `${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     if (loader) {
       const id = await this.registerBundled(key, loader, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
+      if (id === null) retryable = true;
     }
 
     // Terminal link: the always-available last-resort base face. Appended after
@@ -335,15 +360,54 @@ export class TextMeasureFontRegistry {
     // bytes to measure with, keeping the block on the native path instead of the
     // browser fallback. Deduped by engine id (a family whose metric-compat IS
     // the base face, e.g. Arial→Liberation Sans, contributes one id).
-    const lastResort = this.bundled?.resolveLastResort?.(family, bold, italic);
+    let lastResort: (() => Promise<ArrayBuffer>) | undefined;
+    try {
+      lastResort = bundled?.resolveLastResort?.(family, bold, italic);
+    } catch (error) {
+      retryable = true;
+      console.warn(
+        `[fontRegistry] last-resort resolver for "${family}" failed; falling back: ` +
+          `${error instanceof Error ? error.message : String(error)}`
+      );
+    }
     if (lastResort) {
       const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
+      if (id === null) retryable = true;
     }
 
-    // Only publish into the sync view if nothing invalidated us mid-flight.
-    if (generation === this.generation) this.chainResults.set(key, ids);
-    return ids;
+    if (ids.length === 0) {
+      this.warnFallback(
+        family,
+        bundled !== undefined,
+        loader !== undefined || lastResort !== undefined
+      );
+    }
+
+    return { ids, retryable };
+  }
+
+  /**
+   * An empty chain forces browser measurement. Distinguish absent, incomplete,
+   * and broken providers so the one warning gives applicable remediation.
+   */
+  private warnFallback(family: string, providerResolved: boolean, loaderResolved: boolean): void {
+    if (this.warnedFallback) return;
+    this.warnedFallback = true;
+    const consequence =
+      'Native measurement is unsupported; browser hosts fall back to measureText and may use ' +
+      'different OS fonts, so pagination can vary. Reported once per registry.';
+    console.warn(
+      loaderResolved
+        ? `[fontRegistry] no font bytes for "${family}" — the font provider resolved but every ` +
+            `matching face failed to load. ${consequence} If a bundler inlined ` +
+            '@betteroffice/fonts, mark it external so its asset URLs resolve.'
+        : providerResolved
+          ? `[fontRegistry] no font bytes for "${family}" — the configured font provider has ` +
+            `no matching face. Add coverage for this family. ${consequence}`
+          : `[fontRegistry] no font bytes for "${family}" — no font provider resolved. Install ` +
+            `@betteroffice/fonts. ${consequence}`
+    );
   }
 
   /**
@@ -370,11 +434,10 @@ export class TextMeasureFontRegistry {
   private registerBuffer(bytes: ArrayBuffer): Promise<number> {
     let pending = this.bufferIds.get(bytes);
     if (!pending) {
+      const ids = this.bufferIds;
       pending = Promise.resolve().then(() => this.sink.registerFont(new Uint8Array(bytes)));
-      // Every caller handles the rejection; this guard only keeps a memoized
-      // failure from surfacing as an unhandled-rejection warning.
-      pending.catch(() => {});
-      this.bufferIds.set(bytes, pending);
+      evictFailedPromise(ids, bytes, pending, () => false);
+      ids.set(bytes, pending);
     }
     return pending;
   }
@@ -382,6 +445,7 @@ export class TextMeasureFontRegistry {
   private registerFace(face: EmbeddedFaceInput): Promise<number | null> {
     let pending = this.faceIds.get(face);
     if (!pending) {
+      const ids = this.faceIds;
       pending = (async () => {
         try {
           return await this.registerBuffer(face.data);
@@ -397,7 +461,8 @@ export class TextMeasureFontRegistry {
           return null;
         }
       })();
-      this.faceIds.set(face, pending);
+      evictFailedPromise(ids, face, pending, (id) => id === null);
+      ids.set(face, pending);
     }
     return pending;
   }
@@ -409,29 +474,28 @@ export class TextMeasureFontRegistry {
   ): Promise<number | null> {
     let pending = this.bundledIds.get(key);
     if (!pending) {
+      const ids = this.bundledIds;
       pending = (async () => {
         try {
           const bytes = await loader();
           return await this.registerBuffer(bytes);
-        } catch {
-          // Failed fetch or unparseable bundled face: memoized as a miss for
-          // this registry's lifetime (clear() resets), so a broken loader is
-          // not re-hit on every measurement.
+        } catch (error) {
           console.warn(
-            `[fontRegistry] bundled face for "${family}" failed to load or register; falling back`
+            `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
+              `falling back: ${error instanceof Error ? error.message : String(error)}`
           );
           return null;
         }
       })();
-      this.bundledIds.set(key, pending);
+      evictFailedPromise(ids, key, pending, (id) => id === null);
+      ids.set(key, pending);
     }
     return pending;
   }
 
   /**
-   * Register (once per chain key) the last-resort base face. Mirrors
-   * {@link registerBundled} but keyed in its own memo so it never collides with
-   * the family's metric-compat registration.
+   * Register the last-resort base face. Mirrors {@link registerBundled} but
+   * uses its own memo so it never collides with metric-compatible registration.
    */
   private registerLastResort(
     key: string,
@@ -440,6 +504,7 @@ export class TextMeasureFontRegistry {
   ): Promise<number | null> {
     let pending = this.lastResortIds.get(key);
     if (!pending) {
+      const ids = this.lastResortIds;
       pending = (async () => {
         try {
           const bytes = await loader();
@@ -452,35 +517,50 @@ export class TextMeasureFontRegistry {
           return null;
         }
       })();
-      this.lastResortIds.set(key, pending);
+      evictFailedPromise(ids, key, pending, (id) => id === null);
+      ids.set(key, pending);
     }
     return pending;
   }
 
-  private resolveScript(script: FontScript): Promise<number | null> {
+  private resolveScript(script: FontScript): Promise<ScriptResolution> {
     let pending = this.scriptIds.get(script);
     if (!pending) {
-      // Capture the map so a clear() mid-flight publishes into the orphaned
-      // instance instead of resurrecting stale ids in the fresh one.
+      const ids = this.scriptIds;
       const results = this.scriptResults;
       pending = (async () => {
         let id: number | null = null;
-        const loader = this.bundled?.resolveScriptFallback?.(script, false, false);
+        let retryable = false;
+        const bundled = await this.bundled();
+        if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
+        let loader: (() => Promise<ArrayBuffer>) | undefined;
+        try {
+          loader = bundled?.resolveScriptFallback?.(script, false, false);
+        } catch (error) {
+          retryable = true;
+          console.warn(
+            `[fontRegistry] script-fallback resolver for "${script}" failed; falling back: ` +
+              `${error instanceof Error ? error.message : String(error)}`
+          );
+        }
         if (loader) {
           try {
             const bytes = await loader();
             id = await this.registerBuffer(bytes);
-          } catch {
+          } catch (error) {
+            retryable = true;
             console.warn(
               `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +
-                'falling back'
+                `falling back: ${error instanceof Error ? error.message : String(error)}`
             );
           }
         }
-        results.set(script, id);
-        return id;
+        const resolution = { id, retryable };
+        results.set(script, resolution);
+        return resolution;
       })();
-      this.scriptIds.set(script, pending);
+      evictFailedPromise(ids, script, pending, (resolution) => resolution.retryable);
+      ids.set(script, pending);
     }
     return pending;
   }

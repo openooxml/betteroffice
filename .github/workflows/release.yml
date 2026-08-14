@@ -69,7 +69,7 @@ jobs:
 
       - name: Type check
         if: steps.pending.outputs.publishing == 'true'
-        run: bun run --filter './packages/*' typecheck
+        run: bun run typecheck:packages
 
       - name: Test
         if: steps.pending.outputs.publishing == 'true'

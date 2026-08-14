@@ -1,0 +1,53 @@
+{
+  "name": "@betteroffice/fonts-cjk",
+  "version": "0.0.1",
+  "description": "Optional CJK font binaries for @betteroffice/fonts: Noto Sans SC/TC/JP/KR and Noto Serif SC coverage faces for Chinese, Japanese and Korean documents.",
+  "sideEffects": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "LICENSE",
+    "LICENSES",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.1",
+    "typescript": "^6.0.3"
+  },
+  "keywords": [
+    "fonts",
+    "cjk",
+    "noto",
+    "chinese",
+    "japanese",
+    "korean",
+    "docx",
+    "ooxml"
+  ],
+  "author": "OpenOOXML",
+  "license": "(Apache-2.0 AND OFL-1.1)",
+  "homepage": "https://betteroffice.dev/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "packages/fonts-cjk"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

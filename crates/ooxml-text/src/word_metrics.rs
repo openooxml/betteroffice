@@ -94,6 +94,12 @@
 //! `w:balanceSingleByteDoubleByteWidth`, so a document setting them measures
 //! as though they were off.
 
+//!
+//! [`CompatFlags::gdi_line_metrics`] and [`CompatFlags::typo_line_spacing`]
+//! are independent, opt-in experiments. GDI rounds ppem and components; typo
+//! spacing selects version-4 `USE_TYPO_METRICS` with a signed gap. Both remain
+//! unavailable to paragraph input because observed Word output did not quantize.
+
 use crate::font_store::FontMetrics;
 use crate::shape::ShapeFeature;
 
@@ -104,6 +110,10 @@ pub struct CompatFlags {
     pub no_leading: bool,
     /// w:doNotExpandShiftReturn — lines ended by a soft return are NOT justified.
     pub do_not_expand_shift_return: bool,
+    /// Off-by-default experiment that quantizes ppem and metric components.
+    pub gdi_line_metrics: bool,
+    /// Off-by-default experiment that selects version-4 `USE_TYPO_METRICS`.
+    pub typo_line_spacing: bool,
 }
 
 /// w:spacing lineRule + line value, pre-converted to px by the host where applicable.
@@ -137,46 +147,92 @@ impl LineBox {
     }
 }
 
-/// Word single-spacing line box for a font at `size_px` (rule 1).
+/// Word single-spacing line box for a font at `size_px`.
 ///
-/// - `ascent` / `descent` come from `OS/2` usWinAscent / usWinDescent (the
-///   GDI `tmHeight` lineage Word uses), scaled by `size_px / units_per_em`.
-/// - `leading` is GDI `tmExternalLeading`: `max(0, hhea(ascender − descender
-///   + lineGap) − (usWinAscent + usWinDescent))` scaled, placed below the
-///   descent. Dropped entirely under [`CompatFlags::no_leading`].
-///
-/// Panic-free on malformed metrics: a zero `units_per_em` (or a NaN /
-/// non-positive `size_px`) yields an all-zero box rather than NaN/negative
-/// geometry — font bytes are attacker-controlled and a degenerate line box
-/// is the safe downstream value.
+/// The default path preserves design metrics; experiments bound them to 16 ems.
+/// All paths reject degenerate inputs and cap line boxes at Word's 1638pt limit;
+/// glyph advances remain uncapped.
 pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> LineBox {
-    if m.units_per_em == 0 || size_px.is_nan() || size_px <= 0.0 {
+    if m.units_per_em == 0 || !size_px.is_finite() || size_px <= 0.0 {
         return LineBox {
             ascent: 0.0,
             descent: 0.0,
             leading: 0.0,
         };
     }
-    let scale = size_px / m.units_per_em as f32;
+    let size_px = size_px.min(MAX_SIZE_PX);
 
-    let ascent = m.os2_win_ascent as f32 * scale;
-    let descent = m.os2_win_descent as f32 * scale;
-
-    let leading = if compat.no_leading {
-        0.0
-    } else {
-        // i32 arithmetic: i16/u16 sums cannot overflow, and hhea descender
-        // is negative by convention (hence the subtraction).
-        let hhea_total = m.hhea_ascender as i32 - m.hhea_descender as i32 + m.hhea_line_gap as i32;
-        let win_total = m.os2_win_ascent as i32 + m.os2_win_descent as i32;
-        (hhea_total - win_total).max(0) as f32 * scale
-    };
-
-    LineBox {
-        ascent,
-        descent,
-        leading,
+    if !compat.gdi_line_metrics && !compat.typo_line_spacing {
+        let scale = size_px / m.units_per_em as f32;
+        return LineBox {
+            ascent: m.os2_win_ascent as f32 * scale,
+            descent: m.os2_win_descent as f32 * scale,
+            leading: if compat.no_leading {
+                0.0
+            } else {
+                win_external_leading(m) as f32 * scale
+            },
+        };
     }
+
+    let (ascent, descent, leading) = experimental_metric_family(m, compat.typo_line_spacing);
+    let leading = if compat.no_leading { 0 } else { leading };
+
+    if compat.gdi_line_metrics {
+        let ppem = (size_px.round() as i32).max(1) as f64;
+        let upm = m.units_per_em as f64;
+        let px = |design: i32| (design as f64 * ppem / upm).round() as f32;
+        LineBox {
+            ascent: px(ascent),
+            descent: px(descent),
+            leading: px(leading),
+        }
+    } else {
+        let scale = size_px / m.units_per_em as f32;
+        LineBox {
+            ascent: ascent as f32 * scale,
+            descent: descent as f32 * scale,
+            leading: leading as f32 * scale,
+        }
+    }
+}
+
+/// Per-component ceiling for the bounded experiments.
+const MAX_METRIC_EMS: i32 = 16;
+
+/// Word's 1638pt size limit in px at 96 DPI.
+const MAX_SIZE_PX: f32 = 2184.0;
+
+/// hhea line height in excess of the win box, in design units.
+fn win_external_leading(m: &FontMetrics) -> i32 {
+    let hhea_total = m.hhea_ascender as i32 - m.hhea_descender as i32 + m.hhea_line_gap as i32;
+    let win_total = m.os2_win_ascent as i32 + m.os2_win_descent as i32;
+    (hhea_total - win_total).max(0)
+}
+
+/// Bounded design metrics for the opt-in experiments.
+fn experimental_metric_family(m: &FontMetrics, allow_typo: bool) -> (i32, i32, i32) {
+    let cap = MAX_METRIC_EMS * m.units_per_em as i32;
+
+    if allow_typo && m.use_typo_metrics() {
+        let ascent = m.os2_typo_ascender as i32;
+        let descent = -(m.os2_typo_descender as i32);
+        let leading = m.os2_typo_line_gap as i32;
+        let usable = ascent > 0
+            && descent > 0
+            && ascent <= cap
+            && descent <= cap
+            && leading.abs() <= cap
+            && ascent + descent + leading > 0;
+        if usable {
+            return (ascent, descent, leading);
+        }
+    }
+    (
+        (m.os2_win_ascent as i32).min(cap),
+        (m.os2_win_descent as i32).min(cap),
+        win_external_leading(m).min(cap),
+    )
 }
 
 /// Apply `w:spacing` lineRule to a measured content line box (rule 2).
@@ -185,9 +241,9 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 ///   *full* box including leading is scaled (Word scales line pitch).
 ///   Ascent/descent are preserved and the delta goes to leading below the
 ///   descent, so the baseline stays at the top of a taller line box exactly
-///   as Word places it (cursor/selection rects hug the text). If the target
-///   undercuts ascent + descent (sub-single spacing), ascent and descent
-///   shrink proportionally and leading is 0.
+///   as Word places it (cursor/selection rects hug the text). Single spacing
+///   is an identity. If the target undercuts ascent + descent (sub-single
+///   spacing), ascent and descent shrink proportionally and leading is 0.
 /// - `Exact`: the box is fixed at `px` regardless of content and split
 ///   [`EXACT_BASELINE_RATIO`] above the baseline, the rest below. The split
 ///   is a constant of Word's, not a property of the content, so the box
@@ -203,20 +259,23 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     match *rule {
         LineSpacingRule::Auto { line_240ths } => {
+            if line_240ths == 240 {
+                return content;
+            }
             let target = content.height() * (line_240ths as f32 / 240.0);
             let core = content.ascent + content.descent;
-            if target >= core {
-                LineBox {
-                    ascent: content.ascent,
-                    descent: content.descent,
-                    leading: target - core,
-                }
-            } else {
+            if target < core && line_240ths < 240 {
                 let scale = if core > 0.0 { target / core } else { 0.0 };
                 LineBox {
                     ascent: content.ascent * scale,
                     descent: content.descent * scale,
                     leading: 0.0,
+                }
+            } else {
+                LineBox {
+                    ascent: content.ascent,
+                    descent: content.descent,
+                    leading: target - core,
                 }
             }
         }

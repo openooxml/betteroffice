@@ -84,6 +84,7 @@ version = "0.0.4"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-opc",
  "js-sys",
  "ryu-js",
  "serde",

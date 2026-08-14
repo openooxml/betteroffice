@@ -14,8 +14,9 @@
       "version": "0.0.7",
       "dependencies": {
         "@betteroffice/docx": "workspace:*",
-        "@betteroffice/docx-fonts": "workspace:*",
         "@betteroffice/docx-react": "workspace:*",
+        "@betteroffice/fonts": "workspace:*",
+        "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
@@ -130,11 +131,18 @@
       "name": "@betteroffice/docx",
       "version": "0.0.4",
       "devDependencies": {
+        "@betteroffice/fonts": "workspace:*",
         "@types/bun": "^1.0.0",
         "@types/node": "^26.0.0",
         "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
+      "peerDependencies": {
+        "@betteroffice/fonts": "workspace:^0",
+      },
+      "optionalPeers": [
+        "@betteroffice/fonts",
+      ],
     },
     "packages/docx-i18n": {
       "name": "@betteroffice/docx-i18n",
@@ -180,9 +188,27 @@
       ],
     },
     "packages/fonts": {
-      "name": "@betteroffice/docx-fonts",
+      "name": "@betteroffice/fonts",
       "version": "0.0.1",
       "devDependencies": {
+        "@betteroffice/fonts-cjk": "workspace:*",
+        "@types/bun": "^1.0.0",
+        "@types/node": "^26.0.0",
+        "tsup": "^8.0.1",
+        "typescript": "^6.0.3",
+      },
+      "peerDependencies": {
+        "@betteroffice/fonts-cjk": "workspace:^0",
+      },
+      "optionalPeers": [
+        "@betteroffice/fonts-cjk",
+      ],
+    },
+    "packages/fonts-cjk": {
+      "name": "@betteroffice/fonts-cjk",
+      "version": "0.0.1",
+      "devDependencies": {
+        "tsup": "^8.0.1",
         "typescript": "^6.0.3",
       },
     },
@@ -464,11 +490,13 @@
 
     "@betteroffice/docx": ["@betteroffice/docx@workspace:packages/docx"],
 
-    "@betteroffice/docx-fonts": ["@betteroffice/docx-fonts@workspace:packages/fonts"],
-
     "@betteroffice/docx-i18n": ["@betteroffice/docx-i18n@workspace:packages/docx-i18n"],
 
     "@betteroffice/docx-react": ["@betteroffice/docx-react@workspace:packages/docx-react"],
+
+    "@betteroffice/fonts": ["@betteroffice/fonts@workspace:packages/fonts"],
+
+    "@betteroffice/fonts-cjk": ["@betteroffice/fonts-cjk@workspace:packages/fonts-cjk"],
 
     "@betteroffice/pptx": ["@betteroffice/pptx@workspace:packages/pptx"],
 

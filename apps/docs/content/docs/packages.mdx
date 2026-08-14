@@ -25,6 +25,26 @@ npm and crates.io carry all three formats. PyPI carries one distribution today,
 `betteroffice-xlsx`. The PPTX binding is built and tested in the repository but
 has no PyPI project yet, and there is no DOCX binding for Python at all.
 
+## Fonts
+
+Word documents overwhelmingly reference the MS core fonts, whose binaries cannot
+be redistributed. These packages ship the open metric-compatible replacements —
+same advance widths, so line breaks and pagination match Word.
+
+| Package | Size | Contents |
+| --- | --- | --- |
+| `@betteroffice/fonts` | 7.9 MB | Carlito, Caladea, Liberation Sans/Serif/Mono, Noto Hebrew/Arabic |
+| `@betteroffice/fonts-cjk` | 33 MB | Noto Sans SC/TC/JP/KR, Noto Serif SC |
+
+`npm install @betteroffice/fonts` is the whole setup: `@betteroffice/docx` picks
+it up through an optional dynamic import, so measurement uses real font metrics
+with no wiring. Add `@betteroffice/fonts-cjk` only for Chinese, Japanese, or
+Korean text — it is separate so nobody installs 33 MB they do not need.
+
+Without either, families a document does not embed measure with synthetic
+metrics and pagination will not match Word. Neither package is installed
+automatically; both are declared optional peers.
+
 ## Picking one
 
 - **An editor UI in a React app** — the `-react` packages. They own the toolbar,

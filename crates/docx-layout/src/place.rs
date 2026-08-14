@@ -22,7 +22,7 @@
 //! Anchored images and floating text boxes overlay the page and never move the
 //! pen; inline images, shapes, charts and inline text boxes consume their
 //! measured bbox in flow. Paragraph placement is described on
-//! [`layout_paragraph`].
+//! `layout_paragraph`.
 //!
 //! Checkpoints are resume bookmarks at pristine page starts. They stay resident
 //! and never appear in a serialized `Layout`. [`layout_document_incremental`]
@@ -811,10 +811,11 @@ fn build_resolved_lines(
 ///
 /// Two rules can move lines before they are placed. `w:keepLines` advances to a
 /// fresh column when the whole paragraph fits a column but not the space left
-/// here. Widow and orphan control applies to paragraphs of at least four lines:
-/// a lone opening line moves the paragraph on when two lines would fit there,
-/// and a lone trailing line is avoided by pushing one more line down, provided
-/// the fragment keeps more than two.
+/// here. Widow and orphan control applies to paragraphs of at least four lines
+/// that do not turn `w:widowControl` off: a lone opening line moves the
+/// paragraph on when two lines would fit there, and a lone trailing line is
+/// avoided by pushing one more line down, provided the fragment keeps more than
+/// two.
 ///
 /// Spacing before is charged to the first fragment only and spacing after to
 /// the last, and each fragment carries its own document range and resolved run
@@ -863,6 +864,12 @@ fn layout_paragraph(
     let paragraph_height = lines.iter().fold(0.0, |sum, line| {
         sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
     });
+    let widow_control = lines.len() >= 4
+        && block
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.widow_control)
+            .unwrap_or(true);
 
     if block
         .attrs
@@ -913,7 +920,6 @@ fn layout_paragraph(
         }
 
         let remaining_after = lines.len() - (current_line_index + fitting_lines);
-        let widow_control = lines.len() >= 4;
         if widow_control && remaining_after > 0 {
             if current_line_index == 0 && fitting_lines == 1 {
                 let capacity = paginator.state(state_idx).content_limit
@@ -1434,6 +1440,58 @@ mod pagination_rule_tests {
             })
             .collect();
         assert_eq!(second_page_lines, vec![(0, 4)]);
+    }
+
+    fn paragraph_slices(layout: &Layout, id: f64) -> Vec<(usize, usize, usize)> {
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| match fragment {
+                    Fragment::Paragraph(p)
+                        if matches!(p.block_id, crate::types::BlockId::Num(value) if value == id) =>
+                    {
+                        Some((page_index, p.from_line, p.to_line))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn authored_widow_control_off_splits_where_the_default_moves_the_paragraph_on() {
+        let default = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({})),
+        ]);
+        let disabled = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({ "widowControl": false })),
+        ]);
+
+        assert_eq!(paragraph_slices(&default, 2.0), vec![(1, 0, 4)]);
+        assert_eq!(paragraph_slices(&disabled, 2.0), vec![(0, 0, 1), (1, 1, 4)]);
+    }
+
+    #[test]
+    fn authored_widow_control_off_saves_the_page_the_default_costs() {
+        let default = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({})),
+            paragraph(3, 2, 20.0, json!({})),
+        ]);
+        let disabled = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({ "widowControl": false })),
+            paragraph(3, 2, 20.0, json!({})),
+        ]);
+
+        assert_eq!(default.pages.len(), 3);
+        assert_eq!(paragraph_slices(&default, 3.0), vec![(1, 0, 1), (2, 1, 2)]);
+        assert_eq!(disabled.pages.len(), 2);
+        assert_eq!(paragraph_slices(&disabled, 3.0), vec![(1, 0, 2)]);
     }
 
     #[test]

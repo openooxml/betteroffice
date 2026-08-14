@@ -98,7 +98,7 @@ struct LineState {
     max_font: Option<FontId>,
     max_ascent: f32,
     max_descent: f32,
-    max_leading: f32,
+    max_leading: Option<f32>,
     /// Tallest inline-image footprint on the line.
     max_image_height_px: f32,
     available: f32,
@@ -209,7 +209,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
             max_font: None,
             max_ascent: 0.0,
             max_descent: 0.0,
-            max_leading: 0.0,
+            max_leading: None,
             max_image_height_px: 0.0,
             available: first_available,
             left_offset: first_margins.left,
@@ -549,7 +549,11 @@ impl Filler<'_> {
                 .cur
                 .max_descent
                 .max((line.descent - baseline_shift_px).max(0.0));
-            self.cur.max_leading = self.cur.max_leading.max(line.leading);
+            self.cur.max_leading = Some(
+                self.cur
+                    .max_leading
+                    .map_or(line.leading, |leading| leading.max(line.leading)),
+            );
         }
     }
 
@@ -619,7 +623,7 @@ impl Filler<'_> {
             Some(_) => wm::LineBox {
                 ascent: self.cur.max_ascent,
                 descent: self.cur.max_descent,
-                leading: self.cur.max_leading,
+                leading: self.cur.max_leading.unwrap_or(0.0),
             },
             // Fontless lines use a 0.8/0.2 em split.
             None => wm::LineBox {
@@ -783,7 +787,7 @@ impl Filler<'_> {
             max_font: None,
             max_ascent: 0.0,
             max_descent: 0.0,
-            max_leading: 0.0,
+            max_leading: None,
             max_image_height_px: 0.0,
             available,
             left_offset: margins.left,
@@ -906,6 +910,26 @@ fn to_flags(compat: &CompatIn) -> wm::CompatFlags {
     wm::CompatFlags {
         no_leading: compat.no_leading,
         do_not_expand_shift_return: compat.do_not_expand_shift_return,
+        gdi_line_metrics: {
+            #[cfg(test)]
+            {
+                compat.gdi_line_metrics
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        },
+        typo_line_spacing: {
+            #[cfg(test)]
+            {
+                compat.typo_line_spacing
+            }
+            #[cfg(not(test))]
+            {
+                false
+            }
+        },
     }
 }
 

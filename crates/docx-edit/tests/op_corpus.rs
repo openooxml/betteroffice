@@ -983,6 +983,46 @@ fn apply_paragraph_style_resets_attrs_sweeps_marks_and_errs_before_mutating() {
 }
 
 #[test]
+fn apply_paragraph_style_clears_a_widow_control_off_the_new_style_does_not_author() {
+    let (doc, para) = doc_with("styled paragraph");
+    let selector = ParaSelector::One(para.clone());
+    doc.set_paragraph_attr(&para, "widowControl", Any::Bool(false))
+        .unwrap();
+
+    // Absence encodes default-on, so a style that authors nothing must clear
+    // false.
+    let plain = ResolvedStyleProjection {
+        style_id: "Body".into(),
+        known: true,
+        ..ResolvedStyleProjection::default()
+    };
+    doc.apply_paragraph_style(&ctx(), &selector, &plain)
+        .unwrap();
+    assert_eq!(
+        doc.paragraphs("body").unwrap()[0]
+            .properties
+            .get("widowControl"),
+        None
+    );
+
+    let off = ResolvedStyleProjection {
+        style_id: "Tight".into(),
+        known: true,
+        paragraph_attrs: [("widowControl".to_string(), Any::Bool(false))]
+            .into_iter()
+            .collect(),
+        ..ResolvedStyleProjection::default()
+    };
+    doc.apply_paragraph_style(&ctx(), &selector, &off).unwrap();
+    assert_eq!(
+        doc.paragraphs("body").unwrap()[0]
+            .properties
+            .get("widowControl"),
+        Some(&Any::Bool(false))
+    );
+}
+
+#[test]
 fn dedupe_para_ids_first_occurrence_keeps_its_id() {
     // Concurrent splits of the same paragraph give both new pilcrows the ORIGINAL paraId.
     let base = EditingDoc::new(1);

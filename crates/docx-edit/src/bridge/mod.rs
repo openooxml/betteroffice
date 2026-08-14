@@ -2626,6 +2626,7 @@ fn lower_paragraph_attrs(
 
     result.keep_next = true_property(values, "keepNext");
     result.keep_lines = true_property(values, "keepLines");
+    result.widow_control = false_property(values, "widowControl");
     result.page_break_before = true_property(values, "pageBreakBefore");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");
@@ -3170,6 +3171,11 @@ fn numeric_id(id: &str, env: &RenderEnv) -> f64 {
 
 fn true_property(values: &BTreeMap<String, Any>, key: &str) -> Option<bool> {
     (values.get(key).and_then(any_bool) == Some(true)).then_some(true)
+}
+
+/// Returns only an authored false for a default-on toggle.
+fn false_property(values: &BTreeMap<String, Any>, key: &str) -> Option<bool> {
+    (values.get(key).and_then(any_bool) == Some(false)).then_some(false)
 }
 
 fn attribute<'a>(attributes: Option<&'a Attrs>, key: &str) -> Option<&'a Any> {
@@ -4138,5 +4144,29 @@ mod tests {
                 "columns": { "count": 2.0, "gap": 24.0, "equalWidth": true }
             })
         );
+    }
+
+    #[test]
+    fn authored_widow_control_off_reaches_the_layout_attrs() {
+        let doc = EditingDoc::new(49);
+        let para = doc.create_story("body", "text", "Normal", "left").unwrap();
+        let attrs = |doc: &EditingDoc| {
+            let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+            serde_json::to_value(&blocks).unwrap()[0]["attrs"].clone()
+        };
+
+        assert_eq!(attrs(&doc).get("widowControl"), None);
+
+        doc.set_paragraph_attr(&para, "widowControl", Any::Null)
+            .unwrap();
+        assert_eq!(attrs(&doc).get("widowControl"), None);
+
+        doc.set_paragraph_attr(&para, "widowControl", Any::Bool(true))
+            .unwrap();
+        assert_eq!(attrs(&doc).get("widowControl"), None);
+
+        doc.set_paragraph_attr(&para, "widowControl", Any::Bool(false))
+            .unwrap();
+        assert_eq!(attrs(&doc)["widowControl"], json!(false));
     }
 }
