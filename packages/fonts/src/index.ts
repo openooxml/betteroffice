@@ -17,7 +17,6 @@ export interface BundledFontFace {
   style: 'normal' | 'italic';
   /** Asset filename under this package's `assets/` directory. */
   file: string;
-  /** Exact byte length of the vendored raw sfnt asset. */
   byteLength: number;
   /** Present on faces that serve as per-script coverage fallbacks. */
   script?: BundledFontScript;
@@ -400,15 +399,11 @@ const FONT_ASSET_URLS: Record<string, () => URL> = {
   'NotoSansHebrew-Regular.ttf': () => new URL('../assets/NotoSansHebrew-Regular.ttf', import.meta.url),
 };
 
-/** Where a face's bytes are served from. */
 export interface FontAssetOptions {
   /**
-   * Serve the faces from here instead of this package's own assets. Same-origin
-   * (the package's own assets) is the default on purpose: a CDN default would
-   * leak document-font usage to a third party and break offline and strict-CSP
-   * deployments. A trailing slash is optional. A relative base is resolved
-   * against the current document when the provider is created; outside a
-   * browser the base must be absolute.
+   * Asset root. The default stays same-origin for privacy, offline use, and
+   * strict CSP. Relative roots pin to the current document; server roots must
+   * be absolute.
    */
   baseUrl?: string | URL;
 }
@@ -428,10 +423,7 @@ async function importCjkAssetUrls(): Promise<Record<string, () => URL> | undefin
   }
 }
 
-/**
- * Asset URLs of the optional CJK add-on, or `undefined` when it is not
- * installed. In-flight and successful imports are shared; misses are retried.
- */
+/** Shares in-flight or successful CJK imports while leaving misses retryable. */
 function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
   if (cjkAssetUrls === undefined) {
     const promise = importCjkAssetUrls();
@@ -491,14 +483,7 @@ function builtinModule<T>(name: string): T | undefined {
   }
 }
 
-/**
- * Read a `file:` asset off disk, or `undefined` when that is not possible.
- *
- * Node's `fetch` does not implement the `file:` scheme — only Bun's does — so
- * a server-side host importing this package from `node_modules` would get
- * nothing at all from a bare `fetch`. Mirrors `readWasmSync` in
- * `@betteroffice/docx`'s wasm loader, which solves the same problem.
- */
+/** Node fetch cannot read file: package assets, so server imports use built-in I/O. */
 function readFileAsset(url: URL): ArrayBuffer | undefined {
   if (url.protocol !== 'file:') return undefined;
   const fs = builtinModule<NodeFsLike>('node:fs');
@@ -528,15 +513,9 @@ function validateByteLength(face: BundledFontFace, bytes: ArrayBuffer): ArrayBuf
 }
 
 /**
- * Lazily fetch the raw sfnt bytes for a face. The fetch is same-origin by
- * default: the asset URL is derived with `new URL(..., import.meta.url)` so
- * bundlers (Vite) emit the file and serve it alongside the module. Pass
- * `baseUrl` to serve the faces from a CDN instead.
- *
- * Results are cached per (face, base URL) — the same promise is returned for
- * concurrent callers, and the same `ArrayBuffer` instance is handed to every
- * consumer, so byte-identity lets registries deduplicate registrations. A
- * failed fetch is evicted so it can be retried.
+ * Lazily loads raw sfnt bytes from package assets or `baseUrl`. Literal
+ * `import.meta.url` assets keep defaults same-origin; loads share buffer
+ * identity per face/base and failures remain retryable.
  */
 export function loadBundledFontBytes(
   face: BundledFontFace,
@@ -605,33 +584,18 @@ export function registerBundledFontFace(
   return promise;
 }
 
-/**
- * A resolver of bundled font bytes, shaped exactly like the measurement
- * engine's `BundledFontProvider` (`@betteroffice/docx`'s
- * `layout/measure/fontRegistry`). Declared structurally rather than imported
- * so this package stays independent of the engine packages.
- */
+/** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
-  /** Bundled metric-compatible face for a Word family, or undefined. */
   resolve(family: string, bold: boolean, italic: boolean): (() => Promise<ArrayBuffer>) | undefined;
-  /** Per-script coverage face (CJK/RTL), or undefined. */
   resolveScriptFallback(
     script: BundledFontScript,
     bold: boolean,
     italic: boolean
   ): (() => Promise<ArrayBuffer>) | undefined;
-  /** The always-available last-resort base face — never undefined. */
   resolveLastResort(family: string, bold: boolean, italic: boolean): () => Promise<ArrayBuffer>;
 }
 
-/**
- * Build the provider the measurement engine consumes. This is what
- * `@betteroffice/docx` instantiates when a host injects no provider of its
- * own, and what a host should use when it wants the bundled faces served from
- * somewhere other than its own origin.
- *
- * Loaders are lazy: nothing is fetched until a document actually needs a face.
- */
+/** Creates a lazy provider, optionally serving assets from a custom base URL. */
 export function createFontProvider(options?: FontAssetOptions): BundledFontSource {
   const resolvedOptions =
     options?.baseUrl === undefined ? undefined : { baseUrl: resolvedAssetBase(options.baseUrl) };

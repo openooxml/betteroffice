@@ -13,7 +13,7 @@ import {
 } from './index';
 
 const SFNT_TRUETYPE = 0x00010000;
-const SFNT_CFF = 0x4f54544f; // 'OTTO'
+const SFNT_CFF = 0x4f54544f;
 
 describe('resolution', () => {
   test('maps the MS core fonts to their metric-compatible substitutes', () => {
@@ -26,7 +26,6 @@ describe('resolution', () => {
 
   test('falls back to a family regular when the exact style is not vendored', () => {
     expect(resolveMetricCompatFace('Calibri', true, true)?.file).toBe('Carlito-BoldItalic.ttf');
-    // CJK ships Regular only; bold resolves to it rather than to nothing.
     expect(resolveMetricCompatFace('SimSun', true, false)?.file).toBe('NotoSerifSC-Regular.otf');
   });
 
@@ -124,11 +123,7 @@ describe('loading', () => {
     }
   });
 
-  /**
-   * Node's `fetch` does not implement `file:` — only Bun's does — so the
-   * loader must read `file:` assets off disk. Stubbing `fetch` to throw is the
-   * only way to prove that from Bun, where a passing `fetch` would mask it.
-   */
+  // Bun supports file: fetch, so throwing here proves the Node filesystem path is used.
   test('reads file: assets from disk without fetch', async () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = (() => {
@@ -144,11 +139,7 @@ describe('loading', () => {
   });
 });
 
-/**
- * Guards the published shape. Pointing `main`/`types` at `src/*.ts` makes the
- * package unimportable from plain Node, which refuses to type-strip anything
- * under `node_modules` (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING).
- */
+// Plain Node refuses to type-strip TypeScript under node_modules.
 describe('published shape', () => {
   test('entry points are built JavaScript, never raw TypeScript', () => {
     for (const entry of [manifest.main, manifest.module, manifest.exports['.'].import]) {

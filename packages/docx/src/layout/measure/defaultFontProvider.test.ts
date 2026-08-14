@@ -5,7 +5,6 @@ import { TextMeasureFontRegistry, type BundledFontProvider } from './fontRegistr
 
 const CARLITO_REGULAR = new URL('../../../../fonts/assets/Carlito-Regular.ttf', import.meta.url);
 
-/** Records every buffer handed to the engine, in registration order. */
 function recordingSink() {
   const registered: Uint8Array[] = [];
   return {
@@ -233,11 +232,8 @@ describe('default font provider', () => {
     }
   });
 
-  /**
-   * What a bundler that inlined `@betteroffice/fonts` produces: the provider
-   * resolves, but its `import.meta.url` asset URLs miss and every load fails.
-   * The advice must not be "install the package" — it already is installed.
-   */
+  // Inlining can resolve the provider while breaking its import.meta.url assets,
+  // so telling this user to install the package again would be misleading.
   test('warns differently when a provider resolves but every face fails to load', async () => {
     const broken: BundledFontProvider = {
       resolve: () => () => Promise.reject(new Error('fetch failed')),

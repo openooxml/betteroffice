@@ -99,13 +99,7 @@ function chainKey(family: string, bold: boolean, italic: boolean): string {
   return `${familyKey(family)}|${bold ? 1 : 0}|${italic ? 1 : 0}`;
 }
 
-/**
- * Either the provider itself, or a factory resolving one asynchronously (the
- * default path dynamic-imports `@betteroffice/fonts`, so it cannot be
- * synchronous). A factory resolving `undefined` means no bundled bytes exist.
- *
- * @public
- */
+/** A provider or async factory; `undefined` means no bundled bytes. @public */
 export type BundledFontProviderSource =
   | BundledFontProvider
   | (() => Promise<BundledFontProvider | undefined>);
@@ -144,14 +138,8 @@ function evictFailedPromise<K, V>(
 export class TextMeasureFontRegistry {
   private readonly sink: TextEngineFontSink;
   private readonly bundledSource: BundledFontProviderSource | undefined;
-  /** In-flight or successful provider resolution; misses are retried by later chains. */
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
-  /**
-   * Whether this registry has already reported a native-measurement fallback.
-   * Scoped per registry rather than per module so two editors with different
-   * providers each report their own state, and so one misconfigured editor is
-   * not silenced by a healthy one.
-   */
+  /** Per-registry so misconfigured editors warn independently. */
   private warnedFallback = false;
 
   /** Normalized family → embedded faces of the current document. */
@@ -163,7 +151,6 @@ export class TextMeasureFontRegistry {
    * a closed document can be collected.
    */
   private faceIds = new WeakMap<EmbeddedFaceInput, Promise<number | null>>();
-  /** Successful or in-flight bundled registrations, keyed by chain key. */
   private bundledIds = new Map<string, Promise<number | null>>();
   /**
    * Last-resort base-face registration memo, keyed by chain key. Kept separate
@@ -182,7 +169,6 @@ export class TextMeasureFontRegistry {
    * collected.
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
-  /** Successful, stable-miss, or in-flight script fallback resolutions. */
   private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();
   /** Settled per-script results for the synchronous view. */
   private scriptResults = new Map<FontScript, ScriptResolution>();
@@ -198,7 +184,7 @@ export class TextMeasureFontRegistry {
     this.bundledSource = opts?.bundled;
   }
 
-  /** Share an in-flight provider resolution and retain only a successful result. */
+  /** Shares in-flight resolution but evicts misses for retry. */
   private bundled(): Promise<BundledFontProvider | undefined> {
     if (this.bundledPromise === undefined) {
       const source = this.bundledSource;
@@ -236,12 +222,8 @@ export class TextMeasureFontRegistry {
   }
 
   /**
-   * Ordered font-id chain for a (family, bold, italic) request — see the
-   * module doc for the chain order. Lazily registers bytes with the sink on
-   * first request and shares in-flight work, so concurrent callers trigger
-   * exactly one `registerFont` per face. Failed work is retried by later calls.
-   * Resolves to an empty array when neither an embedded nor a bundled face
-   * exists — the caller must browser-fallback that run.
+   * Lazily resolves and registers a font chain. Concurrent calls share work;
+   * failed registrations remain retryable.
    */
   getFontIdChain(family: string, bold: boolean, italic: boolean): Promise<number[]> {
     const key = chainKey(family, bold, italic);
@@ -267,11 +249,7 @@ export class TextMeasureFontRegistry {
     return chain.then((resolution) => resolution.ids);
   }
 
-  /**
-   * Synchronous view of an already-resolved chain (for measurement cache
-   * keys); `undefined` while unresolved or never requested. A failed result is
-   * returned once, then evicted so the next request retries it.
-   */
+  /** Synchronous settled view; retryable results are evicted after one read. */
   getCachedFontIdChain(
     family: string,
     bold: boolean,
@@ -288,12 +266,7 @@ export class TextMeasureFontRegistry {
     return resolution?.ids;
   }
 
-  /**
-   * Resolve (and lazily register) the script-fallback faces for `scripts`,
-   * in input order, deduplicated. A script the provider has no face for —
-   * or whose face fails to load/register — contributes nothing. Stable misses
-   * are memoized; failed work is retried by later calls.
-   */
+  /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
   getScriptFallbackIds(scripts: FontScript[]): Promise<number[]> {
     const unique = [...new Set(scripts)];
     return Promise.all(unique.map((script) => this.resolveScript(script))).then((resolutions) => {
@@ -305,12 +278,7 @@ export class TextMeasureFontRegistry {
     });
   }
 
-  /**
-   * Synchronous view of the script-fallback ids for `scripts`; `undefined`
-   * while ANY of them is still unresolved (the caller should fall back and
-   * let `prepareFonts` warm the set). A failed result is returned once for the
-   * current fallback pass, then evicted so the next request retries it.
-   */
+  /** Synchronous settled view; retryable results are evicted after one pass. */
   getCachedScriptFallbackIds(scripts: FontScript[]): readonly number[] | undefined {
     const results = this.scriptResults;
     const resolutions: Array<[FontScript, ScriptResolution]> = [];
@@ -420,13 +388,8 @@ export class TextMeasureFontRegistry {
   }
 
   /**
-   * An empty chain makes the native engine return `UNSUPPORTED`; browser hosts
-   * then measure the block with `measureText`, which may consult OS fonts.
-   * Report this once for the first affected family rather than once per style.
-   *
-   * Distinguish a failed loader from a partial provider with no matching face,
-   * and both from an absent default package, so each audience gets applicable
-   * guidance.
+   * An empty chain forces browser measurement. Distinguish absent, incomplete,
+   * and broken providers so the one warning gives applicable remediation.
    */
   private warnFallback(family: string, providerResolved: boolean, loaderResolved: boolean): void {
     if (this.warnedFallback) return;

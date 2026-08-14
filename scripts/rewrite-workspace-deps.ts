@@ -25,9 +25,7 @@ interface ManifestEntry {
 }
 
 const PKG_DIR = 'packages';
-// devDependencies included for completeness: npm ignores a dependency's
-// devDeps, but an unrewritten `workspace:*` left anywhere in the manifest makes
-// the tarball fail `npm install` with EUNSUPPORTEDPROTOCOL if it is ever read.
+// A workspace:* anywhere in a packed manifest can make npm reject the tarball.
 const DEPENDENCY_FIELDS = [
   'dependencies',
   'devDependencies',
@@ -51,10 +49,8 @@ function resolve(dep: string, range: string): string {
   const suffix = range.slice('workspace:'.length);
   if (suffix === '*' || suffix === '') return version;
   if (suffix === '^' || suffix === '~') return suffix + version;
-  // At the planned 0.1.0 release, the optional font peers deliberately keep
-  // `workspace:^0`, which publishes as `^0`: it accepts the 0.x train but not
-  // 1.0.0. A tighter range makes Changesets re-escalate peer dependents despite
-  // the configured suppression.
+  // Preserve explicit ranges such as ^0; tightening them makes Changesets
+  // re-escalate suppressed peer dependents.
   return suffix; // workspace:1.2.3 → 1.2.3
 }
 

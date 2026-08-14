@@ -18,10 +18,6 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 
-// Rust measurement — the `measurementFontProvider` prop's interface, plus the
-// knob that points the default bundled faces at a CDN. Re-exported from
-// `@betteroffice/docx` so consumers need not add the core package to their
-// dependency tree.
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export { configureDefaultFonts, type DefaultFontOptions } from '@betteroffice/docx/layout';
 

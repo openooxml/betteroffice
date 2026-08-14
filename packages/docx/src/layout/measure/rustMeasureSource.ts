@@ -50,12 +50,7 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
   return enginePromise;
 }
 
-/**
- * Build a measurement source. `bundled` wins when given; otherwise the default
- * provider resolves `@betteroffice/fonts` through an optional dynamic import,
- * so framework-agnostic and server-side hosts get real font metrics without
- * wiring anything. See `defaultFontProvider.ts`.
- */
+/** Builds a source with an explicit provider or the optional default package. */
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;

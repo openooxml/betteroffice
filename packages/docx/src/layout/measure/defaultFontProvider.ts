@@ -1,12 +1,7 @@
-/**
- * Resolves the default provider through a memoized dynamic import of the
- * optional `@betteroffice/fonts` peer.
- * @packageDocumentation
- */
+/** Optional bundled-font provider resolution. @packageDocumentation */
 
 import type { BundledFontProvider } from './fontRegistry';
 
-/** Compile-time contract for the optional peer. */
 type BundledFontsModule = typeof import('@betteroffice/fonts');
 
 /** @public */

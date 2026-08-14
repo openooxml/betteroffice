@@ -297,20 +297,10 @@ export interface DocxEditorProps {
   /** Translation overrides. Import a locale JSON file and pass it directly. */
   i18n?: Translations;
   /**
-   * Bundled metric-compatible font bytes (e.g. Carlito for Calibri) for
-   * families the document does not embed.
-   *
-   * Optional: with `@betteroffice/fonts` installed, core resolves it by
-   * default through an optional dynamic import, so this prop is only needed to
-   * override that with a custom byte source. Set it and the default is never
-   * loaded. With neither, native measurement is unsupported and browser hosts
-   * fall back to `measureText` and OS fonts, so pagination can vary and will not
-   * match Word.
-   *
-   * To keep the default faces but serve them from a CDN, leave this unset and
-   * call `configureDefaultFonts({ baseUrl })` at module initialization before
-   * any editor loads; it is process-global, resolved registries keep their
-   * provider, and it cannot select a different URL per editor or server tenant.
+   * Overrides the optional `@betteroffice/fonts` provider for this editor.
+   * Without either source, browser measurement may not paginate like Word.
+   * Configure a global CDN base before editors load; existing registries retain
+   * their provider, so that setting is not per editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }
