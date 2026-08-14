@@ -113,7 +113,7 @@ export type BundledFontProviderSource =
 export class TextMeasureFontRegistry {
   private readonly sink: TextEngineFontSink;
   private readonly bundledSource: BundledFontProviderSource | undefined;
-  /** Memoized provider resolution, reset with the other registrations by `clear()`. */
+  /** In-flight or successful provider resolution; misses are retried by later chains. */
   private bundledPromise: Promise<BundledFontProvider | undefined> | undefined;
   /**
    * Whether this registry has already reported a native-measurement fallback.
@@ -168,12 +168,20 @@ export class TextMeasureFontRegistry {
     this.bundledSource = opts?.bundled;
   }
 
-  /** Resolve the bundled provider once per cache lifetime, tolerating a rejected factory. */
+  /** Share an in-flight provider resolution and retain only a successful result. */
   private bundled(): Promise<BundledFontProvider | undefined> {
-    this.bundledPromise ??=
-      typeof this.bundledSource === 'function'
-        ? this.bundledSource().catch(() => undefined)
-        : Promise.resolve(this.bundledSource);
+    if (this.bundledPromise === undefined) {
+      const source = this.bundledSource;
+      const promise = Promise.resolve()
+        .then(() => (typeof source === 'function' ? source() : source))
+        .catch(() => undefined);
+      promise.then((provider) => {
+        if (provider === undefined && this.bundledPromise === promise) {
+          this.bundledPromise = undefined;
+        }
+      });
+      this.bundledPromise = promise;
+    }
     return this.bundledPromise;
   }
 
