@@ -9,7 +9,8 @@ const CONTENT_WIDTH: f64 = 624.0;
 const FONT_SIZE_PT: f64 = 11.0;
 const FONT_SIZE_PX: f64 = FONT_SIZE_PT * 96.0 / 72.0;
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
-const NOTO_SANS_SC: &[u8] = include_bytes!("../../../packages/fonts/assets/NotoSansSC-Regular.otf");
+const NOTO_SANS_SC: &[u8] =
+    include_bytes!("../../../packages/fonts-cjk/assets/NotoSansSC-Regular.otf");
 
 const INSERTED: &str = "Vielen Dank für Ihre Bestellung Nr. 4711. Wir freuen uns, Ihnen bestätigen zu können, dass wir Ihre Zahlung erhalten haben.";
 const DELETED: &str =
