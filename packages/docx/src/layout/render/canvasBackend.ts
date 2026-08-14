@@ -316,17 +316,16 @@ async function drawPrimitiveCore(
 // only flips the bidi resolution, never the anchor, so x stays the run's
 // left edge exactly as measured upstream
 function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void {
-  let wrapped = beginVisualState(
+  const rect = textRunRect(run);
+  ctx.save();
+  clipTextPaintToSlot(ctx, rect);
+  beginPrimitiveVisualTransform(
     ctx,
-    textRunRect(run),
+    rect,
     run.hidden && run.opacity === undefined ? 0.4 : run.opacity,
     run.rotationDeg,
     run.horizontalScale
   );
-  if (!wrapped && textEffectsNeedIsolation(run)) {
-    ctx.save();
-    wrapped = true;
-  }
   ctx.font = fontWithVariant(run.font, run.smallCaps);
   ctx.fillStyle = run.color;
   ctx.textAlign = 'left';
@@ -348,11 +347,11 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
   const text = run.allCaps ? run.text.toUpperCase() : run.text;
   if (run.leaderGlyphs?.glyph && (run.leaderGlyphs.count ?? 0) > 0) {
     drawLeaderText(ctx, run);
-  } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, textRunRect(run))) {
+  } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, rect)) {
     drawCanvasTextWithEffects(ctx, text, run.x, run.baselineY, run);
   }
   drawTextEmphasisMarks(ctx, text, run.x, run.baselineY, run.width, run);
-  if (wrapped) ctx.restore();
+  ctx.restore();
 }
 
 function drawRect(ctx: CanvasRenderingContext2D, rect: RectPrimitive): void {
@@ -455,8 +454,8 @@ function drawGlyphRun(
       // fall through to the fillText safety net below
     }
   }
-  drawGlyphRunFallback(ctx, run);
   if (wrapped) ctx.restore();
+  drawGlyphRunFallback(ctx, run);
 }
 
 // browser-text safety net for a glyph run: paints the source text at the first
@@ -467,16 +466,27 @@ function drawGlyphRun(
 function drawGlyphRunFallback(ctx: CanvasRenderingContext2D, run: GlyphRunPrimitive): void {
   const first = run.glyphs[0];
   if (!first) return;
+  const rect = glyphRunRect(run);
+  ctx.save();
+  clipTextPaintToSlot(ctx, rect);
+  beginPrimitiveVisualTransform(
+    ctx,
+    rect,
+    run.hidden && run.opacity === undefined ? 0.4 : run.opacity,
+    run.rotationDeg,
+    run.horizontalScale
+  );
   ctx.font = fontWithVariant(run.fallbackFont ?? `${run.size}px sans-serif`, run.smallCaps);
   ctx.fillStyle = run.color;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   ctx.direction = run.rtl ? 'rtl' : 'ltr';
   const text = run.allCaps ? run.text.toUpperCase() : run.text;
-  if (!drawModernRunText(ctx, text, first.x, first.y, run, glyphRunRect(run))) {
+  if (!drawModernRunText(ctx, text, first.x, first.y, run, rect)) {
     drawCanvasTextWithEffects(ctx, text, first.x, first.y, run);
   }
   drawGlyphEmphasisMarks(ctx, run);
+  ctx.restore();
 }
 
 function drawLine(ctx: CanvasRenderingContext2D, line: LinePrimitive): void {
@@ -1438,6 +1448,12 @@ function drawImageBorder(
   ctx.lineWidth = width;
   ctx.setLineDash(border.dash ?? shapeDashPattern(border.style, width));
   ctx.strokeRect(frame.x, frame.y, frame.w, frame.h);
+}
+
+function clipTextPaintToSlot(ctx: CanvasRenderingContext2D, rect: GeoRect): void {
+  ctx.beginPath();
+  ctx.rect(rect.x, rect.y, Math.max(0, rect.w), Math.max(0, rect.h));
+  ctx.clip();
 }
 
 function beginVisualState(
