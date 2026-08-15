@@ -41,6 +41,8 @@ import type {
   InlineSdt,
   SdtProperties,
   Comment,
+  Footnote,
+  Endnote,
 } from '../types/document';
 import type { YrsSession } from './index';
 
@@ -1577,6 +1579,7 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
   for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
   for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
+  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
   return stories;
 }
 
@@ -1800,17 +1803,23 @@ export function yrsToDocument(
     );
   }
 
-  const shouldProjectFootnotes =
-    options.storyIds === undefined ||
-    base.package.footnotes?.some((note) => shouldProject(`fn:${note.id}`));
-  const footnotes = shouldProjectFootnotes
-    ? base.package.footnotes?.map((note) => {
-        const storyId = `fn:${note.id}`;
-        return context.storyIds.has(storyId) && shouldProject(storyId)
-          ? { ...note, content: context.storyToBlocks(storyId), verbatimXml: undefined }
-          : note;
-      })
-    : base.package.footnotes;
+  const projectNotes = <T extends Footnote | Endnote>(
+    notes: T[] | undefined,
+    prefix: string
+  ): T[] | undefined => {
+    const shouldProjectNotes =
+      options.storyIds === undefined ||
+      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
+    if (!shouldProjectNotes) return notes;
+    return notes?.map((note) => {
+      const storyId = `${prefix}${note.id}`;
+      return context.storyIds.has(storyId) && shouldProject(storyId)
+        ? { ...note, content: context.storyToBlocks(storyId), verbatimXml: undefined }
+        : note;
+    });
+  };
+  const footnotes = projectNotes(base.package.footnotes, 'fn:');
+  const endnotes = projectNotes(base.package.endnotes, 'en:');
 
   return {
     ...base,
@@ -1823,6 +1832,7 @@ export function yrsToDocument(
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
       ...(footnotes ? { footnotes } : {}),
+      ...(endnotes ? { endnotes } : {}),
     },
   };
 }
