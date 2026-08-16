@@ -74,7 +74,9 @@ describe("PyPI downloads total", () => {
   });
 
   test("reports the count once a package has stats", async () => {
-    expect(await monthlyDownloadsTotal(async () => recent(42))).toBe(42);
+    expect(await monthlyDownloadsTotal(async () => recent(42))).toBe(
+      42 * PYPI_PACKAGES.length,
+    );
   });
 
   test("every listed package is a betteroffice distribution", () => {
@@ -88,6 +90,5 @@ describe("PyPI downloads total", () => {
     expect(PYPI_PACKAGES).toEqual(
       PYTHON_PUBLISH_NAMES.map((name) => `betteroffice-${name}`),
     );
-    expect(PYPI_PACKAGES).not.toContain("betteroffice-pptx");
   });
 });
