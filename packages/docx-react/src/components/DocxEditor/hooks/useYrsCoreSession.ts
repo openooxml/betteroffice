@@ -149,11 +149,7 @@ export function warmCompatibilityBase(
   }
 }
 
-/**
- * The story a direct-input edit dirties. Header/footer and note stories project
- * on their own; everything else — the body, and the table cells nested in it —
- * republishes through the body.
- */
+/** Story a direct-input edit dirties: hf/note stories themselves, everything else the body. */
 export function dirtyProjectionStory(activeStory: string): string {
   return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
     ? activeStory
