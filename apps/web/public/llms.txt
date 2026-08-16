@@ -51,11 +51,12 @@ The per-layer crates are published for direct use when you need one stage of the
 
 ## Python packages
 
-Published to PyPI, Apache-2.0. The Rust engine is compiled into the wheel — no Excel, no LibreOffice subprocess, no COM. Wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the stable ABI for CPython 3.9 and up. The [Python guide](https://docs.betteroffice.dev/docs/python) carries the install line, a first example, and what is not published yet.
+Published to PyPI, Apache-2.0. The Rust engine is compiled into the wheel — no Excel, no LibreOffice subprocess, no COM. Wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the stable ABI for CPython 3.9 and up. The [Python guide](https://docs.betteroffice.dev/docs/python) carries the install line and a first example.
 
+- [betteroffice-pptx](https://pypi.org/project/betteroffice-pptx/): `pip install betteroffice-pptx`. Read, edit, and save PPTX decks, and lay slides out into the display-list contract the canvas paints; no rasterizer yet, so it returns a scene description rather than pixels. No font ships in the wheel, so `register_font` must supply at least one face before a slide with text lays out. Yrs collaboration is exposed as byte-level primitives, and a deck is pinned to the thread that opened it.
 - [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): `pip install betteroffice-xlsx`. Open, recalculate, style, render to PNG, and save XLSX workbooks; formulas are evaluated by this engine rather than read back from the file. Yrs collaboration and agent proposals are exposed as byte-level primitives, and opening, recalculating, rendering, and saving release the GIL.
 
-The PPTX binding lives in the repository at `bindings/python-pptx` and is built and tested in CI, but it has no PyPI project yet, so `pip` will not find it. There is no DOCX binding for Python.
+There is no DOCX binding for Python.
 
 ## Collaboration
 
