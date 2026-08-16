@@ -6,10 +6,8 @@ metrics, a display list — and merges edits across replicas, because the Rust
 [BetterOffice](https://betteroffice.dev) PPTX core is compiled into the wheel:
 no PowerPoint, no LibreOffice subprocess, no COM.
 
-Not on PyPI yet. From a checkout, with a Rust toolchain installed:
-
 ```bash
-pip install -e bindings/python-pptx
+pip install betteroffice-pptx
 ```
 
 The distribution is hyphenated, the module is not: `import betteroffice_pptx`.

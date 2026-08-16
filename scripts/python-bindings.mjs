@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 // CI, and wheel builds; see RELEASING.md for the PyPI side.
 // `publish: false` holds it out of the PyPI matrix until its project is ready.
 const REGISTRY = [
-  { path: 'bindings/python-pptx', publish: false },
+  { path: 'bindings/python-pptx', publish: true },
   { path: 'bindings/python-xlsx', publish: true }
 ];
 

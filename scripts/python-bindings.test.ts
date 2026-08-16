@@ -32,16 +32,24 @@ describe('registry', () => {
     }
   });
 
-  test('pptx builds and versions but does not publish', () => {
+  test('pptx publishes', () => {
     expect(PYTHON_BINDINGS).toContain('bindings/python-pptx');
     expect(PYTHON_BINDING_NAMES).toContain('pptx');
-    expect(PYTHON_PUBLISH_NAMES).not.toContain('pptx');
-    expect(PYPI_DISTRIBUTIONS).not.toContain('betteroffice-pptx');
+    expect(PYTHON_PUBLISH_NAMES).toContain('pptx');
+    expect(PYPI_DISTRIBUTIONS).toContain('betteroffice-pptx');
   });
 
   test('xlsx publishes', () => {
     expect(PYTHON_PUBLISH_NAMES).toContain('xlsx');
     expect(PYPI_DISTRIBUTIONS).toContain('betteroffice-xlsx');
+  });
+
+  test('a held-back binding stays out of the publish matrix', () => {
+    const held = PYTHON_BINDING_NAMES.filter((name) => !PYTHON_PUBLISH_NAMES.includes(name));
+    for (const name of held) {
+      expect(PYPI_DISTRIBUTIONS).not.toContain(`betteroffice-${name}`);
+    }
+    expect(PYPI_DISTRIBUTIONS).toHaveLength(PYTHON_PUBLISH_NAMES.length);
   });
 
   test('the CLI reports the registry three ways', () => {

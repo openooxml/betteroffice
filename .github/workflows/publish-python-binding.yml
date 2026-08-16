@@ -1,0 +1,76 @@
+name: Publish a Python binding
+
+# Publishes one bindings/python-* distribution at its committed version, outside
+# the release train. Use it to create a PyPI project from a pending Trusted
+# Publisher, or to fill in a wheel a release run dropped.
+on:
+  workflow_dispatch:
+    inputs:
+      binding:
+        description: The bindings/python-<binding> distribution to publish.
+        required: true
+        type: string
+      dry_run:
+        description: Build and check the artifacts without uploading.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  dist:
+    name: Build ${{ inputs.binding }}
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      binding: ${{ inputs.binding }}
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish betteroffice-${{ inputs.binding }}
+    needs: dist
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Never a reusable workflow: the OIDC claim must name this file.
+    environment: pypi-${{ inputs.binding }}
+    permissions:
+      id-token: write # OIDC Trusted Publishing
+    steps:
+      - name: Require a complete build
+        uses: actions/download-artifact@v4
+        with:
+          name: built-${{ inputs.binding }}
+          path: receipt
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-${{ inputs.binding }}.*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check the metadata renders
+        run: |
+          ls -la dist
+          python -m pip install --upgrade pip twine
+          twine check dist/*
+
+      - name: Refuse a repository-scoped PyPI token
+        env:
+          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "::error::PYPI_API_TOKEN is set. This workflow publishes through Trusted Publishing only."
+            echo "::error::Delete it under Settings > Secrets and variables > Actions, and revoke it on PyPI."
+            exit 1
+          fi
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        if: ${{ !inputs.dry_run }}
+        with:
+          packages-dir: dist
+          skip-existing: true
