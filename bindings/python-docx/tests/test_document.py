@@ -72,6 +72,16 @@ def test_table_cells_are_reachable_through_the_table_and_the_body(
     assert document.paragraph("22222222").text == "Cell text"
 
 
+def test_nested_tables_are_reachable_from_their_cell(nested_table_bytes: bytes) -> None:
+    document = Document.open(nested_table_bytes)
+    outer, direct, controlled = document.tables()
+    (cell,) = outer.rows[0].cells
+
+    assert [table.text for table in cell.tables] == ["Direct nested", "SDT nested"]
+    assert [table.text for table in document.tables()[1:]] == [direct.text, controlled.text]
+    assert len(document.tables()) == len(cell.tables) + 1
+
+
 def test_sections_and_headers(minimal_bytes: bytes) -> None:
     document = Document.open(minimal_bytes)
     first, second = document.sections()
@@ -204,6 +214,35 @@ def test_open_accepts_every_bytes_like(minimal_bytes: bytes) -> None:
     assert len(Document.open(memoryview(minimal_bytes))) == 5
     with pytest.raises(TypeError):
         Document.open("not bytes")  # type: ignore[arg-type]
+
+
+def test_document_is_usable_from_another_thread(minimal_bytes: bytes) -> None:
+    import threading
+
+    document = Document.open(minimal_bytes)
+    results: list[str] = []
+    thread = threading.Thread(target=lambda: results.append(document.text))
+    thread.start()
+    thread.join()
+
+    assert results == [document.text]
+
+
+def test_document_can_be_dropped_on_another_thread(
+    minimal_bytes: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import threading
+
+    unraisable: list[object] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    holder = [Document.open(minimal_bytes)]
+    thread = threading.Thread(target=holder.clear)
+    thread.start()
+    thread.join()
+
+    assert holder == []
+    assert unraisable == []
 
 
 def test_reads_the_demo_document(sample_path: Path) -> None:

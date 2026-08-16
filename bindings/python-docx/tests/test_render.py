@@ -1,11 +1,15 @@
 import json
+import math
+from collections import UserDict
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
 
 from betteroffice_docx import (
     MAX_PIXMAP_DIM,
+    MAX_PIXMAP_PIXELS,
     DisplayList,
     Document,
     RenderError,
@@ -49,6 +53,20 @@ def test_layout_takes_the_envelope_as_json_too(
     from_dict = document.layout(layout_input)
     assert from_text.json == from_dict.json
     assert from_text.display_list.json == from_dict.display_list.json
+
+
+@pytest.mark.parametrize("mapping_type", [UserDict, MappingProxyType])
+def test_layout_accepts_non_dict_mappings(
+    minimal_bytes: bytes,
+    layout_input: "dict[str, Any]",
+    mapping_type: Any,
+) -> None:
+    document = Document.open(minimal_bytes)
+
+    from_mapping = document.layout(mapping_type(layout_input))
+    from_dict = document.layout(layout_input)
+    assert from_mapping.json == from_dict.json
+    assert from_mapping.display_list.json == from_dict.display_list.json
 
 
 def test_layout_rejects_an_envelope_it_cannot_read(minimal_bytes: bytes) -> None:
@@ -118,6 +136,41 @@ def test_rendering_refuses_a_missing_page_and_an_oversized_one(
     with pytest.raises(RenderError) as oversized:
         document.render_png(_page(MAX_PIXMAP_DIM + 1, 4), 0)
     assert str(MAX_PIXMAP_DIM) in str(oversized.value)
+
+
+@pytest.mark.parametrize("page", [-1, 1 << 128, "first"])
+def test_rendering_rejects_invalid_page_indices(
+    minimal_bytes: bytes, page: Any
+) -> None:
+    document = Document.open(minimal_bytes)
+
+    with pytest.raises(IndexError) as invalid:
+        document.render_png(_page(64, 32), page)
+    assert "page index" in str(invalid.value)
+
+
+def test_rendering_refuses_a_page_over_the_area_budget(minimal_bytes: bytes) -> None:
+    document = Document.open(minimal_bytes)
+    width = math.isqrt(MAX_PIXMAP_PIXELS)
+    height = MAX_PIXMAP_PIXELS // width + 1
+    assert max(width, height) <= MAX_PIXMAP_DIM
+
+    with pytest.raises(RenderError) as oversized:
+        document.render_png(_page(width, height), 0)
+    assert f"{MAX_PIXMAP_PIXELS}-pixel allocation cap" in str(oversized.value)
+
+
+def test_concurrent_renders_are_consistent(minimal_bytes: bytes) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    document = Document.open(minimal_bytes)
+    display_list = _page(64, 32)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: document.render_png(display_list), range(8)))
+
+    reference = results[0]
+    assert all(png.bytes == reference.bytes for png in results)
+    assert all(png.skipped_images == reference.skipped_images for png in results)
 
 
 def test_a_registered_image_resolves_per_part(minimal_bytes: bytes) -> None:

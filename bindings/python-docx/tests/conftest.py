@@ -72,14 +72,34 @@ def _read(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _package(parts: "dict[str, str]") -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, body in parts.items():
+            archive.writestr(name, body)
+    return buffer.getvalue()
+
+
 @pytest.fixture(scope="session")
 def minimal_bytes() -> bytes:
     """A document with paragraph IDs, a table, a header, and two sections."""
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, body in PARTS.items():
-            archive.writestr(name, body)
-    return buffer.getvalue()
+    return _package(PARTS)
+
+
+@pytest.fixture(scope="session")
+def nested_table_bytes() -> bytes:
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{W}"><w:body><w:tbl><w:tr><w:tc>'
+        '<w:p><w:r><w:t>Outer cell</w:t></w:r></w:p>'
+        '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Direct nested</w:t></w:r></w:p>'
+        '</w:tc></w:tr></w:tbl>'
+        '<w:sdt><w:sdtPr><w:alias w:val="Nested control"/></w:sdtPr><w:sdtContent>'
+        '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>SDT nested</w:t></w:r></w:p>'
+        '</w:tc></w:tr></w:tbl></w:sdtContent></w:sdt>'
+        '</w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>'
+    )
+    return _package({**PARTS, "word/document.xml": document})
 
 
 @pytest.fixture(scope="session")

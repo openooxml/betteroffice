@@ -131,6 +131,11 @@ fn origin_name(origin: EditOrigin) -> &'static str {
     }
 }
 
+fn extract_page_index(page: &Bound<'_, PyAny>) -> PyResult<usize> {
+    page.extract::<usize>()
+        .map_err(|_| PyIndexError::new_err(format!("page index {page} out of range")))
+}
+
 /// Renders `Option<String>` the way Python would, not the way Rust would.
 fn optional_repr(value: &Option<String>) -> String {
     value
@@ -215,6 +220,29 @@ fn paragraphs_of(blocks: &[BlockContent]) -> Vec<PyParagraph> {
     let mut found = Vec::new();
     collect_paragraphs(blocks, &mut found);
     found.into_iter().map(PyParagraph::from_core).collect()
+}
+
+fn collect_tables<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Table>) {
+    for block in blocks {
+        match block {
+            BlockContent::Paragraph(_) => {}
+            BlockContent::Table(table) => {
+                output.push(table);
+                for row in &table.rows {
+                    for cell in &row.cells {
+                        collect_tables(&cell.content, output);
+                    }
+                }
+            }
+            BlockContent::BlockSdt(sdt) => collect_tables(&sdt.content, output),
+        }
+    }
+}
+
+fn tables_of(blocks: &[BlockContent]) -> Vec<PyTable> {
+    let mut found = Vec::new();
+    collect_tables(blocks, &mut found);
+    found.into_iter().map(PyTable::from_core).collect()
 }
 
 /// One styled run of text inside a paragraph.
@@ -345,14 +373,7 @@ pub struct PyTableCell {
 impl PyTableCell {
     fn from_core(cell: &betteroffice_docx::TableCell) -> Self {
         let paragraphs = paragraphs_of(&cell.content);
-        let tables = cell
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                BlockContent::Table(table) => Some(PyTable::from_core(table)),
-                _ => None,
-            })
-            .collect();
+        let tables = tables_of(&cell.content);
         let text = join_text(paragraphs.iter().map(|paragraph| paragraph.text.as_str()));
         Self {
             paragraphs,
@@ -787,6 +808,12 @@ impl PyDocument {
         }
     }
 
+    fn open_owned(py: Python<'_>, data: Vec<u8>, limits: ParseLimits) -> PyResult<Self> {
+        py.detach(|| CoreDocument::open_with_limits(&data, &limits))
+            .map(Self::wrap)
+            .map_err(map_error)
+    }
+
     /// Copies first: a borrow of a Python buffer cannot cross `detach`.
     fn open_bytes(
         py: Python<'_>,
@@ -795,9 +822,7 @@ impl PyDocument {
     ) -> PyResult<Self> {
         let limits = parse_limits(limits)?;
         let data = data.to_vec();
-        py.detach(|| CoreDocument::open_with_limits(&data, &limits))
-            .map(Self::wrap)
-            .map_err(map_error)
+        Self::open_owned(py, data, limits)
     }
 
     fn edit_ctx(&self) -> EditCtx {
@@ -891,7 +916,8 @@ impl PyDocument {
         let data = py
             .detach(|| fs::read(&path))
             .map_err(|error| map_io_error(&error, &path))?;
-        Self::open_bytes(py, &data, limits)
+        let limits = parse_limits(limits)?;
+        Self::open_owned(py, data, limits)
     }
 
     /// Stamped on every edit this document makes.
@@ -1097,7 +1123,7 @@ impl PyDocument {
         &self,
         py: Python<'_>,
         display_list: &PyDisplayList,
-        page: usize,
+        #[pyo3(from_py_with = extract_page_index)] page: usize,
     ) -> PyResult<PyPng> {
         let list = &display_list.inner;
         let rendered = py

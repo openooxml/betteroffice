@@ -188,7 +188,7 @@ class Document:
         The engine paginates blocks that were measured already; it does not
         measure them, so the envelope carries the metrics.
         """
-        return self._inner.layout(input)
+        return self._inner.layout(input if isinstance(input, str) else dict(input))
 
     def register_font(
         self,
