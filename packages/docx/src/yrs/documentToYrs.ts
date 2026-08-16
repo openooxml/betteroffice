@@ -574,6 +574,10 @@ function runContentToUnits(
       return [noteRefUnit(content.id, 'footnote', marks, commentId)];
     case 'endnoteRef':
       return [noteRefUnit(content.id, 'endnote', marks, commentId)];
+    case 'footnoteRefMark':
+      return [embedUnit('noteRefMark', { noteType: 'footnote' }, marks, commentId)];
+    case 'endnoteRefMark':
+      return [embedUnit('noteRefMark', { noteType: 'endnote' }, marks, commentId)];
     default:
       return [];
   }
@@ -725,12 +729,21 @@ function runBoundary(
   styleResolver: StyleResolver | null
 ): Attrs | null {
   const units = runToUnits(run, styleFormatting, styleResolver);
-  if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
+  if (
+    units.some(
+      (unit) =>
+        unit.kind !== 'text' && unit.embedKind !== 'noteRef' && unit.embedKind !== 'noteRefMark'
+    )
+  ) {
+    return null;
+  }
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
+  const mark = units.find((unit) => unit.kind === 'embed' && unit.embedKind === 'noteRefMark');
   const text = units
     .map((unit) => {
       if (unit.kind === 'text') return unit.text;
+      if (unit.embedKind === 'noteRefMark') return '';
       const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
       return String(id ?? '');
     })
@@ -738,6 +751,7 @@ function runBoundary(
   const key = keys[0];
   return {
     text,
+    ...(mark?.kind === 'embed' ? { noteMark: mark.payload.noteType } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
     ...(run.formatting ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),

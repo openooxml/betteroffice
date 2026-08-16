@@ -2728,6 +2728,19 @@ mod tests {
             .doc()
             .create_story("fn:5", "Footnote text", "Normal", "left")
             .unwrap();
+        engine
+            .doc()
+            .apply_raw_ops(
+                "fn:5",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "noteRefMark".to_owned(),
+                    payload: vec![("noteType".to_owned(), Any::from("footnote"))],
+                    attrs: Attrs::new(),
+                }],
+                &crate::EditCtx::local("", "2026-07-18T00:00:00Z"),
+            )
+            .unwrap();
         let request = serde_json::json!({
             "bodyStory": "body",
             "regions": {
@@ -2761,7 +2774,9 @@ mod tests {
             serde_json::json!([5.0])
         );
         assert_eq!(note["displayLabel"], "1");
+        assert_eq!(note["blocks"][0]["runs"].as_array().map(Vec::len), Some(2));
         assert_eq!(note["blocks"][0]["runs"][0]["text"], "1  ");
+        assert_eq!(note["blocks"][0]["runs"][1]["text"], "Footnote text");
         assert!(note["height"].as_f64().unwrap() > 0.0);
         assert!(
             output["layout"]["pages"][0]["footnoteReservedHeight"]

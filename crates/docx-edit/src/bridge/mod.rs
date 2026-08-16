@@ -403,6 +403,14 @@ fn lower_story<T: ReadTxn>(
                     paragraph_pm_units += label_width;
                     at_block_boundary = false;
                 }
+                // The note number itself is prepended by `apply_note_presentation`.
+                Out::YMap(mark)
+                    if shared_map_string(&mark, txn, "_kind").as_deref() == Some("noteRefMark") =>
+                {
+                    story_index += 1;
+                    paragraph_pm_units += 1;
+                    at_block_boundary = false;
+                }
                 Out::YMap(field)
                     if shared_map_string(&field, txn, "_kind").as_deref() == Some("field") =>
                 {
@@ -3544,6 +3552,46 @@ mod tests {
 
         let footnote = yrs_doc_to_layout_blocks(&doc, "fn:5", &RenderEnv::default()).unwrap();
         assert_eq!(footnote.len(), 1);
+    }
+
+    #[test]
+    fn native_note_ref_mark_occupies_one_position_without_a_run() {
+        let doc = EditingDoc::new(44);
+        doc.create_story("fn:5", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "fn:5",
+            vec![
+                RawOp::Delete { index: 0, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "noteRefMark".to_owned(),
+                    payload: vec![("noteType".to_owned(), Any::from("footnote"))],
+                    attrs: Attrs::new(),
+                },
+                RawOp::Insert {
+                    index: 1,
+                    text: " Footnote text".to_owned(),
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 15,
+                    kind: "pilcrow".to_owned(),
+                    payload: vec![("paraId".to_owned(), Any::from("fn-p"))],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+
+        let footnote = serde_json::to_value(
+            yrs_doc_to_layout_blocks(&doc, "fn:5", &RenderEnv::default()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(footnote[0]["runs"].as_array().map(Vec::len), Some(1));
+        assert_eq!(footnote[0]["runs"][0]["text"], json!(" Footnote text"));
+        assert_eq!(footnote[0]["runs"][0]["pmStart"], json!(2.0));
+        assert_eq!(footnote[0]["pmEnd"], json!(17.0));
     }
 
     #[test]

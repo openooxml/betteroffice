@@ -203,6 +203,7 @@ interface BookmarkBoundary extends CommentBoundary {
 
 interface OriginalRunBoundary {
   text: string;
+  noteMark?: 'footnote' | 'endnote';
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
@@ -840,6 +841,15 @@ function commentReferenceFromPayload(payload: Attrs): Run | null {
   };
 }
 
+function noteRefMarkRun(item: EmbedItem): Run {
+  const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
+  return {
+    type: 'run',
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    content: [{ type: item.payload.noteType === 'endnote' ? 'endnoteRefMark' : 'footnoteRefMark' }],
+  };
+}
+
 function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   if (item.kind === 'text') return createTextRun(item.text, item.attributes);
   switch (item.embedKind) {
@@ -871,6 +881,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
         ],
       };
     }
+    case 'noteRefMark':
+      return noteRefMarkRun(item);
     default:
       return null;
   }
@@ -881,6 +893,7 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
   if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
     run = shapeRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'noteRefMark') run = noteRefMarkRun(item);
   else if (item.kind === 'text') {
     const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
     run = {
@@ -921,6 +934,8 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
     else (hyperlink.structuredChildren ??= [...hyperlink.children]).push(child);
   } else if (item.embedKind === 'math') {
     (hyperlink.structuredChildren ??= [...hyperlink.children]).push(mathFromPayload(item.payload));
+  } else if (item.embedKind === 'noteRefMark') {
+    hyperlink.children.push(noteRefMarkRun(item));
   }
 }
 
@@ -1033,9 +1048,20 @@ function restoreOriginalRuns(
   if (
     !boundaries?.length ||
     !content.every(
-      (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
+      (child) =>
+        child.type === 'run' &&
+        child.content.every(
+          (entry) =>
+            entry.type === 'text' ||
+            entry.type === 'footnoteRefMark' ||
+            entry.type === 'endnoteRefMark'
+        )
     ) ||
-    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink)
+    items.some(
+      (item) =>
+        item.attributes.hyperlink || (item.kind !== 'text' && item.embedKind !== 'noteRefMark')
+    ) ||
+    boundaries.some((boundary) => boundary.noteMark && boundary.text.length > 0)
   ) {
     return content;
   }
@@ -1046,13 +1072,27 @@ function restoreOriginalRuns(
   let itemOffset = 0;
   const restoredAttrs: Attrs[] = [];
   for (const boundary of boundaries) {
+    if (boundary.noteMark) {
+      const item = items[itemIndex];
+      if (
+        item?.kind !== 'embed' ||
+        item.embedKind !== 'noteRefMark' ||
+        item.payload.noteType !== boundary.noteMark ||
+        itemOffset !== 0
+      ) {
+        return content;
+      }
+      restoredAttrs.push(formattingAttrs(item.attributes));
+      itemIndex += 1;
+      continue;
+    }
     const expected = marksKeyToYrsAttrs(boundary.marksKey);
     if (!expected) return content;
     restoredAttrs.push(expected);
     let remaining = boundary.text.length;
     while (remaining > 0) {
-      const item = items[itemIndex] as TextItem | undefined;
-      if (!item) return content;
+      const item = items[itemIndex];
+      if (item?.kind !== 'text') return content;
       if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
         return content;
       }
@@ -1067,7 +1107,19 @@ function restoreOriginalRuns(
     }
   }
 
+  if (itemIndex !== items.length || itemOffset !== 0) return content;
+
   return boundaries.map((boundary, index) => {
+    if (boundary.noteMark) {
+      const markFormatting = attrsToTextFormatting(restoredAttrs[index]);
+      const markRun: Run = {
+        type: 'run',
+        content: [{ type: boundary.noteMark === 'endnote' ? 'endnoteRefMark' : 'footnoteRefMark' }],
+      };
+      if (Object.keys(markFormatting).length > 0) markRun.formatting = markFormatting;
+      if (boundary.propertyChanges?.length) markRun.propertyChanges = boundary.propertyChanges;
+      return markRun;
+    }
     // restoreOriginalRuns restores the original segmentation/property-change
     // cache, but non-empty runs keep formatting reconstructed from their live
     // marks. Only empty runs have no node and therefore take cached formatting.
@@ -1093,7 +1145,11 @@ function runTextLength(run: Run): number {
     if (
       content.type === 'tab' ||
       content.type === 'softHyphen' ||
-      content.type === 'noBreakHyphen'
+      content.type === 'noBreakHyphen' ||
+      content.type === 'footnoteRef' ||
+      content.type === 'endnoteRef' ||
+      content.type === 'footnoteRefMark' ||
+      content.type === 'endnoteRefMark'
     ) {
       return length + 1;
     }
