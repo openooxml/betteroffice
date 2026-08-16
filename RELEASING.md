@@ -82,8 +82,9 @@ sdist by the release; only a flagged one enters the publish matrix. A binding
 lands with `publish: false`, so merging it cannot create a PyPI project.
 Flipping that flag is what arms the upload, and it is the last step of a launch.
 
-`bindings/python-pptx` is at `publish: false`: `betteroffice-pptx` does not
-exist on PyPI and has no publisher configured.
+`bindings/python-docx` and `bindings/python-pptx` are at `publish: false`:
+neither `betteroffice-docx` nor `betteroffice-pptx` exists on PyPI, and neither
+has a publisher configured. Both are past step 1 below.
 
 ### Launching a binding
 
