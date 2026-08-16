@@ -55,7 +55,7 @@ Published to PyPI, Apache-2.0. The Rust engine is compiled into the wheel — no
 
 - [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): `pip install betteroffice-xlsx`. Open, recalculate, style, render to PNG, and save XLSX workbooks; formulas are evaluated by this engine rather than read back from the file. Yrs collaboration and agent proposals are exposed as byte-level primitives, and opening, recalculating, rendering, and saving release the GIL.
 
-The PPTX binding lives in the repository at `bindings/python-pptx` and is built and tested in CI, but it has no PyPI project yet, so `pip` will not find it. There is no DOCX binding for Python.
+The PPTX and DOCX bindings live in the repository at `bindings/python-pptx` and `bindings/python-docx` and are built and tested in CI, but neither has a PyPI project yet, so `pip` will not find them.
 
 ## Collaboration
 
