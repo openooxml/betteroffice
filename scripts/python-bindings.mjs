@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 // `publish: false` holds it out of the PyPI matrix until its project is ready.
 const REGISTRY = [
   { path: 'bindings/python-docx', publish: true },
-  { path: 'bindings/python-pptx', publish: false },
+  { path: 'bindings/python-pptx', publish: true },
   { path: 'bindings/python-xlsx', publish: true }
 ];
 

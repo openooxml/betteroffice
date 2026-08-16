@@ -1,19 +1,22 @@
 ---
 title: Python
-description: betteroffice-docx and betteroffice-xlsx on PyPI — read, edit, lay out, render, and save
+description: betteroffice-docx, betteroffice-xlsx, and betteroffice-pptx on PyPI — read, edit, lay out, render, and save
 ---
 
 ```bash
 pip install betteroffice-docx
 pip install betteroffice-xlsx
+pip install betteroffice-pptx
 ```
 
-[`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) and
-[`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) are the
-BetterOffice distributions on PyPI today. The Rust engine is compiled into each
-wheel: no Word, no Excel, no LibreOffice subprocess, no COM. Wheels are built for
-Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the
-stable ABI for CPython 3.9 and up.
+All three formats are on PyPI. The Rust engine is compiled into each wheel: no
+Word, no Excel, no PowerPoint, no LibreOffice subprocess, no COM. Wheels are
+built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64)
+against the stable ABI for CPython 3.9 and up.
+
+[`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) is the
+workbook distribution, and the rest of this page walks through it;
+[DOCX](#docx) and [PPTX](#pptx) follow at the end.
 
 ## Formulas calculate
 
@@ -74,7 +77,8 @@ and the error hierarchy.
 
 ## DOCX
 
-`betteroffice-docx` reads paragraphs, tables, and sections, rewrites the text of
+[`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) reads
+paragraphs, tables, and sections, rewrites the text of
 a plain single-run paragraph, and saves back to DOCX with everything the model
 does not represent reused from the package it opened. It paginates and
 rasterizes too: the layout pass takes an already-measured projection of the
@@ -85,18 +89,9 @@ registered is an error rather than a page of invisible text.
 
 ## PPTX
 
-The PPTX binding is not on PyPI yet, so `pip` will not find it. It lives in the
-repository at
-[`bindings/python-pptx`](https://github.com/openooxml/betteroffice/tree/main/bindings/python-pptx),
-and CI builds and tests it on every change. From a checkout, with a Rust
-toolchain installed:
-
-```bash
-pip install -e bindings/python-pptx
-```
-
-`betteroffice-pptx` reads decks, edits shapes and text in memory, saves the edits
-back to `.pptx` bytes, and lays slides out into the same display-list contract the
-canvas paints. `render_slide` fails until `register_font` has supplied at least
-one face — no font is compiled into that wheel. A `Presentation` is also pinned to
-the thread that opened it, and must be released there.
+[`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,
+edits shapes and text, saves the edits back to `.pptx` bytes, and lays slides
+out into the same display-list contract the canvas paints. `render_slide` fails
+until `register_font` has supplied at least one face — no font is compiled into
+that wheel. A `Presentation` is also pinned to the thread that opened it, and
+must be released there.

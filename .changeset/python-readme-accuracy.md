@@ -13,9 +13,7 @@ edits at all. The `betteroffice-pptx` page said unregistered families fell back
 to a metrics-only path; `render_slide` raises `RenderError: no font has been
 registered for slide text` instead, so the layout section leads with that error
 and then shows registering a face, and says what a family you did not register
-resolves to once one exists. That page also told readers to `pip install
-betteroffice-pptx`, which is not on PyPI; it now gives the editable install from
-a checkout.
+resolves to once one exists.
 
 Both READMEs name the import next to the install line, because `pip install
 betteroffice-xlsx` gives `import betteroffice_xlsx`, and both name the incumbent

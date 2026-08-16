@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
 import {
+  dirtyProjectionStory,
   mergeDocxHostMetadata,
   seedYrsSession,
   warmCompatibilityBase,
@@ -228,5 +229,23 @@ describe('warmCompatibilityBase', () => {
     warmCompatibilityBase({ materializeDocx: () => expect.unreachable() }, compatibilityBase);
 
     expect(compatibilityBase.current).toBe(projected);
+  });
+});
+
+describe('dirtyProjectionStory', () => {
+  test('marks the note story itself for header, footer, footnote and endnote input', () => {
+    expect(dirtyProjectionStory('hf:rId5')).toBe('hf:rId5');
+    expect(dirtyProjectionStory('fn:2')).toBe('fn:2');
+    expect(dirtyProjectionStory('en:2')).toBe('en:2');
+  });
+
+  test('falls back to the body for a table cell nested in it', () => {
+    expect(dirtyProjectionStory('body:t0:r0c0')).toBe('body');
+  });
+
+  test('marks the note or header root for a table cell nested in it', () => {
+    expect(dirtyProjectionStory('hf:rId5:t0:r0c0')).toBe('hf:rId5');
+    expect(dirtyProjectionStory('fn:2:t0:r0c0')).toBe('fn:2');
+    expect(dirtyProjectionStory('en:2:t0:r0c0:sdt0')).toBe('en:2');
   });
 });

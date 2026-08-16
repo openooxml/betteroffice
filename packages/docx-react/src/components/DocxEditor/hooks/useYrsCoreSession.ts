@@ -149,6 +149,13 @@ export function warmCompatibilityBase(
   }
 }
 
+/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
+export function dirtyProjectionStory(activeStory: string): string {
+  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
+    ? activeStory.split(':', 2).join(':')
+    : 'body';
+}
+
 export function useYrsCoreSession(
   enabled: boolean,
   document: Document | null,
@@ -330,9 +337,7 @@ export function useYrsCoreSession(
     if (!live || !live.storyIds().includes('body')) return;
     inputPositionMapsRef.current.clear();
     const activeStory = live.selection()?.head.story ?? 'body';
-    projectionStoriesRef.current.add(
-      activeStory.startsWith('hf:') || activeStory.startsWith('fn:') ? activeStory : 'body'
-    );
+    projectionStoriesRef.current.add(dirtyProjectionStory(activeStory));
   }, []);
 
   return {

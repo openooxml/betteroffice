@@ -82,8 +82,7 @@ sdist by the release; only a flagged one enters the publish matrix. A binding
 lands with `publish: false`, so merging it cannot create a PyPI project.
 Flipping that flag is what arms the upload, and it is the last step of a launch.
 
-`bindings/python-pptx` is at `publish: false`: `betteroffice-pptx` does not
-exist on PyPI and has no publisher configured. It is past step 1 below.
+Every registered binding is at `publish: true` today; none is held back.
 
 ### Launching a binding
 
@@ -93,9 +92,9 @@ distribution never needs an API token ([PyPI docs][pending]). A pending
 publisher reserves nothing until it is used — if someone else registers the
 project name first, it is invalidated.
 
-To launch `betteroffice-pptx`:
+To launch `betteroffice-<format>`:
 
-1. Add `bindings/python-pptx` to the registry with `publish: false`, and give
+1. Add `bindings/python-<format>` to the registry with `publish: false`, and give
    the directory a private `package.json` at the version its `Cargo.toml`
    carries, so Changesets versions it. Those are the only two files to write:
    the `members = ["python-*"]` glob in `bindings/Cargo.toml` already covers the
@@ -106,11 +105,11 @@ To launch `betteroffice-pptx`:
    writes `bindings/Cargo.lock`. `bun install` never touches the Cargo lock. CI
    fails on either being stale (`bun install --frozen-lockfile`, and
    `cargo clippy --locked` on the bindings workspace).
-2. Create the GitHub environment `pypi-pptx`. The publish job runs in
+2. Create the GitHub environment `pypi-<format>`. The publish job runs in
    `pypi-<binding>`, which is what scopes a Trusted Publisher to one project.
 3. Add a pending publisher at <https://pypi.org/manage/account/publishing/> with
-   project name `betteroffice-pptx`, owner `openooxml`, repository
-   `betteroffice`, workflow `release.yml`, and environment `pypi-pptx`.
+   project name `betteroffice-<format>`, owner `openooxml`, repository
+   `betteroffice`, workflow `release.yml`, and environment `pypi-<format>`.
    Publishing must stay a direct job in `release.yml`: PyPI [cannot name a
    reusable workflow][reusable] as a Trusted Publisher.
 4. Flip the registry entry to `publish: true`. The next push to `main` with no
