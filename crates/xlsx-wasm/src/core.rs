@@ -81,6 +81,7 @@ struct ChartHitArgs {
 #[derive(Deserialize)]
 struct MoveChartArgs {
     sheet: u32,
+    /// a `ChartRegion` id: the frame, not the chart part backing it.
     chart: String,
     dx: f32,
     dy: f32,

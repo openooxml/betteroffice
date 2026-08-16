@@ -1,4 +1,5 @@
 import type { CompatibilityFlags } from '../../docx/settingsParser';
+import { resolveDefaultFontProvider } from './defaultFontProvider';
 import {
   TextMeasureFontRegistry,
   type BundledFontProvider,
@@ -49,13 +50,14 @@ export function getRustTextEngine(): Promise<RustTextEngine> {
   return enginePromise;
 }
 
+/** Builds a source with an explicit provider or the optional default package. */
 export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
 }): RustMeasureSource {
   const registry = new TextMeasureFontRegistry(
     { registerFont: (bytes) => options.engine.registerFont(bytes) },
-    { bundled: options.bundled }
+    { bundled: options.bundled ?? resolveDefaultFontProvider }
   );
   let compat: CompatibilityFlags | undefined;
 

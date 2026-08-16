@@ -280,10 +280,36 @@ pub enum EditError {
     InvalidGeometry(String),
     #[error("invalid shape adjustment: {0}")]
     InvalidAdjustment(String),
+    #[error("invalid text: {0}")]
+    InvalidText(String),
     #[error("update observer failed: {0}")]
     Observer(String),
     #[error("JSON boundary error: {0}")]
     Json(String),
+    #[error("could not write PPTX: {0}")]
+    Write(String),
 }
 
 pub type EditResult<T> = Result<T, EditError>;
+
+/// Rejects characters XML 1.0 cannot carry, so a bad edit fails loudly
+/// instead of producing an unopenable file at save time.
+pub(crate) fn validate_xml_text(value: &str) -> EditResult<()> {
+    match value
+        .chars()
+        .find(|character| !legal_xml_character(*character))
+    {
+        Some(character) => Err(EditError::InvalidText(format!(
+            "character U+{:04X} cannot be stored in a PPTX file",
+            character as u32
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn legal_xml_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || ('\u{20}'..='\u{d7ff}').contains(&character)
+        || ('\u{e000}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}

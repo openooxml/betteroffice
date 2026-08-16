@@ -4,15 +4,16 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use docx_layout::display_list::{
-    GlyphRunPrimitive, LeaderGlyphMetadata, PlacedGlyph, TextRunPrimitive,
+    ClipRect, GlyphRunPrimitive, LeaderGlyphMetadata, PlacedGlyph, TextRunPrimitive,
 };
 use ooxml_text::{
     FontId, FontStore, PathCmd, ShapeDirection, ShapeFeature, shape, shape::shape_with_properties,
 };
-use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
 use crate::{
-    FRect, PageBudget, RenderResources, color_with_opacity, number_f32, primitive_visual_transform,
+    FRect, PageBudget, RenderResources, color_with_opacity, mask_bytes, number_f32,
+    primitive_visual_transform,
 };
 
 /// Measures one font run in pixels.
@@ -61,10 +62,38 @@ pub(crate) struct PaintContext<'a, 'b> {
     pub budget: &'a mut PageBudget,
     pub base_transform: Transform,
     pub mask: Option<&'a Mask>,
+    pub retained_mask_bytes: u64,
     pub opacity: f32,
 }
 
+impl<'a, 'b> PaintContext<'a, 'b> {
+    fn reborrow_with_mask<'c>(&'c mut self, mask: &'c Mask) -> PaintContext<'c, 'b> {
+        PaintContext {
+            pixmap: self.pixmap,
+            resources: self.resources,
+            cache: self.cache,
+            budget: self.budget,
+            base_transform: self.base_transform,
+            mask: Some(mask),
+            retained_mask_bytes: self.retained_mask_bytes,
+            opacity: self.opacity,
+        }
+    }
+}
+
 pub(crate) fn paint_text(
+    context: &mut PaintContext<'_, '_>,
+    run: &TextRunPrimitive,
+) -> Result<(), String> {
+    let mask = paint_clip_mask(context, run.paint_clip.as_ref())?;
+    if let Some(mask) = &mask {
+        paint_text_core(&mut context.reborrow_with_mask(mask), run)
+    } else {
+        paint_text_core(context, run)
+    }
+}
+
+fn paint_text_core(
     context: &mut PaintContext<'_, '_>,
     run: &TextRunPrimitive,
 ) -> Result<(), String> {
@@ -125,6 +154,18 @@ pub(crate) fn paint_glyph_run(
     context: &mut PaintContext<'_, '_>,
     run: &GlyphRunPrimitive,
 ) -> Result<(), String> {
+    let mask = paint_clip_mask(context, run.paint_clip.as_ref())?;
+    if let Some(mask) = &mask {
+        paint_glyph_run_core(&mut context.reborrow_with_mask(mask), run)
+    } else {
+        paint_glyph_run_core(context, run)
+    }
+}
+
+fn paint_glyph_run_core(
+    context: &mut PaintContext<'_, '_>,
+    run: &GlyphRunPrimitive,
+) -> Result<(), String> {
     validate_glyph_effects(run)?;
     context.budget.charge_glyphs(run.glyphs.len() as u64)?;
     if run.glyphs.is_empty() {
@@ -149,6 +190,51 @@ pub(crate) fn paint_glyph_run(
         paint_placed_glyph(context, font, glyph, run.size as f32, &paint, transform)?;
     }
     Ok(())
+}
+
+fn paint_clip_mask(
+    context: &mut PaintContext<'_, '_>,
+    clip: Option<&ClipRect>,
+) -> Result<Option<Mask>, String> {
+    let Some(clip) = clip else {
+        return Ok(None);
+    };
+    debug_assert!(context.base_transform.is_identity() || context.base_transform.is_translate());
+    let width = context.pixmap.width();
+    let height = context.pixmap.height();
+    let bytes = mask_bytes(width, height);
+    context
+        .budget
+        .charge_masks(context.retained_mask_bytes.saturating_add(bytes))?;
+    let mut mask =
+        Mask::new(width, height).ok_or_else(|| "invalid text paint mask size".to_string())?;
+    let x = clip.x.as_ref().map(number_f32).transpose()?.unwrap_or(0.0);
+    let slot_width = clip
+        .w
+        .as_ref()
+        .map(number_f32)
+        .transpose()?
+        .unwrap_or(0.0)
+        .max(0.0);
+    let left = (f64::from(x) + f64::from(context.base_transform.tx)).clamp(0.0, f64::from(width));
+    let right = (f64::from(x) + f64::from(slot_width) + f64::from(context.base_transform.tx))
+        .clamp(0.0, f64::from(width));
+    if right > left {
+        let rect = Rect::from_xywh(left as f32, 0.0, (right - left) as f32, height as f32)
+            .ok_or_else(|| "invalid text paint clip rectangle".to_string())?;
+        mask.fill_path(
+            &PathBuilder::from_rect(rect),
+            FillRule::Winding,
+            true,
+            Transform::identity(),
+        );
+    }
+    if let Some(outer) = context.mask {
+        for (value, clip) in mask.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*clip) + 127) / 255) as u8;
+        }
+    }
+    Ok(Some(mask))
 }
 
 fn validate_text_effects(run: &TextRunPrimitive) -> Result<(), String> {

@@ -113,6 +113,33 @@ describe('wasm loader', () => {
     }
   });
 
+  // a chart part backs a frame, not the other way round: two anchors may name
+  // one part, so only the anchor addresses a frame across the boundary.
+  it('addresses a chart by its drawing anchor and moves that one alone', () => {
+    const handle = openWorkbook(chartBytes());
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = handle.displayList(viewport).charts ?? [];
+      expect(before.map((chart) => chart.id)).toEqual([
+        'xl/drawings/drawing1.xml#0',
+        'xl/drawings/drawing1.xml#1',
+        'xl/drawings/drawing1.xml#2',
+        'xl/drawings/drawing1.xml#3',
+      ]);
+
+      const target = before.findIndex((chart) => chart.movable);
+      expect(handle.moveChart(0, before[target].id, 24, 12).applied).toBe(true);
+      const after = handle.displayList(viewport).charts ?? [];
+      expect(after.map((chart) => chart.id)).toEqual(before.map((chart) => chart.id));
+      for (const [index, chart] of after.entries()) {
+        if (index === target) expect(chart.rect).not.toEqual(before[index].rect);
+        else expect(chart.rect).toEqual(before[index].rect);
+      }
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('moves a chart by a pixel delta that survives save and undoes in one step', () => {
     const handle = openWorkbook(chartBytes());
     const viewport = { x: 0, y: 0, width: 800, height: 800 };
@@ -148,7 +175,9 @@ describe('wasm loader', () => {
       const pinned = charts.filter((chart) => !chart.movable);
       expect(pinned.length).toBe(1);
       expect(() => handle.moveChart(0, pinned[0].id, 1, 0)).toThrow(/pinned/);
-      expect(() => handle.moveChart(0, 'xl/charts/nope.xml', 1, 0)).toThrow(/nope\.xml/);
+      expect(() => handle.moveChart(0, 'xl/drawings/drawing1.xml#9', 1, 0)).toThrow(
+        /drawing1\.xml#9/
+      );
     } finally {
       handle.dispose();
     }

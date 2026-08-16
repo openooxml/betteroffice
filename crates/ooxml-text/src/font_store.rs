@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use skrifa::raw::TableProvider;
+use skrifa::raw::tables::os2::SelectionFlags;
 use skrifa::{FontRef, MetadataProvider};
 
 use crate::shape::ShapedGlyph;
@@ -158,9 +159,8 @@ impl std::error::Error for FontError {}
 
 /// Design-space metrics extracted at registration time, in font units.
 ///
-/// Both the `hhea` and `OS/2` variants are kept because Word derives line
-/// height from `OS/2` usWinAscent/usWinDescent while typographic spacing
-/// uses the sTypo values — see [`crate::word_metrics`].
+/// Both the `hhea` and `OS/2` variants support the line-metric experiments in
+/// [`crate::word_metrics`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontMetrics {
     pub units_per_em: u16,
@@ -172,6 +172,22 @@ pub struct FontMetrics {
     pub os2_typo_line_gap: i16,
     pub os2_win_ascent: u16,
     pub os2_win_descent: u16,
+    /// `OS/2` fsSelection, defined bits only (the parser drops reserved bits).
+    pub os2_fs_selection: u16,
+    /// `OS/2` table version, which decides how much of the table is defined.
+    pub os2_version: u16,
+}
+
+impl FontMetrics {
+    /// `OS/2` fsSelection bit 7 (USE_TYPO_METRICS): the font asks for its
+    /// sTypo values to drive default line spacing.
+    ///
+    /// Only defined from table version 4. Versions 0-3 reserve the bit, so a
+    /// set bit there is meaningless and must not select the typo family.
+    pub fn use_typo_metrics(&self) -> bool {
+        self.os2_version >= 4
+            && self.os2_fs_selection & SelectionFlags::USE_TYPO_METRICS.bits() != 0
+    }
 }
 
 struct FontEntry {
@@ -225,6 +241,8 @@ impl FontStore {
             os2_typo_line_gap: os2.s_typo_line_gap(),
             os2_win_ascent: os2.us_win_ascent(),
             os2_win_descent: os2.us_win_descent(),
+            os2_fs_selection: os2.fs_selection().bits(),
+            os2_version: os2.version(),
         };
 
         let data: Box<[u8]> = bytes.into_boxed_slice();
@@ -249,6 +267,20 @@ impl FontStore {
     /// Per-font design-space metrics captured at registration.
     pub fn metrics(&self, id: FontId) -> Result<&FontMetrics, FontError> {
         self.entry(id).map(|e| &e.metrics)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_metrics_for_test(
+        &mut self,
+        id: FontId,
+        metrics: FontMetrics,
+    ) -> Result<(), FontError> {
+        let entry = self
+            .fonts
+            .get_mut(id.0 as usize)
+            .ok_or(FontError::UnknownFont)?;
+        entry.metrics = metrics;
+        Ok(())
     }
 
     /// Raw bytes of a registered font (for shaping / outline extraction).

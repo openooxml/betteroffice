@@ -35,6 +35,12 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  /**
+   * Opens from a collaboration update instead of parsing the file bytes.
+   * When the bytes are the file the update was seeded from, the session
+   * keeps them and `save()` works; any other bytes open without a source
+   * and `save()` throws.
+   */
   initialUpdate?: Uint8Array;
 }
 
@@ -46,6 +52,8 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  /** serialize the presentation back to .pptx bytes, edits included. */
+  save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
@@ -128,7 +136,8 @@ export function openPresentation(
       ? PptxDocument.openCollaborative(bytes, collaborationClientId)
       : PptxDocument.openCollaborativeFromUpdate(
           options.initialUpdate.slice(),
-          collaborationClientId
+          collaborationClientId,
+          bytes.slice()
         )
   );
   const renderer = construct(() => new PptxRenderer());
@@ -256,6 +265,9 @@ export function openPresentation(
     },
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath).slice());
+    },
+    save(): Uint8Array {
+      return wasmCall(() => doc.saveBytes().slice());
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(

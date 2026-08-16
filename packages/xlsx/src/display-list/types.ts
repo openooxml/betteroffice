@@ -159,14 +159,18 @@ export interface HyperlinkRegion {
 
 /**
  * A chart's placement in the frame: the id that addresses it across the wasm
- * boundary (the chart part's package path), what a screen reader reads, whether
- * the renderer managed to draw it, its full viewport-local rect and the visible
- * part after pane clipping. A chart that degraded to a placeholder still gets a
- * region, so it stays an addressable object on the sheet.
+ * boundary, what a screen reader reads, whether the renderer managed to draw
+ * it, its full viewport-local rect and the visible part after pane clipping. A
+ * chart that degraded to a placeholder still gets a region, so it stays an
+ * addressable object on the sheet.
  *
  * Hand-mirrored from crates/xlsx-render/src/display_list.rs — keep in sync.
  */
 export interface ChartRegion {
+  /**
+   * the drawing part and the anchor in it, unique within a sheet. Opaque —
+   * never the chart part's path, which two anchors may share.
+   */
   id: string;
   label: string;
   /**

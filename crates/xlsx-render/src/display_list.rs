@@ -139,7 +139,8 @@ pub struct HyperlinkRegion {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChartRegion {
-    /// package path of the `c:chartSpace` part; unique within a sheet.
+    /// `SheetChart::frame_id` — the drawing part and the anchor in it, unique
+    /// within a sheet. Not the chart part, which two anchors may share.
     pub id: String,
     pub label: String,
     /// the chart could not be drawn; a neutral box occupies its rect instead.

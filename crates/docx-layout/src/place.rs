@@ -13,7 +13,8 @@
 //! A section break reads the *next* section's configuration and break type,
 //! falling back to the current break's when the plan has no successor. Column
 //! balancing runs over the range up to the next section break, both at the start
-//! of the document and after each break that opens multi-column geometry.
+//! of the document and after each break that opens multi-column geometry, except
+//! when that range ends with `nextColumn` and its successor needs the full band.
 //!
 //! Unknown block and run kinds raise `Unsupported` rather than being silently
 //! dropped, and a measure whose kind disagrees with its block raises `Invalid`.
@@ -21,7 +22,7 @@
 //! Anchored images and floating text boxes overlay the page and never move the
 //! pen; inline images, shapes, charts and inline text boxes consume their
 //! measured bbox in flow. Paragraph placement is described on
-//! [`layout_paragraph`].
+//! `layout_paragraph`.
 //!
 //! Checkpoints are resume bookmarks at pristine page starts. They stay resident
 //! and never appear in a serialized `Layout`. [`layout_document_incremental`]
@@ -483,6 +484,24 @@ struct PlacementOutcome {
     converged: Option<(LayoutCheckpoint, LayoutCheckpoint)>,
 }
 
+fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<SectionBreakType> {
+    plan.section_break_types
+        .get(section_index + 1)
+        .copied()
+        .flatten()
+        .or_else(|| {
+            plan.section_break_types
+                .get(section_index)
+                .copied()
+                .flatten()
+        })
+}
+
+fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> bool {
+    plan.break_indices.get(section_index).is_some()
+        && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
+}
+
 /// The block walk itself, per the module's ordering rules. Returns early once
 /// a checkpoint matches the retained layout, which is how incremental placement
 /// detects convergence.
@@ -504,6 +523,7 @@ fn place(
         .as_ref()
         .map_or(1.0, |columns| columns.count)
         > 1.0
+        && !section_ends_with_next_column(plan, section_idx)
     {
         hooks::balance_terminal_continuous_text_columns(
             measured,
@@ -636,26 +656,24 @@ fn place(
             LayoutBlock::SectionBreak(block) => {
                 // use the NEXT section's columns; for break type, prefer the
                 // next section's but fall back to the current break's
-                let next_type: Option<SectionBreakType> = plan
-                    .section_break_types
-                    .get(section_idx + 1)
-                    .copied()
-                    .flatten()
-                    .or_else(|| plan.section_break_types.get(section_idx).copied().flatten());
+                let next_type = break_type_after_section(plan, section_idx);
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
                     .cloned()
                     .unwrap_or_else(|| initial_config.clone());
+                let opened_column_region =
+                    hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
                 paginator.set_section_index(section_idx + 1);
-                hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();
-                if next_section_config
-                    .columns
-                    .as_ref()
-                    .map_or(1.0, |c| c.count)
-                    > 1.0
+                if opened_column_region
+                    && next_section_config
+                        .columns
+                        .as_ref()
+                        .map_or(1.0, |c| c.count)
+                        > 1.0
+                    && !section_ends_with_next_column(plan, section_idx + 1)
                 {
                     hooks::balance_terminal_continuous_text_columns(
                         measured,
@@ -793,10 +811,11 @@ fn build_resolved_lines(
 ///
 /// Two rules can move lines before they are placed. `w:keepLines` advances to a
 /// fresh column when the whole paragraph fits a column but not the space left
-/// here. Widow and orphan control applies to paragraphs of at least four lines:
-/// a lone opening line moves the paragraph on when two lines would fit there,
-/// and a lone trailing line is avoided by pushing one more line down, provided
-/// the fragment keeps more than two.
+/// here. Widow and orphan control applies to paragraphs of at least four lines
+/// that do not turn `w:widowControl` off: a lone opening line moves the
+/// paragraph on when two lines would fit there, and a lone trailing line is
+/// avoided by pushing one more line down, provided the fragment keeps more than
+/// two.
 ///
 /// Spacing before is charged to the first fragment only and spacing after to
 /// the last, and each fragment carries its own document range and resolved run
@@ -845,6 +864,12 @@ fn layout_paragraph(
     let paragraph_height = lines.iter().fold(0.0, |sum, line| {
         sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
     });
+    let widow_control = lines.len() >= 4
+        && block
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.widow_control)
+            .unwrap_or(true);
 
     if block
         .attrs
@@ -895,7 +920,6 @@ fn layout_paragraph(
         }
 
         let remaining_after = lines.len() - (current_line_index + fitting_lines);
-        let widow_control = lines.len() >= 4;
         if widow_control && remaining_after > 0 {
             if current_line_index == 0 && fitting_lines == 1 {
                 let capacity = paginator.state(state_idx).content_limit
@@ -1416,6 +1440,58 @@ mod pagination_rule_tests {
             })
             .collect();
         assert_eq!(second_page_lines, vec![(0, 4)]);
+    }
+
+    fn paragraph_slices(layout: &Layout, id: f64) -> Vec<(usize, usize, usize)> {
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page.fragments.iter().filter_map(move |fragment| match fragment {
+                    Fragment::Paragraph(p)
+                        if matches!(p.block_id, crate::types::BlockId::Num(value) if value == id) =>
+                    {
+                        Some((page_index, p.from_line, p.to_line))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn authored_widow_control_off_splits_where_the_default_moves_the_paragraph_on() {
+        let default = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({})),
+        ]);
+        let disabled = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({ "widowControl": false })),
+        ]);
+
+        assert_eq!(paragraph_slices(&default, 2.0), vec![(1, 0, 4)]);
+        assert_eq!(paragraph_slices(&disabled, 2.0), vec![(0, 0, 1), (1, 1, 4)]);
+    }
+
+    #[test]
+    fn authored_widow_control_off_saves_the_page_the_default_costs() {
+        let default = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({})),
+            paragraph(3, 2, 20.0, json!({})),
+        ]);
+        let disabled = layout(vec![
+            paragraph(1, 1, 70.0, json!({})),
+            paragraph(2, 4, 20.0, json!({ "widowControl": false })),
+            paragraph(3, 2, 20.0, json!({})),
+        ]);
+
+        assert_eq!(default.pages.len(), 3);
+        assert_eq!(paragraph_slices(&default, 3.0), vec![(1, 0, 1), (2, 1, 2)]);
+        assert_eq!(disabled.pages.len(), 2);
+        assert_eq!(paragraph_slices(&disabled, 3.0), vec![(1, 0, 2)]);
     }
 
     #[test]

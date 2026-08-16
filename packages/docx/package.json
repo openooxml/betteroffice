@@ -208,7 +208,16 @@
     "typecheck": "tsc --noEmit",
     "build:wasm": "bun ../../scripts/build-docx-wasm.ts"
   },
+  "peerDependencies": {
+    "@betteroffice/fonts": "workspace:^0"
+  },
+  "peerDependenciesMeta": {
+    "@betteroffice/fonts": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@betteroffice/fonts": "workspace:*",
     "tsup": "^8.0.1",
     "typescript": "^6.0.3",
     "@types/bun": "^1.0.0",

@@ -8,14 +8,23 @@ import { initWasm, openWorkbook } from './loader';
 import type { WorkbookHandle, WorkbookUpdateOrigin } from './loader';
 
 const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
+const CHART_FIXTURE = resolve(import.meta.dir, '../../test-fixtures/charts.xlsx');
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 
 function sampleBytes(): Uint8Array {
   return new Uint8Array(readFileSync(FIXTURE));
 }
 
+function chartBytes(): Uint8Array {
+  return new Uint8Array(readFileSync(CHART_FIXTURE));
+}
+
 function collaborative(clientId: number): WorkbookHandle {
   return openWorkbook(sampleBytes(), { collaborative: true, clientId });
+}
+
+function collaborativeCharts(clientId: number): WorkbookHandle {
+  return openWorkbook(chartBytes(), { collaborative: true, clientId });
 }
 
 function requireReplica(replica: CollaborationReplica): CollaborationReplica {
@@ -318,6 +327,27 @@ describe('wasm collaboration', () => {
     } finally {
       target.dispose();
       structuralSource.dispose();
+    }
+  });
+
+  it('drags a chart in a collaborative session and converges the peer', () => {
+    const source = collaborativeCharts(6101);
+    const target = collaborativeCharts(6102);
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = (source.displayList(viewport).charts ?? [])[0];
+      expect(source.moveChart(0, before.id, 24, 12).applied).toBe(true);
+
+      const moved = (source.displayList(viewport).charts ?? [])[0];
+      expect(moved.rect.x).toBeCloseTo(before.rect.x + 24, 1);
+      expect(moved.rect.y).toBeCloseTo(before.rect.y + 12, 1);
+
+      const update = source.encodeStateAsUpdate(target.encodeStateVector());
+      expect(target.applyUpdate(update).applied).toBe(true);
+      expect((target.displayList(viewport).charts ?? [])[0].rect).toEqual(moved.rect);
+    } finally {
+      source.dispose();
+      target.dispose();
     }
   });
 

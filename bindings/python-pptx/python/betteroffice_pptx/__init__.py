@@ -30,7 +30,6 @@ from ._betteroffice_pptx import (
     TextEdit,
     TextRun,
     TransformEdit,
-    UnsupportedWriteError,
 )
 from ._betteroffice_pptx import Presentation as _Presentation
 from ._betteroffice_pptx import PptxError, __version__
@@ -66,7 +65,6 @@ __all__ = [
     "TextEdit",
     "TextRun",
     "TransformEdit",
-    "UnsupportedWriteError",
     "__version__",
 ]
 
@@ -139,7 +137,7 @@ class Presentation:
 
     @property
     def is_edited(self) -> bool:
-        """True once an accepted edit has made ``save`` refuse."""
+        """True once the engine has accepted an edit since the deck opened."""
         return self._inner.is_edited
 
     @property
@@ -376,16 +374,11 @@ class Presentation:
         return self._inner.render_slide(slide)
 
     def save(self) -> bytes:
-        """Serialize back to PPTX bytes.
-
-        Raises ``UnsupportedWriteError`` once the deck has been edited: the
-        engine writes the parsed package, not the edited model, so saving
-        would drop the edits. Check ``is_edited`` to branch early.
-        """
+        """Serialize back to PPTX bytes, edits included."""
         return self._inner.save()
 
     def save_path(self, path: "str | os.PathLike[str]") -> None:
-        """Serialize to a filesystem path. Refuses once the deck has been edited."""
+        """Serialize to a filesystem path, edits included."""
         self._inner.save_path(os.fspath(path))
 
     def state_vector(self) -> bytes:

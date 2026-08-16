@@ -897,7 +897,7 @@ fn parse_text_run(element: &XmlElement) -> TextRun {
     }
 }
 
-fn parse_run_properties(element: Option<&XmlElement>) -> RunProperties {
+pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunProperties {
     let Some(element) = element else {
         return RunProperties::default();
     };

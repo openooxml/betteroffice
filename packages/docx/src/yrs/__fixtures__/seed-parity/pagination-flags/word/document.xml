@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+      <w:r><w:t>Heading kept with the paragraph below it</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Body"/></w:pPr>
+      <w:r><w:t>Body text inheriting widow control off through the style chain.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Body"/><w:widowControl/></w:pPr>
+      <w:r><w:t>Body text turning widow control back on at the paragraph.</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:pStyle w:val="Heading1"/><w:widowControl w:val="0"/></w:pPr>
+      <w:r><w:t>Heading turning widow control off at the paragraph</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Unstyled paragraph taking widow control off from the default style.</w:t></w:r>
+    </w:p>
+    <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+  </w:body>
+</w:document>

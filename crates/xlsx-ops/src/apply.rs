@@ -28,7 +28,8 @@ pub enum OpError {
     DefinedNameNotRewritable { name: String },
     ChartRefNotRewritable { part: String },
     ChartAnchorNotMovable { part: String },
-    ChartNotFound { part: String },
+    ChartNotFound { frame: String },
+    ChartFrameShifted { frame: String },
     InvalidStyle(String),
 }
 
@@ -52,9 +53,13 @@ impl fmt::Display for OpError {
             OpError::ChartAnchorNotMovable { part } => {
                 write!(f, "the anchor of {part} would leave the sheet grid")
             }
-            OpError::ChartNotFound { part } => {
-                write!(f, "no chart on this sheet is backed by {part}")
+            OpError::ChartNotFound { frame } => {
+                write!(f, "no chart frame on this sheet is named {frame}")
             }
+            OpError::ChartFrameShifted { frame } => write!(
+                f,
+                "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"
+            ),
             OpError::InvalidStyle(message) => f.write_str(message),
         }
     }
@@ -136,20 +141,31 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
         }
         Op::SetChartAnchor {
             sheet,
+            frame,
             part,
-            anchor,
+            from,
+            to,
         } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let chart = sheet_ref
                 .charts
                 .iter_mut()
-                .find(|chart| chart.part == *part)
-                .ok_or_else(|| OpError::ChartNotFound { part: part.clone() })?;
-            let old = std::mem::replace(&mut chart.anchor, *anchor);
+                .find(|chart| chart.frame_id() == *frame)
+                .ok_or_else(|| OpError::ChartNotFound {
+                    frame: frame.clone(),
+                })?;
+            if !chart.is_recorded_frame(part, *from) {
+                return Err(OpError::ChartFrameShifted {
+                    frame: frame.clone(),
+                });
+            }
+            chart.anchor = *to;
             Ok(InvertedOp(vec![Op::SetChartAnchor {
                 sheet: *sheet,
+                frame: frame.clone(),
                 part: part.clone(),
-                anchor: old,
+                from: *to,
+                to: *from,
             }]))
         }
         Op::MergeCells { sheet, range } => {
@@ -1567,8 +1583,10 @@ mod tests {
 
         let op = Op::SetChartAnchor {
             sheet: SheetId(0),
+            frame: "xl/drawings/drawing1.xml#0".into(),
             part: "xl/charts/chart1.xml".into(),
-            anchor: anchor(3, 5),
+            from: anchor(0, 0),
+            to: anchor(3, 5),
         };
         let inverse = apply(&mut wb, &op).unwrap();
         assert_eq!(wb.sheets[0].charts[0].anchor, anchor(3, 5));
@@ -1581,11 +1599,34 @@ mod tests {
             &mut wb,
             &Op::SetChartAnchor {
                 sheet: SheetId(0),
-                part: "xl/charts/chart9.xml".into(),
-                anchor: anchor(1, 1),
+                frame: "xl/drawings/drawing9.xml#0".into(),
+                part: "xl/charts/chart1.xml".into(),
+                from: anchor(0, 0),
+                to: anchor(1, 1),
             },
         )
         .unwrap_err();
         assert!(matches!(error, OpError::ChartNotFound { .. }));
+
+        // the frame is there but holds neither the anchor nor the part the op
+        // recorded: the ordinal now names something else, so it is refused.
+        for (part, from) in [
+            ("xl/charts/chart1.xml", anchor(7, 7)),
+            ("xl/charts/chart9.xml", anchor(0, 0)),
+        ] {
+            let error = apply(
+                &mut wb,
+                &Op::SetChartAnchor {
+                    sheet: SheetId(0),
+                    frame: "xl/drawings/drawing1.xml#0".into(),
+                    part: part.into(),
+                    from,
+                    to: anchor(1, 1),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, OpError::ChartFrameShifted { .. }));
+            assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
+        }
     }
 }

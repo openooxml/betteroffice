@@ -59,6 +59,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: ./.github/actions/wasm-toolchain
+        if: steps.pending.outputs.publishing == 'true'
+
       - uses: taiki-e/install-action@v2
         if: steps.pending.outputs.publishing == 'true'
         with:
@@ -66,7 +69,7 @@ jobs:
 
       - name: Type check
         if: steps.pending.outputs.publishing == 'true'
-        run: bun run --filter './packages/*' typecheck
+        run: bun run typecheck:packages
 
       - name: Test
         if: steps.pending.outputs.publishing == 'true'

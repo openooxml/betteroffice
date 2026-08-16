@@ -167,6 +167,40 @@ impl XmlElement {
         append_text(self, &mut output);
         output
     }
+
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: BTreeMap::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn with_attribute(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn with_child(mut self, child: XmlElement) -> Self {
+        self.children.push(XmlNode::Element(child));
+        self
+    }
+
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.children.push(XmlNode::Text(text.into()));
+        self
+    }
+
+    pub fn set_attribute(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.attributes.insert(name.into(), value.into());
+    }
+
+    pub fn child_mut(&mut self, name: &str) -> Option<&mut XmlElement> {
+        self.children.iter_mut().find_map(|child| match child {
+            XmlNode::Element(element) if element.local_name() == name => Some(element),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +229,56 @@ fn append_text(element: &XmlElement, output: &mut String) {
 
 pub(crate) fn local_name(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+pub(crate) fn serialize_xml(root: &XmlElement) -> Vec<u8> {
+    let mut output =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n");
+    write_element(root, &mut output);
+    output.into_bytes()
+}
+
+fn write_element(element: &XmlElement, output: &mut String) {
+    output.push('<');
+    output.push_str(&element.name);
+    for (key, value) in &element.attributes {
+        output.push(' ');
+        output.push_str(key);
+        output.push_str("=\"");
+        escape_into(value, true, output);
+        output.push('"');
+    }
+    if element.children.is_empty() {
+        output.push_str("/>");
+        return;
+    }
+    output.push('>');
+    for child in &element.children {
+        match child {
+            XmlNode::Element(child) => write_element(child, output),
+            XmlNode::Text(text) => escape_into(text, false, output),
+        }
+    }
+    output.push_str("</");
+    output.push_str(&element.name);
+    output.push('>');
+}
+
+fn escape_into(value: &str, attribute: bool, output: &mut String) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' if attribute => output.push_str("&quot;"),
+            // A literal CR would be normalized away on reparse.
+            '\r' => output.push_str("&#xD;"),
+            '\n' | '\t' if attribute => {
+                output.push_str(&format!("&#x{:X};", character as u32));
+            }
+            _ => output.push(character),
+        }
+    }
 }
 
 pub(crate) fn parse_xml(

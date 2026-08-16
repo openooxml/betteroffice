@@ -37,3 +37,6 @@ unicode-segmentation = "1.12"
 # builds too), so the `wasm` feature does not re-declare it as `dep:serde_json`.
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
+
+[dev-dependencies]
+ooxml-opc.workspace = true

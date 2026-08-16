@@ -293,9 +293,10 @@ export interface WorkbookHandle extends CollaborationReplica {
    */
   chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null;
   /**
-   * slide a chart by a content-pixel delta, clamped to the grid, as one undo
-   * step. the new anchor is written back on save. throws for a chart pinned to
-   * the sheet by an absolute anchor.
+   * slide the chart frame `chart` names — a {@link ChartRegion} id — by a
+   * content-pixel delta, clamped to the grid, as one undo step. the new anchor
+   * is written back on save. throws for a chart pinned to the sheet by an
+   * absolute anchor.
    */
   moveChart(sheet: number, chart: string, dx: number, dy: number): EditResult;
   setActiveSheet(index: number): void;

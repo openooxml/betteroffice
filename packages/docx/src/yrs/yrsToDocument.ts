@@ -129,6 +129,7 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   renderedPageBreakBefore: null,
   keepNext: null,
   keepLines: null,
+  widowControl: null,
   contextualSpacing: null,
   defaultTextFormatting: null,
   sectionBreakType: null,

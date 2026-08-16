@@ -2,6 +2,7 @@
   "_lang": "en",
   "toolbar": {
     "label": "Presentation formatting toolbar",
+    "save": "Save",
     "historyLabel": "History",
     "undo": "Undo",
     "redo": "Redo",
@@ -16,6 +17,7 @@
     "objectsLabel": "Objects",
     "addTextBox": "Add text box",
     "groups": {
+      "file": "File",
       "slides": "Slides",
       "history": "History",
       "zoom": "Zoom",

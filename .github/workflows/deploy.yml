@@ -37,6 +37,10 @@ jobs:
         with:
           shared-key: wasm
 
+      - uses: ./.github/actions/wasm-toolchain
+        if: matrix.app == 'demo'
+
+      # Reads `wasm-opt --version`, so it has to follow the toolchain step.
       - name: Fingerprint the wasm inputs
         id: wasm
         if: matrix.app == 'demo'

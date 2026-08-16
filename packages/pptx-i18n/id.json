@@ -2,6 +2,7 @@
   "_lang": "id",
   "toolbar": {
     "label": null,
+    "save": "Simpan",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,6 +17,7 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "Berkas",
       "slides": null,
       "history": null,
       "zoom": null,

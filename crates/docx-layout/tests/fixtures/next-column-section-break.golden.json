@@ -1,0 +1,125 @@
+{
+  "columns": {
+    "count": 2,
+    "gap": 120
+  },
+  "pageGap": 20,
+  "pageSize": {
+    "h": 1056,
+    "w": 816
+  },
+  "pages": [
+    {
+      "columns": {
+        "count": 2,
+        "gap": 24
+      },
+      "fragments": [
+        {
+          "blockId": 0,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 400,
+          "kind": "paragraph",
+          "pmEnd": 24,
+          "pmStart": 1,
+          "toLine": 1,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        },
+        {
+          "blockId": 2,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 400,
+          "kind": "paragraph",
+          "pmEnd": 49,
+          "pmStart": 30,
+          "toLine": 1,
+          "width": 624,
+          "x": 420,
+          "y": 96
+        },
+        {
+          "blockId": 3,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 400,
+          "kind": "paragraph",
+          "pmEnd": 69,
+          "pmStart": 50,
+          "toLine": 1,
+          "width": 624,
+          "x": 420,
+          "y": 496
+        }
+      ],
+      "margins": {
+        "bottom": 96,
+        "footer": 96,
+        "header": 96,
+        "left": 96,
+        "right": 96,
+        "top": 96
+      },
+      "number": 1,
+      "size": {
+        "h": 1056,
+        "w": 816
+      }
+    },
+    {
+      "columns": {
+        "count": 2,
+        "gap": 120
+      },
+      "fragments": [
+        {
+          "blockId": 4,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 400,
+          "kind": "paragraph",
+          "pmEnd": 89,
+          "pmStart": 70,
+          "toLine": 1,
+          "width": 624,
+          "x": 96,
+          "y": 96
+        },
+        {
+          "blockId": 5,
+          "carriedFromPrev": false,
+          "carriedToNext": false,
+          "fromLine": 0,
+          "height": 400,
+          "kind": "paragraph",
+          "pmEnd": 109,
+          "pmStart": 90,
+          "toLine": 1,
+          "width": 624,
+          "x": 96,
+          "y": 496
+        }
+      ],
+      "margins": {
+        "bottom": 96,
+        "footer": 96,
+        "header": 96,
+        "left": 96,
+        "right": 96,
+        "top": 96
+      },
+      "number": 2,
+      "size": {
+        "h": 1056,
+        "w": 816
+      }
+    }
+  ]
+}

@@ -32,21 +32,35 @@ interface Stamp {
 const WASM_PACK_VERSION = '0.15.0';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-function requireWasmPack(): void {
-  const version = spawnSync('wasm-pack', ['--version'], { encoding: 'utf8' });
+/** `<tool> --version`; throws `missing` when the tool is not on PATH. */
+function toolVersion(tool: string, missing: string): string {
+  const version = spawnSync(tool, ['--version'], { encoding: 'utf8' });
   const versionErrorCode =
     version.error && 'code' in version.error && typeof version.error.code === 'string'
       ? version.error.code
       : undefined;
-  if (versionErrorCode === 'ENOENT') {
-    throw new Error(
-      `wasm-pack ${WASM_PACK_VERSION} is required; install it with cargo install wasm-pack --version ${WASM_PACK_VERSION} --locked`
-    );
-  }
+  if (versionErrorCode === 'ENOENT') throw new Error(missing);
   if (version.status !== 0) process.exit(version.status ?? 1);
-  if (version.stdout.trim() !== `wasm-pack ${WASM_PACK_VERSION}`) {
-    throw new Error(`expected wasm-pack ${WASM_PACK_VERSION}, got ${version.stdout.trim()}`);
+  return version.stdout.trim();
+}
+
+export function requireWasmPack(): void {
+  const version = toolVersion(
+    'wasm-pack',
+    `wasm-pack ${WASM_PACK_VERSION} is required; install it with cargo install wasm-pack --version ${WASM_PACK_VERSION} --locked`
+  );
+  if (version !== `wasm-pack ${WASM_PACK_VERSION}`) {
+    throw new Error(`expected wasm-pack ${WASM_PACK_VERSION}, got ${version}`);
   }
+}
+
+/** wasm-pack downloads a 91MB binaryen release mid-build whenever wasm-opt is
+ * missing, so requiring it up front is what keeps the build off the network. */
+export function requireWasmOpt(): string {
+  return toolVersion(
+    'wasm-opt',
+    'wasm-opt is required; install binaryen with `brew install binaryen`, `apt-get install binaryen`, or from https://github.com/WebAssembly/binaryen/releases'
+  );
 }
 
 async function hashTree(hash: Hash, dir: string, prefix: string): Promise<void> {
@@ -74,8 +88,8 @@ const CODEGEN_ENV = [
 ];
 
 /** Digest of every input the emitted wasm depends on: the crates, the workspace
- * manifest (release profiles), the toolchain, the cargo environment and these
- * scripts. Shared by every module, so it doubles as the CI cache key. */
+ * manifest (release profiles), the toolchain, the optimizer, the cargo environment
+ * and these scripts. Shared by every module, so it doubles as the CI cache key. */
 export async function sourcesFingerprint(): Promise<string> {
   const hash = createHash('sha256');
   // `stable` moves, so the toolchain has to be part of the identity.
@@ -83,6 +97,7 @@ export async function sourcesFingerprint(): Promise<string> {
   if (rustc.status !== 0) throw new Error('rustc -vV failed');
   hash.update(rustc.stdout);
   hash.update(`${WASM_PACK_VERSION}\0`);
+  hash.update(`${requireWasmOpt()}\0`);
   const overrides = Object.keys(process.env)
     .filter((name) => name.startsWith('CARGO_PROFILE_'))
     .sort();

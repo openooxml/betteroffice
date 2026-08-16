@@ -82,6 +82,8 @@ export interface PptxTextSelection {
 export interface PptxEditorApi {
   handle: PresentationHandle;
   refresh: () => void;
+  /** Serialize the presentation back to .pptx bytes, edits included. */
+  save: () => Uint8Array;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -99,9 +101,13 @@ export interface PptxEditorProps {
   collaboration?: PptxEditorCollaborationOptions;
   i18n?: Translations;
   className?: string;
+  /** Download name for the save button; falls back to `presentation.pptx`. */
+  fileName?: string;
   onReady?: (api: PptxEditorApi) => void;
   onChange?: (snapshot: DeckSnapshot) => void;
   onError?: (error: Error) => void;
+  /** Receives the saved bytes; without it, saving downloads the file. */
+  onSave?: (bytes: Uint8Array) => void;
 }
 
 interface EditorModel {
@@ -187,6 +193,22 @@ interface RecentCanvasClick {
   count: number;
 }
 
+const PPTX_MIME =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
+// trigger a browser download of a byte blob under the given name and mime type.
+function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
+  const blob = new Blob([new Uint8Array(bytes)], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 const initialStyle: EffectiveTextStyle = {
   bold: false,
   italic: false,
@@ -213,9 +235,11 @@ function PptxEditorContent({
   clientId,
   collaboration,
   className,
+  fileName,
   onReady,
   onChange,
   onError,
+  onSave,
 }: Omit<PptxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -369,7 +393,8 @@ function PptxEditorContent({
           refreshAt(0);
           setLoading(false);
           setCollaborationReplica(handle);
-          onReadyRef.current?.({ handle, refresh });
+          const opened = handle;
+          onReadyRef.current?.({ handle: opened, refresh, save: () => opened.save() });
         } catch (value) {
           setLoading(false);
           reportError(value);
@@ -1090,6 +1115,11 @@ function PptxEditorContent({
       history(event.shiftKey ? 'redo' : 'undo');
       return;
     }
+    if (modifier && (event.key === 's' || event.key === 'S')) {
+      event.preventDefault();
+      save();
+      return;
+    }
     if (!selection && !selectedShapeStoryId) return;
     if (modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
@@ -1300,6 +1330,18 @@ function PptxEditorContent({
     }
   };
 
+  const save = () => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    try {
+      const bytes = handle.save();
+      if (onSave) onSave(bytes);
+      else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
+    } catch (value) {
+      reportError(value);
+    }
+  };
+
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
   const shapeDragDelta =
@@ -1318,6 +1360,7 @@ function PptxEditorContent({
           onInsertSlide={addSlide}
           slideLayouts={slideLayouts}
           currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
+          onSave={save}
           onUndo={() => history('undo')}
           onRedo={() => history('redo')}
           canUndo={historyState.canUndo}

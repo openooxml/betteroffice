@@ -358,7 +358,7 @@ fn visible_charts<'a>(
             chart,
             plot,
             region: ChartRegion {
-                id: chart.part.clone(),
+                id: chart.frame_id(),
                 label: String::new(),
                 placeholder: false,
                 rect,
@@ -1360,7 +1360,7 @@ mod tests {
         };
         let regions = chart_regions(&sheet, &viewport).unwrap();
         assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].id, "xl/charts/chart1.xml");
+        assert_eq!(regions[0].id, "xl/drawings/drawing1.xml#0");
         assert!(regions[0].label.is_empty());
         assert_eq!((regions[0].rect.w, regions[0].rect.h), (100.0, 50.0));
         assert_eq!(regions[0].clip, regions[0].rect);
@@ -1376,5 +1376,42 @@ mod tests {
         )
         .unwrap();
         assert!(scrolled.is_empty());
+    }
+
+    /// A chart part backs a frame, not the other way round: two anchors may
+    /// name one part, and each must still address itself.
+    #[test]
+    fn two_anchors_on_one_chart_part_get_their_own_ids() {
+        let extent = AnchorExtent {
+            cx: 952_500,
+            cy: 476_250,
+        };
+        let mut sheet = charted_sheet(ChartAnchor::OneCell {
+            from: cell(1, 0, 1, 0),
+            extent,
+        });
+        sheet.charts.push(SheetChart {
+            part: sheet.charts[0].part.clone(),
+            drawing: sheet.charts[0].drawing.clone(),
+            anchor_index: 1,
+            anchor: ChartAnchor::OneCell {
+                from: cell(3, 0, 5, 0),
+                extent,
+            },
+            refs: Vec::new(),
+        });
+        let regions = chart_regions(
+            &sheet,
+            &Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 300.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(regions.len(), 2);
+        assert_ne!(regions[0].id, regions[1].id);
+        assert_eq!(regions[1].id, "xl/drawings/drawing1.xml#1");
     }
 }

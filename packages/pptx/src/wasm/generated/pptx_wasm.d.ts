@@ -25,10 +25,20 @@ export class PptxDocument {
     moveShapeJson(args: string): string;
     moveSlideJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
-    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number): PptxDocument;
+    /**
+     * `source` is the file the update was seeded from; when it matches the
+     * recorded fingerprint the session keeps its part bytes and can save.
+     * Any other bytes fall back to the bare update session, whose `saveBytes`
+     * fails — joining a room must not depend on carrying the right file.
+     */
+    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     redoJson(): string;
     removeShapeJson(args: string): string;
     resizeShapeJson(args: string): string;
+    /**
+     * Serializes the deck back to `.pptx` bytes, edits included.
+     */
+    saveBytes(): Uint8Array;
     setShapeAdjustJson(args: string): string;
     setShapeFillJson(args: string): string;
     setShapeStrokeJson(args: string): string;
@@ -101,10 +111,11 @@ export interface InitOutput {
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
-    readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number) => [number, number, number];
+    readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];

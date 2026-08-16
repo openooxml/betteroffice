@@ -28,3 +28,6 @@ sha2 = "0.10"
 thiserror = "2"
 wasm-bindgen = { version = "0.2", optional = true }
 yrs = "0.27.3"
+
+[dev-dependencies]
+ooxml-opc.workspace = true

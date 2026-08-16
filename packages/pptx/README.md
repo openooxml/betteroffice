@@ -46,7 +46,9 @@ and registered with the Rust shaper through `openPresentation`.
 Beyond rendering, `PresentationHandle` covers editing: text
 (`insertText` / `deleteText` / `formatText`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
-(`addTextBox` / `moveShape` / `resizeShape`), `hitTest`, and undo/redo.
+(`addTextBox` / `moveShape` / `resizeShape`), `hitTest`, undo/redo, and
+`save()`, which serializes the deck back to `.pptx` bytes with edits applied —
+untouched slides keep their exact source part bytes.
 
 ## Collaboration
 
@@ -71,7 +73,8 @@ provider.connect();
 ## Development
 
 The generated `.wasm` binary is intentionally not committed. From the repository
-root, install `wasm-pack` 0.15.0 and run `bun scripts/build-pptx-wasm.ts`.
+root, install `wasm-pack` 0.15.0 and `binaryen`, then run
+`bun scripts/build-pptx-wasm.ts`.
 Package builds copy the binary into `dist/generated`.
 
 Docs: https://betteroffice.dev · Apache-2.0.

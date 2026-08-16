@@ -35,6 +35,12 @@ impl PptxPackage {
             .map(|part| part.bytes.as_slice())
     }
 
+    /// False for packages recovered from a collaboration update, which carry
+    /// the parsed model but not the raw part bytes.
+    pub fn has_parts(&self) -> bool {
+        !self.parts.is_empty()
+    }
+
     pub fn replace_part(&mut self, path: &str, bytes: Vec<u8>) -> bool {
         let Some(part) = self.parts.iter_mut().find(|part| part.path == path) else {
             return false;

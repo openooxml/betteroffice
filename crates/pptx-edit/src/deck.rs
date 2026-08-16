@@ -247,6 +247,17 @@ impl DeckSession {
         index: u32,
         layout_part_path: Option<&str>,
     ) -> EditResult<SlideReceipt> {
+        if let Some(path) = layout_part_path
+            && !self
+                .package
+                .layouts
+                .iter()
+                .any(|layout| layout.part_path == path)
+        {
+            return Err(EditError::InvalidState(format!(
+                "unknown slide layout {path:?}"
+            )));
+        }
         let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
         let order = required_order(&txn)?;
@@ -324,6 +335,14 @@ impl DeckSession {
         draft: &ShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
+        crate::model::validate_xml_text(&draft.text)?;
+        crate::story::validate_style_values(
+            draft.style.font_family.as_deref(),
+            draft.style.underline.as_deref(),
+            draft.style.color.as_deref(),
+            draft.style.font_size_pt,
+        )?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
         let paragraph_id = self.next_id("para");
@@ -381,6 +400,7 @@ impl DeckSession {
         draft: &PresetShapeDraft,
     ) -> EditResult<ShapeReceipt> {
         validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
         let aspect_ratio = draft.rect.width as f64 / draft.rect.height as f64;
         if preset_geometry_to_path(&draft.geometry, &Default::default(), aspect_ratio).is_none() {
             return Err(EditError::InvalidGeometry(format!(
@@ -637,6 +657,13 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
+pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    map_string(&meta, &txn, "fingerprint")
+        .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
+}
+
 /// Rewrites a hydrated older document into the current schema and stamps it, so
 /// the next snapshot this session writes is a v2 one.
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
@@ -678,7 +705,7 @@ fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPacka
     serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
 }
 
-fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     let order = required_order(&txn)?;

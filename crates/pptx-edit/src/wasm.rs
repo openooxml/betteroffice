@@ -166,18 +166,27 @@ impl PptxDocument {
             .map_err(js_error)
     }
 
+    /// `source` is the file the update was seeded from; when it matches the
+    /// recorded fingerprint the session keeps its part bytes and can save.
+    /// Any other bytes fall back to the bare update session, whose `saveBytes`
+    /// fails — joining a room must not depend on carrying the right file.
     #[wasm_bindgen(js_name = openCollaborativeFromUpdate)]
     pub fn open_collaborative_from_update(
         update: &[u8],
         client_id: f64,
+        source: Option<Vec<u8>>,
     ) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
-        DeckSession::open_from_update(update, client_id)
-            .map(|session| Self {
-                session,
-                update_observer: None,
+        let session = source
+            .and_then(|source| {
+                DeckSession::open_from_update_with_source(update, &source, client_id).ok()
             })
-            .map_err(js_error)
+            .map_or_else(|| DeckSession::open_from_update(update, client_id), Ok)
+            .map_err(js_error)?;
+        Ok(Self {
+            session,
+            update_observer: None,
+        })
     }
 
     #[wasm_bindgen(getter, js_name = clientId)]
@@ -205,6 +214,12 @@ impl PptxDocument {
             .find(|media| media.part_path == part_path)
             .map(|media| media.bytes.clone())
             .ok_or_else(|| JsValue::from_str("media part was not found"))
+    }
+
+    /// Serializes the deck back to `.pptx` bytes, edits included.
+    #[wasm_bindgen(js_name = saveBytes)]
+    pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
+        self.session.save().map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = encodeStateVector)]

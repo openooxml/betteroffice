@@ -431,4 +431,21 @@ mod tests {
             "rId1"
         );
     }
+
+    #[test]
+    fn next_column_section_start_parses_and_round_trips() {
+        let limits = ParseLimits::default();
+        let document = parse_xml(
+            br#"<w:sectPr><w:type w:val="nextColumn"/><w:cols w:num="2" w:space="720"/></w:sectPr>"#,
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let properties = parse_section_properties(document.root());
+        assert_eq!(properties.section_start.as_deref(), Some("nextColumn"));
+        assert!(
+            crate::serializer::serialize_section_properties(Some(&properties))
+                .contains(r#"<w:type w:val="nextColumn"/>"#)
+        );
+    }
 }

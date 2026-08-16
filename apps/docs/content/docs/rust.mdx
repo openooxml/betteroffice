@@ -56,6 +56,7 @@ let deck = presentation.snapshot()?; // slides, shapes, and text as plain struct
 
 presentation.register_font("Inter", false, false, &font_bytes)?;
 let rendered = presentation.render_slide(0)?; // display list + hit-test metadata
+let saved = presentation.save()?;
 ```
 
 `open_with_limits` on DOCX and PPTX swaps the parser's default resource budget

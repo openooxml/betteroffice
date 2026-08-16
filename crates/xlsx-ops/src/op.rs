@@ -106,11 +106,19 @@ pub enum Op {
         sheet: SheetId,
         charts: Vec<SheetChart>,
     },
-    /// Repin one chart, addressed by the package path of its chart part.
+    /// Repin one chart frame, addressed by its `SheetChart::frame_id`. A frame
+    /// id names an ordinal in a drawing, and a drawing another editor has since
+    /// added to, reordered or thinned renumbers those ordinals, so the id alone
+    /// cannot survive being stored. `part` and `from` are the chart part and
+    /// the anchor the frame held when the op was recorded, and a replay that
+    /// finds either changed is refused instead of moving whoever now sits
+    /// there.
     SetChartAnchor {
         sheet: SheetId,
+        frame: String,
         part: String,
-        anchor: ChartAnchor,
+        from: ChartAnchor,
+        to: ChartAnchor,
     },
     MergeCells {
         sheet: SheetId,

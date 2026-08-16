@@ -16,6 +16,7 @@ use yrs::{
 
 mod deck;
 mod model;
+mod save;
 mod story;
 mod undo;
 
@@ -36,7 +37,7 @@ pub(crate) const MIGRATE_ORIGIN: &str = "pptx:migrate";
 pub(crate) const PILCROW_KIND: &str = "pilcrow";
 pub(crate) const KIND: &str = "_kind";
 pub(crate) const PARA_ID: &str = "paraId";
-const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
+pub(crate) const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
@@ -53,15 +54,28 @@ impl DeckSession {
     pub fn open(bytes: &[u8], client_id: u64) -> EditResult<Self> {
         let package =
             pptx_parse::parse_pptx(bytes).map_err(|error| EditError::Parse(error.to_string()))?;
-        let fingerprint = format!("{:x}", Sha256::digest(bytes));
-        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+        Self::from_package_with_source(package, bytes, client_id)
     }
 
-    /// Opens an edit session from an already parsed package.
+    /// Opens an edit session from an already parsed package. The fingerprint
+    /// is taken from a re-zip of the package; prefer
+    /// [`Self::from_package_with_source`] when the file bytes are at hand, so
+    /// peers can match them against the update.
     pub fn from_package(package: PptxPackage, client_id: u64) -> EditResult<Self> {
         let bytes = pptx_parse::write_pptx(&package)
             .map_err(|error| EditError::Parse(error.to_string()))?;
         let fingerprint = format!("{:x}", Sha256::digest(bytes));
+        Self::from_package_with_fingerprint(package, fingerprint, client_id)
+    }
+
+    /// Opens an edit session from a parsed package, fingerprinting the file
+    /// bytes it was parsed from.
+    pub fn from_package_with_source(
+        package: PptxPackage,
+        source: &[u8],
+        client_id: u64,
+    ) -> EditResult<Self> {
+        let fingerprint = format!("{:x}", Sha256::digest(source));
         Self::from_package_with_fingerprint(package, fingerprint, client_id)
     }
 
@@ -108,6 +122,30 @@ impl DeckSession {
             id_counter: AtomicU64::new(0),
             package: Arc::new(package),
             undo: RefCell::new(undo),
+        })
+    }
+
+    /// Like [`Self::open_from_update`], but re-attaches the source file the
+    /// update was seeded from, so the session can save. The bytes must hash to
+    /// the fingerprint recorded in the update.
+    pub fn open_from_update_with_source(
+        update: &[u8],
+        source: &[u8],
+        client_id: u64,
+    ) -> EditResult<Self> {
+        let session = Self::open_from_update(update, client_id)?;
+        let recorded = deck::fingerprint_from_doc(&session.doc)?;
+        let actual = format!("{:x}", Sha256::digest(source));
+        if recorded != actual {
+            return Err(EditError::Parse(
+                "source bytes do not match the fingerprint recorded in the update".to_owned(),
+            ));
+        }
+        let package =
+            pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()))?;
+        Ok(Self {
+            package: Arc::new(package),
+            ..session
         })
     }
 
@@ -220,7 +258,7 @@ impl DeckSession {
     }
 }
 
-fn doc_with_client_id(client_id: u64) -> Doc {
+pub(crate) fn doc_with_client_id(client_id: u64) -> Doc {
     let mut options = Options::with_client_id(ClientID::new(client_id));
     options.offset_kind = OffsetKind::Utf16;
     Doc::with_options(options)

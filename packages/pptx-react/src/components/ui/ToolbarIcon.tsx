@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 
 export type ToolbarIconName =
+  | 'save'
   | 'undo'
   | 'redo'
   | 'newSlide'
@@ -40,6 +41,7 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
       focusable="false"
       style={{ display: 'inline-flex', flexShrink: 0, ...style }}
     >
+      {name === 'save' && <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 19h14" />}
       {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
       {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
       {name === 'newSlide' && (

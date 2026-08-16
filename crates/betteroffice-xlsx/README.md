@@ -66,6 +66,16 @@ modelled: every `c:f` reference, the `c:numCache` and `c:strCache` beside it,
 and the `xdr:` anchor that pins it. Structural edits move all three together, or
 are refused.
 
+A chart on a sheet is a frame, addressed by the drawing part and the anchor
+index within it — `ChartRegion::id`, what `move_chart` and `Op::SetChartAnchor`
+take. Two anchors may point at one chart part, so the part names no single
+frame; each frame hit-tests, moves and saves as itself. An index names a
+position, not an object, so `Op::SetChartAnchor` is a compare-and-set: it
+carries the chart part and the anchor the frame held when the op was recorded,
+and a replay onto a drawing another editor has since added to, reordered or
+thinned is refused as `Error::ChartFrameShifted` rather than landing on
+whichever frame now sits at that index.
+
 A chart part is refused, and with it every rename, sheet removal and row or
 column edit on the workbook, when it is a ChartEx (`cx:chartSpace`) part, when
 no sheet claims it, when it carries a pivot source, an external data cache, a

@@ -18,10 +18,8 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 
-// Rust measurement — the `measurementFontProvider` prop's interface,
-// re-exported from `@betteroffice/docx` so consumers can implement a
-// provider without adding the core package to their dependency tree.
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
+export { configureDefaultFonts, type DefaultFontOptions } from '@betteroffice/docx/layout';
 
 // i18n contract — runtime only. Locale string types (LocaleStrings,
 // Translations, PartialLocaleStrings, TranslationKey) live in

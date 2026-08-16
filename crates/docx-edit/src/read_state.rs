@@ -116,7 +116,7 @@ pub struct RevisionInfo {
     pub story: StoryId,
     pub change: ChangeInfo,
     /// The raw text under the change's range (deleted text included), capped
-    /// at [`PREVIEW_MAX_CHARS`] characters. Empty for paragraph-mark revisions.
+    /// at `PREVIEW_MAX_CHARS` characters. Empty for paragraph-mark revisions.
     pub preview: String,
 }
 

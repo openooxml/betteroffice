@@ -61,13 +61,6 @@ create_exception!(
     PptxError,
     "The operation requires a collaborative presentation."
 );
-create_exception!(
-    _betteroffice_pptx,
-    UnsupportedWriteError,
-    PptxError,
-    "The engine cannot write this change back to PPTX yet."
-);
-
 fn map_edit_error(error: EditError, message: String) -> PyErr {
     match error {
         EditError::Parse(_) => ParseError::new_err(message),
@@ -77,7 +70,8 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
         }
         EditError::InvalidClientId(_)
         | EditError::InvalidGeometry(_)
-        | EditError::InvalidAdjustment(_) => PyValueError::new_err(message),
+        | EditError::InvalidAdjustment(_)
+        | EditError::InvalidText(_) => PyValueError::new_err(message),
         EditError::SlideNotFound(_) | EditError::ShapeNotFound(_) | EditError::StoryNotFound(_) => {
             PyKeyError::new_err(message)
         }
@@ -1043,15 +1037,7 @@ impl PyPresentation {
         ))
     }
 
-    /// The engine writes the parsed package, not the edited model, so an
-    /// edited deck refuses to serialize rather than dropping the edits.
     fn saved_bytes(&self) -> PyResult<Vec<u8>> {
-        if self.edited.get() {
-            return Err(UnsupportedWriteError::new_err(
-                "this presentation has been edited, and the engine cannot write \
-                 model edits back to PPTX yet; saving would drop them",
-            ));
-        }
         self.presentation.save().map_err(map_error)
     }
 
@@ -1121,7 +1107,7 @@ impl PyPresentation {
         self.collaborative
     }
 
-    /// Whether an edit the engine accepted has made `save` refuse.
+    /// Whether the engine has accepted an edit since the deck was opened.
     #[getter]
     fn is_edited(&self) -> bool {
         self.edited.get()
@@ -1641,10 +1627,6 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add(
         "NotCollaborativeError",
         py.get_type::<NotCollaborativeError>(),
-    )?;
-    module.add(
-        "UnsupportedWriteError",
-        py.get_type::<UnsupportedWriteError>(),
     )?;
     module.add("MAX_COLLABORATION_BYTES", MAX_COLLABORATION_BYTES)?;
     Ok(())

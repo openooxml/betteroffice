@@ -47,7 +47,7 @@ impl Presentation {
         client_id: u64,
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
-        let session = DeckSession::from_package(package, client_id)?;
+        let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
@@ -269,10 +269,12 @@ impl Presentation {
             .layout_slide(self.session.package(), &snapshot, slide_index)?)
     }
 
-    /// Re-zips the retained parts. Part bytes survive unchanged; the container
-    /// is rebuilt, so the output is not byte-identical to the source.
+    /// Serializes the deck with all edits applied. Untouched slides keep their
+    /// exact source part bytes; edited slides are patched at the XML level.
+    /// The container is rebuilt, so the output is not byte-identical to the
+    /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(pptx_parse::write_pptx(self.session.package())?)
+        Ok(self.session.save()?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {

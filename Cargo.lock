@@ -84,6 +84,7 @@ version = "0.0.4"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
+ "betteroffice-opc",
  "js-sys",
  "ryu-js",
  "serde",
@@ -180,6 +181,7 @@ name = "betteroffice-pptx-edit"
 version = "0.0.4"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-opc",
  "betteroffice-pptx-parse",
  "js-sys",
  "serde",
