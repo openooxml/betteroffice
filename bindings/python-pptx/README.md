@@ -6,9 +6,6 @@ metrics, a display list — and merges edits across replicas, because the Rust
 [BetterOffice](https://betteroffice.dev) PPTX core is compiled into the wheel:
 no PowerPoint, no LibreOffice subprocess, no COM.
 
-Editing is in-memory today: see [Writing](#writing) before you reach for
-`save()`.
-
 Not on PyPI yet. From a checkout, with a Rust toolchain installed:
 
 ```bash
