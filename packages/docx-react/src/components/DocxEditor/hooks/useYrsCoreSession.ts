@@ -149,10 +149,10 @@ export function warmCompatibilityBase(
   }
 }
 
-/** Story a direct-input edit dirties: hf/note stories themselves, everything else the body. */
+/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
 export function dirtyProjectionStory(activeStory: string): string {
   return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory
+    ? activeStory.split(':', 2).join(':')
     : 'body';
 }
 
