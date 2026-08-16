@@ -6,10 +6,8 @@ display list, PNG pages — because the Rust
 [BetterOffice](https://betteroffice.dev) DOCX core is compiled into the wheel:
 no Word, no LibreOffice subprocess, no COM.
 
-Not on PyPI yet. From a checkout, with a Rust toolchain installed:
-
 ```bash
-pip install -e bindings/python-docx
+pip install betteroffice-docx
 ```
 
 The distribution is hyphenated, the module is not: `import betteroffice_docx`.
