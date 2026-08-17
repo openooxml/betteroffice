@@ -690,21 +690,38 @@ fn write_spacing(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
 }
 
 fn write_indentation(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
-    let first = formatting.indent_first_line;
-    let has_first =
-        first.is_some_and(|value| formatting.hanging_indent == Some(true) || value != 0.0);
-    if formatting.indent_left.is_none() && formatting.indent_right.is_none() && !has_first {
+    let hanging = formatting.hanging_indent == Some(true);
+    if formatting.indent_left.is_none()
+        && formatting.indent_right.is_none()
+        && formatting.indent_first_line.is_none()
+        && formatting.indent_left_chars.is_none()
+        && formatting.indent_right_chars.is_none()
+        && formatting.indent_first_line_chars.is_none()
+    {
         return;
     }
     writer.start_element("w:ind");
     optional_int(writer, "w:left", formatting.indent_left);
+    optional_int(writer, "w:leftChars", formatting.indent_left_chars);
     optional_int(writer, "w:right", formatting.indent_right);
-    if let Some(first) = first {
-        if formatting.hanging_indent == Some(true) {
-            writer.attribute("w:hanging", &int_attr(Some(first.abs())));
-        } else if first != 0.0 {
-            writer.attribute("w:firstLine", &int_attr(Some(first)));
-        }
+    optional_int(writer, "w:rightChars", formatting.indent_right_chars);
+    if let Some(first) = formatting.indent_first_line {
+        let name = if hanging { "w:hanging" } else { "w:firstLine" };
+        writer.attribute(
+            name,
+            &int_attr(Some(if hanging { first.abs() } else { first })),
+        );
+    }
+    if let Some(first) = formatting.indent_first_line_chars {
+        let name = if hanging {
+            "w:hangingChars"
+        } else {
+            "w:firstLineChars"
+        };
+        writer.attribute(
+            name,
+            &int_attr(Some(if hanging { first.abs() } else { first })),
+        );
     }
     writer.end_element();
 }
@@ -838,6 +855,52 @@ mod tests {
         assert_eq!(
             serialize_paragraph(&paragraph, &mut context()).unwrap(),
             "<w:p w14:paraId=\"AA&amp;BB&quot;CC\"><w:pPr><w:keepNext w:val=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:lastRenderedPageBreak/><w:t>hello &amp; goodbye</w:t></w:r></w:p>"
+        );
+    }
+
+    #[test]
+    fn indentation_keeps_character_units_and_an_explicit_zero_first_line() {
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_left: Some(200.0),
+                indent_left_chars: Some(100.0),
+                indent_first_line_chars: Some(200.0),
+                indent_first_line: Some(420.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:left=\"200\" w:leftChars=\"100\" w:firstLine=\"420\" w:firstLineChars=\"200\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line: Some(0.0),
+                indent_first_line_chars: Some(0.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:firstLine=\"0\" w:firstLineChars=\"0\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                hanging_indent: Some(true),
+                indent_first_line: Some(-315.0),
+                indent_first_line_chars: Some(-150.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:hanging=\"315\" w:hangingChars=\"150\"/>"
         );
     }
 

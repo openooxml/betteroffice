@@ -302,3 +302,62 @@ fn an_unreadable_chart_part_writes_no_picture_in_any_story() {
 fn an_absent_chart_part_writes_no_picture_in_any_story() {
     assert_no_stray_picture(None);
 }
+
+const TEXT_BOX_NAMESPACES: &str = concat!(
+    r#" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+    r#" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#,
+    r#" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing""#,
+    r#" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main""#,
+    r#" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#,
+    r#" xmlns:v="urn:schemas-microsoft-com:vml" mc:Ignorable="wps v""#,
+);
+
+/// The GB/T callout shape from issue #202: an `mc:Choice` textbox with a VML
+/// fallback, a bare textbox, and character-unit first-line indents.
+fn text_box_docx() -> Vec<u8> {
+    let body = concat!(
+        r##"<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>1000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>2000</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="11" name="Text Box 11"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p><w:pPr><w:ind w:firstLineChars="200" w:firstLine="420"/></w:pPr><w:r><w:t>Choice callout</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape id="_x0000_s1026" type="#_x0000_t202"><v:textbox><w:txbxContent><w:p><w:r><w:t>Fallback callout</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>"##,
+        r#"<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="21" name="Text Box 21"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Inline callout</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:ind w:firstLineChars="200" w:firstLine="420"/></w:pPr><w:r><w:t>Body</w:t></w:r></w:p>"#,
+        r#"<w:p><w:pPr><w:ind w:firstLineChars="0" w:firstLine="0"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>"#,
+    );
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document{TEXT_BOX_NAMESPACES}><w:body>{body}</w:body></w:document>"#
+    );
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document.into_bytes()),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn saving_keeps_shape_text_box_bodies_and_character_unit_indents() {
+    let document = Document::open(&text_box_docx()).unwrap();
+    let saved = document.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = saved_part(&parts, "word/document.xml");
+
+    assert_eq!(xml.matches("<w:txbxContent>").count(), 2);
+    assert!(xml.contains("Choice callout"));
+    assert!(xml.contains("Inline callout"));
+    assert_eq!(xml.matches(r#"<wps:cNvSpPr txBox="1"/>"#).count(), 2);
+
+    assert_eq!(xml.matches(r#"w:firstLineChars="200""#).count(), 2);
+    assert_eq!(xml.matches(r#"w:firstLine="420""#).count(), 2);
+    assert!(xml.contains(r#"<w:ind w:firstLine="0" w:firstLineChars="0"/>"#));
+
+    let reopened = Document::open(&saved).unwrap();
+    let resaved = saved_part(
+        &ooxml_opc::unzip_parts(&reopened.save().unwrap()).unwrap(),
+        "word/document.xml",
+    );
+    assert_eq!(resaved, xml);
+}

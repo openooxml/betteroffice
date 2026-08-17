@@ -503,6 +503,13 @@ pub struct ParagraphFormatting {
     pub indent_first_line: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hanging_indent: Option<bool>,
+    /// Hundredths of a character; overrides the twip indent in Word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_left_chars: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_right_chars: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_first_line_chars: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<Borders>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -565,6 +572,14 @@ pub fn parse_paragraph_properties(
         value.indent_first_line = indent.parse_numeric_attribute(Some("w"), "firstLine", 1.0);
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hanging", 1.0) {
             value.indent_first_line = Some(-hanging);
+            value.hanging_indent = Some(true);
+        }
+        value.indent_left_chars = indent.parse_numeric_attribute(Some("w"), "leftChars", 1.0);
+        value.indent_right_chars = indent.parse_numeric_attribute(Some("w"), "rightChars", 1.0);
+        value.indent_first_line_chars =
+            indent.parse_numeric_attribute(Some("w"), "firstLineChars", 1.0);
+        if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hangingChars", 1.0) {
+            value.indent_first_line_chars = Some(-hanging);
             value.hanging_indent = Some(true);
         }
     }
@@ -641,6 +656,12 @@ pub fn merge_paragraph_formatting(
             overlay(&mut result.indent_right, &source.indent_right);
             overlay(&mut result.indent_first_line, &source.indent_first_line);
             overlay(&mut result.hanging_indent, &source.hanging_indent);
+            overlay(&mut result.indent_left_chars, &source.indent_left_chars);
+            overlay(&mut result.indent_right_chars, &source.indent_right_chars);
+            overlay(
+                &mut result.indent_first_line_chars,
+                &source.indent_first_line_chars,
+            );
             if let Some(source) = &source.borders {
                 result.borders = Some(merge_borders(target.borders.as_ref(), source));
             }
@@ -1403,6 +1424,23 @@ mod tests {
                 .as_deref(),
             Some("continue")
         );
+    }
+
+    #[test]
+    fn parses_character_unit_indents_alongside_their_twip_companions() {
+        let style = root(
+            r#"<w:style><w:pPr><w:ind w:left="200" w:leftChars="100" w:right="105" w:rightChars="50" w:firstLine="420" w:firstLineChars="200"/></w:pPr></w:style>"#,
+        );
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left_chars, Some(100.0));
+        assert_eq!(paragraph.indent_right_chars, Some(50.0));
+        assert_eq!(paragraph.indent_first_line_chars, Some(200.0));
+        let hanging = root(
+            r#"<w:style><w:pPr><w:ind w:hanging="315" w:hangingChars="150"/></w:pPr></w:style>"#,
+        );
+        let hanging = parse_paragraph_properties(hanging.child("w", "pPr"), None).unwrap();
+        assert_eq!(hanging.indent_first_line_chars, Some(-150.0));
+        assert_eq!(hanging.hanging_indent, Some(true));
     }
 
     #[test]
