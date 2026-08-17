@@ -249,23 +249,35 @@ fn drawing_theme(theme: &Theme) -> DrawingTheme {
 }
 
 /// The charts a sheet anchors, followed from its drawing relationships. Both
-/// worksheets and chartsheets carry drawings, so both are walked. A chart whose
-/// part is missing is skipped rather than failing the parse.
+/// worksheets and chartsheets carry drawings, so both are walked. A drawing or
+/// chart part that is missing, or that this crate cannot read, is skipped
+/// rather than failing the parse: the workbook opens without that chart, and
+/// the part itself is still carried through a save untouched.
+///
+/// A drawing is skipped whole, never anchor by anchor, because `anchor_index`
+/// names a position in the part's anchor list and a partial list would rename
+/// the anchors a later save patches.
 pub(crate) fn parse_sheet_charts(
     parts: &[(String, Vec<u8>)],
     sheet_path: &str,
 ) -> Result<Vec<SheetChart>, ParseError> {
     let mut charts = Vec::new();
     for (drawing_path, drawing_xml) in sheet_drawings(parts, sheet_path)? {
-        let drawing_rels = find_part(parts, &relationship_part_path(&drawing_path))
+        let drawing_rels = match find_part(parts, &relationship_part_path(&drawing_path))
             .map(parse_relationships)
-            .transpose()?
-            .unwrap_or_default();
-        let drawing_dir = directory_of(&drawing_path).to_owned();
-        for (index, anchor) in read_anchors(&parse_tree(drawing_xml)?)?
-            .into_iter()
-            .enumerate()
         {
+            Some(Ok(rels)) => rels,
+            Some(Err(_)) => continue,
+            None => Vec::new(),
+        };
+        let drawing_dir = directory_of(&drawing_path).to_owned();
+        let Ok(drawing_root) = parse_tree(drawing_xml) else {
+            continue;
+        };
+        let Ok(anchors) = read_anchors(&drawing_root) else {
+            continue;
+        };
+        for (index, anchor) in anchors.into_iter().enumerate() {
             let Some(part) = anchor
                 .chart_rel
                 .as_deref()
@@ -277,10 +289,15 @@ pub(crate) fn parse_sheet_charts(
             let Some(chart_xml) = find_part(parts, &part) else {
                 continue;
             };
-            let root = parse_tree(chart_xml)?;
+            let Ok(root) = parse_tree(chart_xml) else {
+                continue;
+            };
             if !root.is(NS_CHART, "chartSpace") {
                 continue;
             }
+            let Ok(refs) = chart_refs(&root) else {
+                continue;
+            };
             if charts.len() >= MAX_CHART_ANCHORS {
                 return Err(ParseError::TooManyCharts);
             }
@@ -289,7 +306,7 @@ pub(crate) fn parse_sheet_charts(
                 drawing: drawing_path.clone(),
                 anchor_index: index,
                 anchor: anchor.anchor,
-                refs: chart_refs(&root)?,
+                refs,
             });
         }
     }
