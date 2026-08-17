@@ -23,7 +23,7 @@ use xlsx_render::{
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
-    build_display_list_with_charts, scaled, viewport_for_range, viewport_for_used_range,
+    build_display_list_with_charts, scaled, viewport_for_range, viewport_for_used_range_within,
 };
 
 use crate::authority::{
@@ -1591,7 +1591,9 @@ impl Workbook {
         }
         let mut viewport = match options.range {
             Some(range) => viewport_for_range(sheet_ref, range),
-            None => viewport_for_used_range(sheet_ref),
+            None => viewport_for_used_range_within(sheet_ref, |grown| {
+                renderable(sheet_ref, grown, options.scale)
+            }),
         };
         if let Some(width) = options.max_width {
             viewport.width = viewport.width.min(width as f32 / options.scale);
@@ -3209,6 +3211,16 @@ fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Whether a default-range render of `viewport` would clear every guard
+/// [`Workbook::render_sheet`] applies. The used range itself is the caller's
+/// to answer for; this decides only whether a chart may widen the frame.
+#[cfg(feature = "raster")]
+fn renderable(sheet: &Sheet, viewport: &Viewport, scale: f32) -> bool {
+    let width = ((viewport.width * scale).ceil() as u32).max(1);
+    let height = ((viewport.height * scale).ceil() as u32).max(1);
+    validate_render_size(width, height).is_ok() && validate_display_region(sheet, viewport).is_ok()
 }
 
 #[cfg(feature = "raster")]
