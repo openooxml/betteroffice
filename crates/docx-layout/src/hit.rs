@@ -749,11 +749,10 @@ fn in_typeable_area(page: &DisplayPage, x: f64, y: f64) -> bool {
     }
 }
 
-/// Whether a point lies in a note area, the vertical `[y, y + height]` test its
-/// band box gives — the note twin of a header/footer band. An area stating no
-/// band, or a zero-height one, owns no point: the list does not say where such
-/// an area's notes paint, and claiming the region would route a click out of
-/// the body with nothing to route it to.
+/// Whether a point lies in a note area — the vertical `[y, y + height]` test a
+/// header/footer band gets. An area stating no band, or a zero-height one, owns
+/// no point: the list does not say where its notes paint, so claiming the
+/// region would route a click out of the body with nowhere to send it.
 fn in_note_area(area: &NoteRegion, y: f64) -> bool {
     let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64);
     let (Some(top), Some(height)) = (px(&area.y), px(&area.height)) else {
@@ -968,13 +967,11 @@ fn note_region(area: &NoteRegion) -> HitRegion {
     }
 }
 
-/// The stories an area stacks, in paint order. One note's primitives are
-/// emitted contiguously under that note's paint-group id, so each story is one
-/// span of them. A primitive with no attrs to carry a group — a paragraph or
-/// table border line — belongs to the note it sits inside, so it must not end a
-/// span. One that could carry a group and names no listed note does end it:
-/// that is the area's own chrome, or a note the region never identified, and
-/// either way it addresses nothing.
+/// The stories an area stacks, in paint order: one note's primitives are
+/// emitted contiguously under its paint-group id, so each story is one span of
+/// them. A primitive with no attrs to carry a group — a paragraph or table
+/// border line — belongs to the note it sits inside and must not end a span;
+/// one naming no listed note does end it, being the area's own chrome.
 fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
     /// The span being accumulated: its note, and where the span starts.
     #[derive(Clone, Copy)]
@@ -1016,12 +1013,18 @@ fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
     stories
 }
 
-/// Vertical distance from a point to the nearest text band of a primitive
-/// list, zero inside one and infinite for a list painting no text.
-fn band_distance(prims: &[Primitive], y: f64) -> f64 {
+/// Squared distance from a point to the nearest text box of a primitive list,
+/// zero inside one and infinite for a list painting no text. Both axes count:
+/// a note area lays its notes out in columns it starts at the same vertical
+/// position, so two of them can share a band and only `x` tells them apart.
+fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
     text_hits(prims)
         .iter()
-        .map(|hit| (hit.top - y).max(y - hit.bottom).max(0.0))
+        .map(|hit| {
+            let dx = (hit.x - x).max(x - (hit.x + hit.width)).max(0.0);
+            let dy = (hit.top - y).max(y - hit.bottom).max(0.0);
+            dx * dx + dy * dy
+        })
         .fold(f64::INFINITY, f64::min)
 }
 
@@ -1034,10 +1037,9 @@ fn band_distance(prims: &[Primitive], y: f64) -> f64 {
 /// routes editing into that header or footer.
 ///
 /// A note area stacks several independent documents, so it resolves against
-/// the one story nearest the point rather than the area as a whole: a click
-/// can never borrow a position from the note above or below the one it landed
-/// in. Like a band, a note carries no content box of its own, so only its runs
-/// read as typeable text.
+/// the story nearest the point rather than the area as a whole: a click cannot
+/// borrow a position from another note. Like a band it carries no content box,
+/// so only its runs read as typeable text.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
     let page = dl.pages.get(page_index)?;
 
@@ -1074,7 +1076,7 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
     if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, y)) {
         let story = note_stories(area)
             .into_iter()
-            .map(|story| (band_distance(story.primitives, y), story))
+            .map(|story| (text_box_distance_squared(story.primitives, x, y), story))
             .min_by(|(left, _), (right, _)| left.total_cmp(right))
             .map(|(_, story)| story);
         let primitives = story.as_ref().map_or(&[][..], |story| story.primitives);

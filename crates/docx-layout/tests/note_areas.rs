@@ -1,10 +1,14 @@
 //! Note-area fixture and interaction gates.
 //!
-//! `two-footnotes` puts two footnotes in one area at y 860..960 of a single
+//! `two-footnotes` stacks two footnotes in one area at y 860..960 of a single
 //! page, each note's story starting at position 1 — the same numbers, two
 //! unrelated documents. Everything here turns on the two never being confused
 //! with each other or with the body. The second note runs to a bordered
 //! paragraph, so a border line sits between two of its own primitives.
+//!
+//! `two-column-footnotes` puts one note in each of two note columns, which the
+//! emitter starts at the same vertical position: telling those two apart takes
+//! more than the pointer's `y`.
 
 use docx_layout::display_list::{
     DisplayList, Primitive, TextRunPrimitive, build_display_list_json,
@@ -16,14 +20,22 @@ use docx_layout::hit::{
 const NOTE_AREA_TOP: f64 = 860.0;
 const NOTE_AREA_BOTTOM: f64 = 960.0;
 
-fn input() -> String {
+fn read(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/notes/two-footnotes.input.json");
-    std::fs::read_to_string(path).expect("missing two-footnotes.input.json")
+        .join(format!("tests/fixtures/notes/{name}.input.json"));
+    std::fs::read_to_string(path).unwrap_or_else(|_| panic!("missing {name}.input.json"))
+}
+
+fn input() -> String {
+    read("two-footnotes")
+}
+
+fn build_from(input: &str) -> DisplayList {
+    serde_json::from_str(&build_display_list_json(input).expect("builds")).expect("parses")
 }
 
 fn build() -> DisplayList {
-    serde_json::from_str(&build_display_list_json(&input()).expect("builds")).expect("parses")
+    build_from(&input())
 }
 
 /// The run painting `text` inside the page's only note area.
@@ -164,6 +176,33 @@ fn a_border_line_inside_a_note_does_not_split_its_story() {
         "the note lines painted after its border line lost their rects"
     );
     assert!(rects[1].y > rects[0].y);
+}
+
+/// A note area lays its notes out in columns the emitter starts at the same
+/// vertical position, so two stories can share a band and only the pointer's
+/// `x` tells them apart. Resolving on `y` alone hands a point in one column the
+/// other column's note and a position from its story.
+#[test]
+fn notes_in_parallel_columns_resolve_by_column() {
+    let dl = build_from(&read("two-column-footnotes"));
+
+    let left = note_run(&dl, "Left column");
+    let right = note_run(&dl, "Right column");
+    assert!(
+        right.x.as_f64().unwrap() > run_center_x(left),
+        "the fixture did not lay its notes out side by side"
+    );
+    assert_eq!(
+        left.baseline_y, right.baseline_y,
+        "the columns no longer share a vertical band, which is what this pins"
+    );
+
+    for (run, note_id) in [(left, 1), (right, 2)] {
+        let baseline = run.baseline_y.as_f64().unwrap();
+        let hit = hit_test_regions(&dl, 0, run_center_x(run), baseline - 4.0).expect("page 0");
+        assert_eq!(hit.note_id, Some(note_id), "over {:?}", run.text);
+        assert_eq!(hit.target, HoverTarget::Text, "over {:?}", run.text);
+    }
 }
 
 #[test]
