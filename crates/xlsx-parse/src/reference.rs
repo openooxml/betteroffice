@@ -116,39 +116,55 @@ type NamedArea = (String, CellRef);
 
 /// Every preserved part a save cannot rewrite, with what each one names.
 /// `sheet_paths` is the source part of each of `workbook`'s sheets, in order.
+/// `declined` are the drawing and chart parts the parse could not read, which
+/// only it knows about.
 pub(crate) fn unpatchable_references(
     parts: &[(String, Vec<u8>)],
     content_types: &[PartContentType],
     workbook: &Workbook,
     sheet_paths: &[String],
+    declined: &[String],
 ) -> Result<Vec<UnpatchableReference>, ParseError> {
-    if !package_metadata_conforms(parts, content_types, sheet_paths) {
+    let mut references = if package_metadata_conforms(parts, content_types, sheet_paths) {
+        let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
+        for chart in unmodelled_chart_parts(parts, content_types, workbook)? {
+            let areas = match chart
+                .claimed
+                .then(|| find_part(parts, &chart.path))
+                .flatten()
+            {
+                Some(bytes) => chart_reference_areas(bytes, chart.owner.as_deref())?,
+                None => None,
+            };
+            references.push(bound(chart.path, areas, workbook));
+        }
+        references
+    } else if package_bears_references(parts) {
         // Discovery must not be a function of a reader this path has just
         // decided it cannot trust, so here it stops being a function of any
         // reader: every part names everything. Nothing can drop out of a set
         // that is the whole package, whatever a future reader does with it.
+        parts
+            .iter()
+            .map(|(path, _)| bound(path.clone(), None, workbook))
+            .collect()
+    } else {
         // A package holding nothing reference-bearing has nothing to strand,
         // and gets the veto it always got: none.
-        return Ok(if package_bears_references(parts) {
-            parts
-                .iter()
-                .map(|(path, _)| bound(path.clone(), None, workbook))
-                .collect()
-        } else {
-            Vec::new()
-        });
-    }
-    let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
-    for chart in unmodelled_chart_parts(parts, content_types, workbook)? {
-        let areas = match chart
-            .claimed
-            .then(|| find_part(parts, &chart.path))
-            .flatten()
+        Vec::new()
+    };
+    // A part the parse declined names cells nothing here resolved, so it names
+    // every cell of every sheet, the way a chart part no sheet anchors does.
+    // Out here rather than in the branch above because a decline vetoes even in
+    // a package that bears no other reference, and because a walk over the parts
+    // cannot see a target that is missing or unconventionally placed.
+    for path in declined {
+        if references
+            .iter()
+            .all(|reference| reference.part.as_str() != path)
         {
-            Some(bytes) => chart_reference_areas(bytes, chart.owner.as_deref())?,
-            None => None,
-        };
-        references.push(bound(chart.path, areas, workbook));
+            references.push(bound(path.clone(), None, workbook));
+        }
     }
     Ok(references)
 }

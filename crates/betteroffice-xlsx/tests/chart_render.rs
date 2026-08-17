@@ -1,5 +1,6 @@
 use betteroffice_xlsx::{
-    CellRef, CellValue, ChartAnchor, DrawCmd, RenderOptions, SheetId, Viewport, Workbook,
+    CalculationOptions, CellRef, CellValue, ChartAnchor, DrawCmd, Op, RenderOptions, SheetId,
+    Viewport, Workbook,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx");
@@ -256,7 +257,7 @@ fn an_undeclared_entity_in_a_chart_part_drops_only_that_chart() {
 #[test]
 fn a_malformed_drawing_part_drops_every_chart_and_keeps_the_sheet() {
     let package = fixture_with(DRAWING_PART, b"<xdr:wsDr><xdr:twoCellAnchor>");
-    let workbook = Workbook::open(&package).unwrap();
+    let mut workbook = Workbook::open(&package).unwrap();
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();
     assert!(sheet.charts.is_empty());
     assert_eq!(
@@ -278,6 +279,21 @@ fn a_malformed_drawing_part_drops_every_chart_and_keeps_the_sheet() {
             .unwrap()
             .bytes
             .starts_with(&[0x89, b'P', b'N', b'G'])
+    );
+
+    assert_insert_is_refused(&mut workbook, SheetId(0));
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(0, 0),
+            "Period",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    assert_eq!(
+        part_of(&ooxml_opc::unzip_parts(&saved).unwrap(), DRAWING_PART),
+        b"<xdr:wsDr><xdr:twoCellAnchor>"
     );
 }
 
@@ -303,4 +319,233 @@ fn an_unparseable_chart_part_survives_a_save_byte_for_byte() {
         after.iter().map(|(path, _)| path).collect::<Vec<_>>(),
         before.iter().map(|(path, _)| path).collect::<Vec<_>>()
     );
+}
+
+const SECOND_DRAWING: &str = "xl/drawings/drawing2.xml";
+const DRAWING_RELS: &str = "xl/drawings/_rels/drawing1.xml.rels";
+const CONTENT_TYPES: &str = "[Content_Types].xml";
+
+fn part_of(parts: &[(String, Vec<u8>)], path: &str) -> Vec<u8> {
+    parts
+        .iter()
+        .find(|(existing, _)| existing == path)
+        .map(|(_, bytes)| bytes.clone())
+        .unwrap_or_else(|| panic!("{path} is not in the fixture"))
+}
+
+fn set_part(parts: &mut Vec<(String, Vec<u8>)>, path: &str, bytes: Vec<u8>) {
+    match parts.iter_mut().find(|(existing, _)| existing == path) {
+        Some(slot) => slot.1 = bytes,
+        None => parts.push((path.to_owned(), bytes)),
+    }
+}
+
+/// Rewrites a part's markup through `edit`.
+fn rewrite_part(
+    parts: &mut Vec<(String, Vec<u8>)>,
+    path: &str,
+    edit: impl FnOnce(String) -> String,
+) {
+    let source = String::from_utf8(part_of(parts, path)).unwrap();
+    let edited = edit(source.clone());
+    assert_ne!(edited, source, "{path} was left as it was");
+    set_part(parts, path, edited.into_bytes());
+}
+
+/// `charts.xlsx` grown to a second sheet whose own drawing anchors the same four
+/// chart parts, that drawing's markup passed through `damage`.
+fn shared_chart_parts_fixture(damage: impl FnOnce(String) -> String) -> Vec<(String, Vec<u8>)> {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    let sheet = part_of(&parts, "xl/worksheets/sheet1.xml");
+    let drawing = String::from_utf8(part_of(&parts, DRAWING_PART)).unwrap();
+    let drawing_rels = part_of(&parts, DRAWING_RELS);
+    set_part(&mut parts, "xl/worksheets/sheet2.xml", sheet);
+    set_part(
+        &mut parts,
+        "xl/worksheets/_rels/sheet2.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/></Relationships>"#.to_vec(),
+    );
+    set_part(&mut parts, SECOND_DRAWING, damage(drawing).into_bytes());
+    set_part(
+        &mut parts,
+        "xl/drawings/_rels/drawing2.xml.rels",
+        drawing_rels,
+    );
+    rewrite_part(&mut parts, "xl/workbook.xml", |text| {
+        text.replace(
+            r#"<sheet name="Charts" sheetId="1" r:id="rId1"/>"#,
+            r#"<sheet name="Charts" sheetId="1" r:id="rId1"/><sheet name="Second" sheetId="2" r:id="rId2"/>"#,
+        )
+    });
+    rewrite_part(&mut parts, "xl/_rels/workbook.xml.rels", |text| {
+        text.replace(
+            "</Relationships>",
+            r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+        )
+    });
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            "</Types>",
+            r#"<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>"#,
+        )
+    });
+    parts
+}
+
+/// One anchor row this crate cannot read, which costs the whole drawing.
+fn unreadable_anchor(drawing: String) -> String {
+    drawing.replacen("<xdr:row>5</xdr:row>", "<xdr:row>not-a-row</xdr:row>", 1)
+}
+
+fn assert_insert_is_refused(workbook: &mut Workbook, sheet: SheetId) {
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet,
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("references cells this edit would move"),
+        "{error}"
+    );
+}
+
+fn assert_structural_edits_are_refused(package: &[u8]) {
+    let mut workbook = Workbook::open(package).unwrap();
+    assert_insert_is_refused(&mut workbook, SheetId(0));
+}
+
+/// A drawing this crate declined is one no save rewrites, so every structural
+/// edit that would move what its anchors name is refused — on both sheets,
+/// because the chart parts it holds are anchored from the other one too and so
+/// look modelled.
+#[test]
+fn a_skipped_drawing_freezes_structural_edits_on_every_sheet() {
+    let parts = shared_chart_parts_fixture(unreadable_anchor);
+    let package = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&package).unwrap();
+    assert_eq!(workbook.model().sheet(SheetId(0)).unwrap().charts.len(), 4);
+    assert!(
+        workbook
+            .model()
+            .sheet(SheetId(1))
+            .unwrap()
+            .charts
+            .is_empty()
+    );
+
+    assert_insert_is_refused(&mut workbook, SheetId(0));
+    assert_insert_is_refused(&mut workbook, SheetId(1));
+    let error = workbook
+        .apply_ops(
+            vec![Op::RemoveSheet { index: 1 }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("references cells this edit would move"),
+        "{error}"
+    );
+
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(0, 0),
+            "Period",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let written = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(
+        part_of(&written, SECOND_DRAWING),
+        part_of(&parts, SECOND_DRAWING)
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(CellRef::new(0, 0))
+            .map(|cell| &cell.value),
+        Some(&CellValue::Text {
+            value: "Period".to_owned()
+        })
+    );
+}
+
+/// A chart part two sheets anchor is rewritten only when both of them want the
+/// same bytes out of it. A drawing this crate declined leaves one of the two
+/// sheets holding nothing, so that agreement stops being asked for — and an
+/// unqualified reference in the shared part would be moved for one sheet while
+/// the other one's data stayed where it was.
+#[test]
+fn a_skipped_drawing_does_not_let_a_shared_chart_be_rewritten_alone() {
+    let mut parts = shared_chart_parts_fixture(unreadable_anchor);
+    rewrite_part(&mut parts, "xl/charts/chart3.xml", |text| {
+        text.replace("Charts!", "")
+    });
+    let package = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&package).unwrap();
+    assert_insert_is_refused(&mut workbook, SheetId(0));
+}
+
+/// A chart target outside the conventional layout that no content type claims
+/// is in no inventory of the package, so only the decline itself can stop an
+/// edit from stranding it.
+#[test]
+fn a_nonstandard_chart_target_that_cannot_be_read_freezes_structural_edits() {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    parts.retain(|(path, _)| path != CHART_PART);
+    set_part(
+        &mut parts,
+        "xl/custom/badplot.xml",
+        b"<c:chartSpace><c:chart></c:chartSpace>".to_vec(),
+    );
+    rewrite_part(&mut parts, DRAWING_RELS, |text| {
+        text.replace("../charts/chart2.xml", "../custom/badplot.xml")
+    });
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#,
+            "",
+        )
+    });
+    assert_structural_edits_are_refused(&ooxml_opc::rezip_parts(&parts).unwrap());
+}
+
+/// The same hole reached the other way: a chart target the package does not
+/// hold at all, which nothing walking the parts can ever inventory.
+#[test]
+fn a_missing_chart_target_freezes_structural_edits() {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    parts.retain(|(path, _)| path != CHART_PART);
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#,
+            "",
+        )
+    });
+    assert_structural_edits_are_refused(&ooxml_opc::rezip_parts(&parts).unwrap());
+}
+
+/// Drawing relationships are reparsed by every real save, so opening over one
+/// this crate cannot read would hand back a workbook that accepts an edit and
+/// then refuses to write it. The open is where that can still be acted on.
+#[test]
+fn a_malformed_drawing_relationship_part_fails_the_open() {
+    let package = fixture_with(
+        DRAWING_RELS,
+        b"<Relationships><Relationship></Relationships>",
+    );
+    assert!(Workbook::open(&package).is_err());
 }

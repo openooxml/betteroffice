@@ -31,6 +31,9 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
     pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
+    /// The drawing and chart parts no sheet's charts were built from, which
+    /// no save rewrites.
+    pub(crate) declined_parts: Vec<String>,
 }
 
 /// One sheet's row heights and column widths as releases before `hidden` was
@@ -66,6 +69,7 @@ pub(crate) fn parse_workbook_indexed(
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
     let mut legacy_dimensions = Vec::with_capacity(meta.sheets.len());
+    let mut declined_parts = Vec::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
@@ -74,7 +78,7 @@ pub(crate) fn parse_workbook_indexed(
                 .filter(|relationship| !relationship.external)
                 .map(|relationship| resolve_part_path("xl", &relationship.target))
             {
-                sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
+                sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
             }
             sheets.push(sheet);
             shared_string_cells.push(SharedStringCells::new());
@@ -97,7 +101,7 @@ pub(crate) fn parse_workbook_indexed(
             &mut indices,
             &mut legacy,
         )?;
-        sheet.charts = crate::chart::parse_sheet_charts(parts, &path)?;
+        sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
         sheets.push(sheet);
         shared_string_cells.push(indices);
         legacy_dimensions.push(legacy);
@@ -114,6 +118,7 @@ pub(crate) fn parse_workbook_indexed(
         active_sheet: meta.active_sheet,
         shared_string_cells,
         legacy_dimensions,
+        declined_parts,
     })
 }
 

@@ -257,24 +257,31 @@ fn drawing_theme(theme: &Theme) -> DrawingTheme {
 /// A drawing is skipped whole, never anchor by anchor, because `anchor_index`
 /// names a position in the part's anchor list and a partial list would rename
 /// the anchors a later save patches.
+///
+/// Every part skipped is appended to `declined`: this is the only place that
+/// knows one was, and a part no save rewrites has to veto the structural edits
+/// that would move what it names. A chart target is recorded as the drawing
+/// relationship resolved it, which catches one outside the conventional layout
+/// and one the package does not hold — neither of which a walk over the parts
+/// can see.
 pub(crate) fn parse_sheet_charts(
     parts: &[(String, Vec<u8>)],
     sheet_path: &str,
+    declined: &mut Vec<String>,
 ) -> Result<Vec<SheetChart>, ParseError> {
     let mut charts = Vec::new();
     for (drawing_path, drawing_xml) in sheet_drawings(parts, sheet_path)? {
-        let drawing_rels = match find_part(parts, &relationship_part_path(&drawing_path))
+        let drawing_rels = find_part(parts, &relationship_part_path(&drawing_path))
             .map(parse_relationships)
-        {
-            Some(Ok(rels)) => rels,
-            Some(Err(_)) => continue,
-            None => Vec::new(),
-        };
+            .transpose()?
+            .unwrap_or_default();
         let drawing_dir = directory_of(&drawing_path).to_owned();
         let Ok(drawing_root) = parse_tree(drawing_xml) else {
+            declined.push(drawing_path);
             continue;
         };
         let Ok(anchors) = read_anchors(&drawing_root) else {
+            declined.push(drawing_path);
             continue;
         };
         for (index, anchor) in anchors.into_iter().enumerate() {
@@ -287,15 +294,19 @@ pub(crate) fn parse_sheet_charts(
                 continue;
             };
             let Some(chart_xml) = find_part(parts, &part) else {
+                declined.push(part);
                 continue;
             };
             let Ok(root) = parse_tree(chart_xml) else {
+                declined.push(part);
                 continue;
             };
             if !root.is(NS_CHART, "chartSpace") {
+                declined.push(part);
                 continue;
             }
             let Ok(refs) = chart_refs(&root) else {
+                declined.push(part);
                 continue;
             };
             if charts.len() >= MAX_CHART_ANCHORS {

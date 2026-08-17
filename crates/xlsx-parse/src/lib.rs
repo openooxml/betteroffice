@@ -42,6 +42,7 @@ pub fn parse_workbook_with_package(
         &parsed.workbook,
         parsed.active_sheet,
         &parsed.shared_string_cells,
+        &parsed.declined_parts,
     )?;
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,

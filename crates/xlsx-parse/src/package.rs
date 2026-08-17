@@ -39,6 +39,7 @@ impl PreservedPackage {
         workbook: &Workbook,
         active_sheet: SheetId,
         shared_string_cells: &[SharedStringCells],
+        declined_parts: &[String],
     ) -> Result<Self, ParseError> {
         let workbook_xml = find_part(parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
@@ -145,6 +146,7 @@ impl PreservedPackage {
                 .iter()
                 .map(|sheet| sheet.path.clone())
                 .collect::<Vec<_>>(),
+            declined_parts,
         )?;
 
         Ok(Self {
