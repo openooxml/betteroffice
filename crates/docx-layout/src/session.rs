@@ -26,7 +26,7 @@ use std::collections::VecDeque;
 
 use crate::display_list::{DisplayList, DisplayPage};
 use crate::hit::{
-    VerticalDirection, hit_test_regions, parse_region, range_rects, range_rects_in_region,
+    VerticalDirection, hit_test_regions, parse_region_scope, range_rects, range_rects_in_region,
     vertical_move,
 };
 
@@ -249,12 +249,13 @@ pub fn range_rects_by_handle(handle: u32, from: i64, to: i64) -> Result<String, 
 
 /// Region-aware range rects against a stored display list — the by-handle twin
 /// of [`crate::hit::range_rects_region_json`]. `region` is
-/// `"body" | "header" | "footer"`; `r_id` scopes header/footer to one HF part
-/// (empty ⇒ match any). `Err` on an unknown handle or an unparseable region.
+/// `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
+/// header/footer to one HF part (empty ⇒ match any) and names the note id for
+/// a note region. `Err` on an unknown handle or an unparseable region.
 pub fn range_rects_region_by_handle(
     handle: u32,
     region: &str,
-    r_id: &str,
+    part_id: &str,
     from: i64,
     to: i64,
 ) -> Result<String, String> {
@@ -263,9 +264,8 @@ pub fn range_rects_region_by_handle(
         let dl = sessions
             .get(handle)
             .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
-        let region = parse_region(region)?;
-        let r_id = if r_id.is_empty() { None } else { Some(r_id) };
-        serde_json::to_string(&range_rects_in_region(dl, region, r_id, from, to))
+        let scope = parse_region_scope(region, part_id)?;
+        serde_json::to_string(&range_rects_in_region(dl, scope, from, to))
             .map_err(|e| format!("serialize: {e}"))
     })
 }

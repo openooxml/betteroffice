@@ -34,9 +34,9 @@ export function hit_test_regions_by_handle(handle: number, page_index: number, x
 
 /**
  * wasm wrapper over [`hit::hit_test_regions_json`]: region-aware hit test —
- * `{"region":"body"|"header"|"footer","rId"?,"pos":n|null,"target":"text"|"image"|"none"}`
- * (or `"null"` for an out-of-range page). The plain `hit_test_json` export
- * stays body-only.
+ * `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,"noteId"?,`
+ * `"pos":n|null,"target":"text"|"image"|"none"}` (or `"null"` for an
+ * out-of-range page). The plain `hit_test_json` export stays body-only.
  */
 export function hit_test_regions_json(display_list: string, page_index: number, x: number, y: number): string;
 
@@ -94,19 +94,21 @@ export function range_rects_json(display_list: string, from: number, to: number)
 /**
  * wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
  * range rects against a stored display list. `region` is
- * `"body" | "header" | "footer"`; `r_id` scopes header/footer to one HF part.
+ * `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
+ * header/footer to one HF part and names the note id for a note region.
  * `Err` on an unknown/closed handle so the caller can fall back to
  * [`range_rects_region_json`].
  */
-export function range_rects_region_by_handle(handle: number, region: string, r_id: string, from: number, to: number): string;
+export function range_rects_region_by_handle(handle: number, region: string, part_id: string, from: number, to: number): string;
 
 /**
  * wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
- * `region` is `"body" | "header" | "footer"`; `r_id` scopes a header/footer to
- * one HF part (empty for body / match-any). The `from`/`to` refer to that
+ * `region` is `"body" | "header" | "footer" | "footnote" | "endnote"`;
+ * `part_id` scopes a header/footer to one HF part (empty for body / match-any)
+ * and names the note id for a note region. The `from`/`to` refer to that
  * region's doc. The plain `range_rects_json` export stays body-only.
  */
-export function range_rects_region_json(display_list: string, region: string, r_id: string, from: number, to: number): string;
+export function range_rects_region_json(display_list: string, region: string, part_id: string, from: number, to: number): string;
 
 /**
  * Register a font for measurement from raw sfnt bytes; returns the font id

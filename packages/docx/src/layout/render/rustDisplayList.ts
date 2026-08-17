@@ -23,6 +23,7 @@
 import type { Layout } from '../pagination/types';
 import type { MeasuredBlock } from '../pagination/measuredBlock';
 import type { DisplayList } from './displayList';
+import type { DisplayListHitRegion } from './displayListQueries';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from './frameDelta';
 
 /**
@@ -222,8 +223,8 @@ export interface RustDisplayListEngine {
   ): string;
   displayRangeRectsJson?(from: number, to: number): string;
   displayRangeRectsRegionJson?(
-    region: 'body' | 'header' | 'footer',
-    rId: string,
+    region: DisplayListHitRegion,
+    partId: string,
     from: number,
     to: number
   ): string;
@@ -271,7 +272,10 @@ export class RustDisplayListSourceError extends Error {
  * `createDisplayListQueries` falls back to the `*Json` path when it is not.
  */
 export interface RustDisplayListQueryEngine {
-  /** region-aware hit test → `{"region","rId"?,"pos","target"}` or `"null"` JSON */
+  /**
+   * region-aware hit test → `{"region","rId"?,"noteId"?,"pos","target"}` or
+   * `"null"` JSON
+   */
   hitTestRegionsJson(displayList: string, pageIndex: number, x: number, y: number): string;
   /** closest caret position on the adjacent visual line */
   verticalMoveJson?(
@@ -283,15 +287,15 @@ export interface RustDisplayListQueryEngine {
   /** body document range → JSON array of `{pageIndex,x,y,width,height}` rects */
   rangeRectsJson(displayList: string, from: number, to: number): string;
   /**
-   * Region-aware document range → JSON array of rects. `region` is
-   * `'body' | 'header' | 'footer'`; `rId` scopes a header/footer to one part
-   * (empty for body, or to match any). Optional — the facade returns `[]`
-   * when it is absent.
+   * Region-aware document range → JSON array of rects. `region` is a
+   * `DisplayListHitRegion`; `partId` names the instance — a header/footer part
+   * (empty for body, or to match any band of the kind) or a note id. Optional
+   * — the facade returns `[]` when it is absent.
    */
   rangeRectsRegionJson?(
     displayList: string,
     region: string,
-    rId: string,
+    partId: string,
     from: number,
     to: number
   ): string;
@@ -322,7 +326,7 @@ export interface RustDisplayListQueryEngine {
   rangeRectsRegionByHandle?(
     handle: number,
     region: string,
-    rId: string,
+    partId: string,
     from: number,
     to: number
   ): string;

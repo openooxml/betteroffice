@@ -15,7 +15,7 @@ use docx_layout::header_footer::{
     HeaderFooterVariant, extend_body_margins, measure_header_footer,
     resolve_header_footer_field_widths,
 };
-use docx_layout::hit::{CaretRect, HitRegion, VerticalDirection};
+use docx_layout::hit::{CaretRect, VerticalDirection};
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
@@ -1925,23 +1925,18 @@ impl EngineSession {
             .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
     }
 
-    /// Header/footer/body range geometry directly against the resident list.
+    /// Body, header/footer and note range geometry directly against the
+    /// resident list.
     pub fn display_range_rects_region_json(
         &self,
         region: &str,
-        r_id: &str,
+        part_id: &str,
         from: i64,
         to: i64,
     ) -> Result<String, String> {
-        let region = match region {
-            "body" => HitRegion::Body,
-            "header" => HitRegion::Header,
-            "footer" => HitRegion::Footer,
-            other => return Err(format!("unknown region {other:?}")),
-        };
-        let r_id = (!r_id.is_empty()).then_some(r_id);
+        let scope = docx_layout::hit::parse_region_scope(region, part_id)?;
         self.with_display_list(|list| {
-            docx_layout::hit::range_rects_in_region(list, region, r_id, from, to)
+            docx_layout::hit::range_rects_in_region(list, scope, from, to)
         })
         .ok_or_else(|| "resident display list is not built".to_owned())
         .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
@@ -2176,7 +2171,31 @@ mod tests {
                 }]
             },
             "notes": {
-                "contents": [{"id": 7, "height": 20}]
+                "contents": [{
+                    "id": 7,
+                    "height": 20,
+                    "blocks": [{
+                        "kind": "paragraph",
+                        "id": "note-p",
+                        "runs": [{"kind": "text", "text": "note", "pmStart": 1, "pmEnd": 5}],
+                        "pmStart": 1,
+                        "pmEnd": 6
+                    }],
+                    "measures": [{
+                        "kind": "paragraph",
+                        "lines": [{
+                            "headRun": 0,
+                            "headChar": 0,
+                            "tailRun": 0,
+                            "tailChar": 4,
+                            "width": 40,
+                            "ascent": 8,
+                            "descent": 2,
+                            "lineHeight": 20
+                        }],
+                        "totalHeight": 20
+                    }]
+                }]
             }
         })
     }
@@ -2202,39 +2221,42 @@ mod tests {
         assert_eq!(engine.stats().pagination_calls, 2);
     }
 
-    /// Note text is not editable through the display hit test, which answers a
-    /// click in the note band with the BODY position above it. The pointer must
-    /// not invite that click.
+    /// A laid-out note is reachable through the resident hit test: the point
+    /// addresses the note's own story and its glyphs invite typing.
     #[test]
-    fn hover_target_is_absent_over_a_laid_out_note_area() {
+    fn a_laid_out_note_area_resolves_to_its_own_story() {
         let engine = EngineSession::new(133);
         let output = engine
             .layout_document_with_regions_json(&note_area_layout_request().to_string())
             .unwrap();
         engine.build_display_list_json(&output).unwrap();
-        let band = engine
+        let run = engine
             .with_display_list(|list| {
-                let area = &list.pages[0].note_areas[0];
+                let run = list.pages[0].note_areas[0]
+                    .primitives
+                    .iter()
+                    .find_map(|primitive| match primitive {
+                        docx_layout::display_list::Primitive::Text(run) => Some(run),
+                        _ => None,
+                    })
+                    .expect("the note area paints its text");
                 (
-                    area.y.as_ref().unwrap().as_f64().unwrap(),
-                    area.height.as_ref().unwrap().as_f64().unwrap(),
+                    run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
+                    run.baseline_y.as_f64().unwrap(),
                 )
             })
             .expect("the display list is built");
-        assert!(band.1 > 0.0, "the note band has no height");
 
-        let hit = |y: f64| -> serde_json::Value {
-            serde_json::from_str(&engine.display_hit_test_regions_json(0, 20.0, y).unwrap())
-                .unwrap()
+        let hit = |x: f64, y: f64| -> serde_json::Value {
+            serde_json::from_str(&engine.display_hit_test_regions_json(0, x, y).unwrap()).unwrap()
         };
-        let note = hit(band.0 + band.1 / 2.0);
-        assert_eq!(note["target"], "none");
-        assert!(
-            note["pos"].is_i64(),
-            "the note band still resolves a body position"
-        );
-        // the body line above the band stays typeable
-        assert_eq!(hit(band.0 - 2.0)["target"], "text");
+        let note = hit(run.0, run.1 - 2.0);
+        assert_eq!(note["region"], "footnote");
+        assert_eq!(note["noteId"], 7);
+        assert_eq!(note["target"], "text");
+        assert!(note["pos"].is_i64(), "the note resolved no position");
+        // the body line above the area stays the body's
+        assert_eq!(hit(20.0, 20.0)["region"], "body");
     }
 
     #[test]

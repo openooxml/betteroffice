@@ -108,6 +108,7 @@ export {
   type DisplayListHitRegion,
   type DisplayListHoverTarget,
   type DisplayListImageGeometry,
+  type DisplayListNoteRegion,
   type DisplayListParagraphGeometry,
   type DisplayListQueries,
   type DisplayListQuerySourceState,

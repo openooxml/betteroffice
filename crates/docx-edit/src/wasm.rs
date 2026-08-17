@@ -1549,10 +1549,12 @@ impl EditSession {
     /// Region-aware hit test against the resident display list, so no
     /// display-list JSON crosses the boundary. `x`/`y` are page-local px.
     /// Returns
-    /// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null,"target":"text"|"image"|"none"}`,
-    /// or `"null"` for a page index outside the frame. A header/footer `pos`
-    /// refers to that header/footer's own document, not the body; `target` is
-    /// what sits under the point, which is what a pointer cursor needs.
+    /// `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,`
+    /// `"noteId"?,"pos":n|null,"target":"text"|"image"|"none"}`, or `"null"`
+    /// for a page index outside the frame. A header/footer `pos` refers to
+    /// that part's own document and a note `pos` to the `fn:{id}` / `en:{id}`
+    /// story, never the body; `target` is what sits under the point, which is
+    /// what a pointer cursor needs.
     pub fn display_hit_test_regions_json(
         &self,
         page_index: u32,
@@ -1592,21 +1594,22 @@ impl EditSession {
     }
 
     /// Same rectangles as [`EditSession::display_range_rects_json`], scoped to
-    /// a region. `region` is `"body"`, `"header"` or `"footer"`; `r_id` names
-    /// one header/footer part, and an empty string matches any. `from`/`to`
-    /// are positions in THAT region's document, and a header/footer part
-    /// paints on every page carrying it, so the result holds one rect set per
-    /// such page, each tagged with its `pageIndex`. Errors on an unknown
-    /// `region` and when no display list is resident.
+    /// a region. `region` is `"body"`, `"header"`, `"footer"`, `"footnote"` or
+    /// `"endnote"`; `part_id` names one header/footer part (an empty string
+    /// matches any) or the note whose story the positions belong to.
+    /// `from`/`to` are positions in THAT region's document, and a
+    /// header/footer part paints on every page carrying it, so the result
+    /// holds one rect set per such page, each tagged with its `pageIndex`.
+    /// Errors on an unknown `region` and when no display list is resident.
     pub fn display_range_rects_region_json(
         &self,
         region: &str,
-        r_id: &str,
+        part_id: &str,
         from: f64,
         to: f64,
     ) -> Result<String, JsValue> {
         self.engine
-            .display_range_rects_region_json(region, r_id, from as i64, to as i64)
+            .display_range_rects_region_json(region, part_id, from as i64, to as i64)
             .map_err(|error| JsValue::from_str(&error))
     }
 

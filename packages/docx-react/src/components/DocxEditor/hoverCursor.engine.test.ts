@@ -25,6 +25,8 @@ const BODY = fixture('single-page-multi-paragraph.input.json');
 // one header band at y 48..72 and one footer band at y 984..1008, each with a
 // paragraph; a band carries no content box
 const BANDS = fixture('hf/hf-default-both.input.json');
+// two footnotes in one area at y 900..960, each story starting at position 1
+const NOTES = fixture('notes/two-footnotes.input.json');
 
 const facades: DisplayListQueries[] = [];
 
@@ -37,6 +39,7 @@ function open(path: string): { list: DisplayList; queries: DisplayListQueries } 
 
 let body: ReturnType<typeof open>;
 let bands: ReturnType<typeof open>;
+let notes: ReturnType<typeof open>;
 
 const cursorAt = (
   opened: ReturnType<typeof open>,
@@ -49,6 +52,7 @@ beforeAll(async () => {
   await preloadLayoutWasm();
   body = open(BODY);
   bands = open(BANDS);
+  notes = open(NOTES);
   await Promise.all(facades.map((facade) => facade.whenReady()));
 });
 
@@ -109,5 +113,27 @@ describe('hover cursor over an engine-built page', () => {
     const past = run.x + run.width + 200;
     expect(bands.queries.hitTestRegions(0, past, run.baselineY - 2)?.region).toBe('header');
     expect(cursorAt(bands, past, run.baselineY - 2)).toBe('default');
+  });
+
+  // A note is a third document on the page: the hit names the note whose story
+  // the position belongs to, and its glyphs invite typing like the body's.
+  test('a footnote reads as text over its runs and names its own story', () => {
+    const area = notes.list.pages[0].noteAreas?.[0];
+    if (!area) throw new Error('the fixture page has no note area');
+    const run = area.primitives?.find((primitive) => primitive.kind === 'text');
+    if (!run) throw new Error('the note area has no run');
+
+    const x = run.x + run.width / 2;
+    const hit = notes.queries.hitTestRegions(0, x, run.baselineY - 2);
+    expect(hit?.region).toBe('footnote');
+    expect(hit?.noteId).toBe(1);
+    expect(cursorAt(notes, x, run.baselineY - 2)).toBe('text');
+
+    // that note's own story answers the selection geometry
+    const rects = notes.queries.noteRangeRects('footnote', 1, 1, 11);
+    expect(rects).toHaveLength(1);
+    expect(rects[0]!.y).toBeGreaterThanOrEqual(900);
+    // a note the page does not carry highlights nothing
+    expect(notes.queries.noteRangeRects('endnote', 1, 1, 11)).toEqual([]);
   });
 });

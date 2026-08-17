@@ -27,6 +27,15 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(editing, hit({ region: 'footer', target: 'none' }))).toBe('default');
   });
 
+  test('a note reads as text over its own runs', () => {
+    expect(
+      canvasHoverCursor(editing, hit({ region: 'footnote', noteId: 3, target: 'text' }))
+    ).toBe('text');
+    expect(canvasHoverCursor(editing, hit({ region: 'endnote', noteId: 3, target: 'none' }))).toBe(
+      'default'
+    );
+  });
+
   test('editing a band makes only that band typeable', () => {
     const mode = { readOnly: false, hfEditMode: 'header' as const };
     expect(canvasHoverCursor(mode, hit({ region: 'header', target: 'none' }))).toBe('text');
@@ -34,6 +43,7 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(mode, hit({ region: 'header', target: 'image' }))).toBe('default');
     expect(canvasHoverCursor(mode, hit({ region: 'body', target: 'text' }))).toBe('default');
     expect(canvasHoverCursor(mode, hit({ region: 'footer', target: 'text' }))).toBe('default');
+    expect(canvasHoverCursor(mode, hit({ region: 'footnote', target: 'text' }))).toBe('default');
   });
 
   test('read-only and off-page points never type', () => {

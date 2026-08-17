@@ -47,6 +47,7 @@ import { displayPrimitiveRect, type GeoRect } from './displayListGeometry';
 import {
   findImagePrimitiveAtPoint,
   findImagePrimitiveByDocPos,
+  type DisplayListImageRegion,
   type LocatedImagePrimitive,
 } from './displayListImages';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from './rustDisplayList';
@@ -65,15 +66,18 @@ export interface ResidentDisplayListQueryEngine {
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
-    region: 'body' | 'header' | 'footer',
-    rId: string,
+    region: DisplayListHitRegion,
+    partId: string,
     from: number,
     to: number
   ): string;
 }
 
 /** which part of a page owns a hit — mirrors `HitRegion` in hit.rs */
-export type DisplayListHitRegion = 'body' | 'header' | 'footer';
+export type DisplayListHitRegion = 'body' | 'header' | 'footer' | 'footnote' | 'endnote';
+
+/** a note region, whose story is `fn:{id}` / `en:{id}` */
+export type DisplayListNoteRegion = 'footnote' | 'endnote';
 
 /**
  * What a click at a hit point would act on — mirrors `HoverTarget` in hit.rs.
@@ -85,13 +89,16 @@ export type DisplayListHoverTarget = 'text' | 'image' | 'none';
 
 /**
  * Region-aware hit result. For `header`/`footer` the position refers to the
- * header/footer document identified by `rId`, NOT the body document — the
- * caller must route the selection to that editor. `pos` is null when the point
- * is inside the region but resolves to no position.
+ * header/footer document identified by `rId`, and for `footnote`/`endnote` to
+ * the note story named by `noteId` — NOT the body document, so the caller must
+ * route the selection to that editor. `pos` is null when the point is inside
+ * the region but resolves to no position.
  */
 export interface DisplayListRegionHit {
   region: DisplayListHitRegion;
   rId?: string;
+  /** note whose story a `footnote`/`endnote` position addresses */
+  noteId?: number;
   pos: number | null;
   /** Absent from a wasm build predating it; read that as "not text". */
   target?: DisplayListHoverTarget;
@@ -173,13 +180,13 @@ export interface DisplayListQueries {
     pageIndex: number,
     x: number,
     y: number,
-    region?: DisplayListHitRegion,
+    region?: DisplayListImageRegion,
     rId?: string
   ): DisplayListImageGeometry | null;
   /** Image whose atom starts at `pos`. Body by default. */
   imageByPos(
     pos: number,
-    region?: DisplayListHitRegion,
+    region?: DisplayListImageRegion,
     rId?: string
   ): DisplayListImageGeometry | null;
   /** region-aware point → doc position (page-local coordinates) */
@@ -202,6 +209,17 @@ export interface DisplayListQueries {
   hfRangeRects(
     region: 'header' | 'footer',
     rId: string,
+    from: number,
+    to: number
+  ): DisplayListRect[];
+  /**
+   * Note document range → highlight rects for that note's story. `from`/`to`
+   * are positions in the `fn:{noteId}` / `en:{noteId}` document, never the
+   * body's. A note paints once, so this returns at most one rect-set.
+   */
+  noteRangeRects(
+    region: DisplayListNoteRegion,
+    noteId: number,
     from: number,
     to: number
   ): DisplayListRect[];
@@ -655,16 +673,18 @@ export function createDisplayListQueries(
     return parseQuery(raw, null, 'vertical_move');
   };
 
-  const hfRangeRects = (
-    region: 'header' | 'footer',
-    rId: string,
+  // `partId` names the instance the positions belong to: an HF part's rId, or
+  // a note's id.
+  const regionRangeRects = (
+    region: DisplayListHitRegion,
+    partId: string,
     from: number,
     to: number
   ): DisplayListRect[] => {
     if (resident) {
       return parseQuery(
         residentQuery(
-          () => resident.displayRangeRectsRegionJson(region, rId, from, to),
+          () => resident.displayRangeRectsRegionJson(region, partId, from, to),
           'range_rects_region'
         ),
         [],
@@ -677,12 +697,26 @@ export function createDisplayListQueries(
     if (!eng || !eng.hasRangeRectsRegion?.()) return [];
     const raw = runQuery(
       eng.rangeRectsRegionByHandle &&
-        ((h: number) => eng!.rangeRectsRegionByHandle!(h, region, rId, from, to)),
-      () => eng!.rangeRectsRegionJson!(getJson(), region, rId, from, to),
+        ((h: number) => eng!.rangeRectsRegionByHandle!(h, region, partId, from, to)),
+      () => eng!.rangeRectsRegionJson!(getJson(), region, partId, from, to),
       'range_rects_region'
     );
     return parseQuery(raw, [], 'range_rects_region');
   };
+
+  const hfRangeRects = (
+    region: 'header' | 'footer',
+    rId: string,
+    from: number,
+    to: number
+  ): DisplayListRect[] => regionRangeRects(region, rId, from, to);
+
+  const noteRangeRects = (
+    region: DisplayListNoteRegion,
+    noteId: number,
+    from: number,
+    to: number
+  ): DisplayListRect[] => regionRangeRects(region, String(noteId), from, to);
 
   const hfCaretRects = (
     region: 'header' | 'footer',
@@ -971,14 +1005,14 @@ export function createDisplayListQueries(
     pageIndex: number,
     x: number,
     y: number,
-    region: DisplayListHitRegion = 'body',
+    region: DisplayListImageRegion = 'body',
     rId?: string
   ): DisplayListImageGeometry | null =>
     imageGeometry(findImagePrimitiveAtPoint(list, pageIndex, x, y, region, rId));
 
   const imageByPos = (
     pos: number,
-    region: DisplayListHitRegion = 'body',
+    region: DisplayListImageRegion = 'body',
     rId?: string
   ): DisplayListImageGeometry | null =>
     imageGeometry(findImagePrimitiveByDocPos(list, pos, region, rId));
@@ -1017,6 +1051,7 @@ export function createDisplayListQueries(
     verticalMove,
     rangeRects,
     hfRangeRects,
+    noteRangeRects,
     hfCaretRects,
     hfAnchorRects,
     caretRect,

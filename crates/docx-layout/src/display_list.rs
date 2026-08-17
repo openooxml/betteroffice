@@ -4310,18 +4310,22 @@ fn note_partitions<'a>(notes: &'a [NoteItemIn], columns: usize) -> Vec<Vec<&'a N
     out
 }
 
+/// Paint-group id shared by every primitive of one note. Consumers group a
+/// note area's primitives back into stories by rebuilding it.
+pub fn note_group_id(kind: &str, id: i64) -> String {
+    format!("{kind}-{id}")
+}
+
+/// Marks a note's primitives with its paint group. Their document positions
+/// stay the note story's own, so a point or range inside a note addresses that
+/// story; the body-reference range is linkage metadata and rides on the
+/// region's `notes` entry instead.
 fn stamp_note_item(prims: &mut [Primitive], start: usize, note: &NoteItemIn, kind: &str) {
     let Some(id) = note.id else { return };
-    let group_id = format!("{kind}-{id}");
+    let group_id = note_group_id(kind, id);
     for primitive in &mut prims[start..] {
         if let Some(attrs) = doc_attrs_mut(primitive) {
             attrs.group_id = Some(group_id.clone());
-            // The body-reference range is semantic linkage metadata, not the
-            // note story's own selectable range; H consumes it from the group.
-            if attrs.doc_start.is_none() && attrs.doc_end.is_none() {
-                attrs.doc_start = note.anchor_doc_start;
-                attrs.doc_end = note.anchor_doc_end;
-            }
         }
     }
 }
@@ -9394,6 +9398,19 @@ fn primitive_v_extent(p: &Primitive) -> (f64, f64) {
     }
 }
 
+/// The document attributes a primitive carries, if its class has any.
+pub fn doc_attrs(p: &Primitive) -> Option<&DocAttrs> {
+    match p {
+        Primitive::Text(t) => Some(&t.attrs),
+        Primitive::GlyphRun(g) => Some(&g.attrs),
+        Primitive::Rect(r) => Some(&r.attrs),
+        Primitive::Image(i) => Some(&i.attrs),
+        Primitive::Shape(s) => Some(&s.attrs),
+        Primitive::Decoration(d) => Some(&d.attrs),
+        Primitive::Line(_) => None,
+    }
+}
+
 fn doc_attrs_mut(p: &mut Primitive) -> Option<&mut DocAttrs> {
     match p {
         Primitive::Text(t) => Some(&mut t.attrs),
@@ -10166,6 +10183,55 @@ mod tests {
                 .iter()
                 .any(|primitive| primitive["kind"] == "text" && primitive["text"] == "box")
         );
+    }
+
+    /// Every primitive a note paints addresses the note's own story, so one
+    /// carrying no position of its own must stay unpositioned rather than
+    /// inherit the body range of the reference mark that anchors the note —
+    /// that range would hand a click inside the note a body position.
+    #[test]
+    fn note_primitives_never_inherit_the_body_anchor_range() {
+        let input = json!({
+            "measured": [],
+            "options": {},
+            "layout": { "pages": [{
+                "number": 1,
+                "size": { "w": 300, "h": 400 },
+                "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                "noteAreas": [{
+                    "kind": "footnote", "y": 330, "height": 40, "columns": 1,
+                    "notes": [{
+                        "id": 7, "anchorDocStart": 3, "anchorDocEnd": 4, "height": 30,
+                        "blocks": [
+                            { "kind": "paragraph", "id": "note-p", "runs": [{ "kind": "text", "text": "note", "pmStart": 1, "pmEnd": 5 }], "pmStart": 1, "pmEnd": 6 },
+                            { "kind": "image", "id": "note-img", "src": "rId9", "decorative": true }
+                        ],
+                        "measures": [
+                            { "kind": "paragraph", "totalHeight": 16, "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4, "width": 30, "ascent": 11, "descent": 3, "lineHeight": 16 }] },
+                            { "kind": "image", "width": 20, "height": 14 }
+                        ]
+                    }]
+                }],
+                "fragments": []
+            }]}
+        });
+        let output: Value = serde_json::from_str(
+            &build_display_list_json(&input.to_string()).expect("display list builds"),
+        )
+        .expect("valid display JSON");
+        let primitives = output["pages"][0]["noteAreas"][0]["primitives"]
+            .as_array()
+            .expect("note primitives");
+
+        let text = &primitives[0];
+        assert_eq!(text["text"], "note");
+        assert_eq!(text["groupId"], "footnote-7");
+        assert_eq!((&text["docStart"], &text["docEnd"]), (&json!(1), &json!(5)));
+
+        let image = &primitives[1];
+        assert_eq!(image["kind"], "image");
+        assert_eq!(image["groupId"], "footnote-7");
+        assert!(image["docStart"].is_null() && image["docEnd"].is_null());
     }
 
     #[test]
