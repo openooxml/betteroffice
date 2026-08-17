@@ -360,12 +360,18 @@ impl ChartSources<'_> {
 /// resolves to.
 ///
 /// A chart part is a decorative leaf: nothing structural is read from it and
-/// nothing structural is read after it. So each gets its own [`ParseBudget`] —
-/// one cached series can neither starve a slide nor starve the next chart — and
-/// a part `parse_xml` refuses is skipped, leaving the deck to open with that
-/// chart missing exactly as it opens when the part is absent. `parse_xml`
-/// reports only `MalformedXml`, `UnsafeXml` and `ResourceLimit`, each naming
-/// this part; a hostile package is refused earlier, by `ooxml_opc::unzip_parts`.
+/// nothing structural is read after it. So a part `parse_xml` refuses is
+/// skipped, leaving the deck to open with that chart missing exactly as it opens
+/// when the part is absent. `parse_xml` reports only `MalformedXml`, `UnsafeXml`
+/// and `ResourceLimit`, each naming this part; a hostile package is refused
+/// earlier, by `ooxml_opc::unzip_parts`.
+///
+/// What bounds the reading: each part gets its own [`ParseBudget`], so no cached
+/// series can starve a slide or spend another part's depth, byte and text
+/// limits; all of them draw their XML events from one pool the size of
+/// `max_xml_events` ([`read_chart_root`]); and each part is read once however
+/// many themes reference it, the tree being the same for all of them and only
+/// the colours it resolves against differing.
 fn parse_chart_parts(
     parts: &HashMap<&str, &[u8]>,
     sources: &ChartSources<'_>,
@@ -382,8 +388,9 @@ fn parse_chart_parts(
         collect_chart_references(&master.shapes, &master.part_path, &mut references);
     }
     let default_theme = Theme::default();
-    let mut charts = Vec::new();
+    let mut reads = Vec::new();
     let mut loaded = HashSet::new();
+    let mut pending_reads: HashMap<String, usize> = HashMap::new();
     for (source_part, relationship_id) in references {
         let Some(part_path) = sources.chart_target(&source_part, &relationship_id) else {
             continue;
@@ -393,22 +400,61 @@ fn parse_chart_parts(
         if !loaded.insert((part_path.clone(), theme_part_path.clone())) {
             continue;
         }
-        let Some(bytes) = parts.get(part_path.as_str()) else {
-            continue;
-        };
-        let Ok(root) = parse_xml(bytes, &part_path, &mut ParseBudget::new(limits)) else {
-            continue;
-        };
+        *pending_reads.entry(part_path.clone()).or_default() += 1;
         let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
-        if let Some(chart) = parse_chart_part(&root, theme) {
+        reads.push((part_path, theme_part_path, theme));
+    }
+
+    let mut charts = Vec::new();
+    let mut roots: HashMap<String, Option<XmlElement>> = HashMap::new();
+    let mut remaining_events = limits.max_xml_events;
+    for (part_path, theme_part_path, theme) in reads {
+        if !roots.contains_key(&part_path) {
+            let root = parts.get(part_path.as_str()).and_then(|bytes| {
+                read_chart_root(bytes, &part_path, limits, &mut remaining_events)
+            });
+            roots.insert(part_path.clone(), root);
+        }
+        let chart = roots
+            .get(&part_path)
+            .and_then(Option::as_ref)
+            .and_then(|root| parse_chart_part(root, theme));
+        if let Some(chart) = chart {
             charts.push(ChartPart {
-                part_path,
+                part_path: part_path.clone(),
                 theme_part_path,
                 chart,
             });
         }
+        if let Some(pending) = pending_reads.get_mut(&part_path) {
+            *pending -= 1;
+            if *pending == 0 {
+                roots.remove(&part_path);
+            }
+        }
     }
     charts
+}
+
+/// Reads one chart part against its own budget, drawing its XML events from
+/// `remaining_events` — a pool the size of the package's `max_xml_events` that
+/// every chart part shares. A part that empties the pool is declined like a
+/// malformed one, so the deck's charts together cost no more than the one budget
+/// they used to be read against.
+fn read_chart_root(
+    bytes: &[u8],
+    part_path: &str,
+    limits: &ParseLimits,
+    remaining_events: &mut usize,
+) -> Option<XmlElement> {
+    let part_limits = ParseLimits {
+        max_xml_events: *remaining_events,
+        ..limits.clone()
+    };
+    let mut budget = ParseBudget::new(&part_limits);
+    let root = parse_xml(bytes, part_path, &mut budget).ok();
+    *remaining_events = remaining_events.saturating_sub(budget.xml_events_spent());
+    root
 }
 
 /// `(referencing part, relationship id)` for every chart in `shapes`, groups
@@ -635,8 +681,28 @@ mod tests {
         assert_eq!(points[1].explosion, Some(10.0));
     }
 
-    #[test]
-    fn a_shared_chart_is_resolved_once_per_referencing_theme() {
+    /// Three slides sharing `ppt/charts/chart1.xml`, resolving to two themes.
+    struct SharedChartDeck {
+        slides: Vec<Slide>,
+        layouts: Vec<SlideLayout>,
+        masters: Vec<SlideMaster>,
+        themes: Vec<ThemePart>,
+        relationships: BTreeMap<String, Vec<Relationship>>,
+    }
+
+    impl SharedChartDeck {
+        fn sources(&self) -> ChartSources<'_> {
+            ChartSources {
+                slides: &self.slides,
+                layouts: &self.layouts,
+                masters: &self.masters,
+                themes: &self.themes,
+                relationships: &self.relationships,
+            }
+        }
+    }
+
+    fn shared_chart_deck() -> SharedChartDeck {
         fn chart_shape(id: u32) -> ShapeNode {
             ShapeNode::GraphicFrame(GraphicFrame {
                 base: ShapeBase {
@@ -739,17 +805,23 @@ mod tests {
             ("ppt/slides/slide2.xml".to_owned(), chart_relationships()),
             ("ppt/slides/slide3.xml".to_owned(), chart_relationships()),
         ]);
-        let sources = ChartSources {
-            slides: &slides,
-            layouts: &layouts,
-            masters: &masters,
-            themes: &themes,
-            relationships: &relationships,
-        };
+        SharedChartDeck {
+            slides,
+            layouts,
+            masters,
+            themes,
+            relationships,
+        }
+    }
+
+    #[test]
+    fn a_shared_chart_is_resolved_once_per_referencing_theme() {
+        let deck = shared_chart_deck();
         let chart_xml = br#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
         let parts: HashMap<&str, &[u8]> =
             HashMap::from([("ppt/charts/chart1.xml", chart_xml.as_slice())]);
-        let charts = parse_chart_parts(&parts, &sources, &ParseLimits::default());
+
+        let charts = parse_chart_parts(&parts, &deck.sources(), &ParseLimits::default());
 
         assert_eq!(charts.len(), 2);
         assert_eq!(
@@ -761,6 +833,30 @@ mod tests {
         );
         assert_eq!(charts[0].chart.series[0].color, "#112233");
         assert_eq!(charts[1].chart.series[0].color, "#AABBCC");
+    }
+
+    /// A chart part parses to the same tree whatever theme it is coloured
+    /// against, so it is read once: an event pool only one read fits still
+    /// resolves the chart against both themes.
+    #[test]
+    fn a_shared_chart_part_is_read_once_however_many_themes_reference_it() {
+        let deck = shared_chart_deck();
+        let chart_xml = cached_chart(1_000);
+        let parts: HashMap<&str, &[u8]> =
+            HashMap::from([("ppt/charts/chart1.xml", chart_xml.as_slice())]);
+        let limits = ParseLimits {
+            max_xml_events: 6_000,
+            ..ParseLimits::default()
+        };
+
+        let charts = parse_chart_parts(&parts, &deck.sources(), &limits);
+
+        assert_eq!(charts.len(), 2);
+        assert!(
+            charts
+                .iter()
+                .all(|part| part.chart.series[0].values.len() == 1_000)
+        );
     }
 
     #[test]
@@ -887,19 +983,39 @@ mod tests {
         xml.into_bytes()
     }
 
-    /// The undamaged deck that used to be refused: spec-valid charts whose
-    /// caches together outgrow one budget. Each chart holds a cache that most
-    /// of a budget covers, so a budget shared with the slides — or with the
-    /// other chart — leaves the deck unopenable.
-    #[test]
-    fn a_deck_whose_charts_each_fill_a_budget_opens_with_every_chart() {
+    /// `chart-deck.pptx` with charts of `points` cached values and `shapes`
+    /// more shapes on the second slide, so charts and slides both cost real
+    /// events.
+    fn cached_chart_deck(points: usize, shapes: usize) -> Vec<u8> {
+        let crowd = (0..shapes)
+            .map(|shape| {
+                format!(
+                    r#"<p:sp><p:nvSpPr><p:cNvPr id="{}" name=""/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#,
+                    shape + 100
+                )
+            })
+            .collect::<String>();
         let mut parts = ooxml_opc::unzip_parts(CHART_FIXTURE).unwrap();
         for (path, bytes) in &mut parts {
             if path.starts_with("ppt/charts/") {
-                *bytes = cached_chart(4_000);
+                *bytes = cached_chart(points);
+            }
+            if path == "ppt/slides/slide2.xml" {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("</p:spTree>", &format!("{crowd}</p:spTree>"))
+                    .into_bytes();
             }
         }
-        let deck = ooxml_opc::rezip_parts(&parts).unwrap();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    /// The undamaged deck that used to be refused: spec-valid charts whose
+    /// caches, added to what the slides cost, outgrow one budget. The charts
+    /// draw from a pool of their own, so slides and charts both come through.
+    #[test]
+    fn a_deck_whose_charts_outgrow_the_slides_budget_opens_with_every_chart() {
+        let deck = cached_chart_deck(2_000, 1_500);
         let limits = ParseLimits {
             max_xml_events: 30_000,
             ..ParseLimits::default()
@@ -916,13 +1032,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some("Charts"), Some("Grouped")]
         );
+        assert_eq!(package.slides[1].shapes.len(), 1_501);
         assert_eq!(package.charts.len(), 2);
         assert!(
             package
                 .charts
                 .iter()
-                .all(|part| part.chart.series[0].values.len() == 4_000)
+                .all(|part| part.chart.series[0].values.len() == 2_000)
         );
+    }
+
+    /// The pool the charts share is one budget for the whole deck, so a chart
+    /// that empties it leaves the next one declined like a damaged part — and
+    /// the deck still opens.
+    #[test]
+    fn a_deck_whose_charts_outgrow_the_chart_budget_opens_with_the_charts_that_fit() {
+        let deck = cached_chart_deck(4_000, 1_500);
+        let limits = ParseLimits {
+            max_xml_events: 30_000,
+            ..ParseLimits::default()
+        };
+
+        let package = parse_pptx_with_limits(&deck, &limits).unwrap();
+
+        assert_eq!(package.slides.len(), 2);
+        assert_eq!(package.slides[1].shapes.len(), 1_501);
+        assert_eq!(
+            package.slides[0]
+                .shapes
+                .iter()
+                .filter(|shape| matches!(shape, ShapeNode::GraphicFrame(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            package
+                .charts
+                .iter()
+                .map(|part| part.part_path.as_str())
+                .collect::<Vec<_>>(),
+            ["ppt/charts/chart1.xml"]
+        );
+        assert_eq!(package.charts[0].chart.series[0].values.len(), 4_000);
     }
 
     #[test]
