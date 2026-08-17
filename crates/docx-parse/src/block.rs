@@ -13,7 +13,7 @@ use crate::paragraph::{
     DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph,
 };
 use crate::relationships::RelationshipMap;
-use crate::shape::{RelativeRect, Shape, ShapeTextBody};
+use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
 use crate::smart_art::SmartArtContext;
 use crate::styles::{DocDefaults, StyleMap};
 use crate::table::{
@@ -363,12 +363,18 @@ impl StoryParser<'_, '_> {
         shape.wrap = text_box.wrap;
         shape.fill = text_box.fill;
         shape.outline = text_box.outline;
+        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
         shape.text_body = Some(ShapeTextBody {
-            vertical: None,
-            rotation: None,
-            anchor: None,
-            anchor_center: None,
-            auto_fit: None,
+            vertical: body.as_ref().and_then(|body| {
+                body.vertical
+                    .as_deref()
+                    .filter(|value| *value != "horizontal")
+                    .map(|_| true)
+            }),
+            rotation: body.as_ref().and_then(|body| body.rotation),
+            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+            anchor_center: body.as_ref().and_then(|body| body.anchor_center),
+            auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
             margins: text_box.margins.map(|margins| RelativeRect {
                 left: margins.left,
                 top: margins.top,
@@ -381,6 +387,7 @@ impl StoryParser<'_, '_> {
                 .collect::<Result<_, _>>()
                 .map_err(|error| ParseError::Canonical(error.to_string()))?,
         });
+        shape.text_body_properties = body;
         let mut target = run_index;
         if target >= paragraph.content.len() {
             let Some(last_run) = paragraph.content.iter().rposition(|content| {

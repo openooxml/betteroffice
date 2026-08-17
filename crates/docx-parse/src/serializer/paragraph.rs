@@ -713,15 +713,13 @@ fn write_indentation(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
         );
     }
     if let Some(first) = formatting.indent_first_line_chars {
+        let hanging = first.is_sign_negative();
         let name = if hanging {
             "w:hangingChars"
         } else {
             "w:firstLineChars"
         };
-        writer.attribute(
-            name,
-            &int_attr(Some(if hanging { first.abs() } else { first })),
-        );
+        writer.attribute(name, &int_attr(Some(first.abs())));
     }
     writer.end_element();
 }
@@ -902,6 +900,28 @@ mod tests {
             writer.finish(),
             "<w:ind w:hanging=\"315\" w:hangingChars=\"150\"/>"
         );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line: Some(420.0),
+                indent_first_line_chars: Some(-200.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:firstLine=\"420\" w:hangingChars=\"200\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line_chars: Some(-0.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(writer.finish(), "<w:ind w:hangingChars=\"0\"/>");
     }
 
     #[test]

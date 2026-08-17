@@ -197,6 +197,37 @@ pub struct ShapeTextBodyProperties {
     pub preset_text_warp: Option<String>,
 }
 
+impl From<crate::text_box::TextBoxBodyProperties> for ShapeTextBodyProperties {
+    fn from(value: crate::text_box::TextBoxBodyProperties) -> Self {
+        Self {
+            vertical: value.vertical,
+            rotation: value.rotation,
+            upright: value.upright,
+            anchor: value.anchor,
+            anchor_center: value.anchor_center,
+            columns: value.columns,
+            column_spacing: value.column_spacing,
+            wrap: value.wrap,
+            horizontal_overflow: value.horizontal_overflow,
+            vertical_overflow: value.vertical_overflow,
+            margins: value
+                .margins
+                .map(|margins| RelativeRect {
+                    left: margins.left,
+                    top: margins.top,
+                    right: margins.right,
+                    bottom: margins.bottom,
+                })
+                .unwrap_or_default(),
+            auto_fit: value.auto_fit,
+            font_scale: value.font_scale,
+            line_spacing_reduction: value.line_spacing_reduction,
+            from_word_art: value.from_word_art,
+            preset_text_warp: value.preset_text_warp,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeTextBody {

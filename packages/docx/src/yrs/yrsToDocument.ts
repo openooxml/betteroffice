@@ -679,16 +679,32 @@ function imageRunFromPayload(payload: Attrs): Run {
   return { type: 'run', content: [{ type: 'drawing', image }] };
 }
 
+/** The seeded shape, carrying the text body and everything else no payload field describes. */
+function storedShape(value: unknown): Shape | undefined {
+  const json = asString(value);
+  if (!json || json.length > 2_000_000) return undefined;
+  try {
+    const parsed = JSON.parse(json) as Shape;
+    if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
+    if (!asObject(parsed.size)) parsed.size = { width: 0, height: 0 };
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 function shapeRunFromPayload(payload: Attrs): Run {
-  const shape: Shape = {
+  const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
-    shapeType: (asString(payload.shapeType) || 'rect') as Shape['shapeType'],
-    id: asString(payload.shapeId) || undefined,
-    size: {
-      width: payload.width ? pixelsToEmu(Number(payload.width)) : 0,
-      height: payload.height ? pixelsToEmu(Number(payload.height)) : 0,
-    },
+    shapeType: 'rect',
+    size: { width: 0, height: 0 },
   };
+  const shapeType = asString(payload.shapeType);
+  if (shapeType) shape.shapeType = shapeType as Shape['shapeType'];
+  const shapeId = asString(payload.shapeId);
+  if (shapeId) shape.id = shapeId;
+  if (payload.width) shape.size = { ...shape.size, width: pixelsToEmu(Number(payload.width)) };
+  if (payload.height) shape.size = { ...shape.size, height: pixelsToEmu(Number(payload.height)) };
   if (Array.isArray(payload.geometryPath) && payload.geometryPath.length > 0) {
     shape.geometryPath = payload.geometryPath as NonNullable<Shape['geometryPath']>;
   }

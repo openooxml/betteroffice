@@ -1344,15 +1344,18 @@ fn apply_list_rendering(
     };
     let direct_indent = direct_properties.and_then(|properties| properties.child("w", "ind"));
     let direct_left = direct_indent.is_some_and(|indent| {
-        indent.attribute(Some("w"), "left").is_some()
-            || indent.attribute(Some("w"), "start").is_some()
+        ["left", "start", "leftChars", "startChars"]
+            .iter()
+            .any(|name| indent.attribute(Some("w"), name).is_some())
     });
     let direct_first = direct_indent.is_some_and(|indent| {
-        ["firstLine", "hanging"].iter().any(|name| {
-            indent.attribute(Some("w"), name).is_some_and(|raw| {
-                parse_javascript_integer_prefix(raw).is_none_or(|value| value != 0.0)
+        ["firstLine", "hanging", "firstLineChars", "hangingChars"]
+            .iter()
+            .any(|name| {
+                indent.attribute(Some("w"), name).is_some_and(|raw| {
+                    parse_javascript_integer_prefix(raw).is_none_or(|value| value != 0.0)
+                })
             })
-        })
     });
     let formatting = paragraph
         .formatting
@@ -1382,9 +1385,10 @@ fn style_chain_ind(style_id: Option<&str>, styles: Option<&StyleMap>) -> (bool, 
             break;
         };
         if let Some(properties) = &style.p_pr {
-            result.0 |= properties.indent_left.is_some();
-            result.1 |=
-                properties.indent_first_line.is_some() || properties.hanging_indent.is_some();
+            result.0 |= properties.indent_left.is_some() || properties.indent_left_chars.is_some();
+            result.1 |= properties.indent_first_line.is_some()
+                || properties.hanging_indent.is_some()
+                || properties.indent_first_line_chars.is_some();
         }
         if result.0 && result.1 {
             break;

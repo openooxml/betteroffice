@@ -361,3 +361,134 @@ fn saving_keeps_shape_text_box_bodies_and_character_unit_indents() {
     );
     assert_eq!(resaved, xml);
 }
+
+/// A minimal package holding `body`, plus `word/numbering.xml` when given.
+fn story_docx(body: &str, numbering: Option<&str>) -> Vec<u8> {
+    let numbering_override = if numbering.is_some() {
+        r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#
+    } else {
+        ""
+    };
+    let document = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document{TEXT_BOX_NAMESPACES}><w:body>{body}</w:body></w:document>"#
+    );
+    let mut parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>{numbering_override}</Types>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document.into_bytes()),
+    ];
+    if let Some(numbering) = numbering {
+        parts.push((
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNum" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#.to_vec(),
+        ));
+        parts.push((
+            "word/numbering.xml".to_owned(),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{numbering}</w:numbering>"#
+            )
+            .into_bytes(),
+        ));
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// The document part after `Document::open` → `save`.
+fn saved_document(package: &[u8]) -> String {
+    let saved = Document::open(package).unwrap().save().unwrap();
+    saved_part(
+        &ooxml_opc::unzip_parts(&saved).unwrap(),
+        "word/document.xml",
+    )
+}
+
+fn text_box_drawing(body: &str, body_properties: &str) -> String {
+    format!(
+        r#"<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="914400" cy="457200"/><wp:docPr id="31" name="Text Box 31"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>{body}</w:txbxContent></wps:txbx>{body_properties}</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+    )
+}
+
+#[test]
+fn saving_keeps_a_table_inside_a_text_box() {
+    let table = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>TABLE-CELL</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let package = story_docx(
+        &text_box_drawing(table, r#"<wps:bodyPr rot="0" vert="horz"/>"#),
+        None,
+    );
+
+    let xml = saved_document(&package);
+
+    assert!(xml.contains("TABLE-CELL"));
+    let body = xml
+        .split_once("<w:txbxContent>")
+        .and_then(|(_, rest)| rest.split_once("</w:txbxContent>"))
+        .unwrap()
+        .0;
+    assert!(body.starts_with("<w:tbl>"));
+    assert_eq!(body.matches("<w:tc>").count(), 1);
+
+    let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
+    assert_eq!(resaved, xml);
+}
+
+#[test]
+fn saving_keeps_the_writing_direction_of_a_vertical_text_box() {
+    let package = story_docx(
+        &text_box_drawing(
+            r#"<w:p><w:r><w:t>Vertical</w:t></w:r></w:p>"#,
+            r#"<wps:bodyPr rot="0" vert="eaVert"/>"#,
+        ),
+        None,
+    );
+
+    let xml = saved_document(&package);
+
+    assert!(xml.contains(r#"<wps:bodyPr rot="0" vert="eaVert"/>"#));
+    assert!(!xml.contains(r#"vert="horz""#));
+
+    let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
+    assert_eq!(resaved, xml);
+}
+
+const HANGING_NUMBERING: &str = r#"<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>"#;
+
+#[test]
+fn a_direct_character_first_line_indent_outranks_a_numbering_hanging_indent() {
+    let package = story_docx(
+        r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr><w:ind w:firstLineChars="200"/></w:pPr><w:r><w:t>Numbered</w:t></w:r></w:p>"#,
+        Some(HANGING_NUMBERING),
+    );
+
+    let xml = saved_document(&package);
+
+    assert!(xml.contains(r#"<w:ind w:left="720" w:firstLineChars="200"/>"#));
+    assert!(!xml.contains("hangingChars"));
+    assert!(!xml.contains("w:hanging="));
+
+    let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
+    assert_eq!(resaved, xml);
+}
+
+#[test]
+fn mixed_unit_indents_keep_the_direction_each_unit_was_authored_with() {
+    let package = story_docx(
+        r#"<w:p><w:pPr><w:ind w:firstLine="420" w:hangingChars="200"/></w:pPr><w:r><w:t>Mixed</w:t></w:r></w:p>"#,
+        None,
+    );
+
+    let xml = saved_document(&package);
+
+    assert!(xml.contains(r#"<w:ind w:firstLine="420" w:hangingChars="200"/>"#));
+
+    let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
+    assert_eq!(resaved, xml);
+}

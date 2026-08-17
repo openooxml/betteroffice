@@ -1,10 +1,10 @@
 //! Run, text-formatting, image, and shape serializers.
 
+use crate::block::BlockContent;
 use crate::drawingml::{ShapeFill, ShapeOutline};
 use crate::formatting::TextFormatting;
 use crate::image::{Image, ImagePosition, ImageWrap};
 use crate::inline::{Run, RunContent, RunPropertyChange};
-use crate::paragraph::Paragraph;
 use crate::scalars::{ColorValue, ShadingProperties};
 use crate::shape::Shape;
 use crate::xml::ParseError;
@@ -496,8 +496,11 @@ pub fn serialize_shape_content(
         let mut body_properties = XmlWriter::with_capacity(160);
         body_properties
             .start_element("wps:bodyPr")
-            .attribute("rot", "0")
-            .attribute("vert", "horz");
+            .attribute(
+                "rot",
+                &int_attr(Some(text_body.rotation.unwrap_or(0.0) * 60_000.0)),
+            )
+            .attribute("vert", vertical_token(shape));
         if let Some(anchor) = nonempty(text_body.anchor.as_deref()) {
             body_properties.attribute("anchor", if anchor == "middle" { "ctr" } else { anchor });
         }
@@ -510,20 +513,21 @@ pub fn serialize_shape_content(
             optional_int_attr(&mut body_properties, "rIns", margins.right);
             optional_int_attr(&mut body_properties, "bIns", margins.bottom);
         }
+        write_auto_fit(&mut body_properties, shape);
         body_properties.end_element();
         if is_text_box {
             graphic
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
             for value in &text_body.content {
-                let paragraph: Paragraph =
+                let block: BlockContent =
                     serde_json::from_value(value.clone()).map_err(|error| {
                         ParseError::Canonical(format!(
-                            "shape text body contains an invalid paragraph: {error}"
+                            "shape text body contains an invalid block: {error}"
                         ))
                     })?;
-                let paragraph = super::paragraph::serialize_paragraph(&paragraph, context)?;
-                append_generated(&mut graphic, &paragraph);
+                let block = super::sdt::serialize_block_content(&block, context)?;
+                append_generated(&mut graphic, &block);
             }
             graphic.end_element().end_element();
         }
@@ -580,6 +584,60 @@ pub fn serialize_shape_content(
     append_generated(&mut writer, &graphic);
     writer.end_element().end_element();
     Ok(writer.finish())
+}
+
+fn vertical_token(shape: &Shape) -> &'static str {
+    match shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.vertical.as_deref())
+    {
+        Some("vertical") => "vert",
+        Some("vertical270") => "vert270",
+        Some("wordArtVertical") => "wordArtVert",
+        Some("eastAsianVertical") => "eaVert",
+        Some("mongolianVertical") => "mongolianVert",
+        Some("horizontal") => "horz",
+        _ if shape
+            .text_body
+            .as_ref()
+            .is_some_and(|body| body.vertical == Some(true)) =>
+        {
+            "vert"
+        }
+        _ => "horz",
+    }
+}
+
+fn write_auto_fit(writer: &mut XmlWriter, shape: &Shape) {
+    let properties = shape.text_body_properties.as_ref();
+    let auto_fit = shape
+        .text_body
+        .as_ref()
+        .and_then(|body| body.auto_fit.as_deref());
+    match auto_fit {
+        Some("none") => {
+            writer.start_element("a:noAutofit").end_element();
+        }
+        Some("normal") => {
+            writer.start_element("a:normAutofit");
+            optional_int_attr(
+                writer,
+                "fontScale",
+                properties.and_then(|properties| properties.font_scale),
+            );
+            optional_int_attr(
+                writer,
+                "lnSpcReduction",
+                properties.and_then(|properties| properties.line_spacing_reduction),
+            );
+            writer.end_element();
+        }
+        Some("shape") => {
+            writer.start_element("a:spAutoFit").end_element();
+        }
+        _ => {}
+    }
 }
 
 fn serialize_picture_graphic(image: &Image, id: &str) -> String {

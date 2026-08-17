@@ -990,7 +990,7 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
     let command = |value: Value| value;
     let close = || serde_json::json!({ "type": "close" });
     Some(match shape_type {
-        "rect" => vec![
+        "rect" | "textBox" => vec![
             command(serde_json::json!({"type":"move","x":0,"y":0})),
             command(serde_json::json!({"type":"line","x":1,"y":0})),
             command(serde_json::json!({"type":"line","x":1,"y":1})),
@@ -3678,6 +3678,47 @@ mod tests {
         assert_eq!(value[0]["innerText"][0]["runs"][0]["text"], "Native");
         assert_eq!(value[0]["pmStart"], 1.0);
         assert_eq!(value[0]["pmEnd"], 2.0);
+    }
+
+    #[test]
+    fn legacy_text_box_payload_lowers_to_a_rectangle() {
+        let doc = EditingDoc::new(45);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 0, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "shape".to_owned(),
+                    payload: vec![
+                        ("shapeType".to_owned(), Any::from("textBox")),
+                        ("width".to_owned(), Any::from(200.0)),
+                        ("height".to_owned(), Any::from(100.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "pilcrow".to_owned(),
+                    payload: vec![("paraId".to_owned(), Any::from("shape-anchor"))],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(value[0]["kind"], "shape");
+        assert_eq!(value[0]["shapeType"], "textBox");
+        assert_eq!(value[0]["geometryPath"].as_array().unwrap().len(), 5);
+        assert_eq!(value[0]["width"], 200.0);
+        assert_eq!(value[0]["height"], 100.0);
     }
 
     #[test]

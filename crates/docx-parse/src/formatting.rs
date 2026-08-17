@@ -508,6 +508,7 @@ pub struct ParagraphFormatting {
     pub indent_left_chars: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indent_right_chars: Option<f64>,
+    /// Hundredths of a character, negative for `w:hangingChars`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indent_first_line_chars: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -580,7 +581,6 @@ pub fn parse_paragraph_properties(
             indent.parse_numeric_attribute(Some("w"), "firstLineChars", 1.0);
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hangingChars", 1.0) {
             value.indent_first_line_chars = Some(-hanging);
-            value.hanging_indent = Some(true);
         }
     }
     value.borders = parse_paragraph_borders(p_pr.child("w", "pBdr"));
