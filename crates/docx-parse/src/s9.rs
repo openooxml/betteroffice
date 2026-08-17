@@ -238,7 +238,7 @@ pub fn parse_docx_s9_wire_with_limits(
         })
         .cloned()
         .collect();
-    let charts = parse_chart_parts(&all_xml, &mut budget)?;
+    let charts = parse_chart_parts(&all_xml, limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let digest = options
         .determinism_seed

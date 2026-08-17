@@ -101,3 +101,59 @@ fn lays_out_typed_input_and_builds_a_display_list() {
     assert_eq!(result.display_list.pages.len(), 1);
     assert!(!result.display_list.pages[0].primitives.is_empty());
 }
+
+const DAMAGED_CHART: &[u8] = b"<c:chartSpace><c:chart></c:chartSpace>";
+
+/// A document whose only chart part cannot be read.
+fn damaged_chart_docx() -> Vec<u8> {
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><w:body><w:p w14:paraId="11111111"><w:r><w:t>Hello DOCX</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="3200400"/><wp:docPr id="1" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart1"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#.to_vec(),
+        ),
+        ("word/charts/chart1.xml".to_owned(), DAMAGED_CHART.to_vec()),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// Declining to read a chart part must not stop the package from carrying it:
+/// an untouched save still writes the source bytes back.
+#[test]
+fn an_unreadable_chart_part_survives_a_save_byte_for_byte() {
+    let bytes = damaged_chart_docx();
+    let document = Document::open(&bytes).unwrap();
+    assert_eq!(document.structure().body_paragraphs, 2);
+    assert_eq!(
+        get_paragraph_text(document.paragraph("11111111").unwrap()),
+        "Hello DOCX"
+    );
+    assert!(document.model().charts.is_empty());
+
+    let before = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let after = ooxml_opc::unzip_parts(&document.save().unwrap()).unwrap();
+    let part_bytes = |parts: &[(String, Vec<u8>)]| {
+        parts
+            .iter()
+            .find(|(path, _)| path == "word/charts/chart1.xml")
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap()
+    };
+    assert_eq!(part_bytes(&after), DAMAGED_CHART);
+    assert_eq!(part_bytes(&after), part_bytes(&before));
+    assert_eq!(
+        after.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+        before.iter().map(|(path, _)| path).collect::<Vec<_>>()
+    );
+}

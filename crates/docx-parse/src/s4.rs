@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{canonical_sha256, from_serializable, to_canonical_bytes};
-use crate::chart::{Chart, parse_chart_from_drawing, parse_chart_parts};
+use crate::chart::{Chart, is_chart_part, parse_chart_from_drawing, parse_chart_parts};
 use crate::image::parse_drawing;
 use crate::media::{MediaFile, build_media_map};
 use crate::relationships::{RelationshipMap, parse_relationships};
@@ -68,7 +68,7 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
         })
         .cloned()
         .collect::<IndexMap<_, _>>();
-    let charts = parse_chart_parts(&all_xml, &mut budget)?;
+    let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let mut relationship_parts = IndexMap::new();
     for (path, xml) in &all_xml {
@@ -79,7 +79,9 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
     let document_relationships = relationship_parts.get("word/_rels/document.xml.rels");
     let mut xml_parts = Vec::new();
     for (path, xml) in &all_xml {
-        if !path.to_ascii_lowercase().ends_with(".xml") || xml.contains(&0) {
+        // Chart parts carry no drawing, VML or watermark leaf, and
+        // `parse_chart_parts` has already read them on their own budget.
+        if !path.to_ascii_lowercase().ends_with(".xml") || is_chart_part(path) || xml.contains(&0) {
             continue;
         }
         let document = parse_xml(xml, path, &mut budget)?;
