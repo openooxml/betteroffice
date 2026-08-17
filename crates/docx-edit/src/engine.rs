@@ -3080,6 +3080,103 @@ mod tests {
         assert_eq!(margin["target"], "none");
     }
 
+    /// A footnote seeded from a real file, laid out and painted through the
+    /// resident path, resolves to its own `fn:{id}` story. The presentation
+    /// label every note carries has no position of its own, so this is also
+    /// where inheriting the body anchor would hand a click a body position
+    /// under a `"footnote"` region.
+    #[test]
+    fn real_footnote_resolves_to_its_own_story() {
+        let engine = EngineSession::new(19);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            include_bytes!("../tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "notes": {"contents": [{"id": 2, "noteKind": "footnote", "height": 0}]},
+            "measurement": {
+                "fontChains": {},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": false
+            },
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        engine.build_display_list_json(&output).unwrap();
+
+        let area = engine
+            .with_display_list(|list| {
+                let area = &list.pages[0].note_areas[0];
+                let runs = area
+                    .primitives
+                    .iter()
+                    .filter_map(|primitive| match primitive {
+                        docx_layout::display_list::Primitive::Text(run) => Some((
+                            run.text.clone(),
+                            run.attrs.doc_start,
+                            run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
+                            run.baseline_y.as_f64().unwrap(),
+                        )),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (area.note_ids.clone(), runs)
+            })
+            .expect("the display list is built");
+        assert_eq!(area.0, vec![2]);
+        let label = &area.1[0];
+        let body = &area.1[1];
+        // the label is presentation, not story content: it stays unpositioned
+        assert_eq!(label.1, None, "note label {:?} carries a position", label.0);
+        assert_eq!(body.1, Some(1), "note body run lost its story position");
+
+        let hit: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_hit_test_regions_json(0, body.2, body.3 - 2.0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hit["region"], "footnote");
+        assert_eq!(hit["noteId"], 2);
+        assert_eq!(hit["target"], "text");
+        let position = hit["pos"].as_i64().expect("the note hit has a position");
+        assert!(
+            (1..=16).contains(&position),
+            "note hit resolved {position}, outside the note story"
+        );
+
+        // that story's selection geometry lands in the note area, and the same
+        // positions in the body land in the body
+        let note_rects: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_range_rects_region_json("footnote", "2", 1, 16)
+                .unwrap(),
+        )
+        .unwrap();
+        let body_rects: serde_json::Value =
+            serde_json::from_str(&engine.display_range_rects_json(1, 16).unwrap()).unwrap();
+        let note_y = note_rects[0]["y"].as_f64().expect("a note rect");
+        let body_y = body_rects[0]["y"].as_f64().expect("a body rect");
+        assert!(
+            note_y > body_y,
+            "note rect y {note_y} is not below the body rect y {body_y}"
+        );
+
+        // the body reference mark anchoring the note is still the body's
+        let anchor: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_hit_test_regions_json(0, 100.0, 110.0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(anchor["region"], "body");
+    }
+
     const LIBERATION: &[u8] =
         include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 

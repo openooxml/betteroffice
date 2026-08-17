@@ -10188,7 +10188,9 @@ mod tests {
     /// Every primitive a note paints addresses the note's own story, so one
     /// carrying no position of its own must stay unpositioned rather than
     /// inherit the body range of the reference mark that anchors the note —
-    /// that range would hand a click inside the note a body position.
+    /// that range would hand a click inside the note a body position under a
+    /// note region. The reference label leading every note is exactly such a
+    /// primitive: it is presentation, not story content.
     #[test]
     fn note_primitives_never_inherit_the_body_anchor_range() {
         let input = json!({
@@ -10202,14 +10204,17 @@ mod tests {
                     "kind": "footnote", "y": 330, "height": 40, "columns": 1,
                     "notes": [{
                         "id": 7, "anchorDocStart": 3, "anchorDocEnd": 4, "height": 30,
-                        "blocks": [
-                            { "kind": "paragraph", "id": "note-p", "runs": [{ "kind": "text", "text": "note", "pmStart": 1, "pmEnd": 5 }], "pmStart": 1, "pmEnd": 6 },
-                            { "kind": "image", "id": "note-img", "src": "rId9", "decorative": true }
-                        ],
-                        "measures": [
-                            { "kind": "paragraph", "totalHeight": 16, "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4, "width": 30, "ascent": 11, "descent": 3, "lineHeight": 16 }] },
-                            { "kind": "image", "width": 20, "height": 14 }
-                        ]
+                        "blocks": [{
+                            "kind": "paragraph",
+                            "id": "note-p",
+                            "runs": [
+                                { "kind": "text", "text": "1  " },
+                                { "kind": "text", "text": "note", "pmStart": 1, "pmEnd": 5 }
+                            ],
+                            "pmStart": 1,
+                            "pmEnd": 6
+                        }],
+                        "measures": [{ "kind": "paragraph", "totalHeight": 16, "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 4, "width": 50, "ascent": 11, "descent": 3, "lineHeight": 16 }] }]
                     }]
                 }],
                 "fragments": []
@@ -10223,15 +10228,15 @@ mod tests {
             .as_array()
             .expect("note primitives");
 
-        let text = &primitives[0];
+        let label = &primitives[0];
+        assert_eq!(label["text"], "1  ");
+        assert_eq!(label["groupId"], "footnote-7");
+        assert!(label["docStart"].is_null() && label["docEnd"].is_null());
+
+        let text = &primitives[1];
         assert_eq!(text["text"], "note");
         assert_eq!(text["groupId"], "footnote-7");
         assert_eq!((&text["docStart"], &text["docEnd"]), (&json!(1), &json!(5)));
-
-        let image = &primitives[1];
-        assert_eq!(image["kind"], "image");
-        assert_eq!(image["groupId"], "footnote-7");
-        assert!(image["docStart"].is_null() && image["docEnd"].is_null());
     }
 
     #[test]
