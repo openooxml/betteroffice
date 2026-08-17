@@ -874,6 +874,13 @@ fn rewrite_reference_tokens(
                 index = skip_string(source, index);
                 continue;
             }
+            b'{' => match skip_array_constant(source, index) {
+                Some(end) => {
+                    index = end;
+                    continue;
+                }
+                None => return DefinedNameRewrite::Unsupported,
+            },
             b'#' => match error_literal_end(source, index) {
                 Some(end) => {
                     index = end;
@@ -1807,6 +1814,21 @@ fn parse_sheet_token(source: &str, start: usize) -> Option<ParsedSheetToken> {
         end,
         name: source[start..end].to_string(),
     })
+}
+
+/// The end of the array constant at `start`, or `None` when its brace never
+/// closes. Its cells are literals, so nothing inside names a cell.
+fn skip_array_constant(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'}' => return Some(index + 1),
+            b'"' => index = skip_string(source, index),
+            _ => index += source[index..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    None
 }
 
 fn skip_string(source: &str, start: usize) -> usize {
@@ -3000,6 +3022,32 @@ mod tests {
     /// `A1#` names whatever the formula at `A1` spilled and `@` picks one cell
     /// out of the reference behind it. Both bind to the address they carry, so
     /// both move with it and both fall with it.
+    #[test]
+    fn an_array_constant_names_no_cell_and_passes_through() {
+        let cases: &[(&str, &str)] = &[
+            ("SUM(Data!$1:$1,{1,2,3})", "SUM(Data!$2:$2,{1,2,3})"),
+            (
+                "SUM(Data!$1:$1,{\"a\";\"b\"})",
+                "SUM(Data!$2:$2,{\"a\";\"b\"})",
+            ),
+            (
+                "SUM(Data!$1:$1,{TRUE,FALSE})",
+                "SUM(Data!$2:$2,{TRUE,FALSE})",
+            ),
+        ];
+        for (formula, expected) in cases {
+            let mut workbook = wb(&["Data", "Other"]);
+            workbook.defined_names = vec![defined("Arr", formula)];
+            remap_defined_names(&mut workbook, &insert_rows(0, 0, 1))
+                .unwrap_or_else(|error| panic!("{formula}: {error:?}"));
+            assert_eq!(workbook.defined_names[0].formula, *expected, "{formula}");
+        }
+
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![defined("Open", "SUM(Data!$1:$1,{1,2")];
+        assert!(remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).is_err());
+    }
+
     #[test]
     fn spill_and_implicit_intersection_references_move_with_their_address() {
         let cases: &[(&str, &str, &str)] = &[
