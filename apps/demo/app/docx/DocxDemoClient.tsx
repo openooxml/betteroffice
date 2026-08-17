@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { CollaborationProvider } from "@betteroffice/docx/collaboration";
+import { configureDefaultFonts } from "@betteroffice/docx/layout";
+import * as fonts from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import {
   CollaborationControls,
@@ -16,6 +18,9 @@ import {
   type CollaborationTransport,
 } from "../collab";
 import { planDemoSession } from "../../lib/demoSession";
+
+// The engine loads no fonts on its own; hand it the bundled set before any editor mounts.
+configureDefaultFonts({ fonts });
 
 // The editor is browser-only (canvas + wasm + worker); keep it out of SSR.
 const DocxEditor = dynamic(

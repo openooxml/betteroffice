@@ -1523,6 +1523,48 @@ mod tests {
         assert_eq!(wb, before);
     }
 
+    /// A dynamic-range name is ordinary, and the row it names sits nowhere
+    /// near the edit; the whole sheet used to be frozen by it all the same.
+    #[test]
+    fn a_name_the_formula_parser_cannot_read_still_accepts_the_edit() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        wb.defined_names.push(DefinedName {
+            name: "Region".into(),
+            formula: "Sheet1!$A$1:INDEX(Sheet1!$A:$A,COUNTA(Sheet1!$A:$A))".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let before = wb.clone();
+
+        apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 9998,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.defined_names, before.defined_names);
+
+        let inverse = apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.defined_names[0].formula,
+            "Sheet1!$A$2:INDEX(Sheet1!$A:$A,COUNTA(Sheet1!$A:$A))"
+        );
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(wb.defined_names, before.defined_names);
+    }
+
     #[test]
     fn refused_defined_name_rewrites_leave_the_workbook_unchanged() {
         let mut wb = wb_one_sheet();
@@ -1535,7 +1577,7 @@ mod tests {
         );
         wb.defined_names.push(DefinedName {
             name: "Dynamic".into(),
-            formula: "OFFSET($A$1,0,0,COUNTA($A:$A),1)".into(),
+            formula: "SUM(Table1[Amount])".into(),
             local_sheet: Some(SheetId(0)),
             hidden: false,
         });

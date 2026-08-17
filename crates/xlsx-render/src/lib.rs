@@ -31,7 +31,7 @@ pub use display_list::{
 };
 pub use geometry::GridGeometry;
 pub use hit::chart_at_point;
-pub use region::{viewport_for_range, viewport_for_used_range};
+pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
 
 /// a scrolled window in pixels; `x`/`y` offset the non-frozen body.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

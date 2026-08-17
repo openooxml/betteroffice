@@ -19,7 +19,11 @@ export {
 } from './components/DocxEditor';
 
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
-export { configureDefaultFonts, type DefaultFontOptions } from '@betteroffice/docx/layout';
+export {
+  configureDefaultFonts,
+  type BundledFontModule,
+  type DefaultFontOptions,
+} from '@betteroffice/docx/layout';
 
 // i18n contract — runtime only. Locale string types (LocaleStrings,
 // Translations, PartialLocaleStrings, TranslationKey) live in

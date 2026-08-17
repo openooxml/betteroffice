@@ -34,14 +34,25 @@ same advance widths, so line breaks and pagination match Word.
 | `@betteroffice/fonts` | 7.9 MB | Carlito, Caladea, Liberation Sans/Serif/Mono, Noto Hebrew/Arabic |
 | `@betteroffice/fonts-cjk` | 33 MB | Noto Sans SC/TC/JP/KR, Noto Serif SC |
 
-`npm install @betteroffice/fonts` is the whole setup: `@betteroffice/docx` picks
-it up through an optional dynamic import, so measurement uses real font metrics
-with no wiring. Add `@betteroffice/fonts-cjk` only for Chinese, Japanese, or
-Korean text — it is separate so nobody installs 33 MB they do not need.
+The engine loads no fonts on its own and never reaches for a font package.
+Install `@betteroffice/fonts` and hand it over once, before any editor mounts:
 
-Without either, families a document does not embed measure with synthetic
-metrics and pagination will not match Word. Neither package is installed
-automatically; both are declared optional peers.
+```ts
+import { configureDefaultFonts } from "@betteroffice/docx/layout";
+import * as fonts from "@betteroffice/fonts";
+
+configureDefaultFonts({ fonts });
+```
+
+Add a `baseUrl` alongside it to fetch the binaries from your own CDN instead of
+the package assets; the module stays required either way, because it carries the
+manifest that maps a Word font name to a face. Add `@betteroffice/fonts-cjk`
+only for Chinese, Japanese, or Korean text — it is separate so nobody installs
+33 MB they do not need.
+
+Unconfigured, families a document does not embed measure with synthetic metrics
+and pagination will not match Word. Neither package is installed automatically;
+both are declared optional peers.
 
 ## Picking one
 

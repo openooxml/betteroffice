@@ -62,6 +62,11 @@ impl<'a> ParseBudget<'a> {
         }
     }
 
+    /// XML events this budget has been charged, including the one that broke it.
+    pub fn xml_events_spent(&self) -> usize {
+        self.xml_events
+    }
+
     pub fn charge_relationship(&mut self, part: &str) -> Result<(), PptxError> {
         charge(
             &mut self.relationships,

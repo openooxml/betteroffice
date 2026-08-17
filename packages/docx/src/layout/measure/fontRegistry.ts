@@ -405,8 +405,9 @@ export class TextMeasureFontRegistry {
         : providerResolved
           ? `[fontRegistry] no font bytes for "${family}" — the configured font provider has ` +
             `no matching face. Add coverage for this family. ${consequence}`
-          : `[fontRegistry] no font bytes for "${family}" — no font provider resolved. Install ` +
-            `@betteroffice/fonts. ${consequence}`
+          : `[fontRegistry] no font bytes for "${family}" — no font provider is configured. ` +
+            'Install @betteroffice/fonts and pass it with configureDefaultFonts({ fonts }). ' +
+            consequence
     );
   }
 

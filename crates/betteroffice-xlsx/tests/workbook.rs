@@ -492,6 +492,181 @@ fn structural_edits_rewrite_defined_names_through_save_and_undo() {
     assert_eq!(workbook.model().defined_names, before);
 }
 
+/// A workbook whose names use the dynamic-range idiom: a whole-column
+/// reference inside a call, and the range operator applied to `INDEX`. Neither
+/// is anything the formula parser reads, and every row and column edit on the
+/// sheet they name used to be refused because of it.
+fn dynamic_range_names_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="Rows">Data!$A$1:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))</definedName><definedName name="Header">SUM(Data!$1:$1)</definedName><definedName name="Stranded">Data!#REF!</definedName></definedNames></workbook>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn structural_edits_rewrite_dynamic_range_names_through_save_and_undo() {
+    let mut workbook = Workbook::open(&dynamic_range_names_fixture()).unwrap();
+    let before = workbook.model().defined_names.clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 9998,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let formula = |name: &str| {
+        workbook
+            .model()
+            .defined_names
+            .iter()
+            .find(|defined| defined.name == name)
+            .unwrap()
+            .formula
+            .clone()
+    };
+    assert_eq!(
+        formula("Rows"),
+        "Data!$A$2:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))"
+    );
+    assert_eq!(formula("Header"), "SUM(Data!$2:$2)");
+    assert_eq!(formula("Stranded"), "Data!#REF!");
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
+/// A workbook whose names use the reference operators the formula lexer has no
+/// token for: the spill `#`, the implicit intersection `@`, and the range
+/// operator carrying the whitespace and the second qualifier Excel allows.
+fn reference_operator_names_fixture(defined_names: &str) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Sheet2"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let workbook_xml = test_part_text(&parts, "xl/workbook.xml").replace(
+        "</workbook>",
+        &format!("<definedNames>{defined_names}</definedNames></workbook>"),
+    );
+    set_test_part(&mut parts, "xl/workbook.xml", workbook_xml.into_bytes());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn saved_workbook_xml(workbook: &mut Workbook) -> String {
+    let saved = workbook.save().unwrap();
+    String::from_utf8(package_map(&saved)["xl/workbook.xml"].clone()).unwrap()
+}
+
+#[test]
+fn structural_edits_move_reference_operator_names_into_the_saved_workbook() {
+    let mut workbook = Workbook::open(&reference_operator_names_fixture(
+        r#"<definedName name="Spilled">SUM(Data!A1#)</definedName><definedName name="Picked">SUM(@Data!A1)</definedName><definedName name="Spaced">Data!A1: Data!B2</definedName>"#,
+    ))
+    .unwrap();
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let saved = saved_workbook_xml(&mut workbook);
+    assert!(saved.contains(">SUM(Data!A2#)<"), "{saved}");
+    assert!(saved.contains(">SUM(@Data!A2)<"), "{saved}");
+    assert!(saved.contains(">Data!A2: Data!B3<"), "{saved}");
+    assert_eq!(
+        Workbook::open(&workbook.save().unwrap())
+            .unwrap()
+            .model()
+            .defined_names,
+        workbook.model().defined_names
+    );
+}
+
+/// A range that loses its first row keeps its span; the endpoints used to be
+/// clipped apart, stranding the near one on `#REF!` while the far one still
+/// named a live cell.
+#[test]
+fn a_deletion_inside_a_spaced_range_name_clips_it_as_one_span() {
+    let mut workbook = Workbook::open(&reference_operator_names_fixture(
+        r#"<definedName name="Spaced">Data!A1: Data!B2</definedName>"#,
+    ))
+    .unwrap();
+
+    workbook
+        .apply_ops(
+            vec![Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let saved = saved_workbook_xml(&mut workbook);
+    assert!(saved.contains(">Data!A1: Data!B1<"), "{saved}");
+}
+
+/// `A1:Sheet2!B2` is the range operator applied to a cell, not a sheet span,
+/// and the unqualified half of a workbook name binds to whichever sheet is
+/// active — so the edit is refused rather than applied over a name that never
+/// moved.
+#[test]
+fn structural_edits_refuse_a_range_endpoint_in_front_of_a_sheet_qualifier() {
+    let mut workbook = Workbook::open(&reference_operator_names_fixture(
+        r#"<definedName name="Mixed">A1:Sheet2!B2</definedName>"#,
+    ))
+    .unwrap();
+    let before = workbook.model().clone();
+
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot be safely rewritten"));
+    assert_eq!(workbook.model(), &before);
+}
+
 #[test]
 fn structural_edits_refuse_ambiguous_workbook_name_bindings() {
     let mut model = WorkbookModel::default();

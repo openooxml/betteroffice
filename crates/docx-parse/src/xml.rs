@@ -120,6 +120,11 @@ impl<'a> ParseBudget<'a> {
         )
     }
 
+    /// XML events charged so far.
+    pub(crate) fn xml_events(&self) -> usize {
+        self.xml_events
+    }
+
     pub(crate) fn charge_event(&mut self, part: &str) -> Result<(), ParseError> {
         charge(
             &mut self.xml_events,

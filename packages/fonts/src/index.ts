@@ -411,11 +411,10 @@ export interface FontAssetOptions {
 let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
 async function importCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
-  // Keep the SYNTACTIC try/catch around the await. Rewriting this as
-  // `import(…).catch()` or a two-argument `.then()` makes webpack (and so
-  // `next build`) fail hard instead of emitting a warning for the absent
-  // optional peer; only this shape is tolerated. esbuild recognises the
-  // opposite idiom and errors either way — see the bundler note in README.md.
+  // Keep the SYNTACTIC try/catch with the await as its direct body. Rewriting
+  // this as `import(…).catch()` or a two-argument `.then()` makes webpack (and
+  // so `next build`) fail hard on the absent optional peer, and esbuild starts
+  // resolving the specifier eagerly the moment it stops being that direct body.
   try {
     return (await import('@betteroffice/fonts-cjk')).CJK_FONT_ASSET_URLS;
   } catch {

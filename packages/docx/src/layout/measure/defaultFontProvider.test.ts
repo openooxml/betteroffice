@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 
+import * as fonts from '@betteroffice/fonts';
 import { configureDefaultFonts, resolveDefaultFontProvider } from './defaultFontProvider';
 import { TextMeasureFontRegistry, type BundledFontProvider } from './fontRegistry';
 
@@ -31,7 +32,37 @@ describe('default font provider', () => {
     configureDefaultFonts({});
   });
 
-  test('resolves real font bytes with no explicit injection', async () => {
+  test('reaches for no font package until one is configured', async () => {
+    let loaderCalls = 0;
+    configureDefaultFonts({
+      load: () => {
+        loaderCalls++;
+        return Promise.resolve(fonts);
+      },
+    });
+    configureDefaultFonts({});
+
+    expect(await resolveDefaultFontProvider()).toBeUndefined();
+    expect(loaderCalls).toBe(0);
+  });
+
+  test('leaves the chain empty when nothing is configured', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const { registered, sink } = recordingSink();
+      const registry = new TextMeasureFontRegistry(sink, { bundled: resolveDefaultFontProvider });
+
+      expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([]);
+      expect(registered).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('resolves real font bytes from the passed module', async () => {
+    configureDefaultFonts({ fonts });
+
     const provider = await resolveDefaultFontProvider();
     expect(provider).toBeDefined();
 
@@ -44,7 +75,8 @@ describe('default font provider', () => {
     expect(new Uint8Array(bytes)).toEqual(new Uint8Array(await Bun.file(CARLITO_REGULAR).bytes()));
   });
 
-  test('feeds those bytes into a chain with nothing injected', async () => {
+  test('feeds those bytes into a chain', async () => {
+    configureDefaultFonts({ fonts });
     const { registered, sink } = recordingSink();
     const registry = new TextMeasureFontRegistry(sink, { bundled: resolveDefaultFontProvider });
 
@@ -54,8 +86,8 @@ describe('default font provider', () => {
     expect(registered[0]).toEqual(await Bun.file(CARLITO_REGULAR).bytes());
   });
 
-  test('serves the faces from a configured base URL', async () => {
-    configureDefaultFonts({ baseUrl: new URL('../../../../fonts/assets/', import.meta.url) });
+  test('takes the same module from a lazy loader', async () => {
+    configureDefaultFonts({ load: () => import('@betteroffice/fonts') });
 
     const provider = await resolveDefaultFontProvider();
     const bytes = await provider!.resolve('Calibri', false, false)!();
@@ -63,7 +95,51 @@ describe('default font provider', () => {
     expect(new Uint8Array(bytes)).toEqual(new Uint8Array(await Bun.file(CARLITO_REGULAR).bytes()));
   });
 
+  test('serves the faces from a configured base URL', async () => {
+    configureDefaultFonts({
+      fonts,
+      baseUrl: new URL('../../../../fonts/assets/', import.meta.url),
+    });
+
+    const provider = await resolveDefaultFontProvider();
+    const bytes = await provider!.resolve('Calibri', false, false)!();
+
+    expect(new Uint8Array(bytes)).toEqual(new Uint8Array(await Bun.file(CARLITO_REGULAR).bytes()));
+  });
+
+  test('warns that a base URL on its own loads nothing', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      configureDefaultFonts({ baseUrl: 'https://cdn.example.test/betteroffice-fonts/' });
+
+      expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+        'a baseUrl on its own loads nothing'
+      );
+      expect(await resolveDefaultFontProvider()).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('names a configured source that fails to load', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      configureDefaultFonts({ load: () => Promise.reject(new Error('chunk 404')) });
+
+      expect(await resolveDefaultFontProvider()).toBeUndefined();
+      expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+        'the configured font source failed to load'
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test('resolves CJK coverage faces through the optional add-on package', async () => {
+    configureDefaultFonts({ fonts });
+
     const provider = await resolveDefaultFontProvider();
     const loader = provider!.resolveScriptFallback!('cjk-sc', false, false);
     expect(loader).toBeDefined();
@@ -225,6 +301,7 @@ describe('default font provider', () => {
       const fallbacks = warn.mock.calls.filter((call) => String(call[0]).includes('no font bytes'));
       expect(fallbacks).toHaveLength(1);
       expect(String(fallbacks[0]![0])).toContain('Install @betteroffice/fonts');
+      expect(String(fallbacks[0]![0])).toContain('configureDefaultFonts({ fonts })');
       expect(String(fallbacks[0]![0])).toContain('measureText');
       expect(String(fallbacks[0]![0])).toContain('OS fonts');
     } finally {
@@ -285,7 +362,8 @@ describe('default font provider', () => {
     }
   });
 
-  test('does not warn when the default provider covers the family', async () => {
+  test('does not warn when the configured provider covers the family', async () => {
+    configureDefaultFonts({ fonts });
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
 
     try {

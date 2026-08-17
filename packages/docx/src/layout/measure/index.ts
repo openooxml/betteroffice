@@ -21,5 +21,6 @@ export type {
 export {
   configureDefaultFonts,
   resolveDefaultFontProvider,
+  type BundledFontModule,
   type DefaultFontOptions,
 } from './defaultFontProvider';
