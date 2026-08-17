@@ -155,8 +155,8 @@ pub fn parse_pptx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<PptxP
             themes: &themes,
             relationships: &relationships,
         },
-        &mut budget,
-    )?;
+        limits,
+    );
 
     let content_types = parse_content_types(&parts, &mut budget)?;
     let media = source_parts
@@ -356,11 +356,21 @@ impl ChartSources<'_> {
     }
 }
 
+/// Every chart the deck references, read against the theme its source part
+/// resolves to.
+///
+/// A chart part is a decorative leaf: nothing structural is read from it and
+/// nothing structural is read after it. So each gets its own [`ParseBudget`] —
+/// one cached series can neither starve a slide nor starve the next chart — and
+/// a part `parse_xml` refuses is skipped, leaving the deck to open with that
+/// chart missing exactly as it opens when the part is absent. `parse_xml`
+/// reports only `MalformedXml`, `UnsafeXml` and `ResourceLimit`, each naming
+/// this part; a hostile package is refused earlier, by `ooxml_opc::unzip_parts`.
 fn parse_chart_parts(
     parts: &HashMap<&str, &[u8]>,
     sources: &ChartSources<'_>,
-    budget: &mut ParseBudget<'_>,
-) -> Result<Vec<ChartPart>, PptxError> {
+    limits: &ParseLimits,
+) -> Vec<ChartPart> {
     let mut references = Vec::new();
     for slide in sources.slides {
         collect_chart_references(&slide.shapes, &slide.part_path, &mut references);
@@ -386,7 +396,9 @@ fn parse_chart_parts(
         let Some(bytes) = parts.get(part_path.as_str()) else {
             continue;
         };
-        let root = parse_xml(bytes, &part_path, budget)?;
+        let Ok(root) = parse_xml(bytes, &part_path, &mut ParseBudget::new(limits)) else {
+            continue;
+        };
         let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
         if let Some(chart) = parse_chart_part(&root, theme) {
             charts.push(ChartPart {
@@ -396,7 +408,7 @@ fn parse_chart_parts(
             });
         }
     }
-    Ok(charts)
+    charts
 }
 
 /// `(referencing part, relationship id)` for every chart in `shapes`, groups
@@ -528,6 +540,7 @@ mod tests {
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const CHART_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/chart-deck.pptx");
+    const CHART_PART: &str = "ppt/charts/chart1.xml";
 
     #[test]
     fn parses_betteroffice_demo_deck_surface() {
@@ -736,10 +749,7 @@ mod tests {
         let chart_xml = br#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
         let parts: HashMap<&str, &[u8]> =
             HashMap::from([("ppt/charts/chart1.xml", chart_xml.as_slice())]);
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
-
-        let charts = parse_chart_parts(&parts, &sources, &mut budget).unwrap();
+        let charts = parse_chart_parts(&parts, &sources, &ParseLimits::default());
 
         assert_eq!(charts.len(), 2);
         assert_eq!(
@@ -756,6 +766,163 @@ mod tests {
     #[test]
     fn a_deck_without_charts_loads_no_chart_parts() {
         assert!(parse_pptx(FIXTURE).unwrap().charts.is_empty());
+    }
+
+    /// `chart-deck.pptx` with `part`'s bytes replaced.
+    fn chart_deck_with(part: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut parts = ooxml_opc::unzip_parts(CHART_FIXTURE).unwrap();
+        let slot = parts
+            .iter_mut()
+            .find(|(path, _)| path == part)
+            .unwrap_or_else(|| panic!("{part} is not in the fixture"));
+        slot.1 = bytes.to_vec();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    /// Opens a deck whose first chart part carries `bytes` and asserts the deck
+    /// is whole apart from that one chart.
+    fn assert_damaged_chart_is_dropped(bytes: &[u8]) {
+        let package = parse_pptx(&chart_deck_with(CHART_PART, bytes)).unwrap();
+        assert_eq!(package.slides.len(), 2);
+        assert_eq!(package.layouts.len(), 1);
+        assert_eq!(package.masters.len(), 1);
+        assert_eq!(package.themes.len(), 1);
+        assert_eq!(
+            package
+                .slides
+                .iter()
+                .map(|slide| slide.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Charts"), Some("Grouped")]
+        );
+        assert_eq!(
+            package.slides[0]
+                .shapes
+                .iter()
+                .filter(|shape| matches!(shape, ShapeNode::GraphicFrame(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            package
+                .charts
+                .iter()
+                .map(|part| part.part_path.as_str())
+                .collect::<Vec<_>>(),
+            ["ppt/charts/chart2.xml"]
+        );
+    }
+
+    #[test]
+    fn a_malformed_chart_part_drops_only_that_chart() {
+        assert_damaged_chart_is_dropped(b"<c:chartSpace><c:chart></c:chartSpace>");
+    }
+
+    #[test]
+    fn an_empty_chart_part_drops_only_that_chart() {
+        assert_damaged_chart_is_dropped(b"");
+    }
+
+    #[test]
+    fn a_doctype_bearing_chart_part_drops_only_that_chart() {
+        assert_damaged_chart_is_dropped(
+            br#"<?xml version="1.0"?><!DOCTYPE c:chartSpace [<!ENTITY x "y">]><c:chartSpace xmlns:c="c"/>"#,
+        );
+    }
+
+    #[test]
+    fn a_truncated_chart_part_drops_only_that_chart() {
+        let source = ooxml_opc::unzip_parts(CHART_FIXTURE)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == CHART_PART)
+            .map(|(_, bytes)| bytes)
+            .unwrap();
+        assert_damaged_chart_is_dropped(&source[..source.len() / 2]);
+    }
+
+    #[test]
+    fn a_binary_chart_part_drops_only_that_chart() {
+        assert_damaged_chart_is_dropped(&[0x00, 0xff, 0xfe, 0x01, 0x80, 0x7f]);
+    }
+
+    #[test]
+    fn an_undeclared_entity_in_a_chart_part_drops_only_that_chart() {
+        assert_damaged_chart_is_dropped(
+            br#"<c:chartSpace xmlns:c="c"><c:chart><c:title>&nbsp;</c:title></c:chart></c:chartSpace>"#,
+        );
+    }
+
+    /// Declining to read a chart part must not stop the package from carrying
+    /// it: an untouched save still writes the source bytes back.
+    #[test]
+    fn an_unreadable_chart_part_survives_a_save_byte_for_byte() {
+        const DAMAGED: &[u8] = b"<c:chartSpace><c:chart></c:chartSpace>";
+        let deck = chart_deck_with(CHART_PART, DAMAGED);
+        let written = write_pptx(&parse_pptx(&deck).unwrap()).unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&written).unwrap(),
+            ooxml_opc::unzip_parts(&deck).unwrap()
+        );
+        assert_eq!(
+            ooxml_opc::unzip_parts(&written)
+                .unwrap()
+                .into_iter()
+                .find(|(path, _)| path == CHART_PART)
+                .map(|(_, bytes)| bytes),
+            Some(DAMAGED.to_vec())
+        );
+    }
+
+    /// A chart part whose only fault is a large cache. Every point costs the
+    /// reader five events.
+    fn cached_chart(points: usize) -> Vec<u8> {
+        let mut xml = String::from(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:val><c:numRef><c:numCache>"#,
+        );
+        for point in 0..points {
+            xml.push_str(&format!("<c:pt><c:v>{point}</c:v></c:pt>"));
+        }
+        xml.push_str("</c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>");
+        xml.into_bytes()
+    }
+
+    /// The undamaged deck that used to be refused: spec-valid charts whose
+    /// caches together outgrow one budget. Each chart holds a cache that most
+    /// of a budget covers, so a budget shared with the slides — or with the
+    /// other chart — leaves the deck unopenable.
+    #[test]
+    fn a_deck_whose_charts_each_fill_a_budget_opens_with_every_chart() {
+        let mut parts = ooxml_opc::unzip_parts(CHART_FIXTURE).unwrap();
+        for (path, bytes) in &mut parts {
+            if path.starts_with("ppt/charts/") {
+                *bytes = cached_chart(4_000);
+            }
+        }
+        let deck = ooxml_opc::rezip_parts(&parts).unwrap();
+        let limits = ParseLimits {
+            max_xml_events: 30_000,
+            ..ParseLimits::default()
+        };
+
+        let package = parse_pptx_with_limits(&deck, &limits).unwrap();
+
+        assert_eq!(package.slides.len(), 2);
+        assert_eq!(
+            package
+                .slides
+                .iter()
+                .map(|slide| slide.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Charts"), Some("Grouped")]
+        );
+        assert_eq!(package.charts.len(), 2);
+        assert!(
+            package
+                .charts
+                .iter()
+                .all(|part| part.chart.series[0].values.len() == 4_000)
+        );
     }
 
     #[test]
