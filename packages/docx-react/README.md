@@ -79,8 +79,10 @@ revisions).
 - Real-time collaboration with people or agents; the document is a CRDT
 - Live collaborator cursors and selections, shown in each peer's color
 
-Bundled metric-compatible fonts ship in-repo, and the `measurementFontProvider`
-prop accepts a custom provider for Word-accurate metrics.
+For Word-accurate metrics install `@betteroffice/fonts` and hand it to the
+engine once at module scope — `configureDefaultFonts({ fonts })`, re-exported
+here — or pass your own provider through the `measurementFontProvider` prop.
+Without either, measurement falls back to the browser.
 
 ## Collaboration
 

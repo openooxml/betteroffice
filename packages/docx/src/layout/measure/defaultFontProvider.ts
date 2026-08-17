@@ -65,7 +65,8 @@ async function load(): Promise<BundledFontProvider | undefined> {
   try {
     const module = fonts ?? ((await loader!()) as BundledFontModule);
     return module.createFontProvider(baseUrl === undefined ? undefined : { baseUrl });
-  } catch {
+  } catch (error) {
+    console.warn('[configureDefaultFonts] the configured font source failed to load', error);
     return undefined;
   }
 }

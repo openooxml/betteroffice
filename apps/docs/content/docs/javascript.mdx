@@ -25,7 +25,9 @@ import "@betteroffice/docx-react/styles.css";
 ```
 
 `documentBuffer` accepts an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File`.
-Without `onSave`, File > Save downloads the edited bytes. The other two editors
+Without `onSave`, File > Save downloads the edited bytes. For pagination that
+matches Word, add [`@betteroffice/fonts`](./packages#fonts) and configure it once
+before the editor mounts; without it the editor measures with browser fonts. The other two editors
 take their file as a `Uint8Array`:
 
 ```tsx

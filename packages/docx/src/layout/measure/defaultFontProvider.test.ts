@@ -122,6 +122,21 @@ describe('default font provider', () => {
     }
   });
 
+  test('names a configured source that fails to load', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      configureDefaultFonts({ load: () => Promise.reject(new Error('chunk 404')) });
+
+      expect(await resolveDefaultFontProvider()).toBeUndefined();
+      expect(warn.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+        'the configured font source failed to load'
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   test('resolves CJK coverage faces through the optional add-on package', async () => {
     configureDefaultFonts({ fonts });
 

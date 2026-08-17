@@ -6,7 +6,7 @@ Optional CJK font binaries for [`@betteroffice/fonts`](https://www.npmjs.com/pac
 npm install @betteroffice/fonts @betteroffice/fonts-cjk
 ```
 
-Nothing else is required. `@betteroffice/fonts` picks these faces up through an optional dynamic import, so the CJK script-fallback chain starts resolving as soon as the package is present.
+Then hand the base module to the engine once, before any editor mounts — `configureDefaultFonts({ fonts })` from `@betteroffice/docx/layout`, as the [`@betteroffice/fonts` README](https://www.npmjs.com/package/@betteroffice/fonts) shows. `@betteroffice/fonts` picks these faces up through an optional dynamic import, so once the base package is configured the CJK script-fallback chain resolves as soon as this one is present.
 
 Without it nothing breaks: a CJK face resolves to a loader that rejects, the engine logs it once and measures the run with the Latin last-resort face instead. That keeps pagination on the native path, but the ideographs are measured with a font that has no glyphs for them, so CJK line breaking will be wrong.
 
