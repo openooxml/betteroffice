@@ -10,7 +10,7 @@ Measured across 813 real-world documents, scored against Word's own page count i
 
 |                            | exact page-count match | within ±1 | mean abs error |
 | -------------------------- | ---------------------- | --------- | -------------- |
-| This package installed     | **61.9%**              | 84.6%     | 0.80           |
+| This package configured    | **61.9%**              | 84.6%     | 0.80           |
 | No font provider at all    | 46.5%                  | 70.8%     | 2.47           |
 
 ## Install
@@ -19,7 +19,18 @@ Measured across 813 real-world documents, scored against Word's own page count i
 npm install @betteroffice/fonts
 ```
 
-That is the whole setup. `@betteroffice/docx` picks the package up through an optional dynamic import, so measurement starts using real font metrics with no wiring. Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) when your documents contain Chinese, Japanese or Korean text — those five faces are 33 MB and ship separately so nobody installs them unnecessarily.
+`@betteroffice/docx` never reaches for this package on its own: nothing is co-installed, no bundler has to resolve it, and measurement stays on the browser fallback until you say otherwise. Hand the module over once, before any editor mounts:
+
+```ts
+import { configureDefaultFonts } from '@betteroffice/docx/layout';
+import * as fonts from '@betteroffice/fonts';
+
+configureDefaultFonts({ fonts });
+```
+
+`configureDefaultFonts({ load: () => import('@betteroffice/fonts') })` does the same lazily, keeping the package in its own chunk. To leave the binaries off your origin, add a `baseUrl` — see [Serving the faces from a CDN](#serving-the-faces-from-a-cdn).
+
+Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) when your documents contain Chinese, Japanese or Korean text — those five faces are 33 MB and ship separately so nobody installs them unnecessarily.
 
 | Package                   | Faces | Size on disk | Contents                                     |
 | ------------------------- | ----- | ------------ | -------------------------------------------- |
@@ -82,11 +93,14 @@ Same-origin is the default deliberately: a CDN default would leak document-font 
 
 ```ts
 import { configureDefaultFonts } from '@betteroffice/docx/layout';
+import * as fonts from '@betteroffice/fonts';
 
-configureDefaultFonts({ baseUrl: 'https://cdn.example.com/betteroffice-fonts/' });
+configureDefaultFonts({ fonts, baseUrl: 'https://cdn.example.com/betteroffice-fonts/' });
 ```
 
 or by building the provider yourself with `createFontProvider({ baseUrl })`. The base URL is joined with each face's asset filename, so serve the contents of `assets/` at that path.
+
+**A base URL moves the binaries, not the package.** The manifest that maps a Word font name to a face lives in this package's 14 KB of JavaScript, so a CDN deployment still installs `@betteroffice/fonts`; what it stops shipping is the 7.9 MB of faces. A `baseUrl` with no module loads nothing and warns.
 
 `configureDefaultFonts` is process-global: call it at module initialization before any editor resolves fonts, not from `useEffect`; existing registries retain their provider, and a multi-tenant server cannot use it to choose different base URLs per tenant.
 
@@ -100,18 +114,9 @@ Serve the files with `Content-Encoding: br` or `gzip`. The faces are TTF/OTF rat
 
 ## Bundler note
 
-Both optional edges — `@betteroffice/docx` → `@betteroffice/fonts`, and `@betteroffice/fonts` → `@betteroffice/fonts-cjk` — are dynamic `import()`s of packages declared as optional peer dependencies. At runtime an absent package is caught and degraded.
+One optional edge is left: `@betteroffice/fonts` → `@betteroffice/fonts-cjk`, a dynamic `import()` of an optional peer dependency, caught and degraded at runtime when the add-on is absent. `@betteroffice/docx` no longer names this package at all, so nothing has to resolve it to build.
 
-Measured with the peer **not** installed:
-
-| Bundler | Result |
-| --- | --- |
-| **esbuild** | **build fails**, exit 1, no output |
-| Vite | clean, silent |
-| Next (Turbopack) | clean, silent |
-| Next (webpack), webpack, rollup | succeeds with a non-fatal warning |
-
-**esbuild is the one that breaks.** It resolves the specifier at build time and refuses to emit anything, so a consumer who has not installed `@betteroffice/fonts` cannot build at all.
+Measured with the add-on **not** installed, esbuild 0.28 builds cleanly and leaves the unresolved specifier in the output for the runtime catch. That holds only while the `await import()` is the direct body of the try — put it behind a conditional and esbuild resolves it eagerly and fails with exit 1, which is exactly how this package's own edge used to break consumer builds. Vite and Turbopack are clean; webpack and rollup warn.
 
 ### rollup and esbuild must not bundle this package
 
@@ -134,9 +139,9 @@ export default {
 };
 ```
 
-Externalizing resolves both problems at once: the absent-peer build failure and the asset-URL breakage. Verified against the packed tarballs — externalized, both bundlers load 628,032 bytes of Carlito and 8,331,336 bytes of Noto Sans SC; inlined, both fail every load.
+Verified against the packed tarballs — externalized, both bundlers load 628,032 bytes of Carlito and 8,331,336 bytes of Noto Sans SC; inlined, both fail every load.
 
-For the engine edge specifically, `configureDefaultFonts({ load })` replaces the import entirely, so you can point it at your own module and keep the specifier out of your graph. `configureDefaultFonts({ baseUrl })` sidesteps asset URLs altogether by fetching every face over HTTP.
+`configureDefaultFonts({ fonts, baseUrl })` sidesteps the asset URLs altogether by fetching every face over HTTP, which removes the reason to externalize this package at all.
 
 ## Deterministic resolution
 
@@ -144,7 +149,7 @@ With the bundled provider available, measurement never consults OS-installed fon
 
 ## API
 
-Most hosts need none of this — installing the package is enough. It is here for custom byte sources, non-docx consumers, and browser-side `FontFace` registration.
+Most hosts need none of this — `configureDefaultFonts({ fonts })` is enough. It is here for custom byte sources, non-docx consumers, and browser-side `FontFace` registration.
 
 ```ts
 import {

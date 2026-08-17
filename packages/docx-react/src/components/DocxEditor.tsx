@@ -297,10 +297,10 @@ export interface DocxEditorProps {
   /** Translation overrides. Import a locale JSON file and pass it directly. */
   i18n?: Translations;
   /**
-   * Overrides the optional `@betteroffice/fonts` provider for this editor.
-   * Without either source, browser measurement may not paginate like Word.
-   * Configure a global CDN base before editors load; existing registries retain
-   * their provider, so that setting is not per editor or tenant.
+   * Font provider for this editor, overriding whatever `configureDefaultFonts`
+   * set globally. With neither, measurement falls back to the browser and may
+   * not paginate like Word. Call `configureDefaultFonts` before editors load;
+   * existing registries retain their provider, so it is not per editor or tenant.
    */
   measurementFontProvider?: BundledFontProvider;
 }
