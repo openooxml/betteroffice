@@ -511,6 +511,10 @@ fn hard_break_splits_the_fallback_line_under_every_rule() {
             EXACT_LINE_PX,
         ),
         (serde_json::json!({}), TITLE_PX * 1.15),
+        (
+            serde_json::json!({ "line": 1.0, "lineUnit": "multiplier", "lineRule": "auto" }),
+            TITLE_PX * 1.15,
+        ),
     ] {
         let what = spacing.to_string();
         docx_layout::clear_measure_fonts();
@@ -555,6 +559,27 @@ fn hard_break_splits_the_fallback_line_under_every_rule() {
         );
         assert!((runs[0].1 - runs[1].1).abs() < 0.01, "{what}");
     }
+}
+
+/// Single spacing written out is the same identity as single spacing left
+/// implicit; a paragraph must not gain a page from an f32 detour.
+#[test]
+fn explicit_single_spacing_measures_bit_for_bit_like_the_default() {
+    docx_layout::clear_measure_fonts();
+    let mut implicit = cjk_paragraph("第一段的文字");
+    let mut explicit = implicit.clone();
+    implicit["attrs"]["spacing"] = serde_json::json!({});
+    explicit["attrs"]["spacing"] =
+        serde_json::json!({ "line": 1.0, "lineUnit": "multiplier", "lineRule": "auto" });
+    let a = measure_paragraph(implicit, CONTENT_WIDTH, &fallback_config()).unwrap();
+    let b = measure_paragraph(explicit, CONTENT_WIDTH, &fallback_config()).unwrap();
+    assert_eq!(a.lines.len(), b.lines.len());
+    for (x, y) in a.lines.iter().zip(&b.lines) {
+        assert_eq!(x.line_height.to_bits(), y.line_height.to_bits());
+        assert_eq!(x.ascent.to_bits(), y.ascent.to_bits());
+        assert_eq!(x.descent.to_bits(), y.descent.to_bits());
+    }
+    assert_eq!(a.total_height.to_bits(), b.total_height.to_bits());
 }
 
 #[test]

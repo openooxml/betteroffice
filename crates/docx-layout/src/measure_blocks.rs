@@ -586,7 +586,9 @@ fn synthetic_row(
 ) -> TypesetRow {
     let (ascent, descent, line_height) = match rule {
         // single spacing is the identity, so skip the f32 box round-trip
-        None => (font_px * 0.8, font_px * 0.2, font_px * 1.15),
+        None | Some(LineSpacingRule::Auto { line_240ths: 240 }) => {
+            (font_px * 0.8, font_px * 0.2, font_px * 1.15)
+        }
         Some(rule) => {
             let ruled = apply_spacing_rule(
                 LineBox {
