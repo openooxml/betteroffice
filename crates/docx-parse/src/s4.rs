@@ -5,7 +5,9 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{canonical_sha256, from_serializable, to_canonical_bytes};
-use crate::chart::{Chart, is_chart_part, parse_chart_from_drawing, parse_chart_parts};
+use crate::chart::{
+    Chart, DrawingChart, is_chart_part, parse_chart_from_drawing, parse_chart_parts,
+};
 use crate::image::parse_drawing;
 use crate::media::{MediaFile, build_media_map};
 use crate::relationships::{RelationshipMap, parse_relationships};
@@ -206,10 +208,13 @@ fn project_drawing(
     smart_art: &mut SmartArtContext,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Option<DrawingLeaf>, ParseError> {
+    let chart = parse_chart_from_drawing(drawing, relationships, Some(charts))?;
     let (kind, value) = if let Some(text_box) = parse_text_box(drawing) {
         ("textBox", serde_json::to_value(text_box))
-    } else if let Some(chart) = parse_chart_from_drawing(drawing, relationships, Some(charts))? {
+    } else if let DrawingChart::Chart(chart) = &chart {
         ("chart", serde_json::to_value(chart))
+    } else if matches!(chart, DrawingChart::Unread) {
+        return Ok(None);
     } else if is_smart_art_drawing(drawing) {
         let Some(shape) =
             parse_smart_art_from_drawing(drawing, relationships, Some(smart_art), budget)?

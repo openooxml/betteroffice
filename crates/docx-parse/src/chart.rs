@@ -117,25 +117,38 @@ pub fn parse_chart_xml(
 ///
 /// A chart part is a decorative leaf: nothing structural is read from it and
 /// nothing structural is read after it. So each gets its own [`ParseBudget`] —
-/// one cached series can neither starve the body nor starve the next chart —
-/// and a part `parse_xml` refuses is skipped, leaving the document to open with
-/// that chart missing exactly as it opens when the part is absent. `parse_xml`
-/// reports only `MalformedXml`, `UnsafeXml` and `ResourceLimit`, each naming
-/// this part; a hostile package is refused earlier, by `ooxml_opc::unzip_parts`.
-/// A path [`normalize_chart_path`] rejects cannot name a chart part either, so
-/// it is skipped the same way.
+/// one cached series can neither starve the body nor starve the next chart on
+/// depth, attributes or text — and a part `parse_xml` refuses is skipped,
+/// leaving the document to open with that chart missing exactly as it opens
+/// when the part is absent. `parse_xml` reports only `MalformedXml`,
+/// `UnsafeXml` and `ResourceLimit`, each naming this part; a hostile package is
+/// refused earlier, by `ooxml_opc::unzip_parts`. A path
+/// [`normalize_chart_path`] rejects cannot name a chart part either, so it is
+/// skipped the same way.
+///
+/// What bounds the whole is one shared allowance of `max_xml_events`: every
+/// part draws its event budget from the same remainder, so all the charts
+/// together cost no more reads than one part was allowed before. A part the
+/// remainder cannot cover is declined like a malformed one. Nothing else is
+/// shared, so per-part isolation still holds.
 pub fn parse_chart_parts(
     all_xml: &IndexMap<String, Vec<u8>>,
     limits: &ParseLimits,
 ) -> ChartPartsMap {
     let mut charts = ChartPartsMap::new();
+    let mut events = limits.max_xml_events;
     for (path, xml) in all_xml {
         let Some(normalized) = chart_part_path(path) else {
             continue;
         };
-        let Ok(Some(chart)) =
-            parse_chart_xml(xml, Some(&normalized), path, &mut ParseBudget::new(limits))
-        else {
+        let part_limits = ParseLimits {
+            max_xml_events: events,
+            ..limits.clone()
+        };
+        let mut budget = ParseBudget::new(&part_limits);
+        let parsed = parse_chart_xml(xml, Some(&normalized), path, &mut budget);
+        events -= budget.xml_events();
+        let Ok(Some(chart)) = parsed else {
             continue;
         };
         charts.insert(normalized.clone(), chart.clone());
@@ -177,42 +190,52 @@ pub fn normalize_chart_path(target: &str) -> Result<String, ParseError> {
     Ok(normalized)
 }
 
+/// What chart reading made of one `<w:drawing>`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrawingChart {
+    /// The drawing names no internal chart part.
+    None,
+    /// The drawing names a chart part this package has no chart for: the
+    /// parser declined it, or it is missing. Anything else the drawing holds
+    /// belongs to that chart, so it must not be read as a picture.
+    Unread,
+    /// The chart the drawing names.
+    Chart(Box<Chart>),
+}
+
 pub fn parse_chart_from_drawing(
     drawing: &XmlElement,
     relationships: Option<&RelationshipMap>,
     charts: Option<&ChartPartsMap>,
-) -> Result<Option<Chart>, ParseError> {
+) -> Result<DrawingChart, ParseError> {
     let (Some(relationships), Some(charts)) = (relationships, charts) else {
-        return Ok(None);
+        return Ok(DrawingChart::None);
     };
-    if charts.is_empty() {
-        return Ok(None);
-    }
     let Some(chart_ref) = first_deep(drawing, "chart", 0) else {
-        return Ok(None);
+        return Ok(DrawingChart::None);
     };
     let Some(relationship_id) = chart_ref.attribute(Some("r"), "id") else {
-        return Ok(None);
+        return Ok(DrawingChart::None);
     };
     let Some(relationship) = relationships.get(relationship_id) else {
-        return Ok(None);
+        return Ok(DrawingChart::None);
     };
     if relationship.relationship_type != relationship_types::CHART
         || relationship.target_mode == Some(TargetMode::External)
     {
-        return Ok(None);
+        return Ok(DrawingChart::None);
     }
     let path = normalize_chart_path(&relationship.target)?;
     let alias = path.strip_prefix("word/").unwrap_or(&path);
     let Some(source) = charts.get(&path).or_else(|| charts.get(alias)) else {
-        return Ok(None);
+        return Ok(DrawingChart::Unread);
     };
     let mut chart = source.clone();
     apply_drawing_metadata(&mut chart, drawing);
     chart.relationship_id = Some(relationship_id.to_owned());
     chart.path = Some(path);
     chart.size = parse_drawing_extent(drawing).or(chart.size);
-    Ok(Some(chart))
+    Ok(DrawingChart::Chart(Box::new(chart)))
 }
 
 fn first_deep<'a>(root: &'a XmlElement, local: &str, depth: usize) -> Option<&'a XmlElement> {
@@ -414,14 +437,14 @@ mod tests {
             &mut budget,
         )
         .unwrap();
-        assert!(
+        assert_eq!(
             parse_chart_from_drawing(
                 document.root().unwrap(),
                 Some(&relationships),
                 Some(&charts)
             )
-            .unwrap()
-            .is_none()
+            .unwrap(),
+            DrawingChart::None
         );
     }
 
@@ -490,6 +513,87 @@ mod tests {
         ooxml_opc::rezip_parts(&parts).unwrap()
     }
 
+    /// [`DOCUMENT_XML`] with `count` more one-run paragraphs before the section.
+    fn padded_document_xml(count: usize) -> Vec<u8> {
+        let padding = (0..count)
+            .map(|index| {
+                format!(
+                    r#"<w:p w14:paraId="{:08X}"><w:r><w:t>pad</w:t></w:r></w:p>"#,
+                    0x0100_0000 + index
+                )
+            })
+            .collect::<String>();
+        String::from_utf8(DOCUMENT_XML.to_vec())
+            .unwrap()
+            .replace("<w:sectPr>", &format!("{padding}<w:sectPr>"))
+            .into_bytes()
+    }
+
+    /// A document of `count` charted paragraphs, each chart caching `points`.
+    fn many_chart_docx(count: usize, points: usize) -> Vec<u8> {
+        let mut overrides = String::new();
+        let mut relationships = String::new();
+        let mut body = String::new();
+        let mut chart_parts = Vec::new();
+        for index in 1..=count {
+            overrides.push_str(&format!(
+                r#"<Override PartName="/word/charts/chart{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#
+            ));
+            relationships.push_str(&format!(
+                r#"<Relationship Id="rIdChart{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart{index}.xml"/>"#
+            ));
+            body.push_str(&format!(
+                r#"<w:p w14:paraId="{:08X}"><w:r><w:drawing><wp:inline><wp:extent cx="5486400" cy="3200400"/><wp:docPr id="{index}" name="Chart {index}"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart{index}"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#,
+                0x0200_0000 + index
+            ));
+            chart_parts.push((format!("word/charts/chart{index}.xml"), chart_space(points)));
+        }
+        let mut parts = vec![
+            (
+                "[Content_Types].xml".to_owned(),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>{overrides}</Types>"#
+                )
+                .into_bytes(),
+            ),
+            ("_rels/.rels".to_owned(), ROOT_RELS.to_vec()),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationships}</Relationships>"#
+                )
+                .into_bytes(),
+            ),
+            (
+                "word/document.xml".to_owned(),
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#
+                )
+                .into_bytes(),
+            ),
+        ];
+        parts.extend(chart_parts);
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    /// The drawings in `content` no chart was read for.
+    fn opaque_drawings(content: &[BlockContent]) -> usize {
+        content
+            .iter()
+            .filter_map(|block| match block {
+                BlockContent::Paragraph(paragraph) => Some(paragraph),
+                _ => None,
+            })
+            .flat_map(|paragraph| &paragraph.content)
+            .filter_map(|item| match item {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| &run.content)
+            .filter(|item| matches!(item, RunContent::OpaqueDrawing { .. }))
+            .count()
+    }
+
     /// The chart part every charted run in `content` resolved to.
     fn body_charts(content: &[BlockContent]) -> Vec<String> {
         content
@@ -537,6 +641,7 @@ mod tests {
             ["word/charts/chart2.xml", "charts/chart2.xml"]
         );
         assert_eq!(body_charts(content), ["word/charts/chart2.xml"]);
+        assert_eq!(opaque_drawings(content), 1);
     }
 
     #[test]
@@ -547,6 +652,12 @@ mod tests {
     #[test]
     fn an_empty_chart_part_drops_only_that_chart() {
         assert_damaged_chart_is_dropped(b"");
+    }
+
+    /// A chart part that reads but models nothing is declined the same way.
+    #[test]
+    fn a_chart_part_without_a_chart_drops_only_that_chart() {
+        assert_damaged_chart_is_dropped(br#"<c:chartSpace xmlns:c="c"/>"#);
     }
 
     #[test]
@@ -596,20 +707,22 @@ mod tests {
     }
 
     /// The undamaged document that used to be refused: spec-valid charts whose
-    /// caches together outgrow one budget. Each chart holds a cache that most
-    /// of a budget covers, so a budget shared with the body — or with the other
-    /// chart — leaves the document unopenable.
+    /// caches fill the chart allowance on their own, in a body the same budget
+    /// could not have covered too.
     #[test]
-    fn a_document_whose_charts_each_fill_a_budget_opens_with_every_chart() {
+    fn a_document_whose_charts_fill_the_chart_budget_opens_with_every_chart() {
         let mut parts = chart_docx();
         for (path, bytes) in &mut parts {
             if path.starts_with("word/charts/") {
                 *bytes = chart_space(4_000);
             }
+            if path == "word/document.xml" {
+                *bytes = padded_document_xml(400);
+            }
         }
         let document = ooxml_opc::rezip_parts(&parts).unwrap();
         let limits = ParseLimits {
-            max_xml_events: 30_000,
+            max_xml_events: 41_000,
             ..ParseLimits::default()
         };
 
@@ -628,6 +741,32 @@ mod tests {
                 .iter()
                 .all(|(_, chart)| chart.series[0].values.len() == 4_000)
         );
+    }
+
+    /// Chart parts draw on one shared event allowance. The parts it covers are
+    /// read; the rest are declined and their drawings stay opaque.
+    #[test]
+    fn charts_past_the_shared_event_budget_are_declined() {
+        let limits = ParseLimits {
+            max_xml_events: 12_000,
+            ..ParseLimits::default()
+        };
+
+        let package = parse_docx_s9_wire_with_limits(
+            &many_chart_docx(4, 1_000),
+            S9ParseOptions::default(),
+            &limits,
+        )
+        .unwrap()
+        .document
+        .package;
+
+        assert_eq!(package.document.content.len(), 4);
+        assert_eq!(
+            body_charts(&package.document.content),
+            ["word/charts/chart1.xml", "word/charts/chart2.xml"]
+        );
+        assert_eq!(opaque_drawings(&package.document.content), 2);
     }
 
     #[test]

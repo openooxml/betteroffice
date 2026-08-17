@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::chart::{ChartPartsMap, parse_chart_from_drawing};
+use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, TextFormatting,
     parse_paragraph_properties,
@@ -1059,10 +1059,14 @@ fn parse_drawing_owned(
         return Ok(Vec::new());
     }
     let charts = drawing.as_ref().map(|context| context.charts);
-    if let Some(chart) = parse_chart_from_drawing(element, relationships, charts)? {
-        return Ok(vec![RunContent::Chart {
-            chart: Box::new(chart),
-        }]);
+    match parse_chart_from_drawing(element, relationships, charts)? {
+        DrawingChart::Chart(chart) => return Ok(vec![RunContent::Chart { chart }]),
+        DrawingChart::Unread => {
+            return Ok(vec![RunContent::OpaqueDrawing {
+                kind: "drawing".to_owned(),
+            }]);
+        }
+        DrawingChart::None => {}
     }
     if is_smart_art_drawing(element) {
         let shape = match drawing {
