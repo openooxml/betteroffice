@@ -285,8 +285,13 @@ pub(crate) fn parse_sheet_charts(
             continue;
         };
         for (index, anchor) in anchors.into_iter().enumerate() {
-            let Some(rel_id) = anchor.chart_rel.as_deref() else {
-                continue;
+            let rel_id = match &anchor.chart {
+                AnchorChart::None => continue,
+                AnchorChart::Unrelated => {
+                    declined.push(drawing_path.clone());
+                    continue;
+                }
+                AnchorChart::Related(id) => id.as_str(),
             };
             let Some(part) = relationship_target(&drawing_rels, rel_id, TYPE_CHART)
                 .map(|target| resolve_part_path(&drawing_dir, target))
@@ -354,7 +359,16 @@ fn sheet_drawings<'a>(
 
 struct DrawingAnchor {
     anchor: ChartAnchor,
-    chart_rel: Option<String>,
+    chart: AnchorChart,
+}
+
+/// What an anchor's graphic frame holds: no chart, a chart naming a
+/// relationship, or a chart naming none — which is a frame this crate cannot
+/// model and a save cannot move.
+enum AnchorChart {
+    None,
+    Related(String),
+    Unrelated,
 }
 
 /// Every `xdr:` anchor in a drawing part, in document order, so an index into
@@ -390,7 +404,7 @@ fn read_anchors(root: &Element) -> Result<Vec<DrawingAnchor>, ParseError> {
         }
         anchors.push(DrawingAnchor {
             anchor,
-            chart_rel: chart_relationship_id(child, 0),
+            chart: anchor_chart(child, 0),
         });
     }
     Ok(anchors)
@@ -404,20 +418,25 @@ fn is_anchor(element: &&Element) -> bool {
         )
 }
 
-/// `c:chart/@r:id` under a graphic frame, searched depth-capped by expanded
-/// name so an alternate prefix still resolves.
-fn chart_relationship_id(element: &Element, depth: usize) -> Option<String> {
+/// The `c:chart` under a graphic frame, searched depth-capped by expanded name
+/// so an alternate prefix still resolves, and whether it names a relationship.
+fn anchor_chart(element: &Element, depth: usize) -> AnchorChart {
     if depth > MAX_DEPTH {
-        return None;
+        return AnchorChart::None;
     }
     if element.is(NS_CHART, "chart") {
-        return element
-            .attribute_ns(NS_RELATIONSHIPS, "id")
-            .map(str::to_owned);
+        return match element.attribute_ns(NS_RELATIONSHIPS, "id") {
+            Some(id) => AnchorChart::Related(id.to_owned()),
+            None => AnchorChart::Unrelated,
+        };
     }
-    element
-        .child_elements()
-        .find_map(|child| chart_relationship_id(child, depth + 1))
+    for child in element.child_elements() {
+        match anchor_chart(child, depth + 1) {
+            AnchorChart::None => {}
+            found => return found,
+        }
+    }
+    AnchorChart::None
 }
 
 fn anchor_cell(element: Option<&Element>) -> Result<AnchorCell, ParseError> {

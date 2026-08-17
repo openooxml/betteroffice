@@ -571,6 +571,41 @@ fn an_anchor_whose_chart_relationship_is_unresolved_freezes_structural_edits() {
     assert_structural_edits_are_refused(&package);
 }
 
+/// A `c:chart` that names no relationship is a frame this crate cannot model
+/// either, and with nothing else left to veto on its behalf its drawing must.
+#[test]
+fn a_chart_element_without_a_relationship_freezes_structural_edits() {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    parts.retain(|(path, _)| path != CHART_PART);
+    rewrite_part(&mut parts, DRAWING_PART, |text| {
+        text.replace(r#"<c:chart r:id="rIdChart2"/>"#, "<c:chart/>")
+    });
+    rewrite_part(&mut parts, DRAWING_RELS, |text| {
+        text.replace(
+            r#"<Relationship Id="rIdChart2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/>"#,
+            "",
+        )
+    });
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#,
+            "",
+        )
+    });
+    let package = ooxml_opc::rezip_parts(&parts).unwrap();
+    assert_eq!(
+        Workbook::open(&package)
+            .unwrap()
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .charts
+            .len(),
+        3
+    );
+    assert_structural_edits_are_refused(&package);
+}
+
 /// A declined chart target that another discovery already inventoried with
 /// resolved areas has to be widened to name everything, not left as it was:
 /// the pivot reader saw one cell, the chart reader saw nothing it could hold.
