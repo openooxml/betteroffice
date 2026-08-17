@@ -129,10 +129,13 @@ describe('hover cursor over an engine-built page', () => {
     expect(hit?.noteId).toBe(1);
     expect(cursorAt(notes, x, run.baselineY - 2)).toBe('text');
 
-    // that note's own story answers the selection geometry
+    // that note's own story answers the selection geometry, inside the band
     const rects = notes.queries.noteRangeRects('footnote', 1, 1, 11);
     expect(rects).toHaveLength(1);
-    expect(rects[0]!.y).toBeGreaterThanOrEqual(900);
+    expect(rects[0]!.y).toBeGreaterThanOrEqual(area.y ?? 0);
+    expect(rects[0]!.y).toBeLessThanOrEqual((area.y ?? 0) + (area.height ?? 0));
+    // the sibling note runs to a bordered paragraph, and keeps both lines
+    expect(notes.queries.noteRangeRects('footnote', 2, 1, 22)).toHaveLength(2);
     // a note the page does not carry highlights nothing
     expect(notes.queries.noteRangeRects('endnote', 1, 1, 11)).toEqual([]);
   });

@@ -1,16 +1,17 @@
 //! Note-area fixture and interaction gates.
 //!
-//! `two-footnotes` puts two footnotes in one area at y 900..960 of a single
+//! `two-footnotes` puts two footnotes in one area at y 860..960 of a single
 //! page, each note's story starting at position 1 — the same numbers, two
 //! unrelated documents. Everything here turns on the two never being confused
-//! with each other or with the body.
+//! with each other or with the body. The second note runs to a bordered
+//! paragraph, so a border line sits between two of its own primitives.
 
 use docx_layout::display_list::{DisplayList, Primitive, build_display_list_json, doc_attrs};
 use docx_layout::hit::{
     HitRegion, HoverTarget, RegionScope, hit_test_regions, range_rects, range_rects_in_region,
 };
 
-const NOTE_AREA_TOP: f64 = 900.0;
+const NOTE_AREA_TOP: f64 = 860.0;
 const NOTE_AREA_BOTTOM: f64 = 960.0;
 
 fn input() -> String {
@@ -45,9 +46,10 @@ fn note_primitives_carry_their_own_story_range() {
     let dl = build();
     let area = &dl.pages[0].note_areas[0];
 
-    for (text, group, doc_end) in [
-        ("First note", "footnote-1", 11),
-        ("Second note", "footnote-2", 12),
+    for (text, group, doc_start, doc_end) in [
+        ("First note", "footnote-1", 1, 11),
+        ("Second note", "footnote-2", 1, 12),
+        ("and more", "footnote-2", 14, 22),
     ] {
         let run = area
             .primitives
@@ -57,7 +59,10 @@ fn note_primitives_carry_their_own_story_range() {
         let attrs = doc_attrs(run).expect("a text primitive carries attrs");
         assert_eq!(attrs.group_id.as_deref(), Some(group));
         // the note story's own range, not the body anchor the mark sits at
-        assert_eq!((attrs.doc_start, attrs.doc_end), (Some(1), Some(doc_end)));
+        assert_eq!(
+            (attrs.doc_start, attrs.doc_end),
+            (Some(doc_start), Some(doc_end))
+        );
     }
 
     // the body anchor stays reachable as backlink metadata
@@ -76,7 +81,11 @@ fn note_primitives_carry_their_own_story_range() {
 fn a_point_in_a_note_resolves_against_that_note_story() {
     let dl = build();
 
-    for (text, note_id, doc_end) in [("First note", 1, 11), ("Second note", 2, 12)] {
+    for (text, note_id, doc_end) in [
+        ("First note", 1, 11),
+        ("Second note", 2, 12),
+        ("and more", 2, 22),
+    ] {
         let (x, baseline, width) = note_run(&dl, text);
         let hit = hit_test_regions(&dl, 0, x + width / 2.0, baseline - 4.0).expect("page 0");
         assert_eq!(hit.region, HitRegion::Footnote, "{text}");
@@ -128,6 +137,34 @@ fn range_rects_scoped_to_a_note_cover_that_note_only() {
     // and a note the area does not carry highlights nothing
     assert!(range_rects_in_region(&dl, RegionScope::Footnote(9), 1, 11).is_empty());
     assert!(range_rects_in_region(&dl, RegionScope::Endnote(1), 1, 11).is_empty());
+}
+
+/// A paragraph or table border paints a line that carries no attrs, so it
+/// names no paint group. It must not end the note's span of primitives:
+/// everything after it belongs to the same story, and dropping it would leave
+/// a selection over the whole note highlighting only its first lines.
+#[test]
+fn a_border_line_inside_a_note_does_not_split_its_story() {
+    let dl = build();
+    let primitives = &dl.pages[0].note_areas[0].primitives;
+    let line = primitives
+        .iter()
+        .position(|primitive| matches!(primitive, Primitive::Line(_)))
+        .expect("the fixture note paints a border line");
+    assert!(
+        primitives[line + 1..]
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::Text(_))),
+        "the border line no longer sits before any of the note's text"
+    );
+
+    let rects = range_rects_in_region(&dl, RegionScope::Footnote(2), 1, 22);
+    assert_eq!(
+        rects.len(),
+        2,
+        "the note lines painted after its border line lost their rects"
+    );
+    assert!(rects[1].y > rects[0].y);
 }
 
 #[test]

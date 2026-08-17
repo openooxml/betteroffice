@@ -967,37 +967,43 @@ fn note_region(area: &NoteRegion) -> HitRegion {
     }
 }
 
-fn note_group(primitive: &Primitive) -> Option<&str> {
-    doc_attrs(primitive).and_then(|attrs| attrs.group_id.as_deref())
-}
-
 /// The stories an area stacks, in paint order. One note's primitives are
-/// emitted contiguously under that note's paint-group id, so a run of them
-/// sharing a group is exactly one story; primitives belonging to no listed
-/// note are the area's own chrome and address nothing.
+/// emitted contiguously under that note's paint-group id, so each story is one
+/// span of them. A primitive with no attrs to carry a group — a paragraph or
+/// table border line — belongs to the note it sits inside, so it must not end a
+/// span. One that could carry a group and names no listed note does end it:
+/// that is the area's own chrome, or a note the region never identified, and
+/// either way it addresses nothing.
 fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
     let kind = note_kind(area);
     let mut stories = Vec::new();
-    let mut start = 0;
-    while start < area.primitives.len() {
-        let group = note_group(&area.primitives[start]);
-        let end = start
-            + area.primitives[start..]
-                .iter()
-                .take_while(|primitive| note_group(primitive) == group)
-                .count();
-        if let Some(id) = group.and_then(|group| {
+    let mut open: Option<(i64, usize)> = None;
+    for (index, primitive) in area.primitives.iter().enumerate() {
+        let Some(attrs) = doc_attrs(primitive) else {
+            continue;
+        };
+        let id = attrs.group_id.as_deref().and_then(|group| {
             area.note_ids
                 .iter()
                 .copied()
                 .find(|id| note_group_id(kind, *id) == group)
-        }) {
+        });
+        if id == open.map(|(open_id, _)| open_id) {
+            continue;
+        }
+        if let Some((open_id, start)) = open {
             stories.push(NoteStory {
-                id,
-                primitives: &area.primitives[start..end],
+                id: open_id,
+                primitives: &area.primitives[start..index],
             });
         }
-        start = end;
+        open = id.map(|id| (id, index));
+    }
+    if let Some((id, start)) = open {
+        stories.push(NoteStory {
+            id,
+            primitives: &area.primitives[start..],
+        });
     }
     stories
 }

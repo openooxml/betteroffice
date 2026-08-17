@@ -3080,13 +3080,13 @@ mod tests {
         assert_eq!(margin["target"], "none");
     }
 
-    /// A footnote seeded from a real file, laid out and painted through the
-    /// resident path, resolves to its own `fn:{id}` story. The presentation
-    /// label every note carries has no position of its own, so this is also
-    /// where inheriting the body anchor would hand a click a body position
-    /// under a `"footnote"` region.
+    /// Footnotes and endnotes seeded from a real file, laid out and painted
+    /// through the resident path, resolve to their own `fn:{id}` / `en:{id}`
+    /// stories. The presentation label every note carries has no position of
+    /// its own, so this is also where inheriting the body anchor would hand a
+    /// click a body position under a note region.
     #[test]
-    fn real_footnote_resolves_to_its_own_story() {
+    fn real_notes_resolve_to_their_own_stories() {
         let engine = EngineSession::new(19);
         crate::seed::seed_from_docx(
             engine.doc(),
@@ -3096,7 +3096,10 @@ mod tests {
         let request = serde_json::json!({
             "bodyStory": "body",
             "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
-            "notes": {"contents": [{"id": 2, "noteKind": "footnote", "height": 0}]},
+            "notes": {"contents": [
+                {"id": 2, "noteKind": "footnote", "height": 0},
+                {"id": 3, "noteKind": "endnote", "height": 0}
+            ]},
             "measurement": {
                 "fontChains": {},
                 "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
@@ -3109,65 +3112,81 @@ mod tests {
             .unwrap();
         engine.build_display_list_json(&output).unwrap();
 
-        let area = engine
+        // one area per kind, each carrying its own note; the label leading a
+        // note is presentation and stays unpositioned, the story text does not
+        let areas = engine
             .with_display_list(|list| {
-                let area = &list.pages[0].note_areas[0];
-                let runs = area
-                    .primitives
+                list.pages[0]
+                    .note_areas
                     .iter()
-                    .filter_map(|primitive| match primitive {
-                        docx_layout::display_list::Primitive::Text(run) => Some((
-                            run.text.clone(),
-                            run.attrs.doc_start,
-                            run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
-                            run.baseline_y.as_f64().unwrap(),
-                        )),
-                        _ => None,
+                    .map(|area| {
+                        let runs = area
+                            .primitives
+                            .iter()
+                            .filter_map(|primitive| match primitive {
+                                docx_layout::display_list::Primitive::Text(run) => Some((
+                                    run.attrs.doc_start,
+                                    run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
+                                    run.baseline_y.as_f64().unwrap(),
+                                )),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        (area.kind.clone(), area.note_ids.clone(), runs)
                     })
-                    .collect::<Vec<_>>();
-                (area.note_ids.clone(), runs)
+                    .collect::<Vec<_>>()
             })
             .expect("the display list is built");
-        assert_eq!(area.0, vec![2]);
-        let label = &area.1[0];
-        let body = &area.1[1];
-        // the label is presentation, not story content: it stays unpositioned
-        assert_eq!(label.1, None, "note label {:?} carries a position", label.0);
-        assert_eq!(body.1, Some(1), "note body run lost its story position");
+        assert_eq!(areas.len(), 2, "one area per note kind");
 
-        let hit: serde_json::Value = serde_json::from_str(
-            &engine
-                .display_hit_test_regions_json(0, body.2, body.3 - 2.0)
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(hit["region"], "footnote");
-        assert_eq!(hit["noteId"], 2);
-        assert_eq!(hit["target"], "text");
-        let position = hit["pos"].as_i64().expect("the note hit has a position");
-        assert!(
-            (1..=16).contains(&position),
-            "note hit resolved {position}, outside the note story"
-        );
+        for (kind, note_id, story_end) in [("footnote", 2, 16), ("endnote", 3, 17)] {
+            let (_, note_ids, runs) = areas
+                .iter()
+                .find(|(area_kind, ..)| area_kind.as_deref() == Some(kind))
+                .unwrap_or_else(|| panic!("no {kind} area"));
+            assert_eq!(note_ids, &vec![note_id]);
+            assert_eq!(runs[0].0, None, "the {kind} label carries a position");
+            assert_eq!(
+                runs[1].0,
+                Some(1),
+                "the {kind} text lost its story position"
+            );
 
-        // that story's selection geometry lands in the note area, and the same
-        // positions in the body land in the body
-        let note_rects: serde_json::Value = serde_json::from_str(
-            &engine
-                .display_range_rects_region_json("footnote", "2", 1, 16)
-                .unwrap(),
-        )
-        .unwrap();
-        let body_rects: serde_json::Value =
-            serde_json::from_str(&engine.display_range_rects_json(1, 16).unwrap()).unwrap();
-        let note_y = note_rects[0]["y"].as_f64().expect("a note rect");
-        let body_y = body_rects[0]["y"].as_f64().expect("a body rect");
-        assert!(
-            note_y > body_y,
-            "note rect y {note_y} is not below the body rect y {body_y}"
-        );
+            let hit: serde_json::Value = serde_json::from_str(
+                &engine
+                    .display_hit_test_regions_json(0, runs[1].1, runs[1].2 - 2.0)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(hit["region"], kind);
+            assert_eq!(hit["noteId"], note_id);
+            assert_eq!(hit["target"], "text");
+            let position = hit["pos"].as_i64().expect("the note hit has a position");
+            assert!(
+                (1..=story_end).contains(&position),
+                "{kind} hit resolved {position}, outside its story"
+            );
 
-        // the body reference mark anchoring the note is still the body's
+            // that story's selection geometry lands in its own area, below the
+            // body rects for the very same positions
+            let note_rects: serde_json::Value = serde_json::from_str(
+                &engine
+                    .display_range_rects_region_json(kind, &note_id.to_string(), 1, story_end)
+                    .unwrap(),
+            )
+            .unwrap();
+            let body_rects: serde_json::Value =
+                serde_json::from_str(&engine.display_range_rects_json(1, story_end).unwrap())
+                    .unwrap();
+            let note_y = note_rects[0]["y"].as_f64().expect("a note rect");
+            let body_y = body_rects[0]["y"].as_f64().expect("a body rect");
+            assert!(
+                note_y > body_y,
+                "{kind} rect y {note_y} is not below the body rect y {body_y}"
+            );
+        }
+
+        // the body reference marks anchoring the notes are still the body's
         let anchor: serde_json::Value = serde_json::from_str(
             &engine
                 .display_hit_test_regions_json(0, 100.0, 110.0)

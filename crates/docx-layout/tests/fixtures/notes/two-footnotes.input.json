@@ -42,7 +42,7 @@
     "noteAreas": [
      {
       "columns": 1,
-      "height": 60,
+      "height": 100,
       "kind": "footnote",
       "notes": [
        {
@@ -105,10 +105,33 @@
             "text": "Second note"
            }
           ]
+         },
+         {
+          "attrs": {
+           "borders": {
+            "top": {
+             "color": "#000000",
+             "size": 8,
+             "style": "single"
+            }
+           }
+          },
+          "id": "note-2-q",
+          "kind": "paragraph",
+          "pmEnd": 23,
+          "pmStart": 14,
+          "runs": [
+           {
+            "kind": "text",
+            "pmEnd": 22,
+            "pmStart": 14,
+            "text": "and more"
+           }
+          ]
          }
         ],
         "displayLabel": "2",
-        "height": 20,
+        "height": 40,
         "id": 2,
         "measures": [
          {
@@ -126,12 +149,28 @@
            }
           ],
           "totalHeight": 20
+         },
+         {
+          "kind": "paragraph",
+          "lines": [
+           {
+            "ascent": 15,
+            "descent": 5,
+            "headChar": 0,
+            "headRun": 0,
+            "lineHeight": 20,
+            "tailChar": 8,
+            "tailRun": 0,
+            "width": 60
+           }
+          ],
+          "totalHeight": 20
          }
         ]
        }
       ],
       "sectionId": "main",
-      "y": 900
+      "y": 860
      }
     ],
     "number": 1,

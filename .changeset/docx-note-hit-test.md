@@ -14,6 +14,8 @@ The label being presentation rather than story content has a visible consequence
 
 Selection geometry follows the same scoping. `range_rects_in_region` takes the region and the part that owns it as one argument, so a header/footer is named by an `rId` and a note by an id that is never optional — two notes are two unrelated documents whose positions must not mix. `noteRangeRects` is its query-facade twin.
 
+Grouping an area's primitives back into stories reads the paint group each one carries, and a paragraph or table border paints a line that has no attrs to carry one. Such a line belongs to the note it sits inside rather than ending it, so a selection over a note that runs to a bordered paragraph or a table keeps the lines painted after the border instead of stopping at it.
+
 The test that pinned note areas as holes in the typeable area is replaced by tests of the new behavior, and the area subtraction it described is gone: a point inside a note is answered by the note before the body is ever asked.
 
 `region` may now be `"footnote"` or `"endnote"` and `noteId` is optional on `DisplayListRegionHit`, so a display-list query answered by an older wasm build still typechecks. Clicking a note still does nothing — routing a selection into a note story is the editing mode's job, not the layout API's.
