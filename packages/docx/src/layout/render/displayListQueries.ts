@@ -76,9 +76,6 @@ export interface ResidentDisplayListQueryEngine {
 /** which part of a page owns a hit — mirrors `HitRegion` in hit.rs */
 export type DisplayListHitRegion = 'body' | 'header' | 'footer' | 'footnote' | 'endnote';
 
-/** a note region, whose story is `fn:{id}` / `en:{id}` */
-export type DisplayListNoteRegion = 'footnote' | 'endnote';
-
 /**
  * What a click at a hit point would act on — mirrors `HoverTarget` in hit.rs.
  * `'text'` is the typeable area (a run's box, or the content box around it),
@@ -215,10 +212,11 @@ export interface DisplayListQueries {
   /**
    * Note document range → highlight rects for that note's story. `from`/`to`
    * are positions in the `fn:{noteId}` / `en:{noteId}` document, never the
-   * body's. A note paints once, so this returns at most one rect-set.
+   * body's. A note paints on one page only, so every rect shares its
+   * `pageIndex`.
    */
   noteRangeRects(
-    region: DisplayListNoteRegion,
+    region: 'footnote' | 'endnote',
     noteId: number,
     from: number,
     to: number
@@ -673,8 +671,8 @@ export function createDisplayListQueries(
     return parseQuery(raw, null, 'vertical_move');
   };
 
-  // `partId` names the instance the positions belong to: an HF part's rId, or
-  // a note's id.
+  // The one scoped range-rect path. `partId` names the instance the positions
+  // belong to: an HF part's rId, or a note's id.
   const regionRangeRects = (
     region: DisplayListHitRegion,
     partId: string,
@@ -712,7 +710,7 @@ export function createDisplayListQueries(
   ): DisplayListRect[] => regionRangeRects(region, rId, from, to);
 
   const noteRangeRects = (
-    region: DisplayListNoteRegion,
+    region: 'footnote' | 'endnote',
     noteId: number,
     from: number,
     to: number

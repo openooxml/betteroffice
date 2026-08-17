@@ -23,7 +23,6 @@
 import type { Layout } from '../pagination/types';
 import type { MeasuredBlock } from '../pagination/measuredBlock';
 import type { DisplayList } from './displayList';
-import type { DisplayListHitRegion } from './displayListQueries';
 import { applyFrameDelta, decodeFrameDelta, type RetainedFrame } from './frameDelta';
 
 /**
@@ -223,7 +222,7 @@ export interface RustDisplayListEngine {
   ): string;
   displayRangeRectsJson?(from: number, to: number): string;
   displayRangeRectsRegionJson?(
-    region: DisplayListHitRegion,
+    region: string,
     partId: string,
     from: number,
     to: number
@@ -288,9 +287,9 @@ export interface RustDisplayListQueryEngine {
   rangeRectsJson(displayList: string, from: number, to: number): string;
   /**
    * Region-aware document range → JSON array of rects. `region` is a
-   * `DisplayListHitRegion`; `partId` names the instance — a header/footer part
-   * (empty for body, or to match any band of the kind) or a note id. Optional
-   * — the facade returns `[]` when it is absent.
+   * `DisplayListHitRegion` discriminant; `partId` names the instance — a
+   * header/footer part (empty for body, or to match any band of the kind) or a
+   * note id. Optional — the facade returns `[]` when it is absent.
    */
   rangeRectsRegionJson?(
     displayList: string,

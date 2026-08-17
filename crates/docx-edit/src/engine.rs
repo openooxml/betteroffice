@@ -3080,6 +3080,51 @@ mod tests {
         assert_eq!(margin["target"], "none");
     }
 
+    /// What a laid-out note area gives a hit probe: the note it carries, and
+    /// the two runs every note paints — its presentation label, then its story
+    /// text.
+    struct PaintedNote {
+        kind: Option<String>,
+        note_ids: Vec<i64>,
+        label_doc_start: Option<i64>,
+        text_doc_start: Option<i64>,
+        text_doc_end: i64,
+        text_center_x: f64,
+        text_baseline: f64,
+    }
+
+    fn painted_notes(engine: &EngineSession) -> Vec<PaintedNote> {
+        engine
+            .with_display_list(|list| {
+                list.pages[0]
+                    .note_areas
+                    .iter()
+                    .map(|area| {
+                        let runs = area
+                            .primitives
+                            .iter()
+                            .filter_map(|primitive| match primitive {
+                                docx_layout::display_list::Primitive::Text(run) => Some(run),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let (label, text) = (runs[0], runs[1]);
+                        PaintedNote {
+                            kind: area.kind.clone(),
+                            note_ids: area.note_ids.clone(),
+                            label_doc_start: label.attrs.doc_start,
+                            text_doc_start: text.attrs.doc_start,
+                            text_doc_end: text.attrs.doc_end.expect("note text is positioned"),
+                            text_center_x: text.x.as_f64().unwrap()
+                                + text.width.as_f64().unwrap() / 2.0,
+                            text_baseline: text.baseline_y.as_f64().unwrap(),
+                        }
+                    })
+                    .collect()
+            })
+            .expect("the display list is built")
+    }
+
     /// Footnotes and endnotes seeded from a real file, laid out and painted
     /// through the resident path, resolve to their own `fn:{id}` / `en:{id}`
     /// stories. The presentation label every note carries has no position of
@@ -3112,49 +3157,28 @@ mod tests {
             .unwrap();
         engine.build_display_list_json(&output).unwrap();
 
-        // one area per kind, each carrying its own note; the label leading a
-        // note is presentation and stays unpositioned, the story text does not
-        let areas = engine
-            .with_display_list(|list| {
-                list.pages[0]
-                    .note_areas
-                    .iter()
-                    .map(|area| {
-                        let runs = area
-                            .primitives
-                            .iter()
-                            .filter_map(|primitive| match primitive {
-                                docx_layout::display_list::Primitive::Text(run) => Some((
-                                    run.attrs.doc_start,
-                                    run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
-                                    run.baseline_y.as_f64().unwrap(),
-                                )),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>();
-                        (area.kind.clone(), area.note_ids.clone(), runs)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .expect("the display list is built");
-        assert_eq!(areas.len(), 2, "one area per note kind");
+        let painted = painted_notes(&engine);
+        assert_eq!(painted.len(), 2, "one area per note kind");
 
-        for (kind, note_id, story_end) in [("footnote", 2, 16), ("endnote", 3, 17)] {
-            let (_, note_ids, runs) = areas
+        for (kind, note_id) in [("footnote", 2), ("endnote", 3)] {
+            let note = painted
                 .iter()
-                .find(|(area_kind, ..)| area_kind.as_deref() == Some(kind))
+                .find(|note| note.kind.as_deref() == Some(kind))
                 .unwrap_or_else(|| panic!("no {kind} area"));
-            assert_eq!(note_ids, &vec![note_id]);
-            assert_eq!(runs[0].0, None, "the {kind} label carries a position");
+            assert_eq!(note.note_ids, vec![note_id]);
             assert_eq!(
-                runs[1].0,
+                note.label_doc_start, None,
+                "the {kind} label carries a position"
+            );
+            assert_eq!(
+                note.text_doc_start,
                 Some(1),
                 "the {kind} text lost its story position"
             );
 
             let hit: serde_json::Value = serde_json::from_str(
                 &engine
-                    .display_hit_test_regions_json(0, runs[1].1, runs[1].2 - 2.0)
+                    .display_hit_test_regions_json(0, note.text_center_x, note.text_baseline - 2.0)
                     .unwrap(),
             )
             .unwrap();
@@ -3163,7 +3187,7 @@ mod tests {
             assert_eq!(hit["target"], "text");
             let position = hit["pos"].as_i64().expect("the note hit has a position");
             assert!(
-                (1..=story_end).contains(&position),
+                (1..=note.text_doc_end).contains(&position),
                 "{kind} hit resolved {position}, outside its story"
             );
 
@@ -3171,13 +3195,21 @@ mod tests {
             // body rects for the very same positions
             let note_rects: serde_json::Value = serde_json::from_str(
                 &engine
-                    .display_range_rects_region_json(kind, &note_id.to_string(), 1, story_end)
+                    .display_range_rects_region_json(
+                        kind,
+                        &note_id.to_string(),
+                        1,
+                        note.text_doc_end,
+                    )
                     .unwrap(),
             )
             .unwrap();
-            let body_rects: serde_json::Value =
-                serde_json::from_str(&engine.display_range_rects_json(1, story_end).unwrap())
-                    .unwrap();
+            let body_rects: serde_json::Value = serde_json::from_str(
+                &engine
+                    .display_range_rects_json(1, note.text_doc_end)
+                    .unwrap(),
+            )
+            .unwrap();
             let note_y = note_rects[0]["y"].as_f64().expect("a note rect");
             let body_y = body_rects[0]["y"].as_f64().expect("a body rect");
             assert!(

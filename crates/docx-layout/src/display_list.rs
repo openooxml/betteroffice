@@ -4310,9 +4310,10 @@ fn note_partitions<'a>(notes: &'a [NoteItemIn], columns: usize) -> Vec<Vec<&'a N
     out
 }
 
-/// Paint-group id shared by every primitive of one note. Consumers group a
-/// note area's primitives back into stories by rebuilding it.
-pub fn note_group_id(kind: &str, id: i64) -> String {
+/// Paint-group id shared by every primitive of one note. Grouping a note
+/// area's primitives back into stories means rebuilding it, which hit testing
+/// and the a11y mirror both do.
+pub(crate) fn note_group_id(kind: &str, id: i64) -> String {
     format!("{kind}-{id}")
 }
 
@@ -9399,7 +9400,7 @@ fn primitive_v_extent(p: &Primitive) -> (f64, f64) {
 }
 
 /// The document attributes a primitive carries, if its class has any.
-pub fn doc_attrs(p: &Primitive) -> Option<&DocAttrs> {
+pub(crate) fn doc_attrs(p: &Primitive) -> Option<&DocAttrs> {
     match p {
         Primitive::Text(t) => Some(&t.attrs),
         Primitive::GlyphRun(g) => Some(&g.attrs),

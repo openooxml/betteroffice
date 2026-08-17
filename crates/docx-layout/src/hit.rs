@@ -750,11 +750,15 @@ fn in_typeable_area(page: &DisplayPage, x: f64, y: f64) -> bool {
 }
 
 /// Whether a point lies in a note area, the vertical `[y, y + height]` test its
-/// band box gives — the note twin of a header/footer band. A zero-height area
-/// reserves nothing and owns no point.
+/// band box gives — the note twin of a header/footer band. An area stating no
+/// band, or a zero-height one, owns no point: the list does not say where such
+/// an area's notes paint, and claiming the region would route a click out of
+/// the body with nothing to route it to.
 fn in_note_area(area: &NoteRegion, y: f64) -> bool {
-    let top = area.y.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
-    let height = area.height.as_ref().and_then(Number::as_f64).unwrap_or(0.0);
+    let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64);
+    let (Some(top), Some(height)) = (px(&area.y), px(&area.height)) else {
+        return false;
+    };
     height > 0.0 && y >= top && y <= top + height
 }
 
@@ -926,6 +930,7 @@ impl RegionScope<'_> {
 /// header/footer `rId` (empty ⇒ any band of the kind) or a note id. Shared by
 /// the JSON-arg and session-handle range-rect exports.
 pub fn parse_region_scope<'a>(region: &str, part_id: &'a str) -> Result<RegionScope<'a>, String> {
+    let r_id = (!part_id.is_empty()).then_some(part_id);
     let note_id = || {
         part_id
             .parse::<i64>()
@@ -933,12 +938,8 @@ pub fn parse_region_scope<'a>(region: &str, part_id: &'a str) -> Result<RegionSc
     };
     match region {
         "body" => Ok(RegionScope::Body),
-        "header" => Ok(RegionScope::Header(
-            (!part_id.is_empty()).then_some(part_id),
-        )),
-        "footer" => Ok(RegionScope::Footer(
-            (!part_id.is_empty()).then_some(part_id),
-        )),
+        "header" => Ok(RegionScope::Header(r_id)),
+        "footer" => Ok(RegionScope::Footer(r_id)),
         "footnote" => Ok(RegionScope::Footnote(note_id()?)),
         "endnote" => Ok(RegionScope::Endnote(note_id()?)),
         other => Err(format!("unknown region {other:?}")),
@@ -975,9 +976,16 @@ fn note_region(area: &NoteRegion) -> HitRegion {
 /// that is the area's own chrome, or a note the region never identified, and
 /// either way it addresses nothing.
 fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
+    /// The span being accumulated: its note, and where the span starts.
+    #[derive(Clone, Copy)]
+    struct OpenSpan {
+        id: i64,
+        start: usize,
+    }
+
     let kind = note_kind(area);
     let mut stories = Vec::new();
-    let mut open: Option<(i64, usize)> = None;
+    let mut open: Option<OpenSpan> = None;
     for (index, primitive) in area.primitives.iter().enumerate() {
         let Some(attrs) = doc_attrs(primitive) else {
             continue;
@@ -988,21 +996,21 @@ fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
                 .copied()
                 .find(|id| note_group_id(kind, *id) == group)
         });
-        if id == open.map(|(open_id, _)| open_id) {
+        if id == open.map(|span| span.id) {
             continue;
         }
-        if let Some((open_id, start)) = open {
+        if let Some(span) = open {
             stories.push(NoteStory {
-                id: open_id,
-                primitives: &area.primitives[start..index],
+                id: span.id,
+                primitives: &area.primitives[span.start..index],
             });
         }
-        open = id.map(|id| (id, index));
+        open = id.map(|id| OpenSpan { id, start: index });
     }
-    if let Some((id, start)) = open {
+    if let Some(span) = open {
         stories.push(NoteStory {
-            id,
-            primitives: &area.primitives[start..],
+            id: span.id,
+            primitives: &area.primitives[span.start..],
         });
     }
     stories
@@ -1064,10 +1072,13 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
         });
     }
     if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, y)) {
-        let story = note_stories(area).into_iter().min_by(|left, right| {
-            band_distance(left.primitives, y).total_cmp(&band_distance(right.primitives, y))
-        });
-        let resolved = resolve_point(story.as_ref().map_or(&[], |s| s.primitives), false, x, y);
+        let story = note_stories(area)
+            .into_iter()
+            .map(|story| (band_distance(story.primitives, y), story))
+            .min_by(|(left, _), (right, _)| left.total_cmp(right))
+            .map(|(_, story)| story);
+        let primitives = story.as_ref().map_or(&[][..], |story| story.primitives);
+        let resolved = resolve_point(primitives, false, x, y);
         return Some(RegionHit {
             region: note_region(area),
             r_id: None,
@@ -1284,7 +1295,9 @@ pub fn range_rects_in_region(
             RegionScope::Footnote(note_id) | RegionScope::Endnote(note_id) => page
                 .note_areas
                 .iter()
-                .filter(|area| note_region(area) == scope.region())
+                .filter(|area| {
+                    note_region(area) == scope.region() && area.note_ids.contains(&note_id)
+                })
                 .flat_map(note_stories)
                 .find(|story| story.id == note_id)
                 .map(|story| story.primitives),
@@ -1543,6 +1556,18 @@ mod tests {
         assert_eq!(body.region, HitRegion::Body);
         assert_eq!(body.note_id, None);
         assert_eq!(body.target, HoverTarget::Text);
+    }
+
+    /// An area stating no band of its own cannot say where its notes paint, so
+    /// it claims no point and the body answers — the same under-claim the
+    /// typeable area makes off the content box.
+    #[test]
+    fn a_note_area_without_a_band_claims_no_point() {
+        let mut dl = note_fixture();
+        dl.pages[0].note_areas[0].y = None;
+        let hit = hit_test_regions(&dl, 0, 120.0, 385.0).unwrap();
+        assert_eq!(hit.region, HitRegion::Body);
+        assert_eq!(hit.note_id, None);
     }
 
     /// One area stacks several independent stories, so a point must never

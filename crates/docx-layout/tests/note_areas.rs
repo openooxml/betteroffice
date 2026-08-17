@@ -6,7 +6,9 @@
 //! with each other or with the body. The second note runs to a bordered
 //! paragraph, so a border line sits between two of its own primitives.
 
-use docx_layout::display_list::{DisplayList, Primitive, build_display_list_json, doc_attrs};
+use docx_layout::display_list::{
+    DisplayList, Primitive, TextRunPrimitive, build_display_list_json,
+};
 use docx_layout::hit::{
     HitRegion, HoverTarget, RegionScope, hit_test_regions, range_rects, range_rects_in_region,
 };
@@ -24,39 +26,33 @@ fn build() -> DisplayList {
     serde_json::from_str(&build_display_list_json(&input()).expect("builds")).expect("parses")
 }
 
-/// The run painting `text` inside the page's only note area, as
-/// `(x, baseline, width)`.
-fn note_run(dl: &DisplayList, text: &str) -> (f64, f64, f64) {
+/// The run painting `text` inside the page's only note area.
+fn note_run<'a>(dl: &'a DisplayList, text: &str) -> &'a TextRunPrimitive {
     dl.pages[0].note_areas[0]
         .primitives
         .iter()
         .find_map(|primitive| match primitive {
-            Primitive::Text(run) if run.text == text => Some((
-                run.x.as_f64().unwrap(),
-                run.baseline_y.as_f64().unwrap(),
-                run.width.as_f64().unwrap(),
-            )),
+            Primitive::Text(run) if run.text == text => Some(run),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no note run painting {text:?}"))
 }
 
+/// Horizontal centre of a run, where a pointer probe lands on its glyphs.
+fn run_center_x(run: &TextRunPrimitive) -> f64 {
+    run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0
+}
+
 #[test]
 fn note_primitives_carry_their_own_story_range() {
     let dl = build();
-    let area = &dl.pages[0].note_areas[0];
 
     for (text, group, doc_start, doc_end) in [
         ("First note", "footnote-1", 1, 11),
         ("Second note", "footnote-2", 1, 12),
         ("and more", "footnote-2", 14, 22),
     ] {
-        let run = area
-            .primitives
-            .iter()
-            .find(|primitive| matches!(primitive, Primitive::Text(run) if run.text == text))
-            .unwrap_or_else(|| panic!("no note run painting {text:?}"));
-        let attrs = doc_attrs(run).expect("a text primitive carries attrs");
+        let attrs = &note_run(&dl, text).attrs;
         assert_eq!(attrs.group_id.as_deref(), Some(group));
         // the note story's own range, not the body anchor the mark sits at
         assert_eq!(
@@ -66,7 +62,7 @@ fn note_primitives_carry_their_own_story_range() {
     }
 
     // the body anchor stays reachable as backlink metadata
-    let anchors: Vec<_> = area
+    let anchors: Vec<_> = dl.pages[0].note_areas[0]
         .notes
         .iter()
         .map(|note| (note.id, note.anchor_doc_start, note.anchor_doc_end))
@@ -86,8 +82,9 @@ fn a_point_in_a_note_resolves_against_that_note_story() {
         ("Second note", 2, 12),
         ("and more", 2, 22),
     ] {
-        let (x, baseline, width) = note_run(&dl, text);
-        let hit = hit_test_regions(&dl, 0, x + width / 2.0, baseline - 4.0).expect("page 0");
+        let run = note_run(&dl, text);
+        let baseline = run.baseline_y.as_f64().unwrap();
+        let hit = hit_test_regions(&dl, 0, run_center_x(run), baseline - 4.0).expect("page 0");
         assert_eq!(hit.region, HitRegion::Footnote, "{text}");
         assert_eq!(hit.note_id, Some(note_id), "{text}");
         assert_eq!(hit.target, HoverTarget::Text, "{text}");
@@ -112,6 +109,8 @@ fn a_point_in_a_note_resolves_against_that_note_story() {
 fn range_rects_scoped_to_a_note_cover_that_note_only() {
     let dl = build();
 
+    // 1..11 covers the first line of either story and stops short of the
+    // second note's own second paragraph, so each yields exactly one rect
     let first = range_rects_in_region(&dl, RegionScope::Footnote(1), 1, 11);
     let second = range_rects_in_region(&dl, RegionScope::Footnote(2), 1, 11);
     assert_eq!(first.len(), 1);
