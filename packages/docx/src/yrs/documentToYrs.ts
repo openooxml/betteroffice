@@ -508,8 +508,7 @@ function noteRefUnit(
     'noteRef',
     noteType === 'endnote' ? { endnoteRefId: id } : { footnoteRefId: id },
     allMarks,
-    commentId,
-    String(id).length
+    commentId
   );
 }
 
@@ -574,10 +573,6 @@ function runContentToUnits(
       return [noteRefUnit(content.id, 'footnote', marks, commentId)];
     case 'endnoteRef':
       return [noteRefUnit(content.id, 'endnote', marks, commentId)];
-    case 'footnoteRefMark':
-      return [embedUnit('noteRefMark', { noteType: 'footnote' }, marks, commentId)];
-    case 'endnoteRefMark':
-      return [embedUnit('noteRefMark', { noteType: 'endnote' }, marks, commentId)];
     default:
       return [];
   }
@@ -723,27 +718,32 @@ function paragraphStyleFormatting(
   return mergeTextFormatting(styleFormatting, extraRunFormatting);
 }
 
+/**
+ * Note number marks carry no story unit, so the run boundary cache is the only
+ * place a saved paragraph can learn they were there.
+ */
+function noteRefMarkTypes(run: Run): string[] {
+  const marks: string[] = [];
+  for (const content of run.content) {
+    if (content.type === 'footnoteRefMark') marks.push('footnote');
+    else if (content.type === 'endnoteRefMark') marks.push('endnote');
+  }
+  return marks;
+}
+
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null
 ): Attrs | null {
   const units = runToUnits(run, styleFormatting, styleResolver);
-  if (
-    units.some(
-      (unit) =>
-        unit.kind !== 'text' && unit.embedKind !== 'noteRef' && unit.embedKind !== 'noteRefMark'
-    )
-  ) {
-    return null;
-  }
+  if (units.some((unit) => unit.kind !== 'text' && unit.embedKind !== 'noteRef')) return null;
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
-  const mark = units.find((unit) => unit.kind === 'embed' && unit.embedKind === 'noteRefMark');
+  const marks = noteRefMarkTypes(run);
   const text = units
     .map((unit) => {
       if (unit.kind === 'text') return unit.text;
-      if (unit.embedKind === 'noteRefMark') return '';
       const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
       return String(id ?? '');
     })
@@ -751,7 +751,7 @@ function runBoundary(
   const key = keys[0];
   return {
     text,
-    ...(mark?.kind === 'embed' ? { noteMark: mark.payload.noteType } : {}),
+    ...(marks.length > 0 ? { noteMarks: marks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
     ...(run.formatting ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),

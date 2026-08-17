@@ -1213,16 +1213,6 @@ fn note_ref_unit(
         }),
         &all_marks,
         comment_id,
-        utf16_len(&js_string(id)),
-    )
-}
-
-fn note_ref_mark_unit(note_type: &str, marks: &[Mark], comment_id: Option<String>) -> InlineUnit {
-    embed_unit(
-        "noteRefMark",
-        map_from_value(json!({ "noteType": note_type })),
-        marks,
-        comment_id,
         1,
     )
 }
@@ -1332,8 +1322,6 @@ fn run_content_to_units(
             .map(|id| note_ref_unit(id, "endnote", marks, comment_id))
             .into_iter()
             .collect(),
-        "footnoteRefMark" => vec![note_ref_mark_unit("footnote", marks, comment_id)],
-        "endnoteRefMark" => vec![note_ref_mark_unit("endnote", marks, comment_id)],
         _ => vec![],
     }
 }
@@ -1578,6 +1566,21 @@ fn paragraph_style_formatting(
     merge_text_formatting(style.as_ref(), extra)
 }
 
+/// Note number marks carry no story unit, so the run boundary cache is the only
+/// place a saved paragraph can learn they were there.
+fn note_ref_mark_types(run: &Value) -> Vec<Value> {
+    array(field(Some(run), "content"))
+        .iter()
+        .filter_map(
+            |content| match string(field(Some(content), "type")).unwrap_or_default() {
+                "footnoteRefMark" => Some(Value::String("footnote".to_owned())),
+                "endnoteRefMark" => Some(Value::String("endnote".to_owned())),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 fn run_boundary(
     run: &Value,
     style_formatting: Option<&Value>,
@@ -1585,9 +1588,10 @@ fn run_boundary(
     source: &BTreeMap<String, String>,
 ) -> Option<Value> {
     let units = run_to_units(run, style_formatting, styles, None, &[], source);
-    if units.iter().any(|unit| {
-        matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef" && kind != "noteRefMark")
-    }) {
+    if units
+        .iter()
+        .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
+    {
         return None;
     }
     let keys: Vec<_> = units.iter().map(|unit| marks_key(&unit.marks)).collect();
@@ -1601,7 +1605,6 @@ fn run_boundary(
         .iter()
         .map(|unit| match &unit.content {
             UnitContent::Text(text) => text.clone(),
-            UnitContent::Embed { kind, .. } if kind == "noteRefMark" => String::new(),
             UnitContent::Embed { payload, .. } => payload
                 .get("footnoteRefId")
                 .or_else(|| payload.get("endnoteRefId"))
@@ -1609,16 +1612,11 @@ fn run_boundary(
                 .unwrap_or_default(),
         })
         .collect::<String>();
-    let note_mark = units.iter().find_map(|unit| match &unit.content {
-        UnitContent::Embed { kind, payload } if kind == "noteRefMark" => {
-            payload.get("noteType").cloned()
-        }
-        _ => None,
-    });
+    let note_marks = note_ref_mark_types(run);
     let mut boundary = Map::new();
     boundary.insert("text".to_owned(), Value::String(text));
-    if let Some(note_mark) = note_mark {
-        boundary.insert("noteMark".to_owned(), note_mark);
+    if !note_marks.is_empty() {
+        boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
     }
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
@@ -3171,36 +3169,43 @@ mod tests {
     }
 
     #[test]
-    fn note_ref_marks_seed_as_embeds_that_keep_their_run_marks() {
-        let marks = vec![mark(
-            "runStyle",
-            ordered_object([("styleId", Value::String("FootnoteReference".into()))]),
-        )];
+    fn note_ref_marks_seed_no_story_unit_and_land_in_the_run_boundary() {
+        let styles = StyleResolver::new(None);
         for (content_type, note_type) in [
             ("footnoteRefMark", "footnote"),
             ("endnoteRefMark", "endnote"),
         ] {
-            let units = run_content_to_units(
-                &json!({ "type": content_type }),
-                &marks,
-                None,
-                &BTreeMap::new(),
-            );
-            assert_eq!(units.len(), 1);
-            let UnitContent::Embed { kind, payload } = &units[0].content else {
-                panic!("{content_type} must seed an embed");
-            };
-            assert_eq!(kind, "noteRefMark");
+            let run = json!({
+                "type": "run",
+                "formatting": { "styleId": "FootnoteReference" },
+                "content": [{ "type": content_type }, { "type": content_type }],
+            });
+            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
+            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
             assert_eq!(
-                payload.get("noteType"),
-                Some(&Value::String(note_type.into()))
+                boundary.get("noteMarks"),
+                Some(&json!([note_type, note_type]))
             );
-            assert_eq!(units[0].pm_size, 1);
-            assert_eq!(
-                units[0].attrs.get("runStyle"),
-                Some(&json!({ "styleId": "FootnoteReference" }))
-            );
+            assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
         }
+    }
+
+    #[test]
+    fn multi_digit_note_references_seed_one_position() {
+        let styles = StyleResolver::new(None);
+        let units = run_to_units(
+            &json!({
+                "type": "run",
+                "content": [{ "type": "footnoteRef", "id": 12 }],
+            }),
+            None,
+            &styles,
+            None,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].pm_size, 1);
     }
 
     #[test]
