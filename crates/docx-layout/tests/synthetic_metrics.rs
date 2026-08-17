@@ -479,3 +479,107 @@ fn indented_fallback_accepts_overflow_instead_of_guessing_wraps() {
     assert!(fallback.lines[0].width > 100.0);
     assert!(fallback.lines[0].width > 60.0);
 }
+
+/// `w:line="560"` at `w:lineRule="exact"` — 28pt, the pitch of a Chinese
+/// official-document title (issue #204).
+const EXACT_LINE_PX: f64 = 560.0 / 20.0 * 96.0 / 72.0;
+const TITLE_PT: f64 = 22.0;
+const TITLE_PX: f64 = TITLE_PT * 96.0 / 72.0;
+
+fn hard_break_paragraph(spacing: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+            { "kind": "text", "text": "第一行", "fontSize": TITLE_PT },
+            { "kind": "lineBreak" },
+            { "kind": "text", "text": "第二行", "fontSize": TITLE_PT }
+        ],
+        "attrs": { "defaultFontSize": TITLE_PT, "spacing": spacing }
+    })
+}
+
+#[test]
+fn hard_break_splits_the_fallback_line_under_every_rule() {
+    for (spacing, pitch) in [
+        (
+            serde_json::json!({ "line": EXACT_LINE_PX, "lineRule": "exact" }),
+            EXACT_LINE_PX,
+        ),
+        (
+            serde_json::json!({ "line": EXACT_LINE_PX, "lineRule": "atLeast" }),
+            EXACT_LINE_PX,
+        ),
+        (serde_json::json!({}), TITLE_PX * 1.15),
+    ] {
+        let what = spacing.to_string();
+        docx_layout::clear_measure_fonts();
+        let extent = measure_paragraph(
+            hard_break_paragraph(spacing.clone()),
+            CONTENT_WIDTH,
+            &fallback_config(),
+        )
+        .expect("fallback measures");
+
+        assert_eq!(extent.lines.len(), 2, "{what}");
+        assert_eq!(
+            (extent.lines[0].head_run, extent.lines[0].tail_run),
+            (0, 1),
+            "{what}"
+        );
+        assert_eq!(
+            (extent.lines[1].head_run, extent.lines[1].tail_run),
+            (2, 2),
+            "{what}"
+        );
+        for line in &extent.lines {
+            assert!(
+                (line.line_height - pitch).abs() < 0.01,
+                "{what}: line height {} is not the ruled {pitch}",
+                line.line_height
+            );
+            assert!((line.width - 3.0 * TITLE_PX).abs() < 0.01, "{what}");
+        }
+        assert!((extent.total_height - 2.0 * pitch).abs() < 0.01, "{what}");
+
+        let runs = text_runs(&display_list_without_faces(
+            hard_break_paragraph(spacing),
+            CONTENT_WIDTH,
+        ));
+        assert_eq!(runs.len(), 2, "{what}");
+        assert!(
+            (runs[1].0 - runs[0].0 - pitch).abs() < 0.01,
+            "{what}: baselines {} and {} are not {pitch} apart",
+            runs[0].0,
+            runs[1].0
+        );
+        assert!((runs[0].1 - runs[1].1).abs() < 0.01, "{what}");
+    }
+}
+
+#[test]
+fn trailing_hard_break_adds_an_empty_fallback_line() {
+    let paragraph = serde_json::json!({
+        "kind": "paragraph",
+        "id": 0,
+        "runs": [
+            { "kind": "text", "text": "第一行", "fontSize": TITLE_PT },
+            { "kind": "lineBreak" }
+        ],
+        "attrs": { "defaultFontSize": TITLE_PT }
+    });
+    docx_layout::clear_measure_fonts();
+    let extent =
+        measure_paragraph(paragraph, CONTENT_WIDTH, &fallback_config()).expect("fallback measures");
+
+    assert_eq!(extent.lines.len(), 2);
+    assert_eq!(
+        (
+            extent.lines[1].head_run,
+            extent.lines[1].tail_run,
+            extent.lines[1].tail_char
+        ),
+        (2, 2, 0)
+    );
+    assert_eq!(extent.lines[1].width, 0.0);
+}
