@@ -729,10 +729,23 @@ fn rewrite_defined_name(
             continue;
         }
         let Ok(expr) = parse_formula(component) else {
-            if global && mentions_unqualified_reference(component) {
-                return DefinedNameRewrite::Ambiguous;
+            match rewrite_reference_tokens(component, op, matches_target, global) {
+                DefinedNameRewrite::Unchanged => {
+                    rewritten.push(component.to_owned());
+                    continue;
+                }
+                DefinedNameRewrite::Rewritten(component) => {
+                    changed = true;
+                    rewritten.push(component);
+                    continue;
+                }
+                DefinedNameRewrite::Unsupported
+                    if global && mentions_unqualified_reference(component) =>
+                {
+                    return DefinedNameRewrite::Ambiguous;
+                }
+                refusal => return refusal,
             }
-            return DefinedNameRewrite::Unsupported;
         };
         if global && contains_unqualified_reference(&expr) {
             return DefinedNameRewrite::Ambiguous;
@@ -753,6 +766,223 @@ fn rewrite_defined_name(
         return DefinedNameRewrite::Unchanged;
     }
     DefinedNameRewrite::Rewritten(format!("{prefix}{}", rewritten.join(",")))
+}
+
+/// error literals, which name no cell and so survive any structural edit.
+const ERROR_LITERALS: &[&str] = &[
+    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#SPILL!",
+];
+
+/// A reference the token scanner read: the span it occupies, its sheet
+/// qualifier text and the sheet that binds it, and the address after it.
+struct ReferenceToken<'a> {
+    span: core::ops::Range<usize>,
+    qualifier: &'a str,
+    sheet: Option<String>,
+    address: &'a str,
+}
+
+/// What sits at one position of a component the formula parser rejected.
+enum Scanned<'a> {
+    /// a token that names no cell; resume at this offset.
+    Skip(usize),
+    Reference(ReferenceToken<'a>),
+    /// neither, so nothing can be said about what the component references.
+    Unreadable,
+}
+
+/// An address the scanner recognised.
+enum Address<'a> {
+    Cell(CellRef),
+    Span(CellRange),
+    Axis(AxisRange<'a>),
+}
+
+/// Rewrites a component the formula parser cannot read by remapping its
+/// references one token at a time. Whole-axis references, `Sheet!#REF!`, 3-D
+/// qualifiers and the range operator applied to a call all defeat the lexer,
+/// yet each is ordinary in a defined name, so the component is scanned with
+/// the same tokenizer `mentions_sheet` uses and every address it holds is
+/// moved by the same rules the parsed path applies. A token the scan cannot
+/// classify still refuses the edit.
+fn rewrite_reference_tokens(
+    source: &str,
+    op: &Op,
+    matches_target: &dyn Fn(&Option<String>) -> bool,
+    global: bool,
+) -> DefinedNameRewrite {
+    let bytes = source.as_bytes();
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = skip_string(source, index);
+                continue;
+            }
+            b'#' => match error_literal_end(source, index) {
+                Some(end) => {
+                    index = end;
+                    continue;
+                }
+                None => return DefinedNameRewrite::Unsupported,
+            },
+            // external and structured references, which the scanner does not read.
+            b'[' | b']' => return DefinedNameRewrite::Unsupported,
+            _ => {}
+        }
+        let token = match scan_reference(source, index) {
+            Scanned::Skip(end) => {
+                index = end;
+                continue;
+            }
+            Scanned::Unreadable => return DefinedNameRewrite::Unsupported,
+            Scanned::Reference(token) => token,
+        };
+        index = token.span.end;
+        match remap_reference_token(&token, op, matches_target, global) {
+            DefinedNameRewrite::Unchanged => {}
+            DefinedNameRewrite::Rewritten(text) => {
+                out.push_str(&source[copied..token.span.start]);
+                out.push_str(&text);
+                copied = token.span.end;
+            }
+            refusal => return refusal,
+        }
+    }
+    if copied == 0 {
+        return DefinedNameRewrite::Unchanged;
+    }
+    out.push_str(&source[copied..]);
+    DefinedNameRewrite::Rewritten(out)
+}
+
+/// Reads the token at `index`: a reference, a token that names no cell, or
+/// something the scanner cannot classify.
+fn scan_reference(source: &str, index: usize) -> Scanned<'_> {
+    let bytes = source.as_bytes();
+    let Some(first) = parse_sheet_token(source, index) else {
+        return Scanned::Skip(index + next_char_len(source, index));
+    };
+    let qualified = if bytes.get(first.end) == Some(&b'!') {
+        Some((first.end + 1, first.name.clone()))
+    } else if bytes.get(first.end) == Some(&b':')
+        && let Some(second) = parse_sheet_token(source, first.end + 1)
+        && bytes.get(second.end) == Some(&b'!')
+    {
+        Some((second.end + 1, format!("{}:{}", first.name, second.name)))
+    } else {
+        None
+    };
+    let (start, sheet) = match qualified {
+        Some((start, sheet)) => (start, Some(sheet)),
+        None if is_function_call(source, &first) => return Scanned::Skip(first.end),
+        None => (index, None),
+    };
+    if sheet.is_some() && bytes.get(start) == Some(&b'#') {
+        // `Sheet!#REF!` is what Excel leaves behind; it names nothing to move.
+        return match error_literal_end(source, start) {
+            Some(end) => Scanned::Skip(end),
+            None => Scanned::Unreadable,
+        };
+    }
+    let Some(end) = address_end(source, start) else {
+        return Scanned::Unreadable;
+    };
+    Scanned::Reference(ReferenceToken {
+        span: index..end,
+        qualifier: &source[index..start],
+        sheet,
+        address: &source[start..end],
+    })
+}
+
+/// The end of the address at `start`: one endpoint, or two joined by `:` when
+/// the second is an endpoint rather than a call or another sheet qualifier.
+fn address_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let first = parse_sheet_token(source, start)?;
+    if bytes.get(first.end) != Some(&b':') {
+        return Some(first.end);
+    }
+    let Some(second) = parse_sheet_token(source, first.end + 1) else {
+        return Some(first.end);
+    };
+    if bytes.get(second.end) == Some(&b'!') || is_function_call(source, &second) {
+        return Some(first.end);
+    }
+    Some(second.end)
+}
+
+/// The end of the error literal at `index`, or `None` when `#` starts
+/// something the scanner does not know.
+fn error_literal_end(source: &str, index: usize) -> Option<usize> {
+    let rest = &source[index..];
+    ERROR_LITERALS
+        .iter()
+        .find(|literal| {
+            rest.get(..literal.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(literal))
+        })
+        .map(|literal| index + literal.len())
+}
+
+fn classify_address(address: &str) -> Option<Address<'_>> {
+    if let Ok(cell) = CellRef::parse_a1(address) {
+        return Some(Address::Cell(cell));
+    }
+    if let Ok(span) = CellRange::parse_a1(address) {
+        return Some(Address::Span(span));
+    }
+    AxisRange::parse(address).map(Address::Axis)
+}
+
+/// Moves one scanned reference. A token that is a defined name rather than an
+/// address stays put, as it does on the parsed path.
+fn remap_reference_token(
+    token: &ReferenceToken<'_>,
+    op: &Op,
+    matches_target: &dyn Fn(&Option<String>) -> bool,
+    global: bool,
+) -> DefinedNameRewrite {
+    let Some(address) = classify_address(token.address) else {
+        return DefinedNameRewrite::Unchanged;
+    };
+    if global && token.sheet.is_none() {
+        // a workbook name's unqualified reference binds to whichever sheet is
+        // active, so only an edit that cannot reach it is safe to wave through.
+        let reachable = match &address {
+            Address::Axis(axis) => axis.axis.is_edited_by(op),
+            _ => true,
+        };
+        if reachable {
+            return DefinedNameRewrite::Ambiguous;
+        }
+    }
+    if !matches_target(&token.sheet) {
+        return DefinedNameRewrite::Unchanged;
+    }
+    let moved = match &address {
+        Address::Cell(cell) => match remap_cell(*cell, op) {
+            Remapped::Unchanged => return DefinedNameRewrite::Unchanged,
+            Remapped::Moved(cell) => format!("{}{}", token.qualifier, cell.to_a1()),
+            Remapped::Deleted => ErrorValue::Ref.as_str().to_owned(),
+        },
+        Address::Span(span) => match remap_span(*span, op) {
+            Remapped::Unchanged => return DefinedNameRewrite::Unchanged,
+            Remapped::Moved(span) => format!("{}{}", token.qualifier, span.to_a1()),
+            Remapped::Deleted => ErrorValue::Ref.as_str().to_owned(),
+        },
+        Address::Axis(axis) => match axis.shifted(op) {
+            Remapped::Unchanged => return DefinedNameRewrite::Unchanged,
+            Remapped::Moved((start, end)) => {
+                format!("{}{}", token.qualifier, axis.to_formula(start, end))
+            }
+            Remapped::Deleted => ErrorValue::Ref.as_str().to_owned(),
+        },
+    };
+    DefinedNameRewrite::Rewritten(moved)
 }
 
 fn contains_unqualified_reference(expr: &Expr) -> bool {
@@ -897,7 +1127,15 @@ impl<'a> AxisRange<'a> {
         op: &Op,
         matches_target: &dyn Fn(&Option<String>) -> bool,
     ) -> Remapped<(u32, u32)> {
-        if !matches_target(&self.sheet) || !self.axis.is_edited_by(op) {
+        if !matches_target(&self.sheet) {
+            return Remapped::Unchanged;
+        }
+        self.shifted(op)
+    }
+
+    /// The remap of an axis span already known to sit on the edited sheet.
+    fn shifted(&self, op: &Op) -> Remapped<(u32, u32)> {
+        if !self.axis.is_edited_by(op) {
             return Remapped::Unchanged;
         }
         let (start, end) = match *op {
@@ -1738,11 +1976,7 @@ mod tests {
     #[test]
     fn unrewritable_chart_reference_aimed_at_the_edited_sheet_refuses_the_edit() {
         let mut w = wb(&["Data"]);
-        charted(
-            &mut w,
-            SheetId(0),
-            &["OFFSET(Data!$A$1,0,0,COUNTA(Data!$A:$A),1)"],
-        );
+        charted(&mut w, SheetId(0), &["SUM(Data!Table1[Amount])"]);
         let original = w.clone();
         let error = remap_charts(
             &mut w,
@@ -2290,15 +2524,227 @@ mod tests {
         );
     }
 
-    /// A whole-axis reference nested in a call is beyond the rewriter, and
-    /// leaving it stale is exactly what this refuses to do.
+    /// The ops a name is tested against: one far below any data, then a shift
+    /// and a collapse on each axis.
+    fn grid_edits() -> [Op; 5] {
+        [
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 9998,
+                count: 1,
+            },
+            insert_rows(0, 0, 1),
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        ]
+    }
+
+    /// Whole-axis references nested in a call, the range operator applied to a
+    /// call, and the `Sheet!#REF!` Excel leaves behind after a deletion all
+    /// defeat the formula parser, so every edit on a sheet an ordinary name
+    /// mentioned used to be refused — even one far below the last row.
+    #[test]
+    fn names_the_formula_parser_cannot_read_move_with_the_grid() {
+        let cases: &[(&str, [&str; 5])] = &[
+            (
+                "SUM(Data!$A:$A)",
+                [
+                    "SUM(Data!$A:$A)",
+                    "SUM(Data!$A:$A)",
+                    "SUM(Data!$A:$A)",
+                    "SUM(Data!$B:$B)",
+                    "SUM(#REF!)",
+                ],
+            ),
+            (
+                "COUNTA(Data!$A:$A)",
+                [
+                    "COUNTA(Data!$A:$A)",
+                    "COUNTA(Data!$A:$A)",
+                    "COUNTA(Data!$A:$A)",
+                    "COUNTA(Data!$B:$B)",
+                    "COUNTA(#REF!)",
+                ],
+            ),
+            (
+                "SUM(Data!$1:$1)",
+                [
+                    "SUM(Data!$1:$1)",
+                    "SUM(Data!$2:$2)",
+                    "SUM(#REF!)",
+                    "SUM(Data!$1:$1)",
+                    "SUM(Data!$1:$1)",
+                ],
+            ),
+            (
+                "Data!$A$1:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))",
+                [
+                    "Data!$A$1:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))",
+                    "Data!$A$2:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))",
+                    "#REF!:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))",
+                    "Data!$B$1:INDEX(Data!$B:$B,COUNTA(Data!$B:$B))",
+                    "#REF!:INDEX(#REF!,COUNTA(#REF!))",
+                ],
+            ),
+            (
+                "Data!$A$1:INDEX(Data!$A$1:$A$100,COUNTA(Data!$A$1:$A$100))",
+                [
+                    "Data!$A$1:INDEX(Data!$A$1:$A$100,COUNTA(Data!$A$1:$A$100))",
+                    "Data!$A$2:INDEX(Data!$A$2:$A$101,COUNTA(Data!$A$2:$A$101))",
+                    "#REF!:INDEX(Data!$A$1:$A$99,COUNTA(Data!$A$1:$A$99))",
+                    "Data!$B$1:INDEX(Data!$B$1:$B$100,COUNTA(Data!$B$1:$B$100))",
+                    "#REF!:INDEX(#REF!,COUNTA(#REF!))",
+                ],
+            ),
+            (
+                "Data!#REF!",
+                [
+                    "Data!#REF!",
+                    "Data!#REF!",
+                    "Data!#REF!",
+                    "Data!#REF!",
+                    "Data!#REF!",
+                ],
+            ),
+        ];
+
+        for (formula, expected) in cases {
+            for (op, expected) in grid_edits().iter().zip(expected) {
+                let mut workbook = wb(&["Data", "Other"]);
+                workbook.defined_names = vec![defined("Region", formula)];
+                remap_defined_names(&mut workbook, op)
+                    .unwrap_or_else(|error| panic!("{formula} under {op:?}: {error:?}"));
+                assert_eq!(
+                    workbook.defined_names[0].formula, *expected,
+                    "{formula} under {op:?}"
+                );
+            }
+        }
+    }
+
+    /// A name scoped to the edited sheet resolves its unqualified references
+    /// against that sheet, so the same forms move without a qualifier.
+    #[test]
+    fn scoped_names_the_formula_parser_cannot_read_move_with_the_grid() {
+        let cases: &[(&str, [&str; 5])] = &[
+            (
+                "SUM($A:$A)",
+                [
+                    "SUM($A:$A)",
+                    "SUM($A:$A)",
+                    "SUM($A:$A)",
+                    "SUM($B:$B)",
+                    "SUM(#REF!)",
+                ],
+            ),
+            (
+                "OFFSET($A$1,0,0,COUNTA($A:$A),1)",
+                [
+                    "OFFSET($A$1,0,0,COUNTA($A:$A),1)",
+                    "OFFSET($A$2,0,0,COUNTA($A:$A),1)",
+                    "OFFSET(#REF!,0,0,COUNTA($A:$A),1)",
+                    "OFFSET($B$1,0,0,COUNTA($B:$B),1)",
+                    "OFFSET(#REF!,0,0,COUNTA(#REF!),1)",
+                ],
+            ),
+        ];
+
+        for (formula, expected) in cases {
+            for (op, expected) in grid_edits().iter().zip(expected) {
+                let mut workbook = wb(&["Data", "Other"]);
+                workbook.defined_names = vec![DefinedName {
+                    local_sheet: Some(SheetId(0)),
+                    ..defined("Region", formula)
+                }];
+                remap_defined_names(&mut workbook, op)
+                    .unwrap_or_else(|error| panic!("{formula} under {op:?}: {error:?}"));
+                assert_eq!(
+                    workbook.defined_names[0].formula, *expected,
+                    "{formula} under {op:?}"
+                );
+            }
+        }
+    }
+
+    /// A workbook name's unqualified reference binds to whichever sheet is
+    /// active, so it is still refused — unless the edit provably cannot reach
+    /// it, as a row edit cannot reach a whole-column reference.
+    #[test]
+    fn unqualified_references_in_workbook_names_stay_ambiguous() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![defined("Region", "OFFSET($A$1,0,0,COUNTA($A:$A),1)")];
+        let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();
+        assert!(matches!(error, OpError::DefinedNameNotRewritable { .. }));
+
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![defined("Region", "SUM($A:$A)")];
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "SUM($A:$A)");
+    }
+
+    /// Three-dimensional qualifiers and a leading `=` survive the token
+    /// rewriter, and a reference aimed off the edited sheet stays put.
+    #[test]
+    fn the_token_rewriter_keeps_qualifiers_it_did_not_move() {
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![
+            defined("Span", "SUM(Data:Other!$A$1,'My Book'!$A:$A)"),
+            defined("Prefixed", "=SUM(Data!$1:$1)"),
+            defined("Elsewhere", "SUM(Other!$1:$1)"),
+        ];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "SUM(Data:Other!$A$2,'My Book'!$A:$A)"
+        );
+        assert_eq!(workbook.defined_names[1].formula, "=SUM(Data!$2:$2)");
+        assert_eq!(workbook.defined_names[2].formula, "SUM(Other!$1:$1)");
+    }
+
+    /// Sheet names are not ascii, and neither are the qualifiers built from
+    /// them; the scanner reads whole characters rather than bytes.
+    #[test]
+    fn the_token_rewriter_reads_non_ascii_sheet_names() {
+        let mut workbook = wb(&["Ümsätze", "Other"]);
+        workbook.defined_names = vec![
+            defined(
+                "Rows",
+                "Ümsätze!$A$1:INDEX(Ümsätze!$A:$A,COUNTA(Ümsätze!$A:$A))",
+            ),
+            defined("Odd", "SUM(Ümsätze!$1:$1,\"Ümsätze!$A$1\")"),
+        ];
+
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "Ümsätze!$A$2:INDEX(Ümsätze!$A:$A,COUNTA(Ümsätze!$A:$A))"
+        );
+        assert_eq!(
+            workbook.defined_names[1].formula,
+            "SUM(Ümsätze!$2:$2,\"Ümsätze!$A$1\")"
+        );
+    }
+
+    /// A structured table reference is beyond the rewriter, and leaving it
+    /// stale is exactly what this refuses to do.
     #[test]
     fn unrewritable_name_aimed_at_the_edited_sheet_refuses_the_edit() {
         let mut workbook = wb(&["Data", "Other"]);
-        workbook.defined_names = vec![defined(
-            "Dynamic",
-            "OFFSET(Data!$A$1,0,0,COUNTA(Data!$A:$A),1)",
-        )];
+        workbook.defined_names = vec![defined("Dynamic", "SUM(Data!Table1[Amount])")];
         let original = workbook.clone();
 
         let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();
@@ -2336,7 +2782,7 @@ mod tests {
         let mut workbook = wb(&["Data"]);
         workbook.defined_names = vec![DefinedName {
             local_sheet: Some(SheetId(0)),
-            ..defined("Dynamic", "OFFSET($A$1,0,0,COUNTA($A:$A),1)")
+            ..defined("Dynamic", "SUM(Table1[Amount])")
         }];
 
         let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();
@@ -2346,8 +2792,8 @@ mod tests {
     #[test]
     fn structural_edits_refuse_defined_names_that_would_outgrow_the_length_cap() {
         let mut workbook = wb(&["Data"]);
-        let padding = "+0".repeat((MAX_FORMULA_BYTES - 16) / 2);
-        workbook.defined_names = vec![defined("Long", &format!("Data!$A$9{padding}"))];
+        let padding = "+0".repeat((MAX_FORMULA_BYTES - 10) / 2);
+        workbook.defined_names = vec![defined("Long", &format!("Data!$A$99{padding}"))];
         let original = workbook.clone();
 
         let error = remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap_err();

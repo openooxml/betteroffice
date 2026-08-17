@@ -492,6 +492,77 @@ fn structural_edits_rewrite_defined_names_through_save_and_undo() {
     assert_eq!(workbook.model().defined_names, before);
 }
 
+/// A workbook whose names use the dynamic-range idiom: a whole-column
+/// reference inside a call, and the range operator applied to `INDEX`. Neither
+/// is anything the formula parser reads, and every row and column edit on the
+/// sheet they name used to be refused because of it.
+fn dynamic_range_names_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="Rows">Data!$A$1:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))</definedName><definedName name="Header">SUM(Data!$1:$1)</definedName><definedName name="Stranded">Data!#REF!</definedName></definedNames></workbook>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn structural_edits_rewrite_dynamic_range_names_through_save_and_undo() {
+    let mut workbook = Workbook::open(&dynamic_range_names_fixture()).unwrap();
+    let before = workbook.model().defined_names.clone();
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 9998,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+
+    let formula = |name: &str| {
+        workbook
+            .model()
+            .defined_names
+            .iter()
+            .find(|defined| defined.name == name)
+            .unwrap()
+            .formula
+            .clone()
+    };
+    assert_eq!(
+        formula("Rows"),
+        "Data!$A$2:INDEX(Data!$A:$A,COUNTA(Data!$A:$A))"
+    );
+    assert_eq!(formula("Header"), "SUM(Data!$2:$2)");
+    assert_eq!(formula("Stranded"), "Data!#REF!");
+
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().defined_names,
+        workbook.model().defined_names
+    );
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().defined_names, before);
+}
+
 #[test]
 fn structural_edits_refuse_ambiguous_workbook_name_bindings() {
     let mut model = WorkbookModel::default();
