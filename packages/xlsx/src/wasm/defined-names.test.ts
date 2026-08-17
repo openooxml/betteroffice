@@ -2,7 +2,9 @@
  * Structural edits beside a dynamic-range defined name, across the wasm
  * boundary: the whole-column reference inside `COUNTA` and the range operator
  * applied to `INDEX` are both beyond the formula parser, and used to refuse
- * every row and column edit on the sheet they name.
+ * every row and column edit on the sheet they name. The spill `#`, the
+ * implicit intersection `@` and a range written around whitespace are beyond
+ * it too, and used to be saved on their pre-edit addresses.
  */
 
 import { beforeAll, describe, expect, it } from 'bun:test';
@@ -58,6 +60,33 @@ describe('wasm defined names', () => {
 
       handle.undo();
       expect(zipEntry(handle.save(), 'xl/workbook.xml')).toContain('SUM(Data!$1:$1)');
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('moves the reference operators the formula parser cannot read', () => {
+    const handle = openWorkbook(fixtureBytes());
+    try {
+      expect(handle.applyOps([{ type: 'insertRows', sheet: 0, at: 0, count: 1 }]).applied).toBe(
+        true
+      );
+      const workbookXml = zipEntry(handle.save(), 'xl/workbook.xml');
+      expect(workbookXml).toContain('SUM(Data!A2#)');
+      expect(workbookXml).toContain('SUM(@Data!A2)');
+      expect(workbookXml).toContain('Data!A2: Data!B3');
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('clips a range written around whitespace as one span', () => {
+    const handle = openWorkbook(fixtureBytes());
+    try {
+      expect(handle.applyOps([{ type: 'deleteRows', sheet: 0, at: 0, count: 1 }]).applied).toBe(
+        true
+      );
+      expect(zipEntry(handle.save(), 'xl/workbook.xml')).toContain('Data!A1: Data!B1');
     } finally {
       handle.dispose();
     }
