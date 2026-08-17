@@ -538,6 +538,89 @@ fn a_missing_chart_target_freezes_structural_edits() {
     assert_structural_edits_are_refused(&ooxml_opc::rezip_parts(&parts).unwrap());
 }
 
+/// An anchor that names a chart relationship the drawing rels never resolve,
+/// with no chart part or content type left to veto on its behalf, is a frame
+/// this crate cannot model, and its drawing is what a save would strand.
+#[test]
+fn an_anchor_whose_chart_relationship_is_unresolved_freezes_structural_edits() {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    parts.retain(|(path, _)| path != CHART_PART);
+    rewrite_part(&mut parts, DRAWING_RELS, |text| {
+        text.replace(
+            r#"<Relationship Id="rIdChart2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/>"#,
+            "",
+        )
+    });
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#,
+            "",
+        )
+    });
+    let package = ooxml_opc::rezip_parts(&parts).unwrap();
+    assert_eq!(
+        Workbook::open(&package)
+            .unwrap()
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .charts
+            .len(),
+        3
+    );
+    assert_structural_edits_are_refused(&package);
+}
+
+/// A declined chart target that another discovery already inventoried with
+/// resolved areas has to be widened to name everything, not left as it was:
+/// the pivot reader saw one cell, the chart reader saw nothing it could hold.
+#[test]
+fn a_declined_target_widens_an_entry_another_reader_resolved() {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    parts.retain(|(path, _)| path != CHART_PART);
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            r#"<Override PartName="/xl/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#,
+            "",
+        )
+    });
+    const PIVOT: &str = "xl/pivotCache/pivotCacheDefinition1.xml";
+    set_part(
+        &mut parts,
+        PIVOT,
+        br#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource sheet="Charts" ref="A1"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    );
+    rewrite_part(&mut parts, DRAWING_RELS, |text| {
+        text.replace(
+            r#"Target="../charts/chart2.xml"/>"#,
+            r#"Target="../pivotCache/pivotCacheDefinition1.xml"/>"#,
+        )
+    });
+    rewrite_part(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            "</Types>",
+            r#"<Override PartName="/xl/pivotCache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#,
+        )
+    });
+    let package = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&package).unwrap();
+    assert_eq!(workbook.model().sheet(SheetId(0)).unwrap().charts.len(), 3);
+    // an insert past A1 moves nothing the pivot named, so only the widened
+    // entry can refuse it
+    let refused = workbook.apply_ops(
+        vec![Op::InsertRows {
+            sheet: SheetId(0),
+            at: 1,
+            count: 1,
+        }],
+        CalculationOptions::default(),
+    );
+    assert!(
+        refused.is_err(),
+        "insert past the pivot's one cell was applied"
+    );
+}
+
 /// Drawing relationships are reparsed by every real save, so opening over one
 /// this crate cannot read would hand back a workbook that accepts an edit and
 /// then refuses to write it. The open is where that can still be acted on.

@@ -285,12 +285,13 @@ pub(crate) fn parse_sheet_charts(
             continue;
         };
         for (index, anchor) in anchors.into_iter().enumerate() {
-            let Some(part) = anchor
-                .chart_rel
-                .as_deref()
-                .and_then(|id| relationship_target(&drawing_rels, id, TYPE_CHART))
+            let Some(rel_id) = anchor.chart_rel.as_deref() else {
+                continue;
+            };
+            let Some(part) = relationship_target(&drawing_rels, rel_id, TYPE_CHART)
                 .map(|target| resolve_part_path(&drawing_dir, target))
             else {
+                declined.push(drawing_path.clone());
                 continue;
             };
             let Some(chart_xml) = find_part(parts, &part) else {

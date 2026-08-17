@@ -159,11 +159,12 @@ pub(crate) fn unpatchable_references(
     // a package that bears no other reference, and because a walk over the parts
     // cannot see a target that is missing or unconventionally placed.
     for path in declined {
-        if references
-            .iter()
-            .all(|reference| reference.part.as_str() != path)
+        match references
+            .iter_mut()
+            .find(|reference| reference.part.as_str() == path)
         {
-            references.push(bound(path.clone(), None, workbook));
+            Some(reference) => reference.areas = None,
+            None => references.push(bound(path.clone(), None, workbook)),
         }
     }
     Ok(references)
