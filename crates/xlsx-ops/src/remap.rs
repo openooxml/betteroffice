@@ -1305,6 +1305,7 @@ fn split_union(source: &str) -> Option<Vec<&str>> {
     while index < bytes.len() {
         match bytes[index] {
             b'"' => index = skip_string(source, index),
+            b'{' => index = skip_array_constant(source, index)?,
             b'\'' => index = parse_sheet_token(source, index)?.end,
             b'(' | b'[' => {
                 depth += 1;
@@ -3046,6 +3047,25 @@ mod tests {
         let mut workbook = wb(&["Data"]);
         workbook.defined_names = vec![defined("Open", "SUM(Data!$1:$1,{1,2")];
         assert!(remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).is_err());
+
+        // at the top of a name, where the union splitter sees the commas first
+        for (formula, expected) in [
+            ("Data!$1:$1+{1,2,3}", "Data!$2:$2+{1,2,3}"),
+            ("{1,2,3}", "{1,2,3}"),
+        ] {
+            let mut workbook = wb(&["Data", "Other"]);
+            workbook.defined_names = vec![defined("Arr", formula)];
+            remap_defined_names(&mut workbook, &insert_rows(0, 0, 1))
+                .unwrap_or_else(|error| panic!("{formula}: {error:?}"));
+            assert_eq!(workbook.defined_names[0].formula, expected, "{formula}");
+        }
+        let mut workbook = wb(&["Data"]);
+        workbook.defined_names = vec![DefinedName {
+            local_sheet: Some(SheetId(0)),
+            ..defined("Consts", "{1,2,3}")
+        }];
+        remap_defined_names(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "{1,2,3}");
     }
 
     #[test]
