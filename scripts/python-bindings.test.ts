@@ -14,6 +14,9 @@ import {
 const script = fileURLToPath(new URL('./python-bindings.mjs', import.meta.url));
 const repository = fileURLToPath(new URL('..', import.meta.url));
 const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
+const publishWorkflow = fileURLToPath(
+  new URL('../.github/workflows/publish-python-binding.yml', import.meta.url)
+);
 const ciWorkflow = fileURLToPath(new URL('../.github/workflows/ci.yml', import.meta.url));
 
 function cli(...args: string[]) {
@@ -23,6 +26,7 @@ function cli(...args: string[]) {
 }
 
 const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
+const publish = Bun.YAML.parse(readFileSync(publishWorkflow, 'utf8')) as any;
 
 describe('registry', () => {
   test('every publishable binding is a registered binding', () => {
@@ -74,7 +78,7 @@ describe('registry', () => {
 });
 
 describe('release wiring', () => {
-  test('the registry step computes each list from the registry', () => {
+  test('the registry step computes the publish list from the registry', () => {
     const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
     expect(step.run).toContain('scripts/python-bindings.mjs --publish');
 
@@ -90,31 +94,81 @@ describe('release wiring', () => {
 
     expect(result.status).toBe(0);
     expect(readFileSync(outputs, 'utf8').trim().split('\n')).toEqual([
-      `bindings=${JSON.stringify(PYTHON_BINDING_NAMES)}`,
       `publish=${JSON.stringify(PYTHON_PUBLISH_NAMES)}`
     ]);
   });
 
-  test('the release train exposes both lists', () => {
+  test('the release train exposes the publish list', () => {
     expect(release.jobs['python-bindings'].outputs).toEqual({
-      bindings: '${{ steps.registry.outputs.bindings }}',
       publish: '${{ steps.registry.outputs.publish }}'
     });
   });
 
-  test('builds fan out over every binding', () => {
-    expect(release.jobs['python-dist'].strategy.matrix.binding).toBe(
-      '${{ fromJSON(needs.python-bindings.outputs.bindings) }}'
-    );
+  test('the release publishes nothing to PyPI itself', () => {
+    expect(release.jobs['python-dist']).toBeUndefined();
+    const runs = JSON.stringify(release.jobs['python-pypi']);
+    expect(runs).not.toContain('pypa/gh-action-pypi-publish');
+    expect(runs).not.toContain('PYPI_API_TOKEN');
+    expect(release.jobs['python-pypi'].permissions).toEqual({ actions: 'write' });
   });
 
-  test('publishes fan out only over the opted-in bindings', () => {
-    expect(release.jobs['python-pypi'].strategy.matrix.binding).toBe(
-      '${{ fromJSON(needs.python-bindings.outputs.publish) }}'
-    );
+  test('a dispatch fans out only over the opted-in bindings', () => {
+    expect(release.jobs['python-pypi'].needs).toBe('python-bindings');
     expect(release.jobs['python-pypi'].if).toContain(
       "needs.python-bindings.outputs.publish != '[]'"
     );
+    const step = release.jobs['python-pypi'].steps[0];
+    expect(step.env.PUBLISH).toBe('${{ needs.python-bindings.outputs.publish }}');
+
+    const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
+    const log = join(directory, 'gh.log');
+    writeFileSync(join(directory, 'gh'), `#!/bin/sh\necho "$@" >> "${log}"\n`, { mode: 0o755 });
+    const path = join(directory, 'dispatch.sh');
+    writeFileSync(path, step.run);
+    const result = spawnSync('bash', ['-e', path], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        PUBLISH: JSON.stringify(PYTHON_PUBLISH_NAMES)
+      }
+    });
+
+    expect(result.status).toBe(0);
+    expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(
+      PYTHON_PUBLISH_NAMES.map(
+        (name) =>
+          `workflow run publish-python-binding.yml --ref main -f binding=${name} -f dry_run=false`
+      )
+    );
+  });
+
+  test('one failed dispatch fails the job without skipping the rest', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dispatch-fail-'));
+    const log = join(directory, 'gh.log');
+    writeFileSync(join(directory, 'gh'), `#!/bin/sh\necho "$@" >> "${log}"\nexit 1\n`, {
+      mode: 0o755
+    });
+    const path = join(directory, 'dispatch.sh');
+    writeFileSync(path, release.jobs['python-pypi'].steps[0].run);
+    const result = spawnSync('bash', ['-e', path], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        PUBLISH: JSON.stringify(PYTHON_PUBLISH_NAMES)
+      }
+    });
+
+    expect(result.status).toBe(1);
+    expect(readFileSync(log, 'utf8').trim().split('\n')).toHaveLength(PYTHON_PUBLISH_NAMES.length);
+  });
+
+  test('the dispatched workflow is the one PyPI trusts', () => {
+    expect(Object.keys(publish.on)).toEqual(['workflow_dispatch']);
+    expect(Object.keys(publish.on.workflow_dispatch.inputs)).toEqual(['binding', 'dry_run']);
+    expect(publish.jobs.publish.environment).toBe('pypi-${{ inputs.binding }}');
+    expect(publish.jobs.publish.permissions['id-token']).toBe('write');
   });
 
   test('CI installs and tests every binding, publishable or not', () => {
@@ -141,7 +195,7 @@ describe('repository-scoped token guard', () => {
   test('runs where an environment secret is invisible', () => {
     expect(job.environment).toBeUndefined();
     expect(guard.env.TOKEN).toBe('${{ secrets.PYPI_API_TOKEN }}');
-    expect(release.jobs['python-pypi'].environment).toBe('pypi-${{ matrix.binding }}');
+    expect(publish.jobs.publish.environment).toBe('pypi-${{ inputs.binding }}');
   });
 
   test('passes when no token is visible', () => {

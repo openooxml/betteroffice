@@ -29,12 +29,17 @@ export function workspacePackages() {
     .sort();
 }
 
-/** The npm packages a release uploads. */
-export function publishedPackages() {
+/** The npm packages a release uploads, with the version it would upload. */
+export function publishedPackageVersions() {
   return workspaceManifests()
     .filter((manifest) => !manifest.private && manifest.name?.startsWith('@betteroffice/'))
-    .map((manifest) => manifest.name)
-    .sort();
+    .map((manifest) => ({ name: manifest.name, version: manifest.version }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The npm packages a release uploads. */
+export function publishedPackages() {
+  return publishedPackageVersions().map((entry) => entry.name);
 }
 
 /** The crates a release uploads to crates.io. */
