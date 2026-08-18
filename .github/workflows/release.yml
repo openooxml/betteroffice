@@ -197,33 +197,24 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           status=0
-          dispatched=""
+          runs=""
           for binding in $(echo "$PUBLISH" | jq -r '.[]'); do
-            if gh workflow run publish-python-binding.yml --ref main \
-              -f binding="$binding" -f sha="$SHA" -f dry_run=false; then
-              dispatched="$dispatched $binding"
+            # From API version 2026-03-10 the dispatch returns the created run's id,
+            # so the wait below watches exactly the runs this job started.
+            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
+              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+              runs="$runs $binding:$run"
             else
+              echo "::error::Dispatching the publish of betteroffice-$binding failed."
               status=1
             fi
           done
 
-          # Every binding is dispatched before anything is waited on, so they build
-          # in parallel. The dispatch returns no run id; run-name carries the match.
-          for binding in $dispatched; do
-            run=""
-            for _ in $(seq 30); do
-              run=$(gh run list --workflow publish-python-binding.yml --event workflow_dispatch \
-                --limit 50 --json databaseId,displayTitle |
-                jq -r --arg title "Publish betteroffice-$binding @ $SHA" \
-                  'map(select(.displayTitle == $title)) | first | .databaseId // empty')
-              if [ -n "$run" ]; then break; fi
-              sleep 5
-            done
-            if [ -z "$run" ]; then
-              echo "::error::No publish-python-binding run for $binding appeared at $SHA."
-              status=1
-              continue
-            fi
+          for entry in $runs; do
+            binding=${entry%%:*}
+            run=${entry#*:}
             if ! gh run watch "$run" --exit-status; then
               echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
               status=1

@@ -34,24 +34,22 @@ const SHA = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
 const dispatchStep = release.jobs['python-pypi'].steps[0];
 const RUN_IDS = PYTHON_PUBLISH_NAMES.map((_, index) => 4200 + index);
 
-/** The dispatch step against a `gh` that dispatches, lists, and watches. */
+/** The dispatch step against a `gh` that dispatches (returning a run id) and watches. */
 function dispatch({ dispatchStatus = 0, failing = 0 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
   const log = join(directory, 'gh.log');
-  const runs = PYTHON_PUBLISH_NAMES.map((name, index) => ({
-    databaseId: RUN_IDS[index],
-    displayTitle: (publish['run-name'] as string)
-      .replace('${{ inputs.binding }}', name)
-      .replace('${{ inputs.sha }}', SHA)
-  }));
+  const ids = PYTHON_PUBLISH_NAMES.map(
+    (name, index) => `    *"inputs[binding]=${name}"*) echo ${RUN_IDS[index]} ;;`
+  );
   writeFileSync(
     join(directory, 'gh'),
     [
       '#!/bin/sh',
       `echo "$@" >> "${log}"`,
       'case "$1 $2" in',
-      `  "workflow run") exit ${dispatchStatus} ;;`,
-      `  "run list") echo '${JSON.stringify(runs)}' ;;`,
+      `  "api --method") [ ${dispatchStatus} -ne 0 ] && exit ${dispatchStatus}; case "$*" in`,
+      ...ids,
+      '    esac ;;',
       `  "run watch") [ "$3" = "${failing}" ] && exit 1 ;;`,
       'esac',
       'exit 0'
@@ -65,6 +63,7 @@ function dispatch({ dispatchStatus = 0, failing = 0 } = {}) {
     env: {
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
+      GH_REPO: 'openooxml/betteroffice',
       PUBLISH: JSON.stringify(PYTHON_PUBLISH_NAMES),
       SHA
     }
@@ -167,19 +166,24 @@ describe('release wiring', () => {
     const result = dispatch();
 
     expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('workflow run'))).toEqual(
+    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toEqual(
       PYTHON_PUBLISH_NAMES.map(
         (name) =>
-          `workflow run publish-python-binding.yml --ref main -f binding=${name} -f sha=${SHA} -f dry_run=false`
+          `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-python-binding.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${SHA} -F inputs[dry_run]=false --jq .workflow_run_id`
       )
     );
   });
 
-  test('the wait finds each run by the title the publish workflow sets', () => {
+  test('the wait watches exactly the runs the dispatch created', () => {
+    const result = dispatch();
+
+    expect(result.status).toBe(0);
+    expect(result.log.filter((line) => line.startsWith('run watch'))).toEqual(
+      RUN_IDS.map((id) => `run watch ${id} --exit-status`)
+    );
     expect(publish['run-name']).toBe(
       'Publish betteroffice-${{ inputs.binding }} @ ${{ inputs.sha }}'
     );
-    expect(dispatchStep.run).toContain('Publish betteroffice-$binding @ $SHA');
   });
 
   test('the release ends only once every dispatched run has', () => {
@@ -205,7 +209,7 @@ describe('release wiring', () => {
     const result = dispatch({ dispatchStatus: 1 });
 
     expect(result.status).toBe(1);
-    expect(result.log.filter((line) => line.startsWith('workflow run'))).toHaveLength(
+    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toHaveLength(
       PYTHON_PUBLISH_NAMES.length
     );
     expect(result.log.some((line) => line.startsWith('run watch'))).toBe(false);
