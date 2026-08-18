@@ -479,3 +479,62 @@ fn indented_fallback_accepts_overflow_instead_of_guessing_wraps() {
     assert!(fallback.lines[0].width > 100.0);
     assert!(fallback.lines[0].width > 60.0);
 }
+
+fn text_box_shape(insets: f64) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "shape",
+        "id": "callout",
+        "shapeType": "textBox",
+        "geometryPath": [{ "type": "move", "x": 0, "y": 0 }, { "type": "line", "x": 1, "y": 0 }, { "type": "line", "x": 1, "y": 1 }, { "type": "line", "x": 0, "y": 1 }, { "type": "close" }],
+        "width": 200.0,
+        "height": 120.0,
+        "children": [],
+        "textBodyProperties": {
+            "margins": { "left": insets, "right": insets, "top": 4.0, "bottom": 4.0 }
+        },
+        "innerText": [{
+            "kind": "paragraph",
+            "id": 0,
+            "runs": [{
+                "kind": "text",
+                "text": "The quick brown fox jumps over the lazy dog again and again and again",
+                "fontFamily": "Liberation Sans",
+                "fontSize": FONT_SIZE_PT
+            }],
+            "attrs": { "defaultFontFamily": "Liberation Sans", "defaultFontSize": FONT_SIZE_PT }
+        }]
+    })
+}
+
+fn measure_shape_lines(shape: serde_json::Value, config: &MeasurementConfig) -> Vec<f64> {
+    let block: LayoutBlock = serde_json::from_value(shape).expect("shape parses");
+    let mut blocks = vec![block];
+    let mut extents = measure_blocks(&mut blocks, CONTENT_WIDTH, config).unwrap();
+    match extents.pop() {
+        Some(BlockExtent::Shape(extent)) => extent.inner_measures.unwrap()[0]
+            .lines
+            .iter()
+            .map(|line| line.width)
+            .collect(),
+        _ => panic!("shape extent expected"),
+    }
+}
+
+/// A text box's insets narrow the width its text wraps at, as they narrow the
+/// width it is later drawn into; measured at the full width, the text painted
+/// past the box's own border.
+#[test]
+fn text_box_insets_narrow_the_wrap_width() {
+    docx_layout::clear_measure_fonts();
+    let font_id = docx_layout::register_measure_font(LIBERATION).expect("font registers");
+    let config = registered_config("Liberation Sans", font_id);
+    let full = measure_shape_lines(text_box_shape(0.0), &config);
+    let inset = measure_shape_lines(text_box_shape(48.0), &config);
+
+    assert!(full.iter().all(|width| *width <= 200.0 + 1e-9), "{full:?}");
+    assert!(
+        inset.iter().all(|width| *width <= 200.0 - 96.0 + 1e-9),
+        "{inset:?}"
+    );
+    assert!(inset.len() > full.len(), "full={full:?} inset={inset:?}");
+}

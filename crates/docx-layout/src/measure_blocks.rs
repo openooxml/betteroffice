@@ -931,17 +931,31 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 9_525.0
 }
 
+/// One inset of the shape's text body in px, as the display list reads it, so
+/// the wrap width measured here is the width the text is later emitted into.
+fn text_body_inset(shape: &ShapeBlock, side: &str) -> f64 {
+    shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.get("margins"))
+        .and_then(|margins| margins.get(side))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 fn measure_shape(
     shape: &mut ShapeBlock,
     config: &MeasurementConfig,
 ) -> Result<ShapeExtent, String> {
+    let inner_width =
+        (shape.width - text_body_inset(shape, "left") - text_body_inset(shape, "right")).max(1.0);
     let inner_measures = shape
         .inner_text
         .as_ref()
         .map(|paragraphs| {
             paragraphs
                 .iter()
-                .map(|paragraph| measure_paragraph(paragraph, shape.width, config))
+                .map(|paragraph| measure_paragraph(paragraph, inner_width, config))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?
