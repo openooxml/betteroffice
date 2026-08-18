@@ -713,7 +713,9 @@ fn write_indentation(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
         );
     }
     if let Some(first) = formatting.indent_first_line_chars {
-        let hanging = first.is_sign_negative();
+        let hanging = formatting
+            .hanging_indent_chars
+            .unwrap_or_else(|| first.is_sign_negative());
         let name = if hanging {
             "w:hangingChars"
         } else {
@@ -854,6 +856,22 @@ mod tests {
             serialize_paragraph(&paragraph, &mut context()).unwrap(),
             "<w:p w14:paraId=\"AA&amp;BB&quot;CC\"><w:pPr><w:keepNext w:val=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:lastRenderedPageBreak/><w:t>hello &amp; goodbye</w:t></w:r></w:p>"
         );
+    }
+
+    /// A hanging character indent of zero has no sign to carry its kind, so
+    /// the flag has to.
+    #[test]
+    fn a_zero_hanging_character_indent_stays_hanging() {
+        let mut writer = XmlWriter::with_capacity(64);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line_chars: Some(0.0),
+                hanging_indent_chars: Some(true),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(writer.finish(), "<w:ind w:hangingChars=\"0\"/>");
     }
 
     #[test]

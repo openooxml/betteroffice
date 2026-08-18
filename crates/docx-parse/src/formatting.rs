@@ -511,6 +511,10 @@ pub struct ParagraphFormatting {
     /// Hundredths of a character, negative for `w:hangingChars`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indent_first_line_chars: Option<f64>,
+    /// Whether the character first-line indent is `w:hangingChars`; the sign
+    /// alone cannot say so once a zero has crossed JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hanging_indent_chars: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<Borders>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -581,6 +585,7 @@ pub fn parse_paragraph_properties(
             indent.parse_numeric_attribute(Some("w"), "firstLineChars", 1.0);
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hangingChars", 1.0) {
             value.indent_first_line_chars = Some(-hanging);
+            value.hanging_indent_chars = Some(true);
         }
     }
     value.borders = parse_paragraph_borders(p_pr.child("w", "pBdr"));
@@ -661,6 +666,10 @@ pub fn merge_paragraph_formatting(
             overlay(
                 &mut result.indent_first_line_chars,
                 &source.indent_first_line_chars,
+            );
+            overlay(
+                &mut result.hanging_indent_chars,
+                &source.hanging_indent_chars,
             );
             if let Some(source) = &source.borders {
                 result.borders = Some(merge_borders(target.borders.as_ref(), source));
