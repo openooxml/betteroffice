@@ -13,7 +13,7 @@
 
 ### Requirement: Structural fingerprint
 
-`ooxml-fidelity` SHALL expose a structural fingerprint over a part's XML tree that treats as insignificant: namespace prefix choice (names compare as URI + local name; QName-valued attributes resolve through in-scope bindings), attribute order, quote style, empty-element spelling, and inter-element whitespace that is insignificant under `xml:space` semantics. It SHALL treat as significant: element order, text content including authored whitespace under `xml:space="preserve"` and inside text-bearing WML elements, attribute values, and the set of namespace bindings in scope. Node identities assigned at parse time SHALL NOT enter the fingerprint: two parses of the same bytes assign different ids, and comparing them would report every reopen as a change.
+`ooxml-fidelity` SHALL expose a structural fingerprint over a part's XML tree that treats as insignificant: namespace prefix choice (names compare as URI + local name; QName-valued attributes resolve through in-scope bindings), attribute order, quote style, empty-element spelling, and inter-element whitespace that is insignificant under `xml:space` semantics. It SHALL treat as significant: element order, text content including authored whitespace under `xml:space="preserve"` and inside text-bearing WML elements, attribute values, and the set of namespace URIs declared in scope (prefix names are lexical; a renamed prefix that an attribute value references still fails on the value comparison). Node identities assigned at parse time SHALL NOT enter the fingerprint: two parses of the same bytes assign different ids, and comparing them would report every reopen as a change.
 
 #### Scenario: Lexical noise is invisible
 
