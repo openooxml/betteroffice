@@ -501,8 +501,8 @@ pub fn serialize_shape_content(
                 &int_attr(Some(text_body.rotation.unwrap_or(0.0) * 60_000.0)),
             )
             .attribute("vert", vertical_token(shape));
-        if let Some(anchor) = nonempty(text_body.anchor.as_deref()) {
-            body_properties.attribute("anchor", if anchor == "middle" { "ctr" } else { anchor });
+        if let Some(anchor) = nonempty(text_body.anchor.as_deref()).and_then(anchor_token) {
+            body_properties.attribute("anchor", anchor);
         }
         if text_body.anchor_center == Some(true) {
             body_properties.attribute("anchorCtr", "1");
@@ -584,6 +584,18 @@ pub fn serialize_shape_content(
     append_generated(&mut writer, &graphic);
     writer.end_element().end_element();
     Ok(writer.finish())
+}
+
+/// `ST_TextAnchoringType` for the canonical anchor the parser reads it into.
+fn anchor_token(anchor: &str) -> Option<&'static str> {
+    match anchor {
+        "top" => Some("t"),
+        "middle" => Some("ctr"),
+        "bottom" => Some("b"),
+        "distributed" => Some("dist"),
+        "justified" => Some("just"),
+        _ => None,
+    }
 }
 
 fn vertical_token(shape: &Shape) -> &'static str {

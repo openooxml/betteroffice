@@ -440,6 +440,28 @@ fn saving_keeps_a_table_inside_a_text_box() {
     assert_eq!(resaved, xml);
 }
 
+/// The parser reads `anchor` into a canonical name; every one of them has to
+/// be written back as the schema token, or the next open reads it as none.
+#[test]
+fn saving_keeps_every_text_box_anchor() {
+    for token in ["t", "ctr", "b", "dist", "just"] {
+        let package = story_docx(
+            &text_box_drawing(
+                r#"<w:p><w:r><w:t>Anchored</w:t></w:r></w:p>"#,
+                &format!(r#"<wps:bodyPr rot="0" vert="horz" anchor="{token}"/>"#),
+            ),
+            None,
+        );
+        let xml = saved_document(&package);
+        assert!(
+            xml.contains(&format!(r#"anchor="{token}""#)),
+            "{token}: {xml}"
+        );
+        let resaved = saved_document(&Document::open(&package).unwrap().save().unwrap());
+        assert_eq!(resaved, xml, "{token} second save");
+    }
+}
+
 #[test]
 fn saving_keeps_the_writing_direction_of_a_vertical_text_box() {
     let package = story_docx(

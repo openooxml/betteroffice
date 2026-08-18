@@ -80,7 +80,7 @@ fn lower_shape(
         children,
         scene: field(shape, "scene").cloned(),
         effects: array(shape, "effects").cloned(),
-        text_body_properties: field(shape, "textBodyProperties").cloned(),
+        text_body_properties: field(shape, "textBodyProperties").map(text_body_in_pixels),
         position: None,
         wrap_type: None,
         wrap_text: None,
@@ -94,6 +94,20 @@ fn lower_shape(
         pm_start: doc_start,
         pm_end: doc_end,
     })
+}
+
+/// The text body with its insets in page pixels; the model keeps them in EMU
+/// like every other length, and layout reads them alongside pixel widths.
+fn text_body_in_pixels(properties: &Value) -> Value {
+    let mut properties = properties.clone();
+    if let Some(margins) = properties.get_mut("margins").and_then(Value::as_object_mut) {
+        for side in ["left", "right", "top", "bottom"] {
+            if let Some(emu) = margins.get(side).and_then(Value::as_f64) {
+                margins.insert(side.to_owned(), Value::from(emu_to_pixels(emu)));
+            }
+        }
+    }
+    properties
 }
 
 fn shape_fill(shape: &Value) -> Option<Value> {
@@ -853,6 +867,30 @@ mod tests {
         assert_eq!(block.transform.as_ref().unwrap()["flipH"], true);
         assert_eq!(block.scene.as_ref().unwrap()["version"], 1);
         assert_eq!(block.pm_start, Some(7.0));
+    }
+
+    /// Word writes the insets in EMU on every text box; layout reads them next
+    /// to pixel widths, so a raw inset pushed the text a thousand inches off the
+    /// page.
+    #[test]
+    fn lowers_text_body_insets_from_emu_to_pixels() {
+        let shape = json!({
+            "type": "shape",
+            "shapeType": "textBox",
+            "size": {"width": 914400, "height": 457200},
+            "textBodyProperties": {
+                "anchor": "top",
+                "margins": {"left": 91440, "right": 91440, "top": 45720, "bottom": 45720}
+            },
+            "textBody": {"content": []}
+        });
+
+        let block = lower_shape_json(&shape, 3, &RenderEnv::default()).unwrap();
+        let margins = &block.text_body_properties.unwrap()["margins"];
+
+        assert_eq!(margins["left"], json!(emu_to_pixels(91440.0)));
+        assert_eq!(margins["top"], json!(emu_to_pixels(45720.0)));
+        assert!(margins["left"].as_f64().unwrap() < 10.0);
     }
 
     #[test]
