@@ -13,31 +13,59 @@ const NPM_REGISTRY = process.env.NPM_REGISTRY_URL ?? 'https://registry.npmjs.org
 const CRATES_REGISTRY = process.env.CRATES_REGISTRY_URL ?? 'https://crates.io/api/v1/crates';
 // crates.io rejects a request without one.
 const USER_AGENT = 'betteroffice-release (https://github.com/openooxml/betteroffice)';
+const ATTEMPTS = 5;
+const REQUEST_TIMEOUT_MS = Number(process.env.REGISTRY_TIMEOUT_MS ?? 15_000);
+// A registry may ask for an hour; a release gate waits a minute.
+const RETRY_AFTER_CAP_MS = 60_000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Half the backoff plus a random half, so parallel releases don't retry in lockstep. */
+function backoffMs(attempt) {
+  const base = 2 ** attempt * 500;
+  return base / 2 + Math.random() * (base / 2);
+}
+
+/** `Retry-After` in ms — seconds or an HTTP-date — or undefined if there is none. */
+function retryAfterMs(response) {
+  const header = response.headers.get('Retry-After');
+  if (!header) return undefined;
+  const seconds = Number(header);
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
+  if (!Number.isFinite(ms)) return undefined;
+  return Math.min(Math.max(ms, 0), RETRY_AFTER_CAP_MS);
+}
+
+/** The parsed body, `null` when the name is unclaimed, or a failure to weigh. */
+async function attemptRegistry(url, headers) {
+  const response = await fetch(url, {
+    headers: { 'User-Agent': USER_AGENT, ...headers },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  });
+  if (response.status === 404) return { body: null };
+  if (response.ok) return { body: await response.json() };
+  const error = new Error(`${url} returned ${response.status}`);
+  const retry = response.status === 429 || response.status >= 500;
+  return { error, retry, wait: retry ? retryAfterMs(response) : undefined };
+}
+
 async function fetchRegistry(url, headers = {}) {
   let lastError;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    let response;
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    let result;
     try {
-      response = await fetch(url, {
-        headers: { 'User-Agent': USER_AGENT, ...headers },
-        cache: 'no-store'
-      });
+      result = await attemptRegistry(url, headers);
     } catch (error) {
-      lastError = error;
-      await sleep(2 ** attempt * 500);
-      continue;
+      // A refused connection, a request past REQUEST_TIMEOUT_MS, or a body that stops mid-JSON.
+      result = { error, retry: true };
     }
-    if (response.ok || response.status === 404) return response;
-    if (response.status !== 429 && response.status < 500) {
-      throw new Error(`${url} returned ${response.status}`);
-    }
-    lastError = new Error(`${url} returned ${response.status}`);
-    await sleep(2 ** attempt * 500);
+    if (!result.error) return result.body;
+    if (!result.retry) throw result.error;
+    lastError = result.error;
+    if (attempt < ATTEMPTS - 1) await sleep(result.wait ?? backoffMs(attempt));
   }
   throw lastError;
 }
@@ -46,14 +74,14 @@ async function fetchRegistry(url, headers = {}) {
 export async function auditNpmPackages(packages, registry = NPM_REGISTRY) {
   const audit = [];
   for (const { name, version } of packages) {
-    const response = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`, {
+    const body = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`, {
       Accept: 'application/vnd.npm.install-v1+json'
     });
-    if (response.status === 404) {
+    if (body === null) {
       audit.push({ name, version, state: 'missing' });
       continue;
     }
-    const versions = (await response.json()).versions ?? {};
+    const versions = body.versions ?? {};
     audit.push({ name, version, state: version in versions ? 'published' : 'new' });
   }
   return audit;
@@ -63,8 +91,8 @@ export async function auditNpmPackages(packages, registry = NPM_REGISTRY) {
 export async function auditCrates(names, registry = CRATES_REGISTRY) {
   const audit = [];
   for (const name of names) {
-    const response = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`);
-    audit.push({ name, state: response.status === 404 ? 'missing' : 'present' });
+    const body = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`);
+    audit.push({ name, state: body === null ? 'missing' : 'present' });
   }
   return audit;
 }

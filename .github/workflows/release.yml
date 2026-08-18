@@ -96,11 +96,20 @@ jobs:
         if: steps.pending.outputs.publishing == 'true' && steps.crates-bootstrap.outputs.enabled != 'true'
         uses: rust-lang/crates-io-auth-action@v1
 
+      # Both registries are checked before the first upload: a guard that fails
+      # after the crates publish leaves the release half-published.
       - name: Check crates.io publish targets
         if: steps.pending.outputs.publishing == 'true'
         env:
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: node scripts/check-publish-targets.mjs --crates
+
+      # Publishing here means there are no pending changesets, so changesets/action
+      # runs no `version` command: these manifests carry the versions it publishes.
+      # It reads name and version, which the pin below leaves alone.
+      - name: Check npm publish targets
+        if: steps.pending.outputs.publishing == 'true'
+        run: node scripts/check-publish-targets.mjs --npm
 
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true'
@@ -113,12 +122,6 @@ jobs:
       - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
         run: bun scripts/rewrite-workspace-deps.ts
-
-      # Publishing here means there are no pending changesets, so changesets/action
-      # runs no `version` command: these manifests carry the versions it publishes.
-      - name: Check npm publish targets
-        if: steps.pending.outputs.publishing == 'true'
-        run: node scripts/check-publish-targets.mjs --npm
 
       - name: Release PR or publish
         id: changesets
@@ -161,8 +164,8 @@ jobs:
           if [ -n "$TOKEN" ]; then
             echo "::error::PYPI_API_TOKEN is readable by a job that declares no environment, so it is a repository or organization secret and every binding's publish leg can upload with it."
             echo "::error::Delete it under Settings > Secrets and variables > Actions, then revoke it on PyPI."
-            echo "::error::Preferred: add a PyPI Trusted Publisher (owner openooxml, repository betteroffice, workflow publish-python-binding.yml, environment pypi-<binding>) and keep no token at all."
-            echo "::error::Otherwise: mint a project-scoped token and re-add it as an environment secret on the pypi-<binding> environment only. This step cannot tell a project-scoped token from an account-scoped one, so an account-scoped token would pass."
+            echo "::error::Add a PyPI Trusted Publisher instead (owner openooxml, repository betteroffice, workflow publish-python-binding.yml, environment pypi-<binding>) and keep no token at all."
+            echo "::error::There is no token path: publish-python-binding.yml refuses every PYPI_API_TOKEN it can read, including an environment secret on pypi-<binding>."
             echo "::error::See RELEASING.md."
             exit 1
           fi
@@ -174,26 +177,56 @@ jobs:
 
   # A PyPI Trusted Publisher is scoped to the file that runs the upload, and every
   # publisher here names publish-python-binding.yml, so the release dispatches that
-  # workflow instead of uploading. It builds main, which already carries the
-  # release commit this run was triggered by.
+  # workflow instead of uploading. The dispatch carries this run's commit, because
+  # main moves; the wait is what makes a failed upload fail the release.
   python-pypi:
-    name: Dispatch Python publishes
+    name: Publish Python bindings
     needs: python-bindings
     if: needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Covers the dispatched workflow's own worst case: 45 (wheels) + 5 + 15 (publish).
+    timeout-minutes: 75
     permissions:
       actions: write # dispatch publish-python-binding.yml
     steps:
-      - name: Dispatch a publish per binding
+      - name: Dispatch a publish per binding, then wait for each
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PUBLISH: ${{ needs.python-bindings.outputs.publish }}
+          SHA: ${{ github.sha }}
         run: |
           status=0
+          dispatched=""
           for binding in $(echo "$PUBLISH" | jq -r '.[]'); do
-            gh workflow run publish-python-binding.yml --ref main \
-              -f binding="$binding" -f dry_run=false || status=1
+            if gh workflow run publish-python-binding.yml --ref main \
+              -f binding="$binding" -f sha="$SHA" -f dry_run=false; then
+              dispatched="$dispatched $binding"
+            else
+              status=1
+            fi
+          done
+
+          # Every binding is dispatched before anything is waited on, so they build
+          # in parallel. The dispatch returns no run id; run-name carries the match.
+          for binding in $dispatched; do
+            run=""
+            for _ in $(seq 30); do
+              run=$(gh run list --workflow publish-python-binding.yml --event workflow_dispatch \
+                --limit 50 --json databaseId,displayTitle |
+                jq -r --arg title "Publish betteroffice-$binding @ $SHA" \
+                  'map(select(.displayTitle == $title)) | first | .databaseId // empty')
+              if [ -n "$run" ]; then break; fi
+              sleep 5
+            done
+            if [ -z "$run" ]; then
+              echo "::error::No publish-python-binding run for $binding appeared at $SHA."
+              status=1
+              continue
+            fi
+            if ! gh run watch "$run" --exit-status; then
+              echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+              status=1
+            fi
           done
           exit $status

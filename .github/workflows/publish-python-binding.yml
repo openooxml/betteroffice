@@ -3,11 +3,19 @@ name: Publish a Python binding
 # Publishes one bindings/python-* distribution at its committed version, outside
 # the release train. Use it to create a PyPI project from a pending Trusted
 # Publisher, or to fill in a wheel a release run dropped.
+#
+# The dispatch API returns no run id, so release.yml finds the run it started by
+# matching this title.
+run-name: Publish betteroffice-${{ inputs.binding }} @ ${{ inputs.sha }}
 on:
   workflow_dispatch:
     inputs:
       binding:
         description: The bindings/python-<binding> distribution to publish.
+        required: true
+        type: string
+      sha:
+        description: The commit to build and publish. `main` moves; pass the commit you mean.
         required: true
         type: string
       dry_run:
@@ -24,6 +32,7 @@ jobs:
     uses: ./.github/workflows/python-dist.yml
     with:
       binding: ${{ inputs.binding }}
+      sha: ${{ inputs.sha }}
     permissions:
       contents: read
 

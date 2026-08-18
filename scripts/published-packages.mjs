@@ -5,17 +5,29 @@ import { fileURLToPath } from 'node:url';
 export { PYPI_DISTRIBUTIONS } from './python-bindings.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
-const WORKSPACES = ['apps', 'bindings', 'packages'];
 
+function readManifest(directory) {
+  try {
+    return JSON.parse(readFileSync(join(ROOT, directory, 'package.json'), 'utf8'));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every workspace manifest, from the same globs Bun and Changesets expand. */
 function workspaceManifests() {
   const manifests = [];
-  for (const workspace of WORKSPACES) {
-    for (const entry of readdirSync(join(ROOT, workspace))) {
-      try {
-        manifests.push(JSON.parse(readFileSync(join(ROOT, workspace, entry, 'package.json'), 'utf8')));
-      } catch {
-        continue;
-      }
+  for (const pattern of readManifest('.').workspaces) {
+    if (pattern.includes('*') && !pattern.endsWith('/*')) {
+      throw new Error(`published-packages.mjs cannot expand the workspace glob ${pattern}`);
+    }
+    const parent = pattern.endsWith('/*') ? pattern.slice(0, -2) : undefined;
+    const directories = parent
+      ? readdirSync(join(ROOT, parent)).map((entry) => join(parent, entry))
+      : [pattern];
+    for (const directory of directories) {
+      const manifest = readManifest(directory);
+      if (manifest) manifests.push(manifest);
     }
   }
   return manifests;
@@ -29,10 +41,13 @@ export function workspacePackages() {
     .sort();
 }
 
-/** The npm packages a release uploads, with the version it would upload. */
+/**
+ * The npm packages a release uploads, with the version it would upload: every
+ * non-private workspace, which is exactly the set `changeset publish` takes.
+ */
 export function publishedPackageVersions() {
   return workspaceManifests()
-    .filter((manifest) => !manifest.private && manifest.name?.startsWith('@betteroffice/'))
+    .filter((manifest) => !manifest.private && manifest.name && manifest.version)
     .map((manifest) => ({ name: manifest.name, version: manifest.version }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }

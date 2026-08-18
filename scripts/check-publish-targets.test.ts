@@ -18,7 +18,11 @@ function versions(...published: string[]) {
 }
 
 // Bun.spawnSync would block the loop this fake registry answers on.
-async function guard(mode: string, respond: (name: string) => Response, env: object = {}) {
+async function guard(
+  mode: string,
+  respond: (name: string) => Response | Promise<Response>,
+  env: object = {}
+) {
   const server = Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
@@ -26,6 +30,7 @@ async function guard(mode: string, respond: (name: string) => Response, env: obj
   });
   const origin = `http://127.0.0.1:${server.port}`;
   try {
+    const started = performance.now();
     const child = Bun.spawn(['node', script, mode], {
       stdout: 'pipe',
       stderr: 'pipe',
@@ -42,10 +47,27 @@ async function guard(mode: string, respond: (name: string) => Response, env: obj
       new Response(child.stderr).text(),
       child.exited
     ]);
-    return { stdout, stderr, status };
+    return { stdout, stderr, status, elapsed: performance.now() - started };
   } finally {
     server.stop(true);
   }
+}
+
+/** A registry that answers differently on each call for a name. */
+function flaky(respond: (name: string, call: number) => Response | Promise<Response>) {
+  const calls = new Map<string, number>();
+  return {
+    calls,
+    respond: (name: string) => {
+      const call = (calls.get(name) ?? 0) + 1;
+      calls.set(name, call);
+      return respond(name, call);
+    }
+  };
+}
+
+function published(name: string) {
+  return versions(packages.find((entry) => entry.name === name)!.version);
 }
 
 describe('npm publish targets', () => {
@@ -122,20 +144,94 @@ describe('release wiring', () => {
     }
   });
 
-  test('crates.io is checked before anything is uploaded to it', () => {
-    expect(steps.indexOf('Check crates.io publish targets')).toBeLessThan(
-      steps.indexOf('Publish Rust crates')
+  test('both registries are checked before the first upload of either', () => {
+    const publishes = ['Publish Rust crates', 'Release PR or publish'].map((step) =>
+      steps.indexOf(step)
     );
+    for (const guard of ['Check crates.io publish targets', 'Check npm publish targets']) {
+      for (const publish of publishes) expect(steps.indexOf(guard)).toBeLessThan(publish);
+    }
     expect(guards[0].env.CRATES_IO_BOOTSTRAP_TOKEN).toBe('${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}');
   });
 
-  test('npm is checked after the pin and before changesets publishes', () => {
-    expect(steps.indexOf('Pin workspace deps for npm publish')).toBeLessThan(
-      steps.indexOf('Check npm publish targets')
-    );
+  test('the npm guard reads what the pin that follows it cannot change', () => {
     expect(steps.indexOf('Check npm publish targets')).toBeLessThan(
-      steps.indexOf('Release PR or publish')
+      steps.indexOf('Pin workspace deps for npm publish')
     );
+    for (const entry of packages) expect(Object.keys(entry).sort()).toEqual(['name', 'version']);
+  });
+});
+
+describe('the npm publish set', () => {
+  test('is every non-private workspace, so no new package escapes the guard', () => {
+    const names = packages.map((entry) => entry.name);
+    expect(names).toContain('@betteroffice/fonts');
+    expect(names).not.toContain('@betteroffice/rust-crates');
+    expect(names).not.toContain('@betteroffice/collaboration-relay');
+  });
+});
+
+describe('a registry that misbehaves', () => {
+  const first = packages[0]!.name;
+
+  test('waits out a 429 for as long as its Retry-After asks', async () => {
+    const registry = flaky((name, call) =>
+      name === first && call === 1
+        ? new Response('{"error":"too many requests"}', {
+            status: 429,
+            headers: { 'Retry-After': '1' }
+          })
+        : published(name)
+    );
+    const result = await guard('--npm', registry.respond);
+
+    expect(result.status).toBe(0);
+    expect(registry.calls.get(first)).toBe(2);
+    expect(result.elapsed).toBeGreaterThan(900);
+  });
+
+  test('gives up on a request that hangs, and retries it', async () => {
+    const registry = flaky((name, call) =>
+      name === first && call === 1 ? new Promise<Response>(() => {}) : published(name)
+    );
+    const result = await guard('--npm', registry.respond, { REGISTRY_TIMEOUT_MS: '400' });
+
+    expect(result.status).toBe(0);
+    expect(registry.calls.get(first)).toBe(2);
+    expect(result.elapsed).toBeGreaterThan(400);
+  });
+
+  test('retries a body that stops mid-JSON', async () => {
+    const registry = flaky((name, call) =>
+      name === first && call === 1
+        ? new Response('{"versions":{"0.0.1"', { headers: { 'Content-Type': 'application/json' } })
+        : published(name)
+    );
+    const result = await guard('--npm', registry.respond);
+
+    expect(result.status).toBe(0);
+    expect(registry.calls.get(first)).toBe(2);
+  });
+
+  test('stops after five attempts instead of publishing on a guess', async () => {
+    const registry = flaky(
+      () =>
+        new Response('{"error":"unavailable"}', { status: 503, headers: { 'Retry-After': '0' } })
+    );
+    const result = await guard('--npm', registry.respond);
+
+    expect(result.status).not.toBe(0);
+    expect(registry.calls.get(first)).toBe(5);
+    expect(result.stderr).toContain('503');
+  });
+
+  test('a 4xx that is not a rate limit is not retried', async () => {
+    const registry = flaky(() => new Response('{"error":"gone"}', { status: 410 }));
+    const result = await guard('--npm', registry.respond);
+
+    expect(result.status).not.toBe(0);
+    expect(registry.calls.get(first)).toBe(1);
+    expect(result.stderr).toContain('410');
   });
 });
 
