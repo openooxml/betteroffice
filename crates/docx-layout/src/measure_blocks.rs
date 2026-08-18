@@ -6,9 +6,10 @@ use serde_json::{Value, json};
 use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
 use crate::types::{
     BlockExtent, ChartExtent, ImageExtent, ImageRunPosition, LayoutBlock, ParagraphBlock,
-    ParagraphExtent, Run, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent, TableExtent,
-    TableRowExtent, TextBoxBlock, TextBoxExtent,
+    ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
+    TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
 };
+use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
@@ -550,6 +551,74 @@ fn synthetic_inline_image_width(image: &crate::types::ImageRun) -> f64 {
         .max(0.0)
 }
 
+/// `w:spacing` mapped onto a line rule, in the same precedence order the
+/// measured path uses. `None` is single spacing, which leaves the box alone.
+fn synthetic_line_rule(spacing: Option<&ParagraphSpacing>) -> Option<LineSpacingRule> {
+    let spacing = spacing?;
+    match (
+        spacing.line_rule.as_deref(),
+        spacing.line,
+        spacing.line_unit.as_deref(),
+    ) {
+        (Some("exact"), Some(line), _) => Some(LineSpacingRule::Exact {
+            px: line.max(0.0) as f32,
+        }),
+        (Some("atLeast"), Some(line), _) => Some(LineSpacingRule::AtLeast {
+            px: line.max(0.0) as f32,
+        }),
+        (_, Some(line), Some("multiplier")) => Some(LineSpacingRule::Auto {
+            line_240ths: (line * 240.0).round().clamp(0.0, 24_000_000.0) as u32,
+        }),
+        (_, Some(line), Some("px")) => Some(LineSpacingRule::Exact {
+            px: line.max(0.0) as f32,
+        }),
+        _ => None,
+    }
+}
+
+fn synthetic_row(
+    head_run: usize,
+    tail_run: usize,
+    tail_char: usize,
+    width: f64,
+    font_px: f64,
+    rule: Option<&LineSpacingRule>,
+) -> TypesetRow {
+    let (ascent, descent, line_height) = match rule {
+        // single spacing is the identity, so skip the f32 box round-trip
+        None | Some(LineSpacingRule::Auto { line_240ths: 240 }) => {
+            (font_px * 0.8, font_px * 0.2, font_px * 1.15)
+        }
+        Some(rule) => {
+            let ruled = apply_spacing_rule(
+                LineBox {
+                    ascent: (font_px * 0.8) as f32,
+                    descent: (font_px * 0.2) as f32,
+                    leading: (font_px * 0.15) as f32,
+                },
+                rule,
+            );
+            (
+                f64::from(ruled.ascent),
+                f64::from(ruled.descent),
+                f64::from(ruled.height()),
+            )
+        }
+    };
+    TypesetRow {
+        head_run,
+        head_char: 0,
+        tail_run,
+        tail_char,
+        width,
+        ascent,
+        descent,
+        line_height,
+        synthetic_fallback: Some(true),
+        ..TypesetRow::default()
+    }
+}
+
 fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) -> ParagraphExtent {
     let default_font_size = valid_font_size(
         paragraph
@@ -559,9 +628,19 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         11.0,
     );
     let default_font_px = default_font_size * 96.0 / 72.0;
+    let spacing = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref());
+    let rule = synthetic_line_rule(spacing);
+    let measurable = content_width.is_finite() && content_width > 0.0;
+    let slot = |width: f64| if measurable { width } else { 0.0 };
+
+    let mut lines = Vec::new();
+    let mut head_run = 0usize;
     let mut font_px = default_font_px;
     let mut line_width = 0.0f64;
-    for run in &paragraph.runs {
+    for (index, run) in paragraph.runs.iter().enumerate() {
         match run {
             Run::Text(text) => {
                 font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
@@ -581,39 +660,43 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
                     .unwrap_or("1");
                 line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
             }
-            Run::LineBreak(_) | Run::Unsupported => {}
+            // an authored break is exact, so it splits the fallback rows even
+            // though their widths are guesses
+            Run::LineBreak(_) => {
+                lines.push(synthetic_row(
+                    head_run,
+                    index,
+                    0,
+                    slot(line_width),
+                    font_px,
+                    rule.as_ref(),
+                ));
+                head_run = index + 1;
+                font_px = default_font_px;
+                line_width = 0.0;
+            }
+            Run::Unsupported => {}
         }
     }
-    let tail_run = paragraph.runs.len().saturating_sub(1);
+    let tail_run = paragraph.runs.len().saturating_sub(1).max(head_run);
     let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
         Run::Text(text) => text.text.encode_utf16().count(),
         _ => 0,
     });
-    let spacing = paragraph
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.spacing.as_ref());
-    let line_height = font_px * 1.15;
+    lines.push(synthetic_row(
+        head_run,
+        tail_run,
+        tail_char,
+        slot(line_width),
+        font_px,
+        rule.as_ref(),
+    ));
+
     ParagraphExtent {
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
-            + line_height
+            + lines.iter().map(|line| line.line_height).sum::<f64>()
             + spacing.and_then(|value| value.after).unwrap_or(0.0),
-        lines: vec![crate::types::TypesetRow {
-            head_run: 0,
-            head_char: 0,
-            tail_run,
-            tail_char,
-            width: if content_width.is_finite() && content_width > 0.0 {
-                line_width
-            } else {
-                0.0
-            },
-            ascent: font_px * 0.8,
-            descent: font_px * 0.2,
-            line_height,
-            synthetic_fallback: Some(true),
-            ..crate::types::TypesetRow::default()
-        }],
+        lines,
     }
 }
 
