@@ -269,38 +269,21 @@ fn serialize_simple_field(
     field: &SimpleField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let properties = field
-        .content
-        .first()
-        .and_then(|run| run.formatting.as_ref())
-        .map(|formatting| serialize_text_formatting(Some(formatting)))
-        .unwrap_or_default();
     let mut output = String::new();
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"begin\"");
+    output.push_str("<w:fldSimple w:instr=\"");
+    output.push_str(&super::xml_writer::escape_xml(&field.instruction));
+    output.push('"');
     if field.fld_lock == Some(true) {
         output.push_str(" w:fldLock=\"true\"");
     }
-    output.push_str("/></w:r>");
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:instrText");
-    if needs_preserve(&field.instruction) {
-        output.push_str(" xml:space=\"preserve\"");
+    if field.dirty == Some(true) {
+        output.push_str(" w:dirty=\"true\"");
     }
     output.push('>');
-    output.push_str(&super::xml_writer::escape_xml(&field.instruction));
-    output.push_str("</w:instrText></w:r>");
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
     for run in &field.content {
         output.push_str(&serialize_run(run, context)?);
     }
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    output.push_str("</w:fldSimple>");
     Ok(output)
 }
 
@@ -823,6 +806,34 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_simple_field_saves_back_as_a_simple_field() {
+        let field = SimpleField {
+            node_type: crate::inline::SimpleFieldType::SimpleField,
+            field_type: "PAGE".to_owned(),
+            instruction: " PAGE ".to_owned(),
+            content: vec![Run {
+                node_type: RunType::Run,
+                formatting: None,
+                property_changes: None,
+                content: vec![RunContent::Text {
+                    text: "3".to_owned(),
+                    preserve_space: None,
+                }],
+            }],
+            fld_lock: Some(true),
+            dirty: Some(true),
+            structured_result: None,
+            field_tree: None,
+        };
+        let output = serialize_simple_field(&field, &mut context()).unwrap();
+        assert_eq!(
+            output,
+            "<w:fldSimple w:instr=\" PAGE \" w:fldLock=\"true\" w:dirty=\"true\">\
+             <w:r><w:t>3</w:t></w:r></w:fldSimple>"
+        );
     }
 
     #[test]
