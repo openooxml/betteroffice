@@ -26,7 +26,7 @@
     },
     {
       "file": "betteroffice-demo.docx",
-      "sha256": "fa267b73b0849fe9243c27ea1e441fe01c8700a8126ad8674801634020387dd8",
+      "sha256": "5b272a248fe899d3b90259297dc20158b1bdfc7c0e1d653c7e29985869e17c51",
       "provenance": "generator",
       "application": "scripts/create-demo-doc.ts",
       "features": [

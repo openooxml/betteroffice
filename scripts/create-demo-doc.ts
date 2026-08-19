@@ -480,8 +480,8 @@ const BODY = [
     ),
     '<w:pBdr><w:left w:val="single" w:sz="18" w:space="10" w:color="2E74B5"/></w:pBdr>' +
       '<w:shd w:val="clear" w:color="auto" w:fill="F2F6FB"/>' +
-      '<w:ind w:left="360" w:right="360"/>' +
-      '<w:spacing w:before="120" w:after="120"/>',
+      '<w:spacing w:before="120" w:after="120"/>' +
+      '<w:ind w:left="360" w:right="360"/>',
   ),
 
   para(
