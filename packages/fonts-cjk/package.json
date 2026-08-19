@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/fonts-cjk",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Optional CJK font binaries for @betteroffice/fonts: Noto Sans SC/TC/JP/KR and Noto Serif SC coverage faces for Chinese, Japanese and Korean documents.",
   "sideEffects": false,
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/fonts",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Bundled open fonts for the BetterOffice engine: metric-compatible Latin faces (Carlito, Caladea, Liberation) plus Noto RTL script-coverage faces, with a lazy same-origin loader. CJK faces ship separately in @betteroffice/fonts-cjk.",
   "sideEffects": false,
   "type": "module",
