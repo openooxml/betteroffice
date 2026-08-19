@@ -24,8 +24,12 @@ pub struct Section {
 #[serde(rename_all = "camelCase")]
 pub struct DocumentBody {
     pub content: Vec<BlockContent>,
+    /// Sections with header/footer inheritance resolved forward.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sections: Option<Vec<Section>>,
+    /// The body-level `w:sectPr` as authored. Resolution lives in
+    /// `sections`; re-emitting a resolved copy would rehome inherited
+    /// header and footer references onto the final section on save.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_section_properties: Option<SectionProperties>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,7 +64,7 @@ fn parse_document_body_impl(
         return Ok(DocumentBody::default());
     };
     let content = parser.parse_blocks(body, 0, false)?;
-    let mut final_section_properties = body
+    let final_section_properties = body
         .child("w", "sectPr")
         .map(|element| parse_section_properties(Some(element)));
     let mut sections = build_sections(
@@ -75,11 +79,6 @@ fn parse_document_body_impl(
     apply_section_inheritance(&mut properties);
     for (section, properties) in sections.iter_mut().zip(properties) {
         section.properties = properties;
-    }
-    if final_section_properties.is_some()
-        && let Some(last) = sections.last()
-    {
-        final_section_properties = Some(last.properties.clone());
     }
     Ok(DocumentBody {
         content,
@@ -308,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_sections_inherits_story_refs_and_promotes_the_effective_final_section() {
+    fn builds_sections_inherits_story_refs_and_keeps_the_final_section_as_authored() {
         let body = parse(
             r#"<w:document xmlns:w="w" xmlns:r="r"><w:body>
               <w:p><w:r><w:t>{first}</w:t></w:r><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rH"/><w:titlePg/></w:sectPr></w:pPr></w:p>
@@ -324,16 +323,12 @@ mod tests {
             sections[1].properties.header_references.as_ref().unwrap()[0].relationship_id,
             "rH"
         );
-        assert_eq!(
-            body.final_section_properties
-                .as_ref()
-                .unwrap()
-                .header_references
-                .as_ref()
-                .unwrap()[0]
-                .relationship_id,
-            "rH"
-        );
+        // The final body sectPr stays as authored: a save must not rehome
+        // the inherited reference; resolution is read from `sections`.
+        let final_properties = body.final_section_properties.as_ref().unwrap();
+        assert_eq!(final_properties.margin_left, Some(720.0));
+        assert!(final_properties.header_references.is_none());
+        assert!(final_properties.title_pg.is_none());
         assert_eq!(
             extract_all_template_variables(&body.content),
             ["first", "second-name"]

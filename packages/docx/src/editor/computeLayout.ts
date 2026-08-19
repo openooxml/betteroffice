@@ -71,9 +71,11 @@ function orderedSections(document: Document | null): ResidentRegionLayoutRequest
     sectionId: section.id ?? section.properties.sectionId,
     properties: section.properties,
   }));
+  // finalSectionProperties is the body sectPr as authored; the resolved view
+  // (headers and titlePg inherited forward) is the last entry of sections.
   sections.push({
-    sectionId: body.finalSectionProperties?.sectionId,
-    properties: body.finalSectionProperties ?? {},
+    sectionId: sections.at(-1)?.sectionId ?? body.finalSectionProperties?.sectionId,
+    properties: sections.at(-1)?.properties ?? body.finalSectionProperties ?? {},
   });
   return sections;
 }
@@ -101,7 +103,9 @@ export function buildResidentRegionLayoutRequest(
     regions: {
       sections: orderedSections(document),
       settings: document?.package.settings,
-      watermark: document?.package.document.finalSectionProperties?.watermark,
+      watermark:
+        document?.package.document.sections?.at(-1)?.properties.watermark ??
+        document?.package.document.finalSectionProperties?.watermark,
     },
     notes: { contents },
     renderEnv,

@@ -5,7 +5,7 @@
     "corpusFloor": 2,
     "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 16
+    "knownDefects": 13
   },
   "criteria": [
     {
@@ -1484,7 +1484,7 @@
     {
       "id": "sect.columns",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -1499,10 +1499,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "w:cols is dropped from sectPr on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "sect.hf-binding",
@@ -1524,17 +1526,16 @@
       },
       "gates": {
         "preserve": [
-          "betteroffice-docx fidelity::an_unedited_round_trip_passes_both_oracles_and_the_byte_rules"
+          "betteroffice-docx fidelity::an_unedited_round_trip_passes_both_oracles_and_the_byte_rules",
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
         ]
       },
-      "defects": [
-        "header and footer references are rehomed to the final section on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "defects": []
     },
     {
       "id": "sect.page-numbering",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -1549,10 +1550,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "w:pgNumType is dropped from sectPr on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "sect.line-numbering",
