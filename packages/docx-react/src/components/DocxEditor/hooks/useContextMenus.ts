@@ -53,6 +53,7 @@ export function useContextMenus({
   displayListQueries,
   interactionPageHostRef,
   i18n,
+  partEditOpen,
   onAddComment,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
@@ -62,6 +63,7 @@ export function useContextMenus({
   displayListQueries: DisplayListQueries | null;
   interactionPageHostRef: React.RefObject<HTMLDivElement | null>;
   i18n: Translations | undefined;
+  partEditOpen: boolean;
   onAddComment: (range: { from: number; to: number; yPos: number | null }) => void;
 }) {
   const { t } = useTranslation();
@@ -250,7 +252,7 @@ export function useContextMenus({
         dividerAfter: !contextMenu.hasSelection && !contextMenu.cursorInTable,
       },
     ];
-    if (contextMenu.hasSelection) {
+    if (contextMenu.hasSelection && !partEditOpen) {
       items.push({
         action: 'addComment',
         label: 'Comment',
@@ -293,7 +295,14 @@ export function useContextMenus({
       shortcut: formatKeys(t('contextMenu.selectAllShortcut')),
     });
     return items;
-  }, [contextMenu.hasSelection, contextMenu.cursorInTable, contextMenu.tableContext, i18n, t]);
+  }, [
+    contextMenu.hasSelection,
+    contextMenu.cursorInTable,
+    contextMenu.tableContext,
+    i18n,
+    partEditOpen,
+    t,
+  ]);
 
   const handleContextMenuAction = useCallback(
     async (action: TextContextAction) => {
@@ -370,6 +379,7 @@ export function useContextMenus({
           paged.applyYrsCommand({ type: 'tableDelete' });
           break;
         case 'addComment': {
+          if (partEditOpen) break;
           const selection = paged.getSelectionRange();
           if (!selection || selection.from === selection.to) break;
           const { from, to } = selection;
@@ -403,6 +413,7 @@ export function useContextMenus({
       displayListQueries,
       interactionPageHostRef,
       onAddComment,
+      partEditOpen,
     ]
   );
 
