@@ -228,6 +228,11 @@ export interface DisplayListQueries {
    * caret rect per page carrying the part; the caller picks the edited page.
    */
   hfCaretRects(region: 'header' | 'footer', rId: string, pos: number): DisplayListRect[];
+  /**
+   * Caret geometry for a collapsed selection in a note story — the note twin of
+   * `hfCaretRects`. A note paints on one page, so this returns at most one rect.
+   */
+  noteCaretRects(region: 'footnote' | 'endnote', noteId: number, pos: number): DisplayListRect[];
   /** Header/footer sidebar anchors, one per page carrying the part. */
   hfAnchorRects(region: 'header' | 'footer', rId: string, pos: number): DisplayListRect[];
   /**
@@ -716,49 +721,53 @@ export function createDisplayListQueries(
     to: number
   ): DisplayListRect[] => regionRangeRects(region, String(noteId), from, to);
 
+  /**
+   * One caret per page from a scoped range query. An HF part paints on every
+   * page carrying it, so the caller picks the edited page; a note paints on
+   * exactly one, so the single answer is already the right one.
+   */
+  const scopedCaretRects = (
+    scopedRangeRects: (from: number, to: number) => DisplayListRect[],
+    pos: number
+  ): DisplayListRect[] => {
+    // The leading edge is the first slice on a page, the trailing edge the last.
+    const caretsByPage = (rects: DisplayListRect[], leading: boolean) => {
+      const byPage = new Map<number, DisplayListRect>();
+      for (const rect of rects) {
+        if (leading && byPage.has(rect.pageIndex)) continue;
+        byPage.set(rect.pageIndex, {
+          pageIndex: rect.pageIndex,
+          x: leading ? rect.x : rect.x + rect.width,
+          y: rect.y,
+          width: 0,
+          height: rect.height,
+        });
+      }
+      return [...byPage.values()];
+    };
+    const forward = scopedRangeRects(pos, pos + 1);
+    if (forward.length > 0) return caretsByPage(forward, true);
+    if (pos > 0) {
+      // end of line / end of doc: trailing edge of the previous position
+      const backward = scopedRangeRects(pos - 1, pos);
+      if (backward.length > 0) return caretsByPage(backward, false);
+    }
+    return [];
+  };
+
   const hfCaretRects = (
     region: 'header' | 'footer',
     rId: string,
     pos: number
-  ): DisplayListRect[] => {
-    // The same HF doc paints on every page carrying the part, so a caret query
-    // returns one candidate per page; the caller renders the edited one.
-    const forward = hfRangeRects(region, rId, pos, pos + 1);
-    if (forward.length > 0) {
-      // left edge of the first slice on each page is the caret there
-      const byPage = new Map<number, DisplayListRect>();
-      for (const r of forward) {
-        if (!byPage.has(r.pageIndex)) {
-          byPage.set(r.pageIndex, {
-            pageIndex: r.pageIndex,
-            x: r.x,
-            y: r.y,
-            width: 0,
-            height: r.height,
-          });
-        }
-      }
-      return [...byPage.values()];
-    }
-    if (pos > 0) {
-      // end of line / end of doc: trailing edge of the previous position
-      const backward = hfRangeRects(region, rId, pos - 1, pos);
-      if (backward.length > 0) {
-        const byPage = new Map<number, DisplayListRect>();
-        for (const r of backward) {
-          byPage.set(r.pageIndex, {
-            pageIndex: r.pageIndex,
-            x: r.x + r.width,
-            y: r.y,
-            width: 0,
-            height: r.height,
-          });
-        }
-        return [...byPage.values()];
-      }
-    }
-    return [];
-  };
+  ): DisplayListRect[] =>
+    scopedCaretRects((from, to) => hfRangeRects(region, rId, from, to), pos);
+
+  const noteCaretRects = (
+    region: 'footnote' | 'endnote',
+    noteId: number,
+    pos: number
+  ): DisplayListRect[] =>
+    scopedCaretRects((from, to) => noteRangeRects(region, noteId, from, to), pos);
 
   const caretRect = (pos: number): DisplayListRect | null => {
     const forward = rangeRects(pos, pos + 1);
@@ -1051,6 +1060,7 @@ export function createDisplayListQueries(
     hfRangeRects,
     noteRangeRects,
     hfCaretRects,
+    noteCaretRects,
     hfAnchorRects,
     caretRect,
     anchorRect,

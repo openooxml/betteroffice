@@ -125,7 +125,7 @@ import {
   type YrsEditorCommand,
 } from './yrsCommands';
 import { YrsPositionProjection } from './internals/yrsPositionProjection';
-import { partEditStory, type PartEdit } from './partEdit';
+import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions } from './types';
 
 export { DEFAULT_PAGE_WIDTH };
@@ -210,6 +210,8 @@ export interface PagedEditorProps {
   pluginOverlays?: React.ReactNode;
   /** Callback when header or footer is double-clicked for editing. */
   onHeaderFooterDoubleClick?: (position: 'header' | 'footer', pageNumber?: number) => void;
+  /** Callback when a note area is clicked for editing. */
+  onNoteClick?: (note: NoteEdit) => void;
   /** The one non-body part open for editing (dims body, intercepts body clicks). */
   partEdit?: PartEdit | null;
   /** Called when user clicks the body area while a part is open. */
@@ -441,6 +443,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onRenderedDomContextReady,
       pluginOverlays,
       onHeaderFooterDoubleClick,
+      onNoteClick,
       partEdit = null,
       onBodyClick,
       className,
@@ -534,7 +537,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const map = yrsCore.inputPositionMap(loc.story);
         if (!map) return null;
         const local = yrsLocToLocalDisplayPosition(map, loc);
-        const rootStory = loc.story.startsWith('hf:') ? activeYrsRootStory : 'body';
+        const rootStory =
+          loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
         return (
           getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
           (loc.story === rootStory ? local : null)
@@ -1313,6 +1317,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onContextMenu,
       onHyperlinkClick,
       onHeaderFooterDoubleClick,
+      onNoteClick,
       setSelectionRects,
       setCaretPosition,
       setIsFocused,

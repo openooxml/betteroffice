@@ -24,7 +24,14 @@ import {
   type CanvasHoverCursor,
 } from '../hoverCursor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
-import { hitBelongsToPart, partImageRegion, type PartEdit } from '../partEdit';
+import {
+  hitBelongsToPart,
+  noteEditFromHit,
+  partEditStory,
+  partImageRegion,
+  type NoteEdit,
+  type PartEdit,
+} from '../partEdit';
 import type { YrsEditorCommand } from '../yrsCommands';
 
 interface TableInsertButtonState {
@@ -69,6 +76,8 @@ export interface UsePagesPointerOptions {
     position: { top: number; left: number };
   }) => void;
   onHeaderFooterDoubleClick?: (position: 'header' | 'footer', pageNumber?: number) => void;
+  /** A single click landed in a note area — the host opens it for editing. */
+  onNoteClick?: (note: NoteEdit) => void;
   setSelectionRects: React.Dispatch<React.SetStateAction<SelectionRect[]>>;
   setCaretPosition: React.Dispatch<React.SetStateAction<CaretPosition | null>>;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -176,6 +185,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     onContextMenu,
     onHyperlinkClick,
     onHeaderFooterDoubleClick,
+    onNoteClick,
     setSelectionRects,
     setCaretPosition,
     setIsFocused,
@@ -184,6 +194,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const isDraggingRef = useRef(false);
   const dragAnchorRef = useRef<number | null>(null);
+  const pendingNoteCaretRef = useRef<{ story: string; position: number } | null>(null);
   const yrsCellDragAnchorRef = useRef<YrsCellLoc | null>(null);
   const yrsCellDraggingRef = useRef(false);
   const [tableInsertButton, setTableInsertButton] = useState<TableInsertButtonState | null>(null);
@@ -336,6 +347,18 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const hit = point?.hit ?? null;
       const region = hit?.region ?? null;
+      // A note area opens on a single click, wherever the caret was before:
+      // one part is open at a time, so this both leaves the old one and picks
+      // the note up. The caret the click asked for is placed once the editor
+      // is on that note's story.
+      const note = noteEditFromHit(hit);
+      if (note && onNoteClick && !hitBelongsToPart(partEdit, hit)) {
+        e.stopPropagation();
+        pendingNoteCaretRef.current =
+          hit?.pos == null ? null : { story: partEditStory(note), position: hit.pos };
+        onNoteClick(note);
+        return;
+      }
       if (partEdit) {
         if (!hitBelongsToPart(partEdit, hit) && onBodyClick) {
           e.stopPropagation();
@@ -346,12 +369,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         return;
       }
 
-      if (displayListQueries && point) {
+      const imageRegion = partImageRegion(partEdit);
+      if (displayListQueries && point && imageRegion) {
         const image = displayListQueries.imageAtPoint(
           point.pageIndex,
           point.x,
           point.y,
-          partImageRegion(partEdit),
+          imageRegion,
           hit?.rId
         );
         if (image) {
@@ -382,6 +406,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       getPositionFromMouse,
       getYrsPositionProjection,
       onBodyClick,
+      onNoteClick,
       partEdit,
       readOnly,
       resolveCanvasHit,
@@ -393,6 +418,17 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       yrsRootStory,
     ]
   );
+
+  // The opening click resolves a position in a story the editor is not on yet,
+  // so the caret waits for the story to become active. Keyed on the story it
+  // was resolved in, a request the host never honoured expires unused.
+  useEffect(() => {
+    const pending = pendingNoteCaretRef.current;
+    if (!pending || pending.story !== yrsRootStory) return;
+    pendingNoteCaretRef.current = null;
+    setTextSelection(pending.position);
+    focusInput();
+  }, [focusInput, setTextSelection, yrsRootStory]);
 
   dragExtendRef.current = (cx, cy) => {
     if (!isDraggingRef.current || dragAnchorRef.current == null) return;
@@ -476,14 +512,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         scheduleHide();
         return;
       }
+      // Table affordances are indexed by band; a note carries none, so an open
+      // note has no table to offer a row/column on.
       let region: DisplayListTableRegion = { kind: 'body' };
       if (partEdit) {
-        if (!hitBelongsToPart(partEdit, point.hit ?? null) || !point.hit?.rId) {
+        const inBand =
+          (partEdit.kind === 'header' || partEdit.kind === 'footer') &&
+          hitBelongsToPart(partEdit, point.hit ?? null);
+        if (!inBand || !point.hit?.rId) {
           scheduleHide();
           return;
         }
         region = { kind: partEdit.kind, rId: point.hit.rId };
-      } else if (point.hit?.region === 'header' || point.hit?.region === 'footer') {
+      } else if (point.hit && point.hit.region !== 'body') {
         scheduleHide();
         return;
       }
@@ -565,9 +606,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       if (projection && queries && host && point) {
+        // Hyperlink primitives are indexed by band, so an open note — whose
+        // area the index does not cover — resolves none and falls through to
+        // the multi-click selection below.
+        const inOpenPart = hitBelongsToPart(partEdit, point.hit ?? null);
         const region: DisplayListTableRegion | null = !partEdit
           ? { kind: 'body' }
-          : hitBelongsToPart(partEdit, point.hit ?? null)
+          : inOpenPart && (partEdit.kind === 'header' || partEdit.kind === 'footer')
             ? { kind: partEdit.kind, rId: point.hit?.rId }
             : null;
         const displayHit = region
@@ -681,12 +726,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       };
       let imageInfo: ImageInfo | null = null;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
-      if (displayListQueries && point) {
+      const imageRegion = partImageRegion(partEdit);
+      if (displayListQueries && point && imageRegion) {
         const image = displayListQueries.imageAtPoint(
           point.pageIndex,
           point.x,
           point.y,
-          partImageRegion(partEdit),
+          imageRegion,
           point.hit?.rId
         );
         if (image) imageInfo = readImageNodeAt(image.pos);

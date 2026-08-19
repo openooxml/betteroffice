@@ -46,6 +46,16 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(mode, hit({ region: 'footnote', target: 'text' }))).toBe('default');
   });
 
+  test('editing a note makes only that note typeable', () => {
+    const mode = { readOnly: false, partEdit: { kind: 'footnote', noteId: 2 } as const };
+    expect(canvasHoverCursor(mode, hit({ region: 'footnote', noteId: 2, target: 'none' }))).toBe(
+      'text'
+    );
+    expect(canvasHoverCursor(mode, hit({ region: 'footnote', noteId: 3, target: 'text' }))).toBe(
+      'default'
+    );
+    expect(canvasHoverCursor(mode, hit({ region: 'body', target: 'text' }))).toBe('default');
+  });
 
   test('read-only and off-page points never type', () => {
     expect(canvasHoverCursor({ readOnly: true }, hit({ target: 'text' }))).toBe('default');

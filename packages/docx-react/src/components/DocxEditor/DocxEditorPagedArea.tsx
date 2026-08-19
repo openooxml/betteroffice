@@ -35,7 +35,7 @@ import type { YrsToolbarSelection } from './yrsToolbar';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
-import { partEditStory, type PartEdit, type PartEditTarget } from './partEdit';
+import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 /**
@@ -68,6 +68,7 @@ export function DocxEditorPagedArea({
   partEditTarget,
   setPartEditTarget,
   onHeaderFooterDoubleClick,
+  onNoteClick,
   onRemoveHeaderFooter,
   onBodyClick,
   // Editor
@@ -145,6 +146,7 @@ export function DocxEditorPagedArea({
   partEditTarget: PartEditTarget | null;
   setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
   onHeaderFooterDoubleClick: (position: 'header' | 'footer', pageNumber?: number) => void;
+  onNoteClick: (note: NoteEdit) => void;
   onRemoveHeaderFooter: () => void;
   onBodyClick: () => void;
   zoom: number;
@@ -228,7 +230,11 @@ export function DocxEditorPagedArea({
 }) {
   const sidebarCommentIds = useMemo(() => comments.map((comment) => comment.id), [comments]);
 
-  const bandEdit = partEditTarget;
+  // The open part, split into the two shapes its consumers address it by.
+  const bandEdit =
+    partEditTarget?.kind === 'header' || partEditTarget?.kind === 'footer'
+      ? partEditTarget
+      : null;
 
   // Resolve the active HF block for the inline editor — first-page variant
   // wins when `titlePg` is set and the user double-clicked page 1.
@@ -265,19 +271,23 @@ export function DocxEditorPagedArea({
       })()
     : null;
 
-  // Memoised: consumers key effects on this identity, and a value rebuilt per
-  // render would re-run them for nothing.
+  const noteEdit =
+    partEditTarget?.kind === 'footnote' || partEditTarget?.kind === 'endnote'
+      ? partEditTarget
+      : null;
+  // Memoised: consumers key effects on this identity, and a band that rebuilt
+  // it per render would re-run them for nothing.
   const partEdit = useMemo<PartEdit | null>(
-    () => (bandEdit ? { kind: bandEdit.kind, rId: activeHfRid } : null),
-    [bandEdit, activeHfRid]
+    () => (bandEdit ? { kind: bandEdit.kind, rId: activeHfRid } : noteEdit),
+    [bandEdit, activeHfRid, noteEdit]
   );
 
   // Live Yrs selection inside that part, captured on every selection change.
   const [partSelection, setPartSelection] = useState<{ from: number; to: number } | null>(null);
   const partStory = partEditStory(partEdit);
-  // Cleared during render, not in an effect: a child effect can publish a
-  // caret in the same commit, and an effect here would run after it and wipe
-  // the very selection that was just asked for.
+  // Cleared during render, not in an effect: the click that opens a note
+  // publishes its caret from a child effect, which React flushes first, and an
+  // effect here would then wipe the very selection that click asked for.
   const [selectionStory, setSelectionStory] = useState(partStory);
   if (selectionStory !== partStory) {
     setSelectionStory(partStory);
@@ -411,6 +421,7 @@ export function DocxEditorPagedArea({
         firstPageHeaderContent={firstPageHeaderContent}
         firstPageFooterContent={firstPageFooterContent}
         onHeaderFooterDoubleClick={onHeaderFooterDoubleClick}
+        onNoteClick={onNoteClick}
         partEdit={partEdit}
         onBodyClick={onBodyClick}
         isSuggesting={isSuggesting}
@@ -503,6 +514,7 @@ export function DocxEditorPagedArea({
 
       {!canvasOverlayTarget && floatingCommentButton}
 
+      {/* Cell selection is indexed by band, so only an open band offers it. */}
       {canvasOverlayTarget &&
         displayListQueries &&
         bandEdit &&

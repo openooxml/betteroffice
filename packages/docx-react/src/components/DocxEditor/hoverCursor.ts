@@ -10,7 +10,8 @@
  * An idle header/footer band deliberately DIFFERS from that stylesheet, which
  * gave the whole band a hand: here it reads as text over its own runs, since a
  * single click on an idle band is inert and only a double-click opens it for
- * editing at that word.
+ * editing at that word. Over a note area the same reading is literal — a
+ * single click there opens the note and puts the caret under the pointer.
  *
  * A wasm build predating `target` omits it, which reads as "not text".
  */
@@ -33,7 +34,7 @@ export function canvasHoverCursor(
 ): CanvasHoverCursor {
   if (mode.readOnly || !hit) return 'default';
   if (mode.partEdit) {
-    // only the open part accepts typing; the body and its siblings are inert
+    // only the open part accepts typing; the body and every sibling are inert
     if (!hitBelongsToPart(mode.partEdit, hit)) return 'default';
     // the whole part is typeable once open, so an absent target still types
     return hit.target === 'image' ? 'default' : 'text';

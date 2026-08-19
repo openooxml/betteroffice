@@ -7,7 +7,7 @@ import { projectPageLocalRect } from '../internals/canvasProjection';
 import type { PartEdit } from '../partEdit';
 
 export interface CanvasPartSelectionOverlayProps {
-  /** Which band is open. */
+  /** Which part is open — a header/footer band, or one note. */
   part: PartEdit;
   /** Current selection, in the open part's own display positions, or null. */
   selection: { from: number; to: number } | null;
@@ -17,7 +17,7 @@ export interface CanvasPartSelectionOverlayProps {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   /** Display-list queries — part geometry source + page-local → canvas scale. */
   displayListQueries: DisplayListQueries;
-  /** Exact display page whose band was activated. */
+  /** Exact display page whose band was activated. Notes paint on one page. */
   activePageIndex?: number;
   /** Sidebar open — recompute after its `translateX` transition settles. */
   sidebarOpen: boolean;
@@ -39,12 +39,21 @@ function partSelectionRects(
   from: number,
   to: number
 ): DisplayListRect[] {
-  if (!part.rId) return [];
   const start = Math.min(from, to);
   const end = Math.max(from, to);
-  return start === end
-    ? queries.hfCaretRects(part.kind, part.rId, start)
-    : queries.hfRangeRects(part.kind, part.rId, start, end);
+  switch (part.kind) {
+    case 'footnote':
+    case 'endnote':
+      return start === end
+        ? queries.noteCaretRects(part.kind, part.noteId, start)
+        : queries.noteRangeRects(part.kind, part.noteId, start, end);
+    case 'header':
+    case 'footer':
+      if (!part.rId) return [];
+      return start === end
+        ? queries.hfCaretRects(part.kind, part.rId, start)
+        : queries.hfRangeRects(part.kind, part.rId, start, end);
+  }
 }
 
 export function CanvasPartSelectionOverlay({
@@ -72,8 +81,8 @@ export function CanvasPartSelectionOverlay({
     const isCaret = from === to;
 
     const recompute = () => {
-      // Candidates come back one-per-page (the part paints on every page it
-      // covers); each rect carries its own pageIndex.
+      // Candidates come back one-per-page (an HF part paints on every page it
+      // covers, a note on exactly one); each rect carries its own pageIndex.
       const candidates = partSelectionRects(displayListQueries, part, from, to);
       if (candidates.length === 0) {
         setState({ caret: null, rects: [] });

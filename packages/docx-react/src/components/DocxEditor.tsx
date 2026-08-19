@@ -636,7 +636,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const isDark = useIsDark(colorMode);
 
-  // The one non-body part open for editing.
+  // The one non-body part open for editing — a header/footer band or a note.
   const [partEditTarget, setPartEditTarget] = useState<PartEditTarget | null>(null);
 
   // Controlled by `commentsSidebarOpen` when provided, else editor-owned; the
@@ -1858,6 +1858,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               partEditTarget={partEditTarget}
               setPartEditTarget={setPartEditTarget}
               onHeaderFooterDoubleClick={handleHeaderFooterDoubleClick}
+              onNoteClick={setPartEditTarget}
               onRemoveHeaderFooter={handleRemoveHeaderFooter}
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
