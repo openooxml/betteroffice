@@ -26,6 +26,7 @@ import {
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import {
   hitBelongsToPart,
+  isNoteAreaHit,
   noteEditFromHit,
   partEditStory,
   partImageRegion,
@@ -194,12 +195,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const isDraggingRef = useRef(false);
   const dragAnchorRef = useRef<number | null>(null);
-  const pendingNoteCaretRef = useRef<{
+  const pendingPartCaretRef = useRef<{
     session: YrsSession;
     story: string;
     position: number;
   } | null>(null);
-  const [pendingNoteCaretVersion, setPendingNoteCaretVersion] = useState(0);
+  const [pendingPartCaretVersion, setPendingPartCaretVersion] = useState(0);
   const yrsCellDragAnchorRef = useRef<YrsCellLoc | null>(null);
   const yrsCellDraggingRef = useRef(false);
   const [tableInsertButton, setTableInsertButton] = useState<TableInsertButtonState | null>(null);
@@ -337,9 +338,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      pendingNoteCaretRef.current = null;
-      const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) return;
+      pendingPartCaretRef.current = null;
       if (e.button === 2) {
         e.preventDefault();
         return;
@@ -358,6 +357,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // the note up. The caret the click asked for is placed once the editor
       // is on that note's story.
       const note = noteEditFromHit(hit);
+      if (isNoteAreaHit(hit) && !note) return;
       if (note && onNoteClick && !hitBelongsToPart(partEdit, hit)) {
         e.stopPropagation();
         const pending =
@@ -368,20 +368,29 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
                 story: partEditStory(note),
                 position: hit.pos,
               };
-        pendingNoteCaretRef.current = pending;
+        pendingPartCaretRef.current = pending;
         onNoteClick(note);
-        if (pending) setPendingNoteCaretVersion((version) => version + 1);
+        if (pending) setPendingPartCaretVersion((version) => version + 1);
         return;
       }
       if (partEdit) {
         if (!hitBelongsToPart(partEdit, hit) && onBodyClick) {
           e.stopPropagation();
+          const pending =
+            hit?.region === 'body' && hit.pos != null && yrsSession
+              ? { session: yrsSession, story: 'body', position: hit.pos }
+              : null;
+          pendingPartCaretRef.current = pending;
           onBodyClick();
+          if (pending) setPendingPartCaretVersion((version) => version + 1);
           return;
         }
       } else if ((region === 'header' || region === 'footer') && e.detail !== 2) {
         return;
       }
+
+      const projection = getYrsPositionProjection(yrsRootStory);
+      if (!projection) return;
 
       const imageRegion = partImageRegion(partEdit);
       if (displayListQueries && point && imageRegion) {
@@ -434,12 +443,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     ]
   );
 
-  // The opening click resolves a position in a story the editor is not on yet,
-  // so the caret waits for the requested part to become active in this session.
   useEffect(() => {
-    const pending = pendingNoteCaretRef.current;
+    const pending = pendingPartCaretRef.current;
     if (!pending) return;
-    pendingNoteCaretRef.current = null;
+    pendingPartCaretRef.current = null;
     if (
       pending.session !== yrsSession ||
       pending.story !== yrsRootStory ||
@@ -456,7 +463,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     focusInput,
     getYrsPositionProjection,
     partEdit,
-    pendingNoteCaretVersion,
+    pendingPartCaretVersion,
     setTextSelection,
     yrsRootStory,
     yrsSession,

@@ -18,7 +18,7 @@
 
 import type { DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 
-import { hitBelongsToPart, type PartEdit } from './partEdit';
+import { hitBelongsToPart, isNoteAreaHit, type PartEdit } from './partEdit';
 
 export type CanvasHoverCursor = 'default' | 'text';
 
@@ -39,6 +39,7 @@ export function canvasHoverCursor(
     // the whole part is typeable once open, so an absent target still types
     return hit.target === 'image' ? 'default' : 'text';
   }
+  if (isNoteAreaHit(hit)) return hit.target === 'image' ? 'default' : 'text';
   return hit.target === 'text' ? 'text' : 'default';
 }
 

@@ -124,7 +124,10 @@ import {
   yrsTableSelectionRange,
   type YrsEditorCommand,
 } from './yrsCommands';
-import { YrsPositionProjection } from './internals/yrsPositionProjection';
+import {
+  createYrsPositionProjection,
+  type YrsPositionProjection,
+} from './internals/yrsPositionProjection';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions } from './types';
 
@@ -1257,7 +1260,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
-        if (!session) return null;
+        if (!session || !session.storyIds().includes(rootStory)) return null;
         const cached = yrsPositionProjectionCacheRef.current;
         if (
           cached?.version === yrsProjectionVersionRef.current &&
@@ -1266,7 +1269,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         ) {
           return cached.projection;
         }
-        const projection = new YrsPositionProjection(session, rootStory);
+        const projection = createYrsPositionProjection(session, rootStory);
+        if (!projection) return null;
         yrsPositionProjectionCacheRef.current = {
           version: yrsProjectionVersionRef.current,
           session,

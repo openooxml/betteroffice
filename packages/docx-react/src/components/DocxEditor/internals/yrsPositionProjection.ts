@@ -55,6 +55,14 @@ export interface YrsPointerProjectionTarget {
   cell?: YrsCellLoc;
 }
 
+export function createYrsPositionProjection(
+  session: YrsSession,
+  rootStory: string
+): YrsPositionProjection | null {
+  if (!session.storyIds().includes(rootStory)) return null;
+  return new YrsPositionProjection(session, rootStory);
+}
+
 export class YrsPositionProjection {
   private readonly stories = new Map<string, StoryProjection>();
   private readonly nodes = new Map<number, YrsProjectedNode>();

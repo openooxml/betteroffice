@@ -188,6 +188,7 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
       {isOpen && (
         <div
           ref={dropdownRef}
+          data-docx-escape-layer="true"
           style={{
             position: 'fixed',
             top: dropdownPos.top,

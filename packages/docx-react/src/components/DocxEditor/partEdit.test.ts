@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import type { DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 import {
   hitBelongsToPart,
+  isNoteAreaHit,
   noteEditFromHit,
   partEditStory,
   partImageRegion,
@@ -12,6 +13,15 @@ const hit = (over: Partial<DisplayListRegionHit>): DisplayListRegionHit => ({
   region: 'body',
   pos: 12,
   ...over,
+});
+
+describe('isNoteAreaHit', () => {
+  test('recognises both note regions without requiring an attributed note', () => {
+    expect(isNoteAreaHit(hit({ region: 'footnote', noteId: undefined, pos: null }))).toBe(true);
+    expect(isNoteAreaHit(hit({ region: 'endnote', noteId: undefined, pos: null }))).toBe(true);
+    expect(isNoteAreaHit(hit({ region: 'body' }))).toBe(false);
+    expect(isNoteAreaHit(null)).toBe(false);
+  });
 });
 
 describe('partEditStory', () => {

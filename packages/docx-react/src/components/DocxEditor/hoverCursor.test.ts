@@ -27,11 +27,14 @@ describe('canvas hover cursor', () => {
     expect(canvasHoverCursor(editing, hit({ region: 'footer', target: 'none' }))).toBe('default');
   });
 
-  test('a note reads as text over its own runs', () => {
+  test('an idle note area is text unless it is an image', () => {
     expect(
       canvasHoverCursor(editing, hit({ region: 'footnote', noteId: 3, target: 'text' }))
     ).toBe('text');
     expect(canvasHoverCursor(editing, hit({ region: 'endnote', noteId: 3, target: 'none' }))).toBe(
+      'text'
+    );
+    expect(canvasHoverCursor(editing, hit({ region: 'footnote', target: 'image' }))).toBe(
       'default'
     );
   });
@@ -71,6 +74,7 @@ describe('canvas hover cursor', () => {
   test('a wasm build without the target degrades to the pre-hover behaviour', () => {
     const older: DisplayListRegionHit = { region: 'body', pos: 12 };
     expect(canvasHoverCursor(editing, older)).toBe('default');
+    expect(canvasHoverCursor(editing, { ...older, region: 'footnote' })).toBe('text');
     // an open band types regardless: the whole band is its typeable area
     expect(
       canvasHoverCursor(

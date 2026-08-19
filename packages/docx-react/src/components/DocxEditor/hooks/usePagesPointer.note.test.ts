@@ -6,9 +6,11 @@
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { createRef, useState } from 'react';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { createElement, createRef, useState } from 'react';
+import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import { MenuDropdown } from '../../ui/MenuDropdown';
+import { useEscapeKey } from '../../../hooks/useEscapeKey';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
 import type { YrsInputRef } from '../YrsInput';
 import { partEditStory, type PartEdit } from '../partEdit';
@@ -16,7 +18,7 @@ import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, render, renderHook } = await import('@testing-library/react');
 
 const PAGE = { width: 800, height: 1000 };
 /** y at or past this is the page's footnote area in the fake engine. */
@@ -25,16 +27,23 @@ const NOTE_A_ID = 1;
 const NOTE_ID = 2;
 /** what the fake engine resolves anywhere inside the note area */
 const NOTE_POSITION = 7;
+const UNATTRIBUTED_NOTE_HIT = {
+  region: 'footnote',
+  noteId: undefined,
+  pos: null,
+  target: 'none',
+} as DisplayListRegionHit;
 
 let host: HTMLDivElement;
 let selections: Array<{ anchor: number; head: number; story?: string }>;
 
-function fakeQueries(): DisplayListQueries {
+function fakeQueries(fixedHit?: DisplayListRegionHit): DisplayListQueries {
   return {
     displayList: { pages: [{ pageIndex: 0, ...PAGE, primitives: [] }] },
     pageCount: () => 1,
     pageSize: () => PAGE,
     hitTestRegions: (_pageIndex: number, x: number, y: number) => {
+      if (fixedHit) return fixedHit;
       if (y < NOTE_FROM) return { region: 'body' as const, pos: 1, target: 'text' as const };
       return x < PAGE.width / 2
         ? {
@@ -111,6 +120,17 @@ function dispatchMouse(
 
 function mouse(type: string, clientX: number, clientY: number, target: EventTarget): void {
   act(() => dispatchMouse(type, clientX, clientY, target));
+}
+
+function dispatchEscape(target: EventTarget, init: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Escape',
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  act(() => target.dispatchEvent(event));
+  return event;
 }
 
 beforeEach(() => {
@@ -399,18 +419,111 @@ describe('clicking a note', () => {
     ]);
   });
 
-  test('a click in the body leaves the note instead of typing into it', () => {
+  test('a click in the body leaves the note and places the body caret there', () => {
     let left = 0;
     const options = stableOptions();
-    renderHook(() =>
-      usePagesPointer(
-        options({ partEdit: note, yrsRootStory: `fn:${NOTE_ID}`, onBodyClick: () => (left += 1) })
-      )
-    );
+    renderHook(() => {
+      const [partEdit, setPartEdit] = useState<PartEdit | null>(note);
+      return usePagesPointer(
+        options({
+          partEdit,
+          yrsRootStory: partEditStory(partEdit),
+          onBodyClick: () => {
+            left += 1;
+            setPartEdit(null);
+          },
+        })
+      );
+    });
 
     mouse('mousedown', 400, 500, canvasOf());
 
     expect(left).toBe(1);
+    expect(selections).toEqual([{ anchor: 1, head: 1, story: 'body' }]);
+  });
+
+  test('a click in the body leaves a band and places the body caret there', () => {
+    let left = 0;
+    const options = stableOptions();
+    renderHook(() => {
+      const [partEdit, setPartEdit] = useState<PartEdit | null>({
+        kind: 'header',
+        rId: 'rId7',
+      });
+      return usePagesPointer(
+        options({
+          partEdit,
+          yrsRootStory: partEditStory(partEdit),
+          onBodyClick: () => {
+            left += 1;
+            setPartEdit(null);
+          },
+        })
+      );
+    });
+
+    mouse('mousedown', 400, 500, canvasOf());
+
+    expect(left).toBe(1);
+    expect(selections).toEqual([{ anchor: 1, head: 1, story: 'body' }]);
+  });
+
+  test('a body click can leave a note whose story vanished', () => {
+    let left = 0;
+    const options = stableOptions();
+    const projectionFor = options().getYrsPositionProjection;
+    renderHook(() => {
+      const [partEdit, setPartEdit] = useState<PartEdit | null>(note);
+      return usePagesPointer(
+        options({
+          partEdit,
+          yrsRootStory: partEditStory(partEdit),
+          getYrsPositionProjection: (story) =>
+            story === `fn:${NOTE_ID}` ? null : projectionFor(story),
+          onBodyClick: () => {
+            left += 1;
+            setPartEdit(null);
+          },
+        })
+      );
+    });
+
+    mouse('mousedown', 400, 500, canvasOf());
+
+    expect(left).toBe(1);
+    expect(selections).toEqual([{ anchor: 1, head: 1, story: 'body' }]);
+  });
+
+  test('an unattributed note-area hit is inert while the body is active', () => {
+    const options = stableOptions();
+    renderHook(() =>
+      usePagesPointer(
+        options({ displayListQueries: fakeQueries(UNATTRIBUTED_NOTE_HIT), onNoteClick: () => {} })
+      )
+    );
+
+    mouse('mousedown', 400, 950, canvasOf());
+
+    expect(selections).toEqual([]);
+  });
+
+  test('an unattributed note-area hit does not close an open note', () => {
+    let left = 0;
+    const options = stableOptions();
+    renderHook(() =>
+      usePagesPointer(
+        options({
+          partEdit: note,
+          yrsRootStory: `fn:${NOTE_ID}`,
+          displayListQueries: fakeQueries(UNATTRIBUTED_NOTE_HIT),
+          onBodyClick: () => (left += 1),
+        })
+      )
+    );
+
+    mouse('mousedown', 400, 950, canvasOf());
+
+    expect(left).toBe(0);
     expect(selections).toEqual([]);
   });
 
@@ -466,3 +579,92 @@ describe('clicking a note', () => {
     expect(contexts[0]?.image).toBeNull();
   });
 });
+
+describe('closing an open part with Escape', () => {
+  test('ignores composition Escape events', () => {
+    let closed = 0;
+    renderHook(() => useEscapeKey(true, () => (closed += 1)));
+
+    dispatchEscape(document, { isComposing: true });
+    const legacy = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(legacy, 'keyCode', { value: 229 });
+    act(() => document.dispatchEvent(legacy));
+
+    expect(closed).toBe(0);
+  });
+
+  test('lets an open menu consume Escape without closing the part', () => {
+    let closed = 0;
+    const view = render(createElement(EscapeMenuHarness, { onEscape: () => (closed += 1) }));
+    const trigger = view.getByRole('button', { name: 'File' });
+    act(() => trigger.click());
+
+    expect(view.getByText('Open')).toBeTruthy();
+    dispatchEscape(trigger);
+
+    expect(view.queryByText('Open')).toBeNull();
+    expect(closed).toBe(0);
+  });
+
+  test('plain Escape from the editor input closes the part', () => {
+    let closed = 0;
+    const input = document.createElement('textarea');
+    input.className = 'paged-editor__yrs-input';
+    host.append(input);
+    renderHook(() => useEscapeKey(true, () => (closed += 1)));
+
+    const event = dispatchEscape(input);
+
+    expect(closed).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+    input.remove();
+  });
+
+  test('ignores Escape from another input', () => {
+    let closed = 0;
+    const input = document.createElement('input');
+    host.append(input);
+    renderHook(() => useEscapeKey(true, () => (closed += 1)));
+
+    dispatchEscape(input);
+
+    expect(closed).toBe(0);
+    input.remove();
+  });
+
+  test('ignores an already prevented Escape', () => {
+    let closed = 0;
+    renderHook(() => useEscapeKey(true, () => (closed += 1)));
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    event.preventDefault();
+
+    act(() => document.dispatchEvent(event));
+
+    expect(closed).toBe(0);
+  });
+
+  test('closes an active part without mounted chrome', () => {
+    let closed = 0;
+    renderHook(() => useEscapeKey(true, () => (closed += 1)));
+
+    dispatchEscape(document);
+
+    expect(closed).toBe(1);
+  });
+});
+
+function EscapeMenuHarness({ onEscape }: { onEscape: () => void }) {
+  useEscapeKey(true, onEscape);
+  return createElement(MenuDropdown, {
+    label: 'File',
+    items: [{ label: 'Open', onClick: () => {} }],
+  });
+}

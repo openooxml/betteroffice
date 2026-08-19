@@ -59,8 +59,14 @@ export function partImageRegion(part: PartEdit | null): DisplayListImageRegion |
   return isNote(part) ? null : part.kind;
 }
 
+export function isNoteAreaHit(
+  hit: DisplayListRegionHit | null
+): hit is DisplayListRegionHit & { region: 'footnote' | 'endnote' } {
+  return hit?.region === 'footnote' || hit?.region === 'endnote';
+}
+
 /** The note a hit opens for editing, or null when it names none. */
 export function noteEditFromHit(hit: DisplayListRegionHit | null): NoteEdit | null {
-  if (hit?.region !== 'footnote' && hit?.region !== 'endnote') return null;
+  if (!isNoteAreaHit(hit)) return null;
   return hit.noteId == null ? null : { kind: hit.region, noteId: hit.noteId };
 }
