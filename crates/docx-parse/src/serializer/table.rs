@@ -394,12 +394,17 @@ fn write_table_look(writer: &mut XmlWriter, look: Option<&TableLook>) {
         (look.no_h_band, "w:noHBand"),
         (look.no_v_band, "w:noVBand"),
     ];
-    if !values.iter().any(|(value, _)| *value == Some(true)) {
+    if look.value.is_none() && !values.iter().any(|(value, _)| value.is_some()) {
         return;
     }
     writer.start_element("w:tblLook");
-    for (_, name) in values.into_iter().filter(|(value, _)| *value == Some(true)) {
-        writer.attribute(name, "1");
+    if let Some(value) = nonempty(look.value.as_deref()) {
+        writer.attribute("w:val", value);
+    }
+    for (value, name) in values {
+        if let Some(value) = value {
+            writer.attribute(name, if value { "1" } else { "0" });
+        }
     }
     writer.end_element();
 }
@@ -475,6 +480,28 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn table_look_keeps_the_legacy_value_and_explicit_zero_flags() {
+        let mut writer = XmlWriter::with_capacity(64);
+        write_table_look(
+            &mut writer,
+            Some(&crate::formatting::TableLook {
+                value: Some("04A0".to_owned()),
+                first_row: Some(true),
+                last_row: Some(false),
+                first_column: Some(true),
+                last_column: Some(false),
+                no_h_band: Some(false),
+                no_v_band: Some(true),
+            }),
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:tblLook w:val=\"04A0\" w:firstRow=\"1\" w:lastRow=\"0\" w:firstColumn=\"1\" \
+             w:lastColumn=\"0\" w:noHBand=\"0\" w:noVBand=\"1\"/>"
+        );
     }
 
     #[test]

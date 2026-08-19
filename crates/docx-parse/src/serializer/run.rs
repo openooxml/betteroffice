@@ -51,6 +51,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
             fonts.h_ansi_theme.as_deref(),
             fonts.east_asia_theme.as_deref(),
             fonts.cs_theme.as_deref(),
+            fonts.hint.as_deref(),
         ]
         .into_iter()
         .any(|value| nonempty(value).is_some());
@@ -68,6 +69,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 fonts.east_asia_theme.as_deref(),
             );
             optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
     }

@@ -241,7 +241,7 @@ fn serialize_hyperlink(
         || nonempty(hyperlink.anchor.as_deref()).is_some()
         || nonempty(hyperlink.tooltip.as_deref()).is_some()
         || nonempty(hyperlink.target.as_deref()).is_some()
-        || hyperlink.history == Some(false)
+        || hyperlink.history.is_some()
         || nonempty(hyperlink.doc_location.as_deref()).is_some();
     if !has_attributes && nonempty(hyperlink.href.as_deref()).is_none() {
         return Ok(children);
@@ -252,9 +252,11 @@ fn serialize_hyperlink(
     optional_attr(&mut writer, "w:anchor", hyperlink.anchor.as_deref());
     optional_attr(&mut writer, "w:tooltip", hyperlink.tooltip.as_deref());
     optional_attr(&mut writer, "w:tgtFrame", hyperlink.target.as_deref());
-    if hyperlink.history == Some(false) {
-        writer.attribute("w:history", "0");
-    }
+    match hyperlink.history {
+        Some(true) => writer.attribute("w:history", "1"),
+        Some(false) => writer.attribute("w:history", "0"),
+        None => &mut writer,
+    };
     optional_attr(
         &mut writer,
         "w:docLocation",

@@ -166,11 +166,18 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
     let mut shading = ShadingProperties::default();
     if let Some(fill) = element
         .attribute(Some("w"), "fill")
-        .filter(|value| !value.is_empty() && *value != "auto")
+        .filter(|value| !value.is_empty())
     {
-        shading.fill = Some(ColorValue {
-            rgb: Some(fill.to_owned()),
-            ..ColorValue::default()
+        shading.fill = Some(if fill == "auto" {
+            ColorValue {
+                auto: Some(true),
+                ..ColorValue::default()
+            }
+        } else {
+            ColorValue {
+                rgb: Some(fill.to_owned()),
+                ..ColorValue::default()
+            }
         });
     }
     if let Some(theme_fill) = element
@@ -192,11 +199,18 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
     }
     if let Some(color) = element
         .attribute(Some("w"), "color")
-        .filter(|value| !value.is_empty() && *value != "auto")
+        .filter(|value| !value.is_empty())
     {
-        shading.color = Some(ColorValue {
-            rgb: Some(color.to_owned()),
-            ..ColorValue::default()
+        shading.color = Some(if color == "auto" {
+            ColorValue {
+                auto: Some(true),
+                ..ColorValue::default()
+            }
+        } else {
+            ColorValue {
+                rgb: Some(color.to_owned()),
+                ..ColorValue::default()
+            }
         });
     }
     if let Some(theme_color) = element
@@ -782,6 +796,17 @@ mod tests {
             .root()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn auto_shading_color_is_authored_content() {
+        let element = root(r#"<w:shd w:val="clear" w:color="auto" w:fill="FBE4D5"/>"#);
+        let shading = parse_document_shading(Some(&element)).unwrap();
+        assert_eq!(shading.color.as_ref().unwrap().auto, Some(true));
+        assert_eq!(
+            shading.fill.as_ref().unwrap().rgb.as_deref(),
+            Some("FBE4D5")
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
     "corpusFloor": 2,
     "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 12
+    "knownDefects": 8
   },
   "criteria": [
     {
@@ -424,7 +424,7 @@
     {
       "id": "run.fonts",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -439,10 +439,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "hint-only w:rFonts is dropped on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "run.size",
@@ -662,7 +664,7 @@
     {
       "id": "para.shading",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -677,10 +679,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "w:shd color=auto is elided on save, on runs, paragraphs, and cells (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "para.tabs",
@@ -922,7 +926,7 @@
     {
       "id": "style.table-conditional",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -937,10 +941,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "w:tblLook legacy val and zero flags are elided on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "style.latent",
@@ -2012,7 +2018,7 @@
     {
       "id": "fld.hyperlinks",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -2027,10 +2033,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "w:history is dropped from hyperlinks on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "fld.bookmarks",

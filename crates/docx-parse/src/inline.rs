@@ -1164,8 +1164,11 @@ pub fn parse_hyperlink(
         .attribute(Some("w"), "tgtFrame")
         .filter(|value| !value.is_empty())
         .map(|value| truncate_chars(value, 255));
-    let history =
-        matches!(element.attribute(Some("w"), "history"), Some("1" | "true")).then_some(true);
+    let history = match element.attribute(Some("w"), "history") {
+        Some("1" | "true") => Some(true),
+        Some("0" | "false") => Some(false),
+        _ => None,
+    };
     let doc_location = element
         .attribute(Some("w"), "docLocation")
         .filter(|value| !value.is_empty())
