@@ -1678,7 +1678,6 @@ fn paragraph_attrs(
             "spaceAfter",
             "lineSpacing",
             "lineSpacingRule",
-            "indentLeft",
             "indentRight",
             "borders",
             "shading",
@@ -1709,6 +1708,16 @@ fn paragraph_attrs(
         let numbering_removed = number(field(field(formatting, "numPr"), "numId")) == Some(0.0)
             && field(style_ppr_ref, "numPr").is_some()
             && number(field(field(style_ppr_ref, "numPr"), "numId")) != Some(0.0);
+        // Numbering-level indents ride listRendering; they apply after the
+        // style chain, matching Word's property application order.
+        attrs.insert(
+            "indentLeft".to_owned(),
+            field(formatting, "indentLeft")
+                .or_else(|| field(style_ppr_ref, "indentLeft"))
+                .or_else(|| field(list, "indentLeft"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
         attrs.insert(
             "indentFirstLine".to_owned(),
             field(formatting, "indentFirstLine")
@@ -1717,6 +1726,7 @@ fn paragraph_attrs(
                         .then(|| field(style_ppr_ref, "indentFirstLine"))
                         .flatten()
                 })
+                .or_else(|| field(list, "indentFirstLine"))
                 .cloned()
                 .unwrap_or(Value::Null),
         );
@@ -1728,6 +1738,7 @@ fn paragraph_attrs(
                         .then(|| field(style_ppr_ref, "hangingIndent"))
                         .flatten()
                 })
+                .or_else(|| field(list, "hangingIndent"))
                 .cloned()
                 .unwrap_or(Value::Bool(false)),
         );
@@ -1759,9 +1770,7 @@ fn paragraph_attrs(
             "spaceAfter",
             "lineSpacing",
             "lineSpacingRule",
-            "indentLeft",
             "indentRight",
-            "indentFirstLine",
             "borders",
             "shading",
             "tabs",
@@ -1785,8 +1794,23 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
         attrs.insert(
+            "indentLeft".to_owned(),
+            field(formatting, "indentLeft")
+                .or_else(|| field(list, "indentLeft"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        attrs.insert(
+            "indentFirstLine".to_owned(),
+            field(formatting, "indentFirstLine")
+                .or_else(|| field(list, "indentFirstLine"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        attrs.insert(
             "hangingIndent".to_owned(),
             field(formatting, "hangingIndent")
+                .or_else(|| field(list, "hangingIndent"))
                 .cloned()
                 .unwrap_or(Value::Bool(false)),
         );

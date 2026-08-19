@@ -794,13 +794,27 @@ function paragraphAttrs(
     attrs.lineSpacing = formatting?.lineSpacing ?? stylePpr?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? stylePpr?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
-    attrs.indentLeft = formatting?.indentLeft ?? stylePpr?.indentLeft ?? null;
+    // Numbering-level indents ride listRendering; they apply after the style
+    // chain, matching Word's property application order.
+    attrs.indentLeft =
+      formatting?.indentLeft ??
+      stylePpr?.indentLeft ??
+      paragraph.listRendering?.indentLeft ??
+      null;
     attrs.indentRight = formatting?.indentRight ?? stylePpr?.indentRight ?? null;
     const numberingRemoved =
       formatting?.numPr?.numId === 0 && stylePpr?.numPr && stylePpr.numPr.numId !== 0;
     const styleFirstLine = numberingRemoved ? undefined : stylePpr;
-    attrs.indentFirstLine = formatting?.indentFirstLine ?? styleFirstLine?.indentFirstLine ?? null;
-    attrs.hangingIndent = formatting?.hangingIndent ?? styleFirstLine?.hangingIndent ?? false;
+    attrs.indentFirstLine =
+      formatting?.indentFirstLine ??
+      styleFirstLine?.indentFirstLine ??
+      paragraph.listRendering?.indentFirstLine ??
+      null;
+    attrs.hangingIndent =
+      formatting?.hangingIndent ??
+      styleFirstLine?.hangingIndent ??
+      paragraph.listRendering?.hangingIndent ??
+      false;
     attrs.borders = formatting?.borders ?? stylePpr?.borders ?? null;
     attrs.shading = formatting?.shading ?? stylePpr?.shading ?? null;
     attrs.tabs = formatting?.tabs ?? stylePpr?.tabs ?? null;
@@ -832,10 +846,12 @@ function paragraphAttrs(
     attrs.lineSpacing = formatting?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
-    attrs.indentLeft = formatting?.indentLeft ?? null;
+    attrs.indentLeft = formatting?.indentLeft ?? paragraph.listRendering?.indentLeft ?? null;
     attrs.indentRight = formatting?.indentRight ?? null;
-    attrs.indentFirstLine = formatting?.indentFirstLine ?? null;
-    attrs.hangingIndent = formatting?.hangingIndent ?? false;
+    attrs.indentFirstLine =
+      formatting?.indentFirstLine ?? paragraph.listRendering?.indentFirstLine ?? null;
+    attrs.hangingIndent =
+      formatting?.hangingIndent ?? paragraph.listRendering?.hangingIndent ?? false;
     attrs.borders = formatting?.borders ?? null;
     attrs.shading = formatting?.shading ?? null;
     attrs.tabs = formatting?.tabs ?? null;

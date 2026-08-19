@@ -5,7 +5,7 @@
     "corpusFloor": 2,
     "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 4
+    "knownDefects": 3
   },
   "criteria": [
     {
@@ -751,7 +751,7 @@
     {
       "id": "para.numpr",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -766,10 +766,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "numbering-level indents are materialized onto paragraphs on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "para.outline-bidi",

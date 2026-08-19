@@ -1378,50 +1378,45 @@ fn apply_list_rendering(
         rendering.marker = convert_bullet_to_unicode(&rendering.marker);
     }
     let level = numbering.get_level(rendering.num_id, rendering.level);
-    paragraph.list_rendering = Some(rendering);
-    let Some(level_properties) = level.and_then(|level| level.p_pr) else {
-        return;
-    };
-    let style_indents = if from_style {
-        style_chain_ind(
-            paragraph
-                .formatting
-                .as_ref()
-                .and_then(|formatting| formatting.style_id.as_deref()),
-            styles,
-        )
-    } else {
-        (false, false)
-    };
-    let direct_indent = direct_properties.and_then(|properties| properties.child("w", "ind"));
-    let direct_left = direct_indent.is_some_and(|indent| {
-        ["left", "start", "leftChars", "startChars"]
-            .iter()
-            .any(|name| indent.attribute(Some("w"), name).is_some())
-    });
-    let direct_first = direct_indent.is_some_and(|indent| {
-        ["firstLine", "hanging", "firstLineChars", "hangingChars"]
-            .iter()
-            .any(|name| {
-                indent.attribute(Some("w"), name).is_some_and(|raw| {
-                    parse_javascript_integer_prefix(raw).is_none_or(|value| value != 0.0)
+    if let Some(level_properties) = level.and_then(|level| level.p_pr) {
+        let style_indents = if from_style {
+            style_chain_ind(
+                paragraph
+                    .formatting
+                    .as_ref()
+                    .and_then(|formatting| formatting.style_id.as_deref()),
+                styles,
+            )
+        } else {
+            (false, false)
+        };
+        let direct_indent = direct_properties.and_then(|properties| properties.child("w", "ind"));
+        let direct_left = direct_indent.is_some_and(|indent| {
+            ["left", "start", "leftChars", "startChars"]
+                .iter()
+                .any(|name| indent.attribute(Some("w"), name).is_some())
+        });
+        let direct_first = direct_indent.is_some_and(|indent| {
+            ["firstLine", "hanging", "firstLineChars", "hangingChars"]
+                .iter()
+                .any(|name| {
+                    indent.attribute(Some("w"), name).is_some_and(|raw| {
+                        parse_javascript_integer_prefix(raw).is_none_or(|value| value != 0.0)
+                    })
                 })
-            })
-    });
-    let formatting = paragraph
-        .formatting
-        .get_or_insert_with(ParagraphFormatting::default);
-    if !direct_left && !style_indents.0 {
-        formatting.indent_left = level_properties.indent_left;
-    }
-    if !direct_first && !style_indents.1 {
-        if level_properties.indent_first_line.is_some() {
-            formatting.indent_first_line = level_properties.indent_first_line;
+        });
+        // The level's indents ride the rendering: the paragraph's authored
+        // properties stay authored, and consumers apply the fallback at
+        // layout time instead of a save materializing it into w:ind.
+        if !direct_left && !style_indents.0 {
+            rendering.indent_left = level_properties.indent_left;
         }
-        if level_properties.hanging_indent.is_some() {
-            formatting.hanging_indent = level_properties.hanging_indent;
+        if !direct_first && !style_indents.1 {
+            rendering.indent_first_line = level_properties.indent_first_line;
+            rendering.hanging_indent = level_properties.hanging_indent;
         }
     }
+    paragraph.list_rendering = Some(rendering);
 }
 
 fn style_chain_ind(style_id: Option<&str>, styles: Option<&StyleMap>) -> (bool, bool) {
