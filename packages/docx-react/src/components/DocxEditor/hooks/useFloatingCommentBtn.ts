@@ -31,6 +31,7 @@ export function useFloatingCommentBtn({
   editorContentRef,
   isAddingCommentRef,
   setFloatingCommentBtn,
+  partEditOpen,
   readOnly,
   isLoading,
   zoom,
@@ -42,6 +43,7 @@ export function useFloatingCommentBtn({
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   isAddingCommentRef: React.RefObject<boolean>;
   setFloatingCommentBtn: React.Dispatch<React.SetStateAction<{ top: number; left: number } | null>>;
+  partEditOpen: boolean;
   readOnly: boolean;
   isLoading: boolean;
   zoom: number;
@@ -52,9 +54,15 @@ export function useFloatingCommentBtn({
 }) {
   const readOnlyForFloatingBtnRef = useRef(false);
   readOnlyForFloatingBtnRef.current = readOnly;
+  const partEditOpenRef = useRef(false);
+  partEditOpenRef.current = partEditOpen;
 
   const recomputeFloatingCommentBtn = useCallback(() => {
-    if (isAddingCommentRef.current || readOnlyForFloatingBtnRef.current) {
+    if (
+      partEditOpenRef.current ||
+      isAddingCommentRef.current ||
+      readOnlyForFloatingBtnRef.current
+    ) {
       setFloatingCommentBtn(null);
       return;
     }
@@ -111,6 +119,10 @@ export function useFloatingCommentBtn({
   useEffect(() => {
     recomputeFloatingCommentBtn();
   }, [zoom, recomputeFloatingCommentBtn]);
+
+  useEffect(() => {
+    if (partEditOpen) setFloatingCommentBtn(null);
+  }, [partEditOpen, setFloatingCommentBtn]);
 
   return { recomputeFloatingCommentBtn };
 }

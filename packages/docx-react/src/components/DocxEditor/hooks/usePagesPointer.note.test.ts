@@ -11,6 +11,9 @@ import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/doc
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { AlignmentButtons } from '../../ui/AlignmentButtons';
 import { MenuDropdown } from '../../ui/MenuDropdown';
+import { TableStyleGallery } from '../../ui/TableStyleGallery';
+import { FootnotePropertiesDialog } from '../../dialogs/FootnotePropertiesDialog';
+import { CommentCard } from '../../sidebar/CommentCard';
 import { useEscapeKey } from '../../../hooks/useEscapeKey';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
 import type { YrsInputRef } from '../YrsInput';
@@ -630,6 +633,55 @@ describe('closing an open part with Escape', () => {
     input.remove();
   });
 
+  test('lets the table style gallery consume Escape without closing the part', () => {
+    let closed = 0;
+    const view = render(
+      createElement(EscapeTableStyleHarness, { onEscape: () => (closed += 1) })
+    );
+    const trigger = view.container.querySelector('button');
+    expect(trigger).not.toBeNull();
+    act(() => trigger!.click());
+
+    expect(view.container.querySelector('[data-docx-escape-layer]')).not.toBeNull();
+    dispatchEscape(trigger!);
+
+    expect(view.container.querySelector('[data-docx-escape-layer]')).toBeNull();
+    expect(closed).toBe(0);
+  });
+
+  test('lets the footnote properties dialog consume Escape without closing the part', () => {
+    let closed = 0;
+    let dialogClosed = 0;
+    const view = render(
+      createElement(EscapeFootnotePropertiesHarness, {
+        onEscape: () => (closed += 1),
+        onClose: () => (dialogClosed += 1),
+      })
+    );
+
+    dispatchEscape(view.getByRole('dialog'));
+
+    expect(view.queryByRole('dialog')).toBeNull();
+    expect(dialogClosed).toBe(1);
+    expect(closed).toBe(0);
+  });
+
+  test('lets a comment menu consume Escape without closing the part', () => {
+    let closed = 0;
+    const view = render(
+      createElement(EscapeCommentMenuHarness, { onEscape: () => (closed += 1) })
+    );
+    const trigger = view.container.querySelector<HTMLButtonElement>('[aria-haspopup="menu"]');
+    expect(trigger).not.toBeNull();
+    act(() => trigger!.click());
+
+    expect(view.getByRole('menu')).toBeTruthy();
+    dispatchEscape(trigger!);
+
+    expect(view.queryByRole('menu')).toBeNull();
+    expect(closed).toBe(0);
+  });
+
   test('plain Escape from the editor input closes the part', () => {
     let closed = 0;
     const input = document.createElement('textarea');
@@ -692,4 +744,39 @@ function EscapeMenuHarness({ onEscape }: { onEscape: () => void }) {
 function EscapeAlignmentHarness({ onEscape }: { onEscape: () => void }) {
   useEscapeKey(true, onEscape);
   return createElement(AlignmentButtons);
+}
+
+function EscapeTableStyleHarness({ onEscape }: { onEscape: () => void }) {
+  useEscapeKey(true, onEscape);
+  return createElement(TableStyleGallery, { onAction: () => {} });
+}
+
+function EscapeFootnotePropertiesHarness({
+  onEscape,
+  onClose,
+}: {
+  onEscape: () => void;
+  onClose: () => void;
+}) {
+  useEscapeKey(true, onEscape);
+  const [open, setOpen] = useState(true);
+  return createElement(FootnotePropertiesDialog, {
+    isOpen: open,
+    onClose: () => {
+      setOpen(false);
+      onClose();
+    },
+    onApply: () => {},
+  });
+}
+
+function EscapeCommentMenuHarness({ onEscape }: { onEscape: () => void }) {
+  useEscapeKey(true, onEscape);
+  return createElement(CommentCard, {
+    comment: { id: 1, author: 'Reviewer', content: [] },
+    replies: [],
+    isExpanded: true,
+    onToggleExpand: () => {},
+    measureRef: () => {},
+  });
 }

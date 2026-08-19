@@ -353,7 +353,7 @@ export function DocxEditorPagedArea({
   );
 
   const floatingCommentButton =
-    floatingCommentBtn != null && !isAddingComment && !readOnly ? (
+    partEditTarget == null && floatingCommentBtn != null && !isAddingComment && !readOnly ? (
       <Tooltip content="Add comment" side="bottom" delayMs={300}>
         <button
           type="button"

@@ -7,10 +7,16 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook } = await import('@testing-library/react');
 
-function options(partEditOpen: boolean) {
+function options(
+  partEditOpen: boolean,
+  onAddComment: (range: { from: number; to: number; yPos: number | null }) => void = () => {}
+) {
   return {
     pagedEditorRef: {
-      current: { getYrsSession: () => null } as PagedEditorRef,
+      current: {
+        getYrsSession: () => null,
+        getSelectionRange: () => ({ from: 1, to: 2 }),
+      } as PagedEditorRef,
     },
     focusActiveEditor: () => {},
     openSplitCellDialog: () => {},
@@ -19,7 +25,7 @@ function options(partEditOpen: boolean) {
     interactionPageHostRef: { current: null },
     i18n: undefined,
     partEditOpen,
-    onAddComment: () => {},
+    onAddComment,
   };
 }
 
@@ -45,5 +51,25 @@ describe('selection context menu', () => {
     openSelectionMenu(result);
 
     expect(result.current.contextMenuItems.map((item) => item.action)).not.toContain('addComment');
+  });
+
+  test('rejects a displayed Comment action when a part opens before dispatch', async () => {
+    let added = 0;
+    const onAddComment = () => {
+      added += 1;
+    };
+    const { result, rerender } = renderHook(
+      ({ partEditOpen }) => useContextMenus(options(partEditOpen, onAddComment)),
+      { initialProps: { partEditOpen: false } }
+    );
+    openSelectionMenu(result);
+    expect(result.current.contextMenuItems.map((item) => item.action)).toContain('addComment');
+
+    rerender({ partEditOpen: true });
+    await act(async () => {
+      await result.current.handleContextMenuAction('addComment');
+    });
+
+    expect(added).toBe(0);
   });
 });

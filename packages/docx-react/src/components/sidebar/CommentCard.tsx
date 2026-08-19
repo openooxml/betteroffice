@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { MaterialSymbol } from '../ui/Icons';
 import type { SidebarItemRenderProps } from '../../plugin-api/types';
@@ -36,6 +36,15 @@ export function CommentCard({
 }: CommentCardProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const { t } = useTranslation();
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [menuOpen]);
 
   return (
     <div
@@ -98,6 +107,8 @@ export function CommentCard({
                 e.stopPropagation();
                 setMenuOpen(!menuOpen);
               }}
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
               title={t('comments.moreOptions')}
               style={ICON_BUTTON_STYLE}
             >
@@ -105,6 +116,7 @@ export function CommentCard({
             </button>
             {menuOpen && (
               <div
+                role="menu"
                 onClick={(e) => e.stopPropagation()}
                 onMouseDown={(e) => e.stopPropagation()}
                 style={{
@@ -120,6 +132,7 @@ export function CommentCard({
                 }}
               >
                 <button
+                  role="menuitem"
                   onClick={() => {
                     setMenuOpen(false);
                     onDelete?.(comment.id);

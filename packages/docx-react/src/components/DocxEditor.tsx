@@ -1006,6 +1006,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     editorContentRef,
     isAddingCommentRef,
     setFloatingCommentBtn,
+    partEditOpen: partEditTarget !== null,
     readOnly,
     isLoading: state.isLoading,
     zoom: state.zoom,
