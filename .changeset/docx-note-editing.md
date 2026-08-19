@@ -1,6 +1,6 @@
 ---
-"@betteroffice/docx": patch
-"@betteroffice/docx-react": patch
+"@betteroffice/docx": minor
+"@betteroffice/docx-react": minor
 ---
 
 Clicking a footnote or an endnote now opens it for editing. The caret lands under the pointer, typing goes into that note, and what is typed reaches the saved file. Escape or a click back in the body leaves the note.
