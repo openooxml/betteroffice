@@ -24,6 +24,7 @@ import {
   type CanvasHoverCursor,
 } from '../hoverCursor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
+import { hitBelongsToPart, partImageRegion, type PartEdit } from '../partEdit';
 import type { YrsEditorCommand } from '../yrsCommands';
 
 interface TableInsertButtonState {
@@ -49,7 +50,8 @@ export interface UsePagesPointerOptions {
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean) => boolean;
   readOnly: boolean;
-  hfEditMode?: 'header' | 'footer' | null;
+  /** the non-body part open for editing — the body is inert behind it */
+  partEdit?: PartEdit | null;
   displayListQueries?: DisplayListQueries | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   canvasOverlayTarget?: HTMLElement | null;
@@ -166,7 +168,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     applyYrsCommand,
     syncYrsInputState,
     readOnly,
-    hfEditMode,
+    partEdit = null,
     displayListQueries,
     canvasHostRef,
     canvasOverlayTarget,
@@ -237,9 +239,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     (clientX: number, clientY: number) => {
       hoverPointRef.current = { x: clientX, y: clientY };
       const hit = readOnly ? null : (resolveCanvasHit(clientX, clientY, false)?.hit ?? null);
-      paintHoverCursor(canvasHoverCursor({ readOnly, hfEditMode }, hit));
+      paintHoverCursor(canvasHoverCursor({ readOnly, partEdit }, hit));
     },
-    [hfEditMode, paintHoverCursor, readOnly, resolveCanvasHit]
+    [paintHoverCursor, partEdit, readOnly, resolveCanvasHit]
   );
   // A mode flip changes what is typeable under a pointer that has not moved.
   // A gesture still holds its own cursor; the release resolves the new mode.
@@ -259,10 +261,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     (clientX: number, clientY: number): number | null => {
       const hit = resolveCanvasHit(clientX, clientY, isDraggingRef.current)?.hit;
       if (!hit) return null;
-      if (hfEditMode) return hit.region === hfEditMode ? hit.pos : null;
+      if (partEdit) return hitBelongsToPart(partEdit, hit) ? hit.pos : null;
       return hit.region === 'body' ? hit.pos : null;
     },
-    [hfEditMode, resolveCanvasHit]
+    [partEdit, resolveCanvasHit]
   );
 
   const resolveTarget = useCallback(
@@ -332,9 +334,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (readOnly) return;
 
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
-      const region = point?.hit?.region ?? null;
-      if (hfEditMode) {
-        if (region !== hfEditMode && onBodyClick) {
+      const hit = point?.hit ?? null;
+      const region = hit?.region ?? null;
+      if (partEdit) {
+        if (!hitBelongsToPart(partEdit, hit) && onBodyClick) {
           e.stopPropagation();
           onBodyClick();
           return;
@@ -348,8 +351,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           point.pageIndex,
           point.x,
           point.y,
-          hfEditMode ?? 'body',
-          point.hit?.rId
+          partImageRegion(partEdit),
+          hit?.rId
         );
         if (image) {
           e.stopPropagation();
@@ -357,7 +360,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           setSelectionRects([]);
           setCaretPosition(null);
           focusInput();
-          if (!hfEditMode) setIsFocused(true);
+          if (!partEdit) setIsFocused(true);
           return;
         }
       }
@@ -370,7 +373,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       dragAnchorRef.current = targetPos;
       setTextSelection(targetPos);
       focusInput();
-      if (!hfEditMode) setIsFocused(true);
+      if (!partEdit) setIsFocused(true);
     },
     [
       clearTableInsertTimer,
@@ -378,8 +381,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       focusInput,
       getPositionFromMouse,
       getYrsPositionProjection,
-      hfEditMode,
       onBodyClick,
+      partEdit,
       readOnly,
       resolveCanvasHit,
       resolveTarget,
@@ -454,7 +457,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (isDraggingRef.current || yrsCellDraggingRef.current) return;
       hoverPointRef.current = { x: e.clientX, y: e.clientY };
       const point = readOnly ? null : resolveCanvasHit(e.clientX, e.clientY, false);
-      paintHoverCursor(canvasHoverCursor({ readOnly, hfEditMode }, point?.hit ?? null));
+      paintHoverCursor(canvasHoverCursor({ readOnly, partEdit }, point?.hit ?? null));
       if (readOnly) return;
       const scheduleHide = () => {
         tableInsertHideTimerRef.current ??= setTimeout(() => {
@@ -474,12 +477,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         return;
       }
       let region: DisplayListTableRegion = { kind: 'body' };
-      if (hfEditMode) {
-        if (point.hit?.region !== hfEditMode || !point.hit.rId) {
+      if (partEdit) {
+        if (!hitBelongsToPart(partEdit, point.hit ?? null) || !point.hit?.rId) {
           scheduleHide();
           return;
         }
-        region = { kind: hfEditMode, rId: point.hit.rId };
+        region = { kind: partEdit.kind, rId: point.hit.rId };
       } else if (point.hit?.region === 'header' || point.hit?.region === 'footer') {
         scheduleHide();
         return;
@@ -514,9 +517,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       clearTableInsertTimer,
       displayListQueries,
       getYrsPositionProjection,
-      hfEditMode,
       pagesContainerRef,
       paintHoverCursor,
+      partEdit,
       readOnly,
       resolveCanvasHit,
       yrsRootStory,
@@ -562,21 +565,20 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       if (projection && queries && host && point) {
-        const hitRegion = point.hit?.region;
-        let region: DisplayListTableRegion = { kind: 'body' };
-        if (hfEditMode && hitRegion === hfEditMode) {
-          region = { kind: hfEditMode, rId: point.hit?.rId };
-        }
-        const displayHit =
-          !hfEditMode || hitRegion === hfEditMode
-            ? findDisplayListHyperlinkAtPoint(
-                queries.displayList,
-                point.pageIndex,
-                point.x,
-                point.y,
-                region
-              )
+        const region: DisplayListTableRegion | null = !partEdit
+          ? { kind: 'body' }
+          : hitBelongsToPart(partEdit, point.hit ?? null)
+            ? { kind: partEdit.kind, rId: point.hit?.rId }
             : null;
+        const displayHit = region
+          ? findDisplayListHyperlinkAtPoint(
+              queries.displayList,
+              point.pageIndex,
+              point.x,
+              point.y,
+              region
+            )
+          : null;
         const href = sanitizeHref(displayHit?.href ?? '');
         if (href) {
           e.preventDefault();
@@ -621,7 +623,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
-      if (e.detail === 2 && !hfEditMode && onHeaderFooterDoubleClick) {
+      if (e.detail === 2 && !partEdit && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (region === 'header' || region === 'footer') {
           e.preventDefault();
@@ -649,10 +651,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       focusInput,
       getPositionFromMouse,
       getYrsPositionProjection,
-      hfEditMode,
       onHeaderFooterDoubleClick,
       onHyperlinkClick,
       pagesContainerRef,
+      partEdit,
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,
@@ -684,7 +686,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           point.pageIndex,
           point.x,
           point.y,
-          hfEditMode ?? 'body',
+          partImageRegion(partEdit),
           point.hit?.rId
         );
         if (image) imageInfo = readImageNodeAt(image.pos);
@@ -693,7 +695,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (!imageInfo && selection && Math.abs(selection.anchor - selection.head) === 1) {
         imageInfo = readImageNodeAt(Math.min(selection.anchor, selection.head));
       }
-      if (imageInfo?.wrapType === 'inline' && displayListQueries && !hfEditMode) {
+      if (imageInfo?.wrapType === 'inline' && displayListQueries && !partEdit) {
         imageInfo.inlinePositionEmu = captureInlinePositionEmuFromDisplayList(
           displayListQueries,
           imageInfo.pos
@@ -712,7 +714,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       ) {
         setTextSelection(pmPos);
         focusInput();
-        if (!hfEditMode) setIsFocused(true);
+        if (!partEdit) setIsFocused(true);
       }
       const latest = yrsInputRef.current?.displaySelection();
       onContextMenu({
@@ -727,8 +729,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       focusInput,
       getPositionFromMouse,
       getYrsPositionProjection,
-      hfEditMode,
       onContextMenu,
+      partEdit,
       resolveCanvasHit,
       resolveTarget,
       setIsFocused,

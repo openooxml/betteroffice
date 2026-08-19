@@ -893,10 +893,10 @@
   background-color: transparent;
 }
 
-/* HF caret overlay blink. Used by the painted HF caret in both adapters
-   (DocxEditorPagedArea.tsx / DocxEditor.vue set `animation: hf-caret-blink ...`
-   inline). Defined once here so the keyframes aren't duplicated per adapter. */
-@keyframes hf-caret-blink {
+/* Part caret overlay blink. Used by the caret painted inside the open
+   header/footer band or note (CanvasPartSelectionOverlay sets
+   `animation: part-caret-blink ...` inline). */
+@keyframes part-caret-blink {
   0%,
   49% {
     opacity: 1;

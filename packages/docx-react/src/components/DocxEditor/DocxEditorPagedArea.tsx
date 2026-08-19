@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ReactNode } from 'react';
 import type {
@@ -23,7 +23,7 @@ import { UnifiedSidebar } from '../UnifiedSidebar';
 import { CommentMarginMarkers } from '../CommentMarginMarkers';
 import { useCanvasOverlayTarget } from './internals/useCanvasOverlayTarget';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
-import { CanvasHfSelectionOverlay } from './overlays/CanvasHfSelectionOverlay';
+import { CanvasPartSelectionOverlay } from './overlays/CanvasPartSelectionOverlay';
 import { projectPageLocalRect } from './internals/canvasProjection';
 import { Tooltip } from '../ui/Tooltip';
 import { MaterialSymbol } from '../ui/Icons';
@@ -35,6 +35,8 @@ import type { YrsToolbarSelection } from './yrsToolbar';
 import type { TrackedChangesResult } from '@betteroffice/docx/layout/render';
 import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
+import { partEditStory, type PartEdit, type PartEditTarget } from './partEdit';
+import { useEscapeKey } from '../../hooks/useEscapeKey';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -63,10 +65,8 @@ export function DocxEditorPagedArea({
   footerContent,
   firstPageHeaderContent,
   firstPageFooterContent,
-  hfEditPosition,
-  setHfEditPosition,
-  hfEditIsFirstPage,
-  hfEditPageIndex,
+  partEditTarget,
+  setPartEditTarget,
   onHeaderFooterDoubleClick,
   onRemoveHeaderFooter,
   onBodyClick,
@@ -142,10 +142,8 @@ export function DocxEditorPagedArea({
   footerContent: HeaderFooter | null | undefined;
   firstPageHeaderContent: HeaderFooter | null | undefined;
   firstPageFooterContent: HeaderFooter | null | undefined;
-  hfEditPosition: 'header' | 'footer' | null;
-  setHfEditPosition: React.Dispatch<React.SetStateAction<'header' | 'footer' | null>>;
-  hfEditIsFirstPage: boolean;
-  hfEditPageIndex: number;
+  partEditTarget: PartEditTarget | null;
+  setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
   onHeaderFooterDoubleClick: (position: 'header' | 'footer', pageNumber?: number) => void;
   onRemoveHeaderFooter: () => void;
   onBodyClick: () => void;
@@ -230,14 +228,16 @@ export function DocxEditorPagedArea({
 }) {
   const sidebarCommentIds = useMemo(() => comments.map((comment) => comment.id), [comments]);
 
+  const bandEdit = partEditTarget;
+
   // Resolve the active HF block for the inline editor — first-page variant
   // wins when `titlePg` is set and the user double-clicked page 1.
-  const activeHf = hfEditPosition
-    ? hfEditIsFirstPage
-      ? hfEditPosition === 'header'
+  const activeHf = bandEdit
+    ? bandEdit.isFirstPage
+      ? bandEdit.kind === 'header'
         ? firstPageHeaderContent
         : firstPageFooterContent
-      : hfEditPosition === 'header'
+      : bandEdit.kind === 'header'
         ? headerContent
         : footerContent
     : null;
@@ -248,14 +248,14 @@ export function DocxEditorPagedArea({
   // the user is editing page 1 of a titlePg section. This keys the region-aware
   // range-rect query so a first-page vs default variant on another page never
   // contributes stray rects.
-  const activeHfRid = hfEditPosition
+  const activeHfRid = bandEdit
     ? (() => {
         const refs =
-          hfEditPosition === 'header'
+          bandEdit.kind === 'header'
             ? finalSectionProperties?.headerReferences
             : finalSectionProperties?.footerReferences;
         if (!refs) return null;
-        const wantType = hfEditIsFirstPage ? 'first' : 'default';
+        const wantType = bandEdit.isFirstPage ? 'first' : 'default';
         const entry =
           refs.find((r) => r.type === wantType) ??
           refs.find((r) => r.type === 'default') ??
@@ -265,24 +265,39 @@ export function DocxEditorPagedArea({
       })()
     : null;
 
-  // Live HF Yrs selection, captured on every HF selection change.
-  const [hfSelection, setHfSelection] = useState<{ from: number; to: number } | null>(null);
-  useEffect(() => {
-    setHfSelection(null);
-  }, [hfEditPosition, activeHfRid]);
+  // Memoised: consumers key effects on this identity, and a value rebuilt per
+  // render would re-run them for nothing.
+  const partEdit = useMemo<PartEdit | null>(
+    () => (bandEdit ? { kind: bandEdit.kind, rId: activeHfRid } : null),
+    [bandEdit, activeHfRid]
+  );
+
+  // Live Yrs selection inside that part, captured on every selection change.
+  const [partSelection, setPartSelection] = useState<{ from: number; to: number } | null>(null);
+  const partStory = partEditStory(partEdit);
+  // Cleared during render, not in an effect: a child effect can publish a
+  // caret in the same commit, and an effect here would run after it and wipe
+  // the very selection that was just asked for.
+  const [selectionStory, setSelectionStory] = useState(partStory);
+  if (selectionStory !== partStory) {
+    setSelectionStory(partStory);
+    setPartSelection(null);
+  }
+
+  useEscapeKey(partEditTarget != null, () => setPartEditTarget(null));
 
   // UI chrome is independent of renderer readiness and always portals onto
   // the positioned editor-content host.
   const canvasOverlayTarget = useCanvasOverlayTarget(true, editorContentRef);
 
-  const activeHfPage = displayListQueries
-    ? (displayListQueries.displayList.pages[hfEditPageIndex] ??
-      displayListQueries.displayList.pages.find((page) => {
-        const band = hfEditPosition ? page[hfEditPosition] : null;
-        return band?.rId === activeHfRid;
-      }))
-    : null;
-  const activeHfBand = activeHfPage && hfEditPosition ? activeHfPage[hfEditPosition] : null;
+  const activeHfPage =
+    displayListQueries && bandEdit
+      ? (displayListQueries.displayList.pages[bandEdit.pageIndex] ??
+        displayListQueries.displayList.pages.find(
+          (page) => page[bandEdit.kind]?.rId === activeHfRid
+        ))
+      : null;
+  const activeHfBand = activeHfPage && bandEdit ? activeHfPage[bandEdit.kind] : null;
   const hfChromeRect =
     activeHfPage &&
     activeHfBand &&
@@ -396,8 +411,7 @@ export function DocxEditorPagedArea({
         firstPageHeaderContent={firstPageHeaderContent}
         firstPageFooterContent={firstPageFooterContent}
         onHeaderFooterDoubleClick={onHeaderFooterDoubleClick}
-        hfEditMode={hfEditPosition}
-        hfEditRId={activeHfRid}
+        partEdit={partEdit}
         onBodyClick={onBodyClick}
         isSuggesting={isSuggesting}
         author={author}
@@ -409,8 +423,8 @@ export function DocxEditorPagedArea({
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
-        onYrsHfSelectionChange={(rId, selection) => {
-          if (rId === activeHfRid) setHfSelection(selection);
+        onYrsPartSelectionChange={(part, selection) => {
+          if (partEditStory(part) === partStory) setPartSelection(selection);
         }}
         onRenderedDomContextReady={onRenderedDomContextReady}
         pluginOverlays={pluginOverlays}
@@ -491,44 +505,44 @@ export function DocxEditorPagedArea({
 
       {canvasOverlayTarget &&
         displayListQueries &&
-        hfEditPosition &&
+        bandEdit &&
         activeHfRid &&
         canvasHostRef && (
-          <>
-            <CanvasCellSelectionOverlay
-              session={pagedEditorRef.current?.getYrsSession() ?? null}
-              positionProjection={null}
-              overlayTarget={canvasOverlayTarget}
-              canvasHostRef={canvasHostRef}
-              displayListQueries={displayListQueries}
-              region={{ kind: hfEditPosition, rId: activeHfRid }}
-              sidebarOpen={sidebarOpen}
-              zoom={zoom}
-            />
-            <CanvasHfSelectionOverlay
-              region={hfEditPosition}
-              rId={activeHfRid}
-              selection={hfSelection}
-              overlayTarget={canvasOverlayTarget}
-              canvasHostRef={canvasHostRef}
-              displayListQueries={displayListQueries}
-              activePageIndex={activeHfPage?.pageIndex}
-              sidebarOpen={sidebarOpen}
-              zoom={zoom}
-            />
-          </>
+          <CanvasCellSelectionOverlay
+            session={pagedEditorRef.current?.getYrsSession() ?? null}
+            positionProjection={null}
+            overlayTarget={canvasOverlayTarget}
+            canvasHostRef={canvasHostRef}
+            displayListQueries={displayListQueries}
+            region={{ kind: bandEdit.kind, rId: activeHfRid }}
+            sidebarOpen={sidebarOpen}
+            zoom={zoom}
+          />
         )}
 
-      {hfEditPosition &&
+      {canvasOverlayTarget && displayListQueries && partEdit && canvasHostRef && (
+        <CanvasPartSelectionOverlay
+          part={partEdit}
+          selection={partSelection}
+          overlayTarget={canvasOverlayTarget}
+          canvasHostRef={canvasHostRef}
+          displayListQueries={displayListQueries}
+          activePageIndex={activeHfPage?.pageIndex}
+          sidebarOpen={sidebarOpen}
+          zoom={zoom}
+        />
+      )}
+
+      {bandEdit &&
         activeHf &&
         hfChromeRect &&
         (() => {
           const editor = (
             <InlineHeaderFooterEditor
-              position={hfEditPosition}
+              position={bandEdit.kind}
               targetRect={hfChromeRect}
               onClose={() => {
-                setHfEditPosition(null);
+                setPartEditTarget(null);
               }}
               onRemove={onRemoveHeaderFooter}
             />

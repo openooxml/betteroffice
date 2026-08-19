@@ -28,10 +28,5 @@ export type {
   ShapeTextBodyProperties,
 } from './drawing';
 
-export {
-  computeHfCaretRectsFromDisplayList,
-  computeHfSelectionRectsFromDisplayList,
-  DEFAULT_PAGE_HEIGHT_PX,
-  resolveHeaderFooter,
-} from './contracts';
+export { DEFAULT_PAGE_HEIGHT_PX, resolveHeaderFooter } from './contracts';
 export { LayoutSelectionGate } from './selectionGate';

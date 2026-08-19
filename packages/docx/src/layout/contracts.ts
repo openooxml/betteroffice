@@ -1,5 +1,4 @@
 import type { Document, HeaderFooter, SectionProperties } from '../types/document';
-import type { DisplayListQueries, DisplayListRect } from './render';
 
 export const DEFAULT_PAGE_HEIGHT_PX = 1056;
 
@@ -27,27 +26,4 @@ export function resolveHeaderFooter(
     footer ??= firstFooter;
   }
   return { header, footer, firstHeader, firstFooter };
-}
-
-export function computeHfCaretRectsFromDisplayList(
-  queries: DisplayListQueries,
-  section: 'header' | 'footer',
-  rId: string,
-  position: number,
-  pageIndex?: number
-): DisplayListRect[] {
-  const rects = queries.hfCaretRects(section, rId, position);
-  return pageIndex === undefined ? rects : rects.filter((rect) => rect.pageIndex === pageIndex);
-}
-
-export function computeHfSelectionRectsFromDisplayList(
-  queries: DisplayListQueries,
-  section: 'header' | 'footer',
-  rId: string,
-  from: number,
-  to: number,
-  pageIndex?: number
-): DisplayListRect[] {
-  const rects = queries.hfRangeRects(section, rId, Math.min(from, to), Math.max(from, to));
-  return pageIndex === undefined ? rects : rects.filter((rect) => rect.pageIndex === pageIndex);
 }

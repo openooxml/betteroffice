@@ -48,6 +48,7 @@ import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
 import { useControllableBoolean } from './DocxEditor/hooks/useControllableBoolean';
 import { useTableDialogs } from './DocxEditor/hooks/useTableDialogs';
 import { useHeaderFooterEditing } from './DocxEditor/hooks/useHeaderFooterEditing';
+import type { PartEditTarget } from './DocxEditor/partEdit';
 import { useDocumentLoader } from './DocxEditor/hooks/useDocumentLoader';
 import { useYrsCoreSession } from './DocxEditor/hooks/useYrsCoreSession';
 import { useContextMenus } from './DocxEditor/hooks/useContextMenus';
@@ -635,10 +636,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const isDark = useIsDark(colorMode);
 
-  // Header/footer editing state.
-  const [hfEditPosition, setHfEditPosition] = useState<'header' | 'footer' | null>(null);
-  const [hfEditIsFirstPage, setHfEditIsFirstPage] = useState(false);
-  const [hfEditPageIndex, setHfEditPageIndex] = useState(0);
+  // The one non-body part open for editing.
+  const [partEditTarget, setPartEditTarget] = useState<PartEditTarget | null>(null);
 
   // Controlled by `commentsSidebarOpen` when provided, else editor-owned; the
   // setter routes through `onCommentsSidebarOpenChange`. See useControllableBoolean.
@@ -820,8 +819,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     setCommentSelectionRange,
     setAddCommentYPosition,
     setFloatingCommentBtn,
-    setHfEditPosition,
-    setHfEditIsFirstPage,
+    setPartEditTarget,
     setAnchorPositions,
     clearFindReplaceMatches: useCallback(() => findReplace.setMatches([], 0), [findReplace]),
     cleanOrphanedCommentsTimerRef,
@@ -1332,11 +1330,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pushDocument,
     initialSectionProperties,
     finalSectionProperties,
-    hfEditPosition,
-    setHfEditPosition,
-    hfEditIsFirstPage,
-    setHfEditIsFirstPage,
-    setHfEditPageIndex,
+    partEditTarget,
+    setPartEditTarget,
   });
 
   // Container styles - using overflow: auto so sticky toolbar works
@@ -1860,10 +1855,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               footerContent={footerContent}
               firstPageHeaderContent={firstPageHeaderContent}
               firstPageFooterContent={firstPageFooterContent}
-              hfEditPosition={hfEditPosition}
-              setHfEditPosition={setHfEditPosition}
-              hfEditIsFirstPage={hfEditIsFirstPage}
-              hfEditPageIndex={hfEditPageIndex}
+              partEditTarget={partEditTarget}
+              setPartEditTarget={setPartEditTarget}
               onHeaderFooterDoubleClick={handleHeaderFooterDoubleClick}
               onRemoveHeaderFooter={handleRemoveHeaderFooter}
               onBodyClick={handleBodyClick}

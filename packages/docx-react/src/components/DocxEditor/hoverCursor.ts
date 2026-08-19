@@ -17,12 +17,14 @@
 
 import type { DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 
+import { hitBelongsToPart, type PartEdit } from './partEdit';
+
 export type CanvasHoverCursor = 'default' | 'text';
 
 export interface CanvasHoverMode {
   readOnly: boolean;
-  /** the header/footer region being edited inline, if any */
-  hfEditMode?: 'header' | 'footer' | null;
+  /** the non-body part open for editing, if any */
+  partEdit?: PartEdit | null;
 }
 
 export function canvasHoverCursor(
@@ -30,10 +32,10 @@ export function canvasHoverCursor(
   hit: DisplayListRegionHit | null
 ): CanvasHoverCursor {
   if (mode.readOnly || !hit) return 'default';
-  if (mode.hfEditMode) {
-    // only the edited band accepts typing; the body and the sibling band are inert
-    if (hit.region !== mode.hfEditMode) return 'default';
-    // the whole band is typeable once open, so an absent target still types
+  if (mode.partEdit) {
+    // only the open part accepts typing; the body and its siblings are inert
+    if (!hitBelongsToPart(mode.partEdit, hit)) return 'default';
+    // the whole part is typeable once open, so an absent target still types
     return hit.target === 'image' ? 'default' : 'text';
   }
   return hit.target === 'text' ? 'text' : 'default';

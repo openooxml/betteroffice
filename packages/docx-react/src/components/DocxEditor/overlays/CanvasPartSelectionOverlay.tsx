@@ -1,28 +1,23 @@
-/** Draws header/footer selection geometry over canvas pages. */
+/** Draws the open part's selection geometry over canvas pages. */
 
 import { useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import {
-  computeHfCaretRectsFromDisplayList,
-  computeHfSelectionRectsFromDisplayList,
-} from '@betteroffice/docx/layout';
+import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
 import { projectPageLocalRect } from '../internals/canvasProjection';
+import type { PartEdit } from '../partEdit';
 
-export interface CanvasHfSelectionOverlayProps {
-  /** Which HF band is being edited. */
-  region: 'header' | 'footer';
-  /** Relationship id of the active HF part (the display-list variant's `rId`). */
-  rId: string;
-  /** Current HF selection (positions in the HF doc), or null. */
+export interface CanvasPartSelectionOverlayProps {
+  /** Which band is open. */
+  part: PartEdit;
+  /** Current selection, in the open part's own display positions, or null. */
   selection: { from: number; to: number } | null;
   /** Portal target — `editorContentRef.current` (shares the canvas host's top-left). */
   overlayTarget: HTMLElement;
   /** `.canvas-pages` host — live per-page `<canvas>` rects are read from here. */
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
-  /** Display-list queries — HF geometry source + page-local → canvas scale. */
+  /** Display-list queries — part geometry source + page-local → canvas scale. */
   displayListQueries: DisplayListQueries;
-  /** Exact display page whose HF band was activated. */
+  /** Exact display page whose band was activated. */
   activePageIndex?: number;
   /** Sidebar open — recompute after its `translateX` transition settles. */
   sidebarOpen: boolean;
@@ -37,9 +32,23 @@ interface ProjectedRect {
   height: number;
 }
 
-export function CanvasHfSelectionOverlay({
-  region,
-  rId,
+/** The open part's own story answers, never the body's. */
+function partSelectionRects(
+  queries: DisplayListQueries,
+  part: PartEdit,
+  from: number,
+  to: number
+): DisplayListRect[] {
+  if (!part.rId) return [];
+  const start = Math.min(from, to);
+  const end = Math.max(from, to);
+  return start === end
+    ? queries.hfCaretRects(part.kind, part.rId, start)
+    : queries.hfRangeRects(part.kind, part.rId, start, end);
+}
+
+export function CanvasPartSelectionOverlay({
+  part,
   selection,
   overlayTarget,
   canvasHostRef,
@@ -47,7 +56,7 @@ export function CanvasHfSelectionOverlay({
   activePageIndex,
   sidebarOpen,
   zoom,
-}: CanvasHfSelectionOverlayProps) {
+}: CanvasPartSelectionOverlayProps) {
   const [state, setState] = useState<{ caret: ProjectedRect | null; rects: ProjectedRect[] }>({
     caret: null,
     rects: [],
@@ -55,7 +64,7 @@ export function CanvasHfSelectionOverlay({
 
   useLayoutEffect(() => {
     const host = canvasHostRef.current;
-    if (!host || !rId || !selection) {
+    if (!host || !selection) {
       setState({ caret: null, rects: [] });
       return;
     }
@@ -63,17 +72,15 @@ export function CanvasHfSelectionOverlay({
     const isCaret = from === to;
 
     const recompute = () => {
-      // Candidates come back one-per-page (the HF part paints on every page it
+      // Candidates come back one-per-page (the part paints on every page it
       // covers); each rect carries its own pageIndex.
-      const candidates = isCaret
-        ? computeHfCaretRectsFromDisplayList(displayListQueries, region, rId, from)
-        : computeHfSelectionRectsFromDisplayList(displayListQueries, region, rId, from, to);
+      const candidates = partSelectionRects(displayListQueries, part, from, to);
       if (candidates.length === 0) {
         setState({ caret: null, rects: [] });
         return;
       }
 
-      // Render on the page the user is editing = the one whose HF band sits
+      // Render on the page the user is editing = the one whose band sits
       // nearest the viewport center (the display-list analogue of the DOM
       // path's nearest visible HF-page behavior.
       const pageIndices = [...new Set(candidates.map((c) => c.pageIndex))];
@@ -134,8 +141,7 @@ export function CanvasHfSelectionOverlay({
       host.removeEventListener('transitionend', recompute);
     };
   }, [
-    region,
-    rId,
+    part,
     selection,
     overlayTarget,
     canvasHostRef,
@@ -152,7 +158,7 @@ export function CanvasHfSelectionOverlay({
       {state.caret && (
         <div
           aria-hidden="true"
-          data-testid="hf-caret"
+          data-testid="part-caret"
           style={{
             position: 'absolute',
             top: state.caret.top,
@@ -162,15 +168,15 @@ export function CanvasHfSelectionOverlay({
             background: '#4285f4',
             pointerEvents: 'none',
             zIndex: 11,
-            animation: 'hf-caret-blink 1.06s steps(1) infinite',
+            animation: 'part-caret-blink 1.06s steps(1) infinite',
           }}
         />
       )}
       {state.rects.map((r, i) => (
         <div
-          key={`hf-sel-${i}-${r.top}-${r.left}`}
+          key={`part-sel-${i}-${r.top}-${r.left}`}
           aria-hidden="true"
-          data-testid="hf-selection-rect"
+          data-testid="part-selection-rect"
           style={{
             position: 'absolute',
             top: r.top,
@@ -188,4 +194,4 @@ export function CanvasHfSelectionOverlay({
   );
 }
 
-export default CanvasHfSelectionOverlay;
+export default CanvasPartSelectionOverlay;

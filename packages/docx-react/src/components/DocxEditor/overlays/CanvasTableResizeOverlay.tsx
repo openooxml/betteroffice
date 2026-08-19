@@ -23,7 +23,7 @@
  * separate doc, so `deriveDisplayListTableFragments` + the commit path would
  * need to bind to the active header/footer story and its region geometry; see the note
  * in `displayListTables.ts`). The HF *caret + selection* on canvas are covered
- * by `CanvasHfSelectionOverlay`.
+ * by `CanvasPartSelectionOverlay`.
  *
  */
 

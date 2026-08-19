@@ -125,6 +125,7 @@ import {
   type YrsEditorCommand,
 } from './yrsCommands';
 import { YrsPositionProjection } from './internals/yrsPositionProjection';
+import { partEditStory, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions } from './types';
 
 export { DEFAULT_PAGE_WIDTH };
@@ -209,11 +210,9 @@ export interface PagedEditorProps {
   pluginOverlays?: React.ReactNode;
   /** Callback when header or footer is double-clicked for editing. */
   onHeaderFooterDoubleClick?: (position: 'header' | 'footer', pageNumber?: number) => void;
-  /** Active header/footer editing mode (dims body, intercepts body clicks). */
-  hfEditMode?: 'header' | 'footer' | null;
-  /** Relationship id of the exact HF part active on the edited page. */
-  hfEditRId?: string | null;
-  /** Called when user clicks the body area while in HF editing mode. */
+  /** The one non-body part open for editing (dims body, intercepts body clicks). */
+  partEdit?: PartEdit | null;
+  /** Called when user clicks the body area while a part is open. */
   onBodyClick?: () => void;
   /** Custom class name. */
   className?: string;
@@ -268,8 +267,8 @@ export interface PagedEditorProps {
   sidebarCommentIds?: readonly (string | number)[];
   /** yrs-authoritative tracked-change list, emitted while standard yrs input is active. */
   onYrsTrackedChangesChange?: (result: TrackedChangesResult) => void;
-  /** Sticky yrs HF selection, expressed in the active HF root's display positions. */
-  onYrsHfSelectionChange?: (rId: string, selection: { from: number; to: number }) => void;
+  /** Sticky yrs selection inside the open part, in that part's display positions. */
+  onYrsPartSelectionChange?: (part: PartEdit, selection: { from: number; to: number }) => void;
   /**
    * Callback fired when the page count changes after a layout pass.
    * Parents use this to keep their own page counters (e.g. scroll indicator,
@@ -437,13 +436,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
-      onYrsHfSelectionChange,
+      onYrsPartSelectionChange,
       onReady,
       onRenderedDomContextReady,
       pluginOverlays,
       onHeaderFooterDoubleClick,
-      hfEditMode,
-      hfEditRId,
+      partEdit = null,
       onBodyClick,
       className,
       style,
@@ -519,7 +517,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         numericIds: {},
       };
     }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop]);
-    const activeYrsRootStory = hfEditMode && hfEditRId ? `hf:${hfEditRId}` : 'body';
+    const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
       [activeYrsRootStory, yrsCore.inputPositionMap]
@@ -563,14 +561,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
-    const onYrsHfSelectionChangeRef = useRef(onYrsHfSelectionChange);
+    const onYrsPartSelectionChangeRef = useRef(onYrsPartSelectionChange);
     const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
     const onReadyRef = useRef(onReady);
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
-    onYrsHfSelectionChangeRef.current = onYrsHfSelectionChange;
+    onYrsPartSelectionChangeRef.current = onYrsPartSelectionChange;
     onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
     onReadyRef.current = onReady;
@@ -584,18 +582,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const [isFocused, setIsFocused] = useState(false);
 
     useEffect(() => {
-      if (hfEditMode) setIsFocused(false);
-    }, [hfEditMode]);
+      if (partEdit) setIsFocused(false);
+    }, [partEdit]);
 
     useEffect(() => {
       if (!isFocused) onCaretInterrupt?.();
     }, [isFocused, onCaretInterrupt]);
 
-    // Read-only / suggesting / HF-edit transitions bypass the resident input
+    // Read-only / suggesting / part-edit transitions bypass the resident input
     // path, so any painted caret line would go stale — swap to the DOM caret.
     useEffect(() => {
       onCaretInterrupt?.();
-    }, [readOnly, isSuggesting, hfEditMode, onCaretInterrupt]);
+    }, [readOnly, isSuggesting, partEdit, onCaretInterrupt]);
 
     // Image selection state — `isImageInteractingRef` lives at the parent so
     // useSelectionOverlay can read it (to gate the deferred image-info clear)
@@ -783,8 +781,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
         }
 
-        if (activeYrsRootStory.startsWith('hf:') && hfEditRId) {
-          onYrsHfSelectionChangeRef.current?.(hfEditRId, {
+        if (partEdit && activeYrsRootStory !== 'body') {
+          onYrsPartSelectionChangeRef.current?.(partEdit, {
             from: selection.anchor,
             to: selection.head,
           });
@@ -823,7 +821,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [
         activeYrsRootStory,
         collaboration?.presence,
-        hfEditRId,
+        partEdit,
         refreshYrsLayout,
         updateSelectionOverlay,
         yrsCore.inputPositionMap,
@@ -1307,7 +1305,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
-      hfEditMode,
+      partEdit,
       displayListQueries,
       canvasHostRef,
       canvasOverlayTarget,
@@ -1647,7 +1645,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         <YrsInput
           ref={yrsInputRef}
           enabled
-          readOnly={readOnly || (!!hfEditMode && !hfEditRId)}
+          readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}
@@ -1688,11 +1686,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             canvasDisplayList &&
             (residentCaretAuthoritative || displayListQueries) && (
               <CanvasSelectionOverlay
-                selectionRects={hfEditMode ? [] : selectionRects}
+                selectionRects={partEdit ? [] : selectionRects}
                 // While the worker paints the caret into the presented frame,
                 // the DOM blink caret stays unmounted (two-mode caret).
-                caretPosition={hfEditMode || paintedCaretActive ? null : caretPosition}
-                isFocused={isFocused && !hfEditMode}
+                caretPosition={partEdit || paintedCaretActive ? null : caretPosition}
+                isFocused={isFocused && !partEdit}
                 readOnly={readOnly}
                 overlayTarget={canvasOverlayTarget}
                 canvasHostRef={interactionPageHostRef}
@@ -1723,7 +1721,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               />
             )}
 
-          {canvasOverlayTarget && displayListQueries && !hfEditMode && (
+          {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
               session={yrsCore.session}
               positionProjection={getYrsPositionProjection('body')}
@@ -1737,8 +1735,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
           {canvasOverlayTarget && displayListQueries && (
             <CanvasImageSelectionOverlay
-              pmPos={hfEditMode ? null : canvasSelectedImagePos}
-              isFocused={isFocused && !hfEditMode}
+              pmPos={partEdit ? null : canvasSelectedImagePos}
+              isFocused={isFocused && !partEdit}
               readOnly={readOnly}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
@@ -1755,7 +1753,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             />
           )}
 
-          {canvasOverlayTarget && displayListQueries && !hfEditMode && (
+          {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasTableResizeOverlay
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}

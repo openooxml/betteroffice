@@ -6,12 +6,14 @@ import type {
 } from '@betteroffice/docx/types/document';
 import { resolveHeaderFooter } from '@betteroffice/docx/layout';
 
+import type { PartEditTarget } from '../partEdit';
+
 /**
- * Owns the inline header/footer editing mode: which slot is being
- * edited (`hfEditPosition`), whether the first-page variant applies
- * (`hfEditIsFirstPage`), the resolved header/footer content for the
- * current section, plus the double-click → edit, save, remove, and
- * "click out" workflows.
+ * Owns the inline header/footer editing mode: which slot is being edited and
+ * which page it was opened from (both carried by `partEditTarget`, the one
+ * value naming whatever non-body part is open), the resolved header/footer
+ * content for the current section, plus the double-click → edit, save,
+ * remove, and "click out" workflows.
  *
  * Empty headers/footers are materialised on first double-click so the
  * user can start typing — the helper writes the new HeaderFooter into
@@ -23,23 +25,17 @@ export function useHeaderFooterEditing({
   pushDocument,
   initialSectionProperties,
   finalSectionProperties,
-  hfEditPosition,
-  setHfEditPosition,
-  hfEditIsFirstPage,
-  setHfEditIsFirstPage,
-  setHfEditPageIndex,
+  partEditTarget,
+  setPartEditTarget,
 }: {
   document: Document | null;
   pushDocument: (doc: Document) => void;
   initialSectionProperties: SectionProperties | undefined;
   finalSectionProperties: SectionProperties | undefined;
-  // State + setters live in the parent so selection and canvas overlays can
-  // route to the active header/footer story.
-  hfEditPosition: 'header' | 'footer' | null;
-  setHfEditPosition: React.Dispatch<React.SetStateAction<'header' | 'footer' | null>>;
-  hfEditIsFirstPage: boolean;
-  setHfEditIsFirstPage: React.Dispatch<React.SetStateAction<boolean>>;
-  setHfEditPageIndex: React.Dispatch<React.SetStateAction<number>>;
+  // State + setter live in the parent so selection and canvas overlays can
+  // route to the open part's story.
+  partEditTarget: PartEditTarget | null;
+  setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
 }) {
   const { headerContent, footerContent, firstPageHeaderContent, firstPageFooterContent } =
     useMemo(() => {
@@ -63,7 +59,11 @@ export function useHeaderFooterEditing({
       // over THAT page's header and edits propagate visually to all others.
       const sectProps = document?.package?.document?.finalSectionProperties;
       const isFirstPage = sectProps?.titlePg === true && (pageNumber ?? 1) === 1;
-      setHfEditPageIndex(Math.max(0, (pageNumber ?? 1) - 1));
+      const opened: PartEditTarget = {
+        kind: position,
+        isFirstPage,
+        pageIndex: Math.max(0, (pageNumber ?? 1) - 1),
+      };
       const hf = isFirstPage
         ? position === 'header'
           ? firstPageHeaderContent
@@ -71,9 +71,8 @@ export function useHeaderFooterEditing({
         : position === 'header'
           ? headerContent
           : footerContent;
-      setHfEditIsFirstPage(isFirstPage);
       if (hf) {
-        setHfEditPosition(position);
+        setPartEditTarget(opened);
         return;
       }
 
@@ -136,7 +135,7 @@ export function useHeaderFooterEditing({
         },
       };
       pushDocument(newDoc);
-      setHfEditPosition(position);
+      setPartEditTarget(opened);
     },
     [
       headerContent,
@@ -145,29 +144,30 @@ export function useHeaderFooterEditing({
       firstPageFooterContent,
       document,
       pushDocument,
-      setHfEditPosition,
-      setHfEditIsFirstPage,
-      setHfEditPageIndex,
+      setPartEditTarget,
     ]
   );
 
   const handleBodyClick = useCallback(() => {
-    if (!hfEditPosition) return;
-    setHfEditPosition(null);
-  }, [hfEditPosition, setHfEditPosition]);
+    setPartEditTarget(null);
+  }, [setPartEditTarget]);
 
   const handleRemoveHeaderFooter = useCallback(() => {
-    if (!hfEditPosition || !document?.package) {
-      setHfEditPosition(null);
+    const band =
+      partEditTarget?.kind === 'header' || partEditTarget?.kind === 'footer'
+        ? partEditTarget
+        : null;
+    if (!band || !document?.package) {
+      setPartEditTarget(null);
       return;
     }
 
     const pkg = document.package;
     const sectionProps = pkg.document?.finalSectionProperties;
-    const refKey = hfEditPosition === 'header' ? 'headerReferences' : 'footerReferences';
-    const mapKey = hfEditPosition === 'header' ? 'headers' : 'footers';
+    const refKey = band.kind === 'header' ? 'headerReferences' : 'footerReferences';
+    const mapKey = band.kind === 'header' ? 'headers' : 'footers';
     const refs = sectionProps?.[refKey];
-    const delTargetType = hfEditIsFirstPage ? 'first' : 'default';
+    const delTargetType = band.isFirstPage ? 'first' : 'default';
     const activeRef =
       refs?.find((r) => r.type === delTargetType) ??
       refs?.find((r) => r.type === 'default') ??
@@ -199,8 +199,8 @@ export function useHeaderFooterEditing({
       pushDocument(newDoc);
     }
 
-    setHfEditPosition(null);
-  }, [hfEditPosition, hfEditIsFirstPage, document, pushDocument, setHfEditPosition]);
+    setPartEditTarget(null);
+  }, [partEditTarget, document, pushDocument, setPartEditTarget]);
 
   return {
     headerContent,

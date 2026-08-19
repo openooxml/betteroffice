@@ -10,6 +10,7 @@ import { createRef } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
+import type { PartEdit } from '../partEdit';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 
 // Registered only if nobody else did, and handed back at the end: a leaked
@@ -178,15 +179,15 @@ describe('pages pointer hover cursor', () => {
   test('a mode flip mid-drag waits for the release', () => {
     const options = stableOptions();
     const { rerender } = renderHook(
-      (hfEditMode: 'header' | 'footer' | null) => usePagesPointer(options({ hfEditMode })),
-      { initialProps: null as 'header' | 'footer' | null }
+      (partEdit: PartEdit | null) => usePagesPointer(options({ partEdit })),
+      { initialProps: null as PartEdit | null }
     );
 
     mouse('mousemove', 400, 500, canvasOf());
     mouse('mousedown', 400, 500, canvasOf());
 
     // the body becomes inert behind an open band editor, but not mid-gesture
-    act(() => rerender('header'));
+    act(() => rerender({ kind: 'header', rId: 'rId7' }));
     expect(host.style.cursor).toBe('text');
 
     mouse('mouseup', 400, 500, window);
@@ -215,15 +216,15 @@ describe('pages pointer hover cursor', () => {
   test('opening a header editor re-resolves a pointer that has not moved', () => {
     const options = stableOptions();
     const { rerender } = renderHook(
-      (hfEditMode: 'header' | 'footer' | null) => usePagesPointer(options({ hfEditMode })),
-      { initialProps: null as 'header' | 'footer' | null }
+      (partEdit: PartEdit | null) => usePagesPointer(options({ partEdit })),
+      { initialProps: null as PartEdit | null }
     );
 
     mouse('mousemove', 400, 500, canvasOf());
     expect(host.style.cursor).toBe('text');
 
     // the body is inert behind an open band editor, under the same pointer
-    act(() => rerender('header'));
+    act(() => rerender({ kind: 'header', rId: 'rId7' }));
     expect(host.style.cursor).toBe('default');
   });
 });
