@@ -194,7 +194,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const isDraggingRef = useRef(false);
   const dragAnchorRef = useRef<number | null>(null);
-  const pendingNoteCaretRef = useRef<{ story: string; position: number } | null>(null);
+  const pendingNoteCaretRef = useRef<{
+    session: YrsSession;
+    story: string;
+    position: number;
+  } | null>(null);
+  const [pendingNoteCaretVersion, setPendingNoteCaretVersion] = useState(0);
   const yrsCellDragAnchorRef = useRef<YrsCellLoc | null>(null);
   const yrsCellDraggingRef = useRef(false);
   const [tableInsertButton, setTableInsertButton] = useState<TableInsertButtonState | null>(null);
@@ -332,6 +337,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      pendingNoteCaretRef.current = null;
       const projection = getYrsPositionProjection(yrsRootStory);
       if (!projection) return;
       if (e.button === 2) {
@@ -354,9 +360,17 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const note = noteEditFromHit(hit);
       if (note && onNoteClick && !hitBelongsToPart(partEdit, hit)) {
         e.stopPropagation();
-        pendingNoteCaretRef.current =
-          hit?.pos == null ? null : { story: partEditStory(note), position: hit.pos };
+        const pending =
+          hit?.pos == null || !yrsSession
+            ? null
+            : {
+                session: yrsSession,
+                story: partEditStory(note),
+                position: hit.pos,
+              };
+        pendingNoteCaretRef.current = pending;
         onNoteClick(note);
+        if (pending) setPendingNoteCaretVersion((version) => version + 1);
         return;
       }
       if (partEdit) {
@@ -416,19 +430,37 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setSelectionRects,
       setTextSelection,
       yrsRootStory,
+      yrsSession,
     ]
   );
 
   // The opening click resolves a position in a story the editor is not on yet,
-  // so the caret waits for the story to become active. Keyed on the story it
-  // was resolved in, a request the host never honoured expires unused.
+  // so the caret waits for the requested part to become active in this session.
   useEffect(() => {
     const pending = pendingNoteCaretRef.current;
-    if (!pending || pending.story !== yrsRootStory) return;
+    if (!pending) return;
     pendingNoteCaretRef.current = null;
-    setTextSelection(pending.position);
+    if (
+      pending.session !== yrsSession ||
+      pending.story !== yrsRootStory ||
+      pending.story !== partEditStory(partEdit)
+    ) {
+      return;
+    }
+    const projection = getYrsPositionProjection(yrsRootStory);
+    if (!projection) return;
+    const position = Math.min(Math.max(0, pending.position), Math.max(0, projection.size - 1));
+    setTextSelection(position);
     focusInput();
-  }, [focusInput, setTextSelection, yrsRootStory]);
+  }, [
+    focusInput,
+    getYrsPositionProjection,
+    partEdit,
+    pendingNoteCaretVersion,
+    setTextSelection,
+    yrsRootStory,
+    yrsSession,
+  ]);
 
   dragExtendRef.current = (cx, cy) => {
     if (!isDraggingRef.current || dragAnchorRef.current == null) return;
@@ -738,7 +770,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         if (image) imageInfo = readImageNodeAt(image.pos);
       }
       const selection = yrsInputRef.current?.displaySelection();
-      if (!imageInfo && selection && Math.abs(selection.anchor - selection.head) === 1) {
+      if (
+        !imageInfo &&
+        imageRegion &&
+        selection &&
+        Math.abs(selection.anchor - selection.head) === 1
+      ) {
         imageInfo = readImageNodeAt(Math.min(selection.anchor, selection.head));
       }
       if (imageInfo?.wrapType === 'inline' && displayListQueries && !partEdit) {
