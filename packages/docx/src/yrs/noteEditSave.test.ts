@@ -12,7 +12,9 @@ import { resolve } from 'node:path';
 import { parseDocx } from '../docx';
 import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
-import type { BlockContent, Document, Endnote, Footnote } from '../types/document';
+import { readDocxContainer } from '../docx/zipContainer';
+import type { DisplayList, DisplayListRegionHit, TextRunPrimitive } from '../layout/render';
+import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
 import { createYrsInputPositionMap, displayPositionToYrsLoc } from './inputPositionMap';
@@ -71,9 +73,11 @@ const FOOTNOTES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:footnote w:id="2">
     <w:p>
       <w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>
+      <w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>
       <w:r><w:t xml:space="preserve">Ibsen 1879</w:t></w:r>
     </w:p>
   </w:footnote>
+  <w:footnote w:id="3"><w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t>Clean footnote sibling.</w:t></w:r></w:p></w:footnote>
 </w:footnotes>`;
 
 const ENDNOTES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -83,9 +87,11 @@ const ENDNOTES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:endnote w:id="2">
     <w:p>
       <w:pPr><w:pStyle w:val="EndnoteText"/></w:pPr>
+      <w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteRef/></w:r>
       <w:r><w:t xml:space="preserve">Ibsen 1879</w:t></w:r>
     </w:p>
   </w:endnote>
+  <w:endnote w:id="3"><w:p><w:pPr><w:pStyle w:val="EndnoteText"/></w:pPr><w:r><w:rPr><w:rStyle w:val="EndnoteReference"/></w:rPr><w:endnoteRef/></w:r><w:r><w:t>Clean endnote sibling.</w:t></w:r></w:p></w:endnote>
 </w:endnotes>`;
 
 function fixture(): Uint8Array {
@@ -119,31 +125,75 @@ function typeAtDisplayPosition(
   session.insertText(head, text);
 }
 
-function blocksText(blocks: readonly BlockContent[]): string {
-  return blocks
-    .map((block) =>
-      block.type === 'paragraph'
-        ? block.content
-            .map((item) =>
-              item.type === 'run'
-                ? item.content.map((run) => (run.type === 'text' ? run.text : '')).join('')
-                : ''
-            )
-            .join('')
-        : ''
-    )
-    .join('');
+interface NoteClick {
+  story: string;
+  position: number;
 }
 
-function noteText(notes: readonly (Footnote | Endnote)[] | undefined, id: number): string {
-  const note = notes?.find((candidate) => candidate.id === id);
-  return note ? blocksText(note.content) : '';
+function clickedNotePositions(session: YrsSession): NoteClick[] {
+  const layout = session.layoutDocumentWithRegionsJson(
+    JSON.stringify({
+      bodyStory: 'body',
+      regions: { sections: [{ sectionId: 'main', properties: {} }] },
+      notes: {
+        contents: [
+          { id: 2, noteKind: 'footnote', height: 0 },
+          { id: 2, noteKind: 'endnote', height: 0 },
+        ],
+      },
+      measurement: {
+        fontChains: {},
+        defaults: { fontSize: 11, fontFamily: 'Calibri' },
+        authoritativeShaping: false,
+      },
+      renderEnv: {},
+    })
+  );
+  const list = JSON.parse(session.buildDisplayListJson(layout)) as DisplayList;
+  return (['footnote', 'endnote'] as const).map((kind) => {
+    const located = list.pages
+      .flatMap((page) => (page.noteAreas ?? []).map((area) => ({ page, area })))
+      .find(({ area }) => (area.kind ?? 'footnote') === kind && (area.noteIds ?? []).includes(2));
+    if (!located) throw new Error(`no ${kind} area`);
+    const run = located.area.primitives?.find(
+      (primitive): primitive is TextRunPrimitive & { docStart: number } =>
+        primitive.kind === 'text' && primitive.docStart != null && primitive.text.includes('Ibsen')
+    );
+    if (!run) throw new Error(`no positioned ${kind} text`);
+    const split = run.text.indexOf(' ');
+    if (split < 0) throw new Error(`no word boundary in ${kind} text`);
+    const target = run.docStart + split;
+    for (let step = 0; step <= 512; step += 1) {
+      const x = run.x + (run.width * step) / 512;
+      const hit = JSON.parse(
+        session.displayHitTestRegionsJson(located.page.pageIndex, x, run.baselineY - 2)
+      ) as DisplayListRegionHit | null;
+      if (hit?.region !== kind || hit.noteId !== 2 || hit.pos !== target) continue;
+      return {
+        story: `${kind === 'footnote' ? 'fn' : 'en'}:${hit.noteId}`,
+        position: hit.pos,
+      };
+    }
+    throw new Error(`no ${kind} hit resolved display position ${target}`);
+  });
+}
+
+function noteXml(xml: string, tag: 'footnote' | 'endnote', id: number): string {
+  const match = new RegExp(
+    `<w:${tag}\\b[^>]*\\bw:id=["']${id}["'][^>]*>[\\s\\S]*?</w:${tag}>`
+  ).exec(xml);
+  if (!match) throw new Error(`no ${tag} ${id}`);
+  return match[0];
+}
+
+function rawNoteText(xml: string): string {
+  return [...xml.matchAll(/<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g)].map((match) => match[1]).join('');
 }
 
 describe('typing into a note through the editor path', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
 
-  it('saves what was typed where the caret was clicked', async () => {
+  it('selectively saves note clicks without rewriting clean stories', async () => {
     const bytes = fixture();
     const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
     const session = await createYrsSession({ clientId: 53003 });
@@ -151,17 +201,29 @@ describe('typing into a note through the editor path', () => {
     let saved: Document;
     try {
       session.seedFromDocx(bytes);
-      // display position 6 = five characters into "Ibsen 1879", i.e. between
-      // the name and the year — a caret a click could put there
-      typeAtDisplayPosition(session, 'fn:2', 6, ',');
-      typeAtDisplayPosition(session, 'en:2', 6, ',');
-      saved = yrsToDocument(session, parsed);
+      const clicks = clickedNotePositions(session);
+      expect(clicks.map((click) => click.story)).toEqual(['fn:2', 'en:2']);
+      for (const click of clicks) typeAtDisplayPosition(session, click.story, click.position, ',');
+      saved = yrsToDocument(session, parsed, {
+        storyIds: new Set(clicks.map((click) => click.story)),
+      });
     } finally {
       session.destroy();
     }
 
-    const reopened = await parseDocx(await repackDocx(saved), { preloadFonts: false });
-    expect(noteText(reopened.package.footnotes, 2)).toBe('Ibsen, 1879');
-    expect(noteText(reopened.package.endnotes, 2)).toBe('Ibsen, 1879');
+    expect(saved.package.document.content).toBe(parsed.package.document.content);
+
+    const parts = readDocxContainer(await repackDocx(saved));
+    const footnotesXml = parts.text('word/footnotes.xml') ?? '';
+    const endnotesXml = parts.text('word/endnotes.xml') ?? '';
+    const footnote = noteXml(footnotesXml, 'footnote', 2);
+    const endnote = noteXml(endnotesXml, 'endnote', 2);
+
+    expect(footnote).toContain('<w:footnoteRef/>');
+    expect(rawNoteText(footnote)).toBe('Ibsen, 1879');
+    expect(endnote).toContain('<w:endnoteRef/>');
+    expect(rawNoteText(endnote)).toBe('Ibsen, 1879');
+    expect(noteXml(footnotesXml, 'footnote', 3)).toBe(noteXml(FOOTNOTES, 'footnote', 3));
+    expect(noteXml(endnotesXml, 'endnote', 3)).toBe(noteXml(ENDNOTES, 'endnote', 3));
   });
 });
