@@ -5,7 +5,7 @@
     "corpusFloor": 2,
     "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 5
+    "knownDefects": 4
   },
   "criteria": [
     {
@@ -2069,7 +2069,7 @@
     {
       "id": "drw.inline",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -2084,10 +2084,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "drawing subtrees are rewritten on save, fingerprints differ (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "drw.anchor-position",

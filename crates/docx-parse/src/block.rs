@@ -359,6 +359,7 @@ impl StoryParser<'_, '_> {
         }
         let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
         shape.id = text_box.id;
+        shape.name = text_box.name;
         shape.position = text_box.position;
         shape.wrap = text_box.wrap;
         shape.fill = text_box.fill;

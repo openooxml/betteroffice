@@ -2,7 +2,7 @@
   "fixtures": [
     {
       "file": "wordprocessingml-comprehensive.docx",
-      "sha256": "6fd3c963a7ddc7c39135baf3c183b686ec8b8367d319b54d20a74cd013cbc8b6",
+      "sha256": "4182b66416dbfadc561f049423dc3c1eeda7e7a9abc27a02120e9a3878977890",
       "provenance": "generator",
       "application": "scripts/create-wordprocessingml-comprehensive.ts",
       "features": [
