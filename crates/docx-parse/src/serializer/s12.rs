@@ -334,6 +334,7 @@ mod tests {
                 node_type: "paragraph".to_owned(),
                 para_id: None,
                 text_id: None,
+                extra_attributes: Vec::new(),
                 formatting: None,
                 property_changes: None,
                 p_pr_ins: None,

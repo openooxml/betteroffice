@@ -1,4 +1,0 @@
-fingerprint differs: word/document.xml
-census loss: urn:betteroffice-fixture-x:marker 1 -> 0
-digest: word/document.xml block[74].genericStructure | {urn:betteroffice-fixture-x}marker({urn:betteroffice-fixture-x}kind=inline) -> 
-digest: word/document.xml block[75].attributes | {urn:betteroffice-fixture-x}origin=fixture -> 

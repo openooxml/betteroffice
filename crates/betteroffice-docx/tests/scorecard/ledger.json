@@ -5,7 +5,7 @@
     "corpusFloor": 2,
     "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 3
+    "knownDefects": 1
   },
   "criteria": [
     {
@@ -191,7 +191,7 @@
     {
       "id": "pkg.unknown-xml",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "n/a",
         "edit": "n/a",
         "layout": "n/a",
@@ -206,11 +206,14 @@
         "paint": "n/a",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "unknown element in a modelled part is dropped on save (betteroffice-docx fidelity::an_unknown_element_in_a_modelled_part_is_a_known_defect)",
-        "unknown attribute on a known element is dropped on save (betteroffice-docx fidelity::an_unknown_attribute_on_a_known_element_is_a_known_defect)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings",
+          "betteroffice-docx fidelity::an_unknown_element_in_a_modelled_part_survives_the_round_trip",
+          "betteroffice-docx fidelity::an_unknown_attribute_on_a_known_element_survives_the_round_trip"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "pkg.whitespace",

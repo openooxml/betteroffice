@@ -313,6 +313,7 @@ fn prune_blocks(blocks: &mut [BlockContent], comment_ids: &HashSet<u64>) {
                 }
             }
             BlockContent::BlockSdt(sdt) => prune_blocks(&mut sdt.content, comment_ids),
+            BlockContent::RawXml(_) => {}
         }
     }
 }

@@ -1018,6 +1018,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                     content: Vec::new(),
                     sections,
                     final_section_properties: package.document.final_section_properties.clone(),
+                    custom_root_bindings: package.document.custom_root_bindings.clone(),
                     comments: package.document.comments.clone(),
                 },
                 styles: package.styles.clone(),

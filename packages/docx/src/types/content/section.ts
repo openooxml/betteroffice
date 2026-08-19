@@ -241,6 +241,8 @@ export interface DocumentBody {
   sections?: Section[];
   /** Final section properties (from body's sectPr) */
   finalSectionProperties?: SectionProperties;
+  /** Root namespace declarations outside the standard set, kept for replayed foreign markup. */
+  customRootBindings?: { name: string; value: string }[];
   /** Comments from comments.xml */
   comments?: Comment[];
   /** Stable reviewer palette metadata. Undefined = derive colors by author order. */

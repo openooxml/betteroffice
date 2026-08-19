@@ -175,6 +175,7 @@ pub fn serialize_table_cell(
                 emitted = true;
             }
             BlockContent::BlockSdt(_) => {}
+            BlockContent::RawXml(_) => {}
         }
     }
     if !emitted {

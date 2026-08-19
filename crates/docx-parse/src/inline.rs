@@ -824,6 +824,60 @@ fn consume_non_whitespace(value: &str, mut cursor: usize) -> usize {
     cursor
 }
 
+/// An inline element the model does not type, kept as authored markup and
+/// replayed verbatim on save; dropping markup the parser never read is a loss.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RawInlineXml {
+    #[serde(rename = "type")]
+    pub node_type: RawInlineXmlType,
+    pub xml: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RawInlineXmlType {
+    #[serde(rename = "rawXml")]
+    RawXml,
+}
+
+/// Prefixes the typed model owns; an element under any other prefix is
+/// foreign markup that survives as a raw inline node.
+const CANONICAL_PREFIXES: [&str; 26] = [
+    "w", "r", "m", "mc", "o", "v", "a", "pic", "wp", "wp14", "w10", "w14", "w15", "w16", "w16cex",
+    "w16cid", "w16du", "w16sdtdh", "w16sdtfl", "w16se", "wne", "wpc", "wpg", "wpi", "wps", "xml",
+];
+
+pub(crate) fn is_canonical_prefix(prefix: &str) -> bool {
+    CANONICAL_PREFIXES.contains(&prefix)
+        || matches!(
+            prefix,
+            "cx" | "cx1"
+                | "cx2"
+                | "cx3"
+                | "cx4"
+                | "cx5"
+                | "cx6"
+                | "cx7"
+                | "cx8"
+                | "aink"
+                | "am3d"
+                | "oel"
+        )
+}
+
+pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<InlineNode> {
+    let prefix = match element.name.split_once(':') {
+        Some((prefix, _)) => prefix,
+        None => "",
+    };
+    if CANONICAL_PREFIXES.contains(&prefix) {
+        return None;
+    }
+    Some(InlineNode::RawXml(Box::new(RawInlineXml {
+        node_type: RawInlineXmlType::RawXml,
+        xml: element.to_raw_inline_xml(),
+    })))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InlineNode {
@@ -835,6 +889,7 @@ pub enum InlineNode {
     ComplexField(Box<ComplexField>),
     InlineSdt(Box<InlineSdt>),
     Math(MathEquation),
+    RawXml(Box<RawInlineXml>),
 }
 
 impl InlineNode {
@@ -848,6 +903,7 @@ impl InlineNode {
             Self::ComplexField(_) => "complexField",
             Self::InlineSdt(_) => "inlineSdt",
             Self::Math(_) => "mathEquation",
+            Self::RawXml(_) => "rawXml",
         }
     }
 }
@@ -2202,7 +2258,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .as_deref()
             .map(|text| text.encode_utf16().count())
             .unwrap_or(0),
-        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => 0,
+        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) | InlineNode::RawXml(_) => 0,
     }
 }
 

@@ -15,13 +15,22 @@ use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::foundation::{BorderSide, write_border};
-use super::raw::{validate_math_subtree, validate_raw_subtree};
+use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
     serialize_run, serialize_text_formatting, write_shading,
 };
 use super::section::serialize_section_properties;
 use super::xml_writer::{XmlWriter, int_attr, js_number};
+
+/// A replayed attribute name must be exactly one XML name, or it could
+/// smuggle markup into the tag.
+pub(crate) fn is_safe_attribute_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_' | '.')
+        })
+}
 
 /// Serialize one complete `w:p` element.
 pub fn serialize_paragraph(
@@ -45,6 +54,11 @@ fn serialize_paragraph_inner(
     }
     if let Some(value) = nonempty(paragraph.text_id.as_deref()) {
         writer.attribute("w14:textId", value);
+    }
+    for attribute in &paragraph.extra_attributes {
+        if is_safe_attribute_name(&attribute.name) {
+            writer.dynamic_attribute(&attribute.name, &attribute.value);
+        }
     }
     let properties = serialize_paragraph_formatting(
         paragraph.formatting.as_ref(),
@@ -192,6 +206,10 @@ pub(crate) fn serialize_inline_node(
         InlineNode::ComplexField(field) => serialize_complex_field(field, context),
         InlineNode::InlineSdt(sdt) => serialize_inline_sdt(sdt, context),
         InlineNode::Math(math) => serialize_math(math),
+        InlineNode::RawXml(raw) => {
+            validate_replayed_fragment(&raw.xml)?;
+            Ok(raw.xml.clone())
+        }
     }
 }
 
@@ -851,6 +869,7 @@ mod tests {
             node_type: "paragraph".to_owned(),
             para_id: Some("AA&BB\"CC".to_owned()),
             text_id: None,
+            extra_attributes: Vec::new(),
             formatting: Some(ParagraphFormatting {
                 keep_next: Some(false),
                 alignment: Some("center".to_owned()),

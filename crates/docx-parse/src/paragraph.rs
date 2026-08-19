@@ -133,6 +133,13 @@ impl ParagraphContent {
     }
 }
 
+/// One attribute kept exactly as authored, prefixed name and all.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RawAttribute {
+    pub name: String,
+    pub value: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Paragraph {
@@ -142,6 +149,10 @@ pub struct Paragraph {
     pub para_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_id: Option<String>,
+    /// Attributes the model does not type, kept in authored form so a save
+    /// re-emits them; dropping an attribute the parser never read is a loss.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_attributes: Vec<RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formatting: Option<ParagraphFormatting>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +208,20 @@ impl HexIdAllocator {
     }
 }
 
+/// Everything on `w:p` the model does not consume itself.
+fn extra_paragraph_attributes(element: &XmlElement) -> Vec<RawAttribute> {
+    const CONSUMED: [&str; 4] = ["w14:paraId", "w:paraId", "w14:textId", "w:textId"];
+    element
+        .attributes
+        .iter()
+        .filter(|(name, _)| !CONSUMED.contains(&name.as_str()))
+        .map(|(name, value)| RawAttribute {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn parse_paragraph(
     element: &XmlElement,
@@ -228,6 +253,7 @@ pub fn parse_paragraph(
                 .or_else(|| element.attribute(Some("w"), "textId")),
             ids,
         ),
+        extra_attributes: extra_paragraph_attributes(element),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -631,7 +657,11 @@ fn parse_paragraph_contents(
             ))),
             // Paragraph properties are handled by the orchestrator.
             "pPr" | "proofErr" | "permStart" | "permEnd" | "customXml" | "smartTag" => {}
-            _ => {}
+            _ => {
+                if let Some(node) = crate::inline::raw_foreign_inline(child) {
+                    output.push(ParagraphContent::Inline(node));
+                }
+            }
         }
     }
     while let Some(field) = fields.pop() {
@@ -1291,6 +1321,7 @@ fn paragraph_content_length(content: &ParagraphContent) -> usize {
 
 fn inline_node_length(node: &InlineNode) -> usize {
     match node {
+        InlineNode::RawXml(_) => 0,
         InlineNode::Run(run) => run
             .content
             .iter()

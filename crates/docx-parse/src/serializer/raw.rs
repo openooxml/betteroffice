@@ -31,6 +31,20 @@ pub(super) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
 );
 
+/// A replayed foreign fragment must still be exactly one well-formed
+/// element; the resolver-free reader accepts its authored prefixes as-is.
+pub(crate) fn validate_replayed_fragment(xml: &str) -> Result<(), ParseError> {
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let document = parse_xml(xml.as_bytes(), "replayed-fragment", &mut budget)?;
+    if document.root().is_none() {
+        return Err(ParseError::Canonical(
+            "replayed fragment must contain exactly one element".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_raw_subtree(
     xml: &str,
     expected_prefix: &str,

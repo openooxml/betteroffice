@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::block::{BlockContent, StoryParser};
 use crate::comments::Comment;
 use crate::inline::{InlineNode, RunContent};
+use crate::paragraph::RawAttribute;
 use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::section::{
     SectionProperties, apply_section_inheritance, default_section_properties,
@@ -32,6 +33,10 @@ pub struct DocumentBody {
     /// header and footer references onto the final section on save.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_section_properties: Option<SectionProperties>,
+    /// Root-level namespace declarations outside the serializer's standard
+    /// set, kept so replayed foreign markup keeps resolving after a save.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_root_bindings: Vec<RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comments: Option<Vec<Comment>>,
 }
@@ -84,8 +89,26 @@ fn parse_document_body_impl(
         content,
         sections: Some(sections),
         final_section_properties,
+        custom_root_bindings: custom_root_bindings(document),
         comments: None,
     })
+}
+
+/// Declarations on the document root the serializer's standard boilerplate
+/// will not re-emit.
+pub(crate) fn custom_root_bindings(document: &XmlElement) -> Vec<RawAttribute> {
+    document
+        .attributes
+        .iter()
+        .filter(|(name, _)| {
+            name.strip_prefix("xmlns:")
+                .is_some_and(|prefix| !crate::inline::is_canonical_prefix(prefix))
+        })
+        .map(|(name, value)| RawAttribute {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
 }
 
 fn build_sections(
@@ -240,6 +263,7 @@ pub fn extract_all_template_variables(content: &[BlockContent]) -> Vec<String> {
             }
             // Block SDTs are not traversed.
             BlockContent::BlockSdt(_) => {}
+            BlockContent::RawXml(_) => {}
         }
     }
     variables
@@ -266,6 +290,7 @@ fn extract_table_template_variables(table: &crate::table::Table) -> Vec<String> 
                         }
                     }
                     BlockContent::BlockSdt(_) => {}
+                    BlockContent::RawXml(_) => {}
                 }
             }
         }

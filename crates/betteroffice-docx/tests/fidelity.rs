@@ -124,11 +124,8 @@ fn the_guard_has_teeth() {
     assert_ne!(digest_diff(&before, &after), vec![]);
 }
 
-/// KNOWN DEFECT (`pkg.unknown-xml`): a foreign-namespace element inside a
-/// modelled part does not survive save. Ceiling: exactly three lost elements
-/// on this fixture. Implementing generic preservation must lower it to zero.
 #[test]
-fn an_unknown_element_in_a_modelled_part_is_a_known_defect() {
+fn an_unknown_element_in_a_modelled_part_survives_the_round_trip() {
     let original = with_document_xml(&sample_docx(), |xml| {
         xml.replace(
             "<w:body>",
@@ -140,28 +137,44 @@ fn an_unknown_element_in_a_modelled_part_is_a_known_defect() {
         )
     });
     let saved = save_unedited(&original);
-    let lost: Vec<String> = losses(
-        &element_census(&parts_of(&original)).unwrap(),
-        &element_census(&parts_of(&saved)).unwrap(),
-    )
-    .into_iter()
-    .map(|loss| format!("{}:{}", loss.namespace, loss.local))
-    .collect();
     assert_eq!(
-        lost,
-        vec![
-            "urn:custom-x:block".to_owned(),
-            "urn:custom-x:tag".to_owned(),
-            "urn:custom-x:y".to_owned(),
-        ]
+        losses(
+            &element_census(&parts_of(&original)).unwrap(),
+            &element_census(&parts_of(&saved)).unwrap(),
+        ),
+        vec![]
+    );
+    assert_eq!(digest_diff(&parts_of(&original), &parts_of(&saved)), vec![]);
+}
+
+/// Foreign markup in a header, declared on the story root rather than
+/// inline, must keep resolving after a save re-emits the root.
+#[test]
+fn root_declared_foreign_markup_in_a_header_survives_the_round_trip() {
+    let mut parts = ooxml_opc::unzip_parts(&sample_docx()).unwrap();
+    for (name, bytes) in &mut parts {
+        if name == "word/header1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            *bytes = xml
+                .replace(
+                    r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+                    r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:bofx="urn:betteroffice-fixture-x""#,
+                )
+                .replace("<w:p ", r#"<bofx:hmark/><w:p bofx:flag="1" "#)
+                .into_bytes();
+        }
+    }
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+    let saved = save_unedited(&original);
+    assert_eq!(
+        roundtrip_report(&parts_of(&original), &parts_of(&saved)),
+        Vec::<String>::new()
     );
 }
 
-/// KNOWN DEFECT (`pkg.unknown-xml`): a foreign-namespace attribute on a known
-/// element does not survive save. The census is blind to attributes; the
-/// digest names the exact loss. Ceiling: exactly one difference.
+/// The census is blind to attributes; the digest is the net here.
 #[test]
-fn an_unknown_attribute_on_a_known_element_is_a_known_defect() {
+fn an_unknown_attribute_on_a_known_element_survives_the_round_trip() {
     let original = with_document_xml(&sample_docx(), |xml| {
         xml.replace(
             r#"<w:p w14:paraId="33333333">"#,
@@ -169,9 +182,5 @@ fn an_unknown_attribute_on_a_known_element_is_a_known_defect() {
         )
     });
     let saved = save_unedited(&original);
-    let differences = digest_diff(&parts_of(&original), &parts_of(&saved));
-    assert_eq!(differences.len(), 1);
-    assert_eq!(differences[0].path, "word/document.xml block[2].attributes");
-    assert!(differences[0].before.contains("{urn:custom-x}flag=1"));
-    assert!(!differences[0].after.contains("{urn:custom-x}flag=1"));
+    assert_eq!(digest_diff(&parts_of(&original), &parts_of(&saved)), vec![]);
 }

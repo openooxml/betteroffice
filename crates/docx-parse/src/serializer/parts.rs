@@ -11,6 +11,7 @@ use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
+use super::paragraph::is_safe_attribute_name;
 use super::raw::validate_raw_subtree;
 use super::sdt::serialize_block_content;
 use super::section::serialize_section_properties;
@@ -118,6 +119,21 @@ pub struct CommentParaInfo {
     pub done: Option<bool>,
 }
 
+/// Root declarations outside the standard boilerplate, re-emitted verbatim.
+fn custom_bindings_attributes(bindings: &[crate::paragraph::RawAttribute]) -> String {
+    let mut custom = String::new();
+    for binding in bindings {
+        if binding.name.starts_with("xmlns:") && is_safe_attribute_name(&binding.name) {
+            custom.push(' ');
+            custom.push_str(&binding.name);
+            custom.push_str("=\"");
+            custom.push_str(&escape_xml(&binding.value));
+            custom.push('"');
+        }
+    }
+    custom
+}
+
 pub fn serialize_document_body(
     body: &DocumentBody,
     context: &mut SerializerContext,
@@ -137,8 +153,9 @@ pub fn serialize_document_part(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let body_xml = serialize_document_body(body, context)?;
+    let custom = custom_bindings_attributes(&body.custom_root_bindings);
     Ok(format!(
-        "{XML_DECLARATION}<w:document {DOCUMENT_NAMESPACES} mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh wp14\"><w:body>{body_xml}</w:body></w:document>"
+        "{XML_DECLARATION}<w:document {DOCUMENT_NAMESPACES}{custom} mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh wp14\"><w:body>{body_xml}</w:body></w:document>"
     ))
 }
 
@@ -161,8 +178,9 @@ pub fn serialize_header_footer_part(
     } else {
         "w:ftr"
     };
+    let custom = custom_bindings_attributes(&story.custom_root_bindings);
     Ok(format!(
-        "{XML_DECLARATION}\n<{root} {HEADER_FOOTER_NAMESPACES}>{content}</{root}>"
+        "{XML_DECLARATION}\n<{root} {HEADER_FOOTER_NAMESPACES}{custom}>{content}</{root}>"
     ))
 }
 
@@ -588,6 +606,7 @@ mod tests {
             node_type: "paragraph".to_owned(),
             para_id: None,
             text_id: None,
+            extra_attributes: Vec::new(),
             formatting: None,
             property_changes: None,
             p_pr_ins: None,
@@ -661,6 +680,7 @@ mod tests {
                 hdr_ftr_type: "default".to_owned(),
                 content: Vec::new(),
                 watermark: None,
+                custom_root_bindings: Vec::new(),
             },
             &mut context(),
         )
