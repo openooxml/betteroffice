@@ -8,7 +8,9 @@ import {
   PYPI_DISTRIBUTIONS,
   PYTHON_BINDINGS,
   PYTHON_BINDING_NAMES,
-  PYTHON_PUBLISH_NAMES
+  PYTHON_PUBLISH_NAMES,
+  bindingVersion,
+  pendingPublishNames
 } from './python-bindings.mjs';
 
 const script = fileURLToPath(new URL('./python-bindings.mjs', import.meta.url));
@@ -121,9 +123,9 @@ describe('registry', () => {
 });
 
 describe('release wiring', () => {
-  test('the registry step computes the publish list from the registry', () => {
+  test('the registry step computes the publish list from PyPI state', () => {
     const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
-    expect(step.run).toContain('scripts/python-bindings.mjs --publish');
+    expect(step.run).toContain('scripts/python-bindings.mjs --pending');
 
     const directory = mkdtempSync(join(tmpdir(), 'registry-'));
     const outputs = join(directory, 'outputs');
@@ -136,9 +138,10 @@ describe('release wiring', () => {
     });
 
     expect(result.status).toBe(0);
-    expect(readFileSync(outputs, 'utf8').trim().split('\n')).toEqual([
-      `publish=${JSON.stringify(PYTHON_PUBLISH_NAMES)}`
-    ]);
+    const lines = readFileSync(outputs, 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const pending = JSON.parse(lines[0]!.replace(/^publish=/, '')) as string[];
+    expect(PYTHON_PUBLISH_NAMES.filter((name) => pending.includes(name))).toEqual(pending);
   });
 
   test('the release train exposes the publish list', () => {
@@ -284,5 +287,73 @@ describe('repository-scoped token guard', () => {
     );
     expect(child.env.TOKEN).toBe('${{ secrets.PYPI_API_TOKEN }}');
     expect(child.run).toContain('exit 1');
+  });
+});
+
+describe('pending publish selection', () => {
+  const live = () =>
+    Object.fromEntries(
+      PYTHON_BINDINGS.map((path) => [
+        `betteroffice-${path.replace('bindings/python-', '')}`,
+        [bindingVersion(path)]
+      ])
+    );
+
+  function pypi(releases: Record<string, string[] | null>) {
+    const requested: string[] = [];
+    const fetchImpl = async (url: string) => {
+      requested.push(url);
+      const project = url.match(/\/pypi\/([^/]+)\/json$/)?.[1] ?? '';
+      const versions = releases[project];
+      if (versions == null) return { status: 404, ok: false } as Response;
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({ releases: Object.fromEntries(versions.map((v) => [v, []])) })
+      } as unknown as Response;
+    };
+    return { fetchImpl, requested };
+  }
+
+  test('every binding version is a semver', () => {
+    for (const path of PYTHON_BINDINGS) expect(bindingVersion(path)).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  test('nothing is pending when PyPI serves every version', async () => {
+    const { fetchImpl, requested } = pypi(live());
+    expect(await pendingPublishNames({ fetchImpl })).toEqual([]);
+    expect(requested).toEqual(PYPI_DISTRIBUTIONS.map((d) => `https://pypi.org/pypi/${d}/json`));
+  });
+
+  test('a version PyPI does not serve is pending', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = ['0.0.0'];
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual(['docx']);
+  });
+
+  test('a project PyPI does not know is pending', async () => {
+    const releases = live();
+    releases['betteroffice-xlsx'] = null;
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual(['xlsx']);
+  });
+
+  test('an unreadable PyPI fails the run instead of skipping a publish', async () => {
+    const fetchImpl = async () => ({ status: 503, ok: false }) as Response;
+    await expect(
+      pendingPublishNames({ fetchImpl, attempts: 2, retryDelayMs: 0 })
+    ).rejects.toThrow('cannot read PyPI');
+  });
+
+  test('a transient error is retried', async () => {
+    let calls = 0;
+    const good = pypi(live()).fetchImpl;
+    const fetchImpl = async (url: string) => {
+      calls += 1;
+      if (calls === 1) throw new Error('reset');
+      return good(url);
+    };
+    expect(await pendingPublishNames({ fetchImpl, retryDelayMs: 0 })).toEqual([]);
   });
 });
