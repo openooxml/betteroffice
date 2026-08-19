@@ -88,6 +88,7 @@ export function EditingModeDropdown({
       {isOpen && (
         <div
           ref={dropdownRef}
+          data-docx-escape-layer="true"
           onMouseDown={(e) => e.preventDefault()}
           style={{
             position: 'fixed',

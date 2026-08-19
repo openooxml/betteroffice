@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:tes
 import { createElement, createRef, useState } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import { AlignmentButtons } from '../../ui/AlignmentButtons';
 import { MenuDropdown } from '../../ui/MenuDropdown';
 import { useEscapeKey } from '../../../hooks/useEscapeKey';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
@@ -610,6 +611,25 @@ describe('closing an open part with Escape', () => {
     expect(closed).toBe(0);
   });
 
+  test('lets an open alignment dropdown consume Escape without closing the part', () => {
+    let closed = 0;
+    const view = render(
+      createElement(EscapeAlignmentHarness, { onEscape: () => (closed += 1) })
+    );
+    const trigger = view.getByTestId('toolbar-alignment');
+    act(() => trigger.click());
+
+    expect(view.getByTestId('alignment-left')).toBeTruthy();
+    const input = document.createElement('textarea');
+    input.className = 'paged-editor__yrs-input';
+    host.append(input);
+    dispatchEscape(input);
+
+    expect(view.queryByTestId('alignment-left')).toBeNull();
+    expect(closed).toBe(0);
+    input.remove();
+  });
+
   test('plain Escape from the editor input closes the part', () => {
     let closed = 0;
     const input = document.createElement('textarea');
@@ -667,4 +687,9 @@ function EscapeMenuHarness({ onEscape }: { onEscape: () => void }) {
     label: 'File',
     items: [{ label: 'Open', onClick: () => {} }],
   });
+}
+
+function EscapeAlignmentHarness({ onEscape }: { onEscape: () => void }) {
+  useEscapeKey(true, onEscape);
+  return createElement(AlignmentButtons);
 }

@@ -58,6 +58,7 @@ function SelectContent({
       {/* Wrap in .oox-root so Tailwind scoped utilities apply inside the portal */}
       <div className={cn('oox-root', isDark && 'dark')}>
         <SelectPrimitive.Content
+          data-docx-escape-layer="true"
           className={cn(
             'relative z-50 max-h-72 min-w-[8rem] overflow-hidden',
             'rounded-lg border border-border bg-popover text-popover-foreground shadow-lg',

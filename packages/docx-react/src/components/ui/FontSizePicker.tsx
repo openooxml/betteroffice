@@ -283,6 +283,7 @@ export function FontSizePicker({
       {isDropdownOpen && (
         <div
           ref={dropdownRef}
+          data-docx-escape-layer="true"
           style={{
             ...fixedDropdownStyle,
             backgroundColor: 'var(--doc-surface)',

@@ -199,6 +199,7 @@ export function ContentControlWidgets({
     <div
       ref={popupRef}
       className="layout-sdt-widget-popup"
+      data-docx-escape-layer="true"
       style={style}
       role={popup.kind === 'dropdown' ? 'listbox' : undefined}
       onKeyDown={handlePopupKeyDown}

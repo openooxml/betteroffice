@@ -462,6 +462,7 @@ export function TableStyleGallery({
 
       {isOpen && (
         <div
+          data-docx-escape-layer="true"
           style={{
             position: 'absolute',
             top: '100%',
