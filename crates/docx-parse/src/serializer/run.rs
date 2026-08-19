@@ -331,9 +331,14 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
-        RunContent::CommentReference { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::CommentReference { id } => {
+            writer.start_element("w:commentReference");
+            if let Some(id) = id {
+                writer.attribute("w:id", &js_number(*id));
+            }
+            writer.end_element();
+        }
+        RunContent::Chart { .. } | RunContent::OpaqueDrawing { .. } => {}
     }
     Ok(writer.finish())
 }

@@ -325,8 +325,22 @@ fn serialize_complex_field(
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    for run in &field.field_result {
-        output.push_str(&serialize_run(run, context)?);
+    // The structured result keeps links, bookmarks, and nested fields in
+    // their authored positions; the run-level view is the fallback for
+    // multi-block results and fields rebuilt by the edit path.
+    let structured = field
+        .structured_result
+        .as_ref()
+        .filter(|content| content.blocks.is_none())
+        .and_then(|content| content.inline.as_ref());
+    if let Some(nodes) = structured {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else {
+        for run in &field.field_result {
+            output.push_str(&serialize_run(run, context)?);
+        }
     }
     output.push_str("<w:r>");
     output.push_str(&properties);
@@ -529,20 +543,13 @@ fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> 
                 .attribute("w:id", &js_number(marker.id))
                 .end_element();
         }
+        // The reference run beside the range end serializes itself; a
+        // synthesized copy here would add a run every save and never let the
+        // package reach a fixed point.
         "commentRangeEnd" => {
             writer
                 .start_element("w:commentRangeEnd")
                 .attribute("w:id", &js_number(marker.id))
-                .end_element()
-                .start_element("w:r")
-                .start_element("w:rPr")
-                .start_element("w:rStyle")
-                .attribute("w:val", "CommentReference")
-                .end_element()
-                .end_element()
-                .start_element("w:commentReference")
-                .attribute("w:id", &js_number(marker.id))
-                .end_element()
                 .end_element();
         }
         _ => {}

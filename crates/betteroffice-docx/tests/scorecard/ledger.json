@@ -5,7 +5,7 @@
     "corpusFloor": 2,
     "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 8
+    "knownDefects": 5
   },
   "criteria": [
     {
@@ -299,12 +299,11 @@
       },
       "gates": {
         "preserve": [
-          "betteroffice-docx fidelity::save_reopen_save_is_byte_identical"
+          "betteroffice-docx fidelity::save_reopen_save_is_byte_identical",
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
         ]
       },
-      "defects": [
-        "comment identity minting is not stable across save-reopen-save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "defects": []
     },
     {
       "id": "run.text",
@@ -1932,7 +1931,7 @@
     {
       "id": "fld.toc",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -1947,10 +1946,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "complex-field run order is rewritten around hyperlinks on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "fld.ref",
@@ -2553,7 +2554,7 @@
     {
       "id": "cmt.content",
       "statuses": {
-        "preserve": "none",
+        "preserve": "partial",
         "model": "generic",
         "edit": "none",
         "layout": "none",
@@ -2568,10 +2569,12 @@
         "paint": "golden",
         "evidence": "word"
       },
-      "gates": {},
-      "defects": [
-        "comment paragraphs gain an empty run on save (pinned in crates/betteroffice-docx/tests/corpus/expected/)"
-      ]
+      "gates": {
+        "preserve": [
+          "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings"
+        ]
+      },
+      "defects": []
     },
     {
       "id": "cmt.render",

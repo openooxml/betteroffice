@@ -338,7 +338,12 @@ fn serialize_comment(
     para_infos: &mut Vec<CommentParaInfo>,
     context: &mut SerializerContext,
 ) -> String {
-    let comment_para_id = context.allocate_hex_id();
+    // Reuse the identities the package already carries; minting fresh ones
+    // every save would keep the package from ever reaching a fixed point.
+    let comment_para_id = comment
+        .para_id
+        .clone()
+        .unwrap_or_else(|| context.allocate_hex_id());
     let mut output = String::new();
     output.push_str("<w:comment w:id=\"");
     output.push_str(&js_number(comment.id));
@@ -395,7 +400,10 @@ fn serialize_comment(
     para_infos.push(CommentParaInfo {
         comment_id: comment.id,
         last_para_id: comment_para_id,
-        durable_id: context.allocate_hex_id(),
+        durable_id: comment
+            .durable_id
+            .clone()
+            .unwrap_or_else(|| context.allocate_hex_id()),
         parent_id: comment.parent_id,
         done: comment.done,
     });
@@ -419,13 +427,24 @@ fn serialize_comment_paragraph(
             "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r>",
         );
     }
+    // An authored annotation-reference run reaches the model with no
+    // serializable content; re-emitting it beside the injected one above
+    // would add an empty run the input never had.
     for item in &paragraph.content {
-        if let ParagraphContent::Inline(InlineNode::Run(run)) = item {
+        if let ParagraphContent::Inline(InlineNode::Run(run)) = item
+            && comment_run_has_content(run)
+        {
             output.push_str(&serialize_comment_run(run));
         }
     }
     output.push_str("</w:p>");
     output
+}
+
+fn comment_run_has_content(run: &Run) -> bool {
+    run.content
+        .iter()
+        .any(|content| matches!(content, RunContent::Text { .. } | RunContent::Break { .. }))
 }
 
 fn serialize_comment_run(run: &Run) -> String {
@@ -538,6 +557,30 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_comment_reuses_its_parsed_identities_instead_of_minting() {
+        let comment = Comment {
+            id: 0.0,
+            author: "Reviewer".to_owned(),
+            initials: None,
+            date: None,
+            content: Vec::new(),
+            parent_id: None,
+            done: None,
+            status: "active".to_owned(),
+            author_id: None,
+            durable_id: Some("2ECC71AA".to_owned()),
+            para_id: Some("1CB626C9".to_owned()),
+            date_utc: None,
+            palette_index: 0.0,
+            block_content: Vec::new(),
+        };
+        let (xml, infos) = serialize_comments_with_info(&[comment], &mut context());
+        assert!(xml.contains(r#"w14:paraId="1CB626C9""#));
+        assert_eq!(infos[0].last_para_id, "1CB626C9");
+        assert_eq!(infos[0].durable_id, "2ECC71AA");
     }
 
     fn paragraph(text: &str) -> BlockContent {

@@ -252,6 +252,7 @@ fn parse_comments_back(xml: &str, seed: &str) -> Result<Vec<Comment>, ParseError
         root,
         None,
         None,
+        None,
         &mut StoryParser {
             relationships: None,
             theme: None,

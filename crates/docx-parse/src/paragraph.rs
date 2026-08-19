@@ -416,6 +416,23 @@ struct OpenComplexField {
     formatting: Option<TextFormatting>,
 }
 
+impl OpenComplexField {
+    /// A node inside an open field joins the field's structure in place; its
+    /// runs flatten into the run-level view consumers read for text.
+    fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
+        match self.mode {
+            FieldMode::Code => {
+                self.code_runs.extend(runs);
+                self.structured_code.push(node);
+            }
+            FieldMode::Result => {
+                self.result_runs.extend(runs);
+                self.structured_result.push(node);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph_contents(
     element: &XmlElement,
@@ -458,8 +475,11 @@ fn parse_paragraph_contents(
                 )?;
                 process_field_run(run, &mut fields, &mut output, part)?;
             }
-            "hyperlink" => output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
-                parse_hyperlink_composed(
+            // Inside an open field these nodes belong to the field: pushing
+            // them to the paragraph would reorder them in front of the field
+            // on save. Runs still flatten into the run-level result view.
+            "hyperlink" => {
+                let hyperlink = parse_hyperlink_composed(
                     child,
                     relationships,
                     theme,
@@ -469,16 +489,39 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
-                )?,
-            )))),
-            "bookmarkStart" => output.push(ParagraphContent::Inline(InlineNode::BookmarkStart(
-                parse_bookmark_start(child),
-            ))),
-            "bookmarkEnd" => output.push(ParagraphContent::Inline(InlineNode::BookmarkEnd(
-                parse_bookmark_end(child),
-            ))),
-            "fldSimple" => output.push(ParagraphContent::Inline(InlineNode::SimpleField(
-                Box::new(parse_simple_field_composed(
+                )?;
+                if let Some(active) = fields.last_mut() {
+                    let runs: Vec<Run> = hyperlink
+                        .children
+                        .iter()
+                        .filter_map(|node| match node {
+                            InlineNode::Run(run) => Some(run.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                } else {
+                    output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
+                        hyperlink,
+                    ))));
+                }
+            }
+            "bookmarkStart" => {
+                let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
+                match fields.last_mut() {
+                    Some(active) => active.absorb(node, Vec::new()),
+                    None => output.push(ParagraphContent::Inline(node)),
+                }
+            }
+            "bookmarkEnd" => {
+                let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
+                match fields.last_mut() {
+                    Some(active) => active.absorb(node, Vec::new()),
+                    None => output.push(ParagraphContent::Inline(node)),
+                }
+            }
+            "fldSimple" => {
+                let field = parse_simple_field_composed(
                     child,
                     relationships,
                     theme,
@@ -488,8 +531,16 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
-                )?),
-            ))),
+                )?;
+                if let Some(active) = fields.last_mut() {
+                    let runs = field.content.clone();
+                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                } else {
+                    output.push(ParagraphContent::Inline(InlineNode::SimpleField(Box::new(
+                        field,
+                    ))));
+                }
+            }
             "sdt" => {
                 if let Some(container) = child.child("w", "sdtContent") {
                     let parsed = parse_paragraph_contents(
