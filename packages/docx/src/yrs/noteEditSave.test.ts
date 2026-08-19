@@ -226,4 +226,43 @@ describe('typing into a note through the editor path', () => {
     expect(noteXml(footnotesXml, 'footnote', 3)).toBe(noteXml(FOOTNOTES, 'footnote', 3));
     expect(noteXml(endnotesXml, 'endnote', 3)).toBe(noteXml(ENDNOTES, 'endnote', 3));
   });
+
+  it('selectively saves a body undo while the note caret is active', async () => {
+    const bytes = fixture();
+    const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+    const session = await createYrsSession({ clientId: 53004 });
+
+    try {
+      session.seedFromDocx(bytes);
+      const body = session.paragraphs('body')[0];
+      session.setSelection({ story: 'body', paraId: body.paraId, offset: 9 });
+      session.insertText(session.selection()!.head, '!');
+      expect(session.historyStory()).toBe('body');
+      const afterBodyEdit = yrsToDocument(session, parsed, {
+        storyIds: new Set(['body']),
+      });
+      const note = session.paragraphs('fn:2')[0];
+      session.setSelection({ story: 'fn:2', paraId: note.paraId, offset: 0 });
+
+      expect(session.historyStory()).toBe('body');
+      expect(session.undo()).toBe(true);
+      expect(session.paragraphs('body')[0].text).toBe('Body text');
+
+      const misattributed = yrsToDocument(session, afterBodyEdit, {
+        storyIds: new Set(['fn:2']),
+      });
+      const misattributedParts = readDocxContainer(await repackDocx(misattributed));
+      expect(rawNoteText(misattributedParts.text('word/document.xml') ?? '')).toBe('Body text!');
+
+      const historyStory = session.historyStory();
+      expect(historyStory).toBe('body');
+      const saved = yrsToDocument(session, afterBodyEdit, {
+        storyIds: new Set([historyStory!]),
+      });
+      const savedParts = readDocxContainer(await repackDocx(saved));
+      expect(rawNoteText(savedParts.text('word/document.xml') ?? '')).toBe('Body text');
+    } finally {
+      session.destroy();
+    }
+  });
 });

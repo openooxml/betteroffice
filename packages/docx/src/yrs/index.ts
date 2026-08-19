@@ -732,6 +732,8 @@ export interface YrsSession extends CollaborationReplica {
   cellSelection(): YrsTableRange | null;
   /** Lazily begin local-origin undo capture after import/seeding has completed. */
   beginUndoCapture(story: string, includeTableStories?: boolean): void;
+  /** Story owned by the current undo/redo scope, or null before the first local edit. */
+  historyStory(): string | null;
   /** Coalesce the stack entries added since `startDepth` into one host undo intent. */
   markUndoGroup(startDepth: number): void;
   /** Undo/redo only local-origin direct operations (never remote/system transactions). */
@@ -1326,6 +1328,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: (story, includeTableStories = false) =>
       includeTableStories ? ensureTableUndo(story) : ensureUndo(story),
+    historyStory: () =>
+      undoStory?.startsWith('table:') ? undoStory.slice('table:'.length) : undoStory,
     markUndoGroup: (startDepth) => {
       const endDepth = session.undo_depth();
       const size = Math.max(0, endDepth - startDepth);

@@ -106,7 +106,7 @@ export interface YrsInputProps {
     residentLayoutReady?: boolean,
     residentCaretReady?: boolean
   ): void;
-  onDirectInput(): void;
+  onDirectInput(story?: string): void;
   /** One-owner body text path; false until the resident frame is initialized. */
   applyResidentInput?(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-owner collapsed delete/merge path; false until the resident frame is initialized. */
@@ -321,11 +321,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const finishMutation = useCallback(
-    (residentLayoutReady = false, residentCaretReady = false): void => {
+    (residentLayoutReady = false, residentCaretReady = false, dirtyStory?: string): void => {
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onCaretInput?.();
-      onDirectInput();
+      onDirectInput(dirtyStory);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
     [emitSelection, onCaretInput, onDirectInput]
@@ -726,8 +726,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (redo: boolean): void => {
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
-        const changed = performYrsHistoryAction(session, redo);
-        if (changed) finishMutation();
+        const result = performYrsHistoryAction(session, redo);
+        if (result.changed) finishMutation(false, false, result.story ?? undefined);
       });
     },
     [enqueueInputOperation, finishMutation, readOnly, session]

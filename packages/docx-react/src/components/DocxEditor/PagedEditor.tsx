@@ -708,8 +708,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const publishYrsDirectInput = useCallback((): void => {
-      yrsCore.publishDirectInput();
+    const publishYrsDirectInput = useCallback((dirtyStory?: string): void => {
+      yrsCore.publishDirectInput(dirtyStory);
       // Structural input can mint a paragraph before the existing projection
       // can map its new sticky caret. Invalidate first so emitSelection can
       // rebuild the projection and reach the normal layout-refresh callback.
@@ -853,11 +853,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [collaboration?.presence, yrsCore.session]);
 
     const syncYrsInputState = useCallback(
-      (docChanged: boolean, origin: LayoutUpdateOrigin = 'local'): boolean => {
+      (
+        docChanged: boolean,
+        origin: LayoutUpdateOrigin = 'local',
+        dirtyStory?: string
+      ): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
-          yrsCore.publishDirectInput();
+          yrsCore.publishDirectInput(dirtyStory);
         }
         handleYrsStateChange(displaySelection, docChanged, false, false, origin);
         return true;
@@ -1599,7 +1603,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
       yrsLocToDisplayPosition,
-      syncYrsInputState,
+      syncYrsInputState: (docChanged, dirtyStory) =>
+        syncYrsInputState(docChanged, 'local', dirtyStory),
       applyYrsFormatting,
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),

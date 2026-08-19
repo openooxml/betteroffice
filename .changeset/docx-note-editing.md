@@ -5,7 +5,7 @@
 
 Clicking a footnote or an endnote now opens it for editing. The caret lands under the pointer, typing goes into that note, and what is typed reaches the saved file. Escape leaves the note; clicking back in the body leaves it and places the body caret under the pointer.
 
-Undo tracking follows the open part, so entering a note starts a fresh undo scope.
+Undo follows the part being edited: the first edit in a newly opened part replaces the undo scope and discards the previous part's history.
 
 A note area is document text, not chrome, so a single click opens it — where a header or footer band, which repeats on every page and sits in the margin, still needs a double-click. The click that opens the note also places its caret: the position it resolved belongs to a story the editor is not on yet, so it waits for that story to become active and is discarded if the host never opens the note.
 
