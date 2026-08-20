@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use yrs::types::Attrs;
 use yrs::types::text::YChange;
+use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TransactionMut,
+    Any, Assoc, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
+    TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -88,45 +89,168 @@ impl EditingDoc {
     }
 }
 
+/// Accumulates forward-moving story ops as one yrs delta so each block is
+/// walked once per run, instead of once per op via absolute-index resolution.
+struct DeltaRun {
+    deltas: Vec<Delta<In>>,
+    cursor: u32,
+    story_len: u32,
+}
+
+impl DeltaRun {
+    fn new(story: &TextRef, txn: &TransactionMut<'_>) -> Self {
+        Self {
+            deltas: Vec::new(),
+            cursor: 0,
+            story_len: story.len(txn),
+        }
+    }
+
+    /// Applies the pending deltas and resets the cursor to the story start.
+    fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) {
+        if !self.deltas.is_empty() {
+            story.apply_delta(txn, std::mem::take(&mut self.deltas));
+        }
+        self.cursor = 0;
+    }
+
+    fn seek(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>, index: u32) {
+        if index < self.cursor {
+            self.flush(story, txn);
+        }
+        if index > self.cursor {
+            self.deltas.push(Delta::Retain(index - self.cursor, None));
+        }
+        self.cursor = index;
+    }
+
+    fn guard_index(&self, index: u32) -> OpResult<()> {
+        if index <= self.story_len {
+            Ok(())
+        } else {
+            Err(OpError::OutOfBounds {
+                index,
+                len: self.story_len,
+            })
+        }
+    }
+
+    fn guard_range(&self, index: u32, len: u32) -> OpResult<()> {
+        if index
+            .checked_add(len)
+            .is_some_and(|end| end <= self.story_len)
+        {
+            Ok(())
+        } else {
+            Err(OpError::OutOfBounds {
+                index: index.saturating_add(len),
+                len: self.story_len,
+            })
+        }
+    }
+
+    fn insert(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        index: u32,
+        text: String,
+        attrs: Attrs,
+    ) -> OpResult<()> {
+        self.guard_index(index)?;
+        if text.is_empty() {
+            return Ok(());
+        }
+        let len = text.encode_utf16().count() as u32;
+        self.seek(story, txn, index);
+        self.deltas.push(Delta::Inserted(
+            In::Any(Any::String(Arc::from(text))),
+            (!attrs.is_empty()).then(|| Box::new(attrs)),
+        ));
+        self.cursor += len;
+        self.story_len += len;
+        Ok(())
+    }
+
+    fn insert_embed(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        index: u32,
+        kind: String,
+        payload: Vec<(String, Any)>,
+        attrs: Attrs,
+    ) -> OpResult<()> {
+        self.guard_index(index)?;
+        self.seek(story, txn, index);
+        let entries = std::iter::once((KIND_KEY.to_owned(), Any::from(kind))).chain(payload);
+        self.deltas.push(Delta::Inserted(
+            In::Map(MapPrelim::from_iter(entries)),
+            (!attrs.is_empty()).then(|| Box::new(attrs)),
+        ));
+        self.cursor += 1;
+        self.story_len += 1;
+        Ok(())
+    }
+
+    fn delete(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        index: u32,
+        len: u32,
+    ) -> OpResult<()> {
+        self.guard_range(index, len)?;
+        if len > 0 {
+            self.seek(story, txn, index);
+            self.deltas.push(Delta::Deleted(len));
+            self.story_len -= len;
+        }
+        Ok(())
+    }
+
+    fn format(
+        &mut self,
+        story: &TextRef,
+        txn: &mut TransactionMut<'_>,
+        index: u32,
+        len: u32,
+        attrs: Attrs,
+    ) -> OpResult<()> {
+        self.guard_range(index, len)?;
+        if len > 0 {
+            self.seek(story, txn, index);
+            self.deltas.push(Delta::Retain(len, Some(Box::new(attrs))));
+            self.cursor += len;
+        }
+        Ok(())
+    }
+}
+
 fn apply_raw_ops_to_story(
     txn: &mut TransactionMut<'_>,
     story_id: &str,
     ops: Vec<RawOp>,
 ) -> OpResult<()> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
+    let mut run = DeltaRun::new(&story, txn);
+    let mut result = Ok(());
     for op in ops {
-        match op {
-            RawOp::Insert { index, text, attrs } => {
-                guard_index(&story, txn, index)?;
-                story.insert_with_attributes(txn, index, &text, attrs);
-            }
-            RawOp::Delete { index, len } => {
-                guard_range(&story, txn, index, len)?;
-                story.remove_range(txn, index, len);
-            }
-            RawOp::Format { index, len, attrs } => {
-                guard_range(&story, txn, index, len)?;
-                if len > 0 {
-                    story.format(txn, index, len, attrs);
-                }
-            }
+        result = match op {
+            RawOp::Insert { index, text, attrs } => run.insert(&story, txn, index, text, attrs),
+            RawOp::Delete { index, len } => run.delete(&story, txn, index, len),
+            RawOp::Format { index, len, attrs } => run.format(&story, txn, index, len, attrs),
             RawOp::InsertEmbed {
                 index,
                 kind,
                 payload,
                 attrs,
-            } => {
-                guard_index(&story, txn, index)?;
-                let embed =
-                    story.insert_embed_with_attributes(txn, index, MapPrelim::default(), attrs);
-                embed.insert(txn, KIND_KEY, kind.as_str());
-                for (key, value) in payload {
-                    embed.insert(txn, key, value);
-                }
-            }
+            } => run.insert_embed(&story, txn, index, kind, payload, attrs),
             RawOp::SetEmbedAttr { index, key, value } => {
-                let embed = embed_at(&story, txn, index)?;
-                embed.insert(txn, key, value);
+                run.flush(&story, txn);
+                embed_at(&story, txn, index).map(|embed| {
+                    embed.insert(txn, key, value);
+                })
             }
             RawOp::SetComment {
                 id,
@@ -135,63 +259,71 @@ fn apply_raw_ops_to_story(
                 date,
                 body,
             } => {
-                if ranges.is_empty() {
-                    return Err(OpError::InvalidComment(
-                        "at least one anchored range is required".into(),
-                    ));
-                }
-                let mut anchors = Vec::with_capacity(ranges.len());
-                for (start, end) in ranges {
-                    let len = end
-                        .checked_sub(start)
-                        .filter(|len| *len > 0)
-                        .ok_or(OpError::InvalidRange { start, end })?;
-                    guard_range(&story, txn, start, len)?;
-                    let start_anchor =
-                        story
-                            .sticky_index(txn, start, Assoc::After)
-                            .ok_or_else(|| {
-                                OpError::InvalidComment("start anchor could not be made".into())
-                            })?;
-                    let end_anchor =
-                        story.sticky_index(txn, end, Assoc::Before).ok_or_else(|| {
-                            OpError::InvalidComment("end anchor could not be made".into())
-                        })?;
-                    anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));
-                }
-                let comments = txn
-                    .get_map(COMMENTS)
-                    .expect("comments root is declared by EditingDoc::new");
-                let comment = comments.insert(txn, id.as_str(), MapPrelim::default());
-                comment.insert(txn, "author", author.as_str());
-                comment.insert(txn, "date", date.as_str());
-                comment.insert(txn, "parentId", Any::Null);
-                comment.insert(txn, "done", false);
-                comment.insert(txn, "body", body);
-                comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
+                run.flush(&story, txn);
+                set_comment(txn, &story, story_id, id, ranges, author, date, body)
             }
             RawOp::RemoveComment { id } => {
+                run.flush(&story, txn);
                 let comments = txn
                     .get_map(COMMENTS)
                     .expect("comments root is declared by EditingDoc::new");
                 if comments.remove(txn, &id).is_none() {
-                    return Err(OpError::UnknownComment(id));
+                    Err(OpError::UnknownComment(id))
+                } else {
+                    Ok(())
                 }
             }
+        };
+        if result.is_err() {
+            break;
         }
     }
-    Ok(())
+    run.flush(&story, txn);
+    result
 }
 
-fn guard_index<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<()> {
-    if index <= story.len(txn) {
-        Ok(())
-    } else {
-        Err(OpError::OutOfBounds {
-            index,
-            len: story.len(txn),
-        })
+#[allow(clippy::too_many_arguments)]
+fn set_comment(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    story_id: &str,
+    id: String,
+    ranges: Vec<(u32, u32)>,
+    author: String,
+    date: String,
+    body: Any,
+) -> OpResult<()> {
+    if ranges.is_empty() {
+        return Err(OpError::InvalidComment(
+            "at least one anchored range is required".into(),
+        ));
     }
+    let mut anchors = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        let len = end
+            .checked_sub(start)
+            .filter(|len| *len > 0)
+            .ok_or(OpError::InvalidRange { start, end })?;
+        guard_range(story, txn, start, len)?;
+        let start_anchor = story
+            .sticky_index(txn, start, Assoc::After)
+            .ok_or_else(|| OpError::InvalidComment("start anchor could not be made".into()))?;
+        let end_anchor = story
+            .sticky_index(txn, end, Assoc::Before)
+            .ok_or_else(|| OpError::InvalidComment("end anchor could not be made".into()))?;
+        anchors.push(anchor_value(story_id, &start_anchor, &end_anchor));
+    }
+    let comments = txn
+        .get_map(COMMENTS)
+        .expect("comments root is declared by EditingDoc::new");
+    let comment = comments.insert(txn, id.as_str(), MapPrelim::default());
+    comment.insert(txn, "author", author.as_str());
+    comment.insert(txn, "date", date.as_str());
+    comment.insert(txn, "parentId", Any::Null);
+    comment.insert(txn, "done", false);
+    comment.insert(txn, "body", body);
+    comment.insert(txn, "anchors", Any::Array(Arc::from(anchors)));
+    Ok(())
 }
 
 fn guard_range<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32, len: u32) -> OpResult<()> {
@@ -211,13 +343,349 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::{EditCtx, PILCROW_KIND};
+    use crate::canonical::project_story;
+    use crate::{EditCtx, EditingDoc, PILCROW_KIND, seed_from_docx};
 
     fn attrs(pairs: &[(&str, Any)]) -> Attrs {
         pairs
             .iter()
             .map(|(key, value)| (Arc::from(*key), value.clone()))
             .collect()
+    }
+
+    /// The pre-delta applier: absolute-index resolution per op. Kept verbatim
+    /// so the delta path can be proven equivalent to the layout it replaced.
+    fn apply_raw_ops_legacy(
+        doc: &EditingDoc,
+        story_id: &str,
+        ops: Vec<RawOp>,
+        ctx: &EditCtx,
+    ) -> OpResult<()> {
+        let mut txn = doc.transact_for(ctx);
+        let story = story_ref(&txn, story_id).map_err(OpError::from)?;
+        let guard_index = |txn: &TransactionMut<'_>, index: u32| -> OpResult<()> {
+            if index <= story.len(txn) {
+                Ok(())
+            } else {
+                Err(OpError::OutOfBounds {
+                    index,
+                    len: story.len(txn),
+                })
+            }
+        };
+        for op in ops {
+            match op {
+                RawOp::Insert { index, text, attrs } => {
+                    guard_index(&txn, index)?;
+                    story.insert_with_attributes(&mut txn, index, &text, attrs);
+                }
+                RawOp::Delete { index, len } => {
+                    guard_range(&story, &txn, index, len)?;
+                    story.remove_range(&mut txn, index, len);
+                }
+                RawOp::Format { index, len, attrs } => {
+                    guard_range(&story, &txn, index, len)?;
+                    if len > 0 {
+                        story.format(&mut txn, index, len, attrs);
+                    }
+                }
+                RawOp::InsertEmbed {
+                    index,
+                    kind,
+                    payload,
+                    attrs,
+                } => {
+                    guard_index(&txn, index)?;
+                    let embed = story.insert_embed_with_attributes(
+                        &mut txn,
+                        index,
+                        MapPrelim::default(),
+                        attrs,
+                    );
+                    embed.insert(&mut txn, KIND_KEY, kind.as_str());
+                    for (key, value) in payload {
+                        embed.insert(&mut txn, key, value);
+                    }
+                }
+                RawOp::SetEmbedAttr { index, key, value } => {
+                    let embed = embed_at(&story, &txn, index)?;
+                    embed.insert(&mut txn, key, value);
+                }
+                RawOp::SetComment {
+                    id,
+                    ranges,
+                    author,
+                    date,
+                    body,
+                } => set_comment(&mut txn, &story, story_id, id, ranges, author, date, body)?,
+                RawOp::RemoveComment { id } => {
+                    let comments = txn
+                        .get_map(COMMENTS)
+                        .expect("comments root is declared by EditingDoc::new");
+                    if comments.remove(&mut txn, &id).is_none() {
+                        return Err(OpError::UnknownComment(id));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn assert_stories_equivalent(left: &EditingDoc, right: &EditingDoc, story_id: &str) {
+        assert_eq!(
+            project_story(left, story_id).unwrap(),
+            project_story(right, story_id).unwrap()
+        );
+        assert_eq!(
+            left.story_segments(story_id).unwrap(),
+            right.story_segments(story_id).unwrap()
+        );
+    }
+
+    fn pilcrow_payload(para_id: &str) -> Vec<(String, Any)> {
+        vec![
+            ("paraId".into(), Any::from(para_id)),
+            ("pStyle".into(), Any::from("Normal")),
+            ("alignment".into(), Any::from("left")),
+        ]
+    }
+
+    /// A seed-shaped batch: the placeholder delete, then strictly appending
+    /// text runs with changing attributes, embeds, and a trailing comment.
+    fn seed_shaped_ops() -> Vec<RawOp> {
+        let font = attrs(&[(
+            "fontFamily",
+            Any::from_json(r#"{"ascii":"Calibri","hAnsi":"Calibri"}"#).unwrap(),
+        )]);
+        let mut bold = font.clone();
+        bold.insert("bold".into(), Any::Bool(true));
+        struct Builder {
+            ops: Vec<RawOp>,
+            index: u32,
+        }
+        impl Builder {
+            fn text(&mut self, value: &str, attrs: &Attrs) {
+                self.ops.push(RawOp::Insert {
+                    index: self.index,
+                    text: value.into(),
+                    attrs: attrs.clone(),
+                });
+                self.index += value.encode_utf16().count() as u32;
+            }
+            fn embed(&mut self, kind: &str, payload: Vec<(String, Any)>) {
+                self.ops.push(RawOp::InsertEmbed {
+                    index: self.index,
+                    kind: kind.into(),
+                    payload,
+                    attrs: Attrs::new(),
+                });
+                self.index += 1;
+            }
+        }
+        let mut builder = Builder {
+            ops: vec![RawOp::Delete { index: 0, len: 1 }],
+            index: 0,
+        };
+        builder.text("Heading with stars ★★", &bold);
+        builder.embed(PILCROW_KIND, pilcrow_payload("7:p0"));
+        builder.text("Body ", &font);
+        builder.text("bold span", &bold);
+        builder.text(" and surrogate pairs 𝔘𝔫𝔦", &font);
+        builder.embed("break", Vec::new());
+        builder.text("after the break", &font);
+        builder.embed(PILCROW_KIND, pilcrow_payload("7:p1"));
+        builder.embed(PILCROW_KIND, pilcrow_payload("7:p2"));
+        builder.text("tail paragraph", &font);
+        builder.embed(PILCROW_KIND, pilcrow_payload("7:p3"));
+        let mut ops = builder.ops;
+        ops.push(RawOp::SetComment {
+            id: "9".into(),
+            ranges: vec![(22, 30), (40, 45)],
+            author: String::new(),
+            date: String::new(),
+            body: Any::Null,
+        });
+        ops
+    }
+
+    #[test]
+    fn delta_application_matches_legacy_for_a_seed_shaped_batch() {
+        let ctx = EditCtx::local(String::new(), String::new());
+        let legacy = EditingDoc::new(7);
+        legacy.create_empty_stories(&["body".into()]).unwrap();
+        apply_raw_ops_legacy(&legacy, "body", seed_shaped_ops(), &ctx).unwrap();
+
+        let delta = EditingDoc::new(7);
+        delta.create_empty_stories(&["body".into()]).unwrap();
+        delta
+            .apply_raw_ops("body", seed_shaped_ops(), &ctx)
+            .unwrap();
+
+        assert_stories_equivalent(&legacy, &delta, "body");
+        assert_eq!(
+            legacy.paragraphs("body").unwrap().len(),
+            delta.paragraphs("body").unwrap().len()
+        );
+        let legacy_anchor = legacy.resolve_comment("9").unwrap();
+        let delta_anchor = delta.resolve_comment("9").unwrap();
+        assert_eq!(
+            legacy_anchor
+                .iter()
+                .map(|anchor| (anchor.start, anchor.end))
+                .collect::<Vec<_>>(),
+            delta_anchor
+                .iter()
+                .map(|anchor| (anchor.start, anchor.end))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn delta_application_matches_legacy_for_backward_jumps() {
+        let ops = vec![
+            RawOp::Insert {
+                index: 4,
+                text: " tail".into(),
+                attrs: Attrs::new(),
+            },
+            RawOp::Insert {
+                index: 2,
+                text: "XY".into(),
+                attrs: attrs(&[("bold", Any::Bool(true))]),
+            },
+            RawOp::Format {
+                index: 1,
+                len: 5,
+                attrs: attrs(&[("italic", Any::Bool(true))]),
+            },
+            RawOp::Delete { index: 3, len: 2 },
+            RawOp::InsertEmbed {
+                index: 0,
+                kind: "break".into(),
+                payload: Vec::new(),
+                attrs: Attrs::new(),
+            },
+            RawOp::Insert {
+                index: 10,
+                text: "end".into(),
+                attrs: Attrs::new(),
+            },
+            RawOp::SetEmbedAttr {
+                index: 0,
+                key: "cleared".into(),
+                value: Any::Bool(true),
+            },
+        ];
+        let ctx = EditCtx::local(String::new(), String::new());
+        let legacy = EditingDoc::new(7);
+        legacy
+            .create_story("body", "seed", "Normal", "left")
+            .unwrap();
+        apply_raw_ops_legacy(&legacy, "body", ops.clone(), &ctx).unwrap();
+
+        let delta = EditingDoc::new(7);
+        delta
+            .create_story("body", "seed", "Normal", "left")
+            .unwrap();
+        delta.apply_raw_ops("body", ops, &ctx).unwrap();
+
+        assert_stories_equivalent(&legacy, &delta, "body");
+    }
+
+    #[test]
+    fn a_failing_op_leaves_the_same_applied_prefix_as_legacy() {
+        let ops = vec![
+            RawOp::Insert {
+                index: 2,
+                text: "one".into(),
+                attrs: Attrs::new(),
+            },
+            RawOp::Insert {
+                index: 0,
+                text: "two".into(),
+                attrs: attrs(&[("bold", Any::Bool(true))]),
+            },
+            RawOp::Delete { index: 90, len: 5 },
+            RawOp::Insert {
+                index: 0,
+                text: "never applied".into(),
+                attrs: Attrs::new(),
+            },
+        ];
+        let ctx = EditCtx::local(String::new(), String::new());
+        let legacy = EditingDoc::new(7);
+        legacy.create_story("body", "AB", "Normal", "left").unwrap();
+        let legacy_err = apply_raw_ops_legacy(&legacy, "body", ops.clone(), &ctx).unwrap_err();
+
+        let delta = EditingDoc::new(7);
+        delta.create_story("body", "AB", "Normal", "left").unwrap();
+        let delta_err = delta.apply_raw_ops("body", ops, &ctx).unwrap_err();
+
+        assert_eq!(format!("{legacy_err:?}"), format!("{delta_err:?}"));
+        assert_stories_equivalent(&legacy, &delta, "body");
+    }
+
+    #[test]
+    fn legacy_seeded_state_loads_and_merges_under_the_delta_applier() {
+        let ctx = EditCtx::local(String::new(), String::new());
+        let original = EditingDoc::new(1);
+        original.create_empty_stories(&["body".into()]).unwrap();
+        apply_raw_ops_legacy(&original, "body", seed_shaped_ops(), &ctx).unwrap();
+
+        let restored = EditingDoc::new(2);
+        restored
+            .apply_update_v1(&original.encode_state_as_update_v1())
+            .unwrap();
+        assert_stories_equivalent(&original, &restored, "body");
+
+        restored
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::Insert {
+                    index: 5,
+                    text: "restored edit ".into(),
+                    attrs: attrs(&[("italic", Any::Bool(true))]),
+                }],
+                &ctx,
+            )
+            .unwrap();
+        original
+            .apply_update_v1(&restored.encode_state_as_update_v1())
+            .unwrap();
+        restored
+            .apply_update_v1(&original.encode_state_as_update_v1())
+            .unwrap();
+        assert_stories_equivalent(&original, &restored, "body");
+        assert!(
+            original
+                .story_segments("body")
+                .unwrap()
+                .iter()
+                .any(|segment| matches!(
+                    &segment.content,
+                    crate::SegmentContent::Text(text) if text.contains("restored edit")
+                ))
+        );
+    }
+
+    #[test]
+    fn seeded_docx_state_round_trips_through_encode_and_load() {
+        let bytes = include_bytes!("../tests/fixtures/footnote-anchor.docx");
+        let seeded = EditingDoc::new(1);
+        seed_from_docx(&seeded, bytes).unwrap();
+
+        let loaded = EditingDoc::new(2);
+        loaded
+            .apply_update_v1(&seeded.encode_state_as_update_v1())
+            .unwrap();
+        let txn = yrs::Transact::transact(seeded.yrs_doc());
+        let stories = txn.get_map(crate::STORIES).unwrap();
+        let story_ids: Vec<String> = stories.keys(&txn).map(|key| key.to_string()).collect();
+        drop(txn);
+        assert!(!story_ids.is_empty());
+        for story_id in story_ids {
+            assert_stories_equivalent(&seeded, &loaded, &story_id);
+        }
     }
 
     #[test]
