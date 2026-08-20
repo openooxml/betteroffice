@@ -1,11 +1,16 @@
-# Demo comparison
+# Comparison output
 
-`demo-page-1-vello.png` is the GPU/Vello render. `demo-page-1-vello.raster.png` is the same display-list page rendered by `betteroffice-docx-raster`.
+`--png` writes the Vello render here alongside the same page rendered by the
+existing raster backend, then prints per-channel mean absolute difference and
+the share of pixels differing by more than 8 on any channel.
 
-Generated from the repository root with:
+The images are generated, not committed. From the repository root:
 
 ```sh
-cargo run --release --manifest-path apps/native-viewer/Cargo.toml -- --png apps/native-viewer/artifacts/demo-page-1-vello.png
-```
+cargo run --release --manifest-path apps/native-viewer/Cargo.toml -- \
+  --png apps/native-viewer/artifacts/demo-page-1-vello.png
 
-The comparison uses threshold 8 on any RGBA channel. The exact metrics printed by the generating run are recorded in the implementation report.
+cargo run --release --manifest-path apps/native-viewer/Cargo.toml -- \
+  --document apps/demo/public/showcase.xlsx --sheet 1 \
+  --png apps/native-viewer/artifacts/showcase-sheet-1-vello.png
+```
