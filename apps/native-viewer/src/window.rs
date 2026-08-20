@@ -12,7 +12,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::document::DocumentView;
+use crate::document::{DocumentView, ReferenceDocument};
 
 const MARGIN: f64 = 40.0;
 const PAGE_GAP: f64 = 24.0;
@@ -20,6 +20,17 @@ const PAGE_GAP: f64 = 24.0;
 pub fn run(document: DocumentView) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
         let label = document.scene_label(index);
+        if let ReferenceDocument::Pptx(reference) = &document.reference {
+            let summary = reference
+                .summaries
+                .get(index)
+                .ok_or_else(|| anyhow::anyhow!("PPTX slide has no translation summary"))?;
+            println!(
+                "{label} PPTX summary: {}",
+                serde_json::to_string(&summary.structured(&page.skipped))?
+            );
+            continue;
+        }
         println!(
             "{label} skipped Vello {}: {} {:?}",
             document.display_item_name(),

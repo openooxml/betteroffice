@@ -51,6 +51,10 @@ where
 }
 
 pub fn draw_placeholder(scene: &mut Scene, bounds: Option<Rect>) {
+    draw_transformed_placeholder(scene, bounds, Affine::IDENTITY);
+}
+
+pub fn draw_transformed_placeholder(scene: &mut Scene, bounds: Option<Rect>, transform: Affine) {
     let mut rect = bounds.unwrap_or_else(|| Rect::new(0.0, 0.0, 18.0, 18.0));
     if rect.width() < 8.0 {
         rect = Rect::new(
@@ -65,24 +69,24 @@ pub fn draw_placeholder(scene: &mut Scene, bounds: Option<Rect>) {
     }
     scene.fill(
         Fill::NonZero,
-        Affine::IDENTITY,
+        transform,
         Color::from_rgba8(255, 0, 255, 48),
         None,
         &rect,
     );
     let stroke = Stroke::new(1.5);
     let magenta = Color::from_rgba8(255, 0, 255, 255);
-    scene.stroke(&stroke, Affine::IDENTITY, magenta, None, &rect);
+    scene.stroke(&stroke, transform, magenta, None, &rect);
     scene.stroke(
         &stroke,
-        Affine::IDENTITY,
+        transform,
         magenta,
         None,
         &Line::new((rect.x0, rect.y0), (rect.x1, rect.y1)),
     );
     scene.stroke(
         &stroke,
-        Affine::IDENTITY,
+        transform,
         magenta,
         None,
         &Line::new((rect.x1, rect.y0), (rect.x0, rect.y1)),

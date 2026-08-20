@@ -1,6 +1,6 @@
 # BetterOffice native viewer
 
-This experimental macOS-first app paints BetterOffice DOCX and XLSX display lists with Vello.
+This experimental macOS-first app paints BetterOffice DOCX, XLSX, and PPTX display lists with Vello.
 
 From this directory, render and compare the first DOCX page:
 
@@ -14,9 +14,15 @@ Render the used range of the first sheet in the XLSX showcase:
 cargo run --release -- --document ../demo/public/showcase.xlsx --sheet 1 --png sheet.png
 ```
 
-Each command writes its requested PNG through Vello and a sibling `.raster.png` through the matching existing raster backend, then prints image-difference metrics.
+Render the second slide in the PPTX demo:
 
-Use `--document FILE` and `--scale N` for either format. `--page N` selects a one-based DOCX page, while `--sheet N` selects a one-based XLSX sheet. XLSX defaults to the selected sheet's used range and resolves supported charts from the workbook package. Every display-list item that cannot be translated is replaced by a magenta box and cross, counted by type, and reported with its reason.
+```sh
+cargo run --release -- --document ../demo/public/betteroffice-demo.pptx --slide 2 --png slide.png
+```
+
+DOCX and XLSX write the requested PNG through Vello and a sibling `.raster.png` through the matching existing raster backend, then print image-difference metrics. PPTX has no raster backend, so it writes only the Vello PNG and prints a JSON summary with primitive translation counts, skip reasons, shaped glyph counts, and caret-stop drift.
+
+Use `--document FILE` and `--scale N` for any format. `--page N` selects a one-based DOCX page, `--sheet N` selects a one-based XLSX sheet, and `--slide N` selects a one-based PPTX slide. XLSX defaults to the selected sheet's used range and resolves supported charts from the workbook package. Every display-list item that cannot be translated is replaced by a magenta box and cross, counted by type, and reported with its reason.
 
 Open the interactive viewer:
 
@@ -29,3 +35,5 @@ Scroll vertically with the trackpad or mouse wheel. Hold Command or Control whil
 The DOCX translation covers positioned glyph runs, fallback text shaping, rectangles, line and shape paths, scoped relationship images with crop/flip/rotation, and decorations. Advanced DrawingML effects and paint, filtered or framed images, secondary-color lines, and compound or wave borders remain explicit skips.
 
 The XLSX translation covers fills, clipped solid/dashed/dotted/double lines, geometry paths, and Carlito-shaped text with alignment, synthetic bold/italic, highlight, underline, strike, and dashed underline. Font-family requests intentionally follow `xlsx-raster` and use its bundled Carlito fallback.
+
+The PPTX translation uses the slide layout engine and the same registered Arial-compatible faces for layout and native shaping. It covers positioned glyph runs, underline, normalized shape paths, solid and linear/radial gradient fills, dashed strokes, decoded package images, transforms, clipping, and chart sub-primitives. Rectangular/path gradients and semantic placeholder primitives remain explicit magenta skips.

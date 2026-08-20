@@ -21,10 +21,15 @@ pub fn render_comparison(
     output: &Path,
     scale: f64,
 ) -> Result<()> {
+    let selection = if matches!(&document.reference, ReferenceDocument::Pptx(_)) {
+        "slide"
+    } else {
+        "page"
+    };
     let page = document
         .pages
         .get(page_index)
-        .with_context(|| format!("page {} is out of range", page_index + 1))?;
+        .with_context(|| format!("{selection} {} is out of range", page_index + 1))?;
     let rendered = render_page_gpu(page, scale)?;
     image::save_buffer_with_format(
         output,
@@ -35,6 +40,24 @@ pub fn render_comparison(
         ImageFormat::Png,
     )
     .with_context(|| format!("write Vello PNG {}", output.display()))?;
+
+    if let ReferenceDocument::Pptx(reference) = &document.reference {
+        let summary = reference
+            .summaries
+            .get(page_index)
+            .context("PPTX slide has no translation summary")?;
+        println!("document: {}", document.source.display());
+        println!("slide: {} of {}", page_index + 1, reference.slide_count);
+        println!("gpu: {}", rendered.adapter);
+        println!("font faces: {:?}", reference.font_faces);
+        println!("vello PNG: {}", output.display());
+        println!("raster PNG: not produced (PPTX has no raster backend)");
+        println!(
+            "pptx summary: {}",
+            serde_json::to_string(&summary.structured(&page.skipped))?
+        );
+        return Ok(());
+    }
 
     let (raster_bytes, skipped_raster_images) = match &document.reference {
         ReferenceDocument::Docx(reference) => {
@@ -51,6 +74,7 @@ pub fn render_comparison(
             xlsx_raster::render_png(&reference.display_list).map_err(anyhow::Error::msg)?,
             None,
         ),
+        ReferenceDocument::Pptx(_) => unreachable!(),
     };
     let reference_path = raster_path(output);
     fs::write(&reference_path, &raster_bytes)
@@ -78,12 +102,14 @@ pub fn render_comparison(
                 reference.chart_count, reference.chart_placeholders
             );
         }
+        ReferenceDocument::Pptx(_) => unreachable!(),
     }
     println!("vello PNG: {}", output.display());
     println!("raster PNG: {}", reference_path.display());
     let skipped_label = match &document.reference {
         ReferenceDocument::Docx(_) => "primitives",
         ReferenceDocument::Xlsx(_) => "commands",
+        ReferenceDocument::Pptx(_) => unreachable!(),
     };
     println!(
         "skipped Vello {skipped_label}: {} {:?}",
@@ -258,10 +284,9 @@ fn compare(
     }
     let mut sums = [0u64; 4];
     let mut different = 0u64;
-    for (left, right) in vello
-        .chunks_exact(4)
-        .zip(reference.as_raw().chunks_exact(4))
-    {
+    let (vello_pixels, _) = vello.as_chunks::<4>();
+    let (reference_pixels, _) = reference.as_raw().as_chunks::<4>();
+    for (left, right) in vello_pixels.iter().zip(reference_pixels) {
         let mut pixel_differs = false;
         for channel in 0..4 {
             let difference = left[channel].abs_diff(right[channel]);

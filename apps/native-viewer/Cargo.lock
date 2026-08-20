@@ -231,8 +231,11 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-docx-raster",
+ "betteroffice-drawingml",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
+ "betteroffice-pptx",
+ "betteroffice-pptx-render",
  "betteroffice-xlsx",
  "betteroffice-xlsx-raster",
  "betteroffice-xlsx-render",
@@ -265,6 +268,52 @@ dependencies = [
  "quick-xml",
  "wasm-bindgen",
  "zip",
+]
+
+[[package]]
+name = "betteroffice-pptx"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "betteroffice-pptx-render",
+]
+
+[[package]]
+name = "betteroffice-pptx-edit"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-pptx-parse",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-pptx-parse"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "quick-xml",
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "betteroffice-pptx-render"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-pptx-edit",
+ "betteroffice-pptx-parse",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

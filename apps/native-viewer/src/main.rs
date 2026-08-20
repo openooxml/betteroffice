@@ -4,6 +4,7 @@ mod docx_scene;
 mod fonts;
 mod gpu;
 mod images;
+mod pptx_scene;
 mod scene_shared;
 mod window;
 mod xlsx_scene;
@@ -34,6 +35,7 @@ struct Options {
     png: Option<PathBuf>,
     page: Option<usize>,
     sheet: Option<usize>,
+    slide: Option<usize>,
     scale: f64,
 }
 
@@ -47,6 +49,7 @@ impl Options {
         let mut png = None;
         let mut page = None;
         let mut sheet = None;
+        let mut slide = None;
         let mut scale = 1.0f64;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
@@ -70,6 +73,9 @@ impl Options {
                 Some("--sheet") => {
                     sheet = Some(one_based_index(args.next(), "--sheet")?);
                 }
+                Some("--slide") => {
+                    slide = Some(one_based_index(args.next(), "--slide")?);
+                }
                 Some("--scale") => {
                     scale = args
                         .next()
@@ -83,7 +89,7 @@ impl Options {
                 }
                 Some("--help" | "-h") => {
                     println!(
-                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N] [--scale N]"
+                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N | --slide N] [--scale N]"
                     );
                     std::process::exit(0);
                 }
@@ -95,6 +101,7 @@ impl Options {
             png,
             page,
             sheet,
+            slide,
             scale,
         })
     }
@@ -102,16 +109,22 @@ impl Options {
     fn selection(&self, format: DocumentFormat) -> Result<(usize, usize)> {
         match format {
             DocumentFormat::Docx => {
-                if self.sheet.is_some() {
-                    bail!("--sheet is XLSX-only");
+                if self.sheet.is_some() || self.slide.is_some() {
+                    bail!("--sheet and --slide do not select DOCX pages");
                 }
                 Ok((self.page.unwrap_or(0), 0))
             }
             DocumentFormat::Xlsx => {
-                if self.page.is_some() {
-                    bail!("--page is DOCX-only");
+                if self.page.is_some() || self.slide.is_some() {
+                    bail!("--page and --slide do not select XLSX sheets");
                 }
                 Ok((0, self.sheet.unwrap_or(0)))
+            }
+            DocumentFormat::Pptx => {
+                if self.page.is_some() || self.sheet.is_some() {
+                    bail!("--page and --sheet do not select PPTX slides");
+                }
+                Ok((self.slide.unwrap_or(0), 0))
             }
         }
     }
@@ -159,10 +172,22 @@ mod tests {
         .unwrap();
         assert_eq!(docx.selection(DocumentFormat::Docx).unwrap(), (2, 0));
         assert!(docx.selection(DocumentFormat::Xlsx).is_err());
+
+        let pptx = Options::parse_from([
+            "--document".into(),
+            "slides.pptx".into(),
+            "--slide".into(),
+            "2".into(),
+        ])
+        .unwrap();
+        assert_eq!(pptx.selection(DocumentFormat::Pptx).unwrap(), (1, 0));
+        assert!(pptx.selection(DocumentFormat::Docx).is_err());
+        assert!(pptx.selection(DocumentFormat::Xlsx).is_err());
     }
 
     #[test]
     fn rejects_zero_sheet() {
         assert!(Options::parse_from(["--sheet".into(), "0".into()]).is_err());
+        assert!(Options::parse_from(["--slide".into(), "0".into()]).is_err());
     }
 }

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use betteroffice_pptx::Presentation;
 use betteroffice_xlsx::{SheetId, Workbook, viewport_for_used_range_within};
 use docx_edit::{EngineSession, seed_from_docx};
 use docx_layout::display_list::DisplayList;
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 use crate::docx_scene::translate_document;
 use crate::fonts::FontRegistry;
 use crate::images::ImageRegistry;
+use crate::pptx_scene::{PptxSlideSummary, translate_presentation};
 use crate::scene_shared::PageScene;
 use crate::xlsx_scene::translate_sheet;
 
@@ -24,6 +26,7 @@ pub struct DocumentView {
 pub enum ReferenceDocument {
     Docx(DocxReference),
     Xlsx(XlsxReference),
+    Pptx(PptxReference),
 }
 
 pub struct DocxReference {
@@ -41,10 +44,17 @@ pub struct XlsxReference {
     pub chart_placeholders: usize,
 }
 
+pub struct PptxReference {
+    pub slide_count: usize,
+    pub summaries: Vec<PptxSlideSummary>,
+    pub font_faces: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DocumentFormat {
     Docx,
     Xlsx,
+    Pptx,
 }
 
 impl DocumentFormat {
@@ -57,7 +67,8 @@ impl DocumentFormat {
         {
             Some("docx") => Ok(Self::Docx),
             Some("xlsx") => Ok(Self::Xlsx),
-            _ => bail!("--document must be a .docx or .xlsx file"),
+            Some("pptx") => Ok(Self::Pptx),
+            _ => bail!("--document must be a .docx, .xlsx, or .pptx file"),
         }
     }
 }
@@ -69,6 +80,7 @@ impl DocumentView {
             ReferenceDocument::Xlsx(reference) => {
                 format!("sheet {}", reference.sheet_index + 1)
             }
+            ReferenceDocument::Pptx(_) => format!("slide {}", index + 1),
         }
     }
 
@@ -81,6 +93,7 @@ impl DocumentView {
                 reference.sheet_count,
                 reference.sheet_name
             ),
+            ReferenceDocument::Pptx(reference) => format!("{} slides", reference.slide_count),
         }
     }
 
@@ -88,6 +101,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(_) => "primitives",
             ReferenceDocument::Xlsx(_) => "commands",
+            ReferenceDocument::Pptx(_) => "primitives",
         }
     }
 }
@@ -96,7 +110,25 @@ pub fn load_document(path: &Path, sheet_index: usize) -> Result<DocumentView> {
     match DocumentFormat::from_path(path)? {
         DocumentFormat::Docx => load_docx(path),
         DocumentFormat::Xlsx => load_xlsx(path, sheet_index),
+        DocumentFormat::Pptx => load_pptx(path),
     }
+}
+
+fn load_pptx(path: &Path) -> Result<DocumentView> {
+    let bytes = fs::read(path).with_context(|| format!("read PPTX {}", path.display()))?;
+    let presentation =
+        Presentation::open(&bytes).with_context(|| format!("open PPTX {}", path.display()))?;
+    let slide_count = presentation.slides().len();
+    let translation = translate_presentation(&presentation)?;
+    Ok(DocumentView {
+        source: path.to_owned(),
+        reference: ReferenceDocument::Pptx(PptxReference {
+            slide_count,
+            summaries: translation.summaries,
+            font_faces: translation.font_faces,
+        }),
+        pages: translation.pages,
+    })
 }
 
 fn load_docx(path: &Path) -> Result<DocumentView> {
@@ -272,7 +304,10 @@ mod tests {
             DocumentFormat::from_path(Path::new("workbook.XLSX")).unwrap(),
             DocumentFormat::Xlsx
         );
-        assert!(DocumentFormat::from_path(Path::new("slides.pptx")).is_err());
+        assert_eq!(
+            DocumentFormat::from_path(Path::new("slides.PPTX")).unwrap(),
+            DocumentFormat::Pptx
+        );
     }
 
     #[test]
@@ -286,5 +321,42 @@ mod tests {
         assert_eq!(reference.chart_count, 1);
         assert_eq!(reference.chart_placeholders, 0);
         assert_eq!(document.pages[0].skipped.total(), 0);
+    }
+
+    #[test]
+    fn loads_demo_presentation_and_audits_shaped_carets() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let document = load_document(&path, 0).unwrap();
+        let ReferenceDocument::Pptx(reference) = &document.reference else {
+            panic!("expected PPTX reference");
+        };
+        assert_eq!(reference.slide_count, 3);
+        assert_eq!(document.pages.len(), 3);
+        assert!(reference.summaries[0].shaping.glyph_runs > 0);
+        assert_eq!(reference.summaries[0].shaping.drifted_caret_stops, 0);
+        assert_eq!(reference.summaries[0].shaping.missing_caret_stops, 0);
+        assert_eq!(document.pages[0].skipped.total(), 0);
+        assert_eq!(
+            reference.summaries[0].structured(&document.pages[0].skipped)["primitives"]["image"]["translated"],
+            1
+        );
+        assert_eq!(document.pages[1].skipped.counts["placeholder"], 1);
+        assert!(reference.summaries[2].shaping.drifted_caret_stops > 0);
+    }
+
+    #[test]
+    fn translates_chart_fixture_sub_primitives() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/pptx-parse/tests/fixtures/chart-deck.pptx");
+        let document = load_document(&path, 0).unwrap();
+        let ReferenceDocument::Pptx(reference) = &document.reference else {
+            panic!("expected PPTX reference");
+        };
+        assert_eq!(reference.slide_count, 2);
+        let summary = reference.summaries[0].structured(&document.pages[0].skipped);
+        assert_eq!(summary["primitives"]["chart"]["translated"], 1);
+        assert_eq!(summary["primitives"]["placeholder"]["skipped"], 1);
+        assert!(reference.summaries[0].shaping.missing_caret_stops > 0);
     }
 }
