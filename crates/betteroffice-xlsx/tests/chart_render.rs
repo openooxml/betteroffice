@@ -153,8 +153,9 @@ fn decode_rgba(bytes: &[u8]) -> Vec<[u8; 3]> {
         .unwrap();
     let mut buffer = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut buffer).unwrap();
-    buffer[..info.buffer_size()]
-        .chunks_exact(4)
+    let (pixels, _) = buffer[..info.buffer_size()].as_chunks::<4>();
+    pixels
+        .iter()
         .map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect()
 }
