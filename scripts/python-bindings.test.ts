@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -299,17 +299,22 @@ describe('pending publish selection', () => {
       ])
     );
 
-  function pypi(releases: Record<string, string[] | null>) {
+  type Files = { yanked?: boolean }[];
+
+  function pypi(releases: Record<string, string[] | Record<string, Files> | null>) {
     const requested: string[] = [];
     const fetchImpl = async (url: string) => {
       requested.push(url);
       const project = url.match(/\/pypi\/([^/]+)\/json$/)?.[1] ?? '';
-      const versions = releases[project];
-      if (versions == null) return { status: 404, ok: false } as Response;
+      const entry = releases[project];
+      if (entry == null) return { status: 404, ok: false } as Response;
+      const map = Array.isArray(entry)
+        ? Object.fromEntries(entry.map((version) => [version, [{ yanked: false }]]))
+        : entry;
       return {
         status: 200,
         ok: true,
-        json: async () => ({ releases: Object.fromEntries(versions.map((v) => [v, []])) })
+        json: async () => ({ releases: map })
       } as unknown as Response;
     };
     return { fetchImpl, requested };
@@ -337,6 +342,55 @@ describe('pending publish selection', () => {
     releases['betteroffice-xlsx'] = null;
     const { fetchImpl } = pypi(releases);
     expect(await pendingPublishNames({ fetchImpl })).toEqual(['xlsx']);
+  });
+
+  test('a version whose files are all deleted fails instead of counting as released', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = { [bindingVersion('bindings/python-docx')]: [] };
+    const { fetchImpl } = pypi(releases);
+    await expect(pendingPublishNames({ fetchImpl })).rejects.toThrow('no installable file');
+  });
+
+  test('a version whose files are all yanked fails instead of counting as released', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = {
+      [bindingVersion('bindings/python-docx')]: [{ yanked: true }, { yanked: true }]
+    };
+    const { fetchImpl } = pypi(releases);
+    await expect(pendingPublishNames({ fetchImpl })).rejects.toThrow('no installable file');
+  });
+
+  test('one live file among yanked ones counts as released', async () => {
+    const releases = live();
+    releases['betteroffice-docx'] = {
+      [bindingVersion('bindings/python-docx')]: [{ yanked: true }, { yanked: false }]
+    };
+    const { fetchImpl } = pypi(releases);
+    expect(await pendingPublishNames({ fetchImpl })).toEqual([]);
+  });
+
+  test('a version is read from [package], not another table', () => {
+    const fixture = 'scripts/.manifest-fixture';
+    const directory = join(repository, fixture);
+    const read = (body: string) => {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, 'Cargo.toml'), body);
+      try {
+        return bindingVersion(fixture);
+      } catch (error) {
+        return `THROWS: ${(error as Error).message}`;
+      }
+    };
+
+    try {
+      expect(read('[package]\nversion = "1.2.3" # release\n')).toBe('1.2.3');
+      expect(read('[other]\nversion = "9.9.9"\n\n[package]\nversion = "1.2.3"\n')).toBe('1.2.3');
+      expect(read('[package]\nversion.workspace = true\n\n[other]\nversion = "9.9.9"\n')).toContain(
+        'THROWS'
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test('an unreadable PyPI fails the run instead of skipping a publish', async () => {
