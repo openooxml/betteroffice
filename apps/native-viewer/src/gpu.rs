@@ -14,8 +14,20 @@ use crate::document::{DocumentView, ReferenceDocument};
 use crate::scene_shared::PageScene;
 
 const DIFFERENCE_THRESHOLD: u8 = 8;
+const MAX_HEADLESS_PIXELS: u64 = 33_000_000;
+
+pub fn create_render_context() -> Result<(RenderContext, u32)> {
+    let mut context = RenderContext::new();
+    let device_id = pollster::block_on(context.device(None)).context("no compatible GPU device")?;
+    let limit = context.devices[device_id]
+        .device
+        .limits()
+        .max_texture_dimension_2d;
+    Ok((context, limit))
+}
 
 pub fn render_comparison(
+    context: &mut RenderContext,
     document: &DocumentView,
     page_index: usize,
     output: &Path,
@@ -30,7 +42,7 @@ pub fn render_comparison(
         .pages
         .get(page_index)
         .with_context(|| format!("{selection} {} is out of range", page_index + 1))?;
-    let rendered = render_page_gpu(page, scale)?;
+    let rendered = render_page_gpu(context, page, scale)?;
     image::save_buffer_with_format(
         output,
         &rendered.rgba,
@@ -141,15 +153,19 @@ struct GpuImage {
     adapter: String,
 }
 
-fn render_page_gpu(page: &PageScene, scale: f64) -> Result<GpuImage> {
+fn render_page_gpu(context: &mut RenderContext, page: &PageScene, scale: f64) -> Result<GpuImage> {
     let width = scaled_dimension(page.width, scale)?;
     let height = scaled_dimension(page.height, scale)?;
     let mut scene = Scene::new();
     scene.append(&page.background, Some(Affine::scale(scale)));
     scene.append(&page.scene, Some(Affine::scale(scale)));
-    let mut context = RenderContext::new();
     let device_id = pollster::block_on(context.device(None)).context("no compatible GPU device")?;
     let handle = &context.devices[device_id];
+    validate_target_size(
+        width,
+        height,
+        handle.device.limits().max_texture_dimension_2d,
+    )?;
     let adapter = handle.adapter().get_info();
     let mut renderer = Renderer::new(&handle.device, RendererOptions::default())?;
     let texture = handle.device.create_texture(&wgpu::TextureDescriptor {
@@ -182,6 +198,7 @@ fn render_page_gpu(page: &PageScene, scale: f64) -> Result<GpuImage> {
         },
     )?;
     let rgba = read_texture(&handle.device, &handle.queue, &texture, width, height)?;
+    validate_readback(&rgba, width, height)?;
     Ok(GpuImage {
         rgba,
         width,
@@ -256,10 +273,32 @@ fn read_texture(
 
 fn scaled_dimension(value: f64, scale: f64) -> Result<u32> {
     let value = (value * scale).ceil();
-    if !value.is_finite() || !(1.0..=16_384.0).contains(&value) {
-        bail!("scaled page dimension is outside 1..=16384");
+    if !value.is_finite() || !(1.0..=f64::from(u32::MAX)).contains(&value) {
+        bail!("scaled page dimension is outside the u32 range");
     }
     Ok(value as u32)
+}
+
+fn validate_target_size(width: u32, height: u32, dimension_limit: u32) -> Result<()> {
+    if width > dimension_limit || height > dimension_limit {
+        bail!(
+            "requested headless target {width}x{height} exceeds GPU texture dimension ceiling {dimension_limit}"
+        );
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_HEADLESS_PIXELS {
+        bail!(
+            "requested headless target {width}x{height} has {pixels} pixels, exceeding the {MAX_HEADLESS_PIXELS}-pixel rendering ceiling"
+        );
+    }
+    Ok(())
+}
+
+fn validate_readback(rgba: &[u8], width: u32, height: u32) -> Result<()> {
+    if rgba.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 0) {
+        bail!("Vello rendered an all-transparent {width}x{height} target");
+    }
+    Ok(())
 }
 
 struct DifferenceMetrics {
@@ -314,6 +353,8 @@ fn raster_path(output: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::{ReferenceDocument, load_document};
+    use crate::test_fixtures;
 
     #[test]
     fn derives_reference_path() {
@@ -321,5 +362,72 @@ mod tests {
             raster_path(Path::new("out/page.png")),
             Path::new("out/page.raster.png")
         );
+    }
+
+    #[test]
+    fn rejects_targets_over_device_dimension_limit() {
+        let error = validate_target_size(100, 8_200, 8_192).unwrap_err();
+        assert!(error.to_string().contains("100x8200"));
+        assert!(error.to_string().contains("8192"));
+    }
+
+    #[test]
+    fn rejects_targets_over_area_limit() {
+        let error = validate_target_size(5_075, 6_567, 8_192).unwrap_err();
+        assert!(error.to_string().contains("5075x6567"));
+        assert!(error.to_string().contains("33000000"));
+        validate_target_size(5_018, 6_487, 8_192).unwrap();
+    }
+
+    #[test]
+    fn rejects_all_transparent_readback() {
+        let error = validate_readback(&[0; 16], 2, 2).unwrap_err();
+        assert!(error.to_string().contains("all-transparent 2x2"));
+        validate_readback(&[0, 0, 0, 1], 1, 1).unwrap();
+    }
+
+    #[test]
+    fn embedded_and_rotated_image_pixels_agree_with_raster() {
+        let Ok((mut context, limit)) = create_render_context() else {
+            return;
+        };
+        for rotation in [None, Some(45.0)] {
+            let path = test_fixtures::write_docx("gpu-image", &test_fixtures::image_docx(rotation));
+            let document = load_document(&path, 0, limit).unwrap();
+            let rendered = render_page_gpu(&mut context, &document.pages[0], 1.0).unwrap();
+            let ReferenceDocument::Docx(reference) = &document.reference else {
+                panic!("expected DOCX reference");
+            };
+            let resources = RenderResources::new(
+                &reference.fonts.store,
+                &reference.fonts.chains,
+                &reference.images.raw,
+            );
+            let raster = docx_raster::render_page(&reference.display_list, 0, &resources).unwrap();
+            let raster = image::load_from_memory_with_format(&raster.bytes, ImageFormat::Png)
+                .unwrap()
+                .into_rgba8();
+            assert_eq!((rendered.width, rendered.height), raster.dimensions());
+            let vello_green = green_pixels(&rendered.rgba);
+            let raster_green = green_pixels(raster.as_raw());
+            println!(
+                "rotation {rotation:?}: Vello green pixels {vello_green}, raster green pixels {raster_green}"
+            );
+            assert!(raster_green > 1_000);
+            let difference = vello_green.abs_diff(raster_green);
+            assert!(
+                difference * 100 <= raster_green,
+                "rotation {rotation:?}: Vello {vello_green}, raster {raster_green}"
+            );
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    fn green_pixels(rgba: &[u8]) -> usize {
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[0] < 64 && pixel[1] > 192 && pixel[2] < 64 && pixel[3] > 192)
+            .count()
     }
 }

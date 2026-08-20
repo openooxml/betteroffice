@@ -227,6 +227,7 @@ name = "betteroffice-native-viewer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "betteroffice-docx-edit",
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",

@@ -7,6 +7,8 @@ mod gpu;
 mod images;
 mod pptx_scene;
 mod scene_shared;
+#[cfg(test)]
+mod test_fixtures;
 mod window;
 mod xlsx_scene;
 
@@ -22,11 +24,12 @@ fn main() -> Result<()> {
     let options = Options::parse()?;
     let format = DocumentFormat::from_path(&options.document)?;
     let (page, sheet) = options.selection(format)?;
-    let document = load_document(&options.document, sheet)?;
+    let (mut context, max_texture_dimension_2d) = gpu::create_render_context()?;
+    let document = load_document(&options.document, sheet, max_texture_dimension_2d)?;
     if let Some(output) = options.png {
-        gpu::render_comparison(&document, page, &output, options.scale)?;
+        gpu::render_comparison(&mut context, &document, page, &output, options.scale)?;
     } else {
-        window::run(document)?;
+        window::run(document, context)?;
     }
     Ok(())
 }

@@ -150,7 +150,10 @@ impl PptxSlideSummary {
     }
 }
 
-pub fn translate_presentation(presentation: &Presentation) -> Result<PptxTranslation> {
+pub fn translate_presentation(
+    presentation: &Presentation,
+    max_texture_dimension_2d: u32,
+) -> Result<PptxTranslation> {
     let parsed_slide_count = presentation.slides().len();
     let model_slide_count = presentation.model().slides.len();
     if parsed_slide_count != model_slide_count {
@@ -168,7 +171,12 @@ pub fn translate_presentation(presentation: &Presentation) -> Result<PptxTransla
         let rendered = renderer
             .layout_slide(presentation.package(), &snapshot, slide_index)
             .with_context(|| format!("layout PPTX slide {}", slide_index + 1))?;
-        let (page, summary) = translate_slide(&rendered.display_list, &fonts, &images)?;
+        let (page, summary) = translate_slide(
+            &rendered.display_list,
+            &fonts,
+            &images,
+            max_texture_dimension_2d,
+        )?;
         pages.push(page);
         summaries.push(summary);
     }
@@ -262,9 +270,14 @@ fn translate_slide(
     display_list: &SurfaceDisplayList,
     fonts: &PptxFonts,
     images: &PptxImages,
+    max_texture_dimension_2d: u32,
 ) -> Result<(PageScene, PptxSlideSummary)> {
-    let width = dimension(display_list.width, "slide width")?;
-    let height = dimension(display_list.height, "slide height")?;
+    let width = dimension(display_list.width, "slide width", max_texture_dimension_2d)?;
+    let height = dimension(
+        display_list.height,
+        "slide height",
+        max_texture_dimension_2d,
+    )?;
     let mut translator = Translator {
         scene: Scene::new(),
         fonts,
@@ -934,10 +947,12 @@ fn text_sample(text: &str) -> String {
     text.chars().take(48).collect()
 }
 
-fn dimension(value: f32, label: &str) -> Result<f64> {
+fn dimension(value: f32, label: &str, max_texture_dimension_2d: u32) -> Result<f64> {
     let value = positive(value, label).map_err(anyhow::Error::msg)?;
-    if value > 16_384.0 {
-        bail!("{label} exceeds 16384 pixels");
+    if value > max_texture_dimension_2d as f32 {
+        bail!(
+            "requested {label} {value} exceeds GPU texture dimension ceiling {max_texture_dimension_2d}"
+        );
     }
     Ok(f64::from(value))
 }
@@ -1034,7 +1049,7 @@ mod tests {
         let images = PptxImages {
             assets: HashMap::new(),
         };
-        let (page, summary) = translate_slide(&display_list, &fonts, &images).unwrap();
+        let (page, summary) = translate_slide(&display_list, &fonts, &images, 8_192).unwrap();
         let structured = summary.structured(&page.skipped);
         assert_eq!(page.skipped.counts["shape"], 1);
         assert_eq!(structured["primitives"]["shape"]["skipped"], 1);
@@ -1070,5 +1085,12 @@ mod tests {
         .unwrap();
         assert_eq!(glyph.id, 42);
         assert_eq!((glyph.x, glyph.y), (13.5, 20.0));
+    }
+
+    #[test]
+    fn rejects_slide_dimension_over_device_limit() {
+        let error = dimension(8_200.0, "slide height", 8_192).unwrap_err();
+        assert!(error.to_string().contains("slide height 8200"));
+        assert!(error.to_string().contains("8192"));
     }
 }

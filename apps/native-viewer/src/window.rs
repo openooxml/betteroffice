@@ -22,7 +22,7 @@ const CARET_BLINK: Duration = Duration::from_millis(530);
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 
-pub fn run(document: DocumentView) -> Result<()> {
+pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
         let label = document.scene_label(index);
         if let ReferenceDocument::Pptx(reference) = &document.reference {
@@ -47,7 +47,7 @@ pub fn run(document: DocumentView) -> Result<()> {
         }
     }
     let event_loop = EventLoop::new()?;
-    let mut app = Viewer::new(document)?;
+    let mut app = Viewer::new(document, context)?;
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.fatal {
         bail!(error);
@@ -75,13 +75,13 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(document: DocumentView) -> Result<Self> {
+    fn new(document: DocumentView, context: RenderContext) -> Result<Self> {
         let save_target = matches!(&document.reference, ReferenceDocument::Docx(_))
             .then(|| document.edited_path())
             .transpose()?;
         Ok(Self {
             document,
-            context: RenderContext::new(),
+            context,
             window: None,
             surface: None,
             renderer: None,
@@ -475,7 +475,7 @@ impl Viewer {
             .clone()
             .context("DOCX save target is unavailable")?;
         self.document.save_docx_to(&path)?;
-        let reopened = load_document(&path, 0)
+        let reopened = load_document(&path, 0, self.document.max_texture_dimension_2d)
             .with_context(|| format!("reopen edited DOCX {}", path.display()))?;
         println!("saved and reopened edited DOCX: {}", path.display());
         self.document = reopened;

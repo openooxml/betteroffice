@@ -7,7 +7,7 @@ use docx_layout::display_list::{
 use docx_raster::{ImageScope, NoteKind};
 use serde_json::Number;
 use vello::kurbo::{Affine, BezPath, Line, Rect, Stroke};
-use vello::peniko::{Fill, ImageBrush};
+use vello::peniko::{Color, Fill, ImageBrush};
 use vello::{Glyph, Scene};
 
 use crate::fonts::FontRegistry;
@@ -399,21 +399,45 @@ fn draw_shape(scene: &mut Scene, shape: &ShapePrimitive, opacity: f32) -> Result
             transform = Affine::rotate_about(number(rotation)?.to_radians(), center) * transform;
         }
     }
-    if let Some(fill) = &shape.fill {
-        scene.fill(Fill::NonZero, transform, color(fill, opacity)?, None, &path);
+    let fill = shape
+        .fill
+        .as_deref()
+        .map(|fill| color(fill, opacity))
+        .transpose()?;
+    let stroke = shape
+        .stroke
+        .as_ref()
+        .map(|stroke_spec| -> Result<_, String> {
+            let width = number(&stroke_spec.width)?.max(0.5);
+            let stroke = shape_dash(Stroke::new(width), stroke_spec.dash.as_deref(), width)?;
+            Ok((stroke, color(&stroke_spec.color, opacity)?))
+        })
+        .transpose()?;
+    if let Some(fill) = fill {
+        scene.fill(Fill::NonZero, transform, fill, None, &path);
     }
-    if let Some(stroke_spec) = &shape.stroke {
-        let width = number(&stroke_spec.width)?.max(0.5);
-        let stroke = shape_dash(Stroke::new(width), stroke_spec.dash.as_deref(), width)?;
-        scene.stroke(
-            &stroke,
-            transform,
-            color(&stroke_spec.color, opacity)?,
-            None,
-            &path,
-        );
+    if let Some((stroke, stroke_color)) = stroke {
+        scene.stroke(&stroke, transform, stroke_color, None, &path);
     }
     Ok(())
+}
+
+fn image_frame(primitive: &ImagePrimitive) -> Result<Rect, String> {
+    let frame = primitive.attrs.content_frame.as_ref();
+    rect_from_numbers(
+        frame
+            .and_then(|frame| frame.x.as_ref())
+            .unwrap_or(&primitive.x),
+        frame
+            .and_then(|frame| frame.y.as_ref())
+            .unwrap_or(&primitive.y),
+        frame
+            .and_then(|frame| frame.w.as_ref())
+            .unwrap_or(&primitive.w),
+        frame
+            .and_then(|frame| frame.h.as_ref())
+            .unwrap_or(&primitive.h),
+    )
 }
 
 fn draw_image(
@@ -436,7 +460,10 @@ fn draw_image(
     let image = images
         .get(scope, &primitive.rel_id)
         .ok_or_else(|| format!("image {} is missing or undecodable", primitive.rel_id))?;
-    let target = rect_from_numbers(&primitive.x, &primitive.y, &primitive.w, &primitive.h)?;
+    let target = image_frame(primitive)?;
+    if target.width() == 0.0 || target.height() == 0.0 {
+        return Ok(());
+    }
     let (left, top, right, bottom) = if let Some(crop) = &primitive.crop {
         (
             number(&crop.left)?,
@@ -457,10 +484,12 @@ fn draw_image(
     }
     let source_width = f64::from(image.width);
     let source_height = f64::from(image.height);
-    let crop_x = left * source_width;
-    let crop_y = top * source_height;
-    let crop_width = (1.0 - left - right) * source_width;
-    let crop_height = (1.0 - top - bottom) * source_height;
+    let Some((crop_x, crop_y, crop_width, crop_height)) =
+        cropped_source_rect(source_width, source_height, left, top, right, bottom)
+    else {
+        return Ok(());
+    };
+
     let mut visual = Affine::IDENTITY;
     let center = target.center();
     if primitive.attrs.image_flip_h == Some(true) || primitive.attrs.image_flip_v == Some(true) {
@@ -486,10 +515,28 @@ fn draw_image(
         * Affine::scale_non_uniform(target.width() / crop_width, target.height() / crop_height)
         * Affine::translate((-crop_x, -crop_y));
     scene.push_clip_layer(Fill::NonZero, visual, &target);
-    let brush = ImageBrush::new(image.clone()).with_alpha(opacity);
+    let brush = ImageBrush::new(image).with_alpha(opacity);
     scene.draw_image(&brush, visual * mapping);
     scene.pop_layer();
     Ok(())
+}
+
+fn cropped_source_rect(
+    source_width: f64,
+    source_height: f64,
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let crop_x = left * source_width;
+    let crop_y = top * source_height;
+    let crop_width = (1.0 - left - right) * source_width;
+    let crop_height = (1.0 - top - bottom) * source_height;
+    if crop_width <= 0.0 || crop_height <= 0.0 {
+        return None;
+    }
+    Some((crop_x, crop_y, crop_width, crop_height))
 }
 
 fn translate_border_or_placeholder(
@@ -508,6 +555,7 @@ fn translate_border_or_placeholder(
 
 fn draw_page_border(scene: &mut Scene, border: &PageBorderPrimitive) -> Result<(), String> {
     let rect = rect_from_numbers(&border.x, &border.y, &border.w, &border.h)?;
+    let mut prepared = Vec::new();
     for (side, line) in [
         (
             &border.top,
@@ -527,17 +575,19 @@ fn draw_page_border(scene: &mut Scene, border: &PageBorderPrimitive) -> Result<(
         ),
     ] {
         if let Some(side) = side {
-            draw_page_border_side(scene, side, &line)?;
+            prepared.push(prepare_page_border_side(side, line)?);
         }
+    }
+    for (stroke, color, line) in prepared {
+        scene.stroke(&stroke, Affine::IDENTITY, color, None, &line);
     }
     Ok(())
 }
 
-fn draw_page_border_side(
-    scene: &mut Scene,
+fn prepare_page_border_side(
     side: &PageBorderSide,
-    line: &Line,
-) -> Result<(), String> {
+    line: Line,
+) -> Result<(Stroke, Color, Line), String> {
     let width = number(&side.width)?.max(0.5);
     let style = match side.style.as_str() {
         "solid" => DisplayBorderStyle::Solid,
@@ -548,14 +598,7 @@ fn draw_page_border_side(
         other => return Err(format!("page border style {other} is not translated")),
     };
     let stroke = apply_border_dash(Stroke::new(width), style, width)?;
-    scene.stroke(
-        &stroke,
-        Affine::IDENTITY,
-        color(&side.color, 1.0)?,
-        None,
-        line,
-    );
-    Ok(())
+    Ok((stroke, color(&side.color, 1.0)?, line))
 }
 
 fn validate_visual_fields(primitive: &Primitive) -> Result<(), String> {
@@ -603,8 +646,8 @@ fn validate_visual_fields(primitive: &Primitive) -> Result<(), String> {
     {
         return Err("advanced shape paint is not translated".to_owned());
     }
-    if is_image && (attrs.content_frame.is_some() || attrs.border.is_some()) {
-        return Err("image frame or border is not translated".to_owned());
+    if is_image && attrs.border.is_some() {
+        return Err("image border is not translated".to_owned());
     }
     if !attrs.effects.is_empty() {
         return Err("DrawingML effects are not translated".to_owned());
@@ -889,4 +932,73 @@ fn finite_f32(value: f64, name: &str) -> Result<f32, String> {
         .is_finite()
         .then_some(value)
         .ok_or_else(|| format!("{name} is outside the Vello coordinate range"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use docx_layout::display_list::ShapeStrokePrimitive;
+
+    fn n(value: i64) -> Number {
+        Number::from(value)
+    }
+
+    #[test]
+    fn invalid_shape_stroke_does_not_leave_a_fill() {
+        let shape = ShapePrimitive {
+            x: n(0),
+            y: n(0),
+            w: n(20),
+            h: n(20),
+            geometry_path: vec![
+                ShapePathCommand::Move { x: n(0), y: n(0) },
+                ShapePathCommand::Line { x: n(20), y: n(0) },
+                ShapePathCommand::Line { x: n(20), y: n(20) },
+                ShapePathCommand::Close,
+            ],
+            fill: Some("#00ff00".to_owned()),
+            stroke: Some(ShapeStrokePrimitive {
+                color: "#000000".to_owned(),
+                width: n(1),
+                dash: Some("unsupported".to_owned()),
+            }),
+            transform: None,
+            decorative: false,
+            attrs: DocAttrs::default(),
+        };
+        let mut scene = Scene::new();
+        assert!(draw_shape(&mut scene, &shape, 1.0).is_err());
+        assert!(scene.encoding().is_empty());
+    }
+
+    #[test]
+    fn invalid_later_page_border_does_not_leave_an_earlier_side() {
+        let border = PageBorderPrimitive {
+            x: n(0),
+            y: n(0),
+            w: n(20),
+            h: n(20),
+            z_order: None,
+            top: Some(PageBorderSide {
+                width: n(1),
+                color: "#000000".to_owned(),
+                style: "solid".to_owned(),
+            }),
+            right: Some(PageBorderSide {
+                width: n(1),
+                color: "#000000".to_owned(),
+                style: "unsupported".to_owned(),
+            }),
+            bottom: None,
+            left: None,
+        };
+        let mut scene = Scene::new();
+        assert!(draw_page_border(&mut scene, &border).is_err());
+        assert!(scene.encoding().is_empty());
+    }
+
+    #[test]
+    fn zero_width_image_crop_is_empty() {
+        assert!(cropped_source_rect(0.0, 80.0, 0.0, 0.0, 0.0, 0.0).is_none());
+    }
 }

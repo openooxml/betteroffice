@@ -34,7 +34,9 @@ Scroll vertically with the trackpad or mouse wheel. Hold Command or Control whil
 
 DOCX documents are editable in the window. Click or drag to place a caret or select text, Shift-click to extend a selection, and double-click to select a word. Arrow keys, Home, End, typing, Backspace, Delete, and Enter use the resident DOCX engine. Press Command-S or Control-S to save beside the input as `<name>-edited.docx`; the viewer reopens the saved file immediately. XLSX and PPTX remain read-only.
 
-The DOCX translation covers positioned glyph runs, fallback text shaping, rectangles, line and shape paths, scoped relationship images with crop/flip/rotation, and decorations. Advanced DrawingML effects and paint, filtered or framed images, secondary-color lines, and compound or wave borders remain explicit skips.
+DOCX saving currently round-trips text edits only in top-level body paragraphs made entirely of text runs with compatible formatting. The save patches only edited paragraph XML into the source package, so untouched paragraphs and unrelated package parts remain byte-for-byte unchanged. Saving refuses paragraph splits or merges, nested table or content-control paragraph edits, and edits to paragraphs containing differently formatted runs, hyperlinks, comment or note references, revision marks, drawings or embedded objects, content controls, bookmarks, fields, math, or other non-text run content. The refusal identifies the paragraph and the markup at risk before writing an output file.
+
+The DOCX translation covers positioned glyph runs, fallback text shaping, rectangles, line and shape paths, embedded data-URL and scoped relationship images with crop/flip/rotation, and decorations. Advanced DrawingML effects and paint, filtered or bordered images, secondary-color lines, and compound or wave borders remain explicit skips.
 
 The XLSX translation covers fills, clipped solid/dashed/dotted/double lines, geometry paths, and Carlito-shaped text with alignment, synthetic bold/italic, highlight, underline, strike, and dashed underline. Font-family requests intentionally follow `xlsx-raster` and use its bundled Carlito fallback.
 

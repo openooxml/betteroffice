@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,7 +13,7 @@ use docx_edit::{
 };
 use docx_layout::display_list::{DocAttrs, Primitive};
 use docx_parse::block::BlockContent;
-use docx_parse::document::DocumentBody;
+use docx_parse::document::{DocumentBody, get_paragraph_text};
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::{
@@ -105,10 +106,11 @@ impl DocxEditor {
         initial_frame: &[u8],
     ) -> Result<Self> {
         let spans = paragraph_spans(&engine)?;
-        let seeded_ids = spans
+        let source_texts = spans
             .iter()
-            .map(|span| span.para_id.clone())
-            .collect::<HashSet<_>>();
+            .map(|span| (span.para_id.clone(), span.text.clone()))
+            .collect();
+        let source_tokens = body_tokens(engine.doc())?;
         Ok(Self {
             engine,
             spans,
@@ -116,7 +118,7 @@ impl DocxEditor {
             selection_rects: Vec::new(),
             vertical_goal_x: None,
             frames: FrameTracker::new(initial_frame)?,
-            save: SaveProjection::new(source, package, seeded_ids),
+            save: SaveProjection::new(source, package, source_texts, source_tokens),
             dirty: false,
         })
     }
@@ -1049,13 +1051,21 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64> {
 struct SaveProjection {
     original: Vec<u8>,
     package: S9PackageWire,
+    source_content: Vec<BlockContent>,
+    source_texts: HashMap<String, String>,
+    source_tokens: Vec<BodyToken>,
     seed: String,
-    seeded_ids: HashSet<String>,
     synthetic_ids: HashSet<String>,
+    changed_para_ids: Vec<String>,
 }
 
 impl SaveProjection {
-    fn new(original: Vec<u8>, mut package: S9PackageWire, seeded_ids: HashSet<String>) -> Self {
+    fn new(
+        original: Vec<u8>,
+        mut package: S9PackageWire,
+        source_texts: HashMap<String, String>,
+        source_tokens: Vec<BodyToken>,
+    ) -> Self {
         let seed = format!("{:x}", Sha256::digest(&original));
         let mut synthetic_ids = HashSet::new();
         let mut paragraph_index = 0;
@@ -1069,12 +1079,16 @@ impl SaveProjection {
                 paragraph_index += 1;
             }
         }
+        let source_content = package.document.content.clone();
         Self {
             original,
             package,
+            source_content,
+            source_texts,
+            source_tokens,
             seed,
-            seeded_ids,
             synthetic_ids,
+            changed_para_ids: Vec::new(),
         }
     }
 
@@ -1085,97 +1099,69 @@ impl SaveProjection {
             .into_iter()
             .map(|paragraph| (paragraph.para_id, paragraph.text))
             .collect::<HashMap<_, _>>();
-        let segments = document
-            .story_segments(BODY_STORY)
-            .map_err(anyhow::Error::msg)?;
-        let mut tokens = Vec::new();
-        for segment in segments {
-            match segment.content {
-                SegmentContent::Pilcrow(properties) => {
-                    tokens.push(BodyToken::Paragraph(properties.para_id));
-                }
-                SegmentContent::OtherEmbed { kind, .. } if kind == "table" => {
-                    tokens.push(BodyToken::Table);
-                }
-                SegmentContent::OtherEmbed { kind, .. } if kind == "blockSdt" => {
-                    tokens.push(BodyToken::BlockSdt);
-                }
-                _ => {}
+        let tokens = body_tokens(document)?;
+        if tokens != self.source_tokens {
+            bail!(
+                "cannot save DOCX structural edits; paragraph splits, merges, tables, and content controls are not round-tripped"
+            );
+        }
+        let mut content = self.source_content.clone();
+        let mut changed_para_ids = Vec::new();
+        let mut projected_para_ids = HashSet::new();
+        let mut paragraph_number = 0;
+        for block in &mut content {
+            let BlockContent::Paragraph(paragraph) = block else {
+                continue;
+            };
+            paragraph_number += 1;
+            let para_id = paragraph
+                .para_id
+                .clone()
+                .context("source paragraph has no projection identity")?;
+            projected_para_ids.insert(para_id.clone());
+            let target = paragraphs.get(&para_id).with_context(|| {
+                format!("paragraph {paragraph_number} ({para_id}) is unavailable")
+            })?;
+            let source = self
+                .source_texts
+                .get(&para_id)
+                .cloned()
+                .unwrap_or_else(|| get_paragraph_text(paragraph));
+            if &source == target {
+                continue;
+            }
+            let risks = paragraph_projection_risks(paragraph);
+            if !risks.is_empty() {
+                bail!(
+                    "cannot save paragraph {paragraph_number} ({para_id}): editing it would lose or flatten {}",
+                    risks.join(", ")
+                );
+            }
+            set_paragraph_text(paragraph, target).map_err(anyhow::Error::msg)?;
+            changed_para_ids.push(para_id);
+        }
+        for (para_id, target) in &paragraphs {
+            let source = self
+                .source_texts
+                .get(para_id)
+                .with_context(|| format!("paragraph {para_id} has no source projection"))?;
+            if source != target && !projected_para_ids.contains(para_id) {
+                bail!(
+                    "cannot save paragraph {para_id}: nested table or content-control paragraphs are not round-tripped"
+                );
             }
         }
-
-        let original = std::mem::take(&mut self.package.document.content);
-        let fallback = original.iter().find_map(|block| match block {
-            BlockContent::Paragraph(paragraph) => Some(paragraph.clone()),
-            _ => None,
-        });
-        let mut old_paragraphs = HashMap::new();
-        let mut blocks = VecDeque::new();
-        for block in original {
-            match block {
-                BlockContent::Paragraph(paragraph) => {
-                    if let Some(para_id) = &paragraph.para_id {
-                        old_paragraphs.insert(para_id.clone(), paragraph);
-                    } else {
-                        blocks.push_back(BlockContent::Paragraph(paragraph));
-                    }
-                }
-                block => blocks.push_back(block),
-            }
-        }
-
-        let mut content = Vec::new();
-        let mut template = fallback;
-        for token in tokens {
-            match token {
-                BodyToken::Paragraph(para_id) => {
-                    let text = paragraphs.get(&para_id).cloned().unwrap_or_default();
-                    if let Some(mut paragraph) = old_paragraphs.remove(&para_id) {
-                        set_paragraph_text(&mut paragraph, &text);
-                        template = Some(paragraph.clone());
-                        content.push(BlockContent::Paragraph(paragraph));
-                    } else if !text.is_empty() || !self.seeded_ids.contains(&para_id) {
-                        let mut paragraph = blank_paragraph(template.as_ref(), para_id);
-                        set_paragraph_text(&mut paragraph, &text);
-                        template = Some(paragraph.clone());
-                        content.push(BlockContent::Paragraph(paragraph));
-                    }
-                }
-                BodyToken::Table => {
-                    if let Some(block) =
-                        take_block(&mut blocks, |block| matches!(block, BlockContent::Table(_)))
-                    {
-                        content.push(block);
-                    }
-                }
-                BodyToken::BlockSdt => {
-                    if let Some(block) = take_block(&mut blocks, |block| {
-                        matches!(block, BlockContent::BlockSdt(_))
-                    }) {
-                        content.push(block);
-                    }
-                }
-            }
-        }
-        content.extend(blocks);
         self.package.document.content = content;
+        self.changed_para_ids = changed_para_ids;
         Ok(())
     }
 
     fn serialize(&self) -> Result<Vec<u8>> {
-        let mut content = self.package.document.content.clone();
-        for block in &mut content {
-            if let BlockContent::Paragraph(paragraph) = block
-                && paragraph
-                    .para_id
-                    .as_ref()
-                    .is_some_and(|para_id| self.synthetic_ids.contains(para_id))
-            {
-                paragraph.para_id = None;
-            }
+        if self.changed_para_ids.is_empty() {
+            return Ok(self.original.clone());
         }
         let document = DocumentBody {
-            content,
+            content: self.package.document.content.clone(),
             sections: None,
             final_section_properties: self.package.document.final_section_properties.clone(),
             comments: self.package.document.comments.clone(),
@@ -1200,82 +1186,132 @@ impl SaveProjection {
             },
             selective: None,
         };
-        write_docx_s13(request, &self.original).map_err(anyhow::Error::from)
+        let projected = write_docx_s13(request, &self.original).map_err(anyhow::Error::from)?;
+        patch_document_paragraphs(
+            &self.original,
+            &projected,
+            &self.changed_para_ids,
+            &self.synthetic_ids,
+        )
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum BodyToken {
     Paragraph(String),
     Table,
     BlockSdt,
 }
 
-fn take_block(
-    blocks: &mut VecDeque<BlockContent>,
-    predicate: impl Fn(&BlockContent) -> bool,
-) -> Option<BlockContent> {
-    let index = blocks.iter().position(predicate)?;
-    blocks.remove(index)
+fn body_tokens(document: &docx_edit::EditingDoc) -> Result<Vec<BodyToken>> {
+    let segments = document
+        .story_segments(BODY_STORY)
+        .map_err(anyhow::Error::msg)?;
+    let mut tokens = Vec::new();
+    for segment in segments {
+        match segment.content {
+            SegmentContent::Pilcrow(properties) => {
+                tokens.push(BodyToken::Paragraph(properties.para_id));
+            }
+            SegmentContent::OtherEmbed { kind, .. } if kind == "table" => {
+                tokens.push(BodyToken::Table);
+            }
+            SegmentContent::OtherEmbed { kind, .. } if kind == "blockSdt" => {
+                tokens.push(BodyToken::BlockSdt);
+            }
+            _ => {}
+        }
+    }
+    Ok(tokens)
 }
 
-fn blank_paragraph(template: Option<&Paragraph>, para_id: String) -> Paragraph {
-    let run = template.and_then(first_run).cloned().unwrap_or(Run {
-        node_type: RunType::Run,
-        formatting: None,
-        property_changes: None,
-        content: Vec::new(),
-    });
-    let mut paragraph = template.cloned().unwrap_or(Paragraph {
-        node_type: "paragraph".to_owned(),
-        para_id: None,
-        text_id: None,
-        formatting: None,
-        property_changes: None,
-        p_pr_ins: None,
-        p_pr_del: None,
-        content: Vec::new(),
-        list_rendering: None,
-        rendered_page_break_before: None,
-        section_properties: None,
-    });
-    paragraph.para_id = Some(para_id);
-    paragraph.text_id = None;
-    paragraph.property_changes = None;
-    paragraph.p_pr_ins = None;
-    paragraph.p_pr_del = None;
-    paragraph.section_properties = None;
-    paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(Run {
-        content: vec![RunContent::Text {
-            text: String::new(),
-            preserve_space: None,
-        }],
-        ..run
-    }))];
-    paragraph
+fn paragraph_projection_risks(paragraph: &Paragraph) -> Vec<&'static str> {
+    let mut risks = Vec::new();
+    if paragraph.property_changes.is_some()
+        || paragraph.p_pr_ins.is_some()
+        || paragraph.p_pr_del.is_some()
+    {
+        risks.push("revision marks");
+    }
+    let mut run_formatting = Vec::new();
+    for content in &paragraph.content {
+        match content {
+            ParagraphContent::Inline(InlineNode::Run(run)) => {
+                run_formatting.push(run.formatting.as_ref());
+                if run.property_changes.is_some() {
+                    risks.push("revision marks");
+                }
+                for content in &run.content {
+                    match content {
+                        RunContent::Text { .. } => {}
+                        RunContent::FootnoteRef { .. }
+                        | RunContent::EndnoteRef { .. }
+                        | RunContent::FootnoteRefMark
+                        | RunContent::EndnoteRefMark => risks.push("note references"),
+                        RunContent::CommentReference { .. } => risks.push("comment references"),
+                        RunContent::FieldChar { .. } | RunContent::InstrText { .. } => {
+                            risks.push("fields")
+                        }
+                        RunContent::Drawing { .. }
+                        | RunContent::Shape { .. }
+                        | RunContent::Chart { .. }
+                        | RunContent::OpaqueDrawing { .. } => risks.push("embedded objects"),
+                        _ => risks.push("non-text run content"),
+                    }
+                }
+            }
+            ParagraphContent::Inline(InlineNode::Hyperlink(_)) => risks.push("hyperlinks"),
+            ParagraphContent::Inline(InlineNode::InlineSdt(_)) => risks.push("content controls"),
+            ParagraphContent::Inline(InlineNode::BookmarkStart(_))
+            | ParagraphContent::Inline(InlineNode::BookmarkEnd(_)) => risks.push("bookmarks"),
+            ParagraphContent::Inline(InlineNode::SimpleField(_))
+            | ParagraphContent::Inline(InlineNode::ComplexField(_)) => risks.push("fields"),
+            ParagraphContent::Inline(InlineNode::Math(_)) => risks.push("math"),
+            ParagraphContent::Tracked(_)
+            | ParagraphContent::RangeStart(_)
+            | ParagraphContent::RangeEnd(_) => risks.push("revision marks"),
+            ParagraphContent::CommentRange(_) => risks.push("comment anchors"),
+        }
+    }
+    if let Some(first) = run_formatting.first()
+        && run_formatting
+            .iter()
+            .skip(1)
+            .any(|formatting| formatting != first)
+    {
+        risks.push("differently formatted runs");
+    }
+    risks.sort_unstable();
+    risks.dedup();
+    risks
 }
 
-fn first_run(paragraph: &Paragraph) -> Option<&Run> {
-    paragraph.content.iter().find_map(|content| match content {
-        ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
-        _ => None,
-    })
-}
-
-fn set_paragraph_text(paragraph: &mut Paragraph, target: &str) {
-    let Some(chunks) = simple_run_chunks(paragraph) else {
-        replace_paragraph_text(paragraph, target);
-        return;
-    };
+fn set_paragraph_text(paragraph: &mut Paragraph, target: &str) -> Result<(), String> {
+    let chunks = simple_run_chunks(paragraph).ok_or_else(|| {
+        "paragraph projection unexpectedly encountered complex inline content".to_owned()
+    })?;
     let current = chunks
         .iter()
         .map(|chunk| chunk.text.as_str())
         .collect::<String>();
     if current == target {
-        return;
+        return Ok(());
     }
     if target.is_empty() {
-        paragraph.content.clear();
-        return;
+        let template = chunks
+            .first()
+            .map(|chunk| chunk.run.clone())
+            .unwrap_or(Run {
+                node_type: RunType::Run,
+                formatting: None,
+                property_changes: None,
+                content: Vec::new(),
+            });
+        paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(run_with_text(
+            &template,
+            String::new(),
+        )))];
+        return Ok(());
     }
     let (prefix, suffix) = common_utf16_edges(&current, target);
     let current_len = utf16_len(&current);
@@ -1328,6 +1364,7 @@ fn set_paragraph_text(paragraph: &mut Paragraph, target: &str) {
         .into_iter()
         .map(|run| ParagraphContent::Inline(InlineNode::Run(run)))
         .collect();
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1357,23 +1394,6 @@ fn simple_run_chunks(paragraph: &Paragraph) -> Option<Vec<RunChunk>> {
     Some(chunks)
 }
 
-fn replace_paragraph_text(paragraph: &mut Paragraph, text: &str) {
-    if text.is_empty() {
-        paragraph.content.clear();
-        return;
-    }
-    let template = first_run(paragraph).cloned().unwrap_or(Run {
-        node_type: RunType::Run,
-        formatting: None,
-        property_changes: None,
-        content: Vec::new(),
-    });
-    paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(run_with_text(
-        &template,
-        text.to_owned(),
-    )))];
-}
-
 fn run_with_text(template: &Run, text: String) -> Run {
     Run {
         content: vec![RunContent::Text {
@@ -1382,6 +1402,180 @@ fn run_with_text(template: &Run, text: String) -> Run {
         }],
         ..template.clone()
     }
+}
+
+#[derive(Clone)]
+struct ParagraphXmlSpan {
+    range: Range<usize>,
+    para_id: Option<String>,
+}
+
+fn patch_document_paragraphs(
+    original: &[u8],
+    projected: &[u8],
+    changed_para_ids: &[String],
+    synthetic_ids: &HashSet<String>,
+) -> Result<Vec<u8>> {
+    let projected_parts = ooxml_opc::unzip_parts(projected).map_err(anyhow::Error::msg)?;
+    let projected_document = projected_parts
+        .iter()
+        .find(|(path, _)| path.eq_ignore_ascii_case("word/document.xml"))
+        .map(|(_, bytes)| bytes.as_slice())
+        .context("projected DOCX has no word/document.xml")?;
+    let projected_spans = paragraph_xml_spans(projected_document)?;
+    let mut original_parts = ooxml_opc::unzip_parts(original).map_err(anyhow::Error::msg)?;
+    let original_document = original_parts
+        .iter_mut()
+        .find(|(path, _)| path.eq_ignore_ascii_case("word/document.xml"))
+        .map(|(_, bytes)| bytes)
+        .context("source DOCX has no word/document.xml")?;
+    let original_spans = paragraph_xml_spans(original_document)?;
+    if original_spans.len() != projected_spans.len() {
+        bail!(
+            "cannot save safely: source has {} paragraph spans but projection has {}",
+            original_spans.len(),
+            projected_spans.len()
+        );
+    }
+    let mut replacements = Vec::with_capacity(changed_para_ids.len());
+    for para_id in changed_para_ids {
+        let matches = projected_spans
+            .iter()
+            .enumerate()
+            .filter(|(_, span)| span.para_id.as_deref() == Some(para_id))
+            .collect::<Vec<_>>();
+        let [(index, projected_span)] = matches.as_slice() else {
+            bail!("cannot save paragraph {para_id}: projection identity is not unique");
+        };
+        let mut replacement = projected_document[projected_span.range.clone()].to_vec();
+        if synthetic_ids.contains(para_id) {
+            let value =
+                String::from_utf8(replacement).context("projected paragraph is not UTF-8")?;
+            let attribute = format!(" w14:paraId=\"{para_id}\"");
+            if !value.contains(&attribute) {
+                bail!("cannot remove synthetic paragraph identity {para_id}");
+            }
+            replacement = value.replacen(&attribute, "", 1).into_bytes();
+        }
+        replacements.push((original_spans[*index].range.clone(), replacement));
+    }
+    replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    for (range, replacement) in replacements {
+        original_document.splice(range, replacement);
+    }
+    ooxml_opc::rezip_parts(&original_parts).map_err(anyhow::Error::msg)
+}
+
+fn paragraph_xml_spans(xml: &[u8]) -> Result<Vec<ParagraphXmlSpan>> {
+    let mut spans = Vec::new();
+    let mut open = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = xml[cursor..].iter().position(|byte| *byte == b'<') {
+        let start = cursor + relative;
+        if xml[start..].starts_with(b"<!--") {
+            cursor = find_xml_bytes(xml, start + 4, b"-->")?
+                .checked_add(3)
+                .context("XML comment position overflow")?;
+            continue;
+        }
+        if xml[start..].starts_with(b"<![CDATA[") {
+            cursor = find_xml_bytes(xml, start + 9, b"]]>")?
+                .checked_add(3)
+                .context("XML CDATA position overflow")?;
+            continue;
+        }
+        let end = xml_tag_end(xml, start)?;
+        let tag = &xml[start..=end];
+        if is_open_paragraph_tag(tag) {
+            let para_id = paragraph_tag_id(tag);
+            if is_self_closing_tag(tag) {
+                spans.push(ParagraphXmlSpan {
+                    range: start..end + 1,
+                    para_id,
+                });
+            } else {
+                open.push((start, para_id));
+            }
+        } else if tag == b"</w:p>" {
+            let (paragraph_start, para_id) = open
+                .pop()
+                .context("word/document.xml has an unmatched paragraph close")?;
+            spans.push(ParagraphXmlSpan {
+                range: paragraph_start..end + 1,
+                para_id,
+            });
+        }
+        cursor = end + 1;
+    }
+    if !open.is_empty() {
+        bail!("word/document.xml has an unclosed paragraph");
+    }
+    spans.sort_unstable_by_key(|span| span.range.start);
+    Ok(spans)
+}
+
+fn find_xml_bytes(xml: &[u8], start: usize, needle: &[u8]) -> Result<usize> {
+    xml.get(start..)
+        .and_then(|tail| {
+            tail.windows(needle.len())
+                .position(|window| window == needle)
+        })
+        .map(|relative| start + relative)
+        .context("word/document.xml contains an unterminated XML section")
+}
+
+fn xml_tag_end(xml: &[u8], start: usize) -> Result<usize> {
+    let mut quote = None;
+    for (relative, byte) in xml[start + 1..].iter().copied().enumerate() {
+        match (quote, byte) {
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (Some(open), close) if open == close => quote = None,
+            (None, b'>') => return Ok(start + relative + 1),
+            _ => {}
+        }
+    }
+    bail!("word/document.xml contains an unterminated tag")
+}
+
+fn is_open_paragraph_tag(tag: &[u8]) -> bool {
+    tag.starts_with(b"<w:p")
+        && matches!(
+            tag.get(4),
+            Some(b'>') | Some(b'/') | Some(b' ' | b'\t' | b'\r' | b'\n')
+        )
+}
+
+fn is_self_closing_tag(tag: &[u8]) -> bool {
+    tag[..tag.len().saturating_sub(1)]
+        .iter()
+        .rev()
+        .find(|byte| !byte.is_ascii_whitespace())
+        == Some(&b'/')
+}
+
+fn paragraph_tag_id(tag: &[u8]) -> Option<String> {
+    let needle = b"w14:paraId";
+    let start = tag
+        .windows(needle.len())
+        .position(|window| window == needle)?;
+    let mut cursor = start + needle.len();
+    while tag.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    if tag.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor += 1;
+    while tag.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    let quote = *tag.get(cursor)?;
+    if !matches!(quote, b'\'' | b'"') {
+        return None;
+    }
+    cursor += 1;
+    let end = tag[cursor..].iter().position(|byte| *byte == quote)? + cursor;
+    String::from_utf8(tag[cursor..end].to_vec()).ok()
 }
 
 fn common_utf16_edges(left: &str, right: &str) -> (u32, u32) {

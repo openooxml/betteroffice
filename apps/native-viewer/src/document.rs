@@ -24,6 +24,7 @@ pub struct DocumentView {
     pub source: PathBuf,
     pub reference: ReferenceDocument,
     pub pages: Vec<PageScene>,
+    pub max_texture_dimension_2d: u32,
 }
 
 pub enum ReferenceDocument {
@@ -221,20 +222,24 @@ impl DocumentView {
     }
 }
 
-pub fn load_document(path: &Path, sheet_index: usize) -> Result<DocumentView> {
+pub fn load_document(
+    path: &Path,
+    sheet_index: usize,
+    max_texture_dimension_2d: u32,
+) -> Result<DocumentView> {
     match DocumentFormat::from_path(path)? {
-        DocumentFormat::Docx => load_docx(path),
-        DocumentFormat::Xlsx => load_xlsx(path, sheet_index),
-        DocumentFormat::Pptx => load_pptx(path),
+        DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d),
+        DocumentFormat::Xlsx => load_xlsx(path, sheet_index, max_texture_dimension_2d),
+        DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d),
     }
 }
 
-fn load_pptx(path: &Path) -> Result<DocumentView> {
+fn load_pptx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read PPTX {}", path.display()))?;
     let presentation =
         Presentation::open(&bytes).with_context(|| format!("open PPTX {}", path.display()))?;
     let slide_count = presentation.slides().len();
-    let translation = translate_presentation(&presentation)?;
+    let translation = translate_presentation(&presentation, max_texture_dimension_2d)?;
     Ok(DocumentView {
         source: path.to_owned(),
         reference: ReferenceDocument::Pptx(PptxReference {
@@ -243,10 +248,11 @@ fn load_pptx(path: &Path) -> Result<DocumentView> {
             font_faces: translation.font_faces,
         }),
         pages: translation.pages,
+        max_texture_dimension_2d,
     })
 }
 
-fn load_docx(path: &Path) -> Result<DocumentView> {
+fn load_docx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read DOCX {}", path.display()))?;
     let parsed = parse_docx_s9_wire(&bytes, S9ParseOptions::default())?;
     let package = parsed.document.package;
@@ -285,10 +291,15 @@ fn load_docx(path: &Path) -> Result<DocumentView> {
             editor,
         })),
         pages,
+        max_texture_dimension_2d,
     })
 }
 
-fn load_xlsx(path: &Path, sheet_index: usize) -> Result<DocumentView> {
+fn load_xlsx(
+    path: &Path,
+    sheet_index: usize,
+    max_texture_dimension_2d: u32,
+) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read XLSX {}", path.display()))?;
     let workbook =
         Workbook::open_for_read(&bytes).with_context(|| format!("open XLSX {}", path.display()))?;
@@ -305,9 +316,18 @@ fn load_xlsx(path: &Path, sheet_index: usize) -> Result<DocumentView> {
     let viewport = viewport_for_used_range_within(sheet, |viewport| {
         viewport.width.is_finite()
             && viewport.height.is_finite()
-            && viewport.width.ceil() <= 16_384.0
-            && viewport.height.ceil() <= 16_384.0
+            && viewport.width.ceil() <= max_texture_dimension_2d as f32
+            && viewport.height.ceil() <= max_texture_dimension_2d as f32
     });
+    let requested_width = viewport.width.ceil();
+    let requested_height = viewport.height.ceil();
+    if requested_width > max_texture_dimension_2d as f32
+        || requested_height > max_texture_dimension_2d as f32
+    {
+        bail!(
+            "requested sheet size {requested_width:.0}x{requested_height:.0} exceeds GPU texture dimension ceiling {max_texture_dimension_2d}"
+        );
+    }
     let display_list = workbook.display_list_for(sheet_id, &viewport)?;
     let page = translate_sheet(&display_list)?;
     let chart_count = display_list.charts.len();
@@ -327,6 +347,7 @@ fn load_xlsx(path: &Path, sheet_index: usize) -> Result<DocumentView> {
             chart_placeholders,
         }),
         pages: vec![page],
+        max_texture_dimension_2d,
     })
 }
 
@@ -400,7 +421,7 @@ fn push_notes(target: &mut Vec<Value>, notes: Option<&[docx_parse::Note]>, note_
     for note in notes.unwrap_or_default() {
         if !note.is_separator() {
             target.push(json!({
-                "id": note.id,
+                "id": note.id as i64,
                 "noteKind": note_kind,
                 "height": 0
             }));
@@ -414,6 +435,7 @@ mod tests {
 
     use super::*;
     use crate::editing::TextLoc;
+    use crate::test_fixtures;
 
     static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -434,9 +456,107 @@ mod tests {
     }
 
     #[test]
+    fn opens_document_with_footnote_and_endnote_regions() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/docx-edit/tests/fixtures/footnote-anchor.docx");
+        let document = load_document(&path, 0, 8_192).unwrap();
+        assert!(!document.pages.is_empty());
+        assert!(
+            document
+                .pages
+                .iter()
+                .any(|page| !page.scene.encoding().is_empty())
+        );
+    }
+
+    #[test]
+    fn preserves_untouched_complex_paragraph_and_refuses_editing_it() {
+        let source_bytes = test_fixtures::complex_docx();
+        let complex_before = test_fixtures::paragraph(&source_bytes, "11111111");
+        let source = test_fixtures::write_docx("complex-save", &source_bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "22222222".to_owned(),
+                    offset: 15,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_insert_text(" edited").unwrap());
+        let output = test_fixtures::write_docx("complex-output", b"replace me");
+        document.save_docx_to(&output).unwrap();
+        let saved = fs::read(&output).unwrap();
+        assert_eq!(test_fixtures::paragraph(&saved, "11111111"), complex_before);
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        let ReferenceDocument::Docx(reference) = &reopened.reference else {
+            panic!("expected DOCX reference");
+        };
+        let paragraphs = reference.editor.engine().doc().paragraphs("body").unwrap();
+        assert_eq!(paragraphs[1].text, "Plain paragraph edited");
+
+        let mut complex_edit = load_document(&source, 0, 8_192).unwrap();
+        complex_edit
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 1,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(complex_edit.docx_insert_text("x").unwrap());
+        let refused = test_fixtures::write_docx("complex-refused", b"sentinel");
+        let error = complex_edit.save_docx_to(&refused).unwrap_err().to_string();
+        assert!(error.contains("paragraph 1 (11111111)"));
+        assert!(error.contains("hyperlinks"));
+        assert!(error.contains("note references"));
+        assert_eq!(fs::read(&refused).unwrap(), b"sentinel");
+
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+        fs::remove_file(refused).unwrap();
+    }
+
+    #[test]
+    fn translates_embedded_and_rotated_image_fixtures() {
+        for rotation in [None, Some(45.0)] {
+            let source = test_fixtures::write_docx("image", &test_fixtures::image_docx(rotation));
+            let document = load_document(&source, 0, 8_192).unwrap();
+            let ReferenceDocument::Docx(reference) = &document.reference else {
+                panic!("expected DOCX reference");
+            };
+            let image = reference
+                .display_list
+                .pages
+                .iter()
+                .flat_map(|page| &page.primitives)
+                .find_map(|primitive| match primitive {
+                    docx_layout::display_list::Primitive::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(image.rel_id.starts_with("data:image/png;base64,"));
+            assert_eq!(image.attrs.content_frame.is_some(), rotation.is_some());
+            assert_eq!(
+                document
+                    .pages
+                    .iter()
+                    .map(|page| page.skipped.total())
+                    .sum::<usize>(),
+                0
+            );
+            fs::remove_file(source).unwrap();
+        }
+    }
+
+    #[test]
     fn loads_showcase_with_native_chart_commands() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
-        let document = load_document(&path, 0).unwrap();
+        let document = load_document(&path, 0, 8_192).unwrap();
         let ReferenceDocument::Xlsx(reference) = &document.reference else {
             panic!("expected XLSX reference");
         };
@@ -447,10 +567,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_sheet_size_over_device_limit() {
+        let path = test_fixtures::write_xlsx("large", &test_fixtures::large_xlsx());
+        let error = load_document(&path, 0, 8_192).err().unwrap().to_string();
+        println!("{error}");
+        assert!(error.contains("requested sheet size"));
+        assert!(error.contains("ceiling 8192"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn loads_demo_presentation_and_audits_positioned_glyphs() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
-        let document = load_document(&path, 0).unwrap();
+        let document = load_document(&path, 0, 8_192).unwrap();
         let ReferenceDocument::Pptx(reference) = &document.reference else {
             panic!("expected PPTX reference");
         };
@@ -474,7 +604,7 @@ mod tests {
     fn translates_chart_fixture_sub_primitives() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../crates/pptx-parse/tests/fixtures/chart-deck.pptx");
-        let document = load_document(&path, 0).unwrap();
+        let document = load_document(&path, 0, 8_192).unwrap();
         let ReferenceDocument::Pptx(reference) = &document.reference else {
             panic!("expected PPTX reference");
         };
@@ -490,7 +620,7 @@ mod tests {
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.docx");
         let source_before = fs::read(&source).unwrap();
-        let mut document = load_document(&source, 0).unwrap();
+        let mut document = load_document(&source, 0, 8_192).unwrap();
         let (para_id, before, paragraph_count) = match &document.reference {
             ReferenceDocument::Docx(reference) => {
                 let paragraphs = reference.editor.engine().doc().paragraphs("body").unwrap();
@@ -530,7 +660,7 @@ mod tests {
             TEST_FILE_ID.fetch_add(1, Ordering::Relaxed)
         ));
         document.save_docx_to(&output).unwrap();
-        let reopened = load_document(&output, 0).unwrap();
+        let reopened = load_document(&output, 0, 8_192).unwrap();
         let (after, reopened_count) = match &reopened.reference {
             ReferenceDocument::Docx(reference) => {
                 let paragraphs = reference.editor.engine().doc().paragraphs("body").unwrap();
@@ -548,7 +678,7 @@ mod tests {
     fn applies_delete_and_enter_through_the_viewer_path() {
         let source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.docx");
-        let mut document = load_document(&source, 0).unwrap();
+        let mut document = load_document(&source, 0, 8_192).unwrap();
         let (para_id, paragraph_count) = match &document.reference {
             ReferenceDocument::Docx(reference) => {
                 let paragraphs = reference.editor.engine().doc().paragraphs("body").unwrap();
@@ -645,18 +775,10 @@ mod tests {
             std::process::id(),
             TEST_FILE_ID.fetch_add(1, Ordering::Relaxed)
         ));
-        document.save_docx_to(&output).unwrap();
-        let reopened = load_document(&output, 0).unwrap();
-        let reopened_paragraphs = match &reopened.reference {
-            ReferenceDocument::Docx(reference) => {
-                reference.editor.engine().doc().paragraphs("body").unwrap()
-            }
-            _ => panic!("expected DOCX reference"),
-        };
-        assert_eq!(reopened_paragraphs.len(), paragraph_count + 1);
-        assert_eq!(reopened_paragraphs[0].text, "Welcome");
-        assert_eq!(reopened_paragraphs[1].text, " to BetterOffice");
-        fs::remove_file(output).unwrap();
+        fs::write(&output, b"sentinel").unwrap();
+        let error = document.save_docx_to(&output).unwrap_err().to_string();
+        assert!(error.contains("cannot save DOCX structural edits"));
+        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
 
         assert!(document.docx_delete(DeleteDirection::Backward).unwrap());
         let paragraphs = match &document.reference {
@@ -667,5 +789,17 @@ mod tests {
         };
         assert_eq!(paragraphs.len(), paragraph_count);
         assert_eq!(paragraphs[0].text, "Welcome to BetterOffice");
+
+        document.save_docx_to(&output).unwrap();
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        let reopened_paragraphs = match &reopened.reference {
+            ReferenceDocument::Docx(reference) => {
+                reference.editor.engine().doc().paragraphs("body").unwrap()
+            }
+            _ => panic!("expected DOCX reference"),
+        };
+        assert_eq!(reopened_paragraphs.len(), paragraph_count);
+        assert_eq!(reopened_paragraphs[0].text, "Welcome to BetterOffice");
+        fs::remove_file(output).unwrap();
     }
 }

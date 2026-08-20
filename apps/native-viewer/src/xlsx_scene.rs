@@ -185,6 +185,15 @@ impl PreparedLine {
         color: &str,
         style: &Option<String>,
     ) -> Result<Self, String> {
+        if !matches!(
+            style.as_deref(),
+            None | Some("solid" | "double" | "dashed" | "dotted")
+        ) {
+            return Err(format!(
+                "line style {} is not translated",
+                style.as_deref().unwrap_or_default()
+            ));
+        }
         Ok(Self {
             x1: finite(x1, "line x1")?,
             y1: finite(y1, "line y1")?,
@@ -244,7 +253,7 @@ impl PreparedLine {
                 with_dashes(Stroke::new(f64::from(self.width)), [1.0, 2.0]),
                 self.color,
             ),
-            _ => stroke_segment(
+            None | Some("solid") => stroke_segment(
                 scene,
                 self.x1,
                 self.y1,
@@ -253,6 +262,7 @@ impl PreparedLine {
                 Stroke::new(f64::from(self.width)),
                 self.color,
             ),
+            Some(_) => unreachable!(),
         }
     }
 }
@@ -760,6 +770,29 @@ mod tests {
                 .reasons
                 .keys()
                 .any(|reason| reason.contains("invalid XLSX color"))
+        );
+    }
+
+    #[test]
+    fn unknown_line_style_becomes_a_counted_placeholder() {
+        let page = translate_sheet(&display_list(vec![DrawCmd::Line {
+            x1: 2.0,
+            y1: 2.0,
+            x2: 20.0,
+            y2: 2.0,
+            width: 1.0,
+            color: "#000000".into(),
+            style: Some("future-style".into()),
+            clip: None,
+        }]))
+        .unwrap();
+        assert_eq!(page.skipped.total(), 1);
+        assert_eq!(page.skipped.counts.get("line"), Some(&1));
+        assert!(
+            page.skipped
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("future-style"))
         );
     }
 }
