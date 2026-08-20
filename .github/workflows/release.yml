@@ -173,7 +173,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - id: registry
-        run: echo "publish=$(node scripts/python-bindings.mjs --pending)" >> "$GITHUB_OUTPUT"
+        run: |
+          publish=$(node scripts/python-bindings.mjs --pending)
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
   # A PyPI Trusted Publisher is scoped to the file that runs the upload, and every
   # publisher here names publish-python-binding.yml, so the release dispatches that

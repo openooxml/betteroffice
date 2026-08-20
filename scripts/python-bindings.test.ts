@@ -144,6 +144,25 @@ describe('release wiring', () => {
     expect(PYTHON_PUBLISH_NAMES.filter((name) => pending.includes(name))).toEqual(pending);
   });
 
+  test('a registry lookup failure fails the step instead of publishing nothing', () => {
+    const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
+    const directory = mkdtempSync(join(tmpdir(), 'registry-fail-'));
+    writeFileSync(join(directory, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const path = join(directory, 'registry.sh');
+    writeFileSync(path, step.run);
+    const result = spawnSync('bash', ['-e', path], {
+      encoding: 'utf8',
+      cwd: repository,
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        GITHUB_OUTPUT: join(directory, 'outputs')
+      }
+    });
+
+    expect(result.status).not.toBe(0);
+  });
+
   test('the release train exposes the publish list', () => {
     expect(release.jobs['python-bindings'].outputs).toEqual({
       publish: '${{ steps.registry.outputs.publish }}'
