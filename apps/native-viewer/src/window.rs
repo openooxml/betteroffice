@@ -19,18 +19,15 @@ const PAGE_GAP: f64 = 24.0;
 
 pub fn run(document: DocumentView) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
+        let label = document.scene_label(index);
         println!(
-            "page {} skipped Vello primitives: {} {:?}",
-            index + 1,
+            "{label} skipped Vello {}: {} {:?}",
+            document.display_item_name(),
             page.skipped.total(),
             page.skipped.counts
         );
         if !page.skipped.reasons.is_empty() {
-            println!(
-                "page {} skip reasons: {:?}",
-                index + 1,
-                page.skipped.reasons
-            );
+            println!("{label} skip reasons: {:?}", page.skipped.reasons);
         }
     }
     let event_loop = EventLoop::new()?;
@@ -246,7 +243,7 @@ impl Viewer {
             .source
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("document.docx");
+            .unwrap_or("document");
         let skipped = self
             .document
             .pages
@@ -254,8 +251,8 @@ impl Viewer {
             .map(|page| page.skipped.total())
             .sum::<usize>();
         window.set_title(&format!(
-            "{name} — {} pages — {:.0}% — {skipped} skipped",
-            self.document.pages.len(),
+            "{name} — {} — {:.0}% — {skipped} skipped",
+            self.document.title_summary(),
             self.zoom * 100.0
         ));
     }

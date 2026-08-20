@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 anyhow = "=1.0.104"
+betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx", default-features = false }
 docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit" }
 docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout" }
 docx-parse = { package = "betteroffice-docx-parse", path = "../../crates/docx-parse", default-features = false }
@@ -17,7 +18,10 @@ image = { version = "=0.25.10", default-features = false, features = ["bmp", "gi
 ooxml-opc = { package = "betteroffice-opc", path = "../../crates/ooxml-opc", default-features = false }
 ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text" }
 pollster = "=0.4.0"
+rustybuzz = "=0.20.1"
 serde_json = "=1.0.151"
 vello = "=0.10.0"
 wgpu = "=29.0.3"
 winit = "=0.30.13"
+xlsx-raster = { package = "betteroffice-xlsx-raster", path = "../../crates/xlsx-raster" }
+xlsx-render = { package = "betteroffice-xlsx-render", path = "../../crates/xlsx-render" }

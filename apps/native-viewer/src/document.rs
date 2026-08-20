@@ -2,25 +2,104 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use betteroffice_xlsx::{SheetId, Workbook, viewport_for_used_range_within};
 use docx_edit::{EngineSession, seed_from_docx};
 use docx_layout::display_list::DisplayList;
 use docx_parse::{S9PackageWire, S9ParseOptions, parse_docx_s9_wire};
 use serde_json::{Value, json};
 
+use crate::docx_scene::translate_document;
 use crate::fonts::FontRegistry;
 use crate::images::ImageRegistry;
-use crate::scene::{PageScene, translate_document};
+use crate::scene_shared::PageScene;
+use crate::xlsx_scene::translate_sheet;
 
 pub struct DocumentView {
     pub source: PathBuf,
-    pub display_list: DisplayList,
-    pub fonts: FontRegistry,
-    pub images: ImageRegistry,
+    pub reference: ReferenceDocument,
     pub pages: Vec<PageScene>,
 }
 
-pub fn load_document(path: &Path) -> Result<DocumentView> {
+pub enum ReferenceDocument {
+    Docx(DocxReference),
+    Xlsx(XlsxReference),
+}
+
+pub struct DocxReference {
+    pub display_list: DisplayList,
+    pub fonts: FontRegistry,
+    pub images: ImageRegistry,
+}
+
+pub struct XlsxReference {
+    pub display_list: xlsx_render::DisplayList,
+    pub sheet_index: usize,
+    pub sheet_count: usize,
+    pub sheet_name: String,
+    pub chart_count: usize,
+    pub chart_placeholders: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentFormat {
+    Docx,
+    Xlsx,
+}
+
+impl DocumentFormat {
+    pub fn from_path(path: &Path) -> Result<Self> {
+        match path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("docx") => Ok(Self::Docx),
+            Some("xlsx") => Ok(Self::Xlsx),
+            _ => bail!("--document must be a .docx or .xlsx file"),
+        }
+    }
+}
+
+impl DocumentView {
+    pub fn scene_label(&self, index: usize) -> String {
+        match &self.reference {
+            ReferenceDocument::Docx(_) => format!("page {}", index + 1),
+            ReferenceDocument::Xlsx(reference) => {
+                format!("sheet {}", reference.sheet_index + 1)
+            }
+        }
+    }
+
+    pub fn title_summary(&self) -> String {
+        match &self.reference {
+            ReferenceDocument::Docx(_) => format!("{} pages", self.pages.len()),
+            ReferenceDocument::Xlsx(reference) => format!(
+                "sheet {} of {} ({})",
+                reference.sheet_index + 1,
+                reference.sheet_count,
+                reference.sheet_name
+            ),
+        }
+    }
+
+    pub fn display_item_name(&self) -> &'static str {
+        match &self.reference {
+            ReferenceDocument::Docx(_) => "primitives",
+            ReferenceDocument::Xlsx(_) => "commands",
+        }
+    }
+}
+
+pub fn load_document(path: &Path, sheet_index: usize) -> Result<DocumentView> {
+    match DocumentFormat::from_path(path)? {
+        DocumentFormat::Docx => load_docx(path),
+        DocumentFormat::Xlsx => load_xlsx(path, sheet_index),
+    }
+}
+
+fn load_docx(path: &Path) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read DOCX {}", path.display()))?;
     let parsed = parse_docx_s9_wire(&bytes, S9ParseOptions::default())?;
     let engine = EngineSession::new(0x0056_454c_4c4f);
@@ -50,10 +129,54 @@ pub fn load_document(path: &Path) -> Result<DocumentView> {
     let pages = translate_document(&display_list, &fonts, &images)?;
     Ok(DocumentView {
         source: path.to_owned(),
-        display_list,
-        fonts,
-        images,
+        reference: ReferenceDocument::Docx(DocxReference {
+            display_list,
+            fonts,
+            images,
+        }),
         pages,
+    })
+}
+
+fn load_xlsx(path: &Path, sheet_index: usize) -> Result<DocumentView> {
+    let bytes = fs::read(path).with_context(|| format!("read XLSX {}", path.display()))?;
+    let workbook =
+        Workbook::open_for_read(&bytes).with_context(|| format!("open XLSX {}", path.display()))?;
+    let sheet_count = workbook.sheet_count();
+    if sheet_index >= sheet_count {
+        bail!(
+            "sheet {} is out of range for a workbook with {sheet_count} sheets",
+            sheet_index + 1
+        );
+    }
+    let sheet_id = SheetId(u32::try_from(sheet_index).context("sheet index is too large")?);
+    let sheet = workbook.sheet(sheet_id)?;
+    let sheet_name = sheet.name.clone();
+    let viewport = viewport_for_used_range_within(sheet, |viewport| {
+        viewport.width.is_finite()
+            && viewport.height.is_finite()
+            && viewport.width.ceil() <= 16_384.0
+            && viewport.height.ceil() <= 16_384.0
+    });
+    let display_list = workbook.display_list_for(sheet_id, &viewport)?;
+    let page = translate_sheet(&display_list)?;
+    let chart_count = display_list.charts.len();
+    let chart_placeholders = display_list
+        .charts
+        .iter()
+        .filter(|chart| chart.placeholder)
+        .count();
+    Ok(DocumentView {
+        source: path.to_owned(),
+        reference: ReferenceDocument::Xlsx(XlsxReference {
+            display_list,
+            sheet_index,
+            sheet_count,
+            sheet_name,
+            chart_count,
+            chart_placeholders,
+        }),
+        pages: vec![page],
     })
 }
 
@@ -132,5 +255,36 @@ fn push_notes(target: &mut Vec<Value>, notes: Option<&[docx_parse::Note]>, note_
                 "height": 0
             }));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_supported_extensions() {
+        assert_eq!(
+            DocumentFormat::from_path(Path::new("document.DOCX")).unwrap(),
+            DocumentFormat::Docx
+        );
+        assert_eq!(
+            DocumentFormat::from_path(Path::new("workbook.XLSX")).unwrap(),
+            DocumentFormat::Xlsx
+        );
+        assert!(DocumentFormat::from_path(Path::new("slides.pptx")).is_err());
+    }
+
+    #[test]
+    fn loads_showcase_with_native_chart_commands() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let document = load_document(&path, 0).unwrap();
+        let ReferenceDocument::Xlsx(reference) = &document.reference else {
+            panic!("expected XLSX reference");
+        };
+        assert_eq!(reference.sheet_name, "Dashboard");
+        assert_eq!(reference.chart_count, 1);
+        assert_eq!(reference.chart_placeholders, 0);
+        assert_eq!(document.pages[0].skipped.total(), 0);
     }
 }

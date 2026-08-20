@@ -1,22 +1,28 @@
 mod document;
+#[path = "scene.rs"]
+mod docx_scene;
 mod fonts;
 mod gpu;
 mod images;
-mod scene;
+mod scene_shared;
 mod window;
+mod xlsx_scene;
 
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use document::load_document;
+use document::{DocumentFormat, load_document};
 
 fn main() -> Result<()> {
     let options = Options::parse()?;
-    let document = load_document(&options.document)?;
+    let format = DocumentFormat::from_path(&options.document)?;
+    let (page, sheet) = options.selection(format)?;
+    let document = load_document(&options.document, sheet)?;
     if let Some(output) = options.png {
-        gpu::render_comparison(&document, options.page, &output, options.scale)?;
+        gpu::render_comparison(&document, page, &output, options.scale)?;
     } else {
         window::run(document)?;
     }
@@ -26,17 +32,23 @@ fn main() -> Result<()> {
 struct Options {
     document: PathBuf,
     png: Option<PathBuf>,
-    page: usize,
+    page: Option<usize>,
+    sheet: Option<usize>,
     scale: f64,
 }
 
 impl Options {
     fn parse() -> Result<Self> {
+        Self::parse_from(env::args_os().skip(1))
+    }
+
+    fn parse_from(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut document = default_document();
         let mut png = None;
-        let mut page = 1usize;
+        let mut page = None;
+        let mut sheet = None;
         let mut scale = 1.0f64;
-        let mut args = env::args_os().skip(1);
+        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--document") => {
@@ -53,15 +65,10 @@ impl Options {
                     );
                 }
                 Some("--page") => {
-                    page = args
-                        .next()
-                        .and_then(|value| value.into_string().ok())
-                        .context("--page needs a number")?
-                        .parse()
-                        .context("invalid --page value")?;
-                    if page == 0 {
-                        bail!("--page is one-based");
-                    }
+                    page = Some(one_based_index(args.next(), "--page")?);
+                }
+                Some("--sheet") => {
+                    sheet = Some(one_based_index(args.next(), "--sheet")?);
                 }
                 Some("--scale") => {
                     scale = args
@@ -76,7 +83,7 @@ impl Options {
                 }
                 Some("--help" | "-h") => {
                     println!(
-                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N] [--scale N]"
+                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N] [--scale N]"
                     );
                     std::process::exit(0);
                 }
@@ -86,12 +93,76 @@ impl Options {
         Ok(Self {
             document,
             png,
-            page: page - 1,
+            page,
+            sheet,
             scale,
         })
     }
+
+    fn selection(&self, format: DocumentFormat) -> Result<(usize, usize)> {
+        match format {
+            DocumentFormat::Docx => {
+                if self.sheet.is_some() {
+                    bail!("--sheet is XLSX-only");
+                }
+                Ok((self.page.unwrap_or(0), 0))
+            }
+            DocumentFormat::Xlsx => {
+                if self.page.is_some() {
+                    bail!("--page is DOCX-only");
+                }
+                Ok((0, self.sheet.unwrap_or(0)))
+            }
+        }
+    }
+}
+
+fn one_based_index(value: Option<OsString>, flag: &str) -> Result<usize> {
+    let value = value
+        .and_then(|value| value.into_string().ok())
+        .with_context(|| format!("{flag} needs a number"))?;
+    let value = value
+        .parse::<usize>()
+        .with_context(|| format!("invalid {flag} value"))?;
+    if value == 0 {
+        bail!("{flag} is one-based");
+    }
+    Ok(value - 1)
 }
 
 fn default_document() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.docx")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selectors_are_one_based_and_format_specific() {
+        let xlsx = Options::parse_from([
+            "--document".into(),
+            "book.xlsx".into(),
+            "--sheet".into(),
+            "2".into(),
+        ])
+        .unwrap();
+        assert_eq!(xlsx.selection(DocumentFormat::Xlsx).unwrap(), (0, 1));
+        assert!(xlsx.selection(DocumentFormat::Docx).is_err());
+
+        let docx = Options::parse_from([
+            "--document".into(),
+            "document.docx".into(),
+            "--page".into(),
+            "3".into(),
+        ])
+        .unwrap();
+        assert_eq!(docx.selection(DocumentFormat::Docx).unwrap(), (2, 0));
+        assert!(docx.selection(DocumentFormat::Xlsx).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_sheet() {
+        assert!(Options::parse_from(["--sheet".into(), "0".into()]).is_err());
+    }
 }

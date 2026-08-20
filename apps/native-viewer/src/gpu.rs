@@ -10,7 +10,8 @@ use vello::peniko::Color;
 use vello::util::RenderContext;
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
 
-use crate::document::DocumentView;
+use crate::document::{DocumentView, ReferenceDocument};
+use crate::scene_shared::PageScene;
 
 const DIFFERENCE_THRESHOLD: u8 = 8;
 
@@ -35,34 +36,66 @@ pub fn render_comparison(
     )
     .with_context(|| format!("write Vello PNG {}", output.display()))?;
 
-    let resources = RenderResources::new(
-        &document.fonts.store,
-        &document.fonts.chains,
-        &document.images.raw,
-    );
-    let raster = docx_raster::render_page(&document.display_list, page_index, &resources)
-        .map_err(anyhow::Error::msg)?;
+    let (raster_bytes, skipped_raster_images) = match &document.reference {
+        ReferenceDocument::Docx(reference) => {
+            let resources = RenderResources::new(
+                &reference.fonts.store,
+                &reference.fonts.chains,
+                &reference.images.raw,
+            );
+            let raster = docx_raster::render_page(&reference.display_list, page_index, &resources)
+                .map_err(anyhow::Error::msg)?;
+            (raster.bytes, Some(raster.skipped_images))
+        }
+        ReferenceDocument::Xlsx(reference) => (
+            xlsx_raster::render_png(&reference.display_list).map_err(anyhow::Error::msg)?,
+            None,
+        ),
+    };
     let reference_path = raster_path(output);
-    fs::write(&reference_path, &raster.bytes)
+    fs::write(&reference_path, &raster_bytes)
         .with_context(|| format!("write raster PNG {}", reference_path.display()))?;
-    let reference = image::load_from_memory_with_format(&raster.bytes, ImageFormat::Png)?;
+    let reference = image::load_from_memory_with_format(&raster_bytes, ImageFormat::Png)?;
     let metrics = compare(&rendered.rgba, rendered.width, rendered.height, reference)?;
 
     println!("document: {}", document.source.display());
-    println!("page: {} of {}", page_index + 1, document.pages.len());
-    println!("gpu: {}", rendered.adapter);
-    println!("font requirements: {:?}", document.fonts.requirements);
+    match &document.reference {
+        ReferenceDocument::Docx(reference) => {
+            println!("page: {} of {}", page_index + 1, document.pages.len());
+            println!("gpu: {}", rendered.adapter);
+            println!("font requirements: {:?}", reference.fonts.requirements);
+        }
+        ReferenceDocument::Xlsx(reference) => {
+            println!(
+                "sheet: {} of {} ({})",
+                reference.sheet_index + 1,
+                reference.sheet_count,
+                reference.sheet_name
+            );
+            println!("gpu: {}", rendered.adapter);
+            println!(
+                "charts: {}, placeholders: {}",
+                reference.chart_count, reference.chart_placeholders
+            );
+        }
+    }
     println!("vello PNG: {}", output.display());
     println!("raster PNG: {}", reference_path.display());
+    let skipped_label = match &document.reference {
+        ReferenceDocument::Docx(_) => "primitives",
+        ReferenceDocument::Xlsx(_) => "commands",
+    };
     println!(
-        "skipped Vello primitives: {} {:?}",
+        "skipped Vello {skipped_label}: {} {:?}",
         page.skipped.total(),
         page.skipped.counts
     );
     if !page.skipped.reasons.is_empty() {
         println!("skip reasons: {:?}", page.skipped.reasons);
     }
-    println!("skipped raster images: {}", raster.skipped_images);
+    if let Some(skipped_images) = skipped_raster_images {
+        println!("skipped raster images: {skipped_images}");
+    }
     println!(
         "mean absolute difference RGBA: {:.4}, {:.4}, {:.4}, {:.4}",
         metrics.mean[0], metrics.mean[1], metrics.mean[2], metrics.mean[3]
@@ -82,7 +115,7 @@ struct GpuImage {
     adapter: String,
 }
 
-fn render_page_gpu(page: &crate::scene::PageScene, scale: f64) -> Result<GpuImage> {
+fn render_page_gpu(page: &PageScene, scale: f64) -> Result<GpuImage> {
     let width = scaled_dimension(page.width, scale)?;
     let height = scaled_dimension(page.height, scale)?;
     let mut scene = Scene::new();

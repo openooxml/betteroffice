@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result};
 use docx_layout::display_list::{
     DisplayBorderStyle, DisplayList, DisplayPage, DocAttrs, GlyphRunPrimitive, ImagePrimitive,
@@ -9,35 +7,14 @@ use docx_layout::display_list::{
 use docx_raster::{ImageScope, NoteKind};
 use serde_json::Number;
 use vello::kurbo::{Affine, BezPath, Line, Rect, Stroke};
-use vello::peniko::{Color, Fill, ImageBrush};
+use vello::peniko::{Fill, ImageBrush};
 use vello::{Glyph, Scene};
 
 use crate::fonts::FontRegistry;
 use crate::images::ImageRegistry;
-
-#[derive(Default)]
-pub struct SkipStats {
-    pub counts: BTreeMap<String, usize>,
-    pub reasons: BTreeMap<String, usize>,
-}
-
-impl SkipStats {
-    pub fn total(&self) -> usize {
-        self.counts.values().sum()
-    }
-
-    fn record(&mut self, kind: &str, reason: String) {
-        *self.counts.entry(kind.to_owned()).or_default() += 1;
-        *self.reasons.entry(reason).or_default() += 1;
-    }
-}
-
-pub struct PageScene {
-    pub scene: Scene,
-    pub width: f64,
-    pub height: f64,
-    pub skipped: SkipStats,
-}
+use crate::scene_shared::{
+    PageScene, SkipStats, color, draw_placeholder, with_clip_layers, with_dashes,
+};
 
 pub fn translate_document(
     display_list: &DisplayList,
@@ -173,34 +150,31 @@ fn translate_primitive(
 ) -> Result<(), String> {
     validate_visual_fields(primitive)?;
     let attrs = primitive_attrs(primitive);
-    let mut layers = 0usize;
+    let mut layers = Vec::with_capacity(2);
     if let Some(clip) = attrs
         .clip_group
         .as_ref()
         .and_then(|group| group.clip.as_ref())
     {
         let rect = clip_rect(clip, page_width, page_height)?;
-        scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
-        layers += 1;
+        layers.push((Affine::IDENTITY, rect));
     }
     match primitive {
         Primitive::Text(run) => {
             if let Some(clip) = &run.paint_clip {
                 let rect = text_clip_rect(clip, page_width, page_height)?;
-                scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
-                layers += 1;
+                layers.push((Affine::IDENTITY, rect));
             }
         }
         Primitive::GlyphRun(run) => {
             if let Some(clip) = &run.paint_clip {
                 let rect = text_clip_rect(clip, page_width, page_height)?;
-                scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &rect);
-                layers += 1;
+                layers.push((Affine::IDENTITY, rect));
             }
         }
         _ => {}
     }
-    let result = match primitive {
+    with_clip_layers(scene, &layers, |scene| match primitive {
         Primitive::Text(run) => draw_text(scene, run, fonts, primitive_opacity(primitive)?),
         Primitive::GlyphRun(run) => {
             draw_glyph_run(scene, run, fonts, primitive_opacity(primitive)?)
@@ -233,9 +207,9 @@ fn translate_primitive(
                 let thickness = rect.height().max(1.0);
                 let mut stroke = Stroke::new(thickness);
                 if decoration.dotted {
-                    stroke = stroke.with_dashes(0.0, [thickness, thickness * 2.0]);
+                    stroke = with_dashes(stroke, [thickness, thickness * 2.0]);
                 } else if decoration.dashed {
-                    stroke = stroke.with_dashes(0.0, [thickness * 2.0, thickness * 2.0]);
+                    stroke = with_dashes(stroke, [thickness * 2.0, thickness * 2.0]);
                 } else if let Some(style) = styled {
                     stroke = apply_border_dash(stroke, style, thickness)?;
                 }
@@ -258,11 +232,7 @@ fn translate_primitive(
             }
             Ok(())
         }
-    };
-    for _ in 0..layers {
-        scene.pop_layer();
-    }
-    result
+    })
 }
 
 fn draw_text(
@@ -369,7 +339,7 @@ fn draw_line(scene: &mut Scene, line: &LinePrimitive, opacity: f32) -> Result<()
     if let Some(dash) = &line.dash {
         let pattern = dash.iter().map(number).collect::<Result<Vec<_>, _>>()?;
         if !pattern.is_empty() {
-            stroke = stroke.with_dashes(0.0, pattern);
+            stroke = with_dashes(stroke, pattern);
         }
     } else if let Some(style) = line.border_style {
         stroke = apply_border_dash(stroke, style, width)?;
@@ -706,13 +676,14 @@ fn apply_border_dash(
     let dashed = [(width * 3.0).max(2.0), (width * 2.0).max(2.0)];
     match style {
         DisplayBorderStyle::Solid => Ok(stroke),
-        DisplayBorderStyle::Dotted => Ok(stroke.with_dashes(0.0, dotted)),
-        DisplayBorderStyle::Dashed => Ok(stroke.with_dashes(0.0, dashed)),
-        DisplayBorderStyle::DashDot => {
-            Ok(stroke.with_dashes(0.0, [dashed[0], dashed[1], width, dashed[1]]))
-        }
-        DisplayBorderStyle::DashDotDot => Ok(stroke.with_dashes(
-            0.0,
+        DisplayBorderStyle::Dotted => Ok(with_dashes(stroke, dotted)),
+        DisplayBorderStyle::Dashed => Ok(with_dashes(stroke, dashed)),
+        DisplayBorderStyle::DashDot => Ok(with_dashes(
+            stroke,
+            [dashed[0], dashed[1], width, dashed[1]],
+        )),
+        DisplayBorderStyle::DashDotDot => Ok(with_dashes(
+            stroke,
             [dashed[0], dashed[1], width, dashed[1], width, dashed[1]],
         )),
         other => Err(format!("line border style {other:?} is not translated")),
@@ -722,17 +693,20 @@ fn apply_border_dash(
 fn shape_dash(stroke: Stroke, name: Option<&str>, width: f64) -> Result<Stroke, String> {
     match name.unwrap_or("") {
         "" | "solid" => Ok(stroke),
-        "dot" | "dotted" | "sysDot" => {
-            Ok(stroke.with_dashes(0.0, [width.max(1.0), (width * 2.0).max(2.0)]))
-        }
-        "dash" | "dashed" | "dashSmallGap" | "sysDash" => {
-            Ok(stroke.with_dashes(0.0, [(width * 3.0).max(2.0), (width * 2.0).max(2.0)]))
-        }
-        "lgDash" | "dashLong" | "dashLongHeavy" => {
-            Ok(stroke.with_dashes(0.0, [(width * 6.0).max(4.0), (width * 2.0).max(2.0)]))
-        }
-        "dashDot" | "lgDashDot" | "sysDashDot" | "dashDotHeavy" => Ok(stroke.with_dashes(
-            0.0,
+        "dot" | "dotted" | "sysDot" => Ok(with_dashes(
+            stroke,
+            [width.max(1.0), (width * 2.0).max(2.0)],
+        )),
+        "dash" | "dashed" | "dashSmallGap" | "sysDash" => Ok(with_dashes(
+            stroke,
+            [(width * 3.0).max(2.0), (width * 2.0).max(2.0)],
+        )),
+        "lgDash" | "dashLong" | "dashLongHeavy" => Ok(with_dashes(
+            stroke,
+            [(width * 6.0).max(4.0), (width * 2.0).max(2.0)],
+        )),
+        "dashDot" | "lgDashDot" | "sysDashDot" | "dashDotHeavy" => Ok(with_dashes(
+            stroke,
             [
                 (width * 3.0).max(2.0),
                 (width * 2.0).max(2.0),
@@ -740,18 +714,17 @@ fn shape_dash(stroke: Stroke, name: Option<&str>, width: f64) -> Result<Stroke, 
                 (width * 2.0).max(2.0),
             ],
         )),
-        "dashDotDot" | "lgDashDotDot" | "sysDashDotDot" | "dashDotDotHeavy" => Ok(stroke
-            .with_dashes(
-                0.0,
-                [
-                    (width * 3.0).max(2.0),
-                    (width * 2.0).max(2.0),
-                    width,
-                    (width * 2.0).max(2.0),
-                    width,
-                    (width * 2.0).max(2.0),
-                ],
-            )),
+        "dashDotDot" | "lgDashDotDot" | "sysDashDotDot" | "dashDotDotHeavy" => Ok(with_dashes(
+            stroke,
+            [
+                (width * 3.0).max(2.0),
+                (width * 2.0).max(2.0),
+                width,
+                (width * 2.0).max(2.0),
+                width,
+                (width * 2.0).max(2.0),
+            ],
+        )),
         other => Err(format!("shape dash style {other} is not translated")),
     }
 }
@@ -859,45 +832,6 @@ fn glyph_bounds(run: &GlyphRunPrimitive) -> Result<Rect, String> {
     ))
 }
 
-fn draw_placeholder(scene: &mut Scene, bounds: Option<Rect>) {
-    let mut rect = bounds.unwrap_or_else(|| Rect::new(0.0, 0.0, 18.0, 18.0));
-    if rect.width() < 8.0 {
-        rect = Rect::new(
-            rect.x0 - 4.0,
-            rect.y0,
-            rect.x0 + 4.0,
-            rect.y1.max(rect.y0 + 8.0),
-        );
-    }
-    if rect.height() < 8.0 {
-        rect = Rect::new(rect.x0, rect.y0 - 4.0, rect.x1, rect.y0 + 4.0);
-    }
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::from_rgba8(255, 0, 255, 48),
-        None,
-        &rect,
-    );
-    let stroke = Stroke::new(1.5);
-    let magenta = Color::from_rgba8(255, 0, 255, 255);
-    scene.stroke(&stroke, Affine::IDENTITY, magenta, None, &rect);
-    scene.stroke(
-        &stroke,
-        Affine::IDENTITY,
-        magenta,
-        None,
-        &Line::new((rect.x0, rect.y0), (rect.x1, rect.y1)),
-    );
-    scene.stroke(
-        &stroke,
-        Affine::IDENTITY,
-        magenta,
-        None,
-        &Line::new((rect.x1, rect.y0), (rect.x0, rect.y1)),
-    );
-}
-
 fn rect_from_numbers(x: &Number, y: &Number, w: &Number, h: &Number) -> Result<Rect, String> {
     let x = number(x)?;
     let y = number(y)?;
@@ -953,96 +887,4 @@ fn finite_f32(value: f64, name: &str) -> Result<f32, String> {
         .is_finite()
         .then_some(value)
         .ok_or_else(|| format!("{name} is outside the Vello coordinate range"))
-}
-
-fn color(value: &str, opacity: f32) -> Result<Color, String> {
-    let (red, green, blue, alpha) = parse_color(value)?;
-    let alpha = (f32::from(alpha) * opacity.clamp(0.0, 1.0)).round() as u8;
-    Ok(Color::from_rgba8(red, green, blue, alpha))
-}
-
-fn parse_color(value: &str) -> Result<(u8, u8, u8, u8), String> {
-    if value.eq_ignore_ascii_case("transparent") {
-        return Ok((0, 0, 0, 0));
-    }
-    if let Some(hex) = value.strip_prefix('#') {
-        let expanded;
-        let hex = match hex.len() {
-            3 | 4 => {
-                expanded = hex
-                    .chars()
-                    .flat_map(|character| [character, character])
-                    .collect::<String>();
-                expanded.as_str()
-            }
-            6 | 8 => hex,
-            _ => return Err(format!("invalid color {value}")),
-        };
-        let byte = |index: usize| {
-            u8::from_str_radix(&hex[index..index + 2], 16)
-                .map_err(|_| format!("invalid color {value}"))
-        };
-        return Ok((
-            byte(0)?,
-            byte(2)?,
-            byte(4)?,
-            if hex.len() == 8 { byte(6)? } else { 255 },
-        ));
-    }
-    for (prefix, alpha) in [("rgba(", true), ("rgb(", false)] {
-        if let Some(body) = value
-            .strip_prefix(prefix)
-            .and_then(|body| body.strip_suffix(')'))
-        {
-            let parts = body.split(',').map(str::trim).collect::<Vec<_>>();
-            if parts.len() != if alpha { 4 } else { 3 } {
-                break;
-            }
-            let channel = |value: &str| -> Option<u8> {
-                if let Some(percent) = value.strip_suffix('%') {
-                    Some((percent.parse::<f32>().ok()?.clamp(0.0, 100.0) * 2.55).round() as u8)
-                } else {
-                    Some(value.parse::<f32>().ok()?.clamp(0.0, 255.0).round() as u8)
-                }
-            };
-            let alpha = if alpha {
-                if let Some(percent) = parts[3].strip_suffix('%') {
-                    (percent
-                        .parse::<f32>()
-                        .map_err(|_| format!("invalid color {value}"))?
-                        .clamp(0.0, 100.0)
-                        * 2.55)
-                        .round() as u8
-                } else {
-                    (parts[3]
-                        .parse::<f32>()
-                        .map_err(|_| format!("invalid color {value}"))?
-                        .clamp(0.0, 1.0)
-                        * 255.0)
-                        .round() as u8
-                }
-            } else {
-                255
-            };
-            return Ok((
-                channel(parts[0]).ok_or_else(|| format!("invalid color {value}"))?,
-                channel(parts[1]).ok_or_else(|| format!("invalid color {value}"))?,
-                channel(parts[2]).ok_or_else(|| format!("invalid color {value}"))?,
-                alpha,
-            ));
-        }
-    }
-    Err(format!("invalid color {value}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_display_list_colors() {
-        assert_eq!(parse_color("#369"), Ok((51, 102, 153, 255)));
-        assert_eq!(parse_color("rgba(10, 20, 30, 0.5)"), Ok((10, 20, 30, 128)));
-        assert!(parse_color("navy").is_err());
-    }
 }
