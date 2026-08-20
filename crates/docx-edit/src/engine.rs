@@ -593,9 +593,8 @@ impl EngineSession {
         }
     }
 
-    /// Internal editing surface for the wasm facade.
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
-    pub(crate) fn doc(&self) -> &EditingDoc {
+    /// Editing document.
+    pub fn doc(&self) -> &EditingDoc {
         &self.doc
     }
 
