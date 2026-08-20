@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_demo_presentation_and_audits_shaped_carets() {
+    fn loads_demo_presentation_and_audits_positioned_glyphs() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
         let document = load_document(&path, 0).unwrap();
@@ -333,16 +333,18 @@ mod tests {
         };
         assert_eq!(reference.slide_count, 3);
         assert_eq!(document.pages.len(), 3);
-        assert!(reference.summaries[0].shaping.glyph_runs > 0);
-        assert_eq!(reference.summaries[0].shaping.drifted_caret_stops, 0);
-        assert_eq!(reference.summaries[0].shaping.missing_caret_stops, 0);
+        for summary in &reference.summaries {
+            assert!(summary.glyph_audit.glyph_runs > 0);
+            assert_eq!(summary.glyph_audit.drifted_caret_stops, 0);
+            assert_eq!(summary.glyph_audit.missing_caret_stops, 0);
+            assert_eq!(summary.glyph_audit.drifted_widths, 0);
+        }
         assert_eq!(document.pages[0].skipped.total(), 0);
         assert_eq!(
             reference.summaries[0].structured(&document.pages[0].skipped)["primitives"]["image"]["translated"],
             1
         );
         assert_eq!(document.pages[1].skipped.counts["placeholder"], 1);
-        assert!(reference.summaries[2].shaping.drifted_caret_stops > 0);
     }
 
     #[test]
@@ -357,6 +359,6 @@ mod tests {
         let summary = reference.summaries[0].structured(&document.pages[0].skipped);
         assert_eq!(summary["primitives"]["chart"]["translated"], 1);
         assert_eq!(summary["primitives"]["placeholder"]["skipped"], 1);
-        assert!(reference.summaries[0].shaping.missing_caret_stops > 0);
+        assert!(reference.summaries[0].glyph_audit.missing_caret_stops > 0);
     }
 }

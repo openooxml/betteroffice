@@ -20,7 +20,7 @@ Render the second slide in the PPTX demo:
 cargo run --release -- --document ../demo/public/betteroffice-demo.pptx --slide 2 --png slide.png
 ```
 
-DOCX and XLSX write the requested PNG through Vello and a sibling `.raster.png` through the matching existing raster backend, then print image-difference metrics. PPTX has no raster backend, so it writes only the Vello PNG and prints a JSON summary with primitive translation counts, skip reasons, shaped glyph counts, and caret-stop drift.
+DOCX and XLSX write the requested PNG through Vello and a sibling `.raster.png` through the matching existing raster backend, then print image-difference metrics. PPTX has no raster backend, so it writes only the Vello PNG and prints a JSON summary with primitive translation counts, skip reasons, positioned-glyph counts, and a caret-stop audit.
 
 Use `--document FILE` and `--scale N` for any format. `--page N` selects a one-based DOCX page, `--sheet N` selects a one-based XLSX sheet, and `--slide N` selects a one-based PPTX slide. XLSX defaults to the selected sheet's used range and resolves supported charts from the workbook package. Every display-list item that cannot be translated is replaced by a magenta box and cross, counted by type, and reported with its reason.
 
@@ -36,4 +36,4 @@ The DOCX translation covers positioned glyph runs, fallback text shaping, rectan
 
 The XLSX translation covers fills, clipped solid/dashed/dotted/double lines, geometry paths, and Carlito-shaped text with alignment, synthetic bold/italic, highlight, underline, strike, and dashed underline. Font-family requests intentionally follow `xlsx-raster` and use its bundled Carlito fallback.
 
-The PPTX translation uses the slide layout engine and the same registered Arial-compatible faces for layout and native shaping. It covers positioned glyph runs, underline, normalized shape paths, solid and linear/radial gradient fills, dashed strokes, decoded package images, transforms, clipping, and chart sub-primitives. Rectangular/path gradients and semantic placeholder primitives remain explicit magenta skips.
+The PPTX translation uses the slide layout engine and replays its positioned glyphs with the registered Arial-compatible faces. It covers positioned glyph runs, underline, normalized shape paths, solid and linear/radial gradient fills, dashed strokes, decoded package images, transforms, clipping, and chart sub-primitives. Rectangular/path gradients and semantic placeholder primitives remain explicit magenta skips.

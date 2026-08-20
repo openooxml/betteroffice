@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use betteroffice_pptx::{
-    GradientType, Paint, PositionedTextLine, PositionedTextRun, PptxPackage, Presentation,
-    Primitive, Stroke as DisplayStroke, SurfaceDisplayList, Transform,
+    GradientType, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, PptxPackage,
+    Presentation, Primitive, Stroke as DisplayStroke, SurfaceDisplayList, Transform,
 };
 use ooxml_drawingml::GeometryPathCommand;
-use ooxml_text::{FontId, FontStore, ShapedGlyph, shape};
 use pptx_render::SlideRenderer;
 use serde_json::{Value, json};
 use vello::kurbo::{Affine, BezPath, Rect, Stroke};
@@ -41,7 +40,7 @@ pub struct PptxTranslation {
 #[derive(Default)]
 pub struct PptxSlideSummary {
     primitives: BTreeMap<String, PrimitiveCounts>,
-    pub shaping: ShapingSummary,
+    pub glyph_audit: GlyphAudit,
 }
 
 #[derive(Default)]
@@ -52,7 +51,7 @@ struct PrimitiveCounts {
 }
 
 #[derive(Default)]
-pub struct ShapingSummary {
+pub struct GlyphAudit {
     pub glyph_runs: usize,
     pub glyphs: usize,
     pub caret_stops_checked: usize,
@@ -119,17 +118,17 @@ impl PptxSlideSummary {
                 "skipped": skipped_total,
             },
             "skipReasons": &skipped.reasons,
-            "shaping": {
-                "glyphRuns": self.shaping.glyph_runs,
-                "glyphs": self.shaping.glyphs,
-                "caretStopsChecked": self.shaping.caret_stops_checked,
-                "missingCaretStops": self.shaping.missing_caret_stops,
-                "driftedCaretStops": self.shaping.drifted_caret_stops,
-                "maxCaretDriftPx": self.shaping.max_caret_drift_px,
-                "widthChecks": self.shaping.width_checks,
-                "driftedWidths": self.shaping.drifted_widths,
-                "maxWidthDriftPx": self.shaping.max_width_drift_px,
-                "driftSamples": &self.shaping.drift_samples,
+            "glyphAudit": {
+                "glyphRuns": self.glyph_audit.glyph_runs,
+                "glyphs": self.glyph_audit.glyphs,
+                "caretStopsChecked": self.glyph_audit.caret_stops_checked,
+                "missingCaretStops": self.glyph_audit.missing_caret_stops,
+                "driftedCaretStops": self.glyph_audit.drifted_caret_stops,
+                "maxCaretDriftPx": self.glyph_audit.max_caret_drift_px,
+                "widthChecks": self.glyph_audit.width_checks,
+                "driftedWidths": self.glyph_audit.drifted_widths,
+                "maxWidthDriftPx": self.glyph_audit.max_width_drift_px,
+                "driftSamples": &self.glyph_audit.drift_samples,
                 "tolerancePx": 0.05,
             },
         })
@@ -181,26 +180,18 @@ pub fn translate_presentation(presentation: &Presentation) -> Result<PptxTransla
 }
 
 struct PptxFonts {
-    store: FontStore,
     vello: HashMap<u32, FontData>,
     labels: Vec<String>,
 }
 
 impl PptxFonts {
     fn load(renderer: &mut SlideRenderer) -> Result<Self> {
-        let mut store = FontStore::new();
         let mut vello = HashMap::new();
         let mut labels = Vec::new();
         for &(family, bold, italic, bytes) in FONT_FACES {
             let layout_id = renderer
                 .register_font(family, bold, italic, bytes)
                 .with_context(|| format!("register PPTX layout font {family}"))?;
-            let shape_id = store
-                .register(bytes.to_vec())
-                .with_context(|| format!("register PPTX shaping font {family}"))?;
-            if layout_id != shape_id.to_u32() {
-                return Err(anyhow!("PPTX layout and shaping font ids diverged"));
-            }
             vello.insert(layout_id, FontData::new(Blob::from(bytes.to_vec()), 0));
             labels.push(format!(
                 "{family}{}{}",
@@ -208,11 +199,7 @@ impl PptxFonts {
                 if italic { " italic" } else { "" }
             ));
         }
-        Ok(Self {
-            store,
-            vello,
-            labels,
-        })
+        Ok(Self { vello, labels })
     }
 
     fn vello_face(&self, id: u32) -> Result<&FontData, String> {
@@ -547,7 +534,7 @@ impl Translator<'_> {
                 .draw_glyphs(&run.font)
                 .font_size(run.font_size_px)
                 .brush(run.color)
-                .transform(affine * Affine::translate((f64::from(run.x), f64::from(run.baseline))))
+                .transform(affine)
                 .draw(Fill::NonZero, run.glyphs.iter().copied());
             if run.underline && run.width > 0.0 {
                 let top = run.baseline + run.font_size_px * 0.08;
@@ -575,31 +562,15 @@ impl Translator<'_> {
         let width = nonnegative(run.width, "text run width")?;
         let font_size_px = positive(run.font_size_px, "text font size")?;
         let font = self.fonts.vello_face(run.font_id)?.clone();
-        let shaped = shape(
-            &self.fonts.store,
-            FontId::from_u32(run.font_id),
-            &run.text,
-            font_size_px,
-            &[],
-        )
-        .map_err(|error| format!("shape font {}: {error}", run.font_id))?;
-        let mut pen = 0.0f32;
-        let glyphs = shaped
+        let glyphs = run
+            .glyphs
             .iter()
-            .map(|glyph| {
-                let positioned = Glyph {
-                    id: glyph.glyph_id,
-                    x: pen + glyph.x_offset,
-                    y: -glyph.y_offset,
-                };
-                pen += glyph.x_advance;
-                positioned
-            })
-            .collect::<Vec<_>>();
-        self.summary.shaping.glyph_runs += 1;
-        self.summary.shaping.glyphs += glyphs.len();
-        self.check_width(run, pen);
-        self.check_carets(line, run, &shaped);
+            .map(prepare_positioned_glyph)
+            .collect::<Result<Vec<_>, String>>()?;
+        self.summary.glyph_audit.glyph_runs += 1;
+        self.summary.glyph_audit.glyphs += glyphs.len();
+        self.check_width(run);
+        self.check_carets(line, run);
         Ok(PreparedTextRun {
             font,
             font_size_px,
@@ -612,51 +583,49 @@ impl Translator<'_> {
         })
     }
 
-    fn check_width(&mut self, run: &PositionedTextRun, shaped_width: f32) {
-        let drift = (shaped_width - run.width).abs();
-        let shaping = &mut self.summary.shaping;
-        shaping.width_checks += 1;
-        shaping.max_width_drift_px = shaping.max_width_drift_px.max(drift);
+    fn check_width(&mut self, run: &PositionedTextRun) {
+        let glyph_width = run
+            .glyphs
+            .last()
+            .map_or(0.0, |glyph| glyph.x + glyph.advance - run.x);
+        let drift = (glyph_width - run.width).abs();
+        let audit = &mut self.summary.glyph_audit;
+        audit.width_checks += 1;
+        audit.max_width_drift_px = audit.max_width_drift_px.max(drift);
         if drift > CARET_DRIFT_TOLERANCE_PX {
-            shaping.drifted_widths += 1;
+            audit.drifted_widths += 1;
             push_drift_sample(
-                shaping,
+                audit,
                 format!(
-                    "run {}..{} {:?} width {:.4} vs shaped {:.4}",
+                    "run {}..{} {:?} width {:.4} vs glyph advances {:.4}",
                     run.start,
                     run.end,
                     text_sample(&run.text),
                     run.width,
-                    shaped_width
+                    glyph_width
                 ),
             );
         }
     }
 
-    fn check_carets(
-        &mut self,
-        line: &PositionedTextLine,
-        run: &PositionedTextRun,
-        shaped: &[ShapedGlyph],
-    ) {
-        let mut starts = shaped
+    fn check_carets(&mut self, line: &PositionedTextLine, run: &PositionedTextRun) {
+        let mut starts = run
+            .glyphs
             .iter()
-            .map(|glyph| glyph.cluster as usize)
-            .filter(|start| *start <= run.text.len() && run.text.is_char_boundary(*start))
+            .map(|glyph| glyph.cluster)
+            .filter(|start| *start >= run.start && *start < run.end)
             .collect::<Vec<_>>();
-        starts.push(0);
-        starts.push(run.text.len());
+        starts.push(run.start);
+        starts.push(run.end);
         starts.sort_unstable();
         starts.dedup();
         let mut expected = vec![(run.start, run.x)];
         let mut cursor = run.x;
         for pair in starts.windows(2) {
-            cursor += shaped
-                .iter()
-                .filter(|glyph| glyph.cluster as usize == pair[0])
-                .map(|glyph| glyph.x_advance)
-                .sum::<f32>();
-            expected.push((run.start + utf16_len(&run.text[..pair[1]]), cursor));
+            if let Some(glyph) = run.glyphs.iter().rfind(|glyph| glyph.cluster == pair[0]) {
+                cursor = glyph.x + glyph.advance;
+            }
+            expected.push((pair[1], cursor));
         }
         let mut largest_drift = None;
         for (position, expected_x) in expected {
@@ -670,15 +639,15 @@ impl Translator<'_> {
                         .total_cmp(&(right.x - expected_x).abs())
                 })
             else {
-                self.summary.shaping.missing_caret_stops += 1;
+                self.summary.glyph_audit.missing_caret_stops += 1;
                 continue;
             };
             let drift = (actual.x - expected_x).abs();
-            let shaping = &mut self.summary.shaping;
-            shaping.caret_stops_checked += 1;
-            shaping.max_caret_drift_px = shaping.max_caret_drift_px.max(drift);
+            let audit = &mut self.summary.glyph_audit;
+            audit.caret_stops_checked += 1;
+            audit.max_caret_drift_px = audit.max_caret_drift_px.max(drift);
             if drift > CARET_DRIFT_TOLERANCE_PX {
-                shaping.drifted_caret_stops += 1;
+                audit.drifted_caret_stops += 1;
                 if largest_drift
                     .as_ref()
                     .is_none_or(|(_, _, _, largest)| drift > *largest)
@@ -689,9 +658,9 @@ impl Translator<'_> {
         }
         if let Some((position, actual_x, expected_x, drift)) = largest_drift {
             push_drift_sample(
-                &mut self.summary.shaping,
+                &mut self.summary.glyph_audit,
                 format!(
-                    "run {}..{} {:?} caret {position} at {:.4} vs shaped {:.4} (drift {:.4})",
+                    "run {}..{} {:?} caret {position} at {:.4} vs glyphs {:.4} (drift {:.4})",
                     run.start,
                     run.end,
                     text_sample(&run.text),
@@ -943,9 +912,20 @@ fn primitive_kind(primitive: &Primitive) -> &'static str {
     }
 }
 
-fn push_drift_sample(shaping: &mut ShapingSummary, sample: String) {
-    if shaping.drift_samples.len() < 16 {
-        shaping.drift_samples.push(sample);
+fn prepare_positioned_glyph(glyph: &PositionedGlyph) -> Result<Glyph, String> {
+    let x = finite(glyph.x, "glyph x")?;
+    let x_offset = finite(glyph.x_offset, "glyph x offset")?;
+    finite(glyph.advance, "glyph advance")?;
+    Ok(Glyph {
+        id: glyph.glyph_id,
+        x: finite(x + x_offset, "positioned glyph x")?,
+        y: finite(glyph.y_offset, "glyph y offset")?,
+    })
+}
+
+fn push_drift_sample(audit: &mut GlyphAudit, sample: String) {
+    if audit.drift_samples.len() < 16 {
+        audit.drift_samples.push(sample);
     }
 }
 
@@ -985,10 +965,6 @@ fn positive(value: f32, label: &str) -> Result<f32, String> {
     } else {
         Err(format!("{label} is not positive"))
     }
-}
-
-fn utf16_len(value: &str) -> u32 {
-    value.encode_utf16().count() as u32
 }
 
 #[cfg(test)]
@@ -1051,7 +1027,6 @@ mod tests {
             }],
         };
         let fonts = PptxFonts {
-            store: FontStore::new(),
             vello: HashMap::new(),
             labels: Vec::new(),
         };
@@ -1079,5 +1054,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path.bounding_box(), Rect::new(10.0, 20.0, 40.0, 60.0));
+    }
+
+    #[test]
+    fn uses_display_list_glyph_positions() {
+        let glyph = prepare_positioned_glyph(&PositionedGlyph {
+            glyph_id: 42,
+            cluster: 3,
+            x: 12.0,
+            advance: 8.0,
+            x_offset: 1.5,
+            y_offset: 20.0,
+        })
+        .unwrap();
+        assert_eq!(glyph.id, 42);
+        assert_eq!((glyph.x, glyph.y), (13.5, 20.0));
     }
 }
