@@ -52,16 +52,22 @@ fn build_docx(paragraph_count: usize, sentences_per_paragraph: usize) -> Vec<u8>
     .expect("synthetic package zips")
 }
 
+/// Minimum of three runs: scheduler pauses only ever inflate a sample, so the
+/// minimum is a contention-robust estimate of the true cost.
 fn seed_time(paragraph_count: usize, sentences_per_paragraph: usize) -> Duration {
     let bytes = build_docx(paragraph_count, sentences_per_paragraph);
-    let doc = EditingDoc::new(7);
-    let start = Instant::now();
-    seed_from_docx(&doc, &bytes).expect("seed succeeds");
-    start.elapsed()
+    (0..3)
+        .map(|_| {
+            let doc = EditingDoc::new(7);
+            let start = Instant::now();
+            seed_from_docx(&doc, &bytes).expect("seed succeeds");
+            start.elapsed()
+        })
+        .min()
+        .unwrap()
 }
 
-/// A quadratic seed makes per-paragraph cost grow ~8x from 500 to 4000
-/// paragraphs; a linear one keeps it flat. 3x holds a wide margin both ways.
+/// Quadratic seeding grows per-paragraph cost ~8x from 500 to 4000 paragraphs.
 #[test]
 fn seeding_stays_linear_in_paragraph_count() {
     let mut per_paragraph = Vec::new();
@@ -81,8 +87,7 @@ fn seeding_stays_linear_in_paragraph_count() {
     );
 }
 
-/// The same character count must not get slower by being split into more
-/// paragraphs: 4000 one-sentence paragraphs vs 500 eight-sentence ones.
+/// Equal character count split into 8x the paragraphs cost ~40x before the fix.
 #[test]
 fn paragraph_heavy_shape_carries_no_penalty() {
     let many_paragraphs = seed_time(4000, 1).as_secs_f64();

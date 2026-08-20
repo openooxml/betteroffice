@@ -89,8 +89,8 @@ impl EditingDoc {
     }
 }
 
-/// Accumulates forward-moving story ops as one yrs delta so each block is
-/// walked once per run, instead of once per op via absolute-index resolution.
+/// Forward-moving ops batched into one yrs delta: a run walks each block once,
+/// where per-op absolute-index resolution walked O(index) and made seeding O(n²).
 struct DeltaRun {
     deltas: Vec<Delta<In>>,
     cursor: u32,
@@ -106,7 +106,6 @@ impl DeltaRun {
         }
     }
 
-    /// Applies the pending deltas and resets the cursor to the story start.
     fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) {
         if !self.deltas.is_empty() {
             story.apply_delta(txn, std::mem::take(&mut self.deltas));
@@ -353,8 +352,7 @@ mod tests {
             .collect()
     }
 
-    /// The pre-delta applier: absolute-index resolution per op. Kept verbatim
-    /// so the delta path can be proven equivalent to the layout it replaced.
+    /// The replaced per-op absolute-index applier, kept verbatim as the equivalence oracle.
     fn apply_raw_ops_legacy(
         doc: &EditingDoc,
         story_id: &str,
@@ -450,8 +448,7 @@ mod tests {
         ]
     }
 
-    /// A seed-shaped batch: the placeholder delete, then strictly appending
-    /// text runs with changing attributes, embeds, and a trailing comment.
+    /// What `seed_parsed_docx` emits: placeholder delete, appending inserts, trailing comment.
     fn seed_shaped_ops() -> Vec<RawOp> {
         let font = attrs(&[(
             "fontFamily",
