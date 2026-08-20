@@ -22,7 +22,9 @@ ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-t
 pollster = "=0.4.0"
 pptx-render = { package = "betteroffice-pptx-render", path = "../../crates/pptx-render" }
 rustybuzz = "=0.20.1"
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+sha2 = "=0.10.9"
 vello = "=0.10.0"
 wgpu = "=29.0.3"
 winit = "=0.30.13"

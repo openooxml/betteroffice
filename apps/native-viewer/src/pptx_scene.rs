@@ -305,6 +305,7 @@ fn translate_slide(
     }
     Ok((
         PageScene {
+            background: Scene::new(),
             scene: translator.scene,
             width,
             height,

@@ -1,6 +1,7 @@
 mod document;
 #[path = "scene.rs"]
 mod docx_scene;
+mod editing;
 mod fonts;
 mod gpu;
 mod images;

@@ -145,6 +145,7 @@ fn render_page_gpu(page: &PageScene, scale: f64) -> Result<GpuImage> {
     let width = scaled_dimension(page.width, scale)?;
     let height = scaled_dimension(page.height, scale)?;
     let mut scene = Scene::new();
+    scene.append(&page.background, Some(Affine::scale(scale)));
     scene.append(&page.scene, Some(Affine::scale(scale)));
     let mut context = RenderContext::new();
     let device_id = pollster::block_on(context.device(None)).context("no compatible GPU device")?;

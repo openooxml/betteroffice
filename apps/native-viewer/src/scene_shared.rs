@@ -22,6 +22,7 @@ impl SkipStats {
 }
 
 pub struct PageScene {
+    pub background: Scene,
     pub scene: Scene,
     pub width: f64,
     pub height: f64,

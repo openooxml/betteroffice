@@ -36,6 +36,7 @@ pub fn translate_sheet(display_list: &DisplayList) -> Result<PageScene> {
         translate_or_placeholder(&mut scene, command, &font, &mut skipped);
     }
     Ok(PageScene {
+        background: Scene::new(),
         scene,
         width,
         height,

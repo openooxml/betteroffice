@@ -28,22 +28,23 @@ pub fn translate_document(
         .collect()
 }
 
-fn translate_page(
+pub fn translate_page(
     page: &DisplayPage,
     fonts: &FontRegistry,
     images: &ImageRegistry,
 ) -> Result<PageScene> {
     let width = number(&page.width).map_err(anyhow::Error::msg)?;
     let height = number(&page.height).map_err(anyhow::Error::msg)?;
-    let mut scene = Scene::new();
+    let mut background_scene = Scene::new();
     let background = page.background.as_deref().unwrap_or("#ffffff");
-    scene.fill(
+    background_scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
         color(background, 1.0).map_err(anyhow::Error::msg)?,
         None,
         &Rect::new(0.0, 0.0, width, height),
     );
+    let mut scene = Scene::new();
     let mut skipped = SkipStats::default();
     for border in page
         .page_borders
@@ -106,6 +107,7 @@ fn translate_page(
         translate_border_or_placeholder(&mut scene, border, &mut skipped);
     }
     Ok(PageScene {
+        background: background_scene,
         scene,
         width,
         height,

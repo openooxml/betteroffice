@@ -30,7 +30,9 @@ Open the interactive viewer:
 cargo run --release
 ```
 
-Scroll vertically with the trackpad or mouse wheel. Hold Command or Control while scrolling to zoom, or use `+`, `-`, and `0`.
+Scroll vertically with the trackpad or mouse wheel. Hold Command or Control while scrolling to zoom. The read-only formats also accept `+`, `-`, and `0`; use Command or Control with those keys while editing DOCX.
+
+DOCX documents are editable in the window. Click or drag to place a caret or select text, Shift-click to extend a selection, and double-click to select a word. Arrow keys, Home, End, typing, Backspace, Delete, and Enter use the resident DOCX engine. Press Command-S or Control-S to save beside the input as `<name>-edited.docx`; the viewer reopens the saved file immediately. XLSX and PPTX remain read-only.
 
 The DOCX translation covers positioned glyph runs, fallback text shaping, rectangles, line and shape paths, scoped relationship images with crop/flip/rotation, and decorations. Advanced DrawingML effects and paint, filtered or framed images, secondary-color lines, and compound or wave borders remain explicit skips.
 
