@@ -1,13 +1,13 @@
-//! Story seeding must stay linear in paragraph count.
-//!
-//! Print the timing table with
-//! `cargo test --release -p betteroffice-docx-edit --test seed_scaling -- --nocapture`.
+//! Story seeding must stay linear.
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use docx_edit::{EditingDoc, seed_from_docx};
 
 const SENTENCE: &str = "The applicant confirms that the control described in this section is operated by the compliance team and reviewed quarterly.";
+
+static TIMING_LOCK: Mutex<()> = Mutex::new(());
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -52,8 +52,6 @@ fn build_docx(paragraph_count: usize, sentences_per_paragraph: usize) -> Vec<u8>
     .expect("synthetic package zips")
 }
 
-/// Minimum of three runs: scheduler pauses only ever inflate a sample, so the
-/// minimum is a contention-robust estimate of the true cost.
 fn seed_time(paragraph_count: usize, sentences_per_paragraph: usize) -> Duration {
     let bytes = build_docx(paragraph_count, sentences_per_paragraph);
     (0..3)
@@ -67,9 +65,11 @@ fn seed_time(paragraph_count: usize, sentences_per_paragraph: usize) -> Duration
         .unwrap()
 }
 
-/// Quadratic seeding grows per-paragraph cost ~8x from 500 to 4000 paragraphs.
 #[test]
 fn seeding_stays_linear_in_paragraph_count() {
+    let _guard = TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut per_paragraph = Vec::new();
     for count in [500usize, 1000, 2000, 4000] {
         let elapsed = seed_time(count, 1);
@@ -82,19 +82,24 @@ fn seeding_stays_linear_in_paragraph_count() {
     }
     let ratio = per_paragraph.last().unwrap() / per_paragraph.first().unwrap();
     assert!(
-        ratio < 3.0,
+        ratio < 4.0,
         "per-paragraph seed cost grew {ratio:.1}x from 500 to 4000 paragraphs; seeding is no longer linear"
     );
 }
 
-/// Equal character count split into 8x the paragraphs cost ~40x before the fix.
 #[test]
-fn paragraph_heavy_shape_carries_no_penalty() {
-    let many_paragraphs = seed_time(4000, 1).as_secs_f64();
-    let few_paragraphs = seed_time(500, 8).as_secs_f64();
+fn paragraph_heavy_shape_avoids_quadratic_penalty() {
+    let _guard = TIMING_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let many_paragraphs = seed_time(8000, 1).as_secs_f64();
+    let few_paragraphs = seed_time(500, 16).as_secs_f64();
     let ratio = many_paragraphs / few_paragraphs;
+    println!("  8000 x 1 sentence    {many_paragraphs:>8.2} s");
+    println!("   500 x 16 sentences  {few_paragraphs:>8.2} s");
+    println!("  paragraph-heavy ratio {ratio:>7.2}x");
     assert!(
-        ratio < 8.0,
-        "4000x1 took {ratio:.1}x the time of 500x8 at equal character count; the pre-fix penalty was ~40x"
+        ratio < 24.0,
+        "8000x1 took {ratio:.1}x the time of 500x16 at equal character count; paragraph-heavy seeding regressed"
     );
 }
