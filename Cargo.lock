@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-fidelity"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "quick-xml",
  "serde_json",

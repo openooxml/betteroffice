@@ -31,6 +31,9 @@ pub struct StoryDigest {
     pub part: String,
     pub blocks: Vec<BlockRecord>,
     pub structure: Vec<String>,
+    /// True for parts whose entries carry no authored order (relationships,
+    /// content types): structure compares as a set, not pairwise.
+    pub unordered: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +147,19 @@ fn diff_story(part: &str, before: &StoryDigest, after: &StoryDigest, out: &mut V
             out,
         );
     }
+    if before.unordered || after.unordered {
+        let before_set: std::collections::BTreeSet<&str> =
+            before.structure.iter().map(String::as_str).collect();
+        let after_set: std::collections::BTreeSet<&str> =
+            after.structure.iter().map(String::as_str).collect();
+        for line in before_set.difference(&after_set) {
+            out.push(difference(&format!("{part} entry"), line, "absent"));
+        }
+        for line in after_set.difference(&before_set) {
+            out.push(difference(&format!("{part} entry"), "absent", line));
+        }
+        return;
+    }
     let lines = before.structure.len().max(after.structure.len());
     for index in 0..lines {
         let b = before.structure.get(index).map(String::as_str);
@@ -206,15 +222,25 @@ fn digest_part(part: &str, root: &XmlElement) -> StoryDigest {
     } else {
         root
     };
-    collect_blocks(container, "", &mut state, 0);
-    // Relationship and content-type entries carry no authored order.
-    if root.is(PACKAGE_RELATIONSHIPS, "Relationships") || root.is(CONTENT_TYPES, "Types") {
+    // Relationship and content-type entries carry no authored order, so they
+    // digest as an identity set: entry tokens without positions, sorted (the
+    // declared "relationship-and-content-type-order" normalization).
+    let unordered =
+        root.is(PACKAGE_RELATIONSHIPS, "Relationships") || root.is(CONTENT_TYPES, "Types");
+    if unordered {
+        state.structure = container
+            .element_children()
+            .map(element_token)
+            .collect::<Vec<_>>();
         state.structure.sort_unstable();
+    } else {
+        collect_blocks(container, "", &mut state, 0);
     }
     StoryDigest {
         part: part.to_owned(),
         blocks: state.blocks,
         structure: state.structure,
+        unordered,
     }
 }
 

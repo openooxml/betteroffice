@@ -11,13 +11,17 @@ mod census;
 mod error;
 mod fingerprint;
 mod registry;
+mod report;
 pub mod wml;
 mod xml;
 
 pub use census::{Census, Loss, element_census, losses};
 pub use error::FidelityError;
-pub use fingerprint::{short_fingerprint, structural_fingerprint};
+pub use fingerprint::{
+    short_fingerprint, structural_fingerprint, structural_fingerprint_excluding,
+};
 pub use registry::{ComparisonMode, DECLARED_NORMALIZATIONS, Normalization, comparison_mode};
+pub use report::roundtrip_findings;
 pub use xml::{XML_NAMESPACE, XmlAttribute, XmlElement, XmlLimits, XmlNode, parse_part};
 
 /// True when a part name denotes an XML part the oracles read.

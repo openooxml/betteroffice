@@ -35,6 +35,34 @@ pub fn comparison_mode(artifact: &str) -> Result<ComparisonMode, FidelityError> 
         .ok_or_else(|| FidelityError::UnknownArtifact(artifact.to_owned()))
 }
 
+/// The XML parts the engine re-emits from its model. Every other XML part is
+/// unmodelled: byte rule 2 holds it to identical bytes through save, so a part
+/// the engine starts rewriting must be declared here in the same change.
+pub const MODELLED_XML_PARTS: &[&str] = &[
+    "[Content_Types].xml",
+    "docProps/core.xml",
+    "word/comments.xml",
+    "word/commentsExtended.xml",
+    "word/commentsExtensible.xml",
+    "word/commentsIds.xml",
+    "word/document.xml",
+    "word/endnotes.xml",
+    "word/footnotes.xml",
+    "word/numbering.xml",
+];
+
+/// Header and footer parts carry a serial number, so they match by stem.
+const MODELLED_STORY_STEMS: &[&str] = &["word/header", "word/footer"];
+
+/// True when the engine re-emits this XML part from its model.
+pub fn is_modelled_xml_part(name: &str) -> bool {
+    name.ends_with(".rels")
+        || MODELLED_XML_PARTS.contains(&name)
+        || MODELLED_STORY_STEMS
+            .iter()
+            .any(|stem| name.starts_with(stem))
+}
+
 /// One intentional serializer deviation from input XML, reviewed and named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Normalization {
@@ -55,12 +83,27 @@ pub const STANDARD_WML_NAMESPACE_URIS: &[&str] = &[
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "http://schemas.openxmlformats.org/officeDocument/2006/math",
     "http://schemas.openxmlformats.org/markup-compatibility/2006",
+    "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "http://schemas.openxmlformats.org/drawingml/2006/picture",
     "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "http://schemas.microsoft.com/office/2019/extlst",
+    "http://schemas.microsoft.com/office/drawing/2014/chartex",
+    "http://schemas.microsoft.com/office/drawing/2015/9/8/chartex",
+    "http://schemas.microsoft.com/office/drawing/2015/10/21/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/5/9/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/5/10/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/5/11/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/5/12/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/5/13/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/5/14/chartex",
+    "http://schemas.microsoft.com/office/drawing/2016/ink",
+    "http://schemas.microsoft.com/office/drawing/2017/model3d",
     "http://schemas.microsoft.com/office/word/2006/wordml",
     "http://schemas.microsoft.com/office/word/2010/wordml",
     "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas",
     "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing",
     "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "http://schemas.microsoft.com/office/word/2010/wordprocessingInk",
     "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
     "http://schemas.microsoft.com/office/word/2012/wordml",
     "http://schemas.microsoft.com/office/word/2015/wordml/symex",
@@ -68,12 +111,31 @@ pub const STANDARD_WML_NAMESPACE_URIS: &[&str] = &[
     "http://schemas.microsoft.com/office/word/2018/wordml",
     "http://schemas.microsoft.com/office/word/2018/wordml/cex",
     "http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash",
+    "http://schemas.microsoft.com/office/word/2023/wordml/word16du",
+    "http://schemas.microsoft.com/office/word/2024/wordml/sdtformatlock",
     "urn:schemas-microsoft-com:office:office",
     "urn:schemas-microsoft-com:office:word",
     "urn:schemas-microsoft-com:vml",
 ];
 
-/// Every entry is one reviewed serializer deviation the fingerprint forgives.
+/// The comment companion parts the serializer materializes on save, exactly
+/// as Word does when it writes threaded comments.
+pub const COMPANION_PART_MARKERS: &[&str] =
+    &["commentsExtended", "commentsIds", "commentsExtensible"];
+
+/// Managed paragraph identity the serializer may mint where absent.
+pub const MANAGED_IDENTITY_ATTRIBUTES: &[(&str, &str)] = &[
+    (
+        "http://schemas.microsoft.com/office/word/2010/wordml",
+        "paraId",
+    ),
+    (
+        "http://schemas.microsoft.com/office/word/2010/wordml",
+        "textId",
+    ),
+];
+
+/// Every entry is one reviewed serializer deviation the oracles forgive.
 pub const DECLARED_NORMALIZATIONS: &[Normalization] = &[
     Normalization {
         id: "root-standard-namespace-declarations",
@@ -84,6 +146,22 @@ pub const DECLARED_NORMALIZATIONS: &[Normalization] = &[
         id: "root-mc-ignorable",
         description: "Modelled WML parts re-emit Word's standard mc:Ignorable list on the root; \
                       the fingerprint excludes mc:Ignorable on root elements only.",
+    },
+    Normalization {
+        id: "relationship-and-content-type-order",
+        description: "Relationship and content-type entries carry no authored order; the digest \
+                      compares them as sorted identity sets without positions.",
+    },
+    Normalization {
+        id: "comment-companion-parts",
+        description: "Saving a document with comments materializes Word's companion parts \
+                      (commentsExtended, commentsIds, commentsExtensible) and their content-type \
+                      and relationship entries; the report tolerates exactly those additions.",
+    },
+    Normalization {
+        id: "paragraph-id-minting",
+        description: "The serializer mints w14:paraId/w14:textId where absent, as Word does. \
+                      Additions are tolerated; a changed or lost identity is never forgiven.",
     },
 ];
 
@@ -117,14 +195,20 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_two_reviewed_normalizations_are_declared() {
+    fn exactly_the_reviewed_normalizations_are_declared() {
         let ids: Vec<&str> = DECLARED_NORMALIZATIONS
             .iter()
             .map(|normalization| normalization.id)
             .collect();
         assert_eq!(
             ids,
-            vec!["root-standard-namespace-declarations", "root-mc-ignorable"]
+            vec![
+                "root-standard-namespace-declarations",
+                "root-mc-ignorable",
+                "relationship-and-content-type-order",
+                "comment-companion-parts",
+                "paragraph-id-minting",
+            ]
         );
     }
 }

@@ -12,4 +12,6 @@ pub enum FidelityError {
     UnboundPrefix { part: String, prefix: String },
     #[error("artifact {0:?} has no registered comparison mode")]
     UnknownArtifact(String),
+    #[error("artifact {artifact:?} compares as bytes but the registry pins {mode}")]
+    LoosenedComparison { artifact: String, mode: String },
 }

@@ -5,13 +5,19 @@
 //! ceiling fails too, so no regression can hide behind the headroom.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-oracles`.
 
-use betteroffice_docx::Document;
-use ooxml_fidelity::wml::{Difference, diff_digests, semantic_digest};
-use ooxml_fidelity::{
-    XmlLimits, element_census, is_xml_part, losses, parse_part, structural_fingerprint,
-};
+mod common;
 
-type Parts = Vec<(String, Vec<u8>)>;
+use betteroffice_docx::Document;
+use common::{Parts, parts_of, roundtrip_report, save_unedited};
+use ooxml_fidelity::wml::{Difference, diff_digests, semantic_digest};
+use ooxml_fidelity::{element_census, losses};
+
+fn digest_diff(before: &Parts, after: &Parts) -> Vec<Difference> {
+    diff_digests(
+        &semantic_digest(before).unwrap(),
+        &semantic_digest(after).unwrap(),
+    )
+}
 
 fn sample_docx() -> Vec<u8> {
     let parts = vec![
@@ -55,69 +61,6 @@ fn with_document_xml(package: &[u8], edit: impl Fn(String) -> String) -> Vec<u8>
         }
     }
     ooxml_opc::rezip_parts(&parts).unwrap()
-}
-
-fn parts_of(package: &[u8]) -> Parts {
-    ooxml_opc::unzip_parts(package).unwrap()
-}
-
-fn save_unedited(package: &[u8]) -> Vec<u8> {
-    Document::open(package).unwrap().save().unwrap()
-}
-
-/// One line per violated rule; an unedited round trip must report nothing.
-fn roundtrip_report(before: &Parts, after: &Parts) -> Vec<String> {
-    let mut report = Vec::new();
-    let limits = XmlLimits::default();
-    let after_bytes: std::collections::BTreeMap<&str, &Vec<u8>> = after
-        .iter()
-        .map(|(name, bytes)| (name.as_str(), bytes))
-        .collect();
-    for (name, bytes) in before {
-        match after_bytes.get(name.as_str()) {
-            None => report.push(format!("part dropped: {name}")),
-            Some(saved) if is_xml_part(name) => {
-                let original = parse_part(bytes, name, &limits).unwrap();
-                let reopened = parse_part(saved, name, &limits).unwrap();
-                if structural_fingerprint(&original) != structural_fingerprint(&reopened) {
-                    report.push(format!("fingerprint differs: {name}"));
-                }
-            }
-            Some(saved) => {
-                if *saved != bytes {
-                    report.push(format!("bytes differ: {name}"));
-                }
-            }
-        }
-    }
-    for (name, _) in after {
-        if !before.iter().any(|(existing, _)| existing == name) {
-            report.push(format!("part added: {name}"));
-        }
-    }
-    for loss in losses(
-        &element_census(before).unwrap(),
-        &element_census(after).unwrap(),
-    ) {
-        report.push(format!(
-            "census loss: {}:{} {} -> {}",
-            loss.namespace, loss.local, loss.before, loss.after
-        ));
-    }
-    for difference in digest_diff(before, after) {
-        report.push(format!(
-            "digest: {} | {} -> {}",
-            difference.path, difference.before, difference.after
-        ));
-    }
-    report
-}
-
-fn digest_diff(before: &Parts, after: &Parts) -> Vec<Difference> {
-    diff_digests(
-        &semantic_digest(before).unwrap(),
-        &semantic_digest(after).unwrap(),
-    )
 }
 
 #[test]

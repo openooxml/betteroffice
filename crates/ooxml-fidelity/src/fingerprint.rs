@@ -13,7 +13,17 @@ use crate::xml::{XML_NAMESPACE, XmlElement, XmlNode};
 
 /// Canonical projection of one part's tree, serialized as JSON.
 pub fn structural_fingerprint(root: &XmlElement) -> String {
-    project_element(root, false, true).to_string()
+    project_element(root, false, true, &[]).to_string()
+}
+
+/// The projection with named attributes excluded everywhere. For the
+/// asymmetric normalizations the report layer owns: it re-compares with an
+/// exclusion to classify a difference, never to hide a loss.
+pub fn structural_fingerprint_excluding(
+    root: &XmlElement,
+    excluded_attributes: &[(&str, &str)],
+) -> String {
+    project_element(root, false, true, excluded_attributes).to_string()
 }
 
 /// FNV-1a 64 of the fingerprint, for compact labels in digests and diffs.
@@ -26,7 +36,12 @@ pub fn short_fingerprint(root: &XmlElement) -> String {
     format!("{hash:016x}")
 }
 
-fn project_element(element: &XmlElement, inherited_preserve: bool, root: bool) -> Value {
+fn project_element(
+    element: &XmlElement,
+    inherited_preserve: bool,
+    root: bool,
+    excluded_attributes: &[(&str, &str)],
+) -> Value {
     let preserve = match element.attribute(XML_NAMESPACE, "space") {
         Some("preserve") => true,
         Some("default") => false,
@@ -38,6 +53,9 @@ fn project_element(element: &XmlElement, inherited_preserve: bool, root: bool) -
         .iter()
         .filter(|attribute| {
             !(root && attribute.namespace == MC_NAMESPACE && attribute.local == "Ignorable")
+                && !excluded_attributes.iter().any(|(namespace, local)| {
+                    attribute.namespace == *namespace && attribute.local == *local
+                })
         })
         .map(|attribute| {
             (
@@ -62,7 +80,7 @@ fn project_element(element: &XmlElement, inherited_preserve: bool, root: bool) -
     bindings.dedup();
     let children: Vec<Value> = significant_children(element, preserve)
         .map(|child| match child {
-            XmlNode::Element(child) => project_element(child, preserve, false),
+            XmlNode::Element(child) => project_element(child, preserve, false, excluded_attributes),
             XmlNode::Text(text) => json!(["t", text]),
         })
         .collect();

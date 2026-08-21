@@ -1,0 +1,43 @@
+{
+  "fixtures": [
+    {
+      "file": "wordprocessingml-comprehensive.docx",
+      "sha256": "6fd3c963a7ddc7c39135baf3c183b686ec8b8367d319b54d20a74cd013cbc8b6",
+      "provenance": "generator",
+      "application": "scripts/create-wordprocessingml-comprehensive.ts",
+      "features": [
+        "character-formatting",
+        "paragraph-formatting",
+        "lists",
+        "tables",
+        "sections-columns",
+        "drawings-textboxes",
+        "footnotes-endnotes",
+        "fields-links-bookmarks",
+        "tracked-changes",
+        "comments",
+        "content-controls",
+        "math",
+        "rtl-cjk",
+        "unknown-markup"
+      ],
+      "oracle": "roundtrip-findings",
+      "evidence": "word — Microsoft Word for Mac 16.112 opened wordprocessingml-comprehensive.docx on 2026-08-18 with no repair dialog; all five pages were checked against the section intents the builder authors"
+    },
+    {
+      "file": "betteroffice-demo.docx",
+      "sha256": "fa267b73b0849fe9243c27ea1e441fe01c8700a8126ad8674801634020387dd8",
+      "provenance": "generator",
+      "application": "scripts/create-demo-doc.ts",
+      "features": [
+        "styles",
+        "lists",
+        "tables",
+        "header-footer",
+        "blockquote"
+      ],
+      "oracle": "roundtrip-findings",
+      "evidence": "none"
+    }
+  ]
+}
