@@ -1343,9 +1343,10 @@ impl<'k> ImageCache<'k> {
         decoded.apply_orientation(orientation);
         let size = IntSize::from_wh(decoded.width(), decoded.height())?;
         let mut data = decoded.into_rgba8().into_raw();
-        for pixel in data.chunks_exact_mut(4) {
+        let (pixels, _) = data.as_chunks_mut::<4>();
+        for pixel in pixels {
             let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            pixel.copy_from_slice(&[color.red(), color.green(), color.blue(), color.alpha()]);
+            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
         }
         Pixmap::from_vec(data, size)
     }
