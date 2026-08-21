@@ -184,9 +184,8 @@ fn read_commands(sender: Sender<PeerInput>) -> Result<()> {
 
 fn connect(config: &CollaborationConfig) -> Result<Connection> {
     let (sender, events) = channel();
-    let client = CollaborationClient::start(config.clone(), move |event| {
-        let _ = sender.send(event);
-    })?;
+    let client =
+        CollaborationClient::start(config.clone(), move |event| sender.send(event).is_ok())?;
     Ok(Connection { client, events })
 }
 

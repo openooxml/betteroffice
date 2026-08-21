@@ -37,3 +37,6 @@ winit = "=0.30.13"
 xlsx-raster = { package = "betteroffice-xlsx-raster", path = "../../crates/xlsx-raster" }
 xlsx-render = { package = "betteroffice-xlsx-render", path = "../../crates/xlsx-render" }
 yrs = "=0.27.3"
+
+[patch.crates-io]
+yrs = { path = "vendor/yrs" }

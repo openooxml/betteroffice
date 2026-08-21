@@ -25,7 +25,10 @@ use docx_parse::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use yrs::Subscription;
+use yrs::branch::{Branch, BranchPtr};
+use yrs::{
+    Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Text, TextRef, Transact,
+};
 
 use crate::chrome::{Alignment, EditingState, ToggleState};
 
@@ -33,6 +36,7 @@ const BODY_STORY: &str = "body";
 const SAVE_TIME: &str = "1970-01-01T00:00:00.000Z";
 pub(crate) const STRUCTURAL_SAVE_REASON: &str =
     "Save unavailable: DOCX paragraph splits and merges cannot be saved; undo the structural edit.";
+pub(crate) const REMOTE_STRUCTURAL_SAVE_REASON: &str = "Save unavailable: a remote collaborator made a structural DOCX edit that this viewer cannot save.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextLoc {
@@ -44,6 +48,25 @@ pub struct TextLoc {
 struct Selection {
     anchor: TextLoc,
     head: TextLoc,
+}
+
+struct StickySelection {
+    anchor: StickyIndex,
+    head: StickyIndex,
+    fallback: Selection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirtyState {
+    Clean,
+    RemoteOnly,
+    Local,
+}
+
+#[derive(Clone, Copy)]
+enum ChangeOrigin {
+    Local,
+    Remote,
 }
 
 #[derive(Clone, Debug)]
@@ -189,7 +212,11 @@ pub struct DocxEditor {
     display_extras: String,
     save: SaveProjection,
     saved_checksum: u64,
-    dirty: bool,
+    source_fingerprint: [u8; 32],
+    remote_only_checksum: Option<u64>,
+    dirty_state: DirtyState,
+    #[cfg(test)]
+    relayout_count: usize,
 }
 
 impl DocxEditor {
@@ -223,6 +250,7 @@ impl DocxEditor {
         let source_tokens = body_tokens(engine.doc())?;
         let saved_checksum =
             story_checksum(engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
+        let source_fingerprint = canonical_checksum(&engine)?;
         let undo = UndoSession::new();
         undo.track(engine.doc(), BODY_STORY)
             .map_err(anyhow::Error::msg)?;
@@ -264,7 +292,11 @@ impl DocxEditor {
                 source_tokens,
             ),
             saved_checksum,
-            dirty: false,
+            source_fingerprint,
+            remote_only_checksum: Some(saved_checksum),
+            dirty_state: DirtyState::Clean,
+            #[cfg(test)]
+            relayout_count: 0,
         })
     }
 
@@ -288,16 +320,20 @@ impl DocxEditor {
     }
 
     pub fn apply_remote_update(&mut self, update: &[u8]) -> Result<SceneChange> {
-        let selection = self.selection.clone();
+        let selection = self.sticky_selection()?;
         self.engine
             .doc()
             .apply_update_v1(update)
             .map_err(anyhow::Error::msg)?;
-        let change = self.relayout()?;
+        let change = self.relayout(ChangeOrigin::Remote)?;
         self.selection = selection.and_then(|selection| {
             Some(Selection {
-                anchor: self.clamp_loc(selection.anchor).ok()?,
-                head: self.clamp_loc(selection.head).ok()?,
+                anchor: self
+                    .loc_from_sticky(&selection.anchor)
+                    .or_else(|| self.clamp_loc(selection.fallback.anchor).ok())?,
+                head: self
+                    .loc_from_sticky(&selection.head)
+                    .or_else(|| self.clamp_loc(selection.fallback.head).ok())?,
             })
         });
         self.vertical_goal_x = None;
@@ -307,37 +343,24 @@ impl DocxEditor {
 
     #[cfg(test)]
     pub fn canonical_checksum(&self) -> Result<[u8; 32]> {
-        use yrs::{Map, ReadTxn, Transact};
+        canonical_checksum(&self.engine)
+    }
 
-        let story_ids = {
-            let transaction = self.engine.doc().yrs_doc().transact();
-            let stories = transaction
-                .get_map("stories")
-                .context("collaborative document has no stories")?;
-            let mut ids = stories
-                .keys(&transaction)
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>();
-            ids.sort();
-            ids
-        };
-        let mut checksum = Sha256::new();
-        checksum.update(b"canonical-document-v1");
-        for story_id in story_ids {
-            let bytes = docx_edit::to_canonical_bytes(&docx_edit::project_story(
-                self.engine.doc(),
-                &story_id,
-            )?);
-            checksum.update((story_id.len() as u64).to_le_bytes());
-            checksum.update(story_id.as_bytes());
-            checksum.update((bytes.len() as u64).to_le_bytes());
-            checksum.update(bytes);
-        }
-        Ok(checksum.finalize().into())
+    pub fn source_fingerprint(&self) -> [u8; 32] {
+        self.source_fingerprint
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.dirty_state != DirtyState::Clean
+    }
+
+    pub fn is_remote_only_dirty(&self) -> bool {
+        self.dirty_state == DirtyState::RemoteOnly
+    }
+
+    #[cfg(test)]
+    pub fn relayout_count(&self) -> usize {
+        self.relayout_count
     }
 
     pub fn has_collapsed_selection(&self) -> bool {
@@ -751,7 +774,8 @@ impl DocxEditor {
         fs::write(path, bytes).with_context(|| format!("write edited DOCX {}", path.display()))?;
         self.saved_checksum =
             story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
-        self.dirty = false;
+        self.remote_only_checksum = Some(self.saved_checksum);
+        self.dirty_state = DirtyState::Clean;
         Ok(())
     }
 
@@ -765,8 +789,13 @@ impl DocxEditor {
             .map_err(anyhow::Error::msg)?;
         self.frames = FrameTracker::new(&frame)?;
         self.spans = paragraph_spans(&self.engine)?;
-        self.dirty = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?
-            != self.saved_checksum;
+        let checksum = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
+        if checksum == self.saved_checksum {
+            self.remote_only_checksum = Some(checksum);
+            self.dirty_state = DirtyState::Clean;
+        } else if self.dirty_state == DirtyState::Clean {
+            self.dirty_state = DirtyState::Local;
+        }
         let selection = self.selection.take();
         self.selection = selection.and_then(|selection| {
             Some(Selection {
@@ -794,7 +823,7 @@ impl DocxEditor {
             head: loc,
         });
         self.vertical_goal_x = None;
-        let change = self.relayout()?;
+        let change = self.relayout(ChangeOrigin::Local)?;
         self.refresh_selection_rects()?;
         Ok(change)
     }
@@ -802,7 +831,7 @@ impl DocxEditor {
     fn finish_edit_preserving(&mut self, selection: Selection) -> Result<SceneChange> {
         self.selection = Some(selection);
         self.vertical_goal_x = None;
-        let change = self.relayout()?;
+        let change = self.relayout(ChangeOrigin::Local)?;
         self.refresh_selection_rects()?;
         Ok(change)
     }
@@ -826,7 +855,7 @@ impl DocxEditor {
         if !changed {
             return Ok(None);
         }
-        let change = self.relayout()?;
+        let change = self.relayout(ChangeOrigin::Local)?;
         self.selection = selection_indices.and_then(|(anchor, head)| {
             Some(Selection {
                 anchor: self.loc_from_story_index_clamped(anchor)?,
@@ -838,23 +867,57 @@ impl DocxEditor {
         Ok(Some(change))
     }
 
-    fn relayout(&mut self) -> Result<SceneChange> {
+    fn relayout(&mut self, origin: ChangeOrigin) -> Result<SceneChange> {
         let frame = self
             .engine
             .apply_and_layout(BODY_STORY, self.frames.frame_epoch)
             .map_err(anyhow::Error::msg)?;
         let change = self.frames.apply(&frame)?;
         self.spans = paragraph_spans(&self.engine)?;
-        self.dirty = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?
-            != self.saved_checksum;
+        let checksum = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
+        self.update_dirty(checksum, origin);
+        #[cfg(test)]
+        {
+            self.relayout_count += 1;
+        }
         Ok(change)
+    }
+
+    fn update_dirty(&mut self, checksum: u64, origin: ChangeOrigin) {
+        if checksum == self.saved_checksum {
+            self.remote_only_checksum = Some(checksum);
+            self.dirty_state = DirtyState::Clean;
+            return;
+        }
+        match origin {
+            ChangeOrigin::Local => {
+                self.dirty_state = if self.remote_only_checksum == Some(checksum) {
+                    DirtyState::RemoteOnly
+                } else {
+                    DirtyState::Local
+                };
+            }
+            ChangeOrigin::Remote if self.dirty_state == DirtyState::Local => {
+                self.remote_only_checksum = None;
+            }
+            ChangeOrigin::Remote => {
+                self.remote_only_checksum = Some(checksum);
+                self.dirty_state = DirtyState::RemoteOnly;
+            }
+        }
     }
 
     fn save_availability(&self) -> Result<(bool, Option<String>)> {
         let can_save = self.save.structure_unchanged(self.engine.doc())?;
         Ok((
             can_save,
-            (!can_save).then(|| STRUCTURAL_SAVE_REASON.to_owned()),
+            (!can_save).then(|| {
+                if self.is_remote_only_dirty() {
+                    REMOTE_STRUCTURAL_SAVE_REASON.to_owned()
+                } else {
+                    STRUCTURAL_SAVE_REASON.to_owned()
+                }
+            }),
         ))
     }
 
@@ -997,6 +1060,42 @@ impl DocxEditor {
         }
     }
 
+    fn sticky_selection(&self) -> Result<Option<StickySelection>> {
+        let Some(fallback) = self.selection.clone() else {
+            return Ok(None);
+        };
+        let anchor_index = self.story_index(&fallback.anchor)?;
+        let head_index = self.story_index(&fallback.head)?;
+        let transaction = self.engine.doc().yrs_doc().transact();
+        let story = body_story_ref(&transaction)?;
+        let length = story.len(&transaction);
+        let sticky = |index| {
+            if index == 0 {
+                Some(StickyIndex::from_type(&transaction, &story, Assoc::Before))
+            } else if index == length {
+                Some(StickyIndex::from_type(&transaction, &story, Assoc::After))
+            } else {
+                story.sticky_index(&transaction, index, Assoc::After)
+            }
+        };
+        Ok(Some(StickySelection {
+            anchor: sticky(anchor_index).context("selection anchor no longer resolves")?,
+            head: sticky(head_index).context("selection head no longer resolves")?,
+            fallback,
+        }))
+    }
+
+    fn loc_from_sticky(&self, sticky: &StickyIndex) -> Option<TextLoc> {
+        let transaction = self.engine.doc().yrs_doc().transact();
+        let story = body_story_ref(&transaction).ok()?;
+        let offset = sticky.get_offset(&transaction)?;
+        let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
+        if offset.branch != expected {
+            return None;
+        }
+        self.loc_from_story_index(offset.index)
+    }
+
     fn clamp_loc(&self, mut loc: TextLoc) -> Result<TextLoc> {
         let span = self
             .span(&loc.para_id)
@@ -1081,6 +1180,40 @@ impl DocxEditor {
             })
         })
     }
+}
+
+fn body_story_ref<T: ReadTxn>(transaction: &T) -> Result<TextRef> {
+    transaction
+        .get_map("stories")
+        .and_then(|stories| stories.get(transaction, BODY_STORY))
+        .and_then(|value| value.cast::<TextRef>().ok())
+        .context("collaborative document has no body story")
+}
+
+fn canonical_checksum(engine: &EngineSession) -> Result<[u8; 32]> {
+    let story_ids = {
+        let transaction = engine.doc().yrs_doc().transact();
+        let stories = transaction
+            .get_map("stories")
+            .context("collaborative document has no stories")?;
+        let mut ids = stories
+            .keys(&transaction)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids
+    };
+    let mut checksum = Sha256::new();
+    checksum.update(b"canonical-document-v1");
+    for story_id in story_ids {
+        let bytes =
+            docx_edit::to_canonical_bytes(&docx_edit::project_story(engine.doc(), &story_id)?);
+        checksum.update((story_id.len() as u64).to_le_bytes());
+        checksum.update(story_id.as_bytes());
+        checksum.update((bytes.len() as u64).to_le_bytes());
+        checksum.update(bytes);
+    }
+    Ok(checksum.finalize().into())
 }
 
 fn toggle_state(state: TriState) -> ToggleState {

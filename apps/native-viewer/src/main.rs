@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod build_support;
 mod chrome;
 mod collaboration;
 mod collaboration_document;

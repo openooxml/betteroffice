@@ -19,7 +19,10 @@ use crate::chrome::{
     Chrome, ChromeHit, ChromeState, STATUS_HEIGHT, TOOLBAR_HEIGHT, ToolbarCommand, ZOOM_MAX,
     ZOOM_MIN,
 };
-use crate::collaboration::{CollaborationClient, CollaborationConfig, TransportEvent};
+use crate::collaboration::{
+    CollaborationClient, CollaborationConfig, TransportEvent, TransportEventReceiver,
+    transport_event_channel,
+};
 use crate::collaboration_document;
 use crate::document::{DocumentView, ReferenceDocument, load_document};
 use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
@@ -34,6 +37,9 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const STATUS_DURATION: Duration = Duration::from_secs(6);
 const UNSAVED_EXIT_REASON: &str = "Unsaved changes: save or undo them before closing the viewer.";
+
+#[derive(Clone, Copy, Debug)]
+struct CollaborationWake;
 
 pub fn run(
     document: DocumentView,
@@ -64,16 +70,19 @@ pub fn run(
             println!("{label} skip reasons: {:?}", page.skipped.reasons);
         }
     }
-    let event_loop = EventLoop::<TransportEvent>::with_user_event().build()?;
+    let event_loop = EventLoop::<CollaborationWake>::with_user_event().build()?;
+    let (event_sender, event_receiver) = transport_event_channel();
     let client = collaboration
         .map(|config| {
             let proxy = event_loop.create_proxy();
+            let event_sender = event_sender.clone();
             CollaborationClient::start(config, move |event| {
-                let _ = proxy.send_event(event);
+                event_sender.try_send(event) && proxy.send_event(CollaborationWake).is_ok()
             })
         })
         .transpose()?;
     let mut app = Viewer::new(document, context, client)?;
+    app.collaboration_events = Some(event_receiver);
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.fatal {
         bail!(error);
@@ -100,6 +109,7 @@ struct Viewer {
     save_target: Option<std::path::PathBuf>,
     status_message: Option<StatusMessage>,
     collaboration: Option<CollaborationClient>,
+    collaboration_events: Option<TransportEventReceiver>,
     fatal: Option<String>,
 }
 
@@ -333,6 +343,7 @@ impl Viewer {
             save_target,
             status_message: None,
             collaboration,
+            collaboration_events: None,
             fatal: None,
         })
     }
@@ -990,7 +1001,7 @@ impl Viewer {
     }
 
     fn request_exit(&mut self) -> bool {
-        if !self.document.is_dirty() {
+        if !self.document.is_dirty() || self.document.is_remote_only_dirty() {
             return true;
         }
         self.set_status(UNSAVED_EXIT_REASON.to_owned());
@@ -1144,7 +1155,7 @@ impl Viewer {
     }
 }
 
-impl ApplicationHandler<TransportEvent> for Viewer {
+impl ApplicationHandler<CollaborationWake> for Viewer {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.create_window(event_loop) {
             self.handle_error(event_loop, WindowErrorPath::Startup, error);
@@ -1240,7 +1251,14 @@ impl ApplicationHandler<TransportEvent> for Viewer {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: TransportEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: CollaborationWake) {
+        let Some(event) = self
+            .collaboration_events
+            .as_ref()
+            .and_then(TransportEventReceiver::try_recv)
+        else {
+            return;
+        };
         if let Err(error) = self.handle_collaboration_event(event) {
             self.handle_error(event_loop, WindowErrorPath::Edit, error);
         }
@@ -1287,13 +1305,14 @@ mod tests {
 
     use super::*;
     use crate::collaboration::TransportCommand;
-    use crate::collaboration_protocol::{ProtocolMessage, decode_messages, encode_update};
+    use crate::collaboration_protocol::{
+        ProtocolMessage, decode_messages, encode_update, encode_update_with_fingerprint,
+    };
     use crate::document::load_collaborative_docx;
+    use crate::editing::REMOTE_STRUCTURAL_SAVE_REASON;
     use crate::test_fixtures;
 
-    fn next_sent_frame(
-        commands: &mut tokio::sync::mpsc::UnboundedReceiver<TransportCommand>,
-    ) -> Vec<u8> {
+    fn next_sent_frame(commands: &mut tokio::sync::mpsc::Receiver<TransportCommand>) -> Vec<u8> {
         match commands.try_recv().unwrap() {
             TransportCommand::Send(frame) => frame,
             TransportCommand::Shutdown => panic!("collaboration client shut down"),
@@ -1496,6 +1515,58 @@ mod tests {
         assert!(viewer.request_exit());
         std::fs::remove_file(source).unwrap();
         std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn remote_structural_dirty_state_does_not_block_exit() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Plain</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("remote-structural-exit", &bytes);
+        let local = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let mut peer = load_collaborative_docx(&source, 8_192, 202).unwrap();
+        peer.docx_select_point(
+            TextLoc {
+                para_id: "11111111".to_owned(),
+                offset: 2,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(peer.docx_enter().unwrap());
+        let fingerprint = local.docx_fingerprint().unwrap();
+        let frame = peer
+            .docx_drain_local_updates()
+            .into_iter()
+            .flat_map(|update| encode_update_with_fingerprint(&update, &fingerprint).unwrap())
+            .collect::<Vec<_>>();
+        let (client, _commands) =
+            CollaborationClient::detached(CollaborationConfig::for_test("remote-structural", 101));
+        let mut viewer = Viewer::new(local, RenderContext::new(), Some(client)).unwrap();
+
+        assert!(viewer.apply_collaboration_frame(&frame).unwrap());
+        assert!(viewer.document.is_dirty());
+        assert!(viewer.document.is_remote_only_dirty());
+        assert!(!viewer.document.docx_undo().unwrap());
+        let editing = viewer.document.editing_state().unwrap();
+        assert!(!editing.can_save);
+        assert_eq!(
+            editing.save_disabled_reason.as_deref(),
+            Some(REMOTE_STRUCTURAL_SAVE_REASON)
+        );
+        viewer
+            .execute_toolbar_command(ToolbarCommand::Save)
+            .unwrap();
+        assert_eq!(
+            viewer
+                .status_message
+                .as_ref()
+                .map(|message| message.text.as_str()),
+            Some(REMOTE_STRUCTURAL_SAVE_REASON)
+        );
+        assert!(viewer.request_exit());
+        std::fs::remove_file(source).unwrap();
     }
 
     #[test]

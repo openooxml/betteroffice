@@ -1,4 +1,8 @@
 use std::fmt;
+use std::sync::mpsc::{
+    Receiver as EventReceiver, SyncSender as EventSender, TrySendError as EventTrySendError,
+    sync_channel,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -6,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::runtime::Builder;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{Receiver, Sender, channel, error::TrySendError};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -18,6 +22,8 @@ pub const DEFAULT_RELAY_ORIGIN: &str = "https://betteroffice-collaboration-relay
 pub const BROWSER_SEED_CLIENT_ID: u64 = 1;
 const INITIAL_RETRY: Duration = Duration::from_millis(250);
 const MAX_RETRY: Duration = Duration::from_secs(5);
+const COMMAND_QUEUE_CAPACITY: usize = 64;
+const EVENT_QUEUE_CAPACITY: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct CollaborationConfig {
@@ -50,6 +56,15 @@ impl CollaborationConfig {
     pub fn client_id(&self) -> u64 {
         self.client_id
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(room: &str, client_id: u64) -> Self {
+        Self {
+            room: room.to_owned(),
+            url: "ws://127.0.0.1:9".to_owned(),
+            client_id,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -62,6 +77,38 @@ pub enum TransportEvent {
     Failed(String),
 }
 
+#[derive(Clone)]
+pub struct TransportEventSender {
+    sender: EventSender<TransportEvent>,
+}
+
+pub struct TransportEventReceiver {
+    receiver: EventReceiver<TransportEvent>,
+}
+
+pub fn transport_event_channel() -> (TransportEventSender, TransportEventReceiver) {
+    let (sender, receiver) = sync_channel(EVENT_QUEUE_CAPACITY);
+    (
+        TransportEventSender { sender },
+        TransportEventReceiver { receiver },
+    )
+}
+
+impl TransportEventSender {
+    pub fn try_send(&self, event: TransportEvent) -> bool {
+        match self.sender.try_send(event) {
+            Ok(()) => true,
+            Err(EventTrySendError::Full(_) | EventTrySendError::Disconnected(_)) => false,
+        }
+    }
+}
+
+impl TransportEventReceiver {
+    pub fn try_recv(&self) -> Option<TransportEvent> {
+        self.receiver.try_recv().ok()
+    }
+}
+
 pub(crate) enum TransportCommand {
     Send(Vec<u8>),
     Shutdown,
@@ -69,7 +116,7 @@ pub(crate) enum TransportCommand {
 
 pub struct CollaborationClient {
     config: CollaborationConfig,
-    commands: UnboundedSender<TransportCommand>,
+    commands: Sender<TransportCommand>,
     status: ConnectionStatus,
     peer_count: Option<usize>,
     protocol_error: Option<String>,
@@ -87,9 +134,9 @@ enum ConnectionStatus {
 impl CollaborationClient {
     pub fn start(
         config: CollaborationConfig,
-        notify: impl Fn(TransportEvent) + Send + 'static,
+        notify: impl Fn(TransportEvent) -> bool + Send + 'static,
     ) -> Result<Self> {
-        let (commands, receiver) = unbounded_channel();
+        let (commands, receiver) = channel(COMMAND_QUEUE_CAPACITY);
         let url = config.url.clone();
         thread::Builder::new()
             .name("docx-collaboration".to_owned())
@@ -97,9 +144,11 @@ impl CollaborationClient {
                 let runtime = Builder::new_current_thread().enable_all().build();
                 match runtime {
                     Ok(runtime) => runtime.block_on(run_transport(url, receiver, notify)),
-                    Err(error) => notify(TransportEvent::Failed(format!(
-                        "create collaboration runtime: {error}"
-                    ))),
+                    Err(error) => {
+                        notify(TransportEvent::Failed(format!(
+                            "create collaboration runtime: {error}"
+                        )));
+                    }
                 }
             })
             .context("start collaboration transport")?;
@@ -113,10 +162,8 @@ impl CollaborationClient {
     }
 
     #[cfg(test)]
-    pub(crate) fn detached(
-        config: CollaborationConfig,
-    ) -> (Self, UnboundedReceiver<TransportCommand>) {
-        let (commands, receiver) = unbounded_channel();
+    pub(crate) fn detached(config: CollaborationConfig) -> (Self, Receiver<TransportCommand>) {
+        let (commands, receiver) = channel(COMMAND_QUEUE_CAPACITY);
         (
             Self {
                 config,
@@ -133,6 +180,10 @@ impl CollaborationClient {
         self.config.room()
     }
 
+    pub fn client_id(&self) -> u64 {
+        self.config.client_id()
+    }
+
     pub fn is_connected(&self) -> bool {
         matches!(self.status, ConnectionStatus::Connected { .. })
     }
@@ -146,8 +197,11 @@ impl CollaborationClient {
             bail!("collaboration frame exceeds {MAX_FRAME_BYTES} bytes");
         }
         self.commands
-            .send(TransportCommand::Send(frame))
-            .map_err(|_| anyhow::anyhow!("collaboration transport stopped"))
+            .try_send(TransportCommand::Send(frame))
+            .map_err(|error| match error {
+                TrySendError::Full(_) => anyhow::anyhow!("collaboration command queue is full"),
+                TrySendError::Closed(_) => anyhow::anyhow!("collaboration transport stopped"),
+            })
     }
 
     pub fn apply_transport_event(&mut self, event: &TransportEvent) {
@@ -189,7 +243,7 @@ impl CollaborationClient {
 
     pub fn deny(&mut self, reason: String) {
         self.status = ConnectionStatus::Denied(reason);
-        let _ = self.commands.send(TransportCommand::Shutdown);
+        let _ = self.commands.try_send(TransportCommand::Shutdown);
     }
 
     pub fn status_line(&self) -> String {
@@ -218,7 +272,7 @@ impl CollaborationClient {
 
 impl Drop for CollaborationClient {
     fn drop(&mut self) {
-        let _ = self.commands.send(TransportCommand::Shutdown);
+        let _ = self.commands.try_send(TransportCommand::Shutdown);
     }
 }
 
@@ -231,12 +285,14 @@ struct PeerMessage {
 
 async fn run_transport(
     url: String,
-    mut commands: UnboundedReceiver<TransportCommand>,
-    notify: impl Fn(TransportEvent),
+    mut commands: Receiver<TransportCommand>,
+    notify: impl Fn(TransportEvent) -> bool,
 ) {
     let mut retry = INITIAL_RETRY;
     loop {
-        notify(TransportEvent::Connecting);
+        if !notify(TransportEvent::Connecting) {
+            return;
+        }
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_FRAME_BYTES))
             .max_frame_size(Some(MAX_FRAME_BYTES));
@@ -248,10 +304,12 @@ async fn run_transport(
             Ok((socket, _)) => socket,
             Err(error) => {
                 let delay = retry;
-                notify(TransportEvent::Reconnecting {
+                if !notify(TransportEvent::Reconnecting {
                     delay,
                     reason: error.to_string(),
-                });
+                }) {
+                    return;
+                }
                 if !wait_for_retry(delay, &mut commands).await {
                     return;
                 }
@@ -260,16 +318,20 @@ async fn run_transport(
             }
         };
         retry = INITIAL_RETRY;
-        notify(TransportEvent::Connected);
+        if !notify(TransportEvent::Connected) {
+            return;
+        }
         let (mut writer, mut reader) = socket.split();
         let reason = loop {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(TransportCommand::Send(frame)) => {
                         if frame.len() > MAX_FRAME_BYTES {
-                            notify(TransportEvent::Failed(format!(
+                            if !notify(TransportEvent::Failed(format!(
                                 "outgoing frame exceeds {MAX_FRAME_BYTES} bytes"
-                            )));
+                            ))) {
+                                return;
+                            }
                             continue;
                         }
                         if let Err(error) = writer.send(Message::Binary(frame.into())).await {
@@ -284,7 +346,10 @@ async fn run_transport(
                 message = reader.next() => match message {
                     Some(Ok(Message::Binary(bytes))) => {
                         if bytes.len() <= MAX_FRAME_BYTES {
-                            notify(TransportEvent::Binary(bytes.to_vec()));
+                            if !notify(TransportEvent::Binary(bytes.to_vec())) {
+                                let _ = writer.close().await;
+                                return;
+                            }
                         } else {
                             break format!("incoming frame exceeds {MAX_FRAME_BYTES} bytes");
                         }
@@ -292,8 +357,10 @@ async fn run_transport(
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(message) = serde_json::from_str::<PeerMessage>(&text)
                             && message.message_type == "peers"
+                            && !notify(TransportEvent::PeerCount(message.count))
                         {
-                            notify(TransportEvent::PeerCount(message.count));
+                            let _ = writer.close().await;
+                            return;
                         }
                     }
                     Some(Ok(Message::Close(frame))) => {
@@ -315,7 +382,9 @@ async fn run_transport(
             }
         };
         let delay = retry;
-        notify(TransportEvent::Reconnecting { delay, reason });
+        if !notify(TransportEvent::Reconnecting { delay, reason }) {
+            return;
+        }
         if !wait_for_retry(delay, &mut commands).await {
             return;
         }
@@ -326,7 +395,7 @@ async fn run_transport(
 async fn connect_or_shutdown(
     url: &str,
     config: WebSocketConfig,
-    commands: &mut UnboundedReceiver<TransportCommand>,
+    commands: &mut Receiver<TransportCommand>,
 ) -> Option<
     Result<
         (
@@ -351,10 +420,7 @@ async fn connect_or_shutdown(
     }
 }
 
-async fn wait_for_retry(
-    delay: Duration,
-    commands: &mut UnboundedReceiver<TransportCommand>,
-) -> bool {
+async fn wait_for_retry(delay: Duration, commands: &mut Receiver<TransportCommand>) -> bool {
     let sleep = tokio::time::sleep(delay);
     tokio::pin!(sleep);
     loop {
@@ -439,10 +505,8 @@ mod tests {
         let config =
             CollaborationConfig::new("transport".to_owned(), &format!("http://{address}")).unwrap();
         let (events, received) = mpsc::channel();
-        let client = CollaborationClient::start(config, move |event| {
-            let _ = events.send(event);
-        })
-        .unwrap();
+        let client =
+            CollaborationClient::start(config, move |event| events.send(event).is_ok()).unwrap();
         loop {
             match received.recv_timeout(Duration::from_secs(3)).unwrap() {
                 TransportEvent::Connected => break,
@@ -498,5 +562,30 @@ mod tests {
             doubled_retry(Duration::from_secs(5)),
             Duration::from_secs(5)
         );
+    }
+
+    #[test]
+    fn command_queue_rejects_overflow() {
+        let config = CollaborationConfig::new("bounded".to_owned(), "ws://127.0.0.1:9").unwrap();
+        let (client, _commands) = CollaborationClient::detached(config);
+        for _ in 0..COMMAND_QUEUE_CAPACITY {
+            client.send(vec![1]).unwrap();
+        }
+        assert!(
+            client
+                .send(vec![1])
+                .unwrap_err()
+                .to_string()
+                .contains("queue is full")
+        );
+    }
+
+    #[test]
+    fn transport_event_queue_rejects_overflow() {
+        let (events, _receiver) = transport_event_channel();
+        for _ in 0..EVENT_QUEUE_CAPACITY {
+            assert!(events.try_send(TransportEvent::Binary(vec![1])));
+        }
+        assert!(!events.try_send(TransportEvent::Binary(vec![1])));
     }
 }

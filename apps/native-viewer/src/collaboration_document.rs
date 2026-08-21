@@ -1,9 +1,12 @@
 use anyhow::Result;
+use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
+use yrs::{ClientID, Update};
 
 use crate::collaboration::{CollaborationClient, TransportEvent};
 use crate::collaboration_protocol::{
-    ProtocolMessage, decode_messages, encode_empty_awareness, encode_sync_step_1,
-    encode_sync_step_2, encode_update,
+    ProtocolMessage, decode_messages, encode_empty_awareness, encode_sync_step_1_with_fingerprint,
+    encode_sync_step_2_with_fingerprint, encode_update_with_fingerprint, split_fingerprint,
 };
 use crate::document::DocumentView;
 
@@ -15,7 +18,10 @@ pub fn handle_transport_event(
     collaboration.apply_transport_event(&event);
     match event {
         TransportEvent::Connected => {
-            collaboration.send(encode_sync_step_1(&document.docx_state_vector()?)?)?;
+            collaboration.send(encode_sync_step_1_with_fingerprint(
+                &document.docx_state_vector()?,
+                &document.docx_fingerprint()?,
+            )?)?;
             Ok(false)
         }
         TransportEvent::Binary(frame) => apply_frame(document, collaboration, &frame),
@@ -38,25 +44,100 @@ pub fn apply_frame(
             return Ok(false);
         }
     };
-    let mut repainted = false;
+    let fingerprint = document.docx_fingerprint()?;
+    for message in &messages {
+        let payload = match message {
+            ProtocolMessage::SyncStep1(payload)
+            | ProtocolMessage::SyncStep2(payload)
+            | ProtocolMessage::Update(payload) => payload,
+            ProtocolMessage::Auth(reason) => {
+                collaboration.deny(reason.clone());
+                return Ok(false);
+            }
+            ProtocolMessage::Awareness(_) | ProtocolMessage::QueryAwareness => continue,
+        };
+        if split_fingerprint(payload)
+            .1
+            .is_some_and(|remote| remote != fingerprint)
+        {
+            collaboration.deny("document fingerprint mismatch; refusing room".to_owned());
+            return Ok(false);
+        }
+    }
+
+    let local_client_id = ClientID::new(collaboration.client_id());
+    let mut updates = Vec::new();
+    let mut saw_sync_step_2 = false;
+    for message in &messages {
+        let payload = match message {
+            ProtocolMessage::SyncStep2(payload) => {
+                saw_sync_step_2 = true;
+                payload
+            }
+            ProtocolMessage::Update(payload) => payload,
+            _ => continue,
+        };
+        let (payload, _) = split_fingerprint(payload);
+        let update = match Update::decode_v1(payload) {
+            Ok(update) => update,
+            Err(error) => {
+                collaboration.report_protocol_error(format!("invalid yrs update: {error}"));
+                return Ok(false);
+            }
+        };
+        if update
+            .state_vector_lower()
+            .contains_client(&local_client_id)
+        {
+            collaboration.report_protocol_error(format!(
+                "incoming update is authored by local client id {}",
+                collaboration.client_id()
+            ));
+            return Ok(false);
+        }
+        updates.push(update);
+    }
+
+    let mut sync_step_1 = None;
+    let mut query_awareness = false;
     for message in messages {
         match message {
-            ProtocolMessage::SyncStep1(state_vector) => collaboration.send(encode_sync_step_2(
-                &document.docx_encode_diff(&state_vector)?,
-            )?)?,
-            ProtocolMessage::SyncStep2(update) => {
-                repainted |= document.docx_apply_remote_update(&update)?;
-                collaboration.mark_synced();
+            ProtocolMessage::SyncStep1(state_vector) if sync_step_1.is_none() => {
+                sync_step_1 = Some(state_vector);
             }
-            ProtocolMessage::Update(update) => {
-                repainted |= document.docx_apply_remote_update(&update)?;
-            }
-            ProtocolMessage::QueryAwareness => {
-                collaboration.send(encode_empty_awareness())?;
-            }
-            ProtocolMessage::Auth(reason) => collaboration.deny(reason),
+            ProtocolMessage::QueryAwareness => query_awareness = true,
+            ProtocolMessage::SyncStep1(_)
+            | ProtocolMessage::SyncStep2(_)
+            | ProtocolMessage::Update(_)
+            | ProtocolMessage::Auth(_) => {}
             ProtocolMessage::Awareness(_) => {}
         }
+    }
+    if let Some(state_vector) = sync_step_1 {
+        let (state_vector, _) = split_fingerprint(&state_vector);
+        collaboration.send(encode_sync_step_2_with_fingerprint(
+            &document.docx_encode_diff(state_vector)?,
+            &fingerprint,
+        )?)?;
+    }
+    if query_awareness {
+        collaboration.send(encode_empty_awareness())?;
+    }
+
+    let repainted = if updates.is_empty() {
+        false
+    } else {
+        let update = Update::merge_updates(updates).encode_v1();
+        match document.docx_apply_remote_update(&update) {
+            Ok(repainted) => repainted,
+            Err(error) => {
+                collaboration.report_protocol_error(format!("invalid remote update: {error:#}"));
+                return Ok(false);
+            }
+        }
+    };
+    if saw_sync_step_2 {
+        collaboration.mark_synced();
     }
     Ok(repainted)
 }
@@ -65,13 +146,185 @@ pub fn forward_local_updates(document: &DocumentView, collaboration: &mut Collab
     if !collaboration.is_connected() {
         return;
     }
+    let fingerprint = match document.docx_fingerprint() {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            collaboration.report_protocol_error(error);
+            return;
+        }
+    };
     for update in document.docx_drain_local_updates() {
-        let result = encode_update(&update)
+        let result = encode_update_with_fingerprint(&update, &fingerprint)
             .map_err(anyhow::Error::from)
             .and_then(|frame| collaboration.send(frame));
         if let Err(error) = result {
             collaboration.report_protocol_error(error);
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc::Receiver;
+    use yrs::{Update, merge_updates_v1};
+
+    use super::*;
+    use crate::collaboration::{CollaborationConfig, TransportCommand};
+    use crate::collaboration_protocol::{
+        MAX_MESSAGES_PER_FRAME, ProtocolMessage, decode_messages,
+        encode_sync_step_1_with_fingerprint, encode_update_with_fingerprint,
+    };
+    use crate::document::load_collaborative_docx;
+    use crate::editing::TextLoc;
+    use crate::test_fixtures;
+
+    fn detached(client_id: u64) -> (CollaborationClient, Receiver<TransportCommand>) {
+        CollaborationClient::detached(CollaborationConfig::for_test("test", client_id))
+    }
+
+    fn next_frame(commands: &mut Receiver<TransportCommand>) -> Vec<u8> {
+        match commands.try_recv().unwrap() {
+            TransportCommand::Send(frame) => frame,
+            TransportCommand::Shutdown => panic!("collaboration client shut down"),
+        }
+    }
+
+    #[test]
+    fn mismatched_document_fingerprint_refuses_the_room_before_sync() {
+        let left_bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Left</w:t></w:r></w:p>"#,
+        );
+        let right_bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="22222222"><w:r><w:t>Right</w:t></w:r></w:p>"#,
+        );
+        let left_path = test_fixtures::write_docx("fingerprint-left", &left_bytes);
+        let right_path = test_fixtures::write_docx("fingerprint-right", &right_bytes);
+        let mut left = load_collaborative_docx(&left_path, 8_192, 101).unwrap();
+        let right = load_collaborative_docx(&right_path, 8_192, 202).unwrap();
+        let before = left.docx_canonical_checksum().unwrap();
+        let frame = encode_sync_step_1_with_fingerprint(
+            &right.docx_state_vector().unwrap(),
+            &right.docx_fingerprint().unwrap(),
+        )
+        .unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut left, &mut collaboration, &frame).unwrap());
+        assert!(collaboration.status_line().contains("fingerprint mismatch"));
+        assert_eq!(left.docx_canonical_checksum().unwrap(), before);
+        std::fs::remove_file(left_path).unwrap();
+        std::fs::remove_file(right_path).unwrap();
+    }
+
+    #[test]
+    fn saved_copy_keeps_a_distinct_room_fingerprint() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Base line</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("fingerprint-original", &bytes);
+        let output = source.with_extension("saved-copy.docx");
+        let mut original = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        original
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 0,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(original.docx_insert_text("LEFT ").unwrap());
+        original.save_docx_to(&output).unwrap();
+        let copy = load_collaborative_docx(&output, 8_192, 202).unwrap();
+        assert_ne!(
+            original.docx_fingerprint().unwrap(),
+            copy.docx_fingerprint().unwrap()
+        );
+        let frame = encode_sync_step_1_with_fingerprint(
+            &copy.docx_state_vector().unwrap(),
+            &copy.docx_fingerprint().unwrap(),
+        )
+        .unwrap();
+        let (mut collaboration, _commands) = detached(101);
+        assert!(!apply_frame(&mut original, &mut collaboration, &frame).unwrap());
+        assert!(collaboration.status_line().contains("fingerprint mismatch"));
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn update_authored_by_the_local_client_id_is_rejected() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Base</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("client-id-collision", &bytes);
+        let mut local = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let mut impostor = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        impostor
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 4,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(impostor.docx_insert_text(" hostile").unwrap());
+        let update = merge_updates_v1(impostor.docx_drain_local_updates()).unwrap();
+        let frame =
+            encode_update_with_fingerprint(&update, &local.docx_fingerprint().unwrap()).unwrap();
+        let before = local.docx_canonical_checksum().unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert!(
+            collaboration
+                .status_line()
+                .contains("authored by local client id 101")
+        );
+        assert_eq!(local.docx_canonical_checksum().unwrap(), before);
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn one_frame_of_updates_causes_one_relayout() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Base</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("coalesced-updates", &bytes);
+        let mut document = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let fingerprint = document.docx_fingerprint().unwrap();
+        let message = encode_update_with_fingerprint(Update::EMPTY_V1, &fingerprint).unwrap();
+        let frame = message.repeat(MAX_MESSAGES_PER_FRAME);
+        let before = document.docx_relayout_count();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(apply_frame(&mut document, &mut collaboration, &frame).unwrap());
+        assert_eq!(document.docx_relayout_count(), before + 1);
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn repeated_awareness_queries_receive_one_response_per_frame() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Base</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("awareness-coalescing", &bytes);
+        let mut document = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let (mut collaboration, mut commands) = detached(101);
+        let frame = vec![3; MAX_MESSAGES_PER_FRAME];
+
+        assert!(!apply_frame(&mut document, &mut collaboration, &frame).unwrap());
+        assert!(matches!(
+            decode_messages(&next_frame(&mut commands))
+                .unwrap()
+                .as_slice(),
+            [ProtocolMessage::Awareness(_)]
+        ));
+        assert!(commands.try_recv().is_err());
+        std::fs::remove_file(source).unwrap();
     }
 }

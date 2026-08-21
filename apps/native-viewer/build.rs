@@ -2,21 +2,10 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-fn numeric_product(source: &str, name: &str) -> u64 {
-    let declaration = source
-        .lines()
-        .find(|line| line.contains(name) && line.contains('='))
-        .unwrap_or_else(|| panic!("missing {name}"));
-    declaration
-        .split_once('=')
-        .unwrap()
-        .1
-        .trim()
-        .trim_end_matches(';')
-        .split('*')
-        .map(|part| part.trim().parse::<u64>().unwrap())
-        .product()
-}
+#[path = "src/build_support.rs"]
+mod build_support;
+
+use build_support::numeric_product;
 
 fn main() {
     let limits_path = "../../shared/collaboration-limits.ts";

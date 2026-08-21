@@ -250,12 +250,27 @@ impl DocumentView {
         reference.editor.drain_local_updates()
     }
 
+    pub fn docx_fingerprint(&self) -> Result<[u8; 32]> {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            bail!("collaboration is available only for DOCX");
+        };
+        Ok(reference.editor.source_fingerprint())
+    }
+
     #[cfg(test)]
     pub fn docx_canonical_checksum(&self) -> Result<[u8; 32]> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             bail!("collaboration is available only for DOCX");
         };
         reference.editor.canonical_checksum()
+    }
+
+    #[cfg(test)]
+    pub fn docx_relayout_count(&self) -> usize {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            return 0;
+        };
+        reference.editor.relayout_count()
     }
 
     pub fn docx_selection_rects(&self) -> &[SelectionRect] {
@@ -311,6 +326,13 @@ impl DocumentView {
             }
             ReferenceDocument::Pptx(reference) => reference.editor.is_dirty(),
         }
+    }
+
+    pub fn is_remote_only_dirty(&self) -> bool {
+        matches!(
+            &self.reference,
+            ReferenceDocument::Docx(reference) if reference.editor.is_remote_only_dirty()
+        )
     }
 
     pub fn save_docx_to(&mut self, path: &Path) -> Result<()> {
@@ -874,8 +896,12 @@ mod tests {
 
     use betteroffice_pptx::{Primitive as PptxPrimitive, Transform as PptxTransform};
     use betteroffice_xlsx::{CellValue, DrawCmd, SheetId};
-    use docx_edit::{SegmentContent, StoryRange};
+    use docx_edit::{
+        EditCtx, EditError, EditingDoc, FormatPolicy, Position, SegmentContent, StoryRange,
+    };
     use vello::kurbo::Point;
+    use yrs::Update;
+    use yrs::updates::decoder::Decode;
 
     use super::*;
     use crate::chrome::{Alignment, ToggleState};
@@ -1106,6 +1132,116 @@ mod tests {
         let right_checksum = right.docx_canonical_checksum().unwrap();
         assert_ne!(left_checksum, baseline);
         assert_eq!(left_checksum, right_checksum);
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn hostile_utf8_update_returns_typed_errors_without_crashing() {
+        let hostile = [
+            0x01, 0x01, 0xca, 0x01, 0x00, 0xc4, 0x01, 0x0a, 0x01, 0x0b, 0x06, 0x20, 0x74, 0x68,
+            0x65, 0xe5, 0x65, 0x00,
+        ];
+        let bare = Update::decode_v1(&hostile);
+        assert!(matches!(bare, Err(yrs::encoding::read::Error::Custom(_))));
+
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Safe</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("hostile-update", &bytes);
+        let mut document = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let ReferenceDocument::Docx(reference) = &document.reference else {
+            unreachable!();
+        };
+        assert!(matches!(
+            reference.editor.engine().doc().apply_update_v1(&hostile),
+            Err(EditError::InvalidUpdate(_))
+        ));
+        assert!(document.docx_apply_remote_update(&hostile).is_err());
+        assert_eq!(docx_paragraph_text(&document, "11111111"), "Safe");
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn mutated_real_updates_never_panic() {
+        let writer = EditingDoc::new(71);
+        writer
+            .create_story("body", "Mutation seed", "Normal", "left")
+            .unwrap();
+        writer
+            .insert_text(
+                &EditCtx::local("", ""),
+                Position::new("body", 4),
+                " payload",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let real_update = writer.encode_state_as_update_v1();
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for case in 0..4_096 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let mut update = real_update.clone();
+            match case % 3 {
+                0 => update.truncate((state as usize) % (update.len() + 1)),
+                1 => {
+                    let index = (state as usize) % update.len();
+                    update[index] ^= (state >> 32) as u8 | 1;
+                }
+                _ => update.extend_from_slice(&state.to_le_bytes()),
+            }
+            let result = std::panic::catch_unwind(move || {
+                let reader = EditingDoc::new(72);
+                let _ = reader.apply_update_v1(&update);
+            });
+            assert!(result.is_ok(), "mutation {case} panicked");
+        }
+    }
+
+    #[test]
+    fn remote_insert_transforms_the_local_selection_before_typing() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>ABCDEFGH</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("remote-selection-transform", &bytes);
+        let mut local = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let mut peer = load_collaborative_docx(&source, 8_192, 202).unwrap();
+        local
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 4,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        local
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 8,
+                },
+                true,
+                false,
+            )
+            .unwrap();
+        peer.docx_select_point(
+            TextLoc {
+                para_id: "11111111".to_owned(),
+                offset: 0,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(peer.docx_insert_text("ZZZZZ").unwrap());
+        for update in peer.docx_drain_local_updates() {
+            local.docx_apply_remote_update(&update).unwrap();
+        }
+        assert_eq!(docx_selection_range(&local), StoryRange::new("body", 9, 13));
+        assert!(local.docx_insert_text("X").unwrap());
+        assert_eq!(docx_paragraph_text(&local, "11111111"), "ZZZZZABCDX");
         std::fs::remove_file(source).unwrap();
     }
 

@@ -12,6 +12,9 @@ const SYNC_STEP_2: u64 = 1;
 const SYNC_UPDATE: u64 = 2;
 const AUTH_PERMISSION_DENIED: u64 = 0;
 const MAX_VAR_UINT: u64 = 9_007_199_254_740_991;
+const FINGERPRINT_TAG: &[u8] = b"\0betteroffice-docx-fingerprint-v1\0";
+
+pub type DocumentFingerprint = [u8; 32];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProtocolMessage {
@@ -177,16 +180,64 @@ pub fn encode_message(message: &ProtocolMessage) -> Result<Vec<u8>, ProtocolErro
     }
 }
 
+#[cfg(test)]
 pub fn encode_sync_step_1(state_vector: &[u8]) -> Result<Vec<u8>, ProtocolError> {
     encode_sync(SYNC_STEP_1, state_vector)
 }
 
+pub fn encode_sync_step_1_with_fingerprint(
+    state_vector: &[u8],
+    fingerprint: &DocumentFingerprint,
+) -> Result<Vec<u8>, ProtocolError> {
+    encode_sync(
+        SYNC_STEP_1,
+        &fingerprinted_payload(state_vector, fingerprint),
+    )
+}
+
+#[cfg(test)]
 pub fn encode_sync_step_2(update: &[u8]) -> Result<Vec<u8>, ProtocolError> {
     encode_sync(SYNC_STEP_2, update)
 }
 
+pub fn encode_sync_step_2_with_fingerprint(
+    update: &[u8],
+    fingerprint: &DocumentFingerprint,
+) -> Result<Vec<u8>, ProtocolError> {
+    encode_sync(SYNC_STEP_2, &fingerprinted_payload(update, fingerprint))
+}
+
+#[cfg(test)]
 pub fn encode_update(update: &[u8]) -> Result<Vec<u8>, ProtocolError> {
     encode_sync(SYNC_UPDATE, update)
+}
+
+pub fn encode_update_with_fingerprint(
+    update: &[u8],
+    fingerprint: &DocumentFingerprint,
+) -> Result<Vec<u8>, ProtocolError> {
+    encode_sync(SYNC_UPDATE, &fingerprinted_payload(update, fingerprint))
+}
+
+pub fn split_fingerprint(payload: &[u8]) -> (&[u8], Option<DocumentFingerprint>) {
+    let suffix_len = FINGERPRINT_TAG.len() + 32;
+    let Some(tag_start) = payload.len().checked_sub(suffix_len) else {
+        return (payload, None);
+    };
+    if &payload[tag_start..tag_start + FINGERPRINT_TAG.len()] != FINGERPRINT_TAG {
+        return (payload, None);
+    }
+    let mut fingerprint = [0_u8; 32];
+    fingerprint.copy_from_slice(&payload[tag_start + FINGERPRINT_TAG.len()..]);
+    (&payload[..tag_start], Some(fingerprint))
+}
+
+fn fingerprinted_payload(payload: &[u8], fingerprint: &DocumentFingerprint) -> Vec<u8> {
+    let mut output = Vec::with_capacity(payload.len() + FINGERPRINT_TAG.len() + fingerprint.len());
+    output.extend_from_slice(payload);
+    output.extend_from_slice(FINGERPRINT_TAG);
+    output.extend_from_slice(fingerprint);
+    output
 }
 
 pub fn encode_empty_awareness() -> Vec<u8> {
@@ -256,6 +307,9 @@ mod tests {
     use std::process::{Command, Stdio};
 
     use serde_json::{Value, json};
+    use yrs::updates::decoder::Decode;
+    use yrs::updates::encoder::Encode;
+    use yrs::{StateVector, Update};
 
     use super::*;
 
@@ -385,5 +439,31 @@ mod tests {
     fn encoder_rejects_frames_above_the_shared_limit() {
         let payload = vec![0; MAX_FRAME_BYTES];
         assert!(encode_update(&payload).is_err());
+    }
+
+    #[test]
+    fn fingerprint_suffix_round_trips_and_remains_yrs_compatible() {
+        let fingerprint = [0x5a; 32];
+        let state_vector = StateVector::default().encode_v1();
+        let frame = encode_sync_step_1_with_fingerprint(&state_vector, &fingerprint).unwrap();
+        let messages = decode_messages(&frame).unwrap();
+        let [ProtocolMessage::SyncStep1(payload)] = messages.as_slice() else {
+            panic!("expected sync step 1");
+        };
+        let (decoded, remote_fingerprint) = split_fingerprint(payload);
+        assert_eq!(decoded, state_vector);
+        assert_eq!(remote_fingerprint, Some(fingerprint));
+        assert!(StateVector::decode_v1(payload).is_ok());
+
+        let frame = encode_update_with_fingerprint(Update::EMPTY_V1, &fingerprint).unwrap();
+        let messages = decode_messages(&frame).unwrap();
+        let [ProtocolMessage::Update(payload)] = messages.as_slice() else {
+            panic!("expected update");
+        };
+        assert_eq!(
+            split_fingerprint(payload),
+            (Update::EMPTY_V1, Some(fingerprint))
+        );
+        assert!(Update::decode_v1(payload).is_ok());
     }
 }
