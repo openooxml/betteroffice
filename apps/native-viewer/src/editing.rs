@@ -9,7 +9,8 @@ use docx_edit::frame_delta::{
     PAGE_OP_PATCH_POSITIONS, PAGE_OP_REMOVE, PAGE_OP_SHIFT_POSITIONS, PAGE_OP_UPSERT,
 };
 use docx_edit::{
-    EditCtx, EngineSession, FormatPolicy, MergeDirection, Position, SegmentContent, StoryRange,
+    EditCtx, EngineSession, FormatPolicy, MergeDirection, ParaAttrDelta, ParaSelector, Patch,
+    Position, SegmentContent, SimpleFormat, StoryRange, TriState, UndoSession, story_checksum,
 };
 use docx_layout::display_list::{DocAttrs, Primitive};
 use docx_parse::block::BlockContent;
@@ -17,10 +18,13 @@ use docx_parse::document::{DocumentBody, get_paragraph_text};
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::{
-    S9PackageWire, S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13,
+    S9PackageWire, S13SaveOptions, S13SaveRequest, SerializerDeterminism, UnderlineValue,
+    write_docx_s13,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::chrome::{Alignment, EditingState, ToggleState};
 
 const BODY_STORY: &str = "body";
 const SAVE_TIME: &str = "1970-01-01T00:00:00.000Z";
@@ -89,12 +93,14 @@ pub enum DeleteDirection {
 
 pub struct DocxEditor {
     engine: EngineSession,
+    undo: UndoSession,
     spans: Vec<ParagraphSpan>,
     selection: Option<Selection>,
     selection_rects: Vec<SelectionRect>,
     vertical_goal_x: Option<f64>,
     frames: FrameTracker,
     save: SaveProjection,
+    initial_checksum: u64,
     dirty: bool,
 }
 
@@ -110,15 +116,42 @@ impl DocxEditor {
             .iter()
             .map(|span| (span.para_id.clone(), span.text.clone()))
             .collect();
+        let source_alignments = engine
+            .doc()
+            .paragraphs(BODY_STORY)
+            .map_err(anyhow::Error::msg)?
+            .into_iter()
+            .map(|paragraph| {
+                (
+                    paragraph.para_id,
+                    string_property(paragraph.properties.get("alignment")),
+                )
+            })
+            .collect();
+        let source_inline = body_inline_projection(engine.doc())?;
         let source_tokens = body_tokens(engine.doc())?;
+        let initial_checksum =
+            story_checksum(engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
+        let undo = UndoSession::new();
+        undo.track(engine.doc(), BODY_STORY)
+            .map_err(anyhow::Error::msg)?;
         Ok(Self {
             engine,
+            undo,
             spans,
             selection: None,
             selection_rects: Vec::new(),
             vertical_goal_x: None,
             frames: FrameTracker::new(initial_frame)?,
-            save: SaveProjection::new(source, package, source_texts, source_tokens),
+            save: SaveProjection::new(
+                source,
+                package,
+                source_texts,
+                source_alignments,
+                source_inline,
+                source_tokens,
+            ),
+            initial_checksum,
             dirty: false,
         })
     }
@@ -139,6 +172,42 @@ impl DocxEditor {
 
     pub fn selection_rects(&self) -> &[SelectionRect] {
         &self.selection_rects
+    }
+
+    pub fn editing_state(&self) -> Result<EditingState> {
+        let can_undo = self.undo.can_undo();
+        let can_redo = self.undo.can_redo();
+        let Some(range) = self.selection_range()? else {
+            return Ok(EditingState::editable_without_selection(can_undo, can_redo));
+        };
+        let context = self
+            .engine
+            .doc()
+            .selection_context(&range)
+            .map_err(anyhow::Error::msg)?;
+        Ok(EditingState {
+            bold: toggle_state(context.bold),
+            italic: toggle_state(context.italic),
+            underline: toggle_state(context.underline),
+            alignment: Alignment::from_engine(context.alignment.as_deref()),
+            inline_enabled: range.start != range.end,
+            alignment_enabled: true,
+            can_undo,
+            can_redo,
+            can_save: true,
+        })
+    }
+
+    pub fn selection_range(&self) -> Result<Option<StoryRange>> {
+        let Some(selection) = &self.selection else {
+            return Ok(None);
+        };
+        let (start, end) = self.ordered_selection(selection)?;
+        Ok(Some(StoryRange::new(
+            BODY_STORY,
+            self.story_index(&start)?,
+            self.story_index(&end)?,
+        )))
     }
 
     pub fn hit_test(&self, page_index: usize, x: f64, y: f64) -> Result<Option<TextLoc>> {
@@ -417,6 +486,53 @@ impl DocxEditor {
         .map(Some)
     }
 
+    pub fn toggle_format(&mut self, format: SimpleFormat) -> Result<Option<SceneChange>> {
+        let Some(selection) = self.selection.clone() else {
+            return Ok(None);
+        };
+        let Some(range) = self.selection_range()? else {
+            return Ok(None);
+        };
+        if range.start == range.end {
+            return Ok(None);
+        }
+        self.undo.add_undo_barrier();
+        self.engine
+            .doc()
+            .toggle_format(&EditCtx::local("", ""), range, format)
+            .map_err(anyhow::Error::msg)?;
+        self.undo.add_undo_barrier();
+        self.finish_edit_preserving(selection).map(Some)
+    }
+
+    pub fn set_alignment(&mut self, alignment: Alignment) -> Result<Option<SceneChange>> {
+        let Some(selection) = self.selection.clone() else {
+            return Ok(None);
+        };
+        let Some(range) = self.selection_range()? else {
+            return Ok(None);
+        };
+        let delta = ParaAttrDelta {
+            alignment: Patch::Set(alignment.engine_value().to_owned()),
+            ..ParaAttrDelta::default()
+        };
+        self.undo.add_undo_barrier();
+        self.engine
+            .doc()
+            .set_paragraph_attrs(&EditCtx::local("", ""), &ParaSelector::Range(range), &delta)
+            .map_err(anyhow::Error::msg)?;
+        self.undo.add_undo_barrier();
+        self.finish_edit_preserving(selection).map(Some)
+    }
+
+    pub fn undo(&mut self) -> Result<Option<SceneChange>> {
+        self.apply_history(false)
+    }
+
+    pub fn redo(&mut self) -> Result<Option<SceneChange>> {
+        self.apply_history(true)
+    }
+
     pub fn caret_geometry(&self) -> Result<Option<CaretGeometry>> {
         let Some(selection) = &self.selection else {
             return Ok(None);
@@ -462,14 +578,59 @@ impl DocxEditor {
             head: loc,
         });
         self.vertical_goal_x = None;
+        let change = self.relayout()?;
+        self.refresh_selection_rects()?;
+        Ok(change)
+    }
+
+    fn finish_edit_preserving(&mut self, selection: Selection) -> Result<SceneChange> {
+        self.selection = Some(selection);
+        self.vertical_goal_x = None;
+        let change = self.relayout()?;
+        self.refresh_selection_rects()?;
+        Ok(change)
+    }
+
+    fn apply_history(&mut self, redo: bool) -> Result<Option<SceneChange>> {
+        let selection_indices = self
+            .selection
+            .as_ref()
+            .map(|selection| -> Result<(u32, u32)> {
+                Ok((
+                    self.story_index(&selection.anchor)?,
+                    self.story_index(&selection.head)?,
+                ))
+            })
+            .transpose()?;
+        let changed = if redo {
+            self.undo.redo()
+        } else {
+            self.undo.undo()
+        };
+        if !changed {
+            return Ok(None);
+        }
+        let change = self.relayout()?;
+        self.selection = selection_indices.and_then(|(anchor, head)| {
+            Some(Selection {
+                anchor: self.loc_from_story_index_clamped(anchor)?,
+                head: self.loc_from_story_index_clamped(head)?,
+            })
+        });
+        self.vertical_goal_x = None;
+        self.refresh_selection_rects()?;
+        Ok(Some(change))
+    }
+
+    fn relayout(&mut self) -> Result<SceneChange> {
         let frame = self
             .engine
             .apply_and_layout(BODY_STORY, self.frames.frame_epoch)
             .map_err(anyhow::Error::msg)?;
         let change = self.frames.apply(&frame)?;
         self.spans = paragraph_spans(&self.engine)?;
-        self.refresh_selection_rects()?;
-        self.dirty = true;
+        self.dirty = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?
+            != self.initial_checksum;
         Ok(change)
     }
 
@@ -637,6 +798,40 @@ impl DocxEditor {
             offset: index - span.story_start,
         })
     }
+
+    fn loc_from_story_index_clamped(&self, index: u32) -> Option<TextLoc> {
+        self.loc_from_story_index(index).or_else(|| {
+            let span = self
+                .spans
+                .iter()
+                .rev()
+                .find(|span| span.story_start <= index)
+                .or_else(|| self.spans.first())?;
+            Some(TextLoc {
+                para_id: span.para_id.clone(),
+                offset: if index < span.story_start {
+                    span.text_start
+                } else {
+                    span.length
+                },
+            })
+        })
+    }
+}
+
+fn toggle_state(state: TriState) -> ToggleState {
+    match state {
+        TriState::On => ToggleState::On,
+        TriState::Off => ToggleState::Off,
+        TriState::Mixed => ToggleState::Mixed,
+    }
+}
+
+fn string_property<T: serde::Serialize>(value: Option<&T>) -> Option<String> {
+    serde_json::to_value(value?)
+        .ok()?
+        .as_str()
+        .map(str::to_owned)
 }
 
 #[derive(Deserialize)]
@@ -1048,11 +1243,54 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64> {
     Ok(u64::from_le_bytes(value))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InlineMarks {
+    bold: bool,
+    italic: bool,
+    underline: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InlineRun {
+    start: u32,
+    end: u32,
+    marks: InlineMarks,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InlineProjection {
+    text: String,
+    runs: Vec<InlineRun>,
+    has_embed: bool,
+}
+
+impl InlineProjection {
+    fn marks_at(&self, offset: u32) -> InlineMarks {
+        self.runs
+            .iter()
+            .find(|run| run.start <= offset && offset < run.end)
+            .map_or(
+                InlineMarks {
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                },
+                |run| run.marks,
+            )
+    }
+
+    fn mark_sequence(&self) -> Vec<InlineMarks> {
+        self.runs.iter().map(|run| run.marks).collect()
+    }
+}
+
 struct SaveProjection {
     original: Vec<u8>,
     package: S9PackageWire,
     source_content: Vec<BlockContent>,
     source_texts: HashMap<String, String>,
+    source_alignments: HashMap<String, Option<String>>,
+    source_inline: HashMap<String, InlineProjection>,
     source_tokens: Vec<BodyToken>,
     seed: String,
     synthetic_ids: HashSet<String>,
@@ -1064,6 +1302,8 @@ impl SaveProjection {
         original: Vec<u8>,
         mut package: S9PackageWire,
         source_texts: HashMap<String, String>,
+        source_alignments: HashMap<String, Option<String>>,
+        source_inline: HashMap<String, InlineProjection>,
         source_tokens: Vec<BodyToken>,
     ) -> Self {
         let seed = format!("{:x}", Sha256::digest(&original));
@@ -1085,6 +1325,8 @@ impl SaveProjection {
             package,
             source_content,
             source_texts,
+            source_alignments,
+            source_inline,
             source_tokens,
             seed,
             synthetic_ids,
@@ -1097,8 +1339,9 @@ impl SaveProjection {
             .paragraphs(BODY_STORY)
             .map_err(anyhow::Error::msg)?
             .into_iter()
-            .map(|paragraph| (paragraph.para_id, paragraph.text))
+            .map(|paragraph| (paragraph.para_id.clone(), paragraph))
             .collect::<HashMap<_, _>>();
+        let inline = body_inline_projection(document)?;
         let tokens = body_tokens(document)?;
         if tokens != self.source_tokens {
             bail!(
@@ -1127,17 +1370,59 @@ impl SaveProjection {
                 .get(&para_id)
                 .cloned()
                 .unwrap_or_else(|| get_paragraph_text(paragraph));
-            if &source == target {
+            let target_alignment = string_property(target.properties.get("alignment"));
+            let source_alignment = self
+                .source_alignments
+                .get(&para_id)
+                .cloned()
+                .unwrap_or_default();
+            let source_inline = self
+                .source_inline
+                .get(&para_id)
+                .with_context(|| format!("paragraph {para_id} has no inline source projection"))?;
+            let target_inline = inline
+                .get(&para_id)
+                .with_context(|| format!("paragraph {para_id} has no inline target projection"))?;
+            let text_changed = source != target.text;
+            let alignment_changed = source_alignment != target_alignment;
+            let inline_changed = source_inline.runs != target_inline.runs;
+            if !text_changed && !alignment_changed && !inline_changed {
                 continue;
             }
-            let risks = paragraph_projection_risks(paragraph);
-            if !risks.is_empty() {
-                bail!(
-                    "cannot save paragraph {paragraph_number} ({para_id}): editing it would lose or flatten {}",
-                    risks.join(", ")
-                );
+            if text_changed {
+                if source_inline.mark_sequence() != target_inline.mark_sequence() {
+                    bail!(
+                        "cannot save paragraph {paragraph_number} ({para_id}): text and character formatting changed together"
+                    );
+                }
+                let risks = paragraph_projection_risks(paragraph);
+                if !risks.is_empty() {
+                    bail!(
+                        "cannot save paragraph {paragraph_number} ({para_id}): editing it would lose or flatten {}",
+                        risks.join(", ")
+                    );
+                }
+                set_paragraph_text(paragraph, &target.text).map_err(anyhow::Error::msg)?;
+            } else if inline_changed {
+                let risks = paragraph_projection_risks(paragraph)
+                    .into_iter()
+                    .filter(|risk| *risk != "differently formatted runs")
+                    .collect::<Vec<_>>();
+                if source_inline.has_embed || target_inline.has_embed || !risks.is_empty() {
+                    let reason = if risks.is_empty() {
+                        "non-text inline content".to_owned()
+                    } else {
+                        risks.join(", ")
+                    };
+                    bail!(
+                        "cannot save paragraph {paragraph_number} ({para_id}): formatting it would lose or flatten {reason}"
+                    );
+                }
+                apply_inline_formatting(paragraph, source_inline, target_inline)?;
             }
-            set_paragraph_text(paragraph, target).map_err(anyhow::Error::msg)?;
+            if alignment_changed {
+                paragraph.formatting.get_or_insert_default().alignment = target_alignment;
+            }
             changed_para_ids.push(para_id);
         }
         for (para_id, target) in &paragraphs {
@@ -1145,7 +1430,16 @@ impl SaveProjection {
                 .source_texts
                 .get(para_id)
                 .with_context(|| format!("paragraph {para_id} has no source projection"))?;
-            if source != target && !projected_para_ids.contains(para_id) {
+            let inline_changed = self.source_inline.get(para_id) != inline.get(para_id);
+            let alignment_changed = self
+                .source_alignments
+                .get(para_id)
+                .cloned()
+                .unwrap_or_default()
+                != string_property(target.properties.get("alignment"));
+            if (source != &target.text || inline_changed || alignment_changed)
+                && !projected_para_ids.contains(para_id)
+            {
                 bail!(
                     "cannot save paragraph {para_id}: nested table or content-control paragraphs are not round-tripped"
                 );
@@ -1201,6 +1495,68 @@ enum BodyToken {
     Paragraph(String),
     Table,
     BlockSdt,
+}
+
+fn body_inline_projection(
+    document: &docx_edit::EditingDoc,
+) -> Result<HashMap<String, InlineProjection>> {
+    let mut projections = HashMap::new();
+    let mut text = String::new();
+    let mut runs: Vec<InlineRun> = Vec::new();
+    let mut cursor = 0_u32;
+    let mut has_embed = false;
+    for segment in document
+        .story_segments(BODY_STORY)
+        .map_err(anyhow::Error::msg)?
+    {
+        match segment.content {
+            SegmentContent::Text(value) => {
+                let length = utf16_len(&value);
+                let marks = InlineMarks {
+                    bold: active_property(segment.attributes.get("bold")),
+                    italic: active_property(segment.attributes.get("italic")),
+                    underline: active_property(segment.attributes.get("underline")),
+                };
+                if length > 0 {
+                    if let Some(previous) = runs.last_mut()
+                        && previous.end == cursor
+                        && previous.marks == marks
+                    {
+                        previous.end += length;
+                    } else {
+                        runs.push(InlineRun {
+                            start: cursor,
+                            end: cursor + length,
+                            marks,
+                        });
+                    }
+                }
+                cursor += length;
+                text.push_str(&value);
+            }
+            SegmentContent::Pilcrow(properties) => {
+                projections.insert(
+                    properties.para_id,
+                    InlineProjection {
+                        text: std::mem::take(&mut text),
+                        runs: std::mem::take(&mut runs),
+                        has_embed,
+                    },
+                );
+                cursor = 0;
+                has_embed = false;
+            }
+            SegmentContent::OtherEmbed { .. } => {
+                cursor = cursor.checked_add(1).context("inline offset overflow")?;
+                has_embed = true;
+            }
+        }
+    }
+    Ok(projections)
+}
+
+fn active_property<T: serde::Serialize>(value: Option<&T>) -> bool {
+    serde_json::to_value(value).is_ok_and(|value| !value.is_null())
 }
 
 fn body_tokens(document: &docx_edit::EditingDoc) -> Result<Vec<BodyToken>> {
@@ -1284,6 +1640,77 @@ fn paragraph_projection_risks(paragraph: &Paragraph) -> Vec<&'static str> {
     risks.sort_unstable();
     risks.dedup();
     risks
+}
+
+fn apply_inline_formatting(
+    paragraph: &mut Paragraph,
+    source: &InlineProjection,
+    target: &InlineProjection,
+) -> Result<()> {
+    if source.text != target.text {
+        bail!("inline formatting projection text changed");
+    }
+    let chunks =
+        simple_run_chunks(paragraph).context("character formatting requires text-only runs")?;
+    let paragraph_text = chunks
+        .iter()
+        .map(|chunk| chunk.text.as_str())
+        .collect::<String>();
+    if paragraph_text != target.text {
+        bail!("character formatting projection does not match paragraph text");
+    }
+    let mut chunk_ranges = Vec::with_capacity(chunks.len());
+    let mut cursor = 0_u32;
+    let mut boundaries = vec![0, utf16_len(&target.text)];
+    for chunk in chunks {
+        let end = cursor + utf16_len(&chunk.text);
+        boundaries.extend([cursor, end]);
+        chunk_ranges.push((cursor, end, chunk.run));
+        cursor = end;
+    }
+    for run in source.runs.iter().chain(&target.runs) {
+        boundaries.extend([run.start, run.end]);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut content = Vec::new();
+    for pair in boundaries.windows(2) {
+        let [start, end] = pair else {
+            continue;
+        };
+        if start == end {
+            continue;
+        }
+        let template = chunk_ranges
+            .iter()
+            .find(|(chunk_start, chunk_end, _)| chunk_start <= start && start < chunk_end)
+            .map(|(_, _, run)| run)
+            .context("character formatting range has no source run")?;
+        let mut run = run_with_text(template, utf16_slice(&target.text, *start, *end));
+        let before = source.marks_at(*start);
+        let after = target.marks_at(*start);
+        if before.bold != after.bold
+            || before.italic != after.italic
+            || before.underline != after.underline
+        {
+            let formatting = run.formatting.get_or_insert_default();
+            if before.bold != after.bold {
+                formatting.bold = Some(after.bold);
+            }
+            if before.italic != after.italic {
+                formatting.italic = Some(after.italic);
+            }
+            if before.underline != after.underline {
+                formatting.underline = Some(UnderlineValue {
+                    style: if after.underline { "single" } else { "none" }.to_owned(),
+                    color: None,
+                });
+            }
+        }
+        content.push(ParagraphContent::Inline(InlineNode::Run(run)));
+    }
+    paragraph.content = content;
+    Ok(())
 }
 
 fn set_paragraph_text(paragraph: &mut Paragraph, target: &str) -> Result<(), String> {

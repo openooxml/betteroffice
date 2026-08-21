@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use vello::kurbo::{Affine, Rect};
+use docx_edit::SimpleFormat;
+use vello::kurbo::{Affine, Point, Rect};
 use vello::peniko::{Color, Fill};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
@@ -13,14 +14,19 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::chrome::{
+    Chrome, ChromeHit, ChromeState, STATUS_HEIGHT, TOOLBAR_HEIGHT, ToolbarCommand, ZOOM_MAX,
+    ZOOM_MIN,
+};
 use crate::document::{DocumentView, ReferenceDocument, load_document};
-use crate::editing::{DeleteDirection, MoveDirection};
+use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
 
 const MARGIN: f64 = 40.0;
 const PAGE_GAP: f64 = 24.0;
 const CARET_BLINK: Duration = Duration::from_millis(530);
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
+const STATUS_DURATION: Duration = Duration::from_secs(6);
 
 pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
@@ -57,6 +63,7 @@ pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
 
 struct Viewer {
     document: DocumentView,
+    chrome: Chrome,
     context: RenderContext,
     window: Option<Arc<Window>>,
     surface: Option<RenderSurface<'static>>,
@@ -71,7 +78,129 @@ struct Viewer {
     next_caret_blink: Instant,
     focused: bool,
     save_target: Option<std::path::PathBuf>,
+    status_message: Option<StatusMessage>,
     fatal: Option<String>,
+}
+
+struct StatusMessage {
+    text: String,
+    expires_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct ViewportGeometry {
+    width: f64,
+    height: f64,
+    zoom: f64,
+    scroll: f64,
+}
+
+impl ViewportGeometry {
+    fn document_height(self) -> f64 {
+        (self.height - TOOLBAR_HEIGHT - STATUS_HEIGHT).max(1.0)
+    }
+
+    fn page_origin(self, pages: &[crate::scene_shared::PageScene], page_index: usize) -> Point {
+        let page = &pages[page_index];
+        let x = ((self.width - page.width * self.zoom) / 2.0).max(MARGIN);
+        let preceding = pages
+            .iter()
+            .take(page_index)
+            .map(|page| page.height * self.zoom + PAGE_GAP)
+            .sum::<f64>();
+        Point::new(x, TOOLBAR_HEIGHT + MARGIN - self.scroll + preceding)
+    }
+
+    fn document_point(
+        self,
+        pages: &[crate::scene_shared::PageScene],
+        x: f64,
+        y: f64,
+        clamp: bool,
+    ) -> Option<(usize, f64, f64)> {
+        if !clamp && (y < TOOLBAR_HEIGHT || y >= (self.height - STATUS_HEIGHT).max(0.0)) {
+            return None;
+        }
+        let mut best: Option<(f64, usize, f64, f64)> = None;
+        for (page_index, page) in pages.iter().enumerate() {
+            let origin = self.page_origin(pages, page_index);
+            let page_width = page.width * self.zoom;
+            let page_height = page.height * self.zoom;
+            let inside = x >= origin.x
+                && x <= origin.x + page_width
+                && y >= origin.y
+                && y <= origin.y + page_height;
+            if inside {
+                return Some((
+                    page_index,
+                    (x - origin.x) / self.zoom,
+                    (y - origin.y) / self.zoom,
+                ));
+            }
+            if clamp {
+                let nearest_x = x.clamp(origin.x, origin.x + page_width);
+                let nearest_y = y.clamp(origin.y, origin.y + page_height);
+                let distance = (x - nearest_x).powi(2) + (y - nearest_y).powi(2);
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_distance, ..)| distance < *best_distance)
+                {
+                    best = Some((
+                        distance,
+                        page_index,
+                        (nearest_x - origin.x) / self.zoom,
+                        (nearest_y - origin.y) / self.zoom,
+                    ));
+                }
+            }
+        }
+        best.map(|(_, page_index, local_x, local_y)| (page_index, local_x, local_y))
+    }
+
+    fn current_page(self, pages: &[crate::scene_shared::PageScene]) -> usize {
+        let viewport_center = TOOLBAR_HEIGHT + self.document_height() / 2.0;
+        pages
+            .iter()
+            .enumerate()
+            .min_by(|(left_index, left), (right_index, right)| {
+                let left_center =
+                    self.page_origin(pages, *left_index).y + left.height * self.zoom / 2.0;
+                let right_center =
+                    self.page_origin(pages, *right_index).y + right.height * self.zoom / 2.0;
+                (left_center - viewport_center)
+                    .abs()
+                    .total_cmp(&(right_center - viewport_center).abs())
+            })
+            .map_or(0, |(index, _)| index)
+    }
+}
+
+enum PointerTarget {
+    Chrome(Option<ToolbarCommand>),
+    Document(TextLoc),
+    None,
+}
+
+fn pointer_target(
+    document: &DocumentView,
+    chrome: &Chrome,
+    state: &ChromeState,
+    geometry: ViewportGeometry,
+    point: Point,
+) -> Result<PointerTarget> {
+    if let ChromeHit::Consumed(command) =
+        chrome.hit_test(geometry.width, geometry.height, point, state)
+    {
+        return Ok(PointerTarget::Chrome(command));
+    }
+    let Some((page_index, local_x, local_y)) =
+        geometry.document_point(&document.pages, point.x, point.y, false)
+    else {
+        return Ok(PointerTarget::None);
+    };
+    Ok(document
+        .docx_hit_test(page_index, local_x, local_y)?
+        .map_or(PointerTarget::None, PointerTarget::Document))
 }
 
 impl Viewer {
@@ -81,6 +210,7 @@ impl Viewer {
             .transpose()?;
         Ok(Self {
             document,
+            chrome: Chrome::new(),
             context,
             window: None,
             surface: None,
@@ -95,6 +225,7 @@ impl Viewer {
             next_caret_blink: Instant::now() + CARET_BLINK,
             focused: true,
             save_target,
+            status_message: None,
             fatal: None,
         })
     }
@@ -107,7 +238,8 @@ impl Viewer {
             event_loop.create_window(
                 Window::default_attributes()
                     .with_title("BetterOffice Vello")
-                    .with_inner_size(LogicalSize::new(1100.0, 900.0)),
+                    .with_inner_size(LogicalSize::new(1100.0, 900.0))
+                    .with_min_inner_size(LogicalSize::new(520.0, 400.0)),
             )?,
         );
         let PhysicalSize { width, height } = window.inner_size();
@@ -136,6 +268,8 @@ impl Viewer {
         } else {
             None
         };
+        let geometry = self.geometry().context("window geometry is unavailable")?;
+        let chrome_state = self.chrome_state()?;
         let Some(window) = &self.window else {
             return Ok(());
         };
@@ -147,12 +281,21 @@ impl Viewer {
         };
         let device_scale = window.scale_factor();
         let mut scene = Scene::new();
-        let mut y = MARGIN * device_scale - self.scroll * device_scale;
         let scale = self.zoom * device_scale;
+        scene.push_clip_layer(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &Rect::new(
+                0.0,
+                TOOLBAR_HEIGHT * device_scale,
+                f64::from(surface.config.width),
+                (geometry.height - STATUS_HEIGHT).max(TOOLBAR_HEIGHT) * device_scale,
+            ),
+        );
         for (page_index, page) in self.document.pages.iter().enumerate() {
-            let x = ((f64::from(surface.config.width) - page.width * scale) / 2.0)
-                .max(MARGIN * device_scale);
-            let transform = Affine::translate((x, y)) * Affine::scale(scale);
+            let origin = geometry.page_origin(&self.document.pages, page_index);
+            let transform = Affine::translate((origin.x * device_scale, origin.y * device_scale))
+                * Affine::scale(scale);
             scene.append(&page.background, Some(transform));
             for rect in selection_rects
                 .iter()
@@ -185,8 +328,15 @@ impl Viewer {
                     ),
                 );
             }
-            y += (page.height * self.zoom + PAGE_GAP) * device_scale;
         }
+        scene.pop_layer();
+        self.chrome.paint(
+            &mut scene,
+            geometry.width,
+            geometry.height,
+            device_scale,
+            &chrome_state,
+        );
         let device = &self.context.devices[surface.dev_id].device;
         let queue = &self.context.devices[surface.dev_id].queue;
         renderer.render_to_texture(
@@ -254,7 +404,7 @@ impl Viewer {
 
     fn zoom_by(&mut self, factor: f64) {
         let old_zoom = self.zoom;
-        self.zoom = (self.zoom * factor).clamp(0.25, 5.0);
+        self.zoom = (self.zoom * factor).clamp(ZOOM_MIN, ZOOM_MAX);
         if (self.zoom - old_zoom).abs() < f64::EPSILON {
             return;
         }
@@ -273,56 +423,70 @@ impl Viewer {
         self.request_redraw();
     }
 
-    fn document_point(&self, x: f64, y: f64, clamp: bool) -> Option<(usize, f64, f64)> {
+    fn geometry(&self) -> Option<ViewportGeometry> {
         let window = self.window.as_ref()?;
-        let viewport_width = f64::from(window.inner_size().width) / window.scale_factor();
-        let mut page_top = MARGIN - self.scroll;
-        let mut best: Option<(f64, usize, f64, f64)> = None;
-        for (page_index, page) in self.document.pages.iter().enumerate() {
-            let page_width = page.width * self.zoom;
-            let page_height = page.height * self.zoom;
-            let page_left = ((viewport_width - page_width) / 2.0).max(MARGIN);
-            let inside = x >= page_left
-                && x <= page_left + page_width
-                && y >= page_top
-                && y <= page_top + page_height;
-            if inside {
-                return Some((
-                    page_index,
-                    (x - page_left) / self.zoom,
-                    (y - page_top) / self.zoom,
-                ));
-            }
-            if clamp {
-                let nearest_x = x.clamp(page_left, page_left + page_width);
-                let nearest_y = y.clamp(page_top, page_top + page_height);
-                let distance = (x - nearest_x).powi(2) + (y - nearest_y).powi(2);
-                if best
-                    .as_ref()
-                    .is_none_or(|(best_distance, ..)| distance < *best_distance)
-                {
-                    best = Some((
-                        distance,
-                        page_index,
-                        (nearest_x - page_left) / self.zoom,
-                        (nearest_y - page_top) / self.zoom,
-                    ));
-                }
-            }
-            page_top += page_height + PAGE_GAP;
-        }
-        best.map(|(_, page_index, local_x, local_y)| (page_index, local_x, local_y))
+        let size = window.inner_size();
+        let scale = window.scale_factor();
+        Some(ViewportGeometry {
+            width: f64::from(size.width) / scale,
+            height: f64::from(size.height) / scale,
+            zoom: self.zoom,
+            scroll: self.scroll,
+        })
+    }
+
+    fn chrome_state(&self) -> Result<ChromeState> {
+        let geometry = self.geometry().context("window geometry is unavailable")?;
+        let file_name = self
+            .document
+            .source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document")
+            .to_owned();
+        let page_index = geometry.current_page(&self.document.pages);
+        let message = self
+            .status_message
+            .as_ref()
+            .filter(|message| message.expires_at > Instant::now())
+            .map(|message| message.text.clone());
+        Ok(ChromeState {
+            editing: self.document.editing_state()?,
+            zoom: self.zoom,
+            file_name,
+            position: self.document.status_position(page_index),
+            message,
+        })
+    }
+
+    fn document_point(&self, x: f64, y: f64, clamp: bool) -> Option<(usize, f64, f64)> {
+        self.geometry()?
+            .document_point(&self.document.pages, x, y, clamp)
     }
 
     fn pointer_down(&mut self) -> Result<bool> {
         let Some((x, y)) = self.cursor else {
             return Ok(false);
         };
-        let Some((page_index, local_x, local_y)) = self.document_point(x, y, false) else {
-            return Ok(false);
-        };
-        let Some(loc) = self.document.docx_hit_test(page_index, local_x, local_y)? else {
-            return Ok(false);
+        let geometry = self.geometry().context("window geometry is unavailable")?;
+        let state = self.chrome_state()?;
+        let loc = match pointer_target(
+            &self.document,
+            &self.chrome,
+            &state,
+            geometry,
+            Point::new(x, y),
+        )? {
+            PointerTarget::Chrome(command) => {
+                self.dragging = false;
+                self.last_click = None;
+                if let Some(command) = command {
+                    self.execute_toolbar_command(command)?;
+                }
+                return Ok(true);
+            }
+            PointerTarget::Document(loc) => loc,
+            PointerTarget::None => return Ok(false),
         };
         let now = Instant::now();
         let word = self.last_click.is_some_and(|(last, last_x, last_y)| {
@@ -360,6 +524,42 @@ impl Viewer {
         Ok(selected)
     }
 
+    fn execute_toolbar_command(&mut self, command: ToolbarCommand) -> Result<()> {
+        let changed = match command {
+            ToolbarCommand::Undo => self.document.docx_undo()?,
+            ToolbarCommand::Redo => self.document.docx_redo()?,
+            ToolbarCommand::Bold => self.document.docx_toggle_format(SimpleFormat::Bold)?,
+            ToolbarCommand::Italic => self.document.docx_toggle_format(SimpleFormat::Italic)?,
+            ToolbarCommand::Underline => {
+                self.document.docx_toggle_format(SimpleFormat::Underline)?
+            }
+            ToolbarCommand::Align(alignment) => self.document.docx_set_alignment(alignment)?,
+            ToolbarCommand::ZoomOut => {
+                self.zoom_by(1.0 / 1.1);
+                return Ok(());
+            }
+            ToolbarCommand::ResetZoom => {
+                self.reset_zoom();
+                return Ok(());
+            }
+            ToolbarCommand::ZoomIn => {
+                self.zoom_by(1.1);
+                return Ok(());
+            }
+            ToolbarCommand::Save => {
+                self.save_with_status();
+                return Ok(());
+            }
+        };
+        if changed {
+            self.reset_caret_blink();
+            self.clamp_scroll();
+            self.update_title();
+        }
+        self.request_redraw();
+        Ok(())
+    }
+
     fn keyboard_input(&mut self, event_loop: &ActiveEventLoop, event: &KeyEvent) -> Result<()> {
         if event.state != ElementState::Pressed {
             return Ok(());
@@ -374,20 +574,28 @@ impl Viewer {
             && !event.repeat
             && let Key::Character(character) = key
         {
+            if character.eq_ignore_ascii_case("z") {
+                self.execute_toolbar_command(if self.modifiers.shift_key() {
+                    ToolbarCommand::Redo
+                } else {
+                    ToolbarCommand::Undo
+                })?;
+                return Ok(());
+            }
             if character.eq_ignore_ascii_case("s") {
-                self.save_and_reopen()?;
+                self.execute_toolbar_command(ToolbarCommand::Save)?;
                 return Ok(());
             }
             if matches!(character, "+" | "=") {
-                self.zoom_by(1.1);
+                self.execute_toolbar_command(ToolbarCommand::ZoomIn)?;
                 return Ok(());
             }
             if character == "-" {
-                self.zoom_by(1.0 / 1.1);
+                self.execute_toolbar_command(ToolbarCommand::ZoomOut)?;
                 return Ok(());
             }
             if character == "0" {
-                self.reset_zoom();
+                self.execute_toolbar_command(ToolbarCommand::ResetZoom)?;
                 return Ok(());
             }
         }
@@ -466,9 +674,20 @@ impl Viewer {
         Ok(())
     }
 
-    fn save_and_reopen(&mut self) -> Result<()> {
+    fn save_with_status(&mut self) {
         if !matches!(&self.document.reference, ReferenceDocument::Docx(_)) {
-            return Ok(());
+            return;
+        }
+        match self.save_and_reopen() {
+            Ok(path) => self.set_status(format!("Saved {}", path.display())),
+            Err(error) => self.set_status(format!("Save refused: {error:#}")),
+        }
+        self.request_redraw();
+    }
+
+    fn save_and_reopen(&mut self) -> Result<std::path::PathBuf> {
+        if !matches!(&self.document.reference, ReferenceDocument::Docx(_)) {
+            bail!("only DOCX documents are editable");
         }
         let path = self
             .save_target
@@ -485,7 +704,14 @@ impl Viewer {
         self.clamp_scroll();
         self.update_title();
         self.request_redraw();
-        Ok(())
+        Ok(path)
+    }
+
+    fn set_status(&mut self, text: String) {
+        self.status_message = Some(StatusMessage {
+            text,
+            expires_at: Instant::now() + STATUS_DURATION,
+        });
     }
 
     fn reset_caret_blink(&mut self) {
@@ -505,10 +731,8 @@ impl Viewer {
     }
 
     fn viewport_height(&self) -> f64 {
-        self.window
-            .as_ref()
-            .map(|window| f64::from(window.inner_size().height) / window.scale_factor())
-            .unwrap_or(1.0)
+        self.geometry()
+            .map_or(1.0, ViewportGeometry::document_height)
     }
 
     fn clamp_scroll(&mut self) {
@@ -649,17 +873,110 @@ impl ApplicationHandler for Viewer {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self
+            .status_message
+            .as_ref()
+            .is_some_and(|message| message.expires_at <= now)
+        {
+            self.status_message = None;
+            self.request_redraw();
+        }
+        let mut deadline = self
+            .status_message
+            .as_ref()
+            .map(|message| message.expires_at);
         if self.focused && self.document.has_docx_caret() {
-            let now = Instant::now();
             if now >= self.next_caret_blink {
                 self.caret_visible = !self.caret_visible;
                 self.next_caret_blink = now + CARET_BLINK;
                 self.request_redraw();
             }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_caret_blink));
+            deadline = Some(deadline.map_or(self.next_caret_blink, |current| {
+                current.min(self.next_caret_blink)
+            }));
         } else {
             self.caret_visible = false;
+        }
+        if let Some(deadline) = deadline {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_fixtures;
+
+    #[test]
+    fn toolbar_hit_is_consumed_and_document_hit_moves_the_caret() {
+        let source = test_fixtures::write_docx("chrome-hit", &test_fixtures::complex_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "22222222".to_owned(),
+                    offset: 0,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        let before = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        let geometry = ViewportGeometry {
+            width: 1_100.0,
+            height: 900.0,
+            zoom: 1.0,
+            scroll: 0.0,
+        };
+        let chrome = Chrome::new();
+        let state = ChromeState {
+            editing: document.editing_state().unwrap(),
+            zoom: 1.0,
+            file_name: "fixture.docx".to_owned(),
+            position: "Page 1 of 1".to_owned(),
+            message: None,
+        };
+        assert!(matches!(
+            pointer_target(&document, &chrome, &state, geometry, Point::new(4.0, 4.0)).unwrap(),
+            PointerTarget::Chrome(None)
+        ));
+        let unchanged = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(unchanged, before);
+
+        let caret = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference
+                .editor
+                .engine()
+                .resident_caret_snapshot(Some(("22222222", 8)))
+                .unwrap()
+                .caret_rect
+                .unwrap(),
+            _ => unreachable!(),
+        };
+        let origin = geometry.page_origin(&document.pages, caret.page_index);
+        let point = Point::new(origin.x + caret.x, origin.y + caret.y + caret.height / 2.0);
+        let PointerTarget::Document(loc) =
+            pointer_target(&document, &chrome, &state, geometry, point).unwrap()
+        else {
+            panic!("expected document pointer target");
+        };
+        assert_eq!(loc.offset, 8);
+        document.docx_select_point(loc, false, false).unwrap();
+        let after = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        assert_ne!(after, before);
+        std::fs::remove_file(source).unwrap();
     }
 }

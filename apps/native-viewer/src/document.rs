@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use betteroffice_pptx::Presentation;
 use betteroffice_xlsx::{SheetId, Workbook, viewport_for_used_range_within};
-use docx_edit::{EngineSession, seed_from_docx};
+use docx_edit::{EngineSession, SimpleFormat, seed_from_docx};
 use docx_layout::display_list::DisplayList;
 use docx_parse::{S9PackageWire, S9ParseOptions, parse_docx_s9_wire};
 use serde_json::{Value, json};
 
+use crate::chrome::{Alignment, EditingState};
 use crate::docx_scene::translate_document;
 use crate::editing::{
     CaretGeometry, DeleteDirection, DocxEditor, MoveDirection, SceneChange, SelectionRect, TextLoc,
@@ -102,6 +103,29 @@ impl DocumentView {
         }
     }
 
+    pub fn status_position(&self, page_index: usize) -> String {
+        match &self.reference {
+            ReferenceDocument::Docx(_) => {
+                format!("Page {} of {}", page_index + 1, self.pages.len())
+            }
+            ReferenceDocument::Xlsx(reference) => format!(
+                "Sheet {} of {}",
+                reference.sheet_index + 1,
+                reference.sheet_count
+            ),
+            ReferenceDocument::Pptx(reference) => {
+                format!("Slide {} of {}", page_index + 1, reference.slide_count)
+            }
+        }
+    }
+
+    pub fn editing_state(&self) -> Result<EditingState> {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            return Ok(EditingState::read_only());
+        };
+        reference.editor.editing_state()
+    }
+
     pub fn display_item_name(&self) -> &'static str {
         match &self.reference {
             ReferenceDocument::Docx(_) => "primitives",
@@ -150,6 +174,22 @@ impl DocumentView {
 
     pub fn docx_enter(&mut self) -> Result<bool> {
         self.apply_docx_edit(DocxEditor::enter)
+    }
+
+    pub fn docx_toggle_format(&mut self, format: SimpleFormat) -> Result<bool> {
+        self.apply_docx_edit(|editor| editor.toggle_format(format))
+    }
+
+    pub fn docx_set_alignment(&mut self, alignment: Alignment) -> Result<bool> {
+        self.apply_docx_edit(|editor| editor.set_alignment(alignment))
+    }
+
+    pub fn docx_undo(&mut self) -> Result<bool> {
+        self.apply_docx_edit(DocxEditor::undo)
+    }
+
+    pub fn docx_redo(&mut self) -> Result<bool> {
+        self.apply_docx_edit(DocxEditor::redo)
     }
 
     pub fn docx_selection_rects(&self) -> &[SelectionRect] {
@@ -434,6 +474,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::chrome::{Alignment, ToggleState};
     use crate::editing::TextLoc;
     use crate::test_fixtures;
 
@@ -519,6 +560,155 @@ mod tests {
         fs::remove_file(source).unwrap();
         fs::remove_file(output).unwrap();
         fs::remove_file(refused).unwrap();
+    }
+
+    #[test]
+    fn derives_toolbar_marks_from_the_engine_selection_context() {
+        let source = test_fixtures::write_docx("toolbar-state", &test_fixtures::complex_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 2,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        let caret = document.editing_state().unwrap();
+        assert_eq!(caret.bold, ToggleState::On);
+        assert!(!caret.inline_enabled);
+
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 5,
+                },
+                true,
+                false,
+            )
+            .unwrap();
+        let mixed = document.editing_state().unwrap();
+        assert_eq!(mixed.bold, ToggleState::Mixed);
+        assert!(mixed.inline_enabled);
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn format_preserves_selection_and_undo_updates_toolbar_state() {
+        let source = test_fixtures::write_docx("toolbar-format", &test_fixtures::complex_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let start = TextLoc {
+            para_id: "22222222".to_owned(),
+            offset: 0,
+        };
+        let end = TextLoc {
+            para_id: "22222222".to_owned(),
+            offset: 5,
+        };
+        document.docx_select_point(start, false, false).unwrap();
+        document.docx_select_point(end, true, false).unwrap();
+        let before = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        let initial = document.editing_state().unwrap();
+        assert_eq!(initial.bold, ToggleState::Off);
+        assert!(!initial.can_undo);
+
+        assert!(document.docx_toggle_format(SimpleFormat::Bold).unwrap());
+        let formatted = document.editing_state().unwrap();
+        assert_eq!(formatted.bold, ToggleState::On);
+        assert!(formatted.can_undo);
+        let after = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(after, before);
+
+        assert!(document.docx_toggle_format(SimpleFormat::Italic).unwrap());
+        let combined = document.editing_state().unwrap();
+        assert_eq!(combined.bold, ToggleState::On);
+        assert_eq!(combined.italic, ToggleState::On);
+        let after_second = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(after_second, before);
+
+        assert!(document.docx_undo().unwrap());
+        let undone = document.editing_state().unwrap();
+        assert_eq!(undone.bold, ToggleState::On);
+        assert_eq!(undone.italic, ToggleState::Off);
+        assert!(undone.can_undo);
+        assert!(undone.can_redo);
+        assert!(document.docx_undo().unwrap());
+        let restored = document.editing_state().unwrap();
+        assert_eq!(restored.bold, ToggleState::Off);
+        assert!(!restored.can_undo);
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn alignment_round_trips_through_save_and_reopen() {
+        let source = test_fixtures::write_docx("toolbar-alignment", &test_fixtures::complex_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let caret = TextLoc {
+            para_id: "22222222".to_owned(),
+            offset: 4,
+        };
+        document
+            .docx_select_point(caret.clone(), false, false)
+            .unwrap();
+        assert!(document.docx_set_alignment(Alignment::Center).unwrap());
+        assert_eq!(
+            document.editing_state().unwrap().alignment,
+            Some(Alignment::Center)
+        );
+
+        let output = test_fixtures::write_docx("toolbar-alignment-output", b"sentinel");
+        document.save_docx_to(&output).unwrap();
+        let mut reopened = load_document(&output, 0, 8_192).unwrap();
+        reopened.docx_select_point(caret, false, false).unwrap();
+        assert_eq!(
+            reopened.editing_state().unwrap().alignment,
+            Some(Alignment::Center)
+        );
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn inline_format_round_trips_through_save_and_reopen() {
+        let source =
+            test_fixtures::write_docx("toolbar-inline-save", &test_fixtures::complex_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let start = TextLoc {
+            para_id: "22222222".to_owned(),
+            offset: 0,
+        };
+        let end = TextLoc {
+            para_id: "22222222".to_owned(),
+            offset: 5,
+        };
+        document
+            .docx_select_point(start.clone(), false, false)
+            .unwrap();
+        document
+            .docx_select_point(end.clone(), true, false)
+            .unwrap();
+        assert!(document.docx_toggle_format(SimpleFormat::Bold).unwrap());
+
+        let output = test_fixtures::write_docx("toolbar-inline-output", b"sentinel");
+        document.save_docx_to(&output).unwrap();
+        let mut reopened = load_document(&output, 0, 8_192).unwrap();
+        reopened.docx_select_point(start, false, false).unwrap();
+        reopened.docx_select_point(end, true, false).unwrap();
+        assert_eq!(reopened.editing_state().unwrap().bold, ToggleState::On);
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
     }
 
     #[test]

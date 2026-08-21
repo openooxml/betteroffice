@@ -1,3 +1,4 @@
+mod chrome;
 mod document;
 #[path = "scene.rs"]
 mod docx_scene;
