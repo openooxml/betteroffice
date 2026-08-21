@@ -252,6 +252,17 @@ impl Presentation {
             .insert_paragraph_break(context, story_id, index)?)
     }
 
+    pub fn delete_paragraph_break(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        index: u32,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .delete_paragraph_break(context, story_id, index)?)
+    }
+
     pub fn register_font(
         &mut self,
         family: &str,

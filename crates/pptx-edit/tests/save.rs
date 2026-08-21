@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeKind, ShapeRect,
-    ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
+    DeckSession, DeckSnapshot, EditCtx, EditError, PresetShapeDraft, ShapeDraft, ShapeKind,
+    ShapeRect, ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
@@ -431,6 +431,56 @@ fn a_paragraph_break_survives_reopen() {
         story.plain_text().replace('\n', ""),
         before.plain_text().replace('\n', "")
     );
+}
+
+#[test]
+fn deleting_a_paragraph_break_merges_and_survives_reopen() {
+    let session = open_fixture();
+    let (_, _, story_id) = first_story(&session.snapshot().unwrap());
+    let before = session.story(&story_id).unwrap();
+    session
+        .insert_paragraph_break(&context(), &story_id, 1)
+        .unwrap();
+    let split = session.story(&story_id).unwrap();
+    session.add_undo_barrier();
+    let receipt = session
+        .delete_paragraph_break(&context(), &story_id, 1)
+        .unwrap();
+    assert_eq!(
+        (receipt.start, receipt.end, receipt.text.as_str()),
+        (1, 2, "\n")
+    );
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), split);
+    assert!(session.redo());
+
+    let reopened = reopen(&session);
+    assert_eq!(reopened.story(&story_id).unwrap(), before);
+}
+
+#[test]
+fn deleting_a_paragraph_break_rejects_text_and_the_final_pilcrow() {
+    let session = open_fixture();
+    let (_, _, story_id) = first_story(&session.snapshot().unwrap());
+    let story = session.story(&story_id).unwrap();
+    let error = session
+        .delete_paragraph_break(&context(), &story_id, 0)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        EditError::ParagraphBoundary { start: 0, end: 1 }
+    ));
+    let final_pilcrow = story.length - 1;
+    let error = session
+        .delete_paragraph_break(&context(), &story_id, final_pilcrow)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        EditError::OutOfBounds { index, length }
+            if index == final_pilcrow && length == final_pilcrow
+    ));
+    assert_eq!(session.story(&story_id).unwrap(), story);
 }
 
 #[test]

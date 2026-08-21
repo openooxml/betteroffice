@@ -279,6 +279,48 @@ impl DeckSession {
             text: "\n".to_owned(),
         })
     }
+
+    pub fn delete_paragraph_break(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        index: u32,
+    ) -> EditResult<TextReceipt> {
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        let final_pilcrow = final_pilcrow_index(&story, &txn)?;
+        if index >= final_pilcrow {
+            return Err(EditError::OutOfBounds {
+                index,
+                length: final_pilcrow,
+            });
+        }
+        let mut offset = 0;
+        let is_pilcrow = story.diff(&txn, YChange::identity).into_iter().any(|diff| {
+            let length = out_len(&diff.insert);
+            let found = offset == index
+                && matches!(
+                    diff.insert,
+                    Out::YMap(ref map)
+                        if map_string(map, &txn, KIND).as_deref() == Some(PILCROW_KIND)
+                );
+            offset += length;
+            found
+        });
+        if !is_pilcrow {
+            return Err(EditError::ParagraphBoundary {
+                start: index,
+                end: index.saturating_add(1),
+            });
+        }
+        story.remove_range(&mut txn, index, 1);
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start: index,
+            end: index + 1,
+            text: "\n".to_owned(),
+        })
+    }
 }
 
 pub(crate) fn validate_story<T: ReadTxn>(
