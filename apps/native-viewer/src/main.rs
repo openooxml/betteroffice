@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use collaboration::{CollaborationConfig, DEFAULT_RELAY_ORIGIN};
-use document::{DocumentFormat, load_collaborative_docx, load_document, load_document_for_export};
+use document::{
+    DocumentFormat, load_collaborative_document, load_document, load_document_for_export,
+};
 
 fn main() -> Result<()> {
     let options = Options::parse()?;
@@ -43,8 +45,9 @@ fn main() -> Result<()> {
     let document = if options.png.is_some() {
         load_document_for_export(&options.document, sheet, max_texture_dimension_2d)?
     } else if let Some(config) = &collaboration {
-        load_collaborative_docx(
+        load_collaborative_document(
             &options.document,
+            sheet,
             max_texture_dimension_2d,
             config.client_id(),
         )?
@@ -172,8 +175,8 @@ impl Options {
         if self.png.is_some() {
             bail!("--room requires the interactive viewer");
         }
-        if format != DocumentFormat::Docx {
-            bail!("--room is available only for DOCX");
+        if format == DocumentFormat::Pptx {
+            bail!("--room is available only for DOCX and XLSX");
         }
         CollaborationConfig::new(room.clone(), &self.relay_origin).map(Some)
     }
@@ -264,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn room_options_enable_only_interactive_docx_collaboration() {
+    fn room_options_enable_only_interactive_docx_and_xlsx_collaboration() {
         let options = Options::parse_from([
             "--document".into(),
             "document.docx".into(),
@@ -279,7 +282,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(collaboration.room(), "shared");
-        assert!(options.collaboration(DocumentFormat::Xlsx).is_err());
+        assert!(options.collaboration(DocumentFormat::Xlsx).is_ok());
+        assert!(options.collaboration(DocumentFormat::Pptx).is_err());
 
         let export = Options::parse_from([
             "--document".into(),

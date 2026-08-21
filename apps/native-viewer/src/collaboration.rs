@@ -139,7 +139,7 @@ impl CollaborationClient {
         let (commands, receiver) = channel(COMMAND_QUEUE_CAPACITY);
         let url = config.url.clone();
         thread::Builder::new()
-            .name("docx-collaboration".to_owned())
+            .name("document-collaboration".to_owned())
             .spawn(move || {
                 let runtime = Builder::new_current_thread().enable_all().build();
                 match runtime {

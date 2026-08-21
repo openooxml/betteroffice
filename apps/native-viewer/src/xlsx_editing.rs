@@ -1,13 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, CellValue, DisplayList, GridMeta, SheetId, Viewport,
-    Workbook, viewport_for_used_range_within,
+    CalculationOptions, CellRange, CellRef, CellValue, DisplayList, GridMeta, SheetId,
+    UpdateOrigin, UpdateSubscription, Viewport, Workbook, viewport_for_used_range_within,
 };
+use sha2::{Digest, Sha256};
 
 const UNIX_EPOCH_SERIAL: f64 = 25_569.0;
 const SECONDS_PER_DAY: f64 = 86_400.0;
@@ -27,8 +29,11 @@ struct CellDraft {
 }
 
 pub struct XlsxEditor {
+    _local_update_subscription: Option<UpdateSubscription>,
+    local_updates: Arc<Mutex<VecDeque<Vec<u8>>>>,
     workbook: Workbook,
     source: Vec<u8>,
+    source_fingerprint: Option<[u8; 32]>,
     sheet: SheetId,
     viewport: Viewport,
     display_list: DisplayList,
@@ -39,6 +44,10 @@ pub struct XlsxEditor {
     revision_ids: Vec<u64>,
     next_revision: u64,
     saved_revision: u64,
+    remote_changed_sheets: BTreeSet<SheetId>,
+    remote_dirty: bool,
+    #[cfg(test)]
+    relayout_count: usize,
 }
 
 impl XlsxEditor {
@@ -48,7 +57,41 @@ impl XlsxEditor {
         max_texture_dimension_2d: u32,
         recalculate: bool,
     ) -> Result<Self> {
-        let mut workbook = Workbook::open_for_read(&source)?;
+        Self::open_internal(
+            source,
+            sheet_index,
+            max_texture_dimension_2d,
+            recalculate,
+            None,
+        )
+    }
+
+    pub fn open_collaborative(
+        source: Vec<u8>,
+        sheet_index: usize,
+        max_texture_dimension_2d: u32,
+        client_id: u64,
+    ) -> Result<Self> {
+        Self::open_internal(
+            source,
+            sheet_index,
+            max_texture_dimension_2d,
+            true,
+            Some(client_id),
+        )
+    }
+
+    fn open_internal(
+        source: Vec<u8>,
+        sheet_index: usize,
+        max_texture_dimension_2d: u32,
+        recalculate: bool,
+        collaboration_client_id: Option<u64>,
+    ) -> Result<Self> {
+        let mut workbook = match collaboration_client_id {
+            Some(client_id) => Workbook::open_collaborative(&source, client_id)?,
+            None => Workbook::open_for_read(&source)?,
+        };
         let sheet_count = workbook.sheet_count();
         if sheet_index >= sheet_count {
             bail!(
@@ -76,9 +119,27 @@ impl XlsxEditor {
             workbook.recalculate_all(calculation_options());
         }
         let display_list = workbook.display_list_for(sheet, &viewport)?;
+        let source_fingerprint = collaboration_client_id.map(|_| workbook_checksum(&workbook));
+        let local_updates = Arc::new(Mutex::new(VecDeque::new()));
+        let local_update_subscription = if collaboration_client_id.is_some() {
+            let observed = Arc::clone(&local_updates);
+            Some(workbook.observe_update_v1(move |event| {
+                if event.origin == UpdateOrigin::Local {
+                    observed
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push_back(event.update);
+                }
+            })?)
+        } else {
+            None
+        };
         Ok(Self {
+            _local_update_subscription: local_update_subscription,
+            local_updates,
             workbook,
             source,
+            source_fingerprint,
             sheet,
             viewport,
             display_list,
@@ -89,11 +150,14 @@ impl XlsxEditor {
             revision_ids: vec![0],
             next_revision: 1,
             saved_revision: 0,
+            remote_changed_sheets: BTreeSet::new(),
+            remote_dirty: false,
+            #[cfg(test)]
+            relayout_count: 0,
         })
     }
 
-    #[cfg(test)]
-    pub fn workbook(&self) -> &Workbook {
+    pub(crate) fn workbook(&self) -> &Workbook {
         &self.workbook
     }
 
@@ -101,8 +165,7 @@ impl XlsxEditor {
         &self.display_list
     }
 
-    #[cfg(test)]
-    pub fn sheet(&self) -> SheetId {
+    pub(crate) fn sheet(&self) -> SheetId {
         self.sheet
     }
 
@@ -123,7 +186,11 @@ impl XlsxEditor {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.revision_ids[self.history_index] != self.saved_revision
+        self.revision_ids[self.history_index] != self.saved_revision || self.remote_dirty
+    }
+
+    pub fn is_remote_only_dirty(&self) -> bool {
+        self.remote_dirty && self.revision_ids[self.history_index] == self.saved_revision
     }
 
     pub fn can_undo(&self) -> bool {
@@ -136,6 +203,67 @@ impl XlsxEditor {
 
     pub fn draft_value(&self) -> Option<&str> {
         self.draft.as_ref().map(|draft| draft.value.as_str())
+    }
+
+    pub fn state_vector(&self) -> Result<Vec<u8>> {
+        if !self.workbook.is_collaborative() {
+            bail!("collaboration is unavailable for this workbook");
+        }
+        Ok(self.workbook.encode_state_vector_v1())
+    }
+
+    pub fn encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.workbook.encode_diff_v1(state_vector)?)
+    }
+
+    pub fn drain_local_updates(&self) -> Vec<Vec<u8>> {
+        self.local_updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    pub fn source_fingerprint(&self) -> Result<[u8; 32]> {
+        self.source_fingerprint
+            .context("collaboration is unavailable for this workbook")
+    }
+
+    pub fn apply_remote_update(&mut self, update: &[u8]) -> Result<bool> {
+        let selection = self.selection;
+        let draft_cell = self.draft.as_ref().map(|draft| draft.cell);
+        let result = self
+            .workbook
+            .apply_update_v1(update, calculation_options())?;
+        self.selection = selection;
+        if let (Some(draft), Some(cell)) = (&mut self.draft, draft_cell) {
+            draft.cell = cell;
+        }
+        if !result.applied {
+            return Ok(false);
+        }
+        if result.changed.is_empty() {
+            self.remote_changed_sheets
+                .extend((0..self.workbook.sheet_count()).map(|index| SheetId(index as u32)));
+        } else {
+            self.remote_changed_sheets
+                .extend(result.changed.iter().map(|address| address.sheet));
+        }
+        self.remote_dirty = true;
+        self.rebuild_display_list()?;
+        Ok(true)
+    }
+
+    pub fn canonical_checksum(&self) -> Result<[u8; 32]> {
+        let mut checksum = Sha256::new();
+        checksum.update(b"betteroffice-native-xlsx-workbook-v1\0");
+        checksum.update(self.workbook.save()?);
+        Ok(checksum.finalize().into())
+    }
+
+    #[cfg(test)]
+    pub fn relayout_count(&self) -> usize {
+        self.relayout_count
     }
 
     pub fn cell_at_point(&self, x: f32, y: f32) -> Option<CellRef> {
@@ -297,14 +425,15 @@ impl XlsxEditor {
     }
 
     pub fn save_to(&mut self, path: &Path) -> Result<()> {
-        let bytes = if self.history_index == 0 {
+        let bytes = if self.history_index == 0 && self.remote_changed_sheets.is_empty() {
             self.source.clone()
         } else {
-            let changed_sheets = self.edit_impacts[..self.history_index]
+            let mut changed_sheets = self.edit_impacts[..self.history_index]
                 .iter()
                 .flatten()
                 .copied()
-                .collect();
+                .collect::<BTreeSet<_>>();
+            changed_sheets.extend(self.remote_changed_sheets.iter().copied());
             restore_untouched_worksheets(
                 &self.source,
                 &self.workbook.save()?,
@@ -315,6 +444,7 @@ impl XlsxEditor {
         ensure_save_fidelity(&self.source, &bytes)?;
         fs::write(path, bytes).with_context(|| format!("write edited XLSX {}", path.display()))?;
         self.saved_revision = self.revision_ids[self.history_index];
+        self.remote_dirty = false;
         Ok(())
     }
 
@@ -324,6 +454,10 @@ impl XlsxEditor {
 
     fn rebuild_display_list(&mut self) -> Result<()> {
         self.display_list = self.workbook.display_list_for(self.sheet, &self.viewport)?;
+        #[cfg(test)]
+        {
+            self.relayout_count += 1;
+        }
         Ok(())
     }
 
@@ -341,6 +475,13 @@ impl XlsxEditor {
             })
             .map_or(cell, |range| range.start)
     }
+}
+
+fn workbook_checksum(workbook: &Workbook) -> [u8; 32] {
+    let mut checksum = Sha256::new();
+    checksum.update(b"betteroffice-native-xlsx-state-v1\0");
+    checksum.update(workbook.encode_state_as_update_v1());
+    checksum.finalize().into()
 }
 
 fn calculation_options() -> CalculationOptions {

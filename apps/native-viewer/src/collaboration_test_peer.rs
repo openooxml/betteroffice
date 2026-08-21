@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use betteroffice_xlsx::{CellRef, SheetId};
 use docx_edit::story_checksum;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +14,7 @@ use yrs::{Map, ReadTxn, Transact};
 
 use crate::collaboration::{CollaborationClient, CollaborationConfig, TransportEvent};
 use crate::collaboration_document;
-use crate::document::{DocumentView, ReferenceDocument, load_collaborative_docx};
+use crate::document::{DocumentView, ReferenceDocument, load_collaborative_document};
 use crate::editing::TextLoc;
 
 #[derive(Deserialize)]
@@ -28,6 +29,13 @@ enum PeerCommand {
         para_id: String,
         offset: u32,
         text: String,
+    },
+    SetCell {
+        id: u64,
+        sheet: u32,
+        row: u32,
+        col: u32,
+        input: String,
     },
     Disconnect {
         id: u64,
@@ -45,6 +53,7 @@ impl PeerCommand {
         match self {
             Self::Snapshot { id }
             | Self::Insert { id, .. }
+            | Self::SetCell { id, .. }
             | Self::Disconnect { id }
             | Self::Reconnect { id }
             | Self::Shutdown { id } => *id,
@@ -70,12 +79,14 @@ struct PeerResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PeerSnapshot {
+    format: &'static str,
     connected: bool,
     synced: bool,
     state_vector: String,
     canonical_checksum: String,
     stories: Vec<StoryState>,
     paragraphs: Vec<ParagraphState>,
+    cells: Vec<CellState>,
 }
 
 #[derive(Serialize)]
@@ -92,13 +103,23 @@ struct ParagraphState {
     text: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellState {
+    sheet: u32,
+    row: u32,
+    col: u32,
+    a1: String,
+    input: String,
+}
+
 struct Connection {
     client: CollaborationClient,
     events: Receiver<TransportEvent>,
 }
 
 pub fn run(document_path: &Path, config: CollaborationConfig) -> Result<()> {
-    let mut document = load_collaborative_docx(document_path, 8_192, config.client_id())?;
+    let mut document = load_collaborative_document(document_path, 0, 8_192, config.client_id())?;
     let (inputs, input_receiver) = channel();
     read_commands(inputs)?;
     let mut connection = Some(connect(&config)?);
@@ -211,6 +232,27 @@ fn apply_command(
                 collaboration_document::forward_local_updates(document, &mut active.client);
             }
         }
+        PeerCommand::SetCell {
+            sheet,
+            row,
+            col,
+            input,
+            ..
+        } => {
+            let ReferenceDocument::Xlsx(reference) = &document.reference else {
+                bail!("native setCell requires XLSX");
+            };
+            if reference.editor.sheet() != SheetId(sheet) {
+                bail!("native peer has not opened sheet {}", sheet.saturating_add(1));
+            }
+            document.xlsx_select_cell(CellRef::new(row, col));
+            if !document.xlsx_begin_edit(Some(&input))? || !document.xlsx_commit(None)? {
+                bail!("native cell edit made no change");
+            }
+            if let Some(active) = connection {
+                collaboration_document::forward_local_updates(document, &mut active.client);
+            }
+        }
         PeerCommand::Disconnect { .. } => {
             if connection.take().is_none() {
                 bail!("native peer is already disconnected");
@@ -227,9 +269,18 @@ fn apply_command(
 }
 
 fn snapshot(document: &DocumentView, connection: Option<&Connection>) -> Result<PeerSnapshot> {
-    let ReferenceDocument::Docx(reference) = &document.reference else {
-        bail!("collaboration test peer requires DOCX");
-    };
+    match &document.reference {
+        ReferenceDocument::Docx(reference) => snapshot_docx(document, reference, connection),
+        ReferenceDocument::Xlsx(reference) => snapshot_xlsx(document, reference, connection),
+        ReferenceDocument::Pptx(_) => bail!("collaboration test peer does not support PPTX"),
+    }
+}
+
+fn snapshot_docx(
+    document: &DocumentView,
+    reference: &crate::document::DocxReference,
+    connection: Option<&Connection>,
+) -> Result<PeerSnapshot> {
     let editing = reference.editor.engine().doc();
     let story_ids = {
         let transaction = editing.yrs_doc().transact();
@@ -261,12 +312,45 @@ fn snapshot(document: &DocumentView, connection: Option<&Connection>) -> Result<
         })
         .collect();
     Ok(PeerSnapshot {
+        format: "docx",
         connected: connection.is_some_and(|active| active.client.is_connected()),
         synced: connection.is_some_and(|active| active.client.is_synced()),
-        state_vector: hex(&document.docx_state_vector()?),
+        state_vector: hex(&document.collaboration_state_vector()?),
         canonical_checksum: canonical_checksum(&stories),
         stories,
         paragraphs,
+        cells: Vec::new(),
+    })
+}
+
+fn snapshot_xlsx(
+    document: &DocumentView,
+    reference: &crate::document::XlsxReference,
+    connection: Option<&Connection>,
+) -> Result<PeerSnapshot> {
+    let workbook = reference.editor.workbook();
+    let mut cells = Vec::new();
+    for sheet_index in 0..workbook.sheet_count() {
+        let sheet_id = SheetId(sheet_index as u32);
+        for (cell, _) in workbook.sheet(sheet_id)?.iter_cells() {
+            cells.push(CellState {
+                sheet: sheet_id.0,
+                row: cell.row,
+                col: cell.col,
+                a1: cell.to_a1(),
+                input: workbook.cell(sheet_id, cell)?.input,
+            });
+        }
+    }
+    Ok(PeerSnapshot {
+        format: "xlsx",
+        connected: connection.is_some_and(|active| active.client.is_connected()),
+        synced: connection.is_some_and(|active| active.client.is_synced()),
+        state_vector: hex(&document.collaboration_state_vector()?),
+        canonical_checksum: hex(&reference.editor.canonical_checksum()?),
+        stories: Vec::new(),
+        paragraphs: Vec::new(),
+        cells,
     })
 }
 

@@ -225,6 +225,7 @@ impl DocumentView {
         self.apply_docx_edit(DocxEditor::redo)
     }
 
+    #[cfg(test)]
     pub fn docx_state_vector(&self) -> Result<Vec<u8>> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             bail!("collaboration is available only for DOCX");
@@ -232,17 +233,11 @@ impl DocumentView {
         Ok(reference.editor.state_vector())
     }
 
-    pub fn docx_encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
-        let ReferenceDocument::Docx(reference) = &self.reference else {
-            bail!("collaboration is available only for DOCX");
-        };
-        reference.editor.encode_diff(state_vector)
-    }
-
     pub fn docx_apply_remote_update(&mut self, update: &[u8]) -> Result<bool> {
         self.apply_docx_edit(|editor| editor.apply_remote_update(update).map(Some))
     }
 
+    #[cfg(test)]
     pub fn docx_drain_local_updates(&self) -> Vec<Vec<u8>> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             return Vec::new();
@@ -250,11 +245,63 @@ impl DocumentView {
         reference.editor.drain_local_updates()
     }
 
+    #[cfg(test)]
     pub fn docx_fingerprint(&self) -> Result<[u8; 32]> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             bail!("collaboration is available only for DOCX");
         };
         Ok(reference.editor.source_fingerprint())
+    }
+
+    pub fn collaboration_state_vector(&self) -> Result<Vec<u8>> {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => Ok(reference.editor.state_vector()),
+            ReferenceDocument::Xlsx(reference) => reference.editor.state_vector(),
+            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+        }
+    }
+
+    pub fn collaboration_encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.encode_diff(state_vector),
+            ReferenceDocument::Xlsx(reference) => reference.editor.encode_diff(state_vector),
+            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+        }
+    }
+
+    pub fn collaboration_apply_remote_update(&mut self, update: &[u8]) -> Result<bool> {
+        match &self.reference {
+            ReferenceDocument::Docx(_) => self.docx_apply_remote_update(update),
+            ReferenceDocument::Xlsx(_) => {
+                let changed = {
+                    let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+                        unreachable!();
+                    };
+                    reference.editor.apply_remote_update(update)?
+                };
+                if changed {
+                    self.refresh_xlsx_scene()?;
+                }
+                Ok(changed)
+            }
+            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+        }
+    }
+
+    pub fn collaboration_drain_local_updates(&self) -> Vec<Vec<u8>> {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.drain_local_updates(),
+            ReferenceDocument::Xlsx(reference) => reference.editor.drain_local_updates(),
+            ReferenceDocument::Pptx(_) => Vec::new(),
+        }
+    }
+
+    pub fn collaboration_fingerprint(&self) -> Result<[u8; 32]> {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => Ok(reference.editor.source_fingerprint()),
+            ReferenceDocument::Xlsx(reference) => reference.editor.source_fingerprint(),
+            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+        }
     }
 
     #[cfg(test)]
@@ -271,6 +318,24 @@ impl DocumentView {
             return 0;
         };
         reference.editor.relayout_count()
+    }
+
+    #[cfg(test)]
+    pub fn collaboration_canonical_checksum(&self) -> Result<[u8; 32]> {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.canonical_checksum(),
+            ReferenceDocument::Xlsx(reference) => reference.editor.canonical_checksum(),
+            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn collaboration_relayout_count(&self) -> usize {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.relayout_count(),
+            ReferenceDocument::Xlsx(reference) => reference.editor.relayout_count(),
+            ReferenceDocument::Pptx(_) => 0,
+        }
     }
 
     pub fn docx_selection_rects(&self) -> &[SelectionRect] {
@@ -329,10 +394,11 @@ impl DocumentView {
     }
 
     pub fn is_remote_only_dirty(&self) -> bool {
-        matches!(
-            &self.reference,
-            ReferenceDocument::Docx(reference) if reference.editor.is_remote_only_dirty()
-        )
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.is_remote_only_dirty(),
+            ReferenceDocument::Xlsx(reference) => reference.editor.is_remote_only_dirty(),
+            ReferenceDocument::Pptx(_) => false,
+        }
     }
 
     pub fn save_docx_to(&mut self, path: &Path) -> Result<()> {
@@ -672,6 +738,7 @@ pub fn load_document_for_export(
     load_document_with_xlsx_mode(path, sheet_index, max_texture_dimension_2d, false)
 }
 
+#[cfg(test)]
 pub fn load_collaborative_docx(
     path: &Path,
     max_texture_dimension_2d: u32,
@@ -681,6 +748,44 @@ pub fn load_collaborative_docx(
         bail!("--room is available only for DOCX");
     }
     load_docx(path, max_texture_dimension_2d, Some(client_id))
+}
+
+#[cfg(test)]
+pub fn load_collaborative_xlsx(
+    path: &Path,
+    sheet_index: usize,
+    max_texture_dimension_2d: u32,
+    client_id: u64,
+) -> Result<DocumentView> {
+    if DocumentFormat::from_path(path)? != DocumentFormat::Xlsx {
+        bail!("XLSX collaboration requires an .xlsx workbook");
+    }
+    load_xlsx(
+        path,
+        sheet_index,
+        max_texture_dimension_2d,
+        true,
+        Some(client_id),
+    )
+}
+
+pub fn load_collaborative_document(
+    path: &Path,
+    sheet_index: usize,
+    max_texture_dimension_2d: u32,
+    client_id: u64,
+) -> Result<DocumentView> {
+    match DocumentFormat::from_path(path)? {
+        DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d, Some(client_id)),
+        DocumentFormat::Xlsx => load_xlsx(
+            path,
+            sheet_index,
+            max_texture_dimension_2d,
+            true,
+            Some(client_id),
+        ),
+        DocumentFormat::Pptx => bail!("collaboration is unavailable for PPTX"),
+    }
 }
 
 fn load_document_with_xlsx_mode(
@@ -696,6 +801,7 @@ fn load_document_with_xlsx_mode(
             sheet_index,
             max_texture_dimension_2d,
             recalculate_xlsx,
+            None,
         ),
         DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d),
     }
@@ -783,10 +889,16 @@ fn load_xlsx(
     sheet_index: usize,
     max_texture_dimension_2d: u32,
     recalculate: bool,
+    collaboration_client_id: Option<u64>,
 ) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read XLSX {}", path.display()))?;
-    let editor = XlsxEditor::open(bytes, sheet_index, max_texture_dimension_2d, recalculate)
-        .map_err(|error| anyhow::anyhow!("open XLSX {}: {error:#}", path.display()))?;
+    let editor = match collaboration_client_id {
+        Some(client_id) => {
+            XlsxEditor::open_collaborative(bytes, sheet_index, max_texture_dimension_2d, client_id)
+        }
+        None => XlsxEditor::open(bytes, sheet_index, max_texture_dimension_2d, recalculate),
+    }
+    .map_err(|error| anyhow::anyhow!("open XLSX {}: {error:#}", path.display()))?;
     let sheet_count = editor.sheet_count();
     let sheet_name = editor.sheet_name()?.to_owned();
     let display_list = editor.display_list();
@@ -1047,22 +1159,23 @@ mod tests {
     }
 
     fn complete_sync(sender: &DocumentView, receiver: &mut DocumentView) {
-        let step_1 = encode_sync_step_1(&receiver.docx_state_vector().unwrap()).unwrap();
+        let step_1 = encode_sync_step_1(&receiver.collaboration_state_vector().unwrap()).unwrap();
         let decoded_step_1 = decode_messages(&step_1).unwrap();
         let [ProtocolMessage::SyncStep1(state_vector)] = decoded_step_1.as_slice() else {
             unreachable!();
         };
-        let step_2 = encode_sync_step_2(&sender.docx_encode_diff(state_vector).unwrap()).unwrap();
+        let step_2 =
+            encode_sync_step_2(&sender.collaboration_encode_diff(state_vector).unwrap()).unwrap();
         let decoded_step_2 = decode_messages(&step_2).unwrap();
         let [ProtocolMessage::SyncStep2(update)] = decoded_step_2.as_slice() else {
             unreachable!();
         };
-        receiver.docx_apply_remote_update(update).unwrap();
+        receiver.collaboration_apply_remote_update(update).unwrap();
     }
 
     fn framed_local_updates(document: &DocumentView) -> Vec<Vec<u8>> {
         document
-            .docx_drain_local_updates()
+            .collaboration_drain_local_updates()
             .into_iter()
             .map(|update| encode_update(&update).unwrap())
             .collect()
@@ -1074,7 +1187,7 @@ mod tests {
             let [ProtocolMessage::Update(update)] = messages.as_slice() else {
                 unreachable!();
             };
-            receiver.docx_apply_remote_update(update).unwrap();
+            receiver.collaboration_apply_remote_update(update).unwrap();
         }
     }
 
@@ -1133,6 +1246,87 @@ mod tests {
         assert_ne!(left_checksum, baseline);
         assert_eq!(left_checksum, right_checksum);
         std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn two_native_xlsx_sessions_converge_after_interleaved_cell_edits() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let mut left = load_collaborative_xlsx(&source, 0, 8_192, 101).unwrap();
+        let mut right = load_collaborative_xlsx(&source, 0, 8_192, 202).unwrap();
+        assert_eq!(
+            left.collaboration_fingerprint().unwrap(),
+            right.collaboration_fingerprint().unwrap()
+        );
+        complete_sync(&left, &mut right);
+        complete_sync(&right, &mut left);
+        let baseline = left.collaboration_canonical_checksum().unwrap();
+        assert_eq!(baseline, right.collaboration_canonical_checksum().unwrap());
+
+        let edit = |document: &mut DocumentView, cell: &str, value: &str| {
+            document.xlsx_select_cell(CellRef::parse_a1(cell).unwrap());
+            document.xlsx_begin_edit(Some(value)).unwrap();
+            assert!(document.xlsx_commit(None).unwrap());
+        };
+        edit(&mut left, "B5", "left first");
+        let left_first = framed_local_updates(&left);
+        edit(&mut right, "C5", "right first");
+        let right_first = framed_local_updates(&right);
+        deliver_room_frames(&mut left, &right_first);
+        edit(&mut left, "D5", "left second");
+        let left_second = framed_local_updates(&left);
+        deliver_room_frames(&mut right, &left_first);
+        edit(&mut right, "E5", "right second");
+        let right_second = framed_local_updates(&right);
+        deliver_room_frames(&mut left, &right_second);
+        deliver_room_frames(&mut right, &left_second);
+        complete_sync(&left, &mut right);
+        complete_sync(&right, &mut left);
+
+        let (ReferenceDocument::Xlsx(left_reference), ReferenceDocument::Xlsx(right_reference)) =
+            (&left.reference, &right.reference)
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            left_reference.editor.workbook().model(),
+            right_reference.editor.workbook().model()
+        );
+        assert_eq!(
+            left_reference.editor.workbook().save().unwrap(),
+            right_reference.editor.workbook().save().unwrap()
+        );
+        let left_checksum = left.collaboration_canonical_checksum().unwrap();
+        let right_checksum = right.collaboration_canonical_checksum().unwrap();
+        assert_ne!(left_checksum, baseline);
+        assert_eq!(left_checksum, right_checksum);
+        assert_eq!(
+            left.collaboration_state_vector().unwrap(),
+            right.collaboration_state_vector().unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_xlsx_edit_preserves_the_row_column_selection() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let mut local = load_collaborative_xlsx(&source, 0, 8_192, 101).unwrap();
+        let mut peer = load_collaborative_xlsx(&source, 0, 8_192, 202).unwrap();
+        let selected = CellRef::parse_a1("D8").unwrap();
+        local.xlsx_select_cell(selected);
+        local.xlsx_begin_edit(None).unwrap();
+        let draft_before = local.xlsx_overlay().unwrap().draft;
+        peer.xlsx_select_cell(CellRef::parse_a1("A1").unwrap());
+        peer.xlsx_begin_edit(Some("remote")).unwrap();
+        peer.xlsx_commit(None).unwrap();
+
+        for update in peer.collaboration_drain_local_updates() {
+            local.collaboration_apply_remote_update(&update).unwrap();
+        }
+
+        let ReferenceDocument::Xlsx(reference) = &local.reference else {
+            unreachable!();
+        };
+        assert_eq!(reference.editor.selection(), selected);
+        assert_eq!(reference.editor.draft_value(), draft_before.as_deref());
     }
 
     #[test]

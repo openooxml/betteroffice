@@ -19,8 +19,8 @@ pub fn handle_transport_event(
     match event {
         TransportEvent::Connected => {
             collaboration.send(encode_sync_step_1_with_fingerprint(
-                &document.docx_state_vector()?,
-                &document.docx_fingerprint()?,
+                &document.collaboration_state_vector()?,
+                &document.collaboration_fingerprint()?,
             )?)?;
             Ok(false)
         }
@@ -44,7 +44,7 @@ pub fn apply_frame(
             return Ok(false);
         }
     };
-    let fingerprint = document.docx_fingerprint()?;
+    let fingerprint = document.collaboration_fingerprint()?;
     for message in &messages {
         let payload = match message {
             ProtocolMessage::SyncStep1(payload)
@@ -116,7 +116,7 @@ pub fn apply_frame(
     if let Some(state_vector) = sync_step_1 {
         let (state_vector, _) = split_fingerprint(&state_vector);
         collaboration.send(encode_sync_step_2_with_fingerprint(
-            &document.docx_encode_diff(state_vector)?,
+            &document.collaboration_encode_diff(state_vector)?,
             &fingerprint,
         )?)?;
     }
@@ -128,7 +128,7 @@ pub fn apply_frame(
         false
     } else {
         let update = Update::merge_updates(updates).encode_v1();
-        match document.docx_apply_remote_update(&update) {
+        match document.collaboration_apply_remote_update(&update) {
             Ok(repainted) => repainted,
             Err(error) => {
                 collaboration.report_protocol_error(format!("invalid remote update: {error:#}"));
@@ -146,14 +146,14 @@ pub fn forward_local_updates(document: &DocumentView, collaboration: &mut Collab
     if !collaboration.is_connected() {
         return;
     }
-    let fingerprint = match document.docx_fingerprint() {
+    let fingerprint = match document.collaboration_fingerprint() {
         Ok(fingerprint) => fingerprint,
         Err(error) => {
             collaboration.report_protocol_error(error);
             return;
         }
     };
-    for update in document.docx_drain_local_updates() {
+    for update in document.collaboration_drain_local_updates() {
         let result = encode_update_with_fingerprint(&update, &fingerprint)
             .map_err(anyhow::Error::from)
             .and_then(|frame| collaboration.send(frame));
@@ -166,6 +166,9 @@ pub fn forward_local_updates(document: &DocumentView, collaboration: &mut Collab
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use betteroffice_xlsx::{CalculationOptions, CellRef, Op, SheetId, Workbook};
     use tokio::sync::mpsc::Receiver;
     use yrs::{Update, merge_updates_v1};
 
@@ -175,7 +178,7 @@ mod tests {
         MAX_MESSAGES_PER_FRAME, ProtocolMessage, decode_messages,
         encode_sync_step_1_with_fingerprint, encode_update_with_fingerprint,
     };
-    use crate::document::load_collaborative_docx;
+    use crate::document::{load_collaborative_docx, load_collaborative_xlsx};
     use crate::editing::TextLoc;
     use crate::test_fixtures;
 
@@ -188,6 +191,10 @@ mod tests {
             TransportCommand::Send(frame) => frame,
             TransportCommand::Shutdown => panic!("collaboration client shut down"),
         }
+    }
+
+    fn showcase_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx")
     }
 
     #[test]
@@ -326,5 +333,104 @@ mod tests {
         ));
         assert!(commands.try_recv().is_err());
         std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn mismatched_xlsx_fingerprint_refuses_the_room_before_sync() {
+        let showcase = showcase_path();
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/sample.xlsx");
+        let mut local = load_collaborative_xlsx(&showcase, 0, 8_192, 101).unwrap();
+        let remote = load_collaborative_xlsx(&sample, 0, 8_192, 202).unwrap();
+        let before = local.collaboration_canonical_checksum().unwrap();
+        let frame = encode_sync_step_1_with_fingerprint(
+            &remote.collaboration_state_vector().unwrap(),
+            &remote.collaboration_fingerprint().unwrap(),
+        )
+        .unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert!(collaboration.status_line().contains("fingerprint mismatch"));
+        assert_eq!(local.collaboration_canonical_checksum().unwrap(), before);
+    }
+
+    #[test]
+    fn xlsx_update_authored_by_the_local_client_id_is_rejected() {
+        let source = showcase_path();
+        let mut local = load_collaborative_xlsx(&source, 0, 8_192, 101).unwrap();
+        let mut impostor = load_collaborative_xlsx(&source, 0, 8_192, 101).unwrap();
+        impostor.xlsx_select_cell(CellRef::parse_a1("B5").unwrap());
+        impostor.xlsx_begin_edit(Some("impostor")).unwrap();
+        impostor.xlsx_commit(None).unwrap();
+        let update = merge_updates_v1(impostor.collaboration_drain_local_updates()).unwrap();
+        let frame =
+            encode_update_with_fingerprint(&update, &local.collaboration_fingerprint().unwrap())
+                .unwrap();
+        let before = local.collaboration_canonical_checksum().unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert!(
+            collaboration
+                .status_line()
+                .contains("authored by local client id 101")
+        );
+        assert_eq!(local.collaboration_canonical_checksum().unwrap(), before);
+    }
+
+    #[test]
+    fn one_xlsx_frame_of_updates_causes_one_repaint() {
+        let source = showcase_path();
+        let mut local = load_collaborative_xlsx(&source, 0, 8_192, 101).unwrap();
+        let mut peer = load_collaborative_xlsx(&source, 0, 8_192, 202).unwrap();
+        for (cell, value) in [("B5", "first"), ("C5", "second")] {
+            peer.xlsx_select_cell(CellRef::parse_a1(cell).unwrap());
+            peer.xlsx_begin_edit(Some(value)).unwrap();
+            peer.xlsx_commit(None).unwrap();
+        }
+        let fingerprint = local.collaboration_fingerprint().unwrap();
+        let frame = peer
+            .collaboration_drain_local_updates()
+            .into_iter()
+            .flat_map(|update| encode_update_with_fingerprint(&update, &fingerprint).unwrap())
+            .collect::<Vec<_>>();
+        let before = local.collaboration_relayout_count();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert_eq!(local.collaboration_relayout_count(), before + 1);
+    }
+
+    #[test]
+    fn hostile_structural_xlsx_frame_is_rolled_back() {
+        let source = showcase_path();
+        let bytes = std::fs::read(&source).unwrap();
+        let mut local = load_collaborative_xlsx(&source, 0, 8_192, 101).unwrap();
+        let mut hostile = Workbook::open(&bytes).unwrap();
+        hostile
+            .apply_ops(
+                vec![Op::RenameSheet {
+                    sheet: SheetId(0),
+                    name: "Hostile".to_owned(),
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let update = hostile
+            .encode_diff_v1(&local.collaboration_state_vector().unwrap())
+            .unwrap();
+        let frame =
+            encode_update_with_fingerprint(&update, &local.collaboration_fingerprint().unwrap())
+                .unwrap();
+        let before = local.collaboration_canonical_checksum().unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert!(
+            collaboration
+                .status_line()
+                .contains("invalid remote update")
+        );
+        assert_eq!(local.collaboration_canonical_checksum().unwrap(), before);
     }
 }

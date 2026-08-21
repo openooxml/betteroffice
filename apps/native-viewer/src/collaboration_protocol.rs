@@ -12,7 +12,7 @@ const SYNC_STEP_2: u64 = 1;
 const SYNC_UPDATE: u64 = 2;
 const AUTH_PERMISSION_DENIED: u64 = 0;
 const MAX_VAR_UINT: u64 = 9_007_199_254_740_991;
-const FINGERPRINT_TAG: &[u8] = b"\0betteroffice-docx-fingerprint-v1\0";
+const FINGERPRINT_TAG: &[u8] = b"\0betteroffice-document-fingerprint-v1\0";
 
 pub type DocumentFingerprint = [u8; 32];
 

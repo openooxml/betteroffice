@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 import { createRoomTransport } from '../../demo/app/collab/createRoomTransport';
 import { CollaborationProvider } from '../../../packages/docx/src/collaboration/provider';
 import type { YrsSession } from '../../../packages/docx/src/yrs';
+import type { WorkbookHandle } from '../../../packages/xlsx/src';
 
 const ROOT = resolve(import.meta.dir, '../../..');
 const NATIVE_VIEWER = resolve(ROOT, 'apps/native-viewer');
@@ -15,6 +16,9 @@ const RELAY = resolve(ROOT, 'apps/relay');
 const DOCUMENT = resolve(ROOT, 'apps/demo/public/betteroffice-demo.docx');
 const SEED = resolve(ROOT, 'apps/demo/public/seeds/docx.bin');
 const WASM = resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm');
+const XLSX_DOCUMENT = resolve(ROOT, 'apps/demo/public/showcase.xlsx');
+const XLSX_SEED = resolve(ROOT, 'apps/demo/public/seeds/xlsx.bin');
+const XLSX_WASM = resolve(ROOT, 'packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const WRANGLER_HOME = resolve(tmpdir(), `betteroffice-wrangler-${process.pid}`);
 
 interface StoryState {
@@ -28,12 +32,22 @@ interface ParagraphState {
 }
 
 interface NativeSnapshot {
+  format: 'docx' | 'xlsx';
   connected: boolean;
   synced: boolean;
   stateVector: string;
   canonicalChecksum: string;
   stories: StoryState[];
   paragraphs: ParagraphState[];
+  cells: XlsxCellState[];
+}
+
+interface XlsxCellState {
+  sheet: number;
+  row: number;
+  col: number;
+  a1: string;
+  input: string;
 }
 
 interface NativeResponse {
@@ -56,7 +70,7 @@ class NativePeer {
   private nextId = 1;
   private stopped = false;
 
-  constructor(origin: string, room: string) {
+  constructor(origin: string, room: string, document = DOCUMENT) {
     this.process = Bun.spawn({
       cmd: [
         'cargo',
@@ -66,7 +80,7 @@ class NativePeer {
         resolve(NATIVE_VIEWER, 'Cargo.toml'),
         '--',
         '--document',
-        DOCUMENT,
+        document,
         '--room',
         room,
         '--relay-origin',
@@ -101,6 +115,10 @@ class NativePeer {
   async command(
     command: 'insert',
     fields: { paraId: string; offset: number; text: string },
+  ): Promise<NativeSnapshot>;
+  async command(
+    command: 'setCell',
+    fields: { sheet: number; row: number; col: number; input: string },
   ): Promise<NativeSnapshot>;
   async command(
     command: string,
@@ -334,6 +352,23 @@ function nativeText(snapshot: NativeSnapshot): string {
   return snapshot.paragraphs.map((paragraph) => paragraph.text).join('\n');
 }
 
+function nativeCell(
+  snapshot: NativeSnapshot,
+  sheet: number,
+  row: number,
+  col: number,
+): string | undefined {
+  return snapshot.cells.find((cell) => cell.sheet === sheet && cell.row === row && cell.col === col)
+    ?.input;
+}
+
+function xlsxCanonicalChecksum(workbook: WorkbookHandle): string {
+  const checksum = createHash('sha256');
+  checksum.update('betteroffice-native-xlsx-workbook-v1\0');
+  checksum.update(workbook.save());
+  return checksum.digest('hex');
+}
+
 async function waitUntil(
   assertion: () => boolean | Promise<boolean>,
   label: string,
@@ -380,6 +415,27 @@ async function assertConverged(
   expect(native.stateVector).toBe(typescript.stateVector);
   console.log(
     `${label}: checksum ${native.canonicalChecksum}, ${native.stories.length} stories, identical state vector`,
+  );
+  return native;
+}
+
+async function assertXlsxConverged(
+  peer: NativePeer,
+  workbook: WorkbookHandle,
+  label: string,
+): Promise<NativeSnapshot> {
+  let native = await peer.command('snapshot');
+  await waitUntil(async () => {
+    native = await peer.command('snapshot');
+    return (
+      native.canonicalChecksum === xlsxCanonicalChecksum(workbook) &&
+      native.stateVector === hex(workbook.encodeStateVector())
+    );
+  }, `${label} convergence`);
+  expect(native.canonicalChecksum).toBe(xlsxCanonicalChecksum(workbook));
+  expect(native.stateVector).toBe(hex(workbook.encodeStateVector()));
+  console.log(
+    `${label}: checksum ${native.canonicalChecksum}, ${native.cells.length} populated cells, identical state vector`,
   );
   return native;
 }
@@ -534,3 +590,136 @@ test(
   },
   600_000,
 );
+
+test('native XLSX and the production TypeScript provider converge through the relay', async () => {
+  await runChecked([process.execPath, resolve(ROOT, 'scripts/build-xlsx-wasm.ts')], ROOT);
+  const [{ initWasm, openWorkbook }, { CollaborationProvider: XlsxCollaborationProvider }] =
+    await Promise.all([
+      import('../../../packages/xlsx/src/index'),
+      import('../../../packages/xlsx/src/collaboration/provider'),
+    ]);
+  await initWasm(new Uint8Array(await readFile(XLSX_WASM)));
+
+  const port = await availablePort();
+  const relay = await startRelay(port);
+  const room = `native-typescript-xlsx-${randomUUID()}`;
+  let native: NativePeer | null = null;
+  let workbook: WorkbookHandle | null = null;
+  let provider: InstanceType<typeof XlsxCollaborationProvider> | null = null;
+  let transport: ReturnType<typeof createRoomTransport> | null = null;
+  const providerErrors: string[] = [];
+
+  try {
+    native = new NativePeer(relay.origin, room, XLSX_DOCUMENT);
+    let nativeState = await waitForNative(
+      native,
+      (snapshot) => snapshot.connected,
+      'native XLSX relay connection'
+    );
+    expect(nativeState.format).toBe('xlsx');
+    const nativeBeforeJoin = 'native before join';
+    nativeState = await native.command('setCell', {
+      sheet: 0,
+      row: 4,
+      col: 1,
+      input: nativeBeforeJoin,
+    });
+    expect(nativeCell(nativeState, 0, 4, 1)).toBe(nativeBeforeJoin);
+    nativeState = await native.command('disconnect');
+    expect(nativeState.connected).toBe(false);
+    await Bun.sleep(100);
+
+    workbook = openWorkbook(new Uint8Array(await readFile(XLSX_DOCUMENT)), {
+      collaborative: true,
+      clientId: 2_147_400_002,
+    });
+    workbook.applyUpdate(new Uint8Array(await readFile(XLSX_SEED)));
+    transport = createRoomTransport(relay.origin, room);
+    provider = new XlsxCollaborationProvider(workbook, transport);
+    provider.onError((error) => providerErrors.push(error.message));
+    provider.connect();
+
+    await waitUntil(
+      () => workbook?.cell(0, 4, 1).input === nativeBeforeJoin,
+      'joining TypeScript XLSX peer to receive populated room state'
+    );
+    expect(provider.synced).toBe(false);
+    expect(providerErrors).toEqual([]);
+    console.log('XLSX join replay: TypeScript model received native pre-join cell');
+
+    await native.command('reconnect');
+    nativeState = await waitForNative(
+      native,
+      (snapshot) => snapshot.connected && snapshot.synced,
+      'native XLSX handshake after retained-state replay'
+    );
+    provider.disconnect();
+    provider.connect();
+    await waitUntil(() => provider?.synced === true, 'TypeScript XLSX handshake with native peer');
+
+    const nativeLive = 'native live';
+    const typescriptLive = 'typescript live';
+    const nativeEdit = native.command('setCell', {
+      sheet: 0,
+      row: 4,
+      col: 2,
+      input: nativeLive,
+    });
+    workbook.editCell(0, 4, 3, typescriptLive);
+    await nativeEdit;
+    await waitUntil(
+      () => workbook?.cell(0, 4, 2).input === nativeLive,
+      'TypeScript XLSX model to receive native live cell'
+    );
+    nativeState = await waitForNative(
+      native,
+      (snapshot) => nativeCell(snapshot, 0, 4, 3) === typescriptLive,
+      'native XLSX model to receive TypeScript live cell'
+    );
+    expect(nativeCell(nativeState, 0, 4, 1)).toBe(nativeBeforeJoin);
+    await assertXlsxConverged(native, workbook, 'XLSX live edits');
+
+    nativeState = await native.command('disconnect');
+    expect(nativeState.connected).toBe(false);
+    const nativeOffline = 'native offline';
+    const typescriptOffline = 'typescript while native offline';
+    nativeState = await native.command('setCell', {
+      sheet: 0,
+      row: 4,
+      col: 4,
+      input: nativeOffline,
+    });
+    expect(nativeCell(nativeState, 0, 4, 4)).toBe(nativeOffline);
+    expect(workbook.cell(0, 4, 4).input).not.toBe(nativeOffline);
+
+    workbook.editCell(0, 4, 5, typescriptOffline);
+    await Bun.sleep(100);
+    nativeState = await native.command('snapshot');
+    expect(nativeCell(nativeState, 0, 4, 5)).not.toBe(typescriptOffline);
+
+    await native.command('reconnect');
+    nativeState = await waitForNative(
+      native,
+      (snapshot) =>
+        snapshot.connected &&
+        snapshot.synced &&
+        nativeCell(snapshot, 0, 4, 5) === typescriptOffline,
+      'native XLSX reconnect and offline TypeScript cell'
+    );
+    await waitUntil(
+      () => workbook?.cell(0, 4, 4).input === nativeOffline,
+      'TypeScript XLSX model to receive reconnected native cell'
+    );
+    expect(nativeCell(nativeState, 0, 4, 4)).toBe(nativeOffline);
+    expect(workbook.cell(0, 4, 5).input).toBe(typescriptOffline);
+    await assertXlsxConverged(native, workbook, 'XLSX reconnected edits');
+    expect(providerErrors).toEqual([]);
+  } finally {
+    provider?.destroy();
+    transport?.disconnect();
+    workbook?.dispose();
+    await native?.stop();
+    await stopRelay(relay.relay);
+    await rm(WRANGLER_HOME, { recursive: true, force: true });
+  }
+}, 600_000);
