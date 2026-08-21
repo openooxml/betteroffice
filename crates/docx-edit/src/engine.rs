@@ -3343,6 +3343,127 @@ mod tests {
             .len()
     }
 
+    #[test]
+    fn resident_display_falls_back_when_input_adds_a_page() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(204);
+        let body = format!(
+            "{}<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>",
+            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(6)
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let measured = output["measured"].as_array().unwrap();
+        for measured_block in measured {
+            let template = serde_json::json!({
+                "block": measured_block["block"],
+                "maxWidth": 248,
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            });
+            engine
+                .measure_paragraph_json(&template.to_string())
+                .unwrap();
+        }
+        engine
+            .layout_document_json(
+                &serde_json::json!({
+                    "measured": output["measured"],
+                    "options": output["options"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+
+        let initial_page_count = engine
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .unwrap()
+            .pages
+            .len();
+        let paragraph = engine.doc().paragraphs("body").unwrap().pop().unwrap();
+        let insertion = " typed text that makes the editable paragraph wrap";
+        let mut offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        let mut frame_epoch = engine.display.borrow().binary_frame_epoch;
+        let mut page_count_changed = false;
+
+        for _ in 0..64 {
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", offset),
+                    insertion,
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            offset += u32::try_from(insertion.encode_utf16().count()).unwrap();
+            let incremental_display_builds = engine.stats().incremental_display_builds;
+            engine.apply_and_layout("body", frame_epoch).unwrap();
+            frame_epoch = engine.display.borrow().binary_frame_epoch;
+
+            let retained = engine.with_display_list(Clone::clone).unwrap();
+            let rebuilt = {
+                let pagination = engine.pagination.borrow();
+                docx_layout::build_display_list_value_from_resident(
+                    pagination.input.as_ref().unwrap(),
+                    pagination.layout.as_ref().unwrap(),
+                    &extras,
+                )
+                .unwrap()
+            };
+            assert_eq!(retained.pages.len(), rebuilt.pages.len());
+            for (retained_page, rebuilt_page) in retained.pages.iter().zip(&rebuilt.pages) {
+                assert_eq!(retained_page, rebuilt_page);
+            }
+
+            if retained.pages.len() > initial_page_count {
+                assert!(engine.pagination.borrow().last_incremental);
+                assert_eq!(
+                    engine.stats().incremental_display_builds,
+                    incremental_display_builds
+                );
+                page_count_changed = true;
+                break;
+            }
+        }
+
+        assert!(page_count_changed, "the edit must add a page");
+        docx_layout::clear_measure_fonts();
+    }
+
     const WIDOW_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>
 <w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Normal"/></w:style>"#;
 

@@ -9685,10 +9685,11 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
 ) -> Result<bool, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
-        || rebuilt_page_start > rebuilt_page_end
-        || rebuilt_page_end > layout.pages.len()
     {
-        return Err("resident display input no longer matches pagination pages".to_owned());
+        return Ok(false);
+    }
+    if rebuilt_page_start > rebuilt_page_end || rebuilt_page_end > layout.pages.len() {
+        return Err("resident display incremental page range is invalid".to_owned());
     }
 
     refresh_resident_display_pages(
