@@ -19,6 +19,11 @@ use crate::chrome::{
     Chrome, ChromeHit, ChromeState, STATUS_HEIGHT, TOOLBAR_HEIGHT, ToolbarCommand, ZOOM_MAX,
     ZOOM_MIN,
 };
+use crate::collaboration::{CollaborationClient, CollaborationConfig, TransportEvent};
+use crate::collaboration_protocol::{
+    ProtocolMessage, decode_messages, encode_empty_awareness, encode_sync_step_1,
+    encode_sync_step_2, encode_update,
+};
 use crate::document::{DocumentView, ReferenceDocument, load_document};
 use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
 use crate::pptx_editing::PptxHit;
@@ -33,7 +38,11 @@ const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const STATUS_DURATION: Duration = Duration::from_secs(6);
 const UNSAVED_EXIT_REASON: &str = "Unsaved changes: save or undo them before closing the viewer.";
 
-pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
+pub fn run(
+    document: DocumentView,
+    context: RenderContext,
+    collaboration: Option<CollaborationConfig>,
+) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
         let label = document.scene_label(index);
         if let ReferenceDocument::Pptx(reference) = &document.reference {
@@ -58,8 +67,16 @@ pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
             println!("{label} skip reasons: {:?}", page.skipped.reasons);
         }
     }
-    let event_loop = EventLoop::new()?;
-    let mut app = Viewer::new(document, context)?;
+    let event_loop = EventLoop::<TransportEvent>::with_user_event().build()?;
+    let client = collaboration
+        .map(|config| {
+            let proxy = event_loop.create_proxy();
+            CollaborationClient::start(config, move |event| {
+                let _ = proxy.send_event(event);
+            })
+        })
+        .transpose()?;
+    let mut app = Viewer::new(document, context, client)?;
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.fatal {
         bail!(error);
@@ -85,6 +102,7 @@ struct Viewer {
     focused: bool,
     save_target: Option<std::path::PathBuf>,
     status_message: Option<StatusMessage>,
+    collaboration: Option<CollaborationClient>,
     fatal: Option<String>,
 }
 
@@ -293,7 +311,11 @@ fn pointer_target(
 }
 
 impl Viewer {
-    fn new(document: DocumentView, context: RenderContext) -> Result<Self> {
+    fn new(
+        document: DocumentView,
+        context: RenderContext,
+        collaboration: Option<CollaborationClient>,
+    ) -> Result<Self> {
         let save_target = Some(document.edited_path()?);
         Ok(Self {
             document,
@@ -313,6 +335,7 @@ impl Viewer {
             focused: true,
             save_target,
             status_message: None,
+            collaboration,
             fatal: None,
         })
     }
@@ -556,12 +579,23 @@ impl Viewer {
             .to_owned();
         let page_index = geometry.current_page(&self.document.pages);
         let editing = self.document.editing_state()?;
+        let persistent_message = match (
+            editing.save_disabled_reason.as_deref(),
+            self.collaboration.as_ref(),
+        ) {
+            (Some(save), Some(collaboration)) => {
+                Some(format!("{save} · {}", collaboration.status_line()))
+            }
+            (Some(save), None) => Some(save.to_owned()),
+            (None, Some(collaboration)) => Some(collaboration.status_line()),
+            (None, None) => None,
+        };
         let message = self
             .status_message
             .as_ref()
             .filter(|message| message.expires_at > Instant::now())
             .map(|message| message.text.clone())
-            .or_else(|| editing.save_disabled_reason.clone());
+            .or(persistent_message);
         Ok(ChromeState {
             editing,
             zoom: self.zoom,
@@ -974,6 +1008,102 @@ impl Viewer {
         });
     }
 
+    fn handle_collaboration_event(&mut self, event: TransportEvent) -> Result<()> {
+        if let Some(collaboration) = &mut self.collaboration {
+            collaboration.apply_transport_event(&event);
+        }
+        match event {
+            TransportEvent::Connected => {
+                let state_vector = self.document.docx_state_vector()?;
+                let frame = encode_sync_step_1(&state_vector)?;
+                if let Some(collaboration) = &self.collaboration {
+                    collaboration.send(frame)?;
+                }
+            }
+            TransportEvent::Binary(frame) => {
+                self.apply_collaboration_frame(&frame)?;
+            }
+            TransportEvent::Connecting
+            | TransportEvent::PeerCount(_)
+            | TransportEvent::Reconnecting { .. }
+            | TransportEvent::Failed(_) => {}
+        }
+        self.request_redraw();
+        Ok(())
+    }
+
+    fn apply_collaboration_frame(&mut self, frame: &[u8]) -> Result<bool> {
+        let messages = match decode_messages(frame) {
+            Ok(messages) => messages,
+            Err(error) => {
+                if let Some(collaboration) = &mut self.collaboration {
+                    collaboration.report_protocol_error(error);
+                }
+                return Ok(false);
+            }
+        };
+        let mut repainted = false;
+        for message in messages {
+            match message {
+                ProtocolMessage::SyncStep1(state_vector) => {
+                    let update = self.document.docx_encode_diff(&state_vector)?;
+                    let frame = encode_sync_step_2(&update)?;
+                    if let Some(collaboration) = &self.collaboration {
+                        collaboration.send(frame)?;
+                    }
+                }
+                ProtocolMessage::SyncStep2(update) => {
+                    repainted |= self.document.docx_apply_remote_update(&update)?;
+                    if let Some(collaboration) = &mut self.collaboration {
+                        collaboration.mark_synced();
+                    }
+                }
+                ProtocolMessage::Update(update) => {
+                    repainted |= self.document.docx_apply_remote_update(&update)?;
+                }
+                ProtocolMessage::QueryAwareness => {
+                    if let Some(collaboration) = &self.collaboration {
+                        collaboration.send(encode_empty_awareness())?;
+                    }
+                }
+                ProtocolMessage::Auth(reason) => {
+                    if let Some(collaboration) = &mut self.collaboration {
+                        collaboration.deny(reason);
+                    }
+                }
+                ProtocolMessage::Awareness(_) => {}
+            }
+        }
+        if repainted {
+            self.reset_caret_blink();
+            self.clamp_scroll();
+            self.update_title();
+        }
+        Ok(repainted)
+    }
+
+    fn forward_local_updates(&mut self) {
+        let Some(collaboration) = &self.collaboration else {
+            return;
+        };
+        if !collaboration.is_connected() {
+            return;
+        }
+        let updates = self.document.docx_drain_local_updates();
+        let Some(collaboration) = &mut self.collaboration else {
+            return;
+        };
+        for update in updates {
+            let result = encode_update(&update)
+                .map_err(anyhow::Error::from)
+                .and_then(|frame| collaboration.send(frame));
+            if let Err(error) = result {
+                collaboration.report_protocol_error(error);
+                break;
+            }
+        }
+    }
+
     fn reset_caret_blink(&mut self) {
         self.caret_visible = true;
         self.next_caret_blink = Instant::now() + CARET_BLINK;
@@ -1071,7 +1201,7 @@ impl Viewer {
     }
 }
 
-impl ApplicationHandler for Viewer {
+impl ApplicationHandler<TransportEvent> for Viewer {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.create_window(event_loop) {
             self.handle_error(event_loop, WindowErrorPath::Startup, error);
@@ -1167,7 +1297,14 @@ impl ApplicationHandler for Viewer {
         }
     }
 
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: TransportEvent) {
+        if let Err(error) = self.handle_collaboration_event(event) {
+            self.handle_error(event_loop, WindowErrorPath::Edit, error);
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.forward_local_updates();
         let now = Instant::now();
         if self
             .status_message
@@ -1206,7 +1343,18 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::collaboration::TransportCommand;
+    use crate::document::load_collaborative_docx;
     use crate::test_fixtures;
+
+    fn next_sent_frame(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<TransportCommand>,
+    ) -> Vec<u8> {
+        match commands.try_recv().unwrap() {
+            TransportCommand::Send(frame) => frame,
+            TransportCommand::Shutdown => panic!("collaboration client shut down"),
+        }
+    }
 
     #[test]
     fn only_startup_errors_are_fatal() {
@@ -1240,6 +1388,126 @@ mod tests {
     }
 
     #[test]
+    fn collaboration_wiring_broadcasts_repaints_and_retains_offline_edits() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Shared</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("window-collaboration", &bytes);
+        let mut document = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 6,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        let config = CollaborationConfig::new("wiring".to_owned(), "ws://127.0.0.1:9").unwrap();
+        let (client, mut commands) = CollaborationClient::detached(config);
+        let mut viewer = Viewer::new(document, RenderContext::new(), Some(client)).unwrap();
+
+        viewer
+            .handle_collaboration_event(TransportEvent::Connected)
+            .unwrap();
+        assert!(matches!(
+            decode_messages(&next_sent_frame(&mut commands))
+                .unwrap()
+                .as_slice(),
+            [ProtocolMessage::SyncStep1(_)]
+        ));
+        assert!(viewer.document.docx_insert_text(" local").unwrap());
+        viewer.forward_local_updates();
+        let local_frame = next_sent_frame(&mut commands);
+        assert!(matches!(
+            decode_messages(&local_frame).unwrap().as_slice(),
+            [ProtocolMessage::Update(_)]
+        ));
+
+        let mut peer = load_collaborative_docx(&source, 8_192, 202).unwrap();
+        let local_messages = decode_messages(&local_frame).unwrap();
+        let [ProtocolMessage::Update(update)] = local_messages.as_slice() else {
+            unreachable!();
+        };
+        peer.docx_apply_remote_update(update).unwrap();
+        peer.docx_select_point(
+            TextLoc {
+                para_id: "11111111".to_owned(),
+                offset: 0,
+            },
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(peer.docx_insert_text("remote ").unwrap());
+        let before_checksum = viewer.document.docx_canonical_checksum().unwrap();
+        let before_glyphs = viewer.document.pages[0]
+            .scene
+            .encoding()
+            .resources
+            .glyphs
+            .len();
+        let mut repainted = false;
+        for update in peer.docx_drain_local_updates() {
+            repainted |= viewer
+                .apply_collaboration_frame(&encode_update(&update).unwrap())
+                .unwrap();
+        }
+        assert!(repainted);
+        assert_ne!(
+            viewer.document.docx_canonical_checksum().unwrap(),
+            before_checksum
+        );
+        assert!(
+            viewer.document.pages[0]
+                .scene
+                .encoding()
+                .resources
+                .glyphs
+                .len()
+                > before_glyphs
+        );
+
+        viewer
+            .handle_collaboration_event(TransportEvent::Reconnecting {
+                delay: Duration::from_millis(250),
+                reason: "relay unavailable".to_owned(),
+            })
+            .unwrap();
+        let offline_status = viewer.collaboration.as_ref().unwrap().status_line();
+        assert!(offline_status.contains("offline, reconnecting"));
+        assert!(offline_status.contains("relay unavailable"));
+        assert!(viewer.document.docx_insert_text(" offline").unwrap());
+        let offline_checksum = viewer.document.docx_canonical_checksum().unwrap();
+        viewer.forward_local_updates();
+        assert!(commands.try_recv().is_err());
+        assert!(viewer.fatal.is_none());
+
+        viewer
+            .handle_collaboration_event(TransportEvent::Connected)
+            .unwrap();
+        assert!(matches!(
+            decode_messages(&next_sent_frame(&mut commands))
+                .unwrap()
+                .as_slice(),
+            [ProtocolMessage::SyncStep1(_)]
+        ));
+        viewer.forward_local_updates();
+        assert!(matches!(
+            decode_messages(&next_sent_frame(&mut commands))
+                .unwrap()
+                .as_slice(),
+            [ProtocolMessage::Update(_)]
+        ));
+        assert_eq!(
+            viewer.document.docx_canonical_checksum().unwrap(),
+            offline_checksum
+        );
+        std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
     fn structural_save_command_is_disabled_and_dirty_exit_is_blocked() {
         let bytes = test_fixtures::editing_docx(
             r#"<w:p w14:paraId="11111111"><w:r><w:t>Plain</w:t></w:r></w:p>"#,
@@ -1258,7 +1526,7 @@ mod tests {
             .unwrap();
         assert!(document.docx_enter().unwrap());
         let output = test_fixtures::write_docx("window-structural-output", b"sentinel");
-        let mut viewer = Viewer::new(document, RenderContext::new()).unwrap();
+        let mut viewer = Viewer::new(document, RenderContext::new(), None).unwrap();
         viewer.save_target = Some(output.clone());
 
         viewer
@@ -1309,7 +1577,7 @@ mod tests {
             _ => unreachable!(),
         };
         let output = test_fixtures::write_docx("window-save-state-output", b"sentinel");
-        let mut viewer = Viewer::new(document, RenderContext::new()).unwrap();
+        let mut viewer = Viewer::new(document, RenderContext::new(), None).unwrap();
         viewer.save_target = Some(output.clone());
         viewer.scroll = 73.0;
 
@@ -1353,7 +1621,7 @@ mod tests {
         let output = test_fixtures::write_docx("window-save-verification-output", b"sentinel");
         let invalid_output = output.with_extension("invalid");
         std::fs::rename(&output, &invalid_output).unwrap();
-        let mut viewer = Viewer::new(document, RenderContext::new()).unwrap();
+        let mut viewer = Viewer::new(document, RenderContext::new(), None).unwrap();
         viewer.save_target = Some(invalid_output.clone());
 
         viewer.save_with_status();

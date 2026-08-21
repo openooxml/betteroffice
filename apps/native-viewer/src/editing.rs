@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
+use std::rc::Rc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use docx_edit::frame_delta::{
@@ -23,6 +25,7 @@ use docx_parse::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use yrs::Subscription;
 
 use crate::chrome::{Alignment, EditingState, ToggleState};
 
@@ -173,6 +176,8 @@ pub enum DeleteDirection {
 }
 
 pub struct DocxEditor {
+    _local_update_observer: Option<Subscription>,
+    local_updates: Rc<RefCell<VecDeque<Vec<u8>>>>,
     engine: EngineSession,
     undo: UndoSession,
     spans: Vec<ParagraphSpan>,
@@ -195,6 +200,7 @@ impl DocxEditor {
         initial_frame: &[u8],
         layout_request: String,
         display_extras: String,
+        observe_local_updates: bool,
     ) -> Result<Self> {
         let spans = paragraph_spans(&engine)?;
         let source_texts = spans
@@ -220,7 +226,26 @@ impl DocxEditor {
         let undo = UndoSession::new();
         undo.track(engine.doc(), BODY_STORY)
             .map_err(anyhow::Error::msg)?;
+        let local_updates = Rc::new(RefCell::new(VecDeque::new()));
+        let local_update_observer = if observe_local_updates {
+            let observed = Rc::clone(&local_updates);
+            Some(
+                engine
+                    .doc()
+                    .yrs_doc()
+                    .observe_update_v1(move |transaction, event| {
+                        if transaction.origin().is_some() {
+                            observed.borrow_mut().push_back(event.update.clone());
+                        }
+                    })
+                    .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
+            _local_update_observer: local_update_observer,
+            local_updates,
             engine,
             undo,
             spans,
@@ -245,6 +270,70 @@ impl DocxEditor {
 
     pub fn engine(&self) -> &EngineSession {
         &self.engine
+    }
+
+    pub fn state_vector(&self) -> Vec<u8> {
+        self.engine.doc().encode_state_vector_v1()
+    }
+
+    pub fn encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
+        self.engine
+            .doc()
+            .encode_diff_v1(state_vector)
+            .map_err(anyhow::Error::msg)
+    }
+
+    pub fn drain_local_updates(&self) -> Vec<Vec<u8>> {
+        self.local_updates.borrow_mut().drain(..).collect()
+    }
+
+    pub fn apply_remote_update(&mut self, update: &[u8]) -> Result<SceneChange> {
+        let selection = self.selection.clone();
+        self.engine
+            .doc()
+            .apply_update_v1(update)
+            .map_err(anyhow::Error::msg)?;
+        let change = self.relayout()?;
+        self.selection = selection.and_then(|selection| {
+            Some(Selection {
+                anchor: self.clamp_loc(selection.anchor).ok()?,
+                head: self.clamp_loc(selection.head).ok()?,
+            })
+        });
+        self.vertical_goal_x = None;
+        self.refresh_selection_rects()?;
+        Ok(change)
+    }
+
+    #[cfg(test)]
+    pub fn canonical_checksum(&self) -> Result<[u8; 32]> {
+        use yrs::{Map, ReadTxn, Transact};
+
+        let story_ids = {
+            let transaction = self.engine.doc().yrs_doc().transact();
+            let stories = transaction
+                .get_map("stories")
+                .context("collaborative document has no stories")?;
+            let mut ids = stories
+                .keys(&transaction)
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+        let mut checksum = Sha256::new();
+        checksum.update(b"canonical-document-v1");
+        for story_id in story_ids {
+            let bytes = docx_edit::to_canonical_bytes(&docx_edit::project_story(
+                self.engine.doc(),
+                &story_id,
+            )?);
+            checksum.update((story_id.len() as u64).to_le_bytes());
+            checksum.update(story_id.as_bytes());
+            checksum.update((bytes.len() as u64).to_le_bytes());
+            checksum.update(bytes);
+        }
+        Ok(checksum.finalize().into())
     }
 
     pub fn is_dirty(&self) -> bool {

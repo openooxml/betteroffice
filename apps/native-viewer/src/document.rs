@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use betteroffice_xlsx::CellRef;
-use docx_edit::{EngineSession, SimpleFormat, seed_from_docx};
+use docx_edit::{EditingDoc, EngineSession, SimpleFormat, seed_from_docx};
 use docx_layout::display_list::DisplayList;
 use docx_parse::{S9PackageWire, S9ParseOptions, parse_docx_s9_wire};
 use serde_json::{Value, json};
 use vello::kurbo::Affine;
 
 use crate::chrome::{Alignment, EditingState};
+use crate::collaboration::BROWSER_SEED_CLIENT_ID;
 use crate::docx_scene::translate_document;
 use crate::editing::{
     DeleteDirection, DocxEditor, MoveDirection, SceneChange, SelectionRect, TextLoc,
@@ -222,6 +223,39 @@ impl DocumentView {
 
     pub fn docx_redo(&mut self) -> Result<bool> {
         self.apply_docx_edit(DocxEditor::redo)
+    }
+
+    pub fn docx_state_vector(&self) -> Result<Vec<u8>> {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            bail!("collaboration is available only for DOCX");
+        };
+        Ok(reference.editor.state_vector())
+    }
+
+    pub fn docx_encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            bail!("collaboration is available only for DOCX");
+        };
+        reference.editor.encode_diff(state_vector)
+    }
+
+    pub fn docx_apply_remote_update(&mut self, update: &[u8]) -> Result<bool> {
+        self.apply_docx_edit(|editor| editor.apply_remote_update(update).map(Some))
+    }
+
+    pub fn docx_drain_local_updates(&self) -> Vec<Vec<u8>> {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            return Vec::new();
+        };
+        reference.editor.drain_local_updates()
+    }
+
+    #[cfg(test)]
+    pub fn docx_canonical_checksum(&self) -> Result<[u8; 32]> {
+        let ReferenceDocument::Docx(reference) = &self.reference else {
+            bail!("collaboration is available only for DOCX");
+        };
+        reference.editor.canonical_checksum()
     }
 
     pub fn docx_selection_rects(&self) -> &[SelectionRect] {
@@ -616,6 +650,17 @@ pub fn load_document_for_export(
     load_document_with_xlsx_mode(path, sheet_index, max_texture_dimension_2d, false)
 }
 
+pub fn load_collaborative_docx(
+    path: &Path,
+    max_texture_dimension_2d: u32,
+    client_id: u64,
+) -> Result<DocumentView> {
+    if DocumentFormat::from_path(path)? != DocumentFormat::Docx {
+        bail!("--room is available only for DOCX");
+    }
+    load_docx(path, max_texture_dimension_2d, Some(client_id))
+}
+
 fn load_document_with_xlsx_mode(
     path: &Path,
     sheet_index: usize,
@@ -623,7 +668,7 @@ fn load_document_with_xlsx_mode(
     recalculate_xlsx: bool,
 ) -> Result<DocumentView> {
     match DocumentFormat::from_path(path)? {
-        DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d),
+        DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d, None),
         DocumentFormat::Xlsx => load_xlsx(
             path,
             sheet_index,
@@ -646,12 +691,25 @@ fn load_pptx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView>
     })
 }
 
-fn load_docx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView> {
+fn load_docx(
+    path: &Path,
+    max_texture_dimension_2d: u32,
+    collaboration_client_id: Option<u64>,
+) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read DOCX {}", path.display()))?;
     let parsed = parse_docx_s9_wire(&bytes, S9ParseOptions::default())?;
     let package = parsed.document.package;
-    let engine = EngineSession::new(0x0056_454c_4c4f);
-    seed_from_docx(engine.doc(), &bytes).map_err(anyhow::Error::msg)?;
+    let engine = EngineSession::new(collaboration_client_id.unwrap_or(0x0056_454c_4c4f));
+    if collaboration_client_id.is_some() {
+        let seed = EditingDoc::new(BROWSER_SEED_CLIENT_ID);
+        seed_from_docx(&seed, &bytes).map_err(anyhow::Error::msg)?;
+        engine
+            .doc()
+            .apply_update_v1(&seed.encode_state_as_update_v1())
+            .map_err(anyhow::Error::msg)?;
+    } else {
+        seed_from_docx(engine.doc(), &bytes).map_err(anyhow::Error::msg)?;
+    }
 
     let probe = region_request(&package, None)?;
     let requirements_json = engine
@@ -683,6 +741,7 @@ fn load_docx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView>
         &initial_frame,
         layout_request,
         extras,
+        collaboration_client_id.is_some(),
     )?;
     Ok(DocumentView {
         source: path.to_owned(),
@@ -820,6 +879,9 @@ mod tests {
 
     use super::*;
     use crate::chrome::{Alignment, ToggleState};
+    use crate::collaboration_protocol::{
+        ProtocolMessage, decode_messages, encode_sync_step_1, encode_sync_step_2, encode_update,
+    };
     use crate::editing::TextLoc;
     use crate::test_fixtures;
 
@@ -958,6 +1020,38 @@ mod tests {
         reference.editor.selection_range().unwrap().unwrap()
     }
 
+    fn complete_sync(sender: &DocumentView, receiver: &mut DocumentView) {
+        let step_1 = encode_sync_step_1(&receiver.docx_state_vector().unwrap()).unwrap();
+        let decoded_step_1 = decode_messages(&step_1).unwrap();
+        let [ProtocolMessage::SyncStep1(state_vector)] = decoded_step_1.as_slice() else {
+            unreachable!();
+        };
+        let step_2 = encode_sync_step_2(&sender.docx_encode_diff(state_vector).unwrap()).unwrap();
+        let decoded_step_2 = decode_messages(&step_2).unwrap();
+        let [ProtocolMessage::SyncStep2(update)] = decoded_step_2.as_slice() else {
+            unreachable!();
+        };
+        receiver.docx_apply_remote_update(update).unwrap();
+    }
+
+    fn framed_local_updates(document: &DocumentView) -> Vec<Vec<u8>> {
+        document
+            .docx_drain_local_updates()
+            .into_iter()
+            .map(|update| encode_update(&update).unwrap())
+            .collect()
+    }
+
+    fn deliver_room_frames(receiver: &mut DocumentView, frames: &[Vec<u8>]) {
+        for frame in frames {
+            let messages = decode_messages(frame).unwrap();
+            let [ProtocolMessage::Update(update)] = messages.as_slice() else {
+                unreachable!();
+            };
+            receiver.docx_apply_remote_update(update).unwrap();
+        }
+    }
+
     #[test]
     fn recognizes_supported_extensions() {
         assert_eq!(
@@ -972,6 +1066,47 @@ mod tests {
             DocumentFormat::from_path(Path::new("slides.PPTX")).unwrap(),
             DocumentFormat::Pptx
         );
+    }
+
+    #[test]
+    fn two_native_sessions_in_one_room_converge_to_the_same_canonical_checksum() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Shared document</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("native-room-convergence", &bytes);
+        let mut left = load_collaborative_docx(&source, 8_192, 101).unwrap();
+        let mut right = load_collaborative_docx(&source, 8_192, 202).unwrap();
+        complete_sync(&left, &mut right);
+        complete_sync(&right, &mut left);
+        let baseline = left.docx_canonical_checksum().unwrap();
+        assert_eq!(baseline, right.docx_canonical_checksum().unwrap());
+
+        let caret = TextLoc {
+            para_id: "11111111".to_owned(),
+            offset: 6,
+        };
+        left.docx_select_point(caret.clone(), false, false).unwrap();
+        right.docx_select_point(caret, false, false).unwrap();
+        assert!(left.docx_insert_text(" left").unwrap());
+        let left_first = framed_local_updates(&left);
+        assert!(right.docx_insert_text(" right").unwrap());
+        let right_first = framed_local_updates(&right);
+        deliver_room_frames(&mut left, &right_first);
+        assert!(left.docx_insert_text(" second").unwrap());
+        let left_second = framed_local_updates(&left);
+        assert!(right.docx_insert_text(" second").unwrap());
+        let right_second = framed_local_updates(&right);
+        deliver_room_frames(&mut right, &left_first);
+        deliver_room_frames(&mut left, &right_second);
+        deliver_room_frames(&mut right, &left_second);
+        complete_sync(&left, &mut right);
+        complete_sync(&right, &mut left);
+
+        let left_checksum = left.docx_canonical_checksum().unwrap();
+        let right_checksum = right.docx_canonical_checksum().unwrap();
+        assert_ne!(left_checksum, baseline);
+        assert_eq!(left_checksum, right_checksum);
+        std::fs::remove_file(source).unwrap();
     }
 
     #[test]

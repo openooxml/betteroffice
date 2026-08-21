@@ -30,6 +30,16 @@ Open the interactive viewer:
 cargo run --release
 ```
 
+To collaborate on one DOCX, open the same file and room ID in two terminals:
+
+```sh
+cargo run --release -- --document ../demo/public/betteroffice-demo.docx --room native-demo
+```
+
+Run that command once in each terminal. The default hosted relay can be replaced with `--relay-origin http://127.0.0.1:8787` or the `BETTEROFFICE_RELAY_ORIGIN` environment variable. The status line reports connecting, synced, peer count, and reconnect failures. Local edits made while disconnected remain in the document and are sent when the connection returns.
+
+Collaboration synchronizes the resident DOCX document state. Native body-text edits and supported character or paragraph formatting are broadcast, and remote document updates are applied and relaid out. File paths, saved package bytes, viewport, local selection, and undo history are not shared. Awareness and presence are not wired: the native viewer answers awareness queries with an empty update and does not show or publish participant names, carets, or selections.
+
 The fixed top toolbar provides undo, redo, bold, italic, underline, paragraph alignment, zoom, and save controls. A fixed status line shows the file and current page, sheet, or slide, plus transient save results. XLSX and PPTX enable save and their engine-backed undo and redo while keeping the DOCX character and paragraph controls disabled. Scroll vertically with the trackpad or mouse wheel. Hold Command or Control while scrolling to zoom. Use Command or Control with `+`, `-`, and `0` to zoom while editing.
 
 DOCX documents are editable in the window. Click or drag to place a caret or select text, Shift-click to extend a selection, and double-click to select a word. Arrow keys, Home, End, typing, Backspace, Delete, and Enter use the resident DOCX engine. Command-Z or Control-Z undoes and adding Shift redoes. Press Command-S or Control-S to save beside the input as `<name>-edited.docx`; the viewer verifies the saved file by reopening it without replacing the live editing session. Save results and fidelity refusals appear in the status line.

@@ -1,4 +1,6 @@
 mod chrome;
+mod collaboration;
+mod collaboration_protocol;
 mod document;
 #[path = "scene.rs"]
 mod docx_scene;
@@ -21,22 +23,30 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use document::{DocumentFormat, load_document, load_document_for_export};
+use collaboration::{CollaborationConfig, DEFAULT_RELAY_ORIGIN};
+use document::{DocumentFormat, load_collaborative_docx, load_document, load_document_for_export};
 
 fn main() -> Result<()> {
     let options = Options::parse()?;
     let format = DocumentFormat::from_path(&options.document)?;
     let (page, sheet) = options.selection(format)?;
+    let collaboration = options.collaboration(format)?;
     let (mut context, max_texture_dimension_2d) = gpu::create_render_context()?;
     let document = if options.png.is_some() {
         load_document_for_export(&options.document, sheet, max_texture_dimension_2d)?
+    } else if let Some(config) = &collaboration {
+        load_collaborative_docx(
+            &options.document,
+            max_texture_dimension_2d,
+            config.client_id(),
+        )?
     } else {
         load_document(&options.document, sheet, max_texture_dimension_2d)?
     };
-    if let Some(output) = options.png {
-        gpu::render_comparison(&mut context, &document, page, &output, options.scale)?;
+    if let Some(output) = &options.png {
+        gpu::render_comparison(&mut context, &document, page, output, options.scale)?;
     } else {
-        window::run(document, context)?;
+        window::run(document, context, collaboration)?;
     }
     Ok(())
 }
@@ -48,6 +58,8 @@ struct Options {
     sheet: Option<usize>,
     slide: Option<usize>,
     scale: f64,
+    room: Option<String>,
+    relay_origin: String,
 }
 
 impl Options {
@@ -62,6 +74,13 @@ impl Options {
         let mut sheet = None;
         let mut slide = None;
         let mut scale = 1.0f64;
+        let mut room = None;
+        let mut relay_origin = match env::var_os("BETTEROFFICE_RELAY_ORIGIN") {
+            Some(value) => value
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("BETTEROFFICE_RELAY_ORIGIN must be Unicode"))?,
+            None => DEFAULT_RELAY_ORIGIN.to_owned(),
+        };
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.to_str() {
@@ -98,9 +117,22 @@ impl Options {
                         bail!("--scale must be greater than zero and at most 8");
                     }
                 }
+                Some("--room") => {
+                    room = Some(
+                        args.next()
+                            .and_then(|value| value.into_string().ok())
+                            .context("--room needs an id")?,
+                    );
+                }
+                Some("--relay-origin") => {
+                    relay_origin = args
+                        .next()
+                        .and_then(|value| value.into_string().ok())
+                        .context("--relay-origin needs a URL")?;
+                }
                 Some("--help" | "-h") => {
                     println!(
-                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N | --slide N] [--scale N]"
+                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N | --slide N] [--scale N] [--room ID] [--relay-origin URL]"
                     );
                     std::process::exit(0);
                 }
@@ -114,7 +146,22 @@ impl Options {
             sheet,
             slide,
             scale,
+            room,
+            relay_origin,
         })
+    }
+
+    fn collaboration(&self, format: DocumentFormat) -> Result<Option<CollaborationConfig>> {
+        let Some(room) = &self.room else {
+            return Ok(None);
+        };
+        if self.png.is_some() {
+            bail!("--room requires the interactive viewer");
+        }
+        if format != DocumentFormat::Docx {
+            bail!("--room is available only for DOCX");
+        }
+        CollaborationConfig::new(room.clone(), &self.relay_origin).map(Some)
     }
 
     fn selection(&self, format: DocumentFormat) -> Result<(usize, usize)> {
@@ -200,5 +247,35 @@ mod tests {
     fn rejects_zero_sheet() {
         assert!(Options::parse_from(["--sheet".into(), "0".into()]).is_err());
         assert!(Options::parse_from(["--slide".into(), "0".into()]).is_err());
+    }
+
+    #[test]
+    fn room_options_enable_only_interactive_docx_collaboration() {
+        let options = Options::parse_from([
+            "--document".into(),
+            "document.docx".into(),
+            "--room".into(),
+            "shared".into(),
+            "--relay-origin".into(),
+            "http://127.0.0.1:8787".into(),
+        ])
+        .unwrap();
+        let collaboration = options
+            .collaboration(DocumentFormat::Docx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(collaboration.room(), "shared");
+        assert!(options.collaboration(DocumentFormat::Xlsx).is_err());
+
+        let export = Options::parse_from([
+            "--document".into(),
+            "document.docx".into(),
+            "--png".into(),
+            "out.png".into(),
+            "--room".into(),
+            "shared".into(),
+        ])
+        .unwrap();
+        assert!(export.collaboration(DocumentFormat::Docx).is_err());
     }
 }
