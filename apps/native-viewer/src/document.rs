@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use betteroffice_pptx::Presentation;
-use betteroffice_xlsx::{SheetId, Workbook, viewport_for_used_range_within};
+use betteroffice_xlsx::CellRef;
 use docx_edit::{EngineSession, SimpleFormat, seed_from_docx};
 use docx_layout::display_list::DisplayList;
 use docx_parse::{S9PackageWire, S9ParseOptions, parse_docx_s9_wire};
@@ -19,6 +19,7 @@ use crate::fonts::FontRegistry;
 use crate::images::ImageRegistry;
 use crate::pptx_scene::{PptxSlideSummary, translate_presentation};
 use crate::scene_shared::PageScene;
+use crate::xlsx_editing::{CellMove, XlsxEditor};
 use crate::xlsx_scene::translate_sheet;
 
 pub struct DocumentView {
@@ -30,7 +31,7 @@ pub struct DocumentView {
 
 pub enum ReferenceDocument {
     Docx(Box<DocxReference>),
-    Xlsx(XlsxReference),
+    Xlsx(Box<XlsxReference>),
     Pptx(PptxReference),
 }
 
@@ -42,12 +43,17 @@ pub struct DocxReference {
 }
 
 pub struct XlsxReference {
-    pub display_list: xlsx_render::DisplayList,
+    pub editor: XlsxEditor,
     pub sheet_index: usize,
     pub sheet_count: usize,
     pub sheet_name: String,
     pub chart_count: usize,
     pub chart_placeholders: usize,
+}
+
+pub struct XlsxOverlay {
+    pub rect: xlsx_render::Rect,
+    pub draft: Option<String>,
 }
 
 pub struct PptxReference {
@@ -108,11 +114,17 @@ impl DocumentView {
             ReferenceDocument::Docx(_) => {
                 format!("Page {} of {}", page_index + 1, self.pages.len())
             }
-            ReferenceDocument::Xlsx(reference) => format!(
-                "Sheet {} of {}",
-                reference.sheet_index + 1,
-                reference.sheet_count
-            ),
+            ReferenceDocument::Xlsx(reference) => {
+                let cell = reference
+                    .editor
+                    .status()
+                    .unwrap_or_else(|_| reference.editor.selection().to_a1());
+                format!(
+                    "Sheet {} of {} · {cell}",
+                    reference.sheet_index + 1,
+                    reference.sheet_count
+                )
+            }
             ReferenceDocument::Pptx(reference) => {
                 format!("Slide {} of {}", page_index + 1, reference.slide_count)
             }
@@ -120,10 +132,14 @@ impl DocumentView {
     }
 
     pub fn editing_state(&self) -> Result<EditingState> {
-        let ReferenceDocument::Docx(reference) = &self.reference else {
-            return Ok(EditingState::read_only());
-        };
-        reference.editor.editing_state()
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.editing_state(),
+            ReferenceDocument::Xlsx(reference) => Ok(EditingState::editable_without_selection(
+                reference.editor.can_undo(),
+                reference.editor.can_redo(),
+            )),
+            ReferenceDocument::Pptx(_) => Ok(EditingState::read_only()),
+        }
     }
 
     pub fn display_item_name(&self) -> &'static str {
@@ -220,14 +236,140 @@ impl DocumentView {
         reference.editor.save_to(path)
     }
 
+    pub fn xlsx_hit_test(&self, page_index: usize, x: f64, y: f64) -> Option<CellRef> {
+        let ReferenceDocument::Xlsx(reference) = &self.reference else {
+            return None;
+        };
+        (page_index == 0)
+            .then(|| reference.editor.cell_at_point(x as f32, y as f32))
+            .flatten()
+    }
+
+    pub fn xlsx_select_cell(&mut self, cell: CellRef) -> bool {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.select(cell)
+    }
+
+    pub fn xlsx_move_selection(&mut self, movement: CellMove) -> bool {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.move_selection(movement)
+    }
+
+    pub fn xlsx_begin_edit(&mut self, seed: Option<&str>) -> Result<bool> {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return Ok(false);
+        };
+        reference.editor.begin_edit(seed)
+    }
+
+    pub fn xlsx_insert_text(&mut self, text: &str) -> bool {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.insert_text(text)
+    }
+
+    pub fn xlsx_backspace(&mut self) -> bool {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.backspace()
+    }
+
+    pub fn xlsx_cancel_edit(&mut self) -> bool {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.cancel()
+    }
+
+    pub fn xlsx_commit(&mut self, movement: Option<CellMove>) -> Result<bool> {
+        let changed = {
+            let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+                return Ok(false);
+            };
+            reference.editor.commit(movement)?
+        };
+        if changed {
+            self.refresh_xlsx_scene()?;
+        }
+        Ok(changed)
+    }
+
+    pub fn xlsx_undo(&mut self) -> Result<bool> {
+        let changed = {
+            let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+                return Ok(false);
+            };
+            reference.editor.undo()?
+        };
+        if changed {
+            self.refresh_xlsx_scene()?;
+        }
+        Ok(changed)
+    }
+
+    pub fn xlsx_redo(&mut self) -> Result<bool> {
+        let changed = {
+            let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+                return Ok(false);
+            };
+            reference.editor.redo()?
+        };
+        if changed {
+            self.refresh_xlsx_scene()?;
+        }
+        Ok(changed)
+    }
+
+    pub fn xlsx_is_editing(&self) -> bool {
+        matches!(
+            &self.reference,
+            ReferenceDocument::Xlsx(reference) if reference.editor.is_editing()
+        )
+    }
+
+    pub fn xlsx_is_dirty(&self) -> bool {
+        matches!(
+            &self.reference,
+            ReferenceDocument::Xlsx(reference) if reference.editor.is_dirty()
+        )
+    }
+
+    pub fn xlsx_overlay(&self) -> Option<XlsxOverlay> {
+        let ReferenceDocument::Xlsx(reference) = &self.reference else {
+            return None;
+        };
+        Some(XlsxOverlay {
+            rect: reference.editor.selection_rect()?,
+            draft: reference.editor.draft_value().map(str::to_owned),
+        })
+    }
+
+    pub fn save_xlsx_to(&self, path: &Path) -> Result<()> {
+        let ReferenceDocument::Xlsx(reference) = &self.reference else {
+            bail!("only XLSX workbooks use the XLSX save path");
+        };
+        reference.editor.save_to(path)
+    }
+
     pub fn edited_path(&self) -> Result<PathBuf> {
+        let extension = match &self.reference {
+            ReferenceDocument::Docx(_) => "docx",
+            ReferenceDocument::Xlsx(_) => "xlsx",
+            ReferenceDocument::Pptx(_) => bail!("PPTX documents are read-only"),
+        };
         let stem = self
             .source
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .context("DOCX input has no UTF-8 file stem")?;
+            .context("input has no UTF-8 file stem")?;
         let parent = self.source.parent().unwrap_or_else(|| Path::new("."));
-        Ok(parent.join(format!("{stem}-edited.docx")))
+        Ok(parent.join(format!("{stem}-edited.{extension}")))
     }
 
     fn apply_docx_edit(
@@ -260,6 +402,22 @@ impl DocumentView {
         reference.display_list = display_list;
         Ok(true)
     }
+
+    fn refresh_xlsx_scene(&mut self) -> Result<()> {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
+            return Ok(());
+        };
+        let display_list = reference.editor.display_list();
+        let page = translate_sheet(display_list)?;
+        reference.chart_count = display_list.charts.len();
+        reference.chart_placeholders = display_list
+            .charts
+            .iter()
+            .filter(|chart| chart.placeholder)
+            .count();
+        self.pages[0] = page;
+        Ok(())
+    }
 }
 
 pub fn load_document(
@@ -267,9 +425,31 @@ pub fn load_document(
     sheet_index: usize,
     max_texture_dimension_2d: u32,
 ) -> Result<DocumentView> {
+    load_document_with_xlsx_mode(path, sheet_index, max_texture_dimension_2d, true)
+}
+
+pub fn load_document_for_export(
+    path: &Path,
+    sheet_index: usize,
+    max_texture_dimension_2d: u32,
+) -> Result<DocumentView> {
+    load_document_with_xlsx_mode(path, sheet_index, max_texture_dimension_2d, false)
+}
+
+fn load_document_with_xlsx_mode(
+    path: &Path,
+    sheet_index: usize,
+    max_texture_dimension_2d: u32,
+    recalculate_xlsx: bool,
+) -> Result<DocumentView> {
     match DocumentFormat::from_path(path)? {
         DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d),
-        DocumentFormat::Xlsx => load_xlsx(path, sheet_index, max_texture_dimension_2d),
+        DocumentFormat::Xlsx => load_xlsx(
+            path,
+            sheet_index,
+            max_texture_dimension_2d,
+            recalculate_xlsx,
+        ),
         DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d),
     }
 }
@@ -339,37 +519,15 @@ fn load_xlsx(
     path: &Path,
     sheet_index: usize,
     max_texture_dimension_2d: u32,
+    recalculate: bool,
 ) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read XLSX {}", path.display()))?;
-    let workbook =
-        Workbook::open_for_read(&bytes).with_context(|| format!("open XLSX {}", path.display()))?;
-    let sheet_count = workbook.sheet_count();
-    if sheet_index >= sheet_count {
-        bail!(
-            "sheet {} is out of range for a workbook with {sheet_count} sheets",
-            sheet_index + 1
-        );
-    }
-    let sheet_id = SheetId(u32::try_from(sheet_index).context("sheet index is too large")?);
-    let sheet = workbook.sheet(sheet_id)?;
-    let sheet_name = sheet.name.clone();
-    let viewport = viewport_for_used_range_within(sheet, |viewport| {
-        viewport.width.is_finite()
-            && viewport.height.is_finite()
-            && viewport.width.ceil() <= max_texture_dimension_2d as f32
-            && viewport.height.ceil() <= max_texture_dimension_2d as f32
-    });
-    let requested_width = viewport.width.ceil();
-    let requested_height = viewport.height.ceil();
-    if requested_width > max_texture_dimension_2d as f32
-        || requested_height > max_texture_dimension_2d as f32
-    {
-        bail!(
-            "requested sheet size {requested_width:.0}x{requested_height:.0} exceeds GPU texture dimension ceiling {max_texture_dimension_2d}"
-        );
-    }
-    let display_list = workbook.display_list_for(sheet_id, &viewport)?;
-    let page = translate_sheet(&display_list)?;
+    let editor = XlsxEditor::open(bytes, sheet_index, max_texture_dimension_2d, recalculate)
+        .map_err(|error| anyhow::anyhow!("open XLSX {}: {error:#}", path.display()))?;
+    let sheet_count = editor.sheet_count();
+    let sheet_name = editor.sheet_name()?.to_owned();
+    let display_list = editor.display_list();
+    let page = translate_sheet(display_list)?;
     let chart_count = display_list.charts.len();
     let chart_placeholders = display_list
         .charts
@@ -378,14 +536,14 @@ fn load_xlsx(
         .count();
     Ok(DocumentView {
         source: path.to_owned(),
-        reference: ReferenceDocument::Xlsx(XlsxReference {
-            display_list,
+        reference: ReferenceDocument::Xlsx(Box::new(XlsxReference {
+            editor,
             sheet_index,
             sheet_count,
             sheet_name,
             chart_count,
             chart_placeholders,
-        }),
+        })),
         pages: vec![page],
         max_texture_dimension_2d,
     })
@@ -472,6 +630,8 @@ fn push_notes(target: &mut Vec<Value>, notes: Option<&[docx_parse::Note]>, note_
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use betteroffice_xlsx::{CellValue, DrawCmd, SheetId};
 
     use super::*;
     use crate::chrome::{Alignment, ToggleState};
@@ -754,6 +914,222 @@ mod tests {
         assert_eq!(reference.chart_count, 1);
         assert_eq!(reference.chart_placeholders, 0);
         assert_eq!(document.pages[0].skipped.total(), 0);
+    }
+
+    #[test]
+    fn edits_a_selected_showcase_cell_and_rebuilds_the_sheet() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let cell = CellRef::parse_a1("B5").unwrap();
+        assert!(document.xlsx_select_cell(cell));
+        assert!(document.xlsx_move_selection(CellMove::Right));
+        assert!(document.xlsx_move_selection(CellMove::Left));
+        let selection = document.xlsx_overlay().unwrap().rect;
+        assert!(selection.w > 0.0 && selection.h > 0.0);
+        assert!(document.xlsx_begin_edit(Some("2048")).unwrap());
+        assert_eq!(
+            document.xlsx_overlay().unwrap().draft.as_deref(),
+            Some("2048")
+        );
+        assert!(document.xlsx_commit(None).unwrap());
+
+        let ReferenceDocument::Xlsx(reference) = &document.reference else {
+            panic!("expected XLSX reference");
+        };
+        assert_eq!(
+            reference
+                .editor
+                .workbook()
+                .cell(reference.editor.sheet(), cell)
+                .unwrap()
+                .input,
+            "2048"
+        );
+        assert!(
+            reference
+                .editor
+                .display_list()
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCmd::Text { text, .. } if text == "2048"))
+        );
+        let state = document.editing_state().unwrap();
+        assert!(state.can_save);
+        assert!(state.can_undo);
+        assert!(!state.inline_enabled);
+        assert!(!state.alignment_enabled);
+        assert!(document.status_position(0).contains("B5 = 2048"));
+        assert!(document.xlsx_undo().unwrap());
+        assert!(!document.xlsx_is_dirty());
+        assert!(document.editing_state().unwrap().can_redo);
+        let undone = test_fixtures::write_xlsx("undone-output", b"sentinel");
+        document.save_xlsx_to(&undone).unwrap();
+        assert_eq!(fs::read(&undone).unwrap(), fs::read(&path).unwrap());
+        fs::remove_file(undone).unwrap();
+        assert!(document.xlsx_redo().unwrap());
+        assert!(document.xlsx_is_dirty());
+        let ReferenceDocument::Xlsx(reference) = &document.reference else {
+            panic!("expected XLSX reference");
+        };
+        assert_eq!(
+            reference
+                .editor
+                .workbook()
+                .cell(reference.editor.sheet(), cell)
+                .unwrap()
+                .input,
+            "2048"
+        );
+    }
+
+    #[test]
+    fn formula_commit_uses_the_engine_recalculation() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let cell = CellRef::parse_a1("B5").unwrap();
+        document.xlsx_select_cell(cell);
+        document.xlsx_begin_edit(Some("=40+2")).unwrap();
+        document.xlsx_commit(None).unwrap();
+
+        let ReferenceDocument::Xlsx(reference) = &document.reference else {
+            panic!("expected XLSX reference");
+        };
+        let calculated = reference
+            .editor
+            .workbook()
+            .sheet(reference.editor.sheet())
+            .unwrap()
+            .cell(cell)
+            .unwrap();
+        assert_eq!(calculated.formula.as_deref(), Some("40+2"));
+        assert_eq!(calculated.value, CellValue::Number { value: 42.0 });
+        assert!(
+            reference
+                .editor
+                .display_list()
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCmd::Text { text, .. } if text == "42"))
+        );
+        assert!(
+            !reference
+                .editor
+                .display_list()
+                .commands
+                .iter()
+                .any(|command| matches!(command, DrawCmd::Text { text, .. } if text == "=40+2"))
+        );
+    }
+
+    #[test]
+    fn escape_discards_the_cell_draft() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let cell = CellRef::parse_a1("B5").unwrap();
+        document.xlsx_select_cell(cell);
+        let before = match &document.reference {
+            ReferenceDocument::Xlsx(reference) => {
+                reference
+                    .editor
+                    .workbook()
+                    .cell(reference.editor.sheet(), cell)
+                    .unwrap()
+                    .input
+            }
+            _ => panic!("expected XLSX reference"),
+        };
+        document.xlsx_begin_edit(Some("discarded")).unwrap();
+        assert!(document.xlsx_insert_text(" draft"));
+        assert!(document.xlsx_cancel_edit());
+        let after = match &document.reference {
+            ReferenceDocument::Xlsx(reference) => {
+                reference
+                    .editor
+                    .workbook()
+                    .cell(reference.editor.sheet(), cell)
+                    .unwrap()
+                    .input
+            }
+            _ => panic!("expected XLSX reference"),
+        };
+        assert_eq!(after, before);
+        assert!(document.xlsx_overlay().unwrap().draft.is_none());
+    }
+
+    #[test]
+    fn saves_reopens_and_preserves_an_untouched_sheet() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let source_bytes = fs::read(&source).unwrap();
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let untouched = match &document.reference {
+            ReferenceDocument::Xlsx(reference) => reference
+                .editor
+                .workbook()
+                .sheet(SheetId(2))
+                .unwrap()
+                .clone(),
+            _ => panic!("expected XLSX reference"),
+        };
+        let cell = CellRef::parse_a1("B5").unwrap();
+        document.xlsx_select_cell(cell);
+        document.xlsx_begin_edit(Some("1776")).unwrap();
+        document.xlsx_commit(None).unwrap();
+
+        let output = test_fixtures::write_xlsx("edited-output", b"sentinel");
+        document.save_xlsx_to(&output).unwrap();
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        let ReferenceDocument::Xlsx(reference) = &reopened.reference else {
+            panic!("expected XLSX reference");
+        };
+        assert_eq!(
+            reference
+                .editor
+                .workbook()
+                .cell(reference.editor.sheet(), cell)
+                .unwrap()
+                .input,
+            "1776"
+        );
+        assert_eq!(
+            reference.editor.workbook().sheet(SheetId(2)).unwrap(),
+            &untouched
+        );
+        let saved = fs::read(&output).unwrap();
+        for part in [
+            "xl/worksheets/sheet2.xml",
+            "xl/worksheets/sheet3.xml",
+            "xl/drawings/drawing1.xml",
+            "xl/charts/chart1.xml",
+            "xl/styles.xml",
+            "xl/sharedStrings.xml",
+        ] {
+            assert_eq!(
+                test_fixtures::part(&source_bytes, part),
+                test_fixtures::part(&saved, part),
+                "{part} changed"
+            );
+        }
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_flatten_shared_formulas_on_save() {
+        let source =
+            test_fixtures::write_xlsx("shared-formula", &test_fixtures::shared_formula_xlsx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let cell = CellRef::parse_a1("C1").unwrap();
+        document.xlsx_select_cell(cell);
+        document.xlsx_begin_edit(Some("edited")).unwrap();
+        document.xlsx_commit(None).unwrap();
+
+        let output = test_fixtures::write_xlsx("shared-formula-refused", b"sentinel");
+        let error = document.save_xlsx_to(&output).unwrap_err().to_string();
+        assert!(error.contains("shared formulas"), "{error}");
+        assert!(error.contains("xl/worksheets/sheet1.xml"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
     }
 
     #[test]

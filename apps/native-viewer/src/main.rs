@@ -11,6 +11,7 @@ mod scene_shared;
 #[cfg(test)]
 mod test_fixtures;
 mod window;
+mod xlsx_editing;
 mod xlsx_scene;
 
 use std::env;
@@ -19,14 +20,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use document::{DocumentFormat, load_document};
+use document::{DocumentFormat, load_document, load_document_for_export};
 
 fn main() -> Result<()> {
     let options = Options::parse()?;
     let format = DocumentFormat::from_path(&options.document)?;
     let (page, sheet) = options.selection(format)?;
     let (mut context, max_texture_dimension_2d) = gpu::create_render_context()?;
-    let document = load_document(&options.document, sheet, max_texture_dimension_2d)?;
+    let document = if options.png.is_some() {
+        load_document_for_export(&options.document, sheet, max_texture_dimension_2d)?
+    } else {
+        load_document(&options.document, sheet, max_texture_dimension_2d)?
+    };
     if let Some(output) = options.png {
         gpu::render_comparison(&mut context, &document, page, &output, options.scale)?;
     } else {

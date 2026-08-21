@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use betteroffice_xlsx::CellRef;
 use docx_edit::SimpleFormat;
-use vello::kurbo::{Affine, Point, Rect};
+use vello::kurbo::{Affine, Point, Rect, Stroke};
 use vello::peniko::{Color, Fill};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
@@ -20,6 +21,8 @@ use crate::chrome::{
 };
 use crate::document::{DocumentView, ReferenceDocument, load_document};
 use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
+use crate::xlsx_editing::CellMove;
+use crate::xlsx_scene::paint_cell_editor;
 
 const MARGIN: f64 = 40.0;
 const PAGE_GAP: f64 = 24.0;
@@ -177,7 +180,8 @@ impl ViewportGeometry {
 
 enum PointerTarget {
     Chrome(Option<ToolbarCommand>),
-    Document(TextLoc),
+    Docx(TextLoc),
+    Xlsx(CellRef),
     None,
 }
 
@@ -198,16 +202,22 @@ fn pointer_target(
     else {
         return Ok(PointerTarget::None);
     };
+    if let Some(loc) = document.docx_hit_test(page_index, local_x, local_y)? {
+        return Ok(PointerTarget::Docx(loc));
+    }
     Ok(document
-        .docx_hit_test(page_index, local_x, local_y)?
-        .map_or(PointerTarget::None, PointerTarget::Document))
+        .xlsx_hit_test(page_index, local_x, local_y)
+        .map_or(PointerTarget::None, PointerTarget::Xlsx))
 }
 
 impl Viewer {
     fn new(document: DocumentView, context: RenderContext) -> Result<Self> {
-        let save_target = matches!(&document.reference, ReferenceDocument::Docx(_))
-            .then(|| document.edited_path())
-            .transpose()?;
+        let save_target = matches!(
+            &document.reference,
+            ReferenceDocument::Docx(_) | ReferenceDocument::Xlsx(_)
+        )
+        .then(|| document.edited_path())
+        .transpose()?;
         Ok(Self {
             document,
             chrome: Chrome::new(),
@@ -263,6 +273,7 @@ impl Viewer {
 
     fn render(&mut self) -> Result<()> {
         let selection_rects = self.document.docx_selection_rects().to_vec();
+        let xlsx_overlay = self.document.xlsx_overlay();
         let caret = if self.focused && self.caret_visible {
             self.document.docx_caret_geometry()?
         } else {
@@ -310,6 +321,28 @@ impl Viewer {
                 );
             }
             scene.append(&page.scene, Some(transform));
+            if page_index == 0
+                && let Some(overlay) = &xlsx_overlay
+            {
+                if let Some(draft) = &overlay.draft {
+                    let mut editor = Scene::new();
+                    paint_cell_editor(&mut editor, overlay.rect, draft)?;
+                    scene.append(&editor, Some(transform));
+                }
+                let rect = Rect::new(
+                    f64::from(overlay.rect.x),
+                    f64::from(overlay.rect.y),
+                    f64::from(overlay.rect.x + overlay.rect.w),
+                    f64::from(overlay.rect.y + overlay.rect.h),
+                );
+                scene.stroke(
+                    &Stroke::new(2.0 / self.zoom),
+                    transform,
+                    Color::from_rgba8(33, 115, 70, 255),
+                    None,
+                    &rect,
+                );
+            }
             if let Some(caret) = caret
                 .as_ref()
                 .filter(|caret| caret.page_index == page_index)
@@ -470,13 +503,14 @@ impl Viewer {
         };
         let geometry = self.geometry().context("window geometry is unavailable")?;
         let state = self.chrome_state()?;
-        let loc = match pointer_target(
+        let target = pointer_target(
             &self.document,
             &self.chrome,
             &state,
             geometry,
             Point::new(x, y),
-        )? {
+        )?;
+        let loc = match target {
             PointerTarget::Chrome(command) => {
                 self.dragging = false;
                 self.last_click = None;
@@ -485,7 +519,15 @@ impl Viewer {
                 }
                 return Ok(true);
             }
-            PointerTarget::Document(loc) => loc,
+            PointerTarget::Xlsx(cell) => {
+                let committed = self.document.xlsx_commit(None)?;
+                let selected = self.document.xlsx_select_cell(cell);
+                self.dragging = false;
+                self.last_click = None;
+                self.update_title();
+                return Ok(committed || selected);
+            }
+            PointerTarget::Docx(loc) => loc,
             PointerTarget::None => return Ok(false),
         };
         let now = Instant::now();
@@ -525,7 +567,13 @@ impl Viewer {
     }
 
     fn execute_toolbar_command(&mut self, command: ToolbarCommand) -> Result<()> {
+        if self.document.xlsx_is_editing() {
+            self.document.xlsx_commit(None)?;
+        }
+        let xlsx = matches!(&self.document.reference, ReferenceDocument::Xlsx(_));
         let changed = match command {
+            ToolbarCommand::Undo if xlsx => self.document.xlsx_undo()?,
+            ToolbarCommand::Redo if xlsx => self.document.xlsx_redo()?,
             ToolbarCommand::Undo => self.document.docx_undo()?,
             ToolbarCommand::Redo => self.document.docx_redo()?,
             ToolbarCommand::Bold => self.document.docx_toggle_format(SimpleFormat::Bold)?,
@@ -567,6 +615,11 @@ impl Viewer {
         let command = self.modifiers.super_key() || self.modifiers.control_key();
         let key = event.logical_key.as_ref();
         if matches!(key, Key::Named(NamedKey::Escape)) {
+            if self.document.xlsx_cancel_edit() {
+                self.update_title();
+                self.request_redraw();
+                return Ok(());
+            }
             event_loop.exit();
             return Ok(());
         }
@@ -653,6 +706,59 @@ impl Viewer {
             }
             return Ok(());
         }
+        if matches!(&self.document.reference, ReferenceDocument::Xlsx(_)) {
+            let editing = self.document.xlsx_is_editing();
+            let changed = if editing {
+                match key {
+                    Key::Named(NamedKey::Enter) => {
+                        self.document.xlsx_commit(Some(CellMove::Down))?
+                    }
+                    Key::Named(NamedKey::Tab) => {
+                        self.document.xlsx_commit(Some(CellMove::Right))?
+                    }
+                    Key::Named(NamedKey::Backspace) => self.document.xlsx_backspace(),
+                    Key::Character(text)
+                        if !command
+                            && !self.modifiers.alt_key()
+                            && text.chars().all(|character| !character.is_control()) =>
+                    {
+                        self.document.xlsx_insert_text(text)
+                    }
+                    _ => false,
+                }
+            } else {
+                match key {
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.document.xlsx_move_selection(CellMove::Left)
+                    }
+                    Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Tab) => {
+                        self.document.xlsx_move_selection(CellMove::Right)
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.document.xlsx_move_selection(CellMove::Up)
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.document.xlsx_move_selection(CellMove::Down)
+                    }
+                    Key::Named(NamedKey::Enter | NamedKey::F2) => {
+                        self.document.xlsx_begin_edit(None)?
+                    }
+                    Key::Character(text)
+                        if !command
+                            && !self.modifiers.alt_key()
+                            && text.chars().all(|character| !character.is_control()) =>
+                    {
+                        self.document.xlsx_begin_edit(Some(text))?
+                    }
+                    _ => false,
+                }
+            };
+            if changed {
+                self.update_title();
+                self.request_redraw();
+            }
+            return Ok(());
+        }
         if event.repeat {
             return Ok(());
         }
@@ -675,7 +781,10 @@ impl Viewer {
     }
 
     fn save_with_status(&mut self) {
-        if !matches!(&self.document.reference, ReferenceDocument::Docx(_)) {
+        if !matches!(
+            &self.document.reference,
+            ReferenceDocument::Docx(_) | ReferenceDocument::Xlsx(_)
+        ) {
             return;
         }
         match self.save_and_reopen() {
@@ -686,17 +795,26 @@ impl Viewer {
     }
 
     fn save_and_reopen(&mut self) -> Result<std::path::PathBuf> {
-        if !matches!(&self.document.reference, ReferenceDocument::Docx(_)) {
-            bail!("only DOCX documents are editable");
+        if self.document.xlsx_is_editing() {
+            self.document.xlsx_commit(None)?;
         }
+        let (format, sheet_index) = match &self.document.reference {
+            ReferenceDocument::Docx(_) => ("DOCX", 0),
+            ReferenceDocument::Xlsx(reference) => ("XLSX", reference.sheet_index),
+            ReferenceDocument::Pptx(_) => bail!("PPTX documents are read-only"),
+        };
         let path = self
             .save_target
             .clone()
-            .context("DOCX save target is unavailable")?;
-        self.document.save_docx_to(&path)?;
-        let reopened = load_document(&path, 0, self.document.max_texture_dimension_2d)
-            .with_context(|| format!("reopen edited DOCX {}", path.display()))?;
-        println!("saved and reopened edited DOCX: {}", path.display());
+            .context("save target is unavailable")?;
+        match &self.document.reference {
+            ReferenceDocument::Docx(_) => self.document.save_docx_to(&path)?,
+            ReferenceDocument::Xlsx(_) => self.document.save_xlsx_to(&path)?,
+            ReferenceDocument::Pptx(_) => unreachable!(),
+        }
+        let reopened = load_document(&path, sheet_index, self.document.max_texture_dimension_2d)
+            .with_context(|| format!("reopen edited {format} {}", path.display()))?;
+        println!("saved and reopened edited {format}: {}", path.display());
         self.document = reopened;
         self.scroll = 0.0;
         self.dragging = false;
@@ -765,6 +883,8 @@ impl Viewer {
         let edit_state = match &self.document.reference {
             ReferenceDocument::Docx(reference) if reference.editor.is_dirty() => " — edited",
             ReferenceDocument::Docx(_) => " — editable",
+            ReferenceDocument::Xlsx(_) if self.document.xlsx_is_dirty() => " — edited",
+            ReferenceDocument::Xlsx(_) => " — editable",
             _ => "",
         };
         window.set_title(&format!(
@@ -908,6 +1028,8 @@ impl ApplicationHandler for Viewer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::test_fixtures;
 
@@ -965,7 +1087,7 @@ mod tests {
         };
         let origin = geometry.page_origin(&document.pages, caret.page_index);
         let point = Point::new(origin.x + caret.x, origin.y + caret.y + caret.height / 2.0);
-        let PointerTarget::Document(loc) =
+        let PointerTarget::Docx(loc) =
             pointer_target(&document, &chrome, &state, geometry, point).unwrap()
         else {
             panic!("expected document pointer target");
@@ -978,5 +1100,41 @@ mod tests {
         };
         assert_ne!(after, before);
         std::fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn worksheet_hit_selects_the_cell_under_the_pointer() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx");
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let expected = CellRef::parse_a1("B5").unwrap();
+        document.xlsx_select_cell(expected);
+        let rect = document.xlsx_overlay().unwrap().rect;
+        document.xlsx_select_cell(CellRef::new(0, 0));
+        let geometry = ViewportGeometry {
+            width: 1_100.0,
+            height: 900.0,
+            zoom: 1.0,
+            scroll: 0.0,
+        };
+        let origin = geometry.page_origin(&document.pages, 0);
+        let point = Point::new(
+            origin.x + f64::from(rect.x + rect.w / 2.0),
+            origin.y + f64::from(rect.y + rect.h / 2.0),
+        );
+        let state = ChromeState {
+            editing: document.editing_state().unwrap(),
+            zoom: 1.0,
+            file_name: "showcase.xlsx".to_owned(),
+            position: document.status_position(0),
+            message: None,
+        };
+        let PointerTarget::Xlsx(cell) =
+            pointer_target(&document, &Chrome::new(), &state, geometry, point).unwrap()
+        else {
+            panic!("expected worksheet pointer target");
+        };
+        assert_eq!(cell, expected);
+        assert!(document.xlsx_select_cell(cell));
+        assert!(document.status_position(0).contains("B5 ="));
     }
 }

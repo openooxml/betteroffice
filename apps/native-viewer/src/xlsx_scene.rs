@@ -44,6 +44,29 @@ pub fn translate_sheet(display_list: &DisplayList) -> Result<PageScene> {
     })
 }
 
+pub fn paint_cell_editor(scene: &mut Scene, rect: DisplayRect, value: &str) -> Result<()> {
+    let bounds =
+        rectangle(rect.x, rect.y, rect.w, rect.h, "cell editor").map_err(anyhow::Error::msg)?;
+    scene.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &bounds);
+    let font = FontData::new(Blob::from(FONT_BYTES.to_vec()), 0);
+    let text = PreparedText::new(
+        rect.x + 2.0,
+        rect.y + (rect.h + 11.0 * 0.7) / 2.0,
+        value,
+        11.0,
+        "#000000",
+        Align::Left,
+        false,
+        false,
+        false,
+        false,
+        None,
+        false,
+    )
+    .map_err(anyhow::Error::msg)?;
+    paint_clipped(scene, Some(&rect), |scene| text.paint(scene, &font)).map_err(anyhow::Error::msg)
+}
+
 fn translate_or_placeholder(
     scene: &mut Scene,
     command: &DrawCmd,

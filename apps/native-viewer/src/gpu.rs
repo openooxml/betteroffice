@@ -83,7 +83,7 @@ pub fn render_comparison(
             (raster.bytes, Some(raster.skipped_images))
         }
         ReferenceDocument::Xlsx(reference) => (
-            xlsx_raster::render_png(&reference.display_list).map_err(anyhow::Error::msg)?,
+            xlsx_raster::render_png(reference.editor.display_list()).map_err(anyhow::Error::msg)?,
             None,
         ),
         ReferenceDocument::Pptx(_) => unreachable!(),
