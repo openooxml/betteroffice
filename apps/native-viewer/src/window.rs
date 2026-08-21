@@ -20,10 +20,7 @@ use crate::chrome::{
     ZOOM_MIN,
 };
 use crate::collaboration::{CollaborationClient, CollaborationConfig, TransportEvent};
-use crate::collaboration_protocol::{
-    ProtocolMessage, decode_messages, encode_empty_awareness, encode_sync_step_1,
-    encode_sync_step_2, encode_update,
-};
+use crate::collaboration_document;
 use crate::document::{DocumentView, ReferenceDocument, load_document};
 use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
 use crate::pptx_editing::PptxHit;
@@ -1009,99 +1006,45 @@ impl Viewer {
     }
 
     fn handle_collaboration_event(&mut self, event: TransportEvent) -> Result<()> {
-        if let Some(collaboration) = &mut self.collaboration {
-            collaboration.apply_transport_event(&event);
-        }
-        match event {
-            TransportEvent::Connected => {
-                let state_vector = self.document.docx_state_vector()?;
-                let frame = encode_sync_step_1(&state_vector)?;
-                if let Some(collaboration) = &self.collaboration {
-                    collaboration.send(frame)?;
-                }
-            }
-            TransportEvent::Binary(frame) => {
-                self.apply_collaboration_frame(&frame)?;
-            }
-            TransportEvent::Connecting
-            | TransportEvent::PeerCount(_)
-            | TransportEvent::Reconnecting { .. }
-            | TransportEvent::Failed(_) => {}
+        let repainted = match &mut self.collaboration {
+            Some(collaboration) => collaboration_document::handle_transport_event(
+                &mut self.document,
+                collaboration,
+                event,
+            )?,
+            None => false,
+        };
+        if repainted {
+            self.refresh_after_collaboration_update();
         }
         self.request_redraw();
         Ok(())
     }
 
+    #[cfg(test)]
     fn apply_collaboration_frame(&mut self, frame: &[u8]) -> Result<bool> {
-        let messages = match decode_messages(frame) {
-            Ok(messages) => messages,
-            Err(error) => {
-                if let Some(collaboration) = &mut self.collaboration {
-                    collaboration.report_protocol_error(error);
-                }
-                return Ok(false);
-            }
+        let Some(collaboration) = &mut self.collaboration else {
+            return Ok(false);
         };
-        let mut repainted = false;
-        for message in messages {
-            match message {
-                ProtocolMessage::SyncStep1(state_vector) => {
-                    let update = self.document.docx_encode_diff(&state_vector)?;
-                    let frame = encode_sync_step_2(&update)?;
-                    if let Some(collaboration) = &self.collaboration {
-                        collaboration.send(frame)?;
-                    }
-                }
-                ProtocolMessage::SyncStep2(update) => {
-                    repainted |= self.document.docx_apply_remote_update(&update)?;
-                    if let Some(collaboration) = &mut self.collaboration {
-                        collaboration.mark_synced();
-                    }
-                }
-                ProtocolMessage::Update(update) => {
-                    repainted |= self.document.docx_apply_remote_update(&update)?;
-                }
-                ProtocolMessage::QueryAwareness => {
-                    if let Some(collaboration) = &self.collaboration {
-                        collaboration.send(encode_empty_awareness())?;
-                    }
-                }
-                ProtocolMessage::Auth(reason) => {
-                    if let Some(collaboration) = &mut self.collaboration {
-                        collaboration.deny(reason);
-                    }
-                }
-                ProtocolMessage::Awareness(_) => {}
-            }
-        }
+        let repainted =
+            collaboration_document::apply_frame(&mut self.document, collaboration, frame)?;
         if repainted {
-            self.reset_caret_blink();
-            self.clamp_scroll();
-            self.update_title();
+            self.refresh_after_collaboration_update();
         }
         Ok(repainted)
     }
 
     fn forward_local_updates(&mut self) {
-        let Some(collaboration) = &self.collaboration else {
-            return;
-        };
-        if !collaboration.is_connected() {
-            return;
-        }
-        let updates = self.document.docx_drain_local_updates();
         let Some(collaboration) = &mut self.collaboration else {
             return;
         };
-        for update in updates {
-            let result = encode_update(&update)
-                .map_err(anyhow::Error::from)
-                .and_then(|frame| collaboration.send(frame));
-            if let Err(error) = result {
-                collaboration.report_protocol_error(error);
-                break;
-            }
-        }
+        collaboration_document::forward_local_updates(&self.document, collaboration);
+    }
+
+    fn refresh_after_collaboration_update(&mut self) {
+        self.reset_caret_blink();
+        self.clamp_scroll();
+        self.update_title();
     }
 
     fn reset_caret_blink(&mut self) {
@@ -1344,6 +1287,7 @@ mod tests {
 
     use super::*;
     use crate::collaboration::TransportCommand;
+    use crate::collaboration_protocol::{ProtocolMessage, decode_messages, encode_update};
     use crate::document::load_collaborative_docx;
     use crate::test_fixtures;
 

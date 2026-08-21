@@ -1,6 +1,8 @@
 mod chrome;
 mod collaboration;
+mod collaboration_document;
 mod collaboration_protocol;
+mod collaboration_test_peer;
 mod document;
 #[path = "scene.rs"]
 mod docx_scene;
@@ -31,6 +33,10 @@ fn main() -> Result<()> {
     let format = DocumentFormat::from_path(&options.document)?;
     let (page, sheet) = options.selection(format)?;
     let collaboration = options.collaboration(format)?;
+    if options.collaboration_test_peer {
+        let config = collaboration.context("--collaboration-test-peer requires --room")?;
+        return collaboration_test_peer::run(&options.document, config);
+    }
     let (mut context, max_texture_dimension_2d) = gpu::create_render_context()?;
     let document = if options.png.is_some() {
         load_document_for_export(&options.document, sheet, max_texture_dimension_2d)?
@@ -60,6 +66,7 @@ struct Options {
     scale: f64,
     room: Option<String>,
     relay_origin: String,
+    collaboration_test_peer: bool,
 }
 
 impl Options {
@@ -75,6 +82,7 @@ impl Options {
         let mut slide = None;
         let mut scale = 1.0f64;
         let mut room = None;
+        let mut collaboration_test_peer = false;
         let mut relay_origin = match env::var_os("BETTEROFFICE_RELAY_ORIGIN") {
             Some(value) => value
                 .into_string()
@@ -130,6 +138,9 @@ impl Options {
                         .and_then(|value| value.into_string().ok())
                         .context("--relay-origin needs a URL")?;
                 }
+                Some("--collaboration-test-peer") => {
+                    collaboration_test_peer = true;
+                }
                 Some("--help" | "-h") => {
                     println!(
                         "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N | --slide N] [--scale N] [--room ID] [--relay-origin URL]"
@@ -148,6 +159,7 @@ impl Options {
             scale,
             room,
             relay_origin,
+            collaboration_test_peer,
         })
     }
 

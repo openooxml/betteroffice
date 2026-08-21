@@ -40,6 +40,16 @@ Run that command once in each terminal. The default hosted relay can be replaced
 
 Collaboration synchronizes the resident DOCX document state. Native body-text edits and supported character or paragraph formatting are broadcast, and remote document updates are applied and relaid out. File paths, saved package bytes, viewport, local selection, and undo history are not shared. Awareness and presence are not wired: the native viewer answers awareness queries with an empty update and does not show or publish participant names, carets, or selections.
 
+Run the native-to-TypeScript collaboration test from the repository root:
+
+```sh
+bun test apps/native-viewer/tests/native_typescript_collaboration.test.ts
+```
+
+The test builds the DOCX Wasm artifacts when needed, starts `apps/relay` locally with Wrangler, connects a headless native viewer peer through `--room`, and drives the production `CollaborationProvider`, Yrs session, protocol implementation, and demo room transport directly from Bun. It proves that a joining TypeScript peer receives native state already retained by the room, both document models receive interleaved native and TypeScript text edits, edits made during a native disconnect cross in both directions after reconnect, and all canonical story checksums combine to the same document checksum with an identical state vector on both peers. This test is not part of the automatic root test run because it starts a live relay and compiles the native viewer.
+
+This exercises the exact TypeScript collaboration module imported by the browser without UI behavior obscuring it. It is not browser-verified: it does not exercise the React editor's provider hookup, worker lifecycle, browser WebSocket implementation, or collaboration UI.
+
 The fixed top toolbar provides undo, redo, bold, italic, underline, paragraph alignment, zoom, and save controls. A fixed status line shows the file and current page, sheet, or slide, plus transient save results. XLSX and PPTX enable save and their engine-backed undo and redo while keeping the DOCX character and paragraph controls disabled. Scroll vertically with the trackpad or mouse wheel. Hold Command or Control while scrolling to zoom. Use Command or Control with `+`, `-`, and `0` to zoom while editing.
 
 DOCX documents are editable in the window. Click or drag to place a caret or select text, Shift-click to extend a selection, and double-click to select a word. Arrow keys, Home, End, typing, Backspace, Delete, and Enter use the resident DOCX engine. Command-Z or Control-Z undoes and adding Shift redoes. Press Command-S or Control-S to save beside the input as `<name>-edited.docx`; the viewer verifies the saved file by reopening it without replacing the live editing session. Save results and fidelity refusals appear in the status line.

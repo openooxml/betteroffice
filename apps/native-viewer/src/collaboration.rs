@@ -137,6 +137,10 @@ impl CollaborationClient {
         matches!(self.status, ConnectionStatus::Connected { .. })
     }
 
+    pub fn is_synced(&self) -> bool {
+        matches!(self.status, ConnectionStatus::Connected { synced: true })
+    }
+
     pub fn send(&self, frame: Vec<u8>) -> Result<()> {
         if frame.len() > MAX_FRAME_BYTES {
             bail!("collaboration frame exceeds {MAX_FRAME_BYTES} bytes");
