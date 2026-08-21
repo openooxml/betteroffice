@@ -38,12 +38,17 @@ Every criterion SHALL be scored on six axes with these statuses, ordered weakest
 
 ### Requirement: The ledger only ratchets
 
-Statuses and targets SHALL only move up the axis vocabularies; measured numbers SHALL only improve. A change that lowers a status, shrinks a required list, or raises a defect ceiling SHALL fail unless it is an explicit, reviewed regression acknowledgment recorded in the entry with the issue that tracks it.
+Statuses and targets SHALL only move up the axis vocabularies; measured numbers SHALL only improve. Three mechanisms SHALL enforce it: no status may outrank its target; a measured number may be rewritten only under `GOLDEN_UPDATE=1`, and regeneration SHALL refuse a number that moved away from its target; and every enumerated defect SHALL be reproduced by a ceiling probe, so headroom cannot be invented. Lowering a status buys nothing — the gates run independently of the ledger, so a red build stays red — and a change that lowers one anyway SHALL record the regression in the entry with the issue that tracks it.
 
 #### Scenario: A silent regression cannot land
 
 - **WHEN** a change makes a `gated` criterion fail its gate
-- **THEN** either the change is fixed, or the ledger records the regression explicitly with its tracking issue — the gate never just disappears
+- **THEN** either the change is fixed, or the ledger records the regression explicitly with its tracking issue — editing the status leaves the gate red
+
+#### Scenario: Regeneration refuses a worsened number
+
+- **WHEN** a defect count grows and the ledger is regenerated under `GOLDEN_UPDATE=1`
+- **THEN** regeneration fails naming the number and its old value, so the regression is recorded deliberately or not at all
 
 ### Requirement: The gap is a list, not an estimate
 

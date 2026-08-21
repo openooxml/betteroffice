@@ -2,10 +2,11 @@
   "version": 1,
   "measured": {
     "corpusFixtures": 2,
+    "corpusFixturesWithoutFindings": 2,
     "corpusFloor": 2,
-    "layoutGoldensRequired": 2,
     "declaredNormalizations": 5,
-    "knownDefects": 1
+    "knownDefects": 3,
+    "layoutGoldensRequired": 2
   },
   "criteria": [
     {
@@ -213,7 +214,14 @@
           "betteroffice-docx fidelity::an_unknown_attribute_on_a_known_element_survives_the_round_trip"
         ]
       },
-      "defects": []
+      "ceilings": [
+        "betteroffice-docx defects::unknown_xml_holds_at_two_defects",
+        "betteroffice-docx defects::the_ledger_enumerates_exactly_the_defects_that_still_reproduce"
+      ],
+      "defects": [
+        "raw foreign nodes do not travel the collaborative edit lane; an editor session drops them",
+        "foreign root declarations on note and comment parts are not yet carried through save"
+      ]
     },
     {
       "id": "pkg.whitespace",
@@ -3274,6 +3282,10 @@
         "evidence": "word"
       },
       "gates": {},
+      "ceilings": [
+        "betteroffice-docx defects::typing_holds_at_one_defect",
+        "betteroffice-docx defects::the_ledger_enumerates_exactly_the_defects_that_still_reproduce"
+      ],
       "defects": [
         "replace_paragraph_text refuses a paragraph carrying bookmark markers (UnsupportedParagraphEdit)"
       ]

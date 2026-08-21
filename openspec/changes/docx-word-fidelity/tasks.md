@@ -44,14 +44,15 @@ Phases 0–1 landed with the first oracle run: the crate, its unit tests, and th
 - [x] 4.2 Corpus runner: unedited gate and fixed point over every manifest entry, findings pinned exactly per fixture under `GOLDEN_UPDATE=1`; the edited gate joins with the canonical edit set
 - [ ] 4.3 Wire the redaction intake: document in `AGENTS.md` that an engine PR's repro file joins the corpus, through `betteroffice-redact` when confidential
 - [x] 4.4 Seed the corpus: the comprehensive and demo documents; real-world redacted documents and the acceptance fixture follow
+- [x] 4.5 Builder-drift gate: every generated fixture equals its builder's output, run where the builders run (`scripts/corpus-fixtures.test.ts`)
 
 ## 5. Meta-oracles
 
 - [ ] 5.1 Reach: per corpus fixture, digest block count equals the part's block count
-- [ ] 5.2 Blind-spot pairs: numbering identity, emptied borders, tab stops, paragraph-mark properties, table flattened to paragraphs, section setup, `styles.xml` and `numbering.xml` definitions — each pair must digest differently
+- [x] 5.2 Blind-spot pairs: numbering identity, emptied borders, tab stops, paragraph-mark properties, table flattened to paragraphs, section setup, an emptied content control, `styles.xml` and `numbering.xml` definitions — each pair must digest differently
 - [x] 5.3 Teeth: strip an element from a saved package; census and digest both fire
-- [ ] 5.4 Floor: every corpus sweep asserts the fixture count exceeds the pinned floor
-- [ ] 5.5 Ceilings: known defects pinned with `==`, each ceiling entry naming its defects in the ledger
+- [x] 5.4 Floor: every corpus sweep asserts the fixture count exceeds the pinned floor
+- [x] 5.5 Ceilings: known defects probed and pinned with `==` in `defects.rs`, the ledger's enumeration equal to the set that still reproduces, each criterion naming its ceiling test
 
 ## 6. Editing fidelity
 
@@ -65,8 +66,8 @@ Phases 0–1 landed with the first oracle run: the crate, its unit tests, and th
 
 ## 7. Scorecard — `crates/betteroffice-docx/tests/scorecard/`
 
-- [ ] 7.1 `ledger.json` implementing the catalogue: one entry per criterion, six axes, per-axis target, gates, defects
-- [ ] 7.2 Ledger test: id set equals the catalogue, measured numbers recomputed and compared exactly, every claimed status's gate exists, regeneration only under `GOLDEN_UPDATE=1`
+- [x] 7.1 `ledger.json` implementing the catalogue: one entry per criterion, six axes, per-axis target, gates, defects
+- [x] 7.2 Ledger test: id set equals the catalogue, no status outranks its target, measured numbers recomputed and compared exactly, every claimed status's gate and every defect's ceiling exists, regeneration only under `GOLDEN_UPDATE=1` and refusing a number that moved the wrong way
 - [ ] 7.3 Generated `scorecard.md`: per-axis criteria-at-target counts, corpus metrics, defect list; drift-checked against the ledger
 - [ ] 7.4 Retire `DL_SNAPSHOT_UPDATE`; gate the hand-edited `.golden.json` files and the inline chart snapshot under `GOLDEN_UPDATE=1`
 

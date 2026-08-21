@@ -1,14 +1,15 @@
 //! Round-trip fidelity gates: open → save → reopen through the package
 //! oracles. The oracles parse bytes with their own reader (`ooxml-fidelity`),
-//! never this crate's model, so a model gap cannot hide a save loss. Known
-//! defects are pinned with exact equality: fixing one without lowering its
-//! ceiling fails too, so no regression can hide behind the headroom.
+//! never this crate's model, so a model gap cannot hide a save loss. What the
+//! round trip still loses is pinned as a ceiling in `defects.rs`.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-oracles`.
 
 mod common;
 
 use betteroffice_docx::Document;
-use common::{Parts, parts_of, roundtrip_report, save_unedited};
+use common::{
+    Parts, parts_of, roundtrip_report, sample_docx, save_unedited, with_document_xml, with_part,
+};
 use ooxml_fidelity::wml::{Difference, diff_digests, semantic_digest};
 use ooxml_fidelity::{element_census, losses};
 
@@ -17,50 +18,6 @@ fn digest_diff(before: &Parts, after: &Parts) -> Vec<Difference> {
         &semantic_digest(before).unwrap(),
         &semantic_digest(after).unwrap(),
     )
-}
-
-fn sample_docx() -> Vec<u8> {
-    let parts = vec![
-        (
-            "[Content_Types].xml".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#.to_vec(),
-        ),
-        (
-            "_rels/.rels".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
-        ),
-        (
-            "word/_rels/document.xml.rels".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#.to_vec(),
-        ),
-        (
-            "word/document.xml".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p w14:paraId="11111111"><w:pPr><w:jc w:val="center"/><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="28"/></w:rPr><w:t xml:space="preserve">Hello </w:t></w:r><w:bookmarkStart w:id="1" w:name="mark"/><w:r><w:t>DOCX</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p w14:paraId="22222222"><w:r><w:t>Cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p w14:paraId="33333333"><w:r><w:tab/><w:t>Second</w:t><w:br/><w:t>section</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>"#.to_vec(),
-        ),
-        (
-            "word/header1.xml".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:p w14:paraId="44444444"><w:r><w:t>Native header</w:t></w:r></w:p></w:hdr>"#.to_vec(),
-        ),
-        (
-            "word/media/image1.png".to_owned(),
-            vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01, 0x02, 0x03],
-        ),
-        (
-            "customXml/item1.xml".to_owned(),
-            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><data xmlns="urn:custom"><value>kept</value></data>"#.to_vec(),
-        ),
-    ];
-    ooxml_opc::rezip_parts(&parts).unwrap()
-}
-
-fn with_document_xml(package: &[u8], edit: impl Fn(String) -> String) -> Vec<u8> {
-    let mut parts = ooxml_opc::unzip_parts(package).unwrap();
-    for (name, bytes) in &mut parts {
-        if name == "word/document.xml" {
-            *bytes = edit(String::from_utf8(bytes.clone()).unwrap()).into_bytes();
-        }
-    }
-    ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
 #[test]
@@ -151,20 +108,13 @@ fn an_unknown_element_in_a_modelled_part_survives_the_round_trip() {
 /// inline, must keep resolving after a save re-emits the root.
 #[test]
 fn root_declared_foreign_markup_in_a_header_survives_the_round_trip() {
-    let mut parts = ooxml_opc::unzip_parts(&sample_docx()).unwrap();
-    for (name, bytes) in &mut parts {
-        if name == "word/header1.xml" {
-            let xml = String::from_utf8(bytes.clone()).unwrap();
-            *bytes = xml
-                .replace(
-                    r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
-                    r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:bofx="urn:betteroffice-fixture-x""#,
-                )
-                .replace("<w:p ", r#"<bofx:hmark/><w:p bofx:flag="1" "#)
-                .into_bytes();
-        }
-    }
-    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+    let original = with_part(&sample_docx(), "word/header1.xml", |xml| {
+        xml.replace(
+            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:bofx="urn:betteroffice-fixture-x""#,
+        )
+        .replace("<w:p ", r#"<bofx:hmark/><w:p bofx:flag="1" "#)
+    });
     let saved = save_unedited(&original);
     assert_eq!(
         roundtrip_report(&parts_of(&original), &parts_of(&saved)),
