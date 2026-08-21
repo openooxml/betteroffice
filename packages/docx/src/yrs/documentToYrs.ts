@@ -1476,10 +1476,9 @@ function unitsToRawOps(units: readonly InlineUnit[]): YrsRawOp[] {
 }
 
 function seedPlan(session: YrsSession, plan: StoryPlan): void {
-  session.applyRawOps(plan.storyId, unitsToRawOps(plan.units));
-  const comments: YrsRawOp[] = [];
+  const ops = unitsToRawOps(plan.units);
   for (const [id, ranges] of plan.commentCoverage) {
-    comments.push({
+    ops.push({
       op: 'setComment',
       id: String(id),
       ranges,
@@ -1488,7 +1487,7 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
       body: null,
     });
   }
-  if (comments.length > 0) session.applyRawOps(plan.storyId, comments);
+  session.applySeedRawOps(plan.storyId, ops);
 }
 
 /**

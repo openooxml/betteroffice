@@ -849,6 +849,14 @@ fn parse_raw_op(value: &Value) -> Result<RawOp, JsValue> {
     }
 }
 
+fn parse_raw_ops(ops_json: &str) -> Result<Vec<RawOp>, JsValue> {
+    let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
+    let entries = value
+        .as_array()
+        .ok_or_else(|| js_err("apply_raw_ops expects an array of ops"))?;
+    entries.iter().map(parse_raw_op).collect()
+}
+
 /// Parses an accept/reject target from JSON: `{"revisionId": string}` (one
 /// coalesced revision, any story) or a Loc range
 /// `{"story","startPara","startOffset","endPara","endOffset"}`.
@@ -3094,18 +3102,21 @@ impl EditSession {
     /// or a missing required field, and leaves the story untouched — parsing
     /// completes before the transaction opens.
     pub fn apply_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
-        let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
-        let entries = value
-            .as_array()
-            .ok_or_else(|| js_err("apply_raw_ops expects an array of ops"))?;
-        let ops = entries
-            .iter()
-            .map(parse_raw_op)
-            .collect::<Result<Vec<_>, _>>()?;
+        let ops = parse_raw_ops(ops_json)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .apply_raw_ops(story, ops, &ctx)
+            .map_err(js_err)
+    }
+
+    /// Applies seed raw operations with deterministic item ordering.
+    pub fn apply_seed_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
+        let ops = parse_raw_ops(ops_json)?;
+        let ctx = EditCtx::local(String::new(), String::new());
+        self.engine
+            .doc()
+            .apply_raw_story_batches(vec![(story.to_owned(), ops)], &ctx)
             .map_err(js_err)
     }
 

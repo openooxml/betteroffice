@@ -12,6 +12,7 @@ export const editsession_apply_input_profiled: (a: number, b: number, c: number,
 export const editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];

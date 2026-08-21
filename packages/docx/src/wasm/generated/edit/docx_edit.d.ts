@@ -121,6 +121,10 @@ export class EditSession {
      */
     apply_raw_ops(story: string, ops_json: string): void;
     /**
+     * Applies seed raw operations with deterministic item ordering.
+     */
+    apply_seed_raw_ops(story: string, ops_json: string): void;
+    /**
      * Applies a remote or incremental yrs v1 update. It commits without a
      * local origin, so this replica's undo manager never claims it. Errors on
      * a malformed update.
@@ -1038,6 +1042,7 @@ export interface InitOutput {
     readonly editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
     readonly editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+    readonly editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_apply_update: (a: number, b: number, c: number) => [number, number];
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];

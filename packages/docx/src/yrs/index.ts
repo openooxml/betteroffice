@@ -842,6 +842,8 @@ export interface YrsSession extends CollaborationReplica {
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
   /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
+  /** Applies seed raw operations with deterministic item ordering. */
+  applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;
   /** Adds a sticky-anchored comment over one or more ranges. */
@@ -1690,6 +1692,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     applyRawOps: (story, ops) => mutate(() => session.apply_raw_ops(story, JSON.stringify(ops))),
+    applySeedRawOps: (story, ops) =>
+      mutate(() => session.apply_seed_raw_ops(story, JSON.stringify(ops))),
     setParagraphAttr: (paraId, key, value) =>
       mutate(() => session.set_paragraph_attr(paraId, key, JSON.stringify(value ?? null))),
     addComment: (ranges, commentAuthor, date, body) =>
