@@ -63,6 +63,7 @@ use yrs::{
 };
 
 mod ctx;
+mod deterministic;
 mod format;
 mod op;
 mod ops;
@@ -582,9 +583,7 @@ impl EditingDoc {
     }
 
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
-        self.doc
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default())
+        deterministic::encode_state_as_update_v1(&self.doc.transact(), &StateVector::default())
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -594,7 +593,10 @@ impl EditingDoc {
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
         let state_vector = StateVector::decode_v1(remote_state_vector)
             .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;
-        Ok(self.doc.transact().encode_diff_v1(&state_vector))
+        Ok(deterministic::encode_diff_v1(
+            &self.doc.transact(),
+            &state_vector,
+        ))
     }
 
     pub fn apply_update_v1(&self, bytes: &[u8]) -> EditResult<()> {

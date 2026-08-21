@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -456,20 +456,24 @@ fn any_from_value(value: Value) -> Result<Any, String> {
             .collect::<Result<Vec<_>, _>>()
             .map(Arc::from)
             .map(Any::Array),
-        Value::Object(values) => values
-            .into_iter()
-            .map(|(key, value)| Ok((key, any_from_value(value)?)))
-            .collect::<Result<HashMap<_, _>, _>>()
-            .map(Arc::new)
-            .map(Any::Map),
+        Value::Object(values) => {
+            let mut entries = values
+                .into_iter()
+                .map(|(key, value)| Ok((key, any_from_value(value)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Ok(Any::Map(Arc::new(entries.into_iter().collect())))
+        }
     }
 }
 
 fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    values
+    let mut entries = values
         .into_iter()
         .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries.into_iter().collect())
 }
 
 fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {

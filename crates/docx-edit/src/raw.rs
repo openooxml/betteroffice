@@ -1,5 +1,6 @@
 //! Raw story mutations using UTF-16 story indices.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use yrs::types::text::YChange;
@@ -73,7 +74,7 @@ impl EditingDoc {
     /// Applies raw story operations in one transaction.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
         let mut txn = self.transact_for(ctx);
-        apply_raw_ops_to_story(&mut txn, story_id, ops)
+        apply_raw_ops_to_story(&mut txn, story_id, ops, false)
     }
 
     pub(crate) fn apply_raw_story_batches(
@@ -83,19 +84,43 @@ impl EditingDoc {
     ) -> OpResult<()> {
         let mut txn = self.transact_for(ctx);
         for (story_id, ops) in batches {
-            apply_raw_ops_to_story(&mut txn, &story_id, ops)?;
+            apply_raw_ops_to_story(&mut txn, &story_id, ops, true)?;
         }
         Ok(())
     }
 }
 
-#[derive(Default)]
 struct InsertRun {
     deltas: Vec<Delta<In>>,
+    deterministic: bool,
+    embeds: Vec<InsertedEmbed>,
+    formats: BTreeMap<Arc<str>, Vec<FormatSpan>>,
     cursor: Option<u32>,
 }
 
+struct InsertedEmbed {
+    index: u32,
+    kind: String,
+    payload: Vec<(String, Any)>,
+}
+
+struct FormatSpan {
+    index: u32,
+    len: u32,
+    value: Any,
+}
+
 impl InsertRun {
+    fn new(deterministic: bool) -> Self {
+        Self {
+            deltas: Vec::new(),
+            deterministic,
+            embeds: Vec::new(),
+            formats: BTreeMap::new(),
+            cursor: None,
+        }
+    }
+
     fn is_active(&self) -> bool {
         self.cursor.is_some()
     }
@@ -121,11 +146,16 @@ impl InsertRun {
         }
     }
 
-    fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) {
+    fn flush(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) -> OpResult<()> {
         if !self.deltas.is_empty() {
             story.apply_delta(txn, std::mem::take(&mut self.deltas));
         }
+        if self.deterministic {
+            self.hydrate_embeds(story, txn)?;
+            self.apply_formats(story, txn);
+        }
         self.cursor = None;
+        Ok(())
     }
 
     fn start_delta(&mut self, index: u32) {
@@ -135,27 +165,42 @@ impl InsertRun {
     }
 
     fn insert(&mut self, index: u32, text: String, attrs: Attrs) {
-        self.cursor = Some(index + text.encode_utf16().count() as u32);
-        if text.is_empty() {
+        let len = text.encode_utf16().count() as u32;
+        self.cursor = Some(index + len);
+        if len == 0 {
             return;
         }
         self.start_delta(index);
-        let attrs = (!attrs.is_empty()).then_some(Box::new(attrs));
-        if let Some(Delta::Inserted(In::Any(Any::String(trailing)), trailing_attrs)) =
-            self.deltas.last_mut()
-        {
-            if trailing_attrs == &attrs {
-                let mut combined = String::with_capacity(trailing.len() + text.len());
-                combined.push_str(trailing);
-                combined.push_str(&text);
-                *trailing = Arc::from(combined);
-                return;
+        if !self.deterministic {
+            let attrs = (!attrs.is_empty()).then_some(Box::new(attrs));
+            if let Some(Delta::Inserted(In::Any(Any::String(trailing)), trailing_attrs)) =
+                self.deltas.last_mut()
+            {
+                if trailing_attrs == &attrs {
+                    let mut combined = String::with_capacity(trailing.len() + text.len());
+                    combined.push_str(trailing);
+                    combined.push_str(&text);
+                    *trailing = Arc::from(combined);
+                    return;
+                }
             }
+            self.deltas.push(Delta::Inserted(
+                In::Any(Any::String(Arc::from(text))),
+                attrs,
+            ));
+            return;
         }
-        self.deltas.push(Delta::Inserted(
-            In::Any(Any::String(Arc::from(text))),
-            attrs,
-        ));
+        self.record_formats(index, len, attrs);
+        if let Some(Delta::Inserted(In::Any(Any::String(trailing)), None)) = self.deltas.last_mut()
+        {
+            let mut combined = String::with_capacity(trailing.len() + text.len());
+            combined.push_str(trailing);
+            combined.push_str(&text);
+            *trailing = Arc::from(combined);
+            return;
+        }
+        self.deltas
+            .push(Delta::Inserted(In::Any(Any::String(Arc::from(text))), None));
     }
 
     fn insert_embed(
@@ -167,11 +212,91 @@ impl InsertRun {
     ) {
         self.cursor = Some(index + 1);
         self.start_delta(index);
-        let entries = std::iter::once((KIND_KEY.to_owned(), Any::from(kind))).chain(payload);
-        self.deltas.push(Delta::Inserted(
-            In::Map(MapPrelim::from_iter(entries)),
-            (!attrs.is_empty()).then_some(Box::new(attrs)),
-        ));
+        if !self.deterministic {
+            let entries = std::iter::once((KIND_KEY.to_owned(), Any::from(kind))).chain(payload);
+            self.deltas.push(Delta::Inserted(
+                In::Map(MapPrelim::from_iter(entries)),
+                (!attrs.is_empty()).then_some(Box::new(attrs)),
+            ));
+            return;
+        }
+        self.record_formats(index, 1, attrs);
+        self.embeds.push(InsertedEmbed {
+            index,
+            kind,
+            payload,
+        });
+        self.deltas
+            .push(Delta::Inserted(In::Map(MapPrelim::default()), None));
+    }
+
+    fn record_formats(&mut self, index: u32, len: u32, attrs: Attrs) {
+        for (key, value) in attrs {
+            let spans = self.formats.entry(key).or_default();
+            if let Some(previous) = spans.last_mut()
+                && previous.index + previous.len == index
+                && previous.value == value
+            {
+                previous.len += len;
+            } else {
+                spans.push(FormatSpan { index, len, value });
+            }
+        }
+    }
+
+    fn hydrate_embeds(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) -> OpResult<()> {
+        if self.embeds.is_empty() {
+            return Ok(());
+        }
+        let embeds = std::mem::take(&mut self.embeds);
+        let mut targets = Vec::with_capacity(embeds.len());
+        let mut next = 0;
+        let mut offset = 0;
+        for diff in story.diff(txn, YChange::identity) {
+            let len = out_len(&diff.insert);
+            if next < embeds.len() && offset == embeds[next].index {
+                let Out::YMap(map) = diff.insert else {
+                    return Err(OpError::OutOfBounds {
+                        index: offset,
+                        len: story.len(txn),
+                    });
+                };
+                targets.push(map);
+                next += 1;
+            }
+            offset += len;
+        }
+        if targets.len() != embeds.len() {
+            return Err(OpError::OutOfBounds {
+                index: embeds[targets.len()].index,
+                len: story.len(txn),
+            });
+        }
+        for (map, embed) in targets.into_iter().zip(embeds) {
+            map.insert(txn, KIND_KEY, embed.kind);
+            for (key, value) in embed.payload {
+                map.insert(txn, key, value);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_formats(&mut self, story: &TextRef, txn: &mut TransactionMut<'_>) {
+        for (key, spans) in std::mem::take(&mut self.formats) {
+            let mut cursor = 0;
+            let mut deltas: Vec<Delta<In>> = Vec::with_capacity(spans.len() * 2);
+            for span in spans {
+                if span.index > cursor {
+                    deltas.push(Delta::Retain(span.index - cursor, None));
+                }
+                deltas.push(Delta::Retain(
+                    span.len,
+                    Some(Box::new(Attrs::from([(key.clone(), span.value)]))),
+                ));
+                cursor = span.index + span.len;
+            }
+            story.apply_delta(txn, deltas);
+        }
     }
 }
 
@@ -179,14 +304,17 @@ fn apply_raw_ops_to_story(
     txn: &mut TransactionMut<'_>,
     story_id: &str,
     ops: Vec<RawOp>,
+    deterministic: bool,
 ) -> OpResult<()> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
-    let mut run = InsertRun::default();
+    let mut run = InsertRun::new(deterministic);
     for op in ops {
         match op {
             RawOp::Insert { index, text, attrs }
                 if run.is_contiguous(index)
-                    && (text.is_empty() || run.trailing_text_attrs_match(&attrs))
+                    && (deterministic
+                        || text.is_empty()
+                        || run.trailing_text_attrs_match(&attrs))
                     && (run.is_active() || is_utf16_boundary(&story, txn, index)) =>
             {
                 if !run.is_active() {
@@ -200,7 +328,7 @@ fn apply_raw_ops_to_story(
                 payload,
                 attrs,
             } if run.is_contiguous(index)
-                && attrs.is_empty()
+                && (deterministic || attrs.is_empty())
                 && (run.is_active() || is_utf16_boundary(&story, txn, index)) =>
             {
                 if !run.is_active() {
@@ -209,12 +337,12 @@ fn apply_raw_ops_to_story(
                 run.insert_embed(index, kind, payload, attrs);
             }
             op => {
-                run.flush(&story, txn);
+                run.flush(&story, txn)?;
                 apply_raw_op_absolute(txn, &story, story_id, op)?;
             }
         }
     }
-    run.flush(&story, txn);
+    run.flush(&story, txn)?;
     Ok(())
 }
 
