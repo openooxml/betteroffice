@@ -92,6 +92,66 @@ struct StatusMessage {
     expires_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowErrorPath {
+    Startup,
+    Render,
+    Selection,
+    Edit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ErrorHandling {
+    Fatal,
+    Status,
+    RecoverLayout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditInput<'a> {
+    Text(&'a str),
+    Enter,
+    Tab,
+    Ignored,
+}
+
+fn edit_input<'a>(
+    key: &Key<&str>,
+    text: Option<&'a str>,
+    command: bool,
+    alt: bool,
+) -> EditInput<'a> {
+    match key {
+        Key::Named(NamedKey::Enter) => EditInput::Enter,
+        Key::Named(NamedKey::Tab) => EditInput::Tab,
+        _ if !command && !alt => text
+            .filter(|text| {
+                !text.is_empty() && text.chars().all(|character| !character.is_control())
+            })
+            .map_or(EditInput::Ignored, EditInput::Text),
+        _ => EditInput::Ignored,
+    }
+}
+
+impl WindowErrorPath {
+    fn handling(self) -> ErrorHandling {
+        match self {
+            Self::Startup => ErrorHandling::Fatal,
+            Self::Render | Self::Selection => ErrorHandling::Status,
+            Self::Edit => ErrorHandling::RecoverLayout,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Startup => "Startup failed",
+            Self::Render => "Render failed",
+            Self::Selection => "Selection failed",
+            Self::Edit => "Edit failed",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ViewportGeometry {
     width: f64,
@@ -686,6 +746,12 @@ impl Viewer {
             }
             _ => {}
         }
+        let edit_input = edit_input(
+            &key,
+            event.text.as_deref(),
+            command,
+            self.modifiers.alt_key(),
+        );
         if matches!(&self.document.reference, ReferenceDocument::Docx(_)) {
             let changed = match key {
                 Key::Named(NamedKey::ArrowLeft) => self
@@ -712,15 +778,11 @@ impl Viewer {
                 Key::Named(NamedKey::Delete) => {
                     self.document.docx_delete(DeleteDirection::Forward)?
                 }
-                Key::Named(NamedKey::Enter) => self.document.docx_enter()?,
-                Key::Character(text)
-                    if !command
-                        && !self.modifiers.alt_key()
-                        && text.chars().all(|character| !character.is_control()) =>
-                {
-                    self.document.docx_insert_text(text)?
-                }
-                _ => false,
+                _ => match edit_input {
+                    EditInput::Text(text) => self.document.docx_insert_text(text)?,
+                    EditInput::Enter => self.document.docx_enter()?,
+                    EditInput::Tab | EditInput::Ignored => false,
+                },
             };
             if changed {
                 self.reset_caret_blink();
@@ -733,28 +795,20 @@ impl Viewer {
             let editing = self.document.xlsx_is_editing();
             let changed = if editing {
                 match key {
-                    Key::Named(NamedKey::Enter) => {
-                        self.document.xlsx_commit(Some(CellMove::Down))?
-                    }
-                    Key::Named(NamedKey::Tab) => {
-                        self.document.xlsx_commit(Some(CellMove::Right))?
-                    }
                     Key::Named(NamedKey::Backspace) => self.document.xlsx_backspace(),
-                    Key::Character(text)
-                        if !command
-                            && !self.modifiers.alt_key()
-                            && text.chars().all(|character| !character.is_control()) =>
-                    {
-                        self.document.xlsx_insert_text(text)
-                    }
-                    _ => false,
+                    _ => match edit_input {
+                        EditInput::Text(text) => self.document.xlsx_insert_text(text),
+                        EditInput::Enter => self.document.xlsx_commit(Some(CellMove::Down))?,
+                        EditInput::Tab => self.document.xlsx_commit(Some(CellMove::Right))?,
+                        EditInput::Ignored => false,
+                    },
                 }
             } else {
                 match key {
                     Key::Named(NamedKey::ArrowLeft) => {
                         self.document.xlsx_move_selection(CellMove::Left)
                     }
-                    Key::Named(NamedKey::ArrowRight) | Key::Named(NamedKey::Tab) => {
+                    Key::Named(NamedKey::ArrowRight) => {
                         self.document.xlsx_move_selection(CellMove::Right)
                     }
                     Key::Named(NamedKey::ArrowUp) => {
@@ -763,17 +817,13 @@ impl Viewer {
                     Key::Named(NamedKey::ArrowDown) => {
                         self.document.xlsx_move_selection(CellMove::Down)
                     }
-                    Key::Named(NamedKey::Enter | NamedKey::F2) => {
-                        self.document.xlsx_begin_edit(None)?
-                    }
-                    Key::Character(text)
-                        if !command
-                            && !self.modifiers.alt_key()
-                            && text.chars().all(|character| !character.is_control()) =>
-                    {
-                        self.document.xlsx_begin_edit(Some(text))?
-                    }
-                    _ => false,
+                    Key::Named(NamedKey::F2) => self.document.xlsx_begin_edit(None)?,
+                    _ => match edit_input {
+                        EditInput::Text(text) => self.document.xlsx_begin_edit(Some(text))?,
+                        EditInput::Enter => self.document.xlsx_begin_edit(None)?,
+                        EditInput::Tab => self.document.xlsx_move_selection(CellMove::Right),
+                        EditInput::Ignored => false,
+                    },
                 }
             };
             if changed {
@@ -804,15 +854,11 @@ impl Viewer {
                 Key::Named(NamedKey::Delete) => {
                     self.document.pptx_delete(DeleteDirection::Forward)?
                 }
-                Key::Named(NamedKey::Enter) => self.document.pptx_enter()?,
-                Key::Character(text)
-                    if !command
-                        && !self.modifiers.alt_key()
-                        && text.chars().all(|character| !character.is_control()) =>
-                {
-                    self.document.pptx_insert_text(text)?
-                }
-                _ => false,
+                _ => match edit_input {
+                    EditInput::Text(text) => self.document.pptx_insert_text(text)?,
+                    EditInput::Enter => self.document.pptx_enter()?,
+                    EditInput::Tab | EditInput::Ignored => false,
+                },
             };
             if changed {
                 self.reset_caret_blink();
@@ -951,16 +997,44 @@ impl Viewer {
         ));
     }
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
-        self.fatal = Some(error.to_string());
-        event_loop.exit();
+    fn handle_error(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        path: WindowErrorPath,
+        error: anyhow::Error,
+    ) {
+        let label = path.label();
+        match path.handling() {
+            ErrorHandling::Fatal => {
+                self.fatal = Some(format!("{error:#}"));
+                event_loop.exit();
+            }
+            ErrorHandling::Status => {
+                self.set_status(format!("{label}: {error:#}"));
+            }
+            ErrorHandling::RecoverLayout => {
+                let message = match self.document.recover_after_edit_error() {
+                    Ok(()) => format!("{label}: {error:#}"),
+                    Err(recovery) => {
+                        format!("{label}: {error:#}; layout recovery failed: {recovery:#}")
+                    }
+                };
+                self.dragging = false;
+                self.clamp_scroll();
+                self.update_title();
+                self.set_status(message);
+            }
+        }
+        if !matches!(path, WindowErrorPath::Render) {
+            self.request_redraw();
+        }
     }
 }
 
 impl ApplicationHandler for Viewer {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.create_window(event_loop) {
-            self.fail(event_loop, error);
+            self.handle_error(event_loop, WindowErrorPath::Startup, error);
         }
     }
 
@@ -987,7 +1061,7 @@ impl ApplicationHandler for Viewer {
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.render() {
-                    self.fail(event_loop, error);
+                    self.handle_error(event_loop, WindowErrorPath::Render, error);
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
@@ -1007,7 +1081,7 @@ impl ApplicationHandler for Viewer {
                 match self.pointer_drag() {
                     Ok(true) => self.request_redraw(),
                     Ok(false) => {}
-                    Err(error) => self.fail(event_loop, error),
+                    Err(error) => self.handle_error(event_loop, WindowErrorPath::Selection, error),
                 }
             }
             WindowEvent::MouseInput {
@@ -1018,7 +1092,7 @@ impl ApplicationHandler for Viewer {
                 ElementState::Pressed => match self.pointer_down() {
                     Ok(true) => self.request_redraw(),
                     Ok(false) => {}
-                    Err(error) => self.fail(event_loop, error),
+                    Err(error) => self.handle_error(event_loop, WindowErrorPath::Edit, error),
                 },
                 ElementState::Released => self.dragging = false,
             },
@@ -1042,7 +1116,7 @@ impl ApplicationHandler for Viewer {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let Err(error) = self.keyboard_input(event_loop, &event) {
-                    self.fail(event_loop, error);
+                    self.handle_error(event_loop, WindowErrorPath::Edit, error);
                 }
             }
             _ => {}
@@ -1089,6 +1163,37 @@ mod tests {
 
     use super::*;
     use crate::test_fixtures;
+
+    #[test]
+    fn only_startup_errors_are_fatal() {
+        assert_eq!(WindowErrorPath::Startup.handling(), ErrorHandling::Fatal);
+        assert_eq!(WindowErrorPath::Render.handling(), ErrorHandling::Status);
+        assert_eq!(WindowErrorPath::Selection.handling(), ErrorHandling::Status);
+        assert_eq!(
+            WindowErrorPath::Edit.handling(),
+            ErrorHandling::RecoverLayout
+        );
+    }
+
+    #[test]
+    fn named_space_uses_event_text_while_enter_and_tab_stay_commands() {
+        let space: Key<&str> = Key::Named(NamedKey::Space);
+        let enter: Key<&str> = Key::Named(NamedKey::Enter);
+        let tab: Key<&str> = Key::Named(NamedKey::Tab);
+        assert_eq!(
+            edit_input(&space, Some(" "), false, false),
+            EditInput::Text(" ")
+        );
+        assert_eq!(
+            edit_input(&space, Some(" "), true, false),
+            EditInput::Ignored
+        );
+        assert_eq!(
+            edit_input(&enter, Some("\r"), false, false),
+            EditInput::Enter
+        );
+        assert_eq!(edit_input(&tab, Some("\t"), false, false), EditInput::Tab);
+    }
 
     #[test]
     fn toolbar_hit_is_consumed_and_document_hit_moves_the_caret() {

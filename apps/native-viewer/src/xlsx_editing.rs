@@ -304,6 +304,10 @@ impl XlsxEditor {
         fs::write(path, bytes).with_context(|| format!("write edited XLSX {}", path.display()))
     }
 
+    pub fn recover_layout(&mut self) -> Result<()> {
+        self.rebuild_display_list()
+    }
+
     fn rebuild_display_list(&mut self) -> Result<()> {
         self.display_list = self.workbook.display_list_for(self.sheet, &self.viewport)?;
         Ok(())

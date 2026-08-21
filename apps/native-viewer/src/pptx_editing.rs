@@ -393,6 +393,10 @@ impl PptxEditor {
         fs::write(path, saved).with_context(|| format!("write PPTX {}", path.display()))
     }
 
+    pub fn recover_layout(&mut self) -> Result<Vec<PageScene>> {
+        self.relayout_all()
+    }
+
     fn finish_edit(
         &mut self,
         mut caret: PptxCaret,

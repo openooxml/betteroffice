@@ -45,10 +45,89 @@ struct Selection {
 struct ParagraphSpan {
     para_id: String,
     text: String,
+    text_segments: Vec<TextSegmentMap>,
     length: u32,
     text_start: u32,
     story_start: u32,
     display_start: i64,
+}
+
+#[derive(Clone, Debug)]
+struct TextSegmentMap {
+    story: Range<u32>,
+    text: Range<u32>,
+}
+
+impl ParagraphSpan {
+    fn previous_offset(&self, offset: u32) -> u32 {
+        let offset = offset.clamp(self.text_start, self.length);
+        if let Some(segment) = self
+            .text_segments
+            .iter()
+            .rev()
+            .find(|segment| offset > segment.story.start && offset <= segment.story.end)
+        {
+            let text_offset = segment.text.start + offset - segment.story.start;
+            let previous =
+                previous_code_point_offset(&self.text, text_offset).max(segment.text.start);
+            return segment.story.start + previous - segment.text.start;
+        }
+        offset.saturating_sub(1).max(self.text_start)
+    }
+
+    fn next_offset(&self, offset: u32) -> u32 {
+        let offset = offset.clamp(self.text_start, self.length);
+        if let Some(segment) = self
+            .text_segments
+            .iter()
+            .find(|segment| offset >= segment.story.start && offset < segment.story.end)
+        {
+            let text_offset = segment.text.start + offset - segment.story.start;
+            let next = next_code_point_offset(&self.text, text_offset).min(segment.text.end);
+            return segment.story.start + next - segment.text.start;
+        }
+        offset.saturating_add(1).min(self.length)
+    }
+
+    fn text_offset(&self, story_offset: u32) -> u32 {
+        let story_offset = story_offset.clamp(self.text_start, self.length);
+        for segment in &self.text_segments {
+            if story_offset < segment.story.start {
+                return segment.text.start;
+            }
+            if story_offset <= segment.story.end {
+                return segment.text.start + story_offset - segment.story.start;
+            }
+        }
+        utf16_len(&self.text)
+    }
+
+    fn story_offset_for_text(&self, text_offset: u32, hint: u32, toward_end: bool) -> u32 {
+        let text_offset = text_offset.min(utf16_len(&self.text));
+        let candidates = self
+            .text_segments
+            .iter()
+            .filter(|segment| text_offset >= segment.text.start && text_offset <= segment.text.end)
+            .map(|segment| segment.story.start + text_offset - segment.text.start)
+            .collect::<Vec<_>>();
+        if toward_end {
+            candidates
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate >= hint)
+                .min()
+                .or_else(|| candidates.iter().copied().max())
+                .unwrap_or(self.length)
+        } else {
+            candidates
+                .iter()
+                .copied()
+                .filter(|candidate| *candidate <= hint)
+                .max()
+                .or_else(|| candidates.iter().copied().min())
+                .unwrap_or(self.text_start)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -99,6 +178,8 @@ pub struct DocxEditor {
     selection_rects: Vec<SelectionRect>,
     vertical_goal_x: Option<f64>,
     frames: FrameTracker,
+    layout_request: String,
+    display_extras: String,
     save: SaveProjection,
     initial_checksum: u64,
     dirty: bool,
@@ -110,6 +191,8 @@ impl DocxEditor {
         source: Vec<u8>,
         package: S9PackageWire,
         initial_frame: &[u8],
+        layout_request: String,
+        display_extras: String,
     ) -> Result<Self> {
         let spans = paragraph_spans(&engine)?;
         let source_texts = spans
@@ -143,6 +226,8 @@ impl DocxEditor {
             selection_rects: Vec::new(),
             vertical_goal_x: None,
             frames: FrameTracker::new(initial_frame)?,
+            layout_request,
+            display_extras,
             save: SaveProjection::new(
                 source,
                 package,
@@ -407,10 +492,11 @@ impl DocxEditor {
         let context = EditCtx::local("", "");
         match direction {
             DeleteDirection::Backward if caret.offset > span.text_start => {
-                let relative = caret.offset - span.text_start;
-                let start = previous_code_point_offset(&span.text, relative);
-                let from = span.story_start + span.text_start + start;
+                let from = span.story_start + span.previous_offset(caret.offset);
                 let to = span.story_start + caret.offset;
+                if from == to {
+                    return Ok(None);
+                }
                 self.engine
                     .doc()
                     .delete_range(&context, StoryRange::new(BODY_STORY, from, to))
@@ -418,10 +504,11 @@ impl DocxEditor {
                 self.finish_edit_at_index(from).map(Some)
             }
             DeleteDirection::Forward if caret.offset < span.length => {
-                let relative = caret.offset.saturating_sub(span.text_start);
-                let end = next_code_point_offset(&span.text, relative);
                 let from = span.story_start + caret.offset;
-                let to = span.story_start + span.text_start + end;
+                let to = span.story_start + span.next_offset(caret.offset);
+                if from == to {
+                    return Ok(None);
+                }
                 self.engine
                     .doc()
                     .delete_range(&context, StoryRange::new(BODY_STORY, from, to))
@@ -562,6 +649,29 @@ impl DocxEditor {
         fs::write(path, bytes).with_context(|| format!("write edited DOCX {}", path.display()))
     }
 
+    pub fn recover_layout(&mut self) -> Result<()> {
+        self.engine
+            .layout_document_with_regions_json(&self.layout_request)
+            .map_err(anyhow::Error::msg)?;
+        let frame = self
+            .engine
+            .build_display_list_frame(&self.display_extras, 0)
+            .map_err(anyhow::Error::msg)?;
+        self.frames = FrameTracker::new(&frame)?;
+        self.spans = paragraph_spans(&self.engine)?;
+        self.dirty = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?
+            != self.initial_checksum;
+        let selection = self.selection.take();
+        self.selection = selection.and_then(|selection| {
+            Some(Selection {
+                anchor: self.clamp_loc(selection.anchor).ok()?,
+                head: self.clamp_loc(selection.head).ok()?,
+            })
+        });
+        self.vertical_goal_x = None;
+        self.refresh_selection_rects()
+    }
+
     fn finish_edit_at_index(&mut self, index: u32) -> Result<SceneChange> {
         self.spans = paragraph_spans(&self.engine)?;
         let loc = self
@@ -657,10 +767,9 @@ impl DocxEditor {
         let span = &self.spans[index];
         if forward {
             if loc.offset < span.length {
-                let relative = loc.offset.saturating_sub(span.text_start);
                 return Ok(TextLoc {
                     para_id: span.para_id.clone(),
-                    offset: span.text_start + next_code_point_offset(&span.text, relative),
+                    offset: span.next_offset(loc.offset),
                 });
             }
             if let Some(next) = self.spans.get(index + 1) {
@@ -671,10 +780,9 @@ impl DocxEditor {
             }
         } else {
             if loc.offset > span.text_start {
-                let relative = loc.offset - span.text_start;
                 return Ok(TextLoc {
                     para_id: span.para_id.clone(),
-                    offset: span.text_start + previous_code_point_offset(&span.text, relative),
+                    offset: span.previous_offset(loc.offset),
                 });
             }
             if index > 0 {
@@ -692,16 +800,16 @@ impl DocxEditor {
         let span = self
             .span(&loc.para_id)
             .context("selection paragraph is unavailable")?;
-        let relative = loc.offset.saturating_sub(span.text_start);
+        let relative = span.text_offset(loc.offset);
         let (start, end) = word_boundaries(&span.text, relative);
         Ok((
             TextLoc {
                 para_id: loc.para_id.clone(),
-                offset: span.text_start + start,
+                offset: span.story_offset_for_text(start, loc.offset, false),
             },
             TextLoc {
                 para_id: loc.para_id.clone(),
-                offset: span.text_start + end,
+                offset: span.story_offset_for_text(end, loc.offset, true),
             },
         ))
     }
@@ -882,12 +990,27 @@ fn paragraph_spans(engine: &EngineSession) -> Result<Vec<ParagraphSpan>> {
     let mut paragraph_start = 0_u32;
     let mut node_start = 0_u32;
     let mut display_start = 0_i64;
+    let mut text_cursor = 0_u32;
+    let mut text_segments = Vec::new();
     for segment in segments {
         match segment.content {
             SegmentContent::Text(text) => {
-                cursor = cursor
-                    .checked_add(utf16_len(&text))
-                    .context("story length overflow")?;
+                let width = utf16_len(&text);
+                let story_start = cursor
+                    .checked_sub(paragraph_start)
+                    .context("paragraph span underflow")?;
+                let story_end = story_start
+                    .checked_add(width)
+                    .context("paragraph span overflow")?;
+                let text_end = text_cursor
+                    .checked_add(width)
+                    .context("paragraph text overflow")?;
+                text_segments.push(TextSegmentMap {
+                    story: story_start..story_end,
+                    text: text_cursor..text_end,
+                });
+                cursor = cursor.checked_add(width).context("story length overflow")?;
+                text_cursor = text_end;
             }
             SegmentContent::Pilcrow(properties) => {
                 let length = cursor
@@ -906,6 +1029,7 @@ fn paragraph_spans(engine: &EngineSession) -> Result<Vec<ParagraphSpan>> {
                         .unwrap_or(display_start),
                     para_id,
                     text,
+                    text_segments: std::mem::take(&mut text_segments),
                     length,
                     text_start,
                     story_start: paragraph_start,
@@ -913,6 +1037,7 @@ fn paragraph_spans(engine: &EngineSession) -> Result<Vec<ParagraphSpan>> {
                 cursor = cursor.checked_add(1).context("story length overflow")?;
                 paragraph_start = cursor;
                 node_start = cursor;
+                text_cursor = 0;
                 display_start = display_start
                     .checked_add(i64::from(length) + 2)
                     .context("display position overflow")?;
@@ -2027,7 +2152,7 @@ fn common_utf16_edges(left: &str, right: &str) -> (u32, u32) {
     }
     if suffix > 0
         && suffix < left_units.len()
-        && (0xd800..=0xdbff).contains(&left_units[left_units.len() - suffix])
+        && (0xdc00..=0xdfff).contains(&left_units[left_units.len() - suffix])
     {
         suffix -= 1;
     }

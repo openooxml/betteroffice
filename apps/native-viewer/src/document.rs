@@ -494,6 +494,37 @@ impl DocumentView {
         Ok(parent.join(format!("{stem}-edited.{extension}")))
     }
 
+    pub fn recover_after_edit_error(&mut self) -> Result<()> {
+        match &mut self.reference {
+            ReferenceDocument::Docx(reference) => {
+                reference.editor.recover_layout()?;
+                let display_list = reference
+                    .editor
+                    .engine()
+                    .with_display_list(Clone::clone)
+                    .context("engine did not retain a recovered display list")?;
+                self.pages =
+                    translate_document(&display_list, &reference.fonts, &reference.images)?;
+                reference.display_list = display_list;
+            }
+            ReferenceDocument::Xlsx(reference) => {
+                reference.editor.recover_layout()?;
+                let display_list = reference.editor.display_list();
+                self.pages = vec![translate_sheet(display_list)?];
+                reference.chart_count = display_list.charts.len();
+                reference.chart_placeholders = display_list
+                    .charts
+                    .iter()
+                    .filter(|chart| chart.placeholder)
+                    .count();
+            }
+            ReferenceDocument::Pptx(reference) => {
+                self.pages = reference.editor.recover_layout()?;
+            }
+        }
+        Ok(())
+    }
+
     fn apply_docx_edit(
         &mut self,
         edit: impl FnOnce(&mut DocxEditor) -> Result<Option<SceneChange>>,
@@ -619,8 +650,9 @@ fn load_docx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView>
     let requirements: Value = serde_json::from_str(&requirements_json)?;
     let fonts = FontRegistry::load(&requirements)?;
     let request = region_request(&package, Some(&fonts.chain_ids))?;
+    let layout_request = request.to_string();
     engine
-        .layout_document_with_regions_json(&request.to_string())
+        .layout_document_with_regions_json(&layout_request)
         .map_err(anyhow::Error::msg)?;
     let extras = json!({ "fontChains": fonts.chain_ids }).to_string();
     engine
@@ -634,7 +666,14 @@ fn load_docx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView>
         .context("engine did not retain a display list")?;
     let images = ImageRegistry::load(&bytes)?;
     let pages = translate_document(&display_list, &fonts, &images)?;
-    let editor = DocxEditor::new(engine, bytes, package, &initial_frame)?;
+    let editor = DocxEditor::new(
+        engine,
+        bytes,
+        package,
+        &initial_frame,
+        layout_request,
+        extras,
+    )?;
     Ok(DocumentView {
         source: path.to_owned(),
         reference: ReferenceDocument::Docx(Box::new(DocxReference {
@@ -766,6 +805,7 @@ mod tests {
 
     use betteroffice_pptx::{Primitive as PptxPrimitive, Transform as PptxTransform};
     use betteroffice_xlsx::{CellValue, DrawCmd, SheetId};
+    use docx_edit::{SegmentContent, StoryRange};
     use vello::kurbo::Point;
 
     use super::*;
@@ -861,6 +901,53 @@ mod tests {
         Affine::rotate_about(f64::from(transform.rotation_deg).to_radians(), center) * flip
     }
 
+    fn docx_paragraph_text(document: &DocumentView, para_id: &str) -> String {
+        let ReferenceDocument::Docx(reference) = &document.reference else {
+            panic!("expected DOCX reference");
+        };
+        reference
+            .editor
+            .engine()
+            .doc()
+            .paragraphs("body")
+            .unwrap()
+            .into_iter()
+            .find(|paragraph| paragraph.para_id == para_id)
+            .unwrap()
+            .text
+    }
+
+    fn docx_paragraph_embed_count(document: &DocumentView, para_id: &str) -> usize {
+        let ReferenceDocument::Docx(reference) = &document.reference else {
+            panic!("expected DOCX reference");
+        };
+        let mut count = 0;
+        for segment in reference
+            .editor
+            .engine()
+            .doc()
+            .story_segments("body")
+            .unwrap()
+        {
+            match segment.content {
+                SegmentContent::OtherEmbed { .. } => count += 1,
+                SegmentContent::Pilcrow(properties) if properties.para_id == para_id => {
+                    return count;
+                }
+                SegmentContent::Pilcrow(_) => count = 0,
+                SegmentContent::Text(_) => {}
+            }
+        }
+        panic!("paragraph {para_id} is unavailable");
+    }
+
+    fn docx_selection_range(document: &DocumentView) -> StoryRange {
+        let ReferenceDocument::Docx(reference) = &document.reference else {
+            panic!("expected DOCX reference");
+        };
+        reference.editor.selection_range().unwrap().unwrap()
+    }
+
     #[test]
     fn recognizes_supported_extensions() {
         assert_eq!(
@@ -889,6 +976,197 @@ mod tests {
                 .iter()
                 .any(|page| !page.scene.encoding().is_empty())
         );
+    }
+
+    #[test]
+    fn backspace_after_text_deletes_only_the_trailing_inline_embed() {
+        let source = test_fixtures::write_docx(
+            "inline-embed-backspace",
+            &test_fixtures::inline_embed_docx(),
+        );
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 10,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_delete(DeleteDirection::Backward).unwrap());
+        assert_eq!(docx_paragraph_text(&document, "11111111"), "Bold link");
+        assert_eq!(docx_paragraph_embed_count(&document, "11111111"), 0);
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn delete_before_a_trailing_inline_embed_is_atomic() {
+        let source =
+            test_fixtures::write_docx("inline-embed-delete", &test_fixtures::inline_embed_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 9,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_delete(DeleteDirection::Forward).unwrap());
+        assert_eq!(docx_paragraph_text(&document, "11111111"), "Bold link");
+        assert_eq!(docx_paragraph_embed_count(&document, "11111111"), 0);
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn backspace_maps_story_offsets_past_a_leading_inline_embed() {
+        let source = test_fixtures::write_docx(
+            "inline-embed-astral-backspace",
+            &test_fixtures::inline_embed_docx(),
+        );
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "22222222".to_owned(),
+                    offset: 4,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_delete(DeleteDirection::Backward).unwrap());
+        assert_eq!(docx_paragraph_text(&document, "22222222"), "a");
+        assert_eq!(docx_paragraph_embed_count(&document, "22222222"), 1);
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn arrows_and_words_map_across_an_inline_embed() {
+        let source =
+            test_fixtures::write_docx("inline-embed-arrows", &test_fixtures::inline_embed_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "33333333".to_owned(),
+                    offset: 0,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        let paragraph_start = docx_selection_range(&document).start;
+        for offset in 1..=10 {
+            assert!(
+                document
+                    .docx_move_selection(MoveDirection::Right, false)
+                    .unwrap()
+            );
+            assert_eq!(
+                docx_selection_range(&document).start,
+                paragraph_start + offset
+            );
+        }
+        assert!(
+            document
+                .docx_move_selection(MoveDirection::Right, false)
+                .unwrap()
+        );
+        assert_eq!(docx_selection_range(&document).start, paragraph_start + 11);
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "33333333".to_owned(),
+                    offset: 6,
+                },
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            docx_selection_range(&document),
+            StoryRange::new("body", paragraph_start + 6, paragraph_start + 10)
+        );
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn emoji_round_trips_after_deleting_the_ascii_prefix() {
+        let source = test_fixtures::write_docx("emoji-save", &test_fixtures::inline_embed_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "44444444".to_owned(),
+                    offset: 0,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "44444444".to_owned(),
+                    offset: 6,
+                },
+                true,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_delete(DeleteDirection::Backward).unwrap());
+
+        let output = test_fixtures::write_docx("emoji-save-output", b"sentinel");
+        document.save_docx_to(&output).unwrap();
+        let saved = fs::read(&output).unwrap();
+        let document_xml =
+            String::from_utf8(test_fixtures::part(&saved, "word/document.xml")).unwrap();
+        assert!(document_xml.contains("<w:t>😀</w:t>"), "{document_xml}");
+        assert!(!document_xml.contains('\u{fffd}'), "{document_xml}");
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        assert_eq!(docx_paragraph_text(&reopened, "44444444"), "😀");
+
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn full_layout_recovery_preserves_unsaved_docx_edits() {
+        let source =
+            test_fixtures::write_docx("edit-recovery", &test_fixtures::inline_embed_docx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "44444444".to_owned(),
+                    offset: 8,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_insert_text("!").unwrap());
+        document.pages.clear();
+
+        document.recover_after_edit_error().unwrap();
+        assert!(!document.pages.is_empty());
+        assert_eq!(docx_paragraph_text(&document, "44444444"), "Hello 😀!");
+        let ReferenceDocument::Docx(reference) = &document.reference else {
+            panic!("expected DOCX reference");
+        };
+        assert!(reference.editor.is_dirty());
+
+        let output = test_fixtures::write_docx("edit-recovery-output", b"sentinel");
+        document.save_docx_to(&output).unwrap();
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        assert_eq!(docx_paragraph_text(&reopened, "44444444"), "Hello 😀!");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
     }
 
     #[test]
