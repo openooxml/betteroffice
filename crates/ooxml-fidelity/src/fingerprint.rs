@@ -66,10 +66,8 @@ fn project_element(
         })
         .collect();
     attributes.sort_unstable();
-    // Prefix names are lexical; the meaning of a declaration is which URIs
-    // enter scope here. A renamed prefix that a value references still fails
-    // on the attribute-value comparison. Standard WML boilerplate URIs are
-    // the declared "root-standard-namespace-declarations" normalization.
+    // A declaration means which URIs enter scope, never which prefix spells
+    // them; `STANDARD_WML_NAMESPACE_URIS` documents the excluded boilerplate.
     let mut bindings: Vec<&str> = element
         .bindings
         .iter()

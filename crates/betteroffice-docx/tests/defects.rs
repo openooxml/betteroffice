@@ -86,8 +86,8 @@ fn typing_refuses_a_bookmarked_paragraph() -> bool {
 }
 
 fn comprehensive_fixture() -> Vec<u8> {
-    let path: PathBuf =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/fixtures/wordprocessingml-comprehensive.docx");
+    let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/corpus/fixtures/wordprocessingml-comprehensive.docx");
     std::fs::read(path).unwrap()
 }
 

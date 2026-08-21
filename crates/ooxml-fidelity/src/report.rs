@@ -8,19 +8,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::census::{element_census, losses};
 use crate::error::FidelityError;
 use crate::fingerprint::{structural_fingerprint, structural_fingerprint_excluding};
-use crate::is_xml_part;
 use crate::registry::{
     COMPANION_PART_MARKERS, ComparisonMode, MANAGED_IDENTITY_ATTRIBUTES, comparison_mode,
     is_modelled_xml_part,
 };
 use crate::wml::{Difference, diff_digests, semantic_digest};
 use crate::xml::{XmlLimits, parse_part};
+use crate::{Part, is_xml_part};
 
 /// One line per violated rule; an unedited round trip must report nothing.
-pub fn roundtrip_findings(
-    before: &[(String, Vec<u8>)],
-    after: &[(String, Vec<u8>)],
-) -> Result<Vec<String>, FidelityError> {
+pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>, FidelityError> {
     let mut findings = Vec::new();
     let limits = XmlLimits::default();
     require_exact("non-xml-part-bytes")?;
@@ -138,7 +135,7 @@ mod tests {
     const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     const W14: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
 
-    fn package(document: &str) -> Vec<(String, Vec<u8>)> {
+    fn package(document: &str) -> Vec<Part> {
         vec![(
             "word/document.xml".to_owned(),
             format!(r#"<w:document xmlns:w="{W}" xmlns:w14="{W14}"><w:body>{document}</w:body></w:document>"#)

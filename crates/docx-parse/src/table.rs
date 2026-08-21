@@ -168,17 +168,7 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
         .attribute(Some("w"), "fill")
         .filter(|value| !value.is_empty())
     {
-        shading.fill = Some(if fill == "auto" {
-            ColorValue {
-                auto: Some(true),
-                ..ColorValue::default()
-            }
-        } else {
-            ColorValue {
-                rgb: Some(fill.to_owned()),
-                ..ColorValue::default()
-            }
-        });
+        shading.fill = Some(ColorValue::from_attribute(fill));
     }
     if let Some(theme_fill) = element
         .attribute(Some("w"), "themeFill")
@@ -201,17 +191,7 @@ pub fn parse_document_shading(element: Option<&XmlElement>) -> Option<ShadingPro
         .attribute(Some("w"), "color")
         .filter(|value| !value.is_empty())
     {
-        shading.color = Some(if color == "auto" {
-            ColorValue {
-                auto: Some(true),
-                ..ColorValue::default()
-            }
-        } else {
-            ColorValue {
-                rgb: Some(color.to_owned()),
-                ..ColorValue::default()
-            }
-        });
+        shading.color = Some(ColorValue::from_attribute(color));
     }
     if let Some(theme_color) = element
         .attribute(Some("w"), "themeColor")

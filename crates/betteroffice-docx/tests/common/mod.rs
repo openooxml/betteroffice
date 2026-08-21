@@ -4,7 +4,7 @@
 
 use betteroffice_docx::Document;
 
-pub type Parts = Vec<(String, Vec<u8>)>;
+pub type Parts = Vec<ooxml_fidelity::Part>;
 
 pub fn parts_of(package: &[u8]) -> Parts {
     ooxml_opc::unzip_parts(package).unwrap()

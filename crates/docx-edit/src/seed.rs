@@ -1708,8 +1708,6 @@ fn paragraph_attrs(
         let numbering_removed = number(field(field(formatting, "numPr"), "numId")) == Some(0.0)
             && field(style_ppr_ref, "numPr").is_some()
             && number(field(field(style_ppr_ref, "numPr"), "numId")) != Some(0.0);
-        // Numbering-level indents ride listRendering; they apply after the
-        // style chain, matching Word's property application order.
         attrs.insert(
             "indentLeft".to_owned(),
             field(formatting, "indentLeft")

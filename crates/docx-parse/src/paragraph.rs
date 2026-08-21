@@ -4,15 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
-    ParagraphFormatting, ParagraphFrame, SpacingExplicit, TextFormatting,
-    parse_paragraph_properties,
+    ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
 };
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
-    ComplexField, ComplexFieldType, ContentPosition, Hyperlink, InlineNode, InlineSdt,
-    InlineSdtType, MathEquation, MathType, Run, RunContent, SimpleField, SimpleFieldType,
-    StructuredFieldContent, StructuredFieldTree, parse_bookmark_end, parse_bookmark_start,
-    parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
+    ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
+    OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
+    StructuredFieldTree, parse_bookmark_end, parse_bookmark_start, parse_field_type,
+    parse_hyperlink, parse_run, parse_sdt_properties,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -422,43 +421,6 @@ enum TrackedContext {
     Deletion,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FieldMode {
-    Code,
-    Result,
-}
-
-#[derive(Clone, Debug)]
-struct OpenComplexField {
-    instruction: String,
-    code_runs: Vec<Run>,
-    result_runs: Vec<Run>,
-    structured_code: Vec<InlineNode>,
-    structured_result: Vec<InlineNode>,
-    children: Vec<StructuredFieldTree>,
-    mode: FieldMode,
-    fld_lock: bool,
-    dirty: bool,
-    formatting: Option<TextFormatting>,
-}
-
-impl OpenComplexField {
-    /// A node inside an open field joins the field's structure in place; its
-    /// runs flatten into the run-level view consumers read for text.
-    fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
-        match self.mode {
-            FieldMode::Code => {
-                self.code_runs.extend(runs);
-                self.structured_code.push(node);
-            }
-            FieldMode::Result => {
-                self.result_runs.extend(runs);
-                self.structured_result.push(node);
-            }
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn parse_paragraph_contents(
     element: &XmlElement,
@@ -501,9 +463,6 @@ fn parse_paragraph_contents(
                 )?;
                 process_field_run(run, &mut fields, &mut output, part)?;
             }
-            // Inside an open field these nodes belong to the field: pushing
-            // them to the paragraph would reorder them in front of the field
-            // on save. Runs still flatten into the run-level result view.
             "hyperlink" => {
                 let hyperlink = parse_hyperlink_composed(
                     child,
@@ -665,9 +624,9 @@ fn parse_paragraph_contents(
         }
     }
     while let Some(field) = fields.pop() {
-        let completed = finalize_open_complex_field(field);
+        let completed = field.finish();
         if let Some(parent) = fields.last_mut() {
-            append_nested_field(parent, completed);
+            parent.absorb_nested(completed);
         } else {
             output.push(ParagraphContent::Inline(InlineNode::ComplexField(
                 Box::new(completed),
@@ -706,34 +665,21 @@ fn process_field_run(
                 part: part.to_owned(),
             });
         }
-        fields.push(create_open_complex_field(&run));
+        fields.push(OpenComplexField::opening(&run));
     }
     if let Some(active) = fields.last_mut() {
-        if !instruction.is_empty() {
-            active.instruction.push_str(&instruction);
-        }
-        if active.formatting.is_none() {
-            active.formatting.clone_from(&run.formatting);
-        }
+        active.append_instruction(&instruction);
+        active.adopt_formatting(&run);
         if has_separate {
-            active.mode = FieldMode::Result;
+            active.switch_to_result();
         }
         if !has_begin && !has_separate && !has_end {
-            match active.mode {
-                FieldMode::Code => {
-                    active.code_runs.push(run.clone());
-                    active.structured_code.push(InlineNode::Run(run));
-                }
-                FieldMode::Result => {
-                    active.result_runs.push(run.clone());
-                    active.structured_result.push(InlineNode::Run(run));
-                }
-            }
+            active.absorb(InlineNode::Run(run.clone()), vec![run]);
         }
         if has_end {
-            let completed = finalize_open_complex_field(fields.pop().unwrap());
+            let completed = fields.pop().unwrap().finish();
             if let Some(parent) = fields.last_mut() {
-                append_nested_field(parent, completed);
+                parent.absorb_nested(completed);
             } else {
                 output.push(ParagraphContent::Inline(InlineNode::ComplexField(
                     Box::new(completed),
@@ -744,77 +690,6 @@ fn process_field_run(
         output.push(ParagraphContent::Inline(InlineNode::Run(run)));
     }
     Ok(())
-}
-
-fn create_open_complex_field(run: &Run) -> OpenComplexField {
-    let flags = run.content.iter().find_map(|content| match content {
-        RunContent::FieldChar {
-            char_type,
-            fld_lock,
-            dirty,
-            ..
-        } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
-        _ => None,
-    });
-    OpenComplexField {
-        instruction: String::new(),
-        code_runs: Vec::new(),
-        result_runs: Vec::new(),
-        structured_code: Vec::new(),
-        structured_result: Vec::new(),
-        children: Vec::new(),
-        mode: FieldMode::Code,
-        fld_lock: flags.is_some_and(|flags| flags.0),
-        dirty: flags.is_some_and(|flags| flags.1),
-        formatting: run.formatting.clone(),
-    }
-}
-
-fn finalize_open_complex_field(field: OpenComplexField) -> ComplexField {
-    let structured_code = (!field.structured_code.is_empty()).then(|| StructuredFieldContent {
-        inline: Some(field.structured_code),
-        blocks: None,
-    });
-    let structured_result = (!field.structured_result.is_empty()).then(|| StructuredFieldContent {
-        inline: Some(field.structured_result),
-        blocks: None,
-    });
-    let field_tree = StructuredFieldTree {
-        version: Some(1.0),
-        code: structured_code.clone(),
-        result: structured_result.clone(),
-        children: (!field.children.is_empty()).then_some(field.children),
-        display_mode: Some("result".to_owned()),
-    };
-    let instruction = field.instruction.trim().to_owned();
-    ComplexField {
-        node_type: ComplexFieldType::ComplexField,
-        field_type: parse_field_type(&instruction),
-        instruction,
-        field_code: field.code_runs,
-        field_result: field.result_runs,
-        formatting: field.formatting,
-        fld_lock: field.fld_lock.then_some(true),
-        dirty: field.dirty.then_some(true),
-        structured_code,
-        structured_result,
-        field_tree: Some(field_tree),
-    }
-}
-
-fn append_nested_field(parent: &mut OpenComplexField, field: ComplexField) {
-    let tree = field.field_tree.clone();
-    match parent.mode {
-        FieldMode::Code => parent
-            .structured_code
-            .push(InlineNode::ComplexField(Box::new(field))),
-        FieldMode::Result => parent
-            .structured_result
-            .push(InlineNode::ComplexField(Box::new(field))),
-    }
-    if let Some(tree) = tree {
-        parent.children.push(tree);
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1436,9 +1311,8 @@ fn apply_list_rendering(
                     })
                 })
         });
-        // The level's indents ride the rendering: the paragraph's authored
-        // properties stay authored, and consumers apply the fallback at
-        // layout time instead of a save materializing it into w:ind.
+        // Consumers apply the level's indents at layout time; materializing
+        // them into w:ind on save would rewrite the authored properties.
         if !direct_left && !style_indents.0 {
             rendering.indent_left = level_properties.indent_left;
         }

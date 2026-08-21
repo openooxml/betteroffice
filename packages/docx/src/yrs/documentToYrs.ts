@@ -794,8 +794,6 @@ function paragraphAttrs(
     attrs.lineSpacing = formatting?.lineSpacing ?? stylePpr?.lineSpacing ?? null;
     attrs.lineSpacingRule = formatting?.lineSpacingRule ?? stylePpr?.lineSpacingRule ?? null;
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
-    // Numbering-level indents ride listRendering; they apply after the style
-    // chain, matching Word's property application order.
     attrs.indentLeft =
       formatting?.indentLeft ??
       stylePpr?.indentLeft ??

@@ -3,8 +3,8 @@
 //! Deliberately independent of the engine's parser: an oracle built on the
 //! code under test inherits its blind spots. Bounded, resolver-free, strict.
 
-use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
 
 use crate::error::FidelityError;
 
@@ -212,9 +212,8 @@ fn decode_element(
             .decode(attribute.key.as_ref())
             .map_err(|error| malformed(part, error))?
             .into_owned();
-        #[allow(deprecated)]
         let value = attribute
-            .decode_and_unescape_value(reader.decoder())
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|error| malformed(part, error))?
             .into_owned();
         if key == "xmlns" {

@@ -270,11 +270,9 @@ fn serialize_hyperlink(
     optional_attr(&mut writer, "w:anchor", hyperlink.anchor.as_deref());
     optional_attr(&mut writer, "w:tooltip", hyperlink.tooltip.as_deref());
     optional_attr(&mut writer, "w:tgtFrame", hyperlink.target.as_deref());
-    match hyperlink.history {
-        Some(true) => writer.attribute("w:history", "1"),
-        Some(false) => writer.attribute("w:history", "0"),
-        None => &mut writer,
-    };
+    if let Some(history) = hyperlink.history {
+        writer.attribute("w:history", if history { "1" } else { "0" });
+    }
     optional_attr(
         &mut writer,
         "w:docLocation",

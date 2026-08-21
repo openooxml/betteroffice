@@ -102,7 +102,7 @@ pub(crate) fn custom_root_bindings(document: &XmlElement) -> Vec<RawAttribute> {
         .iter()
         .filter(|(name, _)| {
             name.strip_prefix("xmlns:")
-                .is_some_and(|prefix| !crate::inline::is_canonical_prefix(prefix))
+                .is_some_and(|prefix| !crate::inline::is_serializer_declared_prefix(prefix))
         })
         .map(|(name, value)| RawAttribute {
             name: name.clone(),

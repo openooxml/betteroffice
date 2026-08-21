@@ -31,9 +31,9 @@ A failing render golden SHALL write the actual image, the expected image, and a 
 
 ### Requirement: Word-reference evidence carries provenance or does not exist
 
-An engine render SHALL never be labeled as a Word reference. A visual comparison against Word SHALL exist only as recorded evidence: the Word variant and version, the date, and the source file, stored with the artifact and referenced by the fixture's manifest entry. The ledger's paint axis reaches `golden` on engine determinism alone; it reaches Word-verified evidence only through this protocol.
+An engine render SHALL never be labeled as a Word reference. A comparison against Word SHALL exist as a record in the fixture's manifest entry naming the Word variant and version, the date, the source file, and what was observed. Images belong in the pull request that makes the claim, never in the repository: an image no test compares is prose that costs bytes. The ledger's paint axis reaches `golden` on engine determinism alone; it reaches Word-verified evidence only through this protocol.
 
 #### Scenario: An unlabeled screenshot is rejected
 
 - **WHEN** a change adds a "matches Word" claim backed by an image without recorded provenance
-- **THEN** review rejects the claim; the image is either labeled engine output or given its provenance record
+- **THEN** review rejects the claim; the image is either labeled engine output or given its manifest record

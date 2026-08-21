@@ -23,17 +23,7 @@ pub fn parse_shading_properties(shading: Option<&XmlElement>) -> Option<ShadingP
 
     let color = shading.attribute(Some("w"), "color");
     if let Some(color) = color.filter(|value| !value.is_empty()) {
-        properties.color = Some(if color == "auto" {
-            ColorValue {
-                auto: Some(true),
-                ..ColorValue::default()
-            }
-        } else {
-            ColorValue {
-                rgb: Some(color.to_owned()),
-                ..ColorValue::default()
-            }
-        });
+        properties.color = Some(ColorValue::from_attribute(color));
     }
     if let Some(theme_color) = shading
         .attribute(Some("w"), "themeColor")
@@ -49,17 +39,7 @@ pub fn parse_shading_properties(shading: Option<&XmlElement>) -> Option<ShadingP
 
     let fill = shading.attribute(Some("w"), "fill");
     if let Some(fill) = fill.filter(|value| !value.is_empty()) {
-        properties.fill = Some(if fill == "auto" {
-            ColorValue {
-                auto: Some(true),
-                ..ColorValue::default()
-            }
-        } else {
-            ColorValue {
-                rgb: Some(fill.to_owned()),
-                ..ColorValue::default()
-            }
-        });
+        properties.fill = Some(ColorValue::from_attribute(fill));
     }
     if let Some(theme_fill) = shading
         .attribute(Some("w"), "themeFill")

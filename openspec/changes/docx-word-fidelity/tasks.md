@@ -35,7 +35,7 @@ Phases 0–1 landed with the first oracle run: the crate, its unit tests, and th
 - [ ] 3.1 Export the supported run-property and paragraph-property inventories from `docx-parse` as data
 - [ ] 3.2 `scripts/create-acceptance-fixture.ts`: every inventory entry, authored whitespace, tabs and breaks, unknown markup at paragraph level / in a run / nested in known containers, one page-crossing paragraph; pinned zip date; regeneration command in the header
 - [ ] 3.3 Acceptance test: coverage derived from the inventories, checked-in bytes equal the builder output, unedited round trip passes both oracles
-- [x] 3.4 Generate the comprehensive document with numbered sections (`scripts/create-wordprocessingml-comprehensive.ts`); Word-authored provenance upgrades follow once the file is validated in Word (open without repair, section screenshots)
+- [x] 3.4 Generate the comprehensive document with numbered sections (`scripts/create-wordprocessingml-comprehensive.ts`); Word-authored provenance upgrades follow once the file is validated in Word (opens without repair, every section matching its intent, recorded in the manifest)
 - [ ] 3.5 Comprehensive oracles: pinned block counts and per-section assertions that cite section numbers
 
 ## 4. Corpus — `crates/betteroffice-docx/tests/corpus/`

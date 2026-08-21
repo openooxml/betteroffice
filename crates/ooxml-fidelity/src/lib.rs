@@ -1,11 +1,8 @@
-//! Fidelity oracles over package bytes.
-//!
-//! The oracles parse saved bytes with their own XML reader, never the typed
-//! model, so they cannot share the parser's blind spots. Two oracles, neither
-//! compensating for the other: the structural fingerprint answers "is this the
-//! same tree?", the semantic digest answers "did a save→reopen keep the
-//! meaning?". The element census catches drops nobody predicted. Governed by
-//! `openspec/changes/docx-word-fidelity/`.
+//! Fidelity oracles over package bytes, read by their own parser so they
+//! cannot share the engine's blind spots. Neither covers for the other: the
+//! fingerprint answers "the same tree?", the digest "the same meaning after a
+//! save→reopen?", the census catches drops nobody predicted.
+//! Governed by `openspec/changes/docx-word-fidelity/`.
 
 mod census;
 mod error;
@@ -23,6 +20,9 @@ pub use fingerprint::{
 pub use registry::{ComparisonMode, DECLARED_NORMALIZATIONS, Normalization, comparison_mode};
 pub use report::roundtrip_findings;
 pub use xml::{XML_NAMESPACE, XmlAttribute, XmlElement, XmlLimits, XmlNode, parse_part};
+
+/// One package part: its name and its bytes.
+pub type Part = (String, Vec<u8>);
 
 /// True when a part name denotes an XML part the oracles read.
 pub fn is_xml_part(name: &str) -> bool {

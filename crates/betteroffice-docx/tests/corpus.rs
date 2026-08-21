@@ -45,8 +45,7 @@ fn the_corpus_is_pinned_by_the_manifest() {
     }
     for file in std::fs::read_dir(corpus_dir().join("fixtures")).unwrap() {
         let name = file.unwrap().file_name().to_string_lossy().to_string();
-        // Word leaves `~$` owner files behind while a fixture is open for
-        // evidence capture; they are not fixtures.
+        // Word writes a `~$` owner file beside any fixture opened in it.
         if name.starts_with("~$") {
             continue;
         }

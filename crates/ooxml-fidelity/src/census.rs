@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use crate::error::FidelityError;
-use crate::is_xml_part;
 use crate::xml::{XmlElement, XmlLimits, XmlNode, parse_part};
+use crate::{Part, is_xml_part};
 
 /// Counts keyed by `(namespace, local)` over every XML part of a package.
 pub type Census = BTreeMap<(String, String), usize>;
@@ -20,7 +20,7 @@ pub struct Loss {
     pub after: usize,
 }
 
-pub fn element_census(parts: &[(String, Vec<u8>)]) -> Result<Census, FidelityError> {
+pub fn element_census(parts: &[Part]) -> Result<Census, FidelityError> {
     let limits = XmlLimits::default();
     let mut census = Census::new();
     for (name, bytes) in parts {
@@ -65,7 +65,7 @@ fn count(element: &XmlElement, census: &mut Census) {
 mod tests {
     use super::*;
 
-    fn package(document: &str) -> Vec<(String, Vec<u8>)> {
+    fn package(document: &str) -> Vec<Part> {
         vec![
             ("word/document.xml".to_owned(), document.as_bytes().to_vec()),
             ("word/media/image1.png".to_owned(), vec![0x89, 0x50]),

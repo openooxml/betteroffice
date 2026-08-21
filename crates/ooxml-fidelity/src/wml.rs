@@ -1,19 +1,17 @@
 //! WML semantic digest: "did a save→reopen keep the meaning?"
 //!
-//! The fingerprint cannot answer that — a serializer that drops content
-//! produces a tree that is internally consistent and fingerprints happily
-//! against itself. So the digest records what the package means — text,
-//! containment, property values including their nesting, unknown subtrees —
-//! and is compared across a real reopen of produced bytes. Its diff returns
-//! paths, never a boolean: the failure it exists to catch is a silent drop,
-//! and a bare `false` reproduces the silence.
+//! The fingerprint cannot answer that — a serializer that drops content still
+//! fingerprints consistently against itself. So the digest records meaning
+//! (text, containment, nested property values, unknown subtrees) across a real
+//! reopen, and diffs it as paths: a bare `false` reproduces the silent drop it
+//! exists to catch.
 
 use std::collections::BTreeMap;
 
 use crate::error::FidelityError;
 use crate::fingerprint::short_fingerprint;
-use crate::is_xml_part;
 use crate::xml::{XmlElement, XmlLimits, XmlNode, parse_part};
+use crate::{Part, is_xml_part};
 
 pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const PACKAGE_RELATIONSHIPS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -58,7 +56,7 @@ pub struct Difference {
     pub after: String,
 }
 
-pub fn semantic_digest(parts: &[(String, Vec<u8>)]) -> Result<SemanticDigest, FidelityError> {
+pub fn semantic_digest(parts: &[Part]) -> Result<SemanticDigest, FidelityError> {
     let limits = XmlLimits::default();
     let mut named: Vec<(&String, &Vec<u8>)> = parts
         .iter()
@@ -111,39 +109,39 @@ fn diff_story(part: &str, before: &StoryDigest, after: &StoryDigest, out: &mut V
         ));
     }
     for (index, pair) in before.blocks.iter().zip(after.blocks.iter()).enumerate() {
-        let (b, a) = pair;
-        diff_field(part, index, "path", &b.path, &a.path, out);
+        let (before, after) = pair;
+        diff_field(part, index, "path", &before.path, &after.path, out);
         diff_field(
             part,
             index,
             "attributes",
-            &b.attributes.join(","),
-            &a.attributes.join(","),
+            &before.attributes.join(","),
+            &after.attributes.join(","),
             out,
         );
-        diff_field(part, index, "text", &b.text, &a.text, out);
+        diff_field(part, index, "text", &before.text, &after.text, out);
         diff_field(
             part,
             index,
             "paragraphProperties",
-            &b.paragraph_properties.join(","),
-            &a.paragraph_properties.join(","),
+            &before.paragraph_properties.join(","),
+            &after.paragraph_properties.join(","),
             out,
         );
         diff_field(
             part,
             index,
             "runProperties",
-            &join_nested(&b.run_properties),
-            &join_nested(&a.run_properties),
+            &join_nested(&before.run_properties),
+            &join_nested(&after.run_properties),
             out,
         );
         diff_field(
             part,
             index,
             "genericStructure",
-            &b.generic_structure.join(","),
-            &a.generic_structure.join(","),
+            &before.generic_structure.join(","),
+            &after.generic_structure.join(","),
             out,
         );
     }
@@ -162,13 +160,13 @@ fn diff_story(part: &str, before: &StoryDigest, after: &StoryDigest, out: &mut V
     }
     let lines = before.structure.len().max(after.structure.len());
     for index in 0..lines {
-        let b = before.structure.get(index).map(String::as_str);
-        let a = after.structure.get(index).map(String::as_str);
-        if b != a {
+        let before_line = before.structure.get(index).map(String::as_str);
+        let after_line = after.structure.get(index).map(String::as_str);
+        if before_line != after_line {
             out.push(difference(
                 &format!("{part} structure[{index}]"),
-                b.unwrap_or("absent"),
-                a.unwrap_or("absent"),
+                before_line.unwrap_or("absent"),
+                after_line.unwrap_or("absent"),
             ));
         }
     }
@@ -513,7 +511,7 @@ fn push_text(element: &XmlElement, text: &mut String) {
 mod tests {
     use super::*;
 
-    fn document(body: &str) -> Vec<(String, Vec<u8>)> {
+    fn document(body: &str) -> Vec<Part> {
         let xml = format!(r#"<w:document xmlns:w="{W}"><w:body>{body}</w:body></w:document>"#);
         vec![("word/document.xml".to_owned(), xml.into_bytes())]
     }

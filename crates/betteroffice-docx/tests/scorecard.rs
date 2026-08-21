@@ -1,9 +1,7 @@
-//! Ledger gate: the scorecard's criteria set equals the catalogue, no status
-//! outranks its target, every claimed status names a test that exists, every
-//! enumerated defect names a ceiling in `defects.rs`, and every measured
-//! number recomputes to exactly the recorded value. Regeneration happens only
-//! under `GOLDEN_UPDATE=1`, and refuses to write a number that moved the wrong
-//! way — that refusal is where the ratchet bites.
+//! Ledger gate: the ledger matches the catalogue, every claim names a test
+//! that exists, and every measured number recomputes exactly. Regeneration
+//! under `GOLDEN_UPDATE=1` refuses a number that moved the wrong way — that
+//! refusal is where the ratchet bites.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-scorecard`.
 
 use std::collections::{BTreeMap, BTreeSet};
