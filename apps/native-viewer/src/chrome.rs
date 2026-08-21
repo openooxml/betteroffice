@@ -64,11 +64,13 @@ pub struct EditingState {
     pub italic: ToggleState,
     pub underline: ToggleState,
     pub alignment: Option<Alignment>,
+    pub alignment_state: ToggleState,
     pub inline_enabled: bool,
     pub alignment_enabled: bool,
     pub can_undo: bool,
     pub can_redo: bool,
     pub can_save: bool,
+    pub save_disabled_reason: Option<String>,
 }
 
 impl EditingState {
@@ -78,11 +80,13 @@ impl EditingState {
             italic: ToggleState::Off,
             underline: ToggleState::Off,
             alignment: None,
+            alignment_state: ToggleState::Off,
             inline_enabled: false,
             alignment_enabled: false,
             can_undo: false,
             can_redo: false,
             can_save: false,
+            save_disabled_reason: None,
         }
     }
 
@@ -627,8 +631,11 @@ fn command_selection(command: ToolbarCommand, state: &ChromeState) -> ToggleStat
         ToolbarCommand::Bold => state.editing.bold,
         ToolbarCommand::Italic => state.editing.italic,
         ToolbarCommand::Underline => state.editing.underline,
+        ToolbarCommand::Align(_) if state.editing.alignment_state == ToggleState::Mixed => {
+            ToggleState::Mixed
+        }
         ToolbarCommand::Align(alignment) if state.editing.alignment == Some(alignment) => {
-            ToggleState::On
+            state.editing.alignment_state
         }
         _ => ToggleState::Off,
     }
@@ -720,11 +727,13 @@ mod tests {
             italic: ToggleState::Off,
             underline: ToggleState::On,
             alignment: Some(Alignment::Center),
+            alignment_state: ToggleState::On,
             inline_enabled: true,
             alignment_enabled: true,
             can_undo: true,
             can_redo: true,
             can_save: true,
+            save_disabled_reason: None,
         };
         let state = state(editing);
         let chrome = Chrome::new();
@@ -752,6 +761,25 @@ mod tests {
             assert_eq!(
                 chrome.hit_test(900.0, 700.0, button.bounds.center(), &state),
                 ChromeHit::Consumed(Some(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_paragraph_alignment_marks_every_alignment_control_mixed() {
+        let mut editing = EditingState::editable_without_selection(false, false);
+        editing.alignment_enabled = true;
+        editing.alignment_state = ToggleState::Mixed;
+        let state = state(editing);
+        for alignment in [
+            Alignment::Left,
+            Alignment::Center,
+            Alignment::Right,
+            Alignment::Justify,
+        ] {
+            assert_eq!(
+                command_selection(ToolbarCommand::Align(alignment), &state),
+                ToggleState::Mixed
             );
         }
     }

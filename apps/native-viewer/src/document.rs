@@ -269,6 +269,16 @@ impl DocumentView {
         }
     }
 
+    pub fn is_dirty(&self) -> bool {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.is_dirty(),
+            ReferenceDocument::Xlsx(reference) => {
+                reference.editor.is_dirty() || reference.editor.is_editing()
+            }
+            ReferenceDocument::Pptx(reference) => reference.editor.is_dirty(),
+        }
+    }
+
     pub fn save_docx_to(&mut self, path: &Path) -> Result<()> {
         let ReferenceDocument::Docx(reference) = &mut self.reference else {
             bail!("only DOCX documents are editable");
@@ -351,8 +361,8 @@ impl DocumentView {
         )
     }
 
-    pub fn save_pptx_to(&self, path: &Path) -> Result<()> {
-        let ReferenceDocument::Pptx(reference) = &self.reference else {
+    pub fn save_pptx_to(&mut self, path: &Path) -> Result<()> {
+        let ReferenceDocument::Pptx(reference) = &mut self.reference else {
             bail!("only PPTX decks use the PPTX save path");
         };
         reference.editor.save_to(path)
@@ -472,8 +482,8 @@ impl DocumentView {
         })
     }
 
-    pub fn save_xlsx_to(&self, path: &Path) -> Result<()> {
-        let ReferenceDocument::Xlsx(reference) = &self.reference else {
+    pub fn save_xlsx_to(&mut self, path: &Path) -> Result<()> {
+        let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             bail!("only XLSX workbooks use the XLSX save path");
         };
         reference.editor.save_to(path)
@@ -976,6 +986,162 @@ mod tests {
                 .iter()
                 .any(|page| !page.scene.encoding().is_empty())
         );
+    }
+
+    #[test]
+    fn alignment_only_save_refuses_to_flatten_a_simple_field() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("alignment-field", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 0,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_set_alignment(Alignment::Center).unwrap());
+
+        let output = test_fixtures::write_docx("alignment-field-output", b"sentinel");
+        let error = document.save_docx_to(&output).unwrap_err().to_string();
+        assert!(error.contains("paragraph 1 (11111111)"), "{error}");
+        assert!(error.contains("fields"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn edited_paragraph_preserves_unmodelled_properties_without_a_source_id() {
+        let properties = r#"<w:pPr><w:kinsoku w:val="0"/><w:wordWrap w:val="0"/><w:snapToGrid w:val="0"/><w:textAlignment w:val="center"/></w:pPr>"#;
+        let bytes = test_fixtures::editing_docx(&format!(
+            "<w:p>{properties}<w:r><w:t>Plain</w:t></w:r></w:p>"
+        ));
+        let source = test_fixtures::write_docx("unmodelled-ppr", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let para_id = match &document.reference {
+            ReferenceDocument::Docx(reference) => {
+                reference.editor.engine().doc().paragraphs("body").unwrap()[0]
+                    .para_id
+                    .clone()
+            }
+            _ => unreachable!(),
+        };
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: para_id.clone(),
+                    offset: 5,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_insert_text(" edited").unwrap());
+
+        let output = test_fixtures::write_docx("unmodelled-ppr-output", b"sentinel");
+        document.save_docx_to(&output).unwrap();
+        let saved = fs::read(&output).unwrap();
+        let xml = String::from_utf8(test_fixtures::part(&saved, "word/document.xml")).unwrap();
+        assert!(xml.contains(properties), "{xml}");
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        assert_eq!(docx_paragraph_text(&reopened, &para_id), "Plain edited");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn structural_edit_disables_save_with_a_reason_until_undo() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Plain</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("structural-save-state", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 2,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_enter().unwrap());
+        let blocked = document.editing_state().unwrap();
+        assert!(!blocked.can_save);
+        assert_eq!(
+            blocked.save_disabled_reason.as_deref(),
+            Some(crate::editing::STRUCTURAL_SAVE_REASON)
+        );
+        assert!(document.docx_undo().unwrap());
+        let restored = document.editing_state().unwrap();
+        assert!(restored.can_save);
+        assert!(restored.save_disabled_reason.is_none());
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn double_click_selects_the_second_adjacent_emoji() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>😀😀</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("adjacent-emoji", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let first = TextLoc {
+            para_id: "11111111".to_owned(),
+            offset: 0,
+        };
+        document
+            .docx_select_point(first.clone(), false, false)
+            .unwrap();
+        let paragraph_start = docx_selection_range(&document).start;
+        document
+            .docx_select_point(TextLoc { offset: 2, ..first }, false, true)
+            .unwrap();
+        assert_eq!(
+            docx_selection_range(&document),
+            StoryRange::new("body", paragraph_start + 2, paragraph_start + 4)
+        );
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn cross_paragraph_alignment_selection_is_mixed() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:pPr><w:jc w:val="left"/></w:pPr><w:r><w:t>Left</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>Right</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("mixed-alignment", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 1,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "22222222".to_owned(),
+                    offset: 1,
+                },
+                true,
+                false,
+            )
+            .unwrap();
+        let state = document.editing_state().unwrap();
+        assert_eq!(state.alignment, None);
+        assert_eq!(state.alignment_state, ToggleState::Mixed);
+        fs::remove_file(source).unwrap();
     }
 
     #[test]
@@ -1576,6 +1742,12 @@ mod tests {
 
         let output = test_fixtures::write_xlsx("edited-output", b"sentinel");
         document.save_xlsx_to(&output).unwrap();
+        assert!(!document.xlsx_is_dirty());
+        assert!(document.editing_state().unwrap().can_undo);
+        assert!(document.xlsx_undo().unwrap());
+        assert!(document.xlsx_is_dirty());
+        assert!(document.xlsx_redo().unwrap());
+        assert!(!document.xlsx_is_dirty());
         let reopened = load_document(&output, 0, 8_192).unwrap();
         let ReferenceDocument::Xlsx(reference) = &reopened.reference else {
             panic!("expected XLSX reference");
@@ -1875,6 +2047,12 @@ mod tests {
 
         let output = test_fixtures::write_pptx("pptx-edited-output", b"sentinel");
         document.save_pptx_to(&output).unwrap();
+        assert!(!document.pptx_is_dirty());
+        assert!(document.editing_state().unwrap().can_undo);
+        assert!(document.pptx_undo().unwrap());
+        assert!(document.pptx_is_dirty());
+        assert!(document.pptx_redo().unwrap());
+        assert!(!document.pptx_is_dirty());
         let saved = fs::read(&output).unwrap();
         for slide in ["ppt/slides/slide2.xml", "ppt/slides/slide3.xml"] {
             assert_eq!(

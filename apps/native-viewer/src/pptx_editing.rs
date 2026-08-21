@@ -61,6 +61,7 @@ pub struct PptxEditor {
     rendered: Vec<RenderedSlide>,
     summaries: Vec<PptxSlideSummary>,
     baseline: DeckSnapshot,
+    saved_snapshot: DeckSnapshot,
     source: Vec<u8>,
     caret: Option<PptxCaret>,
     vertical_goal_x: Option<f32>,
@@ -107,6 +108,7 @@ impl PptxEditor {
                 resources,
                 rendered,
                 summaries,
+                saved_snapshot: baseline.clone(),
                 baseline,
                 source,
                 caret: None,
@@ -379,7 +381,7 @@ impl PptxEditor {
         self.relayout_all().map(Some)
     }
 
-    pub fn save_to(&self, path: &Path) -> Result<()> {
+    pub fn save_to(&mut self, path: &Path) -> Result<()> {
         let current = self.presentation.snapshot()?;
         let edited = text_only_changes(&self.baseline, &current)?;
         let source_parts = package_parts(&self.source)?;
@@ -390,7 +392,10 @@ impl PptxEditor {
             .context("cannot save PPTX safely: reopen the engine output")?;
         ensure_model_fidelity(&current, &reopened)?;
         ensure_text_metadata_fidelity(self.presentation.package(), reopened.package(), &edited)?;
-        fs::write(path, saved).with_context(|| format!("write PPTX {}", path.display()))
+        fs::write(path, saved).with_context(|| format!("write PPTX {}", path.display()))?;
+        self.saved_snapshot = current;
+        self.dirty = false;
+        Ok(())
     }
 
     pub fn recover_layout(&mut self) -> Result<Vec<PageScene>> {
@@ -446,7 +451,7 @@ impl PptxEditor {
     }
 
     fn update_dirty(&mut self) -> Result<()> {
-        self.dirty = self.presentation.snapshot()? != self.baseline;
+        self.dirty = self.presentation.snapshot()? != self.saved_snapshot;
         Ok(())
     }
 }

@@ -36,6 +36,9 @@ pub struct XlsxEditor {
     draft: Option<CellDraft>,
     edit_impacts: Vec<BTreeSet<SheetId>>,
     history_index: usize,
+    revision_ids: Vec<u64>,
+    next_revision: u64,
+    saved_revision: u64,
 }
 
 impl XlsxEditor {
@@ -83,6 +86,9 @@ impl XlsxEditor {
             draft: None,
             edit_impacts: Vec::new(),
             history_index: 0,
+            revision_ids: vec![0],
+            next_revision: 1,
+            saved_revision: 0,
         })
     }
 
@@ -117,7 +123,7 @@ impl XlsxEditor {
     }
 
     pub fn is_dirty(&self) -> bool {
-        self.history_index > 0
+        self.revision_ids[self.history_index] != self.saved_revision
     }
 
     pub fn can_undo(&self) -> bool {
@@ -243,6 +249,12 @@ impl XlsxEditor {
             impact.extend(result.changed.iter().map(|address| address.sheet));
             self.edit_impacts.truncate(self.history_index);
             self.edit_impacts.push(impact);
+            self.revision_ids.truncate(self.history_index + 1);
+            self.revision_ids.push(self.next_revision);
+            self.next_revision = self
+                .next_revision
+                .checked_add(1)
+                .context("XLSX edit revision overflow")?;
             self.history_index += 1;
         }
         if let Some(movement) = movement {
@@ -284,7 +296,7 @@ impl XlsxEditor {
         Ok(format!("{} = {value}", self.selection.to_a1()))
     }
 
-    pub fn save_to(&self, path: &Path) -> Result<()> {
+    pub fn save_to(&mut self, path: &Path) -> Result<()> {
         let bytes = if self.history_index == 0 {
             self.source.clone()
         } else {
@@ -301,7 +313,9 @@ impl XlsxEditor {
             )?
         };
         ensure_save_fidelity(&self.source, &bytes)?;
-        fs::write(path, bytes).with_context(|| format!("write edited XLSX {}", path.display()))
+        fs::write(path, bytes).with_context(|| format!("write edited XLSX {}", path.display()))?;
+        self.saved_revision = self.revision_ids[self.history_index];
+        Ok(())
     }
 
     pub fn recover_layout(&mut self) -> Result<()> {

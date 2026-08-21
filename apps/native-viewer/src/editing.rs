@@ -28,6 +28,8 @@ use crate::chrome::{Alignment, EditingState, ToggleState};
 
 const BODY_STORY: &str = "body";
 const SAVE_TIME: &str = "1970-01-01T00:00:00.000Z";
+pub(crate) const STRUCTURAL_SAVE_REASON: &str =
+    "Save unavailable: DOCX paragraph splits and merges cannot be saved; undo the structural edit.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextLoc {
@@ -181,7 +183,7 @@ pub struct DocxEditor {
     layout_request: String,
     display_extras: String,
     save: SaveProjection,
-    initial_checksum: u64,
+    saved_checksum: u64,
     dirty: bool,
 }
 
@@ -213,7 +215,7 @@ impl DocxEditor {
             .collect();
         let source_inline = body_inline_projection(engine.doc())?;
         let source_tokens = body_tokens(engine.doc())?;
-        let initial_checksum =
+        let saved_checksum =
             story_checksum(engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
         let undo = UndoSession::new();
         undo.track(engine.doc(), BODY_STORY)
@@ -236,7 +238,7 @@ impl DocxEditor {
                 source_inline,
                 source_tokens,
             ),
-            initial_checksum,
+            saved_checksum,
             dirty: false,
         })
     }
@@ -262,9 +264,18 @@ impl DocxEditor {
     pub fn editing_state(&self) -> Result<EditingState> {
         let can_undo = self.undo.can_undo();
         let can_redo = self.undo.can_redo();
+        let (can_save, save_disabled_reason) = self.save_availability()?;
         let Some(range) = self.selection_range()? else {
-            return Ok(EditingState::editable_without_selection(can_undo, can_redo));
+            let mut state = EditingState::editable_without_selection(can_undo, can_redo);
+            state.can_save = can_save;
+            state.save_disabled_reason = save_disabled_reason;
+            return Ok(state);
         };
+        let selection = self
+            .selection
+            .as_ref()
+            .context("selection disappeared while deriving editing state")?;
+        let (alignment, alignment_state) = self.selection_alignment(selection)?;
         let context = self
             .engine
             .doc()
@@ -274,12 +285,14 @@ impl DocxEditor {
             bold: toggle_state(context.bold),
             italic: toggle_state(context.italic),
             underline: toggle_state(context.underline),
-            alignment: Alignment::from_engine(context.alignment.as_deref()),
+            alignment,
+            alignment_state,
             inline_enabled: range.start != range.end,
             alignment_enabled: true,
             can_undo,
             can_redo,
-            can_save: true,
+            can_save,
+            save_disabled_reason,
         })
     }
 
@@ -646,7 +659,11 @@ impl DocxEditor {
     pub fn save_to(&mut self, path: &Path) -> Result<()> {
         self.save.sync(self.engine.doc())?;
         let bytes = self.save.serialize()?;
-        fs::write(path, bytes).with_context(|| format!("write edited DOCX {}", path.display()))
+        fs::write(path, bytes).with_context(|| format!("write edited DOCX {}", path.display()))?;
+        self.saved_checksum =
+            story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
+        self.dirty = false;
+        Ok(())
     }
 
     pub fn recover_layout(&mut self) -> Result<()> {
@@ -660,7 +677,7 @@ impl DocxEditor {
         self.frames = FrameTracker::new(&frame)?;
         self.spans = paragraph_spans(&self.engine)?;
         self.dirty = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?
-            != self.initial_checksum;
+            != self.saved_checksum;
         let selection = self.selection.take();
         self.selection = selection.and_then(|selection| {
             Some(Selection {
@@ -740,8 +757,58 @@ impl DocxEditor {
         let change = self.frames.apply(&frame)?;
         self.spans = paragraph_spans(&self.engine)?;
         self.dirty = story_checksum(self.engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?
-            != self.initial_checksum;
+            != self.saved_checksum;
         Ok(change)
+    }
+
+    fn save_availability(&self) -> Result<(bool, Option<String>)> {
+        let can_save = self.save.structure_unchanged(self.engine.doc())?;
+        Ok((
+            can_save,
+            (!can_save).then(|| STRUCTURAL_SAVE_REASON.to_owned()),
+        ))
+    }
+
+    fn selection_alignment(
+        &self,
+        selection: &Selection,
+    ) -> Result<(Option<Alignment>, ToggleState)> {
+        let anchor = self
+            .span_index(&selection.anchor.para_id)
+            .context("selection anchor paragraph is unavailable")?;
+        let head = self
+            .span_index(&selection.head.para_id)
+            .context("selection head paragraph is unavailable")?;
+        let paragraphs = self
+            .engine
+            .doc()
+            .paragraphs(BODY_STORY)
+            .map_err(anyhow::Error::msg)?
+            .into_iter()
+            .map(|paragraph| (paragraph.para_id, paragraph.properties))
+            .collect::<HashMap<_, _>>();
+        let mut uniform = None;
+        for span in &self.spans[anchor.min(head)..=anchor.max(head)] {
+            let properties = paragraphs
+                .get(&span.para_id)
+                .with_context(|| format!("paragraph {} is unavailable", span.para_id))?;
+            let value = string_property(properties.get("alignment"));
+            let alignment = Alignment::from_engine(value.as_deref());
+            match uniform {
+                None => uniform = Some(alignment),
+                Some(current) if current == alignment => {}
+                Some(_) => return Ok((None, ToggleState::Mixed)),
+            }
+        }
+        let alignment = uniform.flatten();
+        Ok((
+            alignment,
+            if alignment.is_some() {
+                ToggleState::On
+            } else {
+                ToggleState::Off
+            },
+        ))
     }
 
     fn set_move_selection(&mut self, loc: TextLoc, extend: bool) -> Result<bool> {
@@ -1138,7 +1205,8 @@ fn word_boundaries(text: &str, utf16_offset: u32) -> (u32, u32) {
         end += 1;
     }
     if class == WordClass::Other {
-        end = start + 1;
+        start = index;
+        end = index + 1;
     }
     (positions[start].0, positions[end - 1].1)
 }
@@ -1420,6 +1488,7 @@ struct SaveProjection {
     seed: String,
     synthetic_ids: HashSet<String>,
     changed_para_ids: Vec<String>,
+    changed_alignments: HashMap<String, Option<String>>,
 }
 
 impl SaveProjection {
@@ -1456,7 +1525,12 @@ impl SaveProjection {
             seed,
             synthetic_ids,
             changed_para_ids: Vec::new(),
+            changed_alignments: HashMap::new(),
         }
+    }
+
+    fn structure_unchanged(&self, document: &docx_edit::EditingDoc) -> Result<bool> {
+        Ok(body_tokens(document)? == self.source_tokens)
     }
 
     fn sync(&mut self, document: &docx_edit::EditingDoc) -> Result<()> {
@@ -1475,6 +1549,7 @@ impl SaveProjection {
         }
         let mut content = self.source_content.clone();
         let mut changed_para_ids = Vec::new();
+        let mut changed_alignments = HashMap::new();
         let mut projected_para_ids = HashSet::new();
         let mut paragraph_number = 0;
         for block in &mut content {
@@ -1514,39 +1589,34 @@ impl SaveProjection {
             if !text_changed && !alignment_changed && !inline_changed {
                 continue;
             }
+            if text_changed && source_inline.mark_sequence() != target_inline.mark_sequence() {
+                bail!(
+                    "cannot save paragraph {paragraph_number} ({para_id}): text and character formatting changed together"
+                );
+            }
+            let mut risks = paragraph_projection_risks(paragraph);
+            if inline_changed && !text_changed && !alignment_changed {
+                risks.retain(|risk| *risk != "differently formatted runs");
+            }
+            if !risks.is_empty() {
+                bail!(
+                    "cannot save paragraph {paragraph_number} ({para_id}): editing it would lose or flatten {}",
+                    risks.join(", ")
+                );
+            }
+            if inline_changed && (source_inline.has_embed || target_inline.has_embed) {
+                bail!(
+                    "cannot save paragraph {paragraph_number} ({para_id}): formatting it would lose or flatten non-text inline content"
+                );
+            }
             if text_changed {
-                if source_inline.mark_sequence() != target_inline.mark_sequence() {
-                    bail!(
-                        "cannot save paragraph {paragraph_number} ({para_id}): text and character formatting changed together"
-                    );
-                }
-                let risks = paragraph_projection_risks(paragraph);
-                if !risks.is_empty() {
-                    bail!(
-                        "cannot save paragraph {paragraph_number} ({para_id}): editing it would lose or flatten {}",
-                        risks.join(", ")
-                    );
-                }
                 set_paragraph_text(paragraph, &target.text).map_err(anyhow::Error::msg)?;
             } else if inline_changed {
-                let risks = paragraph_projection_risks(paragraph)
-                    .into_iter()
-                    .filter(|risk| *risk != "differently formatted runs")
-                    .collect::<Vec<_>>();
-                if source_inline.has_embed || target_inline.has_embed || !risks.is_empty() {
-                    let reason = if risks.is_empty() {
-                        "non-text inline content".to_owned()
-                    } else {
-                        risks.join(", ")
-                    };
-                    bail!(
-                        "cannot save paragraph {paragraph_number} ({para_id}): formatting it would lose or flatten {reason}"
-                    );
-                }
                 apply_inline_formatting(paragraph, source_inline, target_inline)?;
             }
             if alignment_changed {
-                paragraph.formatting.get_or_insert_default().alignment = target_alignment;
+                paragraph.formatting.get_or_insert_default().alignment = target_alignment.clone();
+                changed_alignments.insert(para_id.clone(), target_alignment);
             }
             changed_para_ids.push(para_id);
         }
@@ -1572,6 +1642,7 @@ impl SaveProjection {
         }
         self.package.document.content = content;
         self.changed_para_ids = changed_para_ids;
+        self.changed_alignments = changed_alignments;
         Ok(())
     }
 
@@ -1611,6 +1682,7 @@ impl SaveProjection {
             &projected,
             &self.changed_para_ids,
             &self.synthetic_ids,
+            &self.changed_alignments,
         )
     }
 }
@@ -1967,6 +2039,7 @@ fn patch_document_paragraphs(
     projected: &[u8],
     changed_para_ids: &[String],
     synthetic_ids: &HashSet<String>,
+    changed_alignments: &HashMap<String, Option<String>>,
 ) -> Result<Vec<u8>> {
     let projected_parts = ooxml_opc::unzip_parts(projected).map_err(anyhow::Error::msg)?;
     let projected_document = projected_parts
@@ -1999,7 +2072,26 @@ fn patch_document_paragraphs(
         let [(index, projected_span)] = matches.as_slice() else {
             bail!("cannot save paragraph {para_id}: projection identity is not unique");
         };
-        let mut replacement = projected_document[projected_span.range.clone()].to_vec();
+        let original_span = &original_spans[*index];
+        let identity_matches = if synthetic_ids.contains(para_id) {
+            original_span.para_id.is_none()
+        } else {
+            original_span.para_id.as_deref() == Some(para_id)
+        };
+        if !identity_matches {
+            bail!(
+                "cannot save paragraph {para_id}: source identity at projection position {} is {:?}",
+                index + 1,
+                original_span.para_id
+            );
+        }
+        let original_paragraph = &original_document[original_span.range.clone()];
+        let projected_paragraph = &projected_document[projected_span.range.clone()];
+        let mut replacement = splice_paragraph_properties(
+            original_paragraph,
+            projected_paragraph,
+            changed_alignments.get(para_id),
+        )?;
         if synthetic_ids.contains(para_id) {
             let value =
                 String::from_utf8(replacement).context("projected paragraph is not UTF-8")?;
@@ -2009,13 +2101,223 @@ fn patch_document_paragraphs(
             }
             replacement = value.replacen(&attribute, "", 1).into_bytes();
         }
-        replacements.push((original_spans[*index].range.clone(), replacement));
+        replacements.push((original_span.range.clone(), replacement));
     }
     replacements.sort_unstable_by_key(|(range, _)| std::cmp::Reverse(range.start));
     for (range, replacement) in replacements {
         original_document.splice(range, replacement);
     }
     ooxml_opc::rezip_parts(&original_parts).map_err(anyhow::Error::msg)
+}
+
+fn splice_paragraph_properties(
+    original: &[u8],
+    projected: &[u8],
+    alignment: Option<&Option<String>>,
+) -> Result<Vec<u8>> {
+    let source_properties =
+        paragraph_properties_span(original)?.map(|range| original[range].to_vec());
+    let properties = match alignment {
+        Some(alignment) => {
+            patch_paragraph_alignment(source_properties.as_deref(), alignment.as_deref())?
+        }
+        None => source_properties,
+    };
+    replace_paragraph_properties(projected, properties.as_deref())
+}
+
+fn patch_paragraph_alignment(
+    properties: Option<&[u8]>,
+    alignment: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    let Some(properties) = properties else {
+        return Ok(alignment.map(|alignment| {
+            format!(
+                "<w:pPr><w:jc w:val=\"{}\"/></w:pPr>",
+                escape_xml_attribute(alignment)
+            )
+            .into_bytes()
+        }));
+    };
+    let mut output = properties.to_vec();
+    if is_self_closing_tag(properties) {
+        let Some(alignment) = alignment else {
+            return Ok(Some(output));
+        };
+        let end = xml_tag_end(properties, 0)?;
+        let slash = properties[..end]
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .context("self-closing w:pPr has no slash")?;
+        if properties[slash] != b'/' {
+            bail!("self-closing w:pPr has no slash");
+        }
+        let mut expanded = properties[..slash].to_vec();
+        expanded.extend_from_slice(b">");
+        expanded.extend_from_slice(
+            format!("<w:jc w:val=\"{}\"/>", escape_xml_attribute(alignment)).as_bytes(),
+        );
+        expanded.extend_from_slice(b"</w:pPr>");
+        return Ok(Some(expanded));
+    }
+    if let Some(range) = direct_child_span(properties, b"w:jc")? {
+        let replacement = alignment
+            .map(|alignment| {
+                format!("<w:jc w:val=\"{}\"/>", escape_xml_attribute(alignment)).into_bytes()
+            })
+            .unwrap_or_default();
+        output.splice(range, replacement);
+        return Ok(Some(output));
+    }
+    let Some(alignment) = alignment else {
+        return Ok(Some(output));
+    };
+    let children = direct_child_spans(properties)?;
+    let insert = children
+        .iter()
+        .find(|(name, _)| {
+            matches!(
+                name.as_slice(),
+                b"w:textDirection"
+                    | b"w:textAlignment"
+                    | b"w:textboxTightWrap"
+                    | b"w:outlineLvl"
+                    | b"w:divId"
+                    | b"w:cnfStyle"
+                    | b"w:rPr"
+                    | b"w:sectPr"
+                    | b"w:pPrChange"
+            )
+        })
+        .map(|(_, range)| range.start)
+        .unwrap_or_else(|| closing_tag_start(properties));
+    output.splice(
+        insert..insert,
+        format!("<w:jc w:val=\"{}\"/>", escape_xml_attribute(alignment)).into_bytes(),
+    );
+    Ok(Some(output))
+}
+
+fn replace_paragraph_properties(paragraph: &[u8], properties: Option<&[u8]>) -> Result<Vec<u8>> {
+    let mut output = paragraph.to_vec();
+    if let Some(range) = paragraph_properties_span(paragraph)? {
+        output.splice(range, properties.unwrap_or_default().iter().copied());
+    } else if let Some(properties) = properties {
+        let insert = xml_tag_end(paragraph, 0)? + 1;
+        output.splice(insert..insert, properties.iter().copied());
+    }
+    Ok(output)
+}
+
+fn paragraph_properties_span(paragraph: &[u8]) -> Result<Option<Range<usize>>> {
+    Ok(direct_child_spans(paragraph)?
+        .into_iter()
+        .find(|(name, _)| name == b"w:pPr")
+        .map(|(_, range)| range))
+}
+
+fn direct_child_span(element: &[u8], name: &[u8]) -> Result<Option<Range<usize>>> {
+    Ok(direct_child_spans(element)?
+        .into_iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, range)| range))
+}
+
+fn direct_child_spans(element: &[u8]) -> Result<Vec<(Vec<u8>, Range<usize>)>> {
+    let mut children = Vec::new();
+    let mut cursor = xml_tag_end(element, 0)? + 1;
+    while let Some(relative) = element[cursor..].iter().position(|byte| *byte == b'<') {
+        let start = cursor + relative;
+        if element[start..].starts_with(b"<!--") {
+            cursor = find_xml_bytes(element, start + 4, b"-->")? + 3;
+            continue;
+        }
+        if element[start..].starts_with(b"<![CDATA[") {
+            cursor = find_xml_bytes(element, start + 9, b"]]>")? + 3;
+            continue;
+        }
+        let end = xml_tag_end(element, start)?;
+        let tag = &element[start..=end];
+        if tag.starts_with(b"</") {
+            break;
+        }
+        let Some(name) = xml_tag_name(tag) else {
+            cursor = end + 1;
+            continue;
+        };
+        let range = xml_element_span(element, start)?;
+        children.push((name.to_vec(), range.clone()));
+        cursor = range.end;
+    }
+    Ok(children)
+}
+
+fn xml_element_span(xml: &[u8], start: usize) -> Result<Range<usize>> {
+    let end = xml_tag_end(xml, start)?;
+    let tag = &xml[start..=end];
+    let name = xml_tag_name(tag)
+        .context("XML element has no name")?
+        .to_vec();
+    if is_self_closing_tag(tag) {
+        return Ok(start..end + 1);
+    }
+    let mut depth = 1_usize;
+    let mut cursor = end + 1;
+    while let Some(relative) = xml[cursor..].iter().position(|byte| *byte == b'<') {
+        let nested_start = cursor + relative;
+        if xml[nested_start..].starts_with(b"<!--") {
+            cursor = find_xml_bytes(xml, nested_start + 4, b"-->")? + 3;
+            continue;
+        }
+        if xml[nested_start..].starts_with(b"<![CDATA[") {
+            cursor = find_xml_bytes(xml, nested_start + 9, b"]]>")? + 3;
+            continue;
+        }
+        let nested_end = xml_tag_end(xml, nested_start)?;
+        let nested = &xml[nested_start..=nested_end];
+        if xml_tag_name(nested) == Some(name.as_slice()) {
+            if nested.starts_with(b"</") {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(start..nested_end + 1);
+                }
+            } else if !is_self_closing_tag(nested) {
+                depth += 1;
+            }
+        }
+        cursor = nested_end + 1;
+    }
+    bail!("XML element is unclosed")
+}
+
+fn xml_tag_name(tag: &[u8]) -> Option<&[u8]> {
+    let mut start = usize::from(tag.get(1) == Some(&b'/')) + 1;
+    if matches!(tag.get(start), None | Some(b'!' | b'?')) {
+        return None;
+    }
+    while tag.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start += 1;
+    }
+    let end = tag[start..]
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>'))?
+        + start;
+    (end > start).then_some(&tag[start..end])
+}
+
+fn closing_tag_start(element: &[u8]) -> usize {
+    element
+        .windows(2)
+        .rposition(|window| window == b"</")
+        .unwrap_or(element.len())
+}
+
+fn escape_xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn paragraph_xml_spans(xml: &[u8]) -> Result<Vec<ParagraphXmlSpan>> {
@@ -2169,4 +2471,40 @@ fn utf16_slice(text: &str, start: u32, end: u32) -> String {
         .min(units.len())
         .max(start);
     String::from_utf16_lossy(&units[start..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paragraph_package(paragraphs: &str) -> Vec<u8> {
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{paragraphs}</w:body></w:document>"#
+        );
+        ooxml_opc::rezip_parts(&[("word/document.xml".to_owned(), document.into_bytes())]).unwrap()
+    }
+
+    #[test]
+    fn paragraph_patch_refuses_a_positional_identity_mismatch() {
+        let original = paragraph_package(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>First</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>Second</w:t></w:r></w:p>"#,
+        );
+        let projected = paragraph_package(
+            r#"<w:p w14:paraId="22222222"><w:r><w:t>Edited second</w:t></w:r></w:p><w:p w14:paraId="11111111"><w:r><w:t>First</w:t></w:r></w:p>"#,
+        );
+        let error = patch_document_paragraphs(
+            &original,
+            &projected,
+            &["22222222".to_owned()],
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("source identity at projection position 1"),
+            "{error}"
+        );
+        assert!(error.contains("11111111"), "{error}");
+    }
 }

@@ -31,6 +31,7 @@ const CARET_BLINK: Duration = Duration::from_millis(530);
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const STATUS_DURATION: Duration = Duration::from_secs(6);
+const UNSAVED_EXIT_REASON: &str = "Unsaved changes: save or undo them before closing the viewer.";
 
 pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
@@ -90,6 +91,21 @@ struct Viewer {
 struct StatusMessage {
     text: String,
     expires_at: Instant,
+}
+
+#[derive(Debug)]
+enum SaveFailure {
+    Save(anyhow::Error),
+    Verification(anyhow::Error),
+}
+
+impl SaveFailure {
+    fn status(&self) -> String {
+        match self {
+            Self::Save(error) => format!("Save refused: {error:#}"),
+            Self::Verification(error) => format!("Save verification failed: {error:#}"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -539,13 +555,15 @@ impl Viewer {
             .unwrap_or("document")
             .to_owned();
         let page_index = geometry.current_page(&self.document.pages);
+        let editing = self.document.editing_state()?;
         let message = self
             .status_message
             .as_ref()
             .filter(|message| message.expires_at > Instant::now())
-            .map(|message| message.text.clone());
+            .map(|message| message.text.clone())
+            .or_else(|| editing.save_disabled_reason.clone());
         Ok(ChromeState {
-            editing: self.document.editing_state()?,
+            editing,
             zoom: self.zoom,
             file_name,
             position: self.document.status_position(page_index),
@@ -643,6 +661,18 @@ impl Viewer {
     }
 
     fn execute_toolbar_command(&mut self, command: ToolbarCommand) -> Result<()> {
+        if command == ToolbarCommand::Save {
+            let editing = self.document.editing_state()?;
+            if !editing.can_save {
+                self.set_status(
+                    editing
+                        .save_disabled_reason
+                        .unwrap_or_else(|| "Save unavailable".to_owned()),
+                );
+                self.request_redraw();
+                return Ok(());
+            }
+        }
         if self.document.xlsx_is_editing() {
             self.document.xlsx_commit(None)?;
         }
@@ -703,7 +733,9 @@ impl Viewer {
                 self.request_redraw();
                 return Ok(());
             }
-            event_loop.exit();
+            if self.request_exit() {
+                event_loop.exit();
+            }
             return Ok(());
         }
         if command
@@ -889,16 +921,19 @@ impl Viewer {
     }
 
     fn save_with_status(&mut self) {
-        match self.save_and_reopen() {
-            Ok(path) => self.set_status(format!("Saved {}", path.display())),
-            Err(error) => self.set_status(format!("Save refused: {error:#}")),
+        match self.save_and_verify() {
+            Ok(path) => {
+                self.update_title();
+                self.set_status(format!("Saved {}", path.display()));
+            }
+            Err(failure) => self.set_status(failure.status()),
         }
         self.request_redraw();
     }
 
-    fn save_and_reopen(&mut self) -> Result<std::path::PathBuf> {
+    fn save_and_verify(&mut self) -> std::result::Result<std::path::PathBuf, SaveFailure> {
         if self.document.xlsx_is_editing() {
-            self.document.xlsx_commit(None)?;
+            self.document.xlsx_commit(None).map_err(SaveFailure::Save)?;
         }
         let (format, sheet_index) = match &self.document.reference {
             ReferenceDocument::Docx(_) => ("DOCX", 0),
@@ -908,23 +943,28 @@ impl Viewer {
         let path = self
             .save_target
             .clone()
-            .context("save target is unavailable")?;
+            .context("save target is unavailable")
+            .map_err(SaveFailure::Save)?;
         match &self.document.reference {
-            ReferenceDocument::Docx(_) => self.document.save_docx_to(&path)?,
-            ReferenceDocument::Xlsx(_) => self.document.save_xlsx_to(&path)?,
-            ReferenceDocument::Pptx(_) => self.document.save_pptx_to(&path)?,
+            ReferenceDocument::Docx(_) => self.document.save_docx_to(&path),
+            ReferenceDocument::Xlsx(_) => self.document.save_xlsx_to(&path),
+            ReferenceDocument::Pptx(_) => self.document.save_pptx_to(&path),
         }
-        let reopened = load_document(&path, sheet_index, self.document.max_texture_dimension_2d)
-            .with_context(|| format!("reopen edited {format} {}", path.display()))?;
-        println!("saved and reopened edited {format}: {}", path.display());
-        self.document = reopened;
-        self.scroll = 0.0;
-        self.dragging = false;
-        self.reset_caret_blink();
-        self.clamp_scroll();
-        self.update_title();
-        self.request_redraw();
+        .map_err(SaveFailure::Save)?;
+        load_document(&path, sheet_index, self.document.max_texture_dimension_2d)
+            .with_context(|| format!("reopen edited {format} {}", path.display()))
+            .map_err(SaveFailure::Verification)?;
+        println!("saved and verified edited {format}: {}", path.display());
         Ok(path)
+    }
+
+    fn request_exit(&mut self) -> bool {
+        if !self.document.is_dirty() {
+            return true;
+        }
+        self.set_status(UNSAVED_EXIT_REASON.to_owned());
+        self.request_redraw();
+        false
     }
 
     fn set_status(&mut self, text: String) {
@@ -1052,7 +1092,11 @@ impl ApplicationHandler for Viewer {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.request_exit() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => self.resize(size),
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(window) = &self.window {
@@ -1193,6 +1237,137 @@ mod tests {
             EditInput::Enter
         );
         assert_eq!(edit_input(&tab, Some("\t"), false, false), EditInput::Tab);
+    }
+
+    #[test]
+    fn structural_save_command_is_disabled_and_dirty_exit_is_blocked() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Plain</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("window-structural-save", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 2,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_enter().unwrap());
+        let output = test_fixtures::write_docx("window-structural-output", b"sentinel");
+        let mut viewer = Viewer::new(document, RenderContext::new()).unwrap();
+        viewer.save_target = Some(output.clone());
+
+        viewer
+            .execute_toolbar_command(ToolbarCommand::Save)
+            .unwrap();
+        assert_eq!(
+            viewer
+                .status_message
+                .as_ref()
+                .map(|message| message.text.as_str()),
+            Some(crate::editing::STRUCTURAL_SAVE_REASON)
+        );
+        assert_eq!(std::fs::read(&output).unwrap(), b"sentinel");
+        assert!(!viewer.request_exit());
+        assert_eq!(
+            viewer
+                .status_message
+                .as_ref()
+                .map(|message| message.text.as_str()),
+            Some(UNSAVED_EXIT_REASON)
+        );
+        assert!(viewer.document.docx_undo().unwrap());
+        assert!(viewer.request_exit());
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn verified_save_keeps_the_live_document_caret_history_and_scroll() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Plain</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("window-save-state", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 5,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_insert_text("!").unwrap());
+        let selection = match &document.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.selection_range().unwrap(),
+            _ => unreachable!(),
+        };
+        let output = test_fixtures::write_docx("window-save-state-output", b"sentinel");
+        let mut viewer = Viewer::new(document, RenderContext::new()).unwrap();
+        viewer.save_target = Some(output.clone());
+        viewer.scroll = 73.0;
+
+        assert_eq!(viewer.save_and_verify().unwrap(), output);
+        assert_eq!(viewer.document.source, source);
+        assert_eq!(viewer.scroll, 73.0);
+        assert!(viewer.document.has_text_caret());
+        let after = match &viewer.document.reference {
+            ReferenceDocument::Docx(reference) => {
+                assert!(!reference.editor.is_dirty());
+                assert!(reference.editor.editing_state().unwrap().can_undo);
+                reference.editor.selection_range().unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(after, selection);
+        assert!(viewer.document.docx_undo().unwrap());
+        assert!(viewer.document.is_dirty());
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn failed_reopen_is_reported_as_save_verification_failure() {
+        let bytes = test_fixtures::editing_docx(
+            r#"<w:p w14:paraId="11111111"><w:r><w:t>Plain</w:t></w:r></w:p>"#,
+        );
+        let source = test_fixtures::write_docx("window-save-verification", &bytes);
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        document
+            .docx_select_point(
+                TextLoc {
+                    para_id: "11111111".to_owned(),
+                    offset: 5,
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert!(document.docx_insert_text("!").unwrap());
+        let output = test_fixtures::write_docx("window-save-verification-output", b"sentinel");
+        let invalid_output = output.with_extension("invalid");
+        std::fs::rename(&output, &invalid_output).unwrap();
+        let mut viewer = Viewer::new(document, RenderContext::new()).unwrap();
+        viewer.save_target = Some(invalid_output.clone());
+
+        viewer.save_with_status();
+        let message = &viewer.status_message.as_ref().unwrap().text;
+        assert!(
+            message.starts_with("Save verification failed:"),
+            "{message}"
+        );
+        assert!(!message.starts_with("Save refused:"), "{message}");
+        assert_ne!(std::fs::read(&invalid_output).unwrap(), b"sentinel");
+        assert_eq!(viewer.document.source, source);
+        assert!(viewer.document.has_text_caret());
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_file(invalid_output).unwrap();
     }
 
     #[test]
