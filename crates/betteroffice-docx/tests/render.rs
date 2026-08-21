@@ -240,10 +240,8 @@ fn renders_text_only_once_its_family_is_registered() {
     let rendered = document.render_png(&text_page(), 0).unwrap();
     assert_eq!(&rendered.bytes[..8], PNG_MAGIC);
     let (_, _, pixels) = decode(&rendered.bytes);
-    let painted = pixels
-        .chunks_exact(4)
-        .filter(|p| *p != [255, 255, 255, 255])
-        .count();
+    let (quads, _) = pixels.as_chunks::<4>();
+    let painted = quads.iter().filter(|p| **p != [255, 255, 255, 255]).count();
     assert!(painted > 0, "no glyphs were painted");
 }
 
