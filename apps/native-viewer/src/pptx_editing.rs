@@ -1,13 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use betteroffice_pptx::{
-    DeckSnapshot, EditCtx, HitTestResult, ModelTextRun, ParagraphProperties, ParagraphSnapshot,
-    PptxPackage, Presentation, Primitive, RenderedSlide, RunProperties, ShapeNode, ShapeSnapshot,
-    StorySnapshot, TextBody, TextStyle, Transform,
+    CaretAnchor, DeckSnapshot, EditCtx, HitTestResult, ModelTextRun, ParagraphProperties,
+    ParagraphSnapshot, PptxPackage, Presentation, Primitive, RenderedSlide, RunProperties,
+    ShapeNode, ShapeSnapshot, StorySnapshot, TextBody, TextStyle, Transform, UpdateOrigin,
+    UpdateSubscription,
 };
+use sha2::{Digest, Sha256};
 use vello::kurbo::{Affine, Point};
 
 use crate::editing::{DeleteDirection, MoveDirection};
@@ -46,6 +49,11 @@ pub struct PptxEditChange {
     pub page: PageScene,
 }
 
+pub enum PptxRemoteChange {
+    Slides(Vec<PptxEditChange>),
+    All(Vec<PageScene>),
+}
+
 #[derive(Clone, Debug)]
 struct PptxCaret {
     slide_index: usize,
@@ -56,6 +64,8 @@ struct PptxCaret {
 }
 
 pub struct PptxEditor {
+    _local_update_subscription: Option<UpdateSubscription>,
+    local_updates: Arc<Mutex<VecDeque<Vec<u8>>>>,
     presentation: Presentation,
     resources: PptxSceneResources,
     rendered: Vec<RenderedSlide>,
@@ -63,10 +73,15 @@ pub struct PptxEditor {
     baseline: DeckSnapshot,
     saved_snapshot: DeckSnapshot,
     source: Vec<u8>,
+    source_fingerprint: Option<[u8; 32]>,
     caret: Option<PptxCaret>,
     vertical_goal_x: Option<f32>,
     dirty: bool,
+    local_dirty: bool,
+    remote_dirty: bool,
     max_texture_dimension_2d: u32,
+    #[cfg(test)]
+    relayout_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -79,7 +94,26 @@ type EditedSlides = BTreeMap<String, BTreeMap<u32, Vec<StoryChange>>>;
 
 impl PptxEditor {
     pub fn open(source: Vec<u8>, max_texture_dimension_2d: u32) -> Result<(Self, Vec<PageScene>)> {
-        let mut presentation = Presentation::open(&source)?;
+        Self::open_internal(source, max_texture_dimension_2d, None)
+    }
+
+    pub fn open_collaborative(
+        source: Vec<u8>,
+        max_texture_dimension_2d: u32,
+        client_id: u64,
+    ) -> Result<(Self, Vec<PageScene>)> {
+        Self::open_internal(source, max_texture_dimension_2d, Some(client_id))
+    }
+
+    fn open_internal(
+        source: Vec<u8>,
+        max_texture_dimension_2d: u32,
+        collaboration_client_id: Option<u64>,
+    ) -> Result<(Self, Vec<PageScene>)> {
+        let mut presentation = match collaboration_client_id {
+            Some(client_id) => Presentation::open_collaborative(&source, client_id),
+            None => Presentation::open(&source),
+        }?;
         let slide_count = presentation.slides().len();
         let model_slide_count = presentation.model().slides.len();
         if slide_count != model_slide_count {
@@ -102,8 +136,25 @@ impl PptxEditor {
             summaries.push(summary);
             pages.push(page);
         }
+        let source_fingerprint = collaboration_client_id.map(|_| Sha256::digest(&source).into());
+        let local_updates = Arc::new(Mutex::new(VecDeque::new()));
+        let local_update_subscription = if collaboration_client_id.is_some() {
+            let observed = Arc::clone(&local_updates);
+            Some(presentation.observe_update_v1(move |event| {
+                if event.origin == UpdateOrigin::Local {
+                    observed
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push_back(event.update);
+                }
+            })?)
+        } else {
+            None
+        };
         Ok((
             Self {
+                _local_update_subscription: local_update_subscription,
+                local_updates,
                 presentation,
                 resources,
                 rendered,
@@ -111,10 +162,15 @@ impl PptxEditor {
                 saved_snapshot: baseline.clone(),
                 baseline,
                 source,
+                source_fingerprint,
                 caret: None,
                 vertical_goal_x: None,
                 dirty: false,
+                local_dirty: false,
+                remote_dirty: false,
                 max_texture_dimension_2d,
+                #[cfg(test)]
+                relayout_count: 0,
             },
             pages,
         ))
@@ -142,6 +198,100 @@ impl PptxEditor {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn is_remote_only_dirty(&self) -> bool {
+        self.dirty && self.remote_dirty && !self.local_dirty
+    }
+
+    pub fn state_vector(&self) -> Result<Vec<u8>> {
+        self.source_fingerprint
+            .context("collaboration is unavailable for this presentation")?;
+        Ok(self.presentation.encode_state_vector_v1())
+    }
+
+    pub fn encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
+        self.source_fingerprint
+            .context("collaboration is unavailable for this presentation")?;
+        Ok(self.presentation.encode_diff_v1(state_vector)?)
+    }
+
+    pub fn drain_local_updates(&self) -> Vec<Vec<u8>> {
+        self.local_updates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    pub fn source_fingerprint(&self) -> Result<[u8; 32]> {
+        self.source_fingerprint
+            .context("collaboration is unavailable for this presentation")
+    }
+
+    pub fn canonical_checksum(&self) -> Result<[u8; 32]> {
+        let mut checksum = Sha256::new();
+        checksum.update(b"betteroffice-native-pptx-deck-v1\0");
+        checksum.update(self.presentation.save()?);
+        Ok(checksum.finalize().into())
+    }
+
+    pub fn apply_remote_update(&mut self, update: &[u8]) -> Result<Option<PptxRemoteChange>> {
+        self.source_fingerprint
+            .context("collaboration is unavailable for this presentation")?;
+        let before = self.presentation.snapshot()?;
+        let caret = self.caret.clone();
+        let caret_anchor = caret
+            .as_ref()
+            .map(|caret| {
+                self.presentation
+                    .anchor_caret(&caret.story_id, caret.position)
+            })
+            .transpose()?;
+        let preferred_y = caret.as_ref().and_then(|caret| {
+            caret_placement(
+                self.rendered.get(caret.slide_index)?,
+                caret,
+                Some(caret.line_index),
+            )
+            .map(|placement| placement.y)
+        });
+        let after = self.presentation.apply_update_v1(update)?;
+        if before == after {
+            return Ok(None);
+        }
+        let rebuilt = before.slides.len() != after.slides.len()
+            || before
+                .slides
+                .iter()
+                .zip(&after.slides)
+                .any(|(left, right)| left.id != right.id);
+        let change = if rebuilt {
+            PptxRemoteChange::All(self.relayout_all()?)
+        } else {
+            let mut changes = Vec::new();
+            for (slide_index, (left, right)) in before.slides.iter().zip(&after.slides).enumerate()
+            {
+                if left != right {
+                    changes.push(self.relayout_slide(slide_index)?);
+                }
+            }
+            PptxRemoteChange::Slides(changes)
+        };
+        self.restore_caret(caret, caret_anchor, preferred_y, &after);
+        self.remote_dirty = true;
+        self.vertical_goal_x = None;
+        self.update_dirty()?;
+        Ok(Some(change))
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<DeckSnapshot> {
+        Ok(self.presentation.snapshot()?)
+    }
+
+    #[cfg(test)]
+    pub fn relayout_count(&self) -> usize {
+        self.relayout_count
     }
 
     pub fn has_caret(&self) -> bool {
@@ -205,6 +355,42 @@ impl PptxEditor {
         });
         self.vertical_goal_x = None;
         true
+    }
+
+    pub(crate) fn select_story_position(&mut self, story_id: &str, position: u32) -> Result<bool> {
+        self.presentation.anchor_caret(story_id, position)?;
+        for (slide_index, rendered) in self.rendered.iter().enumerate() {
+            for primitive in &rendered.display_list.primitives {
+                let Primitive::TextBox {
+                    shape_id: Some(shape_id),
+                    story_id: Some(candidate_story),
+                    lines,
+                    ..
+                } = primitive
+                else {
+                    continue;
+                };
+                if candidate_story != story_id {
+                    continue;
+                }
+                if let Some(line_index) = lines.iter().position(|line| {
+                    line.caret_stops
+                        .iter()
+                        .any(|stop| stop.position == position)
+                }) {
+                    self.caret = Some(PptxCaret {
+                        slide_index,
+                        shape_id: shape_id.clone(),
+                        story_id: story_id.to_owned(),
+                        position,
+                        line_index,
+                    });
+                    self.vertical_goal_x = None;
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn clear_caret(&mut self) -> bool {
@@ -369,6 +555,7 @@ impl PptxEditor {
         if !self.presentation.undo() {
             return Ok(None);
         }
+        self.local_dirty = true;
         self.clear_caret();
         self.relayout_all().map(Some)
     }
@@ -377,6 +564,7 @@ impl PptxEditor {
         if !self.presentation.redo() {
             return Ok(None);
         }
+        self.local_dirty = true;
         self.clear_caret();
         self.relayout_all().map(Some)
     }
@@ -395,6 +583,8 @@ impl PptxEditor {
         fs::write(path, saved).with_context(|| format!("write PPTX {}", path.display()))?;
         self.saved_snapshot = current;
         self.dirty = false;
+        self.local_dirty = false;
+        self.remote_dirty = false;
         Ok(())
     }
 
@@ -425,6 +615,7 @@ impl PptxEditor {
         self.summaries[slide_index] = summary;
         self.caret = Some(caret);
         self.vertical_goal_x = None;
+        self.local_dirty = true;
         self.update_dirty()?;
         Ok(PptxEditChange {
             page_index: slide_index,
@@ -433,8 +624,11 @@ impl PptxEditor {
     }
 
     fn relayout_all(&mut self) -> Result<Vec<PageScene>> {
-        let mut pages = Vec::with_capacity(self.rendered.len());
-        for slide_index in 0..self.rendered.len() {
+        let slide_count = self.presentation.snapshot()?.slides.len();
+        let mut rendered_slides = Vec::with_capacity(slide_count);
+        let mut summaries = Vec::with_capacity(slide_count);
+        let mut pages = Vec::with_capacity(slide_count);
+        for slide_index in 0..slide_count {
             let rendered = self
                 .presentation
                 .render_slide(slide_index)
@@ -442,12 +636,72 @@ impl PptxEditor {
             let (page, summary) = self
                 .resources
                 .translate(&rendered.display_list, self.max_texture_dimension_2d)?;
-            self.rendered[slide_index] = rendered;
-            self.summaries[slide_index] = summary;
+            rendered_slides.push(rendered);
+            summaries.push(summary);
             pages.push(page);
+            #[cfg(test)]
+            {
+                self.relayout_count += 1;
+            }
         }
+        self.rendered = rendered_slides;
+        self.summaries = summaries;
         self.update_dirty()?;
         Ok(pages)
+    }
+
+    fn relayout_slide(&mut self, slide_index: usize) -> Result<PptxEditChange> {
+        let rendered = self
+            .presentation
+            .render_slide(slide_index)
+            .with_context(|| format!("relayout PPTX slide {}", slide_index + 1))?;
+        let (page, summary) = self
+            .resources
+            .translate(&rendered.display_list, self.max_texture_dimension_2d)?;
+        self.rendered[slide_index] = rendered;
+        self.summaries[slide_index] = summary;
+        #[cfg(test)]
+        {
+            self.relayout_count += 1;
+        }
+        Ok(PptxEditChange {
+            page_index: slide_index,
+            page,
+        })
+    }
+
+    fn restore_caret(
+        &mut self,
+        caret: Option<PptxCaret>,
+        anchor: Option<CaretAnchor>,
+        preferred_y: Option<f32>,
+        snapshot: &DeckSnapshot,
+    ) {
+        let (Some(mut caret), Some(anchor)) = (caret, anchor) else {
+            return;
+        };
+        let Some(position) = self.presentation.resolve_caret_anchor(&anchor) else {
+            self.caret = None;
+            return;
+        };
+        let Some((slide_index, shape_id)) =
+            story_location(snapshot, &caret.story_id, &caret.shape_id)
+        else {
+            self.caret = None;
+            return;
+        };
+        caret.slide_index = slide_index;
+        caret.shape_id = shape_id;
+        caret.position = position;
+        let placement = preferred_y
+            .and_then(|y| placement_near_y(&self.rendered[slide_index], &caret, y))
+            .or_else(|| caret_placement(&self.rendered[slide_index], &caret, None));
+        let Some(placement) = placement else {
+            self.caret = None;
+            return;
+        };
+        caret.line_index = placement.line_index;
+        self.caret = Some(caret);
     }
 
     fn update_dirty(&mut self) -> Result<()> {
@@ -501,6 +755,40 @@ fn text_box<'a>(
             }),
             _ => None,
         })
+}
+
+fn story_location(
+    snapshot: &DeckSnapshot,
+    story_id: &str,
+    preferred_shape_id: &str,
+) -> Option<(usize, String)> {
+    snapshot
+        .slides
+        .iter()
+        .enumerate()
+        .find_map(|(slide_index, slide)| {
+            shape_for_story(&slide.shapes, story_id, Some(preferred_shape_id))
+                .or_else(|| shape_for_story(&slide.shapes, story_id, None))
+                .map(|shape_id| (slide_index, shape_id.to_owned()))
+        })
+}
+
+fn shape_for_story<'a>(
+    shapes: &'a [ShapeSnapshot],
+    story_id: &str,
+    preferred_shape_id: Option<&str>,
+) -> Option<&'a str> {
+    for shape in shapes {
+        if preferred_shape_id.is_none_or(|preferred| preferred == shape.id)
+            && shape.text_stories.iter().any(|story| story.id == story_id)
+        {
+            return Some(&shape.id);
+        }
+        if let Some(shape_id) = shape_for_story(&shape.children, story_id, preferred_shape_id) {
+            return Some(shape_id);
+        }
+    }
+    None
 }
 
 fn primitive_transform(x: f32, y: f32, w: f32, h: f32, transform: Transform) -> Affine {

@@ -168,15 +168,12 @@ impl Options {
         })
     }
 
-    fn collaboration(&self, format: DocumentFormat) -> Result<Option<CollaborationConfig>> {
+    fn collaboration(&self, _format: DocumentFormat) -> Result<Option<CollaborationConfig>> {
         let Some(room) = &self.room else {
             return Ok(None);
         };
         if self.png.is_some() {
             bail!("--room requires the interactive viewer");
-        }
-        if format == DocumentFormat::Pptx {
-            bail!("--room is available only for DOCX and XLSX");
         }
         CollaborationConfig::new(room.clone(), &self.relay_origin).map(Some)
     }
@@ -267,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn room_options_enable_only_interactive_docx_and_xlsx_collaboration() {
+    fn room_options_enable_interactive_collaboration_for_every_format() {
         let options = Options::parse_from([
             "--document".into(),
             "document.docx".into(),
@@ -283,7 +280,7 @@ mod tests {
             .unwrap();
         assert_eq!(collaboration.room(), "shared");
         assert!(options.collaboration(DocumentFormat::Xlsx).is_ok());
-        assert!(options.collaboration(DocumentFormat::Pptx).is_err());
+        assert!(options.collaboration(DocumentFormat::Pptx).is_ok());
 
         let export = Options::parse_from([
             "--document".into(),

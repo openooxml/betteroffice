@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use betteroffice_pptx::ShapeSnapshot;
 use betteroffice_xlsx::{CellRef, SheetId};
 use docx_edit::story_checksum;
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,13 @@ enum PeerCommand {
         col: u32,
         input: String,
     },
+    InsertPptx {
+        id: u64,
+        #[serde(rename = "storyId")]
+        story_id: String,
+        index: u32,
+        text: String,
+    },
     Disconnect {
         id: u64,
     },
@@ -54,6 +62,7 @@ impl PeerCommand {
             Self::Snapshot { id }
             | Self::Insert { id, .. }
             | Self::SetCell { id, .. }
+            | Self::InsertPptx { id, .. }
             | Self::Disconnect { id }
             | Self::Reconnect { id }
             | Self::Shutdown { id } => *id,
@@ -87,6 +96,7 @@ struct PeerSnapshot {
     stories: Vec<StoryState>,
     paragraphs: Vec<ParagraphState>,
     cells: Vec<CellState>,
+    pptx_stories: Vec<PptxStoryState>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +121,16 @@ struct CellState {
     col: u32,
     a1: String,
     input: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PptxStoryState {
+    slide: usize,
+    shape_id: String,
+    story_id: String,
+    length: u32,
+    text: String,
 }
 
 struct Connection {
@@ -243,11 +263,30 @@ fn apply_command(
                 bail!("native setCell requires XLSX");
             };
             if reference.editor.sheet() != SheetId(sheet) {
-                bail!("native peer has not opened sheet {}", sheet.saturating_add(1));
+                bail!(
+                    "native peer has not opened sheet {}",
+                    sheet.saturating_add(1)
+                );
             }
             document.xlsx_select_cell(CellRef::new(row, col));
             if !document.xlsx_begin_edit(Some(&input))? || !document.xlsx_commit(None)? {
                 bail!("native cell edit made no change");
+            }
+            if let Some(active) = connection {
+                collaboration_document::forward_local_updates(document, &mut active.client);
+            }
+        }
+        PeerCommand::InsertPptx {
+            story_id,
+            index,
+            text,
+            ..
+        } => {
+            if !document.pptx_select_story_position(&story_id, index)? {
+                bail!("native PPTX story position is not rendered");
+            }
+            if !document.pptx_insert_text(&text)? {
+                bail!("native PPTX insert made no change");
             }
             if let Some(active) = connection {
                 collaboration_document::forward_local_updates(document, &mut active.client);
@@ -272,7 +311,7 @@ fn snapshot(document: &DocumentView, connection: Option<&Connection>) -> Result<
     match &document.reference {
         ReferenceDocument::Docx(reference) => snapshot_docx(document, reference, connection),
         ReferenceDocument::Xlsx(reference) => snapshot_xlsx(document, reference, connection),
-        ReferenceDocument::Pptx(_) => bail!("collaboration test peer does not support PPTX"),
+        ReferenceDocument::Pptx(reference) => snapshot_pptx(document, reference, connection),
     }
 }
 
@@ -320,6 +359,7 @@ fn snapshot_docx(
         stories,
         paragraphs,
         cells: Vec::new(),
+        pptx_stories: Vec::new(),
     })
 }
 
@@ -351,7 +391,44 @@ fn snapshot_xlsx(
         stories: Vec::new(),
         paragraphs: Vec::new(),
         cells,
+        pptx_stories: Vec::new(),
     })
+}
+
+fn snapshot_pptx(
+    document: &DocumentView,
+    reference: &crate::document::PptxReference,
+    connection: Option<&Connection>,
+) -> Result<PeerSnapshot> {
+    let snapshot = reference.editor.snapshot()?;
+    let mut pptx_stories = Vec::new();
+    for (slide, snapshot) in snapshot.slides.iter().enumerate() {
+        collect_pptx_stories(&mut pptx_stories, slide, &snapshot.shapes);
+    }
+    Ok(PeerSnapshot {
+        format: "pptx",
+        connected: connection.is_some_and(|active| active.client.is_connected()),
+        synced: connection.is_some_and(|active| active.client.is_synced()),
+        state_vector: hex(&document.collaboration_state_vector()?),
+        canonical_checksum: hex(&reference.editor.canonical_checksum()?),
+        stories: Vec::new(),
+        paragraphs: Vec::new(),
+        cells: Vec::new(),
+        pptx_stories,
+    })
+}
+
+fn collect_pptx_stories(target: &mut Vec<PptxStoryState>, slide: usize, shapes: &[ShapeSnapshot]) {
+    for shape in shapes {
+        target.extend(shape.text_stories.iter().map(|story| PptxStoryState {
+            slide,
+            shape_id: shape.id.clone(),
+            story_id: story.id.clone(),
+            length: story.length,
+            text: story.plain_text(),
+        }));
+        collect_pptx_stories(target, slide, &shape.children);
+    }
 }
 
 fn canonical_checksum(stories: &[StoryState]) -> String {

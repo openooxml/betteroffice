@@ -29,6 +29,14 @@ function concat(...parts: Uint8Array[]): Uint8Array {
   return output;
 }
 
+function fingerprinted(payload: Uint8Array): Uint8Array {
+  return concat(
+    payload,
+    new TextEncoder().encode('\0betteroffice-document-fingerprint-v1\0'),
+    new Uint8Array(32).fill(0x5a)
+  );
+}
+
 function sentMessageTypes(transport: FakeTransport): string[] {
   return transport.sent.flatMap((frame) => decodeMessages(frame).map((message) => message.type));
 }
@@ -237,6 +245,26 @@ describe('CollaborationProvider sync', () => {
     const { provider, replica, transport } = open();
     transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
     expect(replica.applied).toEqual([Uint8Array.of(4)]);
+    expect(provider.synced).toBe(true);
+  });
+
+  it('strips native document fingerprints before calling the strict PPTX replica', () => {
+    const { provider, replica, transport } = open();
+    transport.emit({
+      type: 'message',
+      data: encodeSyncStep1(fingerprinted(Uint8Array.of(9, 10))),
+    });
+    transport.emit({
+      type: 'message',
+      data: encodeSyncStep2(fingerprinted(Uint8Array.of(4))),
+    });
+    transport.emit({
+      type: 'message',
+      data: encodeUpdate(fingerprinted(Uint8Array.of(5))),
+    });
+
+    expect(replica.remoteStateVectors).toEqual([Uint8Array.of(9, 10)]);
+    expect(replica.applied).toEqual([Uint8Array.of(4), Uint8Array.of(5)]);
     expect(provider.synced).toBe(true);
   });
 

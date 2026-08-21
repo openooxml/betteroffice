@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 
 import { createRoomTransport } from '../../demo/app/collab/createRoomTransport';
 import { CollaborationProvider } from '../../../packages/docx/src/collaboration/provider';
+import type { PresentationHandle } from '../../../packages/pptx/src';
 import type { YrsSession } from '../../../packages/docx/src/yrs';
 import type { WorkbookHandle } from '../../../packages/xlsx/src';
 
@@ -19,6 +20,9 @@ const WASM = resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.w
 const XLSX_DOCUMENT = resolve(ROOT, 'apps/demo/public/showcase.xlsx');
 const XLSX_SEED = resolve(ROOT, 'apps/demo/public/seeds/xlsx.bin');
 const XLSX_WASM = resolve(ROOT, 'packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
+const PPTX_DOCUMENT = resolve(ROOT, 'apps/demo/public/betteroffice-demo.pptx');
+const PPTX_SEED = resolve(ROOT, 'apps/demo/public/seeds/pptx.bin');
+const PPTX_WASM = resolve(ROOT, 'packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm');
 const WRANGLER_HOME = resolve(tmpdir(), `betteroffice-wrangler-${process.pid}`);
 
 interface StoryState {
@@ -32,7 +36,7 @@ interface ParagraphState {
 }
 
 interface NativeSnapshot {
-  format: 'docx' | 'xlsx';
+  format: 'docx' | 'xlsx' | 'pptx';
   connected: boolean;
   synced: boolean;
   stateVector: string;
@@ -40,6 +44,7 @@ interface NativeSnapshot {
   stories: StoryState[];
   paragraphs: ParagraphState[];
   cells: XlsxCellState[];
+  pptxStories: PptxStoryState[];
 }
 
 interface XlsxCellState {
@@ -48,6 +53,14 @@ interface XlsxCellState {
   col: number;
   a1: string;
   input: string;
+}
+
+interface PptxStoryState {
+  slide: number;
+  shapeId: string;
+  storyId: string;
+  length: number;
+  text: string;
 }
 
 interface NativeResponse {
@@ -119,6 +132,10 @@ class NativePeer {
   async command(
     command: 'setCell',
     fields: { sheet: number; row: number; col: number; input: string },
+  ): Promise<NativeSnapshot>;
+  async command(
+    command: 'insertPptx',
+    fields: { storyId: string; index: number; text: string },
   ): Promise<NativeSnapshot>;
   async command(
     command: string,
@@ -369,6 +386,20 @@ function xlsxCanonicalChecksum(workbook: WorkbookHandle): string {
   return checksum.digest('hex');
 }
 
+function pptxStoryText(presentation: PresentationHandle, storyId: string): string {
+  return presentation
+    .story(storyId)
+    .paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
+    .join('\n');
+}
+
+function pptxCanonicalChecksum(presentation: PresentationHandle): string {
+  const checksum = createHash('sha256');
+  checksum.update('betteroffice-native-pptx-deck-v1\0');
+  checksum.update(presentation.save());
+  return checksum.digest('hex');
+}
+
 async function waitUntil(
   assertion: () => boolean | Promise<boolean>,
   label: string,
@@ -436,6 +467,27 @@ async function assertXlsxConverged(
   expect(native.stateVector).toBe(hex(workbook.encodeStateVector()));
   console.log(
     `${label}: checksum ${native.canonicalChecksum}, ${native.cells.length} populated cells, identical state vector`,
+  );
+  return native;
+}
+
+async function assertPptxConverged(
+  peer: NativePeer,
+  presentation: PresentationHandle,
+  label: string,
+): Promise<NativeSnapshot> {
+  let native = await peer.command('snapshot');
+  await waitUntil(async () => {
+    native = await peer.command('snapshot');
+    return (
+      native.canonicalChecksum === pptxCanonicalChecksum(presentation) &&
+      native.stateVector === hex(presentation.encodeStateVector())
+    );
+  }, `${label} convergence`);
+  expect(native.canonicalChecksum).toBe(pptxCanonicalChecksum(presentation));
+  expect(native.stateVector).toBe(hex(presentation.encodeStateVector()));
+  console.log(
+    `${label}: checksum ${native.canonicalChecksum}, ${native.pptxStories.length} text stories, identical state vector`,
   );
   return native;
 }
@@ -718,6 +770,162 @@ test('native XLSX and the production TypeScript provider converge through the re
     provider?.destroy();
     transport?.disconnect();
     workbook?.dispose();
+    await native?.stop();
+    await stopRelay(relay.relay);
+    await rm(WRANGLER_HOME, { recursive: true, force: true });
+  }
+}, 600_000);
+
+test('native PPTX and the production TypeScript provider converge through the relay', async () => {
+  await runChecked([process.execPath, resolve(ROOT, 'scripts/build-pptx-wasm.ts')], ROOT);
+  const [{ initWasm, openPresentation }, { CollaborationProvider: PptxCollaborationProvider }] =
+    await Promise.all([
+      import('../../../packages/pptx/src/index'),
+      import('../../../packages/pptx/src/collaboration/provider'),
+    ]);
+  await initWasm(new Uint8Array(await readFile(PPTX_WASM)));
+
+  const port = await availablePort();
+  const relay = await startRelay(port);
+  const room = `native-typescript-pptx-${randomUUID()}`;
+  let native: NativePeer | null = null;
+  let presentation: PresentationHandle | null = null;
+  let provider: InstanceType<typeof PptxCollaborationProvider> | null = null;
+  let transport: ReturnType<typeof createRoomTransport> | null = null;
+  const providerErrors: string[] = [];
+
+  try {
+    native = new NativePeer(relay.origin, room, PPTX_DOCUMENT);
+    let nativeState = await waitForNative(
+      native,
+      (snapshot) => snapshot.connected,
+      'native PPTX relay connection',
+    );
+    expect(nativeState.format).toBe('pptx');
+    const target = nativeState.pptxStories.find((story) => story.length > 1);
+    if (!target) throw new Error('native PPTX has no editable text story');
+    const typescriptTarget = nativeState.pptxStories.find(
+      (story) => story.storyId !== target.storyId && story.length > 1,
+    );
+    if (!typescriptTarget) throw new Error('native PPTX has no second editable text story');
+    const nativeBeforeJoin = ' [native before join]';
+    nativeState = await native.command('insertPptx', {
+      storyId: target.storyId,
+      index: target.text.length,
+      text: nativeBeforeJoin,
+    });
+    expect(nativeState.pptxStories.find((story) => story.storyId === target.storyId)?.text).toContain(
+      nativeBeforeJoin,
+    );
+    nativeState = await native.command('disconnect');
+    expect(nativeState.connected).toBe(false);
+    await Bun.sleep(100);
+
+    presentation = openPresentation(new Uint8Array(await readFile(PPTX_DOCUMENT)), {
+      clientId: 2_147_400_003,
+      initialUpdate: new Uint8Array(await readFile(PPTX_SEED)),
+    });
+    transport = createRoomTransport(relay.origin, room);
+    provider = new PptxCollaborationProvider(presentation, transport);
+    provider.onError((error) => providerErrors.push(error.message));
+    provider.connect();
+
+    await waitUntil(
+      () => pptxStoryText(presentation!, target.storyId).includes(nativeBeforeJoin),
+      'joining TypeScript PPTX peer to receive populated room state',
+    );
+    expect(provider.synced).toBe(false);
+    expect(providerErrors).toEqual([]);
+    console.log('PPTX join replay: TypeScript model received native pre-join text');
+
+    await native.command('reconnect');
+    nativeState = await waitForNative(
+      native,
+      (snapshot) => snapshot.connected && snapshot.synced,
+      'native PPTX handshake after retained-state replay',
+    );
+    provider.disconnect();
+    provider.connect();
+    await waitUntil(() => provider?.synced === true, 'TypeScript PPTX handshake with native peer');
+
+    const nativeLive = ' [native live]';
+    const typescriptLive = ' [typescript live]';
+    const nativeTarget = nativeState.pptxStories.find(
+      (story) => story.storyId === target.storyId,
+    );
+    if (!nativeTarget) throw new Error('native PPTX target story disappeared');
+    const nativeEdit = native.command('insertPptx', {
+      storyId: target.storyId,
+      index: nativeTarget.text.length,
+      text: nativeLive,
+    });
+    presentation.insertText(typescriptTarget.storyId, 0, typescriptLive);
+    await nativeEdit;
+    await waitUntil(
+      () => pptxStoryText(presentation!, target.storyId).includes(nativeLive),
+      'TypeScript PPTX model to receive native live text',
+    );
+    nativeState = await waitForNative(
+      native,
+      (snapshot) =>
+        snapshot.pptxStories
+          .find((story) => story.storyId === typescriptTarget.storyId)
+          ?.text.includes(typescriptLive) === true,
+      'native PPTX model to receive TypeScript live text',
+    );
+    expect(pptxStoryText(presentation, target.storyId)).toContain(nativeBeforeJoin);
+    await assertPptxConverged(native, presentation, 'PPTX live edits');
+
+    nativeState = await native.command('disconnect');
+    expect(nativeState.connected).toBe(false);
+    const nativeOffline = ' [native offline]';
+    const typescriptOffline = ' [typescript while native offline]';
+    const offlineTarget = nativeState.pptxStories.find(
+      (story) => story.storyId === target.storyId,
+    );
+    if (!offlineTarget) throw new Error('native PPTX target story disappeared while offline');
+    nativeState = await native.command('insertPptx', {
+      storyId: target.storyId,
+      index: offlineTarget.text.length,
+      text: nativeOffline,
+    });
+    expect(
+      nativeState.pptxStories.find((story) => story.storyId === target.storyId)?.text,
+    ).toContain(nativeOffline);
+    expect(pptxStoryText(presentation, target.storyId)).not.toContain(nativeOffline);
+
+    presentation.insertText(typescriptTarget.storyId, 0, typescriptOffline);
+    await Bun.sleep(100);
+    nativeState = await native.command('snapshot');
+    expect(
+      nativeState.pptxStories.find((story) => story.storyId === typescriptTarget.storyId)?.text,
+    ).not.toContain(typescriptOffline);
+
+    await native.command('reconnect');
+    nativeState = await waitForNative(
+      native,
+      (snapshot) =>
+        snapshot.connected &&
+        snapshot.synced &&
+        snapshot.pptxStories
+          .find((story) => story.storyId === typescriptTarget.storyId)
+          ?.text.includes(typescriptOffline) === true,
+      'native PPTX reconnect and offline TypeScript text',
+    );
+    await waitUntil(
+      () => pptxStoryText(presentation!, target.storyId).includes(nativeOffline),
+      'TypeScript PPTX model to receive reconnected native text',
+    );
+    expect(
+      nativeState.pptxStories.find((story) => story.storyId === target.storyId)?.text,
+    ).toContain(nativeOffline);
+    expect(pptxStoryText(presentation, typescriptTarget.storyId)).toContain(typescriptOffline);
+    await assertPptxConverged(native, presentation, 'PPTX reconnected edits');
+    expect(providerErrors).toEqual([]);
+  } finally {
+    provider?.destroy();
+    transport?.disconnect();
+    presentation?.dispose();
     await native?.stop();
     await stopRelay(relay.relay);
     await rm(WRANGLER_HOME, { recursive: true, force: true });

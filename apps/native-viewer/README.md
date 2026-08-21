@@ -30,16 +30,17 @@ Open the interactive viewer:
 cargo run --release
 ```
 
-To collaborate on one DOCX or XLSX, open the same file and room ID in two terminals:
+To collaborate on one DOCX, XLSX, or PPTX, open the same file and room ID in two terminals:
 
 ```sh
 cargo run --release -- --document ../demo/public/betteroffice-demo.docx --room native-demo
 cargo run --release -- --document ../demo/public/showcase.xlsx --room native-sheet
+cargo run --release -- --document ../demo/public/betteroffice-demo.pptx --room native-slides
 ```
 
 Run that command once in each terminal. The default hosted relay can be replaced with `--relay-origin http://127.0.0.1:8787` or the `BETTEROFFICE_RELAY_ORIGIN` environment variable. The status line reports connecting, synced, peer count, and reconnect failures. Local edits made while disconnected remain in the document and are sent when the connection returns.
 
-Collaboration synchronizes the resident DOCX or XLSX state. Native body-text, supported character or paragraph formatting, and cell edits are broadcast; remote updates relayout the affected document or repaint the selected sheet. File paths, saved package bytes, viewport, local selection, and undo history are not shared. Awareness and presence are not wired: the native viewer answers awareness queries with an empty update and does not show or publish participant names, carets, or selections.
+Collaboration synchronizes the resident DOCX, XLSX, or PPTX state. Native body-text, supported character or paragraph formatting, cell edits, and slide-text edits are broadcast; remote updates relayout the affected document, repaint the selected sheet, or repaint the changed slide. File paths, saved package bytes, viewport, local selection, and undo history are not shared. Awareness and presence are not wired: the native viewer answers awareness queries with an empty update and does not show or publish participant names, carets, or selections.
 
 Run the native-to-TypeScript collaboration test from the repository root:
 
@@ -47,7 +48,7 @@ Run the native-to-TypeScript collaboration test from the repository root:
 bun test apps/native-viewer/tests/native_typescript_collaboration.test.ts
 ```
 
-The tests build the DOCX and XLSX Wasm artifacts when needed, start `apps/relay` locally with Wrangler, connect a headless native viewer peer through `--room`, and drive each format's production `CollaborationProvider`, engine replica, protocol implementation, and demo room transport directly from Bun. They prove retained-state joins, interleaved native and TypeScript edits, bidirectional offline edits after reconnect, identical canonical checksums, and identical state vectors. They are not part of the automatic root test run because they start a live relay and compile the native viewer.
+The tests build the DOCX, XLSX, and PPTX Wasm artifacts when needed, start `apps/relay` locally with Wrangler, connect a headless native viewer peer through `--room`, and drive each format's production `CollaborationProvider`, engine replica, protocol implementation, and demo room transport directly from Bun. They prove retained-state joins, interleaved native and TypeScript edits, bidirectional offline edits after reconnect, identical canonical checksums, and identical state vectors. They are not part of the automatic root test run because they start a live relay and compile the native viewer.
 
 This exercises the exact TypeScript collaboration module imported by the browser without UI behavior obscuring it. It is not browser-verified: it does not exercise the React editor's provider hookup, worker lifecycle, browser WebSocket implementation, or collaboration UI.
 

@@ -170,7 +170,7 @@ mod tests {
 
     use betteroffice_xlsx::{CalculationOptions, CellRef, Op, SheetId, Workbook};
     use tokio::sync::mpsc::Receiver;
-    use yrs::{Update, merge_updates_v1};
+    use yrs::{Any, Doc, Map, ReadTxn, StateVector, Transact, Update, merge_updates_v1};
 
     use super::*;
     use crate::collaboration::{CollaborationConfig, TransportCommand};
@@ -178,7 +178,10 @@ mod tests {
         MAX_MESSAGES_PER_FRAME, ProtocolMessage, decode_messages,
         encode_sync_step_1_with_fingerprint, encode_update_with_fingerprint,
     };
-    use crate::document::{load_collaborative_docx, load_collaborative_xlsx};
+    use crate::document::{
+        ReferenceDocument, load_collaborative_docx, load_collaborative_pptx,
+        load_collaborative_xlsx,
+    };
     use crate::editing::TextLoc;
     use crate::test_fixtures;
 
@@ -195,6 +198,10 @@ mod tests {
 
     fn showcase_path() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/showcase.xlsx")
+    }
+
+    fn presentation_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx")
     }
 
     #[test]
@@ -419,6 +426,108 @@ mod tests {
         let update = hostile
             .encode_diff_v1(&local.collaboration_state_vector().unwrap())
             .unwrap();
+        let frame =
+            encode_update_with_fingerprint(&update, &local.collaboration_fingerprint().unwrap())
+                .unwrap();
+        let before = local.collaboration_canonical_checksum().unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert!(
+            collaboration
+                .status_line()
+                .contains("invalid remote update")
+        );
+        assert_eq!(local.collaboration_canonical_checksum().unwrap(), before);
+    }
+
+    #[test]
+    fn mismatched_pptx_fingerprint_refuses_the_room_before_sync() {
+        let local_path = presentation_path();
+        let remote_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/pptx-parse/tests/fixtures/chart-deck.pptx");
+        let mut local = load_collaborative_pptx(&local_path, 8_192, 101).unwrap();
+        let remote = load_collaborative_pptx(&remote_path, 8_192, 202).unwrap();
+        let before = local.collaboration_canonical_checksum().unwrap();
+        let frame = encode_sync_step_1_with_fingerprint(
+            &remote.collaboration_state_vector().unwrap(),
+            &remote.collaboration_fingerprint().unwrap(),
+        )
+        .unwrap();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(!apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert!(collaboration.status_line().contains("fingerprint mismatch"));
+        assert_eq!(local.collaboration_canonical_checksum().unwrap(), before);
+    }
+
+    #[test]
+    fn one_pptx_frame_repaints_the_changed_slide_once() {
+        let source = presentation_path();
+        let mut local = load_collaborative_pptx(&source, 8_192, 101).unwrap();
+        let mut peer = load_collaborative_pptx(&source, 8_192, 202).unwrap();
+        let ReferenceDocument::Pptx(reference) = &peer.reference else {
+            unreachable!();
+        };
+        let story = reference
+            .editor
+            .snapshot()
+            .unwrap()
+            .slides
+            .into_iter()
+            .flat_map(|slide| slide.shapes)
+            .flat_map(|shape| shape.text_stories)
+            .find(|story| story.length > 1)
+            .unwrap();
+        assert!(
+            peer.pptx_select_story_position(&story.id, story.length - 1)
+                .unwrap()
+        );
+        assert!(peer.pptx_insert_text(" first").unwrap());
+        assert!(peer.pptx_insert_text(" second").unwrap());
+        let fingerprint = local.collaboration_fingerprint().unwrap();
+        let frame = peer
+            .collaboration_drain_local_updates()
+            .into_iter()
+            .flat_map(|update| encode_update_with_fingerprint(&update, &fingerprint).unwrap())
+            .collect::<Vec<_>>();
+        let before = local.collaboration_relayout_count();
+        let (mut collaboration, _commands) = detached(101);
+
+        assert!(apply_frame(&mut local, &mut collaboration, &frame).unwrap());
+        assert_eq!(local.collaboration_relayout_count(), before + 1);
+        let ReferenceDocument::Pptx(reference) = &local.reference else {
+            unreachable!();
+        };
+        assert!(
+            reference
+                .editor
+                .story(&story.id)
+                .unwrap()
+                .plain_text()
+                .contains(" first second")
+        );
+    }
+
+    #[test]
+    fn hostile_structural_pptx_frame_is_rolled_back() {
+        let source = presentation_path();
+        let mut local = load_collaborative_pptx(&source, 8_192, 101).unwrap();
+        let baseline = local
+            .collaboration_encode_diff(&StateVector::default().encode_v1())
+            .unwrap();
+        let hostile = Doc::with_client_id(202);
+        hostile
+            .transact_mut()
+            .apply_update(Update::decode_v1(&baseline).unwrap())
+            .unwrap();
+        let state_vector = hostile.transact().state_vector();
+        {
+            let mut transaction = hostile.transact_mut();
+            let meta = transaction.get_map("pptx:meta").unwrap();
+            meta.insert(&mut transaction, "schemaVersion", Any::Number(99.0));
+        }
+        let update = hostile.transact().encode_diff_v1(&state_vector);
         let frame =
             encode_update_with_fingerprint(&update, &local.collaboration_fingerprint().unwrap())
                 .unwrap();

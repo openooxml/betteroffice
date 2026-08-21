@@ -18,7 +18,7 @@ use crate::editing::{
 };
 use crate::fonts::FontRegistry;
 use crate::images::ImageRegistry;
-use crate::pptx_editing::{PptxEditChange, PptxEditor, PptxHit, PptxTextHit};
+use crate::pptx_editing::{PptxEditChange, PptxEditor, PptxHit, PptxRemoteChange, PptxTextHit};
 use crate::scene_shared::PageScene;
 use crate::xlsx_editing::{CellMove, XlsxEditor};
 use crate::xlsx_scene::translate_sheet;
@@ -257,7 +257,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => Ok(reference.editor.state_vector()),
             ReferenceDocument::Xlsx(reference) => reference.editor.state_vector(),
-            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+            ReferenceDocument::Pptx(reference) => reference.editor.state_vector(),
         }
     }
 
@@ -265,7 +265,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => reference.editor.encode_diff(state_vector),
             ReferenceDocument::Xlsx(reference) => reference.editor.encode_diff(state_vector),
-            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+            ReferenceDocument::Pptx(reference) => reference.editor.encode_diff(state_vector),
         }
     }
 
@@ -284,7 +284,26 @@ impl DocumentView {
                 }
                 Ok(changed)
             }
-            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+            ReferenceDocument::Pptx(_) => {
+                let change = {
+                    let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+                        unreachable!();
+                    };
+                    reference.editor.apply_remote_update(update)?
+                };
+                let Some(change) = change else {
+                    return Ok(false);
+                };
+                match change {
+                    PptxRemoteChange::Slides(changes) => {
+                        for change in changes {
+                            self.pages[change.page_index] = change.page;
+                        }
+                    }
+                    PptxRemoteChange::All(pages) => self.pages = pages,
+                }
+                Ok(true)
+            }
         }
     }
 
@@ -292,7 +311,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => reference.editor.drain_local_updates(),
             ReferenceDocument::Xlsx(reference) => reference.editor.drain_local_updates(),
-            ReferenceDocument::Pptx(_) => Vec::new(),
+            ReferenceDocument::Pptx(reference) => reference.editor.drain_local_updates(),
         }
     }
 
@@ -300,7 +319,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => Ok(reference.editor.source_fingerprint()),
             ReferenceDocument::Xlsx(reference) => reference.editor.source_fingerprint(),
-            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+            ReferenceDocument::Pptx(reference) => reference.editor.source_fingerprint(),
         }
     }
 
@@ -325,7 +344,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => reference.editor.canonical_checksum(),
             ReferenceDocument::Xlsx(reference) => reference.editor.canonical_checksum(),
-            ReferenceDocument::Pptx(_) => bail!("collaboration is unavailable for PPTX"),
+            ReferenceDocument::Pptx(reference) => reference.editor.canonical_checksum(),
         }
     }
 
@@ -334,7 +353,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => reference.editor.relayout_count(),
             ReferenceDocument::Xlsx(reference) => reference.editor.relayout_count(),
-            ReferenceDocument::Pptx(_) => 0,
+            ReferenceDocument::Pptx(reference) => reference.editor.relayout_count(),
         }
     }
 
@@ -397,7 +416,7 @@ impl DocumentView {
         match &self.reference {
             ReferenceDocument::Docx(reference) => reference.editor.is_remote_only_dirty(),
             ReferenceDocument::Xlsx(reference) => reference.editor.is_remote_only_dirty(),
-            ReferenceDocument::Pptx(_) => false,
+            ReferenceDocument::Pptx(reference) => reference.editor.is_remote_only_dirty(),
         }
     }
 
@@ -420,6 +439,17 @@ impl DocumentView {
             return false;
         };
         reference.editor.select_hit(hit)
+    }
+
+    pub(crate) fn pptx_select_story_position(
+        &mut self,
+        story_id: &str,
+        position: u32,
+    ) -> Result<bool> {
+        let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+            return Ok(false);
+        };
+        reference.editor.select_story_position(story_id, position)
     }
 
     pub fn pptx_clear_caret(&mut self) -> bool {
@@ -769,6 +799,18 @@ pub fn load_collaborative_xlsx(
     )
 }
 
+#[cfg(test)]
+pub fn load_collaborative_pptx(
+    path: &Path,
+    max_texture_dimension_2d: u32,
+    client_id: u64,
+) -> Result<DocumentView> {
+    if DocumentFormat::from_path(path)? != DocumentFormat::Pptx {
+        bail!("PPTX collaboration requires a .pptx deck");
+    }
+    load_pptx(path, max_texture_dimension_2d, Some(client_id))
+}
+
 pub fn load_collaborative_document(
     path: &Path,
     sheet_index: usize,
@@ -784,7 +826,7 @@ pub fn load_collaborative_document(
             true,
             Some(client_id),
         ),
-        DocumentFormat::Pptx => bail!("collaboration is unavailable for PPTX"),
+        DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d, Some(client_id)),
     }
 }
 
@@ -803,14 +845,23 @@ fn load_document_with_xlsx_mode(
             recalculate_xlsx,
             None,
         ),
-        DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d),
+        DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d, None),
     }
 }
 
-fn load_pptx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView> {
+fn load_pptx(
+    path: &Path,
+    max_texture_dimension_2d: u32,
+    collaboration_client_id: Option<u64>,
+) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read PPTX {}", path.display()))?;
-    let (editor, pages) = PptxEditor::open(bytes, max_texture_dimension_2d)
-        .with_context(|| format!("open PPTX {}", path.display()))?;
+    let (editor, pages) = match collaboration_client_id {
+        Some(client_id) => {
+            PptxEditor::open_collaborative(bytes, max_texture_dimension_2d, client_id)
+        }
+        None => PptxEditor::open(bytes, max_texture_dimension_2d),
+    }
+    .with_context(|| format!("open PPTX {}", path.display()))?;
     Ok(DocumentView {
         source: path.to_owned(),
         reference: ReferenceDocument::Pptx(Box::new(PptxReference { editor })),
@@ -1303,6 +1354,123 @@ mod tests {
             left.collaboration_state_vector().unwrap(),
             right.collaboration_state_vector().unwrap()
         );
+    }
+
+    #[test]
+    fn two_native_pptx_sessions_converge_after_interleaved_text_edits() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut left = load_collaborative_pptx(&source, 8_192, 101).unwrap();
+        let mut right = load_collaborative_pptx(&source, 8_192, 202).unwrap();
+        assert_eq!(
+            left.collaboration_fingerprint().unwrap(),
+            right.collaboration_fingerprint().unwrap()
+        );
+        complete_sync(&left, &mut right);
+        complete_sync(&right, &mut left);
+        let baseline = left.collaboration_canonical_checksum().unwrap();
+        assert_eq!(baseline, right.collaboration_canonical_checksum().unwrap());
+        let ReferenceDocument::Pptx(reference) = &left.reference else {
+            unreachable!();
+        };
+        let story = reference
+            .editor
+            .snapshot()
+            .unwrap()
+            .slides
+            .into_iter()
+            .flat_map(|slide| slide.shapes)
+            .flat_map(|shape| shape.text_stories)
+            .find(|story| story.length > 1)
+            .unwrap();
+        assert!(
+            left.pptx_select_story_position(&story.id, story.length - 1)
+                .unwrap()
+        );
+        assert!(
+            right
+                .pptx_select_story_position(&story.id, story.length - 1)
+                .unwrap()
+        );
+
+        assert!(left.pptx_insert_text(" LEFT").unwrap());
+        let left_first = framed_local_updates(&left);
+        assert!(right.pptx_insert_text(" RIGHT").unwrap());
+        let right_first = framed_local_updates(&right);
+        deliver_room_frames(&mut left, &right_first);
+        assert!(left.pptx_insert_text(" SECOND").unwrap());
+        let left_second = framed_local_updates(&left);
+        deliver_room_frames(&mut right, &left_first);
+        assert!(right.pptx_insert_text(" SECOND").unwrap());
+        let right_second = framed_local_updates(&right);
+        deliver_room_frames(&mut left, &right_second);
+        deliver_room_frames(&mut right, &left_second);
+        complete_sync(&left, &mut right);
+        complete_sync(&right, &mut left);
+
+        let (ReferenceDocument::Pptx(left_reference), ReferenceDocument::Pptx(right_reference)) =
+            (&left.reference, &right.reference)
+        else {
+            unreachable!();
+        };
+        assert_eq!(
+            left_reference.editor.snapshot().unwrap(),
+            right_reference.editor.snapshot().unwrap()
+        );
+        let left_checksum = left.collaboration_canonical_checksum().unwrap();
+        let right_checksum = right.collaboration_canonical_checksum().unwrap();
+        assert_ne!(left_checksum, baseline);
+        assert_eq!(left_checksum, right_checksum);
+        assert_eq!(
+            left.collaboration_state_vector().unwrap(),
+            right.collaboration_state_vector().unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_pptx_insertion_before_the_caret_preserves_its_logical_position() {
+        let source =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut local = load_collaborative_pptx(&source, 8_192, 101).unwrap();
+        let mut peer = load_collaborative_pptx(&source, 8_192, 202).unwrap();
+        let ReferenceDocument::Pptx(reference) = &local.reference else {
+            unreachable!();
+        };
+        let story = reference
+            .editor
+            .snapshot()
+            .unwrap()
+            .slides
+            .into_iter()
+            .flat_map(|slide| slide.shapes)
+            .flat_map(|shape| shape.text_stories)
+            .find(|story| story.length > 1)
+            .unwrap();
+        let caret_before = story.length - 1;
+        assert!(
+            local
+                .pptx_select_story_position(&story.id, caret_before)
+                .unwrap()
+        );
+        assert!(peer.pptx_select_story_position(&story.id, 0).unwrap());
+        let inserted = "Remote ";
+        assert!(peer.pptx_insert_text(inserted).unwrap());
+        let before_relayout = local.collaboration_relayout_count();
+
+        for update in peer.collaboration_drain_local_updates() {
+            assert!(local.collaboration_apply_remote_update(&update).unwrap());
+        }
+
+        let ReferenceDocument::Pptx(reference) = &local.reference else {
+            unreachable!();
+        };
+        assert_eq!(reference.editor.caret_story_id(), Some(story.id.as_str()));
+        assert_eq!(
+            reference.editor.caret_position(),
+            Some(caret_before + inserted.encode_utf16().count() as u32)
+        );
+        assert_eq!(local.collaboration_relayout_count(), before_relayout + 1);
+        assert!(local.caret_geometry().unwrap().is_some());
     }
 
     #[test]
