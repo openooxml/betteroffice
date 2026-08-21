@@ -6,6 +6,7 @@ mod editing;
 mod fonts;
 mod gpu;
 mod images;
+mod pptx_editing;
 mod pptx_scene;
 mod scene_shared;
 #[cfg(test)]

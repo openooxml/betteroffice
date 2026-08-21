@@ -103,6 +103,74 @@ pub fn write_xlsx(label: &str, bytes: &[u8]) -> PathBuf {
     write_fixture(label, "xlsx", bytes)
 }
 
+pub fn write_pptx(label: &str, bytes: &[u8]) -> PathBuf {
+    write_fixture(label, "pptx", bytes)
+}
+
+pub fn signed_pptx() -> Vec<u8> {
+    let mut parts = demo_pptx_parts();
+    parts.push((
+        "_xmlsignatures/sig1.xml".to_owned(),
+        br#"<?xml version="1.0" encoding="UTF-8"?><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/>"#
+            .to_vec(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+pub fn transformed_pptx() -> Vec<u8> {
+    let mut parts = demo_pptx_parts();
+    let slide = parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    let mut xml = String::from_utf8(std::mem::take(&mut slide.1)).unwrap();
+    let marker = r#"<p:cNvPr id="3" name="Deck label"/>"#;
+    let marker_start = xml.find(marker).unwrap();
+    let transform_start = marker_start + xml[marker_start..].find("<a:xfrm").unwrap();
+    xml.insert_str(
+        transform_start + "<a:xfrm".len(),
+        r#" rot="1800000" flipH="1""#,
+    );
+    slide.1 = xml.into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+pub fn theme_linked_pptx() -> Vec<u8> {
+    let mut parts = demo_pptx_parts();
+    let slide = parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    let xml = String::from_utf8(std::mem::take(&mut slide.1)).unwrap();
+    let mut rewritten = String::with_capacity(xml.len());
+    let mut cursor = 0;
+    while let Some(offset) = xml[cursor..].find("<a:srgbClr") {
+        let start = cursor + offset;
+        let end = start + xml[start..].find("/>").unwrap() + 2;
+        rewritten.push_str(&xml[cursor..start]);
+        rewritten.push_str(r#"<a:schemeClr val="accent1"/>"#);
+        cursor = end;
+    }
+    rewritten.push_str(&xml[cursor..]);
+    slide.1 = rewritten.into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+pub fn language_neutral_pptx() -> Vec<u8> {
+    let mut parts = demo_pptx_parts();
+    let slide = parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    let xml = String::from_utf8(std::mem::take(&mut slide.1)).unwrap();
+    slide.1 = xml.replace(r#" lang="en-US""#, "").into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn demo_pptx_parts() -> Vec<(String, Vec<u8>)> {
+    ooxml_opc::unzip_parts(include_bytes!("../../demo/public/betteroffice-demo.pptx")).unwrap()
+}
+
 fn write_fixture(label: &str, extension: &str, bytes: &[u8]) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "betteroffice-native-viewer-{label}-{}-{}.{extension}",

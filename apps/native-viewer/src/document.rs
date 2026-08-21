@@ -3,21 +3,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use betteroffice_pptx::Presentation;
 use betteroffice_xlsx::CellRef;
 use docx_edit::{EngineSession, SimpleFormat, seed_from_docx};
 use docx_layout::display_list::DisplayList;
 use docx_parse::{S9PackageWire, S9ParseOptions, parse_docx_s9_wire};
 use serde_json::{Value, json};
+use vello::kurbo::Affine;
 
 use crate::chrome::{Alignment, EditingState};
 use crate::docx_scene::translate_document;
 use crate::editing::{
-    CaretGeometry, DeleteDirection, DocxEditor, MoveDirection, SceneChange, SelectionRect, TextLoc,
+    DeleteDirection, DocxEditor, MoveDirection, SceneChange, SelectionRect, TextLoc,
 };
 use crate::fonts::FontRegistry;
 use crate::images::ImageRegistry;
-use crate::pptx_scene::{PptxSlideSummary, translate_presentation};
+use crate::pptx_editing::{PptxEditChange, PptxEditor, PptxHit, PptxTextHit};
 use crate::scene_shared::PageScene;
 use crate::xlsx_editing::{CellMove, XlsxEditor};
 use crate::xlsx_scene::translate_sheet;
@@ -32,7 +32,7 @@ pub struct DocumentView {
 pub enum ReferenceDocument {
     Docx(Box<DocxReference>),
     Xlsx(Box<XlsxReference>),
-    Pptx(PptxReference),
+    Pptx(Box<PptxReference>),
 }
 
 pub struct DocxReference {
@@ -57,9 +57,16 @@ pub struct XlsxOverlay {
 }
 
 pub struct PptxReference {
-    pub slide_count: usize,
-    pub summaries: Vec<PptxSlideSummary>,
-    pub font_faces: Vec<String>,
+    pub editor: PptxEditor,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ViewerCaretGeometry {
+    pub page_index: usize,
+    pub x: f64,
+    pub y: f64,
+    pub height: f64,
+    pub transform: Affine,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,7 +112,9 @@ impl DocumentView {
                 reference.sheet_count,
                 reference.sheet_name
             ),
-            ReferenceDocument::Pptx(reference) => format!("{} slides", reference.slide_count),
+            ReferenceDocument::Pptx(reference) => {
+                format!("{} slides", reference.editor.slide_count())
+            }
         }
     }
 
@@ -126,7 +135,11 @@ impl DocumentView {
                 )
             }
             ReferenceDocument::Pptx(reference) => {
-                format!("Slide {} of {}", page_index + 1, reference.slide_count)
+                format!(
+                    "Slide {} of {}",
+                    page_index + 1,
+                    reference.editor.slide_count()
+                )
             }
         }
     }
@@ -138,7 +151,10 @@ impl DocumentView {
                 reference.editor.can_undo(),
                 reference.editor.can_redo(),
             )),
-            ReferenceDocument::Pptx(_) => Ok(EditingState::read_only()),
+            ReferenceDocument::Pptx(reference) => Ok(EditingState::editable_without_selection(
+                reference.editor.can_undo(),
+                reference.editor.can_redo(),
+            )),
         }
     }
 
@@ -215,23 +231,129 @@ impl DocumentView {
         reference.editor.selection_rects()
     }
 
-    pub fn docx_caret_geometry(&self) -> Result<Option<CaretGeometry>> {
-        let ReferenceDocument::Docx(reference) = &self.reference else {
-            return Ok(None);
-        };
-        reference.editor.caret_geometry()
+    pub fn caret_geometry(&self) -> Result<Option<ViewerCaretGeometry>> {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => {
+                Ok(reference
+                    .editor
+                    .caret_geometry()?
+                    .map(|caret| ViewerCaretGeometry {
+                        page_index: caret.page_index,
+                        x: caret.x,
+                        y: caret.y,
+                        height: caret.height,
+                        transform: Affine::IDENTITY,
+                    }))
+            }
+            ReferenceDocument::Pptx(reference) => {
+                Ok(reference
+                    .editor
+                    .caret_geometry()
+                    .map(|caret| ViewerCaretGeometry {
+                        page_index: caret.page_index,
+                        x: caret.x,
+                        y: caret.y,
+                        height: caret.height,
+                        transform: caret.transform,
+                    }))
+            }
+            ReferenceDocument::Xlsx(_) => Ok(None),
+        }
     }
 
-    pub fn has_docx_caret(&self) -> bool {
-        matches!(
-            &self.reference,
-            ReferenceDocument::Docx(reference) if reference.editor.has_collapsed_selection()
-        )
+    pub fn has_text_caret(&self) -> bool {
+        match &self.reference {
+            ReferenceDocument::Docx(reference) => reference.editor.has_collapsed_selection(),
+            ReferenceDocument::Pptx(reference) => reference.editor.has_caret(),
+            ReferenceDocument::Xlsx(_) => false,
+        }
     }
 
     pub fn save_docx_to(&mut self, path: &Path) -> Result<()> {
         let ReferenceDocument::Docx(reference) = &mut self.reference else {
             bail!("only DOCX documents are editable");
+        };
+        reference.editor.save_to(path)
+    }
+
+    pub fn pptx_hit_test(&self, slide_index: usize, x: f64, y: f64) -> Option<PptxHit> {
+        let ReferenceDocument::Pptx(reference) = &self.reference else {
+            return None;
+        };
+        reference.editor.hit_test(slide_index, x as f32, y as f32)
+    }
+
+    pub fn pptx_select_hit(&mut self, hit: PptxTextHit) -> bool {
+        let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.select_hit(hit)
+    }
+
+    pub fn pptx_clear_caret(&mut self) -> bool {
+        let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.clear_caret()
+    }
+
+    pub fn pptx_move_caret(&mut self, direction: MoveDirection) -> bool {
+        let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+            return false;
+        };
+        reference.editor.move_caret(direction)
+    }
+
+    pub fn pptx_insert_text(&mut self, text: &str) -> Result<bool> {
+        self.apply_pptx_edit(|editor| editor.insert_text(text))
+    }
+
+    pub fn pptx_delete(&mut self, direction: DeleteDirection) -> Result<bool> {
+        self.apply_pptx_edit(|editor| editor.delete(direction))
+    }
+
+    pub fn pptx_enter(&mut self) -> Result<bool> {
+        self.apply_pptx_edit(PptxEditor::enter)
+    }
+
+    pub fn pptx_undo(&mut self) -> Result<bool> {
+        let pages = {
+            let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+                return Ok(false);
+            };
+            reference.editor.undo()?
+        };
+        let Some(pages) = pages else {
+            return Ok(false);
+        };
+        self.pages = pages;
+        Ok(true)
+    }
+
+    pub fn pptx_redo(&mut self) -> Result<bool> {
+        let pages = {
+            let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+                return Ok(false);
+            };
+            reference.editor.redo()?
+        };
+        let Some(pages) = pages else {
+            return Ok(false);
+        };
+        self.pages = pages;
+        Ok(true)
+    }
+
+    pub fn pptx_is_dirty(&self) -> bool {
+        matches!(
+            &self.reference,
+            ReferenceDocument::Pptx(reference) if reference.editor.is_dirty()
+        )
+    }
+
+    pub fn save_pptx_to(&self, path: &Path) -> Result<()> {
+        let ReferenceDocument::Pptx(reference) = &self.reference else {
+            bail!("only PPTX decks use the PPTX save path");
         };
         reference.editor.save_to(path)
     }
@@ -361,7 +483,7 @@ impl DocumentView {
         let extension = match &self.reference {
             ReferenceDocument::Docx(_) => "docx",
             ReferenceDocument::Xlsx(_) => "xlsx",
-            ReferenceDocument::Pptx(_) => bail!("PPTX documents are read-only"),
+            ReferenceDocument::Pptx(_) => "pptx",
         };
         let stem = self
             .source
@@ -400,6 +522,23 @@ impl DocumentView {
             }
         }
         reference.display_list = display_list;
+        Ok(true)
+    }
+
+    fn apply_pptx_edit(
+        &mut self,
+        edit: impl FnOnce(&mut PptxEditor) -> Result<Option<PptxEditChange>>,
+    ) -> Result<bool> {
+        let change = {
+            let ReferenceDocument::Pptx(reference) = &mut self.reference else {
+                return Ok(false);
+            };
+            edit(&mut reference.editor)?
+        };
+        let Some(change) = change else {
+            return Ok(false);
+        };
+        self.pages[change.page_index] = change.page;
         Ok(true)
     }
 
@@ -456,18 +595,12 @@ fn load_document_with_xlsx_mode(
 
 fn load_pptx(path: &Path, max_texture_dimension_2d: u32) -> Result<DocumentView> {
     let bytes = fs::read(path).with_context(|| format!("read PPTX {}", path.display()))?;
-    let presentation =
-        Presentation::open(&bytes).with_context(|| format!("open PPTX {}", path.display()))?;
-    let slide_count = presentation.slides().len();
-    let translation = translate_presentation(&presentation, max_texture_dimension_2d)?;
+    let (editor, pages) = PptxEditor::open(bytes, max_texture_dimension_2d)
+        .with_context(|| format!("open PPTX {}", path.display()))?;
     Ok(DocumentView {
         source: path.to_owned(),
-        reference: ReferenceDocument::Pptx(PptxReference {
-            slide_count,
-            summaries: translation.summaries,
-            font_faces: translation.font_faces,
-        }),
-        pages: translation.pages,
+        reference: ReferenceDocument::Pptx(Box::new(PptxReference { editor })),
+        pages,
         max_texture_dimension_2d,
     })
 }
@@ -631,7 +764,9 @@ fn push_notes(target: &mut Vec<Value>, notes: Option<&[docx_parse::Note]>, note_
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use betteroffice_pptx::{Primitive as PptxPrimitive, Transform as PptxTransform};
     use betteroffice_xlsx::{CellValue, DrawCmd, SheetId};
+    use vello::kurbo::Point;
 
     use super::*;
     use crate::chrome::{Alignment, ToggleState};
@@ -639,6 +774,92 @@ mod tests {
     use crate::test_fixtures;
 
     static TEST_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct PptxProbe {
+        hit: PptxTextHit,
+        x: f32,
+        y: f32,
+        caret_x: f32,
+        caret_y: f32,
+        caret_height: f32,
+        transform: Affine,
+    }
+
+    fn pptx_probe(document: &DocumentView, slide_index: usize) -> PptxProbe {
+        pptx_probe_with_transform(document, slide_index, false)
+    }
+
+    fn pptx_probe_with_transform(
+        document: &DocumentView,
+        slide_index: usize,
+        transformed: bool,
+    ) -> PptxProbe {
+        let ReferenceDocument::Pptx(reference) = &document.reference else {
+            panic!("expected PPTX reference");
+        };
+        let rendered = reference.editor.rendered_slide(slide_index).unwrap();
+        for primitive in rendered.display_list.primitives.iter().rev() {
+            let PptxPrimitive::TextBox {
+                shape_id: Some(shape_id),
+                story_id: Some(story_id),
+                x,
+                y,
+                w,
+                h,
+                lines,
+                transform,
+                ..
+            } = primitive
+            else {
+                continue;
+            };
+            if (*transform != PptxTransform::default()) != transformed
+                || reference.editor.story(story_id).is_err()
+            {
+                continue;
+            }
+            let affine = pptx_test_transform(*x, *y, *w, *h, *transform);
+            for line in lines {
+                for stop in &line.caret_stops {
+                    let point = affine
+                        * Point::new(f64::from(stop.x), f64::from(line.y + line.height / 2.0));
+                    let Some(PptxHit::Text(hit)) =
+                        reference
+                            .editor
+                            .hit_test(slide_index, point.x as f32, point.y as f32)
+                    else {
+                        continue;
+                    };
+                    if hit.shape_id == *shape_id
+                        && hit.story_id == *story_id
+                        && hit.position == stop.position
+                    {
+                        return PptxProbe {
+                            hit,
+                            x: point.x as f32,
+                            y: point.y as f32,
+                            caret_x: stop.x,
+                            caret_y: line.y,
+                            caret_height: line.height,
+                            transform: affine,
+                        };
+                    }
+                }
+            }
+        }
+        panic!("demo PPTX has no hittable editable text stop");
+    }
+
+    fn pptx_test_transform(x: f32, y: f32, w: f32, h: f32, transform: PptxTransform) -> Affine {
+        let center = Point::new(f64::from(x + w / 2.0), f64::from(y + h / 2.0));
+        let flip = Affine::translate(center.to_vec2())
+            * Affine::scale_non_uniform(
+                if transform.flip_h { -1.0 } else { 1.0 },
+                if transform.flip_v { -1.0 } else { 1.0 },
+            )
+            * Affine::translate(-center.to_vec2());
+        Affine::rotate_about(f64::from(transform.rotation_deg).to_radians(), center) * flip
+    }
 
     #[test]
     fn recognizes_supported_extensions() {
@@ -1147,12 +1368,16 @@ mod tests {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
         let document = load_document(&path, 0, 8_192).unwrap();
+        assert_eq!(
+            document.edited_path().unwrap(),
+            path.parent().unwrap().join("betteroffice-demo-edited.pptx")
+        );
         let ReferenceDocument::Pptx(reference) = &document.reference else {
             panic!("expected PPTX reference");
         };
-        assert_eq!(reference.slide_count, 3);
+        assert_eq!(reference.editor.slide_count(), 3);
         assert_eq!(document.pages.len(), 3);
-        for summary in &reference.summaries {
+        for summary in reference.editor.summaries() {
             assert!(summary.glyph_audit.glyph_runs > 0);
             assert_eq!(summary.glyph_audit.drifted_caret_stops, 0);
             assert_eq!(summary.glyph_audit.missing_caret_stops, 0);
@@ -1160,7 +1385,8 @@ mod tests {
         }
         assert_eq!(document.pages[0].skipped.total(), 0);
         assert_eq!(
-            reference.summaries[0].structured(&document.pages[0].skipped)["primitives"]["image"]["translated"],
+            reference.editor.summaries()[0].structured(&document.pages[0].skipped)["primitives"]["image"]
+                ["translated"],
             1
         );
         assert_eq!(document.pages[1].skipped.counts["placeholder"], 1);
@@ -1174,11 +1400,312 @@ mod tests {
         let ReferenceDocument::Pptx(reference) = &document.reference else {
             panic!("expected PPTX reference");
         };
-        assert_eq!(reference.slide_count, 2);
-        let summary = reference.summaries[0].structured(&document.pages[0].skipped);
+        assert_eq!(reference.editor.slide_count(), 2);
+        let summary = reference.editor.summaries()[0].structured(&document.pages[0].skipped);
         assert_eq!(summary["primitives"]["chart"]["translated"], 1);
         assert_eq!(summary["primitives"]["placeholder"]["skipped"], 1);
-        assert!(reference.summaries[0].glyph_audit.missing_caret_stops > 0);
+        assert!(
+            reference.editor.summaries()[0]
+                .glyph_audit
+                .missing_caret_stops
+                > 0
+        );
+    }
+
+    #[test]
+    fn pptx_hit_test_places_the_exact_engine_caret_and_types_into_its_story() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        let Some(PptxHit::Text(hit)) = document.pptx_hit_test(
+            probe.hit.slide_index,
+            f64::from(probe.x),
+            f64::from(probe.y),
+        ) else {
+            panic!("expected PPTX text hit");
+        };
+        assert_eq!(hit, probe.hit);
+        assert!(document.pptx_select_hit(hit.clone()));
+        let caret = document.caret_geometry().unwrap().unwrap();
+        assert_eq!(caret.page_index, hit.slide_index);
+        assert_eq!(caret.x.to_bits(), f64::from(probe.caret_x).to_bits());
+        assert_eq!(caret.y.to_bits(), f64::from(probe.caret_y).to_bits());
+        assert_eq!(
+            caret.height.to_bits(),
+            f64::from(probe.caret_height).to_bits()
+        );
+        assert_eq!(caret.transform, Affine::IDENTITY);
+
+        assert!(document.pptx_insert_text("Native ").unwrap());
+        let ReferenceDocument::Pptx(reference) = &document.reference else {
+            panic!("expected PPTX reference");
+        };
+        let story = reference.editor.story(&hit.story_id).unwrap();
+        assert!(story.plain_text().contains("Native "));
+        assert_eq!(
+            reference.editor.caret_position(),
+            Some(hit.position + "Native ".encode_utf16().count() as u32)
+        );
+        let state = document.editing_state().unwrap();
+        assert!(state.can_save);
+        assert!(state.can_undo);
+        assert!(!state.inline_enabled);
+        assert!(!state.alignment_enabled);
+    }
+
+    #[test]
+    fn pptx_transformed_caret_uses_the_exact_engine_stop() {
+        let source =
+            test_fixtures::write_pptx("pptx-transformed-caret", &test_fixtures::transformed_pptx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let probe = pptx_probe_with_transform(&document, 0, true);
+        assert!(document.pptx_select_hit(probe.hit));
+        let caret = document.caret_geometry().unwrap().unwrap();
+        assert_eq!(caret.x.to_bits(), f64::from(probe.caret_x).to_bits());
+        assert_eq!(caret.y.to_bits(), f64::from(probe.caret_y).to_bits());
+        assert_eq!(
+            caret.height.to_bits(),
+            f64::from(probe.caret_height).to_bits()
+        );
+        assert_eq!(caret.transform, probe.transform);
+        let actual_top = caret.transform * Point::new(caret.x, caret.y);
+        let engine_top =
+            probe.transform * Point::new(f64::from(probe.caret_x), f64::from(probe.caret_y));
+        assert_eq!(actual_top.x.to_bits(), engine_top.x.to_bits());
+        assert_eq!(actual_top.y.to_bits(), engine_top.y.to_bits());
+        fs::remove_file(source).unwrap();
+    }
+
+    #[test]
+    fn pptx_arrow_navigation_stops_at_text_box_edges() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        for direction in [
+            MoveDirection::Left,
+            MoveDirection::Right,
+            MoveDirection::Up,
+            MoveDirection::Down,
+        ] {
+            assert!(document.pptx_select_hit(probe.hit.clone()));
+            let mut stopped = false;
+            for _ in 0..10_000 {
+                if !document.pptx_move_caret(direction) {
+                    stopped = true;
+                    break;
+                }
+            }
+            assert!(stopped);
+            assert!(!document.pptx_move_caret(direction));
+            let ReferenceDocument::Pptx(reference) = &document.reference else {
+                panic!("expected PPTX reference");
+            };
+            assert_eq!(
+                reference.editor.caret_story_id(),
+                Some(probe.hit.story_id.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn pptx_backspace_and_delete_remove_engine_caret_intervals() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        let before = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert!(document.pptx_select_hit(probe.hit.clone()));
+        assert!(document.pptx_delete(DeleteDirection::Forward).unwrap());
+        let after_delete = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert!(after_delete.length < before.length);
+
+        assert!(document.pptx_undo().unwrap());
+        assert!(document.pptx_select_hit(probe.hit.clone()));
+        assert!(document.pptx_move_caret(MoveDirection::Right));
+        assert!(document.pptx_delete(DeleteDirection::Backward).unwrap());
+        let after_backspace = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert!(after_backspace.length < before.length);
+    }
+
+    #[test]
+    fn pptx_enter_splits_and_backspace_at_the_start_merges_the_paragraph() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        let before = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert!(document.pptx_select_hit(probe.hit.clone()));
+        assert!(document.pptx_enter().unwrap());
+        let split = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                assert_eq!(
+                    reference.editor.caret_position(),
+                    Some(probe.hit.position + 1)
+                );
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(split.paragraphs.len(), before.paragraphs.len() + 1);
+        assert_eq!(
+            split.plain_text().replace('\n', ""),
+            before.plain_text().replace('\n', "")
+        );
+
+        assert!(document.pptx_delete(DeleteDirection::Backward).unwrap());
+        let merged = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(merged.paragraphs.len(), before.paragraphs.len());
+        assert_eq!(merged.plain_text(), before.plain_text());
+    }
+
+    #[test]
+    fn pptx_save_reopens_text_and_keeps_untouched_slides_byte_identical() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let source = fs::read(&path).unwrap();
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        assert!(document.pptx_select_hit(probe.hit.clone()));
+        assert!(document.pptx_insert_text("Persisted ").unwrap());
+
+        let output = test_fixtures::write_pptx("pptx-edited-output", b"sentinel");
+        document.save_pptx_to(&output).unwrap();
+        let saved = fs::read(&output).unwrap();
+        for slide in ["ppt/slides/slide2.xml", "ppt/slides/slide3.xml"] {
+            assert_eq!(
+                test_fixtures::part(&source, slide),
+                test_fixtures::part(&saved, slide),
+                "{slide}"
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), source);
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        let ReferenceDocument::Pptx(reference) = &reopened.reference else {
+            panic!("expected PPTX reference");
+        };
+        assert!(
+            reference
+                .editor
+                .story(&probe.hit.story_id)
+                .unwrap()
+                .plain_text()
+                .contains("Persisted ")
+        );
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn pptx_save_refuses_to_flatten_unchanged_run_color_metadata() {
+        let source =
+            test_fixtures::write_pptx("pptx-theme-linked", &test_fixtures::theme_linked_pptx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        assert!(document.pptx_select_hit(probe.hit));
+        assert!(document.pptx_insert_text("Theme ").unwrap());
+        let output = test_fixtures::write_pptx("pptx-theme-refused", b"sentinel");
+
+        let error = document.save_pptx_to(&output).unwrap_err().to_string();
+        assert!(error.contains("run color metadata"), "{error}");
+        assert!(error.contains("unchanged text"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn pptx_save_round_trips_a_safe_paragraph_split() {
+        let source = test_fixtures::write_pptx(
+            "pptx-language-neutral",
+            &test_fixtures::language_neutral_pptx(),
+        );
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        let before = match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                reference.editor.story(&probe.hit.story_id).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert!(document.pptx_select_hit(probe.hit.clone()));
+        assert!(document.pptx_move_caret(MoveDirection::Right));
+        assert!(document.pptx_enter().unwrap());
+        let output = test_fixtures::write_pptx("pptx-safe-split", b"sentinel");
+        document.save_pptx_to(&output).unwrap();
+
+        let reopened = load_document(&output, 0, 8_192).unwrap();
+        let ReferenceDocument::Pptx(reference) = &reopened.reference else {
+            panic!("expected PPTX reference");
+        };
+        let after = reference.editor.story(&probe.hit.story_id).unwrap();
+        assert_eq!(after.paragraphs.len(), before.paragraphs.len() + 1);
+        assert_eq!(
+            after.plain_text().replace('\n', ""),
+            before.plain_text().replace('\n', "")
+        );
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn pptx_save_refuses_a_paragraph_split_that_would_drop_run_language() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.pptx");
+        let mut document = load_document(&path, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        assert!(document.pptx_select_hit(probe.hit));
+        assert!(document.pptx_move_caret(MoveDirection::Right));
+        assert!(document.pptx_enter().unwrap());
+        let output = test_fixtures::write_pptx("pptx-language-refused", b"sentinel");
+
+        let error = document.save_pptx_to(&output).unwrap_err().to_string();
+        assert!(error.contains("run language"), "{error}");
+        assert!(error.contains("unchanged text"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+        fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn pptx_save_refuses_a_digital_signature_before_touching_the_output() {
+        let source = test_fixtures::write_pptx("pptx-signed", &test_fixtures::signed_pptx());
+        let mut document = load_document(&source, 0, 8_192).unwrap();
+        let probe = pptx_probe(&document, 0);
+        assert!(document.pptx_select_hit(probe.hit));
+        assert!(document.pptx_insert_text("Signed ").unwrap());
+        let output = test_fixtures::write_pptx("pptx-signed-output", b"sentinel");
+
+        let error = document.save_pptx_to(&output).unwrap_err().to_string();
+        assert!(error.contains("digital signature"), "{error}");
+        assert!(error.contains("_xmlsignatures/sig1.xml"), "{error}");
+        assert_eq!(fs::read(&output).unwrap(), b"sentinel");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(output).unwrap();
     }
 
     #[test]
@@ -1257,13 +1784,13 @@ mod tests {
         document
             .docx_select_point(caret.clone(), false, false)
             .unwrap();
-        let first_line = document.docx_caret_geometry().unwrap().unwrap();
+        let first_line = document.caret_geometry().unwrap().unwrap();
         assert!(
             document
                 .docx_move_selection(MoveDirection::Down, false)
                 .unwrap()
         );
-        let next_line = document.docx_caret_geometry().unwrap().unwrap();
+        let next_line = document.caret_geometry().unwrap().unwrap();
         assert!(
             next_line.page_index > first_line.page_index
                 || (next_line.page_index == first_line.page_index && next_line.y > first_line.y)
@@ -1306,13 +1833,13 @@ mod tests {
                 .docx_move_selection(MoveDirection::Home, false)
                 .unwrap()
         );
-        let home = document.docx_caret_geometry().unwrap().unwrap();
+        let home = document.caret_geometry().unwrap().unwrap();
         assert!(
             document
                 .docx_move_selection(MoveDirection::End, false)
                 .unwrap()
         );
-        let end = document.docx_caret_geometry().unwrap().unwrap();
+        let end = document.caret_geometry().unwrap().unwrap();
         assert_eq!(home.page_index, end.page_index);
         assert!(end.x > home.x);
         document
@@ -1324,7 +1851,7 @@ mod tests {
         assert!(document.docx_delete(DeleteDirection::Backward).unwrap());
         document.docx_select_point(caret, false, false).unwrap();
         assert!(document.docx_enter().unwrap());
-        assert!(document.docx_caret_geometry().unwrap().is_some());
+        assert!(document.caret_geometry().unwrap().is_some());
 
         let paragraphs = match &document.reference {
             ReferenceDocument::Docx(reference) => {

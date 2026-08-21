@@ -6,7 +6,6 @@ use betteroffice_pptx::{
     Presentation, Primitive, Stroke as DisplayStroke, SurfaceDisplayList, Transform,
 };
 use ooxml_drawingml::GeometryPathCommand;
-use pptx_render::SlideRenderer;
 use serde_json::{Value, json};
 use vello::kurbo::{Affine, BezPath, Rect, Stroke};
 use vello::peniko::{
@@ -31,9 +30,9 @@ const FONT_FACES: &[(&str, bool, bool, &[u8])] = &[
     ("Arial", true, true, ARIAL_BOLD_ITALIC),
 ];
 
-pub struct PptxTranslation {
-    pub pages: Vec<PageScene>,
-    pub summaries: Vec<PptxSlideSummary>,
+pub struct PptxSceneResources {
+    fonts: PptxFonts,
+    images: PptxImages,
     pub font_faces: Vec<String>,
 }
 
@@ -150,41 +149,34 @@ impl PptxSlideSummary {
     }
 }
 
-pub fn translate_presentation(
-    presentation: &Presentation,
-    max_texture_dimension_2d: u32,
-) -> Result<PptxTranslation> {
-    let parsed_slide_count = presentation.slides().len();
-    let model_slide_count = presentation.model().slides.len();
-    if parsed_slide_count != model_slide_count {
-        bail!(
-            "PPTX model has {model_slide_count} slide references but {parsed_slide_count} parsed slides"
-        );
+impl PptxSceneResources {
+    pub fn new(presentation: &mut Presentation) -> Result<Self> {
+        let fonts = PptxFonts::load(|family, bold, italic, bytes| {
+            presentation
+                .register_font(family, bold, italic, bytes)
+                .map_err(anyhow::Error::from)
+        })?;
+        let images = PptxImages::load(presentation.package());
+        let font_faces = fonts.labels.clone();
+        Ok(Self {
+            fonts,
+            images,
+            font_faces,
+        })
     }
-    let snapshot = presentation.snapshot().context("snapshot opened PPTX")?;
-    let mut renderer = SlideRenderer::new();
-    let fonts = PptxFonts::load(&mut renderer)?;
-    let images = PptxImages::load(presentation.package());
-    let mut pages = Vec::with_capacity(parsed_slide_count);
-    let mut summaries = Vec::with_capacity(parsed_slide_count);
-    for slide_index in 0..parsed_slide_count {
-        let rendered = renderer
-            .layout_slide(presentation.package(), &snapshot, slide_index)
-            .with_context(|| format!("layout PPTX slide {}", slide_index + 1))?;
-        let (page, summary) = translate_slide(
-            &rendered.display_list,
-            &fonts,
-            &images,
+
+    pub fn translate(
+        &self,
+        display_list: &SurfaceDisplayList,
+        max_texture_dimension_2d: u32,
+    ) -> Result<(PageScene, PptxSlideSummary)> {
+        translate_slide(
+            display_list,
+            &self.fonts,
+            &self.images,
             max_texture_dimension_2d,
-        )?;
-        pages.push(page);
-        summaries.push(summary);
+        )
     }
-    Ok(PptxTranslation {
-        pages,
-        summaries,
-        font_faces: fonts.labels,
-    })
 }
 
 struct PptxFonts {
@@ -193,12 +185,11 @@ struct PptxFonts {
 }
 
 impl PptxFonts {
-    fn load(renderer: &mut SlideRenderer) -> Result<Self> {
+    fn load(mut register: impl FnMut(&str, bool, bool, &[u8]) -> Result<u32>) -> Result<Self> {
         let mut vello = HashMap::new();
         let mut labels = Vec::new();
         for &(family, bold, italic, bytes) in FONT_FACES {
-            let layout_id = renderer
-                .register_font(family, bold, italic, bytes)
+            let layout_id = register(family, bold, italic, bytes)
                 .with_context(|| format!("register PPTX layout font {family}"))?;
             vello.insert(layout_id, FontData::new(Blob::from(bytes.to_vec()), 0));
             labels.push(format!(

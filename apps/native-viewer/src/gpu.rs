@@ -55,13 +55,18 @@ pub fn render_comparison(
 
     if let ReferenceDocument::Pptx(reference) = &document.reference {
         let summary = reference
-            .summaries
+            .editor
+            .summaries()
             .get(page_index)
             .context("PPTX slide has no translation summary")?;
         println!("document: {}", document.source.display());
-        println!("slide: {} of {}", page_index + 1, reference.slide_count);
+        println!(
+            "slide: {} of {}",
+            page_index + 1,
+            reference.editor.slide_count()
+        );
         println!("gpu: {}", rendered.adapter);
-        println!("font faces: {:?}", reference.font_faces);
+        println!("font faces: {:?}", reference.editor.font_faces());
         println!("vello PNG: {}", output.display());
         println!("raster PNG: not produced (PPTX has no raster backend)");
         println!(

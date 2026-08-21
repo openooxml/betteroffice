@@ -21,6 +21,7 @@ use crate::chrome::{
 };
 use crate::document::{DocumentView, ReferenceDocument, load_document};
 use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
+use crate::pptx_editing::PptxHit;
 use crate::xlsx_editing::CellMove;
 use crate::xlsx_scene::paint_cell_editor;
 
@@ -36,7 +37,8 @@ pub fn run(document: DocumentView, context: RenderContext) -> Result<()> {
         let label = document.scene_label(index);
         if let ReferenceDocument::Pptx(reference) = &document.reference {
             let summary = reference
-                .summaries
+                .editor
+                .summaries()
                 .get(index)
                 .ok_or_else(|| anyhow::anyhow!("PPTX slide has no translation summary"))?;
             println!(
@@ -182,6 +184,7 @@ enum PointerTarget {
     Chrome(Option<ToolbarCommand>),
     Docx(TextLoc),
     Xlsx(CellRef),
+    Pptx(PptxHit),
     None,
 }
 
@@ -205,6 +208,9 @@ fn pointer_target(
     if let Some(loc) = document.docx_hit_test(page_index, local_x, local_y)? {
         return Ok(PointerTarget::Docx(loc));
     }
+    if let Some(hit) = document.pptx_hit_test(page_index, local_x, local_y) {
+        return Ok(PointerTarget::Pptx(hit));
+    }
     Ok(document
         .xlsx_hit_test(page_index, local_x, local_y)
         .map_or(PointerTarget::None, PointerTarget::Xlsx))
@@ -212,12 +218,7 @@ fn pointer_target(
 
 impl Viewer {
     fn new(document: DocumentView, context: RenderContext) -> Result<Self> {
-        let save_target = matches!(
-            &document.reference,
-            ReferenceDocument::Docx(_) | ReferenceDocument::Xlsx(_)
-        )
-        .then(|| document.edited_path())
-        .transpose()?;
+        let save_target = Some(document.edited_path()?);
         Ok(Self {
             document,
             chrome: Chrome::new(),
@@ -275,7 +276,7 @@ impl Viewer {
         let selection_rects = self.document.docx_selection_rects().to_vec();
         let xlsx_overlay = self.document.xlsx_overlay();
         let caret = if self.focused && self.caret_visible {
-            self.document.docx_caret_geometry()?
+            self.document.caret_geometry()?
         } else {
             None
         };
@@ -350,7 +351,7 @@ impl Viewer {
                 let half_width = 0.75 / self.zoom;
                 scene.fill(
                     Fill::NonZero,
-                    transform,
+                    transform * caret.transform,
                     Color::from_rgba8(32, 33, 36, 255),
                     None,
                     &Rect::new(
@@ -514,6 +515,7 @@ impl Viewer {
             PointerTarget::Chrome(command) => {
                 self.dragging = false;
                 self.last_click = None;
+                self.document.pptx_clear_caret();
                 if let Some(command) = command {
                     self.execute_toolbar_command(command)?;
                 }
@@ -527,8 +529,22 @@ impl Viewer {
                 self.update_title();
                 return Ok(committed || selected);
             }
+            PointerTarget::Pptx(PptxHit::Text(hit)) => {
+                self.dragging = false;
+                self.last_click = None;
+                let selected = self.document.pptx_select_hit(hit);
+                if selected {
+                    self.reset_caret_blink();
+                }
+                return Ok(selected);
+            }
+            PointerTarget::Pptx(PptxHit::Other) => {
+                self.dragging = false;
+                self.last_click = None;
+                return Ok(self.document.pptx_clear_caret());
+            }
             PointerTarget::Docx(loc) => loc,
-            PointerTarget::None => return Ok(false),
+            PointerTarget::None => return Ok(self.document.pptx_clear_caret()),
         };
         let now = Instant::now();
         let word = self.last_click.is_some_and(|(last, last_x, last_y)| {
@@ -571,9 +587,12 @@ impl Viewer {
             self.document.xlsx_commit(None)?;
         }
         let xlsx = matches!(&self.document.reference, ReferenceDocument::Xlsx(_));
+        let pptx = matches!(&self.document.reference, ReferenceDocument::Pptx(_));
         let changed = match command {
             ToolbarCommand::Undo if xlsx => self.document.xlsx_undo()?,
             ToolbarCommand::Redo if xlsx => self.document.xlsx_redo()?,
+            ToolbarCommand::Undo if pptx => self.document.pptx_undo()?,
+            ToolbarCommand::Redo if pptx => self.document.pptx_redo()?,
             ToolbarCommand::Undo => self.document.docx_undo()?,
             ToolbarCommand::Redo => self.document.docx_redo()?,
             ToolbarCommand::Bold => self.document.docx_toggle_format(SimpleFormat::Bold)?,
@@ -615,6 +634,10 @@ impl Viewer {
         let command = self.modifiers.super_key() || self.modifiers.control_key();
         let key = event.logical_key.as_ref();
         if matches!(key, Key::Named(NamedKey::Escape)) {
+            if self.document.pptx_clear_caret() {
+                self.request_redraw();
+                return Ok(());
+            }
             if self.document.xlsx_cancel_edit() {
                 self.update_title();
                 self.request_redraw();
@@ -759,6 +782,45 @@ impl Viewer {
             }
             return Ok(());
         }
+        if matches!(&self.document.reference, ReferenceDocument::Pptx(_))
+            && self.document.has_text_caret()
+        {
+            let changed = match key {
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.document.pptx_move_caret(MoveDirection::Left)
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.document.pptx_move_caret(MoveDirection::Right)
+                }
+                Key::Named(NamedKey::ArrowUp) => self.document.pptx_move_caret(MoveDirection::Up),
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.document.pptx_move_caret(MoveDirection::Down)
+                }
+                Key::Named(NamedKey::Home) => self.document.pptx_move_caret(MoveDirection::Home),
+                Key::Named(NamedKey::End) => self.document.pptx_move_caret(MoveDirection::End),
+                Key::Named(NamedKey::Backspace) => {
+                    self.document.pptx_delete(DeleteDirection::Backward)?
+                }
+                Key::Named(NamedKey::Delete) => {
+                    self.document.pptx_delete(DeleteDirection::Forward)?
+                }
+                Key::Named(NamedKey::Enter) => self.document.pptx_enter()?,
+                Key::Character(text)
+                    if !command
+                        && !self.modifiers.alt_key()
+                        && text.chars().all(|character| !character.is_control()) =>
+                {
+                    self.document.pptx_insert_text(text)?
+                }
+                _ => false,
+            };
+            if changed {
+                self.reset_caret_blink();
+                self.update_title();
+                self.request_redraw();
+            }
+            return Ok(());
+        }
         if event.repeat {
             return Ok(());
         }
@@ -781,12 +843,6 @@ impl Viewer {
     }
 
     fn save_with_status(&mut self) {
-        if !matches!(
-            &self.document.reference,
-            ReferenceDocument::Docx(_) | ReferenceDocument::Xlsx(_)
-        ) {
-            return;
-        }
         match self.save_and_reopen() {
             Ok(path) => self.set_status(format!("Saved {}", path.display())),
             Err(error) => self.set_status(format!("Save refused: {error:#}")),
@@ -801,7 +857,7 @@ impl Viewer {
         let (format, sheet_index) = match &self.document.reference {
             ReferenceDocument::Docx(_) => ("DOCX", 0),
             ReferenceDocument::Xlsx(reference) => ("XLSX", reference.sheet_index),
-            ReferenceDocument::Pptx(_) => bail!("PPTX documents are read-only"),
+            ReferenceDocument::Pptx(_) => ("PPTX", 0),
         };
         let path = self
             .save_target
@@ -810,7 +866,7 @@ impl Viewer {
         match &self.document.reference {
             ReferenceDocument::Docx(_) => self.document.save_docx_to(&path)?,
             ReferenceDocument::Xlsx(_) => self.document.save_xlsx_to(&path)?,
-            ReferenceDocument::Pptx(_) => unreachable!(),
+            ReferenceDocument::Pptx(_) => self.document.save_pptx_to(&path)?,
         }
         let reopened = load_document(&path, sheet_index, self.document.max_texture_dimension_2d)
             .with_context(|| format!("reopen edited {format} {}", path.display()))?;
@@ -885,7 +941,8 @@ impl Viewer {
             ReferenceDocument::Docx(_) => " — editable",
             ReferenceDocument::Xlsx(_) if self.document.xlsx_is_dirty() => " — edited",
             ReferenceDocument::Xlsx(_) => " — editable",
-            _ => "",
+            ReferenceDocument::Pptx(_) if self.document.pptx_is_dirty() => " — edited",
+            ReferenceDocument::Pptx(_) => " — editable",
         };
         window.set_title(&format!(
             "{name} — {} — {:.0}% — {skipped} skipped{edit_state}",
@@ -1006,7 +1063,7 @@ impl ApplicationHandler for Viewer {
             .status_message
             .as_ref()
             .map(|message| message.expires_at);
-        if self.focused && self.document.has_docx_caret() {
+        if self.focused && self.document.has_text_caret() {
             if now >= self.next_caret_blink {
                 self.caret_visible = !self.caret_visible;
                 self.next_caret_blink = now + CARET_BLINK;
