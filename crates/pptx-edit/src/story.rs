@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use ooxml_drawingml::{Theme, resolve_color_value_to_hex_with_theme};
 use pptx_parse::{RunProperties, TextBody};
+use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{
-    Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim, TextRef, Transact, TransactionMut,
+    Any, Assoc, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, StickyIndex, Text,
+    TextPrelim, TextRef, Transact, TransactionMut,
 };
 
 use crate::model::validate_xml_text;
 use crate::{
-    DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND, ParagraphSnapshot, STORIES,
-    StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch,
+    CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
+    ParagraphSnapshot, STORIES, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle,
+    TextStylePatch,
 };
 
 const UNDERLINE_TYPES: [&str; 18] = [
@@ -153,6 +156,38 @@ impl DeckSession {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         snapshot_story(&story, &txn, story_id)
+    }
+
+    pub fn anchor_caret(&self, story_id: &str, index: u32) -> EditResult<CaretAnchor> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        let length = final_pilcrow_index(&story, &txn)?;
+        if index > length {
+            return Err(EditError::OutOfBounds { index, length });
+        }
+        let position = if index == 0 {
+            StickyIndex::from_type(&txn, &story, Assoc::Before)
+        } else {
+            story
+                .sticky_index(&txn, index, Assoc::After)
+                .ok_or(EditError::OutOfBounds { index, length })?
+        };
+        Ok(CaretAnchor {
+            story_id: story_id.to_owned(),
+            position,
+        })
+    }
+
+    pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, &anchor.story_id).ok()?;
+        let offset = anchor.position.get_offset(&txn)?;
+        let expected = BranchPtr::from(<TextRef as AsRef<Branch>>::as_ref(&story));
+        if offset.branch != expected {
+            return None;
+        }
+        let length = final_pilcrow_index(&story, &txn).ok()?;
+        Some(offset.index.min(length))
     }
 
     pub fn insert_text(

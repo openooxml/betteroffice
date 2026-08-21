@@ -1,9 +1,9 @@
 pub use pptx_edit::{
-    DeckSnapshot, EditCtx, EditError, EditOrigin, ParagraphSnapshot, PresetShapeDraft,
+    CaretAnchor, DeckSnapshot, EditCtx, EditError, EditOrigin, ParagraphSnapshot, PresetShapeDraft,
     ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect,
     ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot,
     TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent,
-    UpdateOrigin,
+    UpdateOrigin, UpdateSubscription,
 };
 pub use pptx_parse::{
     Bullet, GraphicFrame, GraphicFrameData, GroupShape, MediaPart, ParagraphProperties,

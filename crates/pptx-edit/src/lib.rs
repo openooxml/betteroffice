@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
-    ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, Subscription, Transact, Update,
-    WriteTxn,
+    ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, StickyIndex, Subscription, Transact,
+    Update, WriteTxn,
 };
 
 mod deck;
@@ -41,6 +41,14 @@ pub(crate) const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
+
+pub type UpdateSubscription = Subscription;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaretAnchor {
+    story_id: String,
+    position: StickyIndex,
+}
 
 pub struct DeckSession {
     pub(crate) doc: Doc,

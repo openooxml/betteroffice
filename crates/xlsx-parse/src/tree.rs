@@ -486,7 +486,7 @@ fn decode_utf16(data: &[u8], big_endian: bool) -> Result<String, ParseError> {
             "utf-16 part has an odd byte length".into(),
         ));
     }
-    let units = data.chunks_exact(2).map(|pair| {
+    let units = data.as_chunks::<2>().0.iter().map(|pair| {
         let pair = [pair[0], pair[1]];
         if big_endian {
             u16::from_be_bytes(pair)

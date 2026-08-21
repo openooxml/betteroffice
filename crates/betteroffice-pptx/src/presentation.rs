@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot,
-    TextReceipt, TextStyle, TextStylePatch, TransformReceipt,
+    CaretAnchor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt,
+    ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
+    StorySnapshot, TextReceipt, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent,
+    UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -92,6 +93,14 @@ impl Presentation {
 
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
         Ok(self.session.story(story_id)?)
+    }
+
+    pub fn anchor_caret(&self, story_id: &str, index: u32) -> Result<CaretAnchor> {
+        Ok(self.session.anchor_caret(story_id, index)?)
+    }
+
+    pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
+        self.session.resolve_caret_anchor(anchor)
     }
 
     pub fn insert_slide(
@@ -302,6 +311,13 @@ impl Presentation {
 
     pub fn apply_update_v1(&self, update: &[u8]) -> Result<DeckSnapshot> {
         Ok(self.session.apply_update_v1(update)?)
+    }
+
+    pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
+    where
+        F: Fn(UpdateEvent) + 'static,
+    {
+        Ok(self.session.observe_update_v1(callback)?)
     }
 
     pub fn undo(&self) -> bool {
