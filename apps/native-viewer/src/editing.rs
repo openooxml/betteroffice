@@ -31,6 +31,7 @@ use yrs::{
 };
 
 use crate::chrome::{Alignment, EditingState, ToggleState};
+use crate::document::{DeleteDirection, MoveDirection};
 
 const BODY_STORY: &str = "body";
 const SAVE_TIME: &str = "1970-01-01T00:00:00.000Z";
@@ -180,22 +181,6 @@ pub struct CaretGeometry {
 pub struct SceneChange {
     pub rebuild_all: bool,
     pub changed_pages: Vec<usize>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum MoveDirection {
-    Left,
-    Right,
-    Up,
-    Down,
-    Home,
-    End,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum DeleteDirection {
-    Backward,
-    Forward,
 }
 
 pub struct DocxEditor {

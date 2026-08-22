@@ -164,7 +164,7 @@ pub fn forward_local_updates(document: &DocumentView, collaboration: &mut Collab
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "docx", feature = "xlsx", feature = "pptx"))]
 mod tests {
     use std::path::Path;
 

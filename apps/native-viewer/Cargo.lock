@@ -243,6 +243,8 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "image",
+ "objc2 0.5.2",
+ "objc2-foundation 0.2.2",
  "pollster",
  "rustybuzz",
  "serde",

@@ -1,16 +1,36 @@
+#[cfg(target_os = "macos")]
+use std::ffi::{CStr, OsString};
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "xlsx")]
 use betteroffice_xlsx::CellRef;
+#[cfg(feature = "docx")]
 use docx_edit::SimpleFormat;
-use vello::kurbo::{Affine, Point, Rect, Stroke};
+#[cfg(target_os = "macos")]
+use objc2::runtime::{AnyClass, AnyObject, Sel};
+#[cfg(target_os = "macos")]
+use objc2::{ffi, sel};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSArray, NSURL};
+#[cfg(feature = "xlsx")]
+use vello::kurbo::Stroke;
+use vello::kurbo::{Affine, Point, Rect};
 use vello::peniko::{Color, Fill};
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+#[cfg(target_os = "macos")]
+use winit::event_loop::EventLoopProxy;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -24,22 +44,37 @@ use crate::collaboration::{
     transport_event_channel,
 };
 use crate::collaboration_document;
+#[cfg(any(feature = "docx", feature = "pptx"))]
+use crate::document::{DeleteDirection, MoveDirection};
 use crate::document::{DocumentView, ReferenceDocument, load_document};
-use crate::editing::{DeleteDirection, MoveDirection, TextLoc};
+#[cfg(feature = "docx")]
+use crate::editing::TextLoc;
+#[cfg(feature = "pptx")]
 use crate::pptx_editing::PptxHit;
+#[cfg(feature = "xlsx")]
 use crate::xlsx_editing::CellMove;
+#[cfg(feature = "xlsx")]
 use crate::xlsx_scene::paint_cell_editor;
 
 const MARGIN: f64 = 40.0;
 const PAGE_GAP: f64 = 24.0;
 const CARET_BLINK: Duration = Duration::from_millis(530);
+#[cfg(feature = "docx")]
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+#[cfg(feature = "docx")]
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
 const STATUS_DURATION: Duration = Duration::from_secs(6);
 const UNSAVED_EXIT_REASON: &str = "Unsaved changes: save or undo them before closing the viewer.";
 
-#[derive(Clone, Copy, Debug)]
-struct CollaborationWake;
+#[derive(Debug)]
+enum ViewerEvent {
+    Collaboration,
+    #[cfg(target_os = "macos")]
+    OpenDocument(PathBuf),
+}
+
+#[cfg(target_os = "macos")]
+static OPEN_DOCUMENT_PROXY: OnceLock<EventLoopProxy<ViewerEvent>> = OnceLock::new();
 
 pub fn run(
     document: DocumentView,
@@ -48,36 +83,46 @@ pub fn run(
 ) -> Result<()> {
     for (index, page) in document.pages.iter().enumerate() {
         let label = document.scene_label(index);
-        if let ReferenceDocument::Pptx(reference) = &document.reference {
-            let summary = reference
-                .editor
-                .summaries()
-                .get(index)
-                .ok_or_else(|| anyhow::anyhow!("PPTX slide has no translation summary"))?;
-            println!(
-                "{label} PPTX summary: {}",
-                serde_json::to_string(&summary.structured(&page.skipped))?
-            );
-            continue;
+        #[cfg(feature = "pptx")]
+        match &document.reference {
+            ReferenceDocument::Pptx(reference) => {
+                let summary = reference
+                    .editor
+                    .summaries()
+                    .get(index)
+                    .ok_or_else(|| anyhow::anyhow!("PPTX slide has no translation summary"))?;
+                println!(
+                    "{label} PPTX summary: {}",
+                    serde_json::to_string(&summary.structured(&page.skipped))?
+                );
+                continue;
+            }
+            #[cfg(any(feature = "docx", feature = "xlsx"))]
+            _ => {}
         }
-        println!(
-            "{label} skipped Vello {}: {} {:?}",
-            document.display_item_name(),
-            page.skipped.total(),
-            page.skipped.counts
-        );
-        if !page.skipped.reasons.is_empty() {
-            println!("{label} skip reasons: {:?}", page.skipped.reasons);
+        #[cfg(any(feature = "docx", feature = "xlsx"))]
+        {
+            println!(
+                "{label} skipped Vello {}: {} {:?}",
+                document.display_item_name(),
+                page.skipped.total(),
+                page.skipped.counts
+            );
+            if !page.skipped.reasons.is_empty() {
+                println!("{label} skip reasons: {:?}", page.skipped.reasons);
+            }
         }
     }
-    let event_loop = EventLoop::<CollaborationWake>::with_user_event().build()?;
+    let event_loop = EventLoop::<ViewerEvent>::with_user_event().build()?;
+    #[cfg(target_os = "macos")]
+    install_open_document_handler(event_loop.create_proxy())?;
     let (event_sender, event_receiver) = transport_event_channel();
     let client = collaboration
         .map(|config| {
             let proxy = event_loop.create_proxy();
             let event_sender = event_sender.clone();
             CollaborationClient::start(config, move |event| {
-                event_sender.try_send(event) && proxy.send_event(CollaborationWake).is_ok()
+                event_sender.try_send(event) && proxy.send_event(ViewerEvent::Collaboration).is_ok()
             })
         })
         .transpose()?;
@@ -88,6 +133,54 @@ pub fn run(
         bail!(error);
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_open_document_handler(proxy: EventLoopProxy<ViewerEvent>) -> Result<()> {
+    OPEN_DOCUMENT_PROXY
+        .set(proxy)
+        .map_err(|_| anyhow::anyhow!("macOS document handler is already installed"))?;
+    let class = AnyClass::get("WinitApplicationDelegate")
+        .context("Winit application delegate is unavailable")?;
+    let selector = sel!(application:openURLs:);
+    type OpenUrls = unsafe extern "C" fn(&AnyObject, Sel, &AnyObject, &NSArray<NSURL>);
+    let implementation =
+        unsafe { std::mem::transmute::<OpenUrls, unsafe extern "C" fn()>(application_open_urls) };
+    let added = unsafe {
+        ffi::class_addMethod(
+            (class as *const AnyClass).cast_mut().cast(),
+            selector.as_ptr(),
+            Some(implementation),
+            c"v@:@@".as_ptr(),
+        )
+    };
+    if added == ffi::NO {
+        bail!("install macOS document handler");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn application_open_urls(
+    _delegate: &AnyObject,
+    _selector: Sel,
+    _application: &AnyObject,
+    urls: &NSArray<NSURL>,
+) {
+    let Some(url) = urls.get(0) else {
+        return;
+    };
+    if !unsafe { url.isFileURL() } {
+        return;
+    }
+    let representation = unsafe { url.fileSystemRepresentation() };
+    let bytes = unsafe { CStr::from_ptr(representation.as_ptr()) }
+        .to_bytes()
+        .to_vec();
+    let path = PathBuf::from(OsString::from_vec(bytes));
+    if let Some(proxy) = OPEN_DOCUMENT_PROXY.get() {
+        let _ = proxy.send_event(ViewerEvent::OpenDocument(path));
+    }
 }
 
 struct Viewer {
@@ -283,8 +376,11 @@ impl ViewportGeometry {
 
 enum PointerTarget {
     Chrome(Option<ToolbarCommand>),
+    #[cfg(feature = "docx")]
     Docx(TextLoc),
+    #[cfg(feature = "xlsx")]
     Xlsx(CellRef),
+    #[cfg(feature = "pptx")]
     Pptx(PptxHit),
     None,
 }
@@ -306,15 +402,26 @@ fn pointer_target(
     else {
         return Ok(PointerTarget::None);
     };
-    if let Some(loc) = document.docx_hit_test(page_index, local_x, local_y)? {
-        return Ok(PointerTarget::Docx(loc));
+    #[cfg(feature = "docx")]
+    {
+        if let Some(loc) = document.docx_hit_test(page_index, local_x, local_y)? {
+            return Ok(PointerTarget::Docx(loc));
+        }
     }
-    if let Some(hit) = document.pptx_hit_test(page_index, local_x, local_y) {
-        return Ok(PointerTarget::Pptx(hit));
+    #[cfg(feature = "pptx")]
+    {
+        if let Some(hit) = document.pptx_hit_test(page_index, local_x, local_y) {
+            return Ok(PointerTarget::Pptx(hit));
+        }
     }
-    Ok(document
-        .xlsx_hit_test(page_index, local_x, local_y)
-        .map_or(PointerTarget::None, PointerTarget::Xlsx))
+    #[cfg(feature = "xlsx")]
+    {
+        return Ok(document
+            .xlsx_hit_test(page_index, local_x, local_y)
+            .map_or(PointerTarget::None, PointerTarget::Xlsx));
+    }
+    #[cfg(not(feature = "xlsx"))]
+    Ok(PointerTarget::None)
 }
 
 impl Viewer {
@@ -379,8 +486,35 @@ impl Viewer {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    fn open_document(&mut self, path: PathBuf) -> Result<()> {
+        if self.document.is_dirty() && !self.document.is_remote_only_dirty() {
+            bail!("save or undo changes before opening another document");
+        }
+        if self.collaboration.is_some() {
+            bail!("leave the collaboration room before opening another document");
+        }
+        let document = load_document(&path, 0, self.document.max_texture_dimension_2d)
+            .with_context(|| format!("open {}", path.display()))?;
+        let save_target = Some(document.edited_path()?);
+        self.document = document;
+        self.save_target = save_target;
+        self.zoom = 1.0;
+        self.scroll = 0.0;
+        self.cursor = None;
+        self.dragging = false;
+        self.last_click = None;
+        self.status_message = None;
+        self.reset_caret_blink();
+        self.update_title();
+        self.request_redraw();
+        Ok(())
+    }
+
     fn render(&mut self) -> Result<()> {
+        #[cfg(feature = "docx")]
         let selection_rects = self.document.docx_selection_rects().to_vec();
+        #[cfg(feature = "xlsx")]
         let xlsx_overlay = self.document.xlsx_overlay();
         let caret = if self.focused && self.caret_visible {
             self.document.caret_geometry()?
@@ -416,6 +550,7 @@ impl Viewer {
             let transform = Affine::translate((origin.x * device_scale, origin.y * device_scale))
                 * Affine::scale(scale);
             scene.append(&page.background, Some(transform));
+            #[cfg(feature = "docx")]
             for rect in selection_rects
                 .iter()
                 .filter(|rect| rect.page_index == page_index)
@@ -429,6 +564,7 @@ impl Viewer {
                 );
             }
             scene.append(&page.scene, Some(transform));
+            #[cfg(feature = "xlsx")]
             if page_index == 0
                 && let Some(overlay) = &xlsx_overlay
             {
@@ -613,6 +749,7 @@ impl Viewer {
         })
     }
 
+    #[cfg(feature = "docx")]
     fn document_point(&self, x: f64, y: f64, clamp: bool) -> Option<(usize, f64, f64)> {
         self.geometry()?
             .document_point(&self.document.pages, x, y, clamp)
@@ -631,24 +768,27 @@ impl Viewer {
             geometry,
             Point::new(x, y),
         )?;
-        let loc = match target {
+        match target {
             PointerTarget::Chrome(command) => {
                 self.dragging = false;
                 self.last_click = None;
+                #[cfg(feature = "pptx")]
                 self.document.pptx_clear_caret();
                 if let Some(command) = command {
                     self.execute_toolbar_command(command)?;
                 }
-                return Ok(true);
+                Ok(true)
             }
+            #[cfg(feature = "xlsx")]
             PointerTarget::Xlsx(cell) => {
                 let committed = self.document.xlsx_commit(None)?;
                 let selected = self.document.xlsx_select_cell(cell);
                 self.dragging = false;
                 self.last_click = None;
                 self.update_title();
-                return Ok(committed || selected);
+                Ok(committed || selected)
             }
+            #[cfg(feature = "pptx")]
             PointerTarget::Pptx(PptxHit::Text(hit)) => {
                 self.dragging = false;
                 self.last_click = None;
@@ -656,32 +796,43 @@ impl Viewer {
                 if selected {
                     self.reset_caret_blink();
                 }
-                return Ok(selected);
+                Ok(selected)
             }
+            #[cfg(feature = "pptx")]
             PointerTarget::Pptx(PptxHit::Other) => {
                 self.dragging = false;
                 self.last_click = None;
-                return Ok(self.document.pptx_clear_caret());
+                Ok(self.document.pptx_clear_caret())
             }
-            PointerTarget::Docx(loc) => loc,
-            PointerTarget::None => return Ok(self.document.pptx_clear_caret()),
-        };
-        let now = Instant::now();
-        let word = self.last_click.is_some_and(|(last, last_x, last_y)| {
-            now.duration_since(last) <= DOUBLE_CLICK
-                && (x - last_x).hypot(y - last_y) <= DOUBLE_CLICK_DISTANCE
-        });
-        self.last_click = Some((now, x, y));
-        self.dragging = true;
-        let selected = self
-            .document
-            .docx_select_point(loc, self.modifiers.shift_key(), word)?;
-        if selected {
-            self.reset_caret_blink();
+            #[cfg(feature = "docx")]
+            PointerTarget::Docx(loc) => {
+                let now = Instant::now();
+                let word = self.last_click.is_some_and(|(last, last_x, last_y)| {
+                    now.duration_since(last) <= DOUBLE_CLICK
+                        && (x - last_x).hypot(y - last_y) <= DOUBLE_CLICK_DISTANCE
+                });
+                self.last_click = Some((now, x, y));
+                self.dragging = true;
+                let selected =
+                    self.document
+                        .docx_select_point(loc, self.modifiers.shift_key(), word)?;
+                if selected {
+                    self.reset_caret_blink();
+                }
+                Ok(selected)
+            }
+            PointerTarget::None => {
+                #[cfg(feature = "pptx")]
+                {
+                    return Ok(self.document.pptx_clear_caret());
+                }
+                #[cfg(not(feature = "pptx"))]
+                Ok(false)
+            }
         }
-        Ok(selected)
     }
 
+    #[cfg(feature = "docx")]
     fn pointer_drag(&mut self) -> Result<bool> {
         if !self.dragging {
             return Ok(false);
@@ -702,6 +853,11 @@ impl Viewer {
         Ok(selected)
     }
 
+    #[cfg(not(feature = "docx"))]
+    fn pointer_drag(&mut self) -> Result<bool> {
+        Ok(false)
+    }
+
     fn execute_toolbar_command(&mut self, command: ToolbarCommand) -> Result<()> {
         if command == ToolbarCommand::Save {
             let editing = self.document.editing_state()?;
@@ -715,24 +871,58 @@ impl Viewer {
                 return Ok(());
             }
         }
-        if self.document.xlsx_is_editing() {
-            self.document.xlsx_commit(None)?;
+        #[cfg(feature = "xlsx")]
+        {
+            if self.document.xlsx_is_editing() {
+                self.document.xlsx_commit(None)?;
+            }
         }
-        let xlsx = matches!(&self.document.reference, ReferenceDocument::Xlsx(_));
-        let pptx = matches!(&self.document.reference, ReferenceDocument::Pptx(_));
         let changed = match command {
-            ToolbarCommand::Undo if xlsx => self.document.xlsx_undo()?,
-            ToolbarCommand::Redo if xlsx => self.document.xlsx_redo()?,
-            ToolbarCommand::Undo if pptx => self.document.pptx_undo()?,
-            ToolbarCommand::Redo if pptx => self.document.pptx_redo()?,
+            #[cfg(feature = "xlsx")]
+            ToolbarCommand::Undo
+                if matches!(&self.document.reference, ReferenceDocument::Xlsx(_)) =>
+            {
+                self.document.xlsx_undo()?
+            }
+            #[cfg(feature = "xlsx")]
+            ToolbarCommand::Redo
+                if matches!(&self.document.reference, ReferenceDocument::Xlsx(_)) =>
+            {
+                self.document.xlsx_redo()?
+            }
+            #[cfg(feature = "pptx")]
+            ToolbarCommand::Undo
+                if matches!(&self.document.reference, ReferenceDocument::Pptx(_)) =>
+            {
+                self.document.pptx_undo()?
+            }
+            #[cfg(feature = "pptx")]
+            ToolbarCommand::Redo
+                if matches!(&self.document.reference, ReferenceDocument::Pptx(_)) =>
+            {
+                self.document.pptx_redo()?
+            }
+            #[cfg(feature = "docx")]
             ToolbarCommand::Undo => self.document.docx_undo()?,
+            #[cfg(feature = "docx")]
             ToolbarCommand::Redo => self.document.docx_redo()?,
+            #[cfg(feature = "docx")]
             ToolbarCommand::Bold => self.document.docx_toggle_format(SimpleFormat::Bold)?,
+            #[cfg(feature = "docx")]
             ToolbarCommand::Italic => self.document.docx_toggle_format(SimpleFormat::Italic)?,
+            #[cfg(feature = "docx")]
             ToolbarCommand::Underline => {
                 self.document.docx_toggle_format(SimpleFormat::Underline)?
             }
+            #[cfg(feature = "docx")]
             ToolbarCommand::Align(alignment) => self.document.docx_set_alignment(alignment)?,
+            #[cfg(not(feature = "docx"))]
+            ToolbarCommand::Undo
+            | ToolbarCommand::Redo
+            | ToolbarCommand::Bold
+            | ToolbarCommand::Italic
+            | ToolbarCommand::Underline
+            | ToolbarCommand::Align(_) => false,
             ToolbarCommand::ZoomOut => {
                 self.zoom_by(1.0 / 1.1);
                 return Ok(());
@@ -766,10 +956,12 @@ impl Viewer {
         let command = self.modifiers.super_key() || self.modifiers.control_key();
         let key = event.logical_key.as_ref();
         if matches!(key, Key::Named(NamedKey::Escape)) {
+            #[cfg(feature = "pptx")]
             if self.document.pptx_clear_caret() {
                 self.request_redraw();
                 return Ok(());
             }
+            #[cfg(feature = "xlsx")]
             if self.document.xlsx_cancel_edit() {
                 self.update_title();
                 self.request_redraw();
@@ -826,6 +1018,7 @@ impl Viewer {
             command,
             self.modifiers.alt_key(),
         );
+        #[cfg(feature = "docx")]
         if matches!(&self.document.reference, ReferenceDocument::Docx(_)) {
             let changed = match key {
                 Key::Named(NamedKey::ArrowLeft) => self
@@ -865,6 +1058,7 @@ impl Viewer {
             }
             return Ok(());
         }
+        #[cfg(feature = "xlsx")]
         if matches!(&self.document.reference, ReferenceDocument::Xlsx(_)) {
             let editing = self.document.xlsx_is_editing();
             let changed = if editing {
@@ -906,6 +1100,7 @@ impl Viewer {
             }
             return Ok(());
         }
+        #[cfg(feature = "pptx")]
         if matches!(&self.document.reference, ReferenceDocument::Pptx(_))
             && self.document.has_text_caret()
         {
@@ -974,12 +1169,18 @@ impl Viewer {
     }
 
     fn save_and_verify(&mut self) -> std::result::Result<std::path::PathBuf, SaveFailure> {
-        if self.document.xlsx_is_editing() {
-            self.document.xlsx_commit(None).map_err(SaveFailure::Save)?;
+        #[cfg(feature = "xlsx")]
+        {
+            if self.document.xlsx_is_editing() {
+                self.document.xlsx_commit(None).map_err(SaveFailure::Save)?;
+            }
         }
         let (format, sheet_index) = match &self.document.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => ("DOCX", 0),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => ("XLSX", reference.sheet_index),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) => ("PPTX", 0),
         };
         let path = self
@@ -988,8 +1189,11 @@ impl Viewer {
             .context("save target is unavailable")
             .map_err(SaveFailure::Save)?;
         match &self.document.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => self.document.save_docx_to(&path),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => self.document.save_xlsx_to(&path),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) => self.document.save_pptx_to(&path),
         }
         .map_err(SaveFailure::Save)?;
@@ -1107,11 +1311,17 @@ impl Viewer {
             .map(|page| page.skipped.total())
             .sum::<usize>();
         let edit_state = match &self.document.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) if reference.editor.is_dirty() => " — edited",
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => " — editable",
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) if self.document.xlsx_is_dirty() => " — edited",
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => " — editable",
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) if self.document.pptx_is_dirty() => " — edited",
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) => " — editable",
         };
         window.set_title(&format!(
@@ -1155,7 +1365,7 @@ impl Viewer {
     }
 }
 
-impl ApplicationHandler<CollaborationWake> for Viewer {
+impl ApplicationHandler<ViewerEvent> for Viewer {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.create_window(event_loop) {
             self.handle_error(event_loop, WindowErrorPath::Startup, error);
@@ -1251,16 +1461,27 @@ impl ApplicationHandler<CollaborationWake> for Viewer {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: CollaborationWake) {
-        let Some(event) = self
-            .collaboration_events
-            .as_ref()
-            .and_then(TransportEventReceiver::try_recv)
-        else {
-            return;
-        };
-        if let Err(error) = self.handle_collaboration_event(event) {
-            self.handle_error(event_loop, WindowErrorPath::Edit, error);
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ViewerEvent) {
+        match event {
+            ViewerEvent::Collaboration => {
+                let Some(event) = self
+                    .collaboration_events
+                    .as_ref()
+                    .and_then(TransportEventReceiver::try_recv)
+                else {
+                    return;
+                };
+                if let Err(error) = self.handle_collaboration_event(event) {
+                    self.handle_error(event_loop, WindowErrorPath::Edit, error);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            ViewerEvent::OpenDocument(path) => {
+                if let Err(error) = self.open_document(path) {
+                    self.set_status(format!("Open failed: {error:#}"));
+                    self.request_redraw();
+                }
+            }
         }
     }
 
@@ -1299,7 +1520,7 @@ impl ApplicationHandler<CollaborationWake> for Viewer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "docx", feature = "xlsx", feature = "pptx"))]
 mod tests {
     use std::path::Path;
 

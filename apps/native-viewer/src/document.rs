@@ -1,26 +1,40 @@
+#[cfg(feature = "docx")]
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "xlsx")]
 use betteroffice_xlsx::CellRef;
+#[cfg(feature = "docx")]
 use docx_edit::{EditingDoc, EngineSession, SimpleFormat, seed_from_docx};
+#[cfg(feature = "docx")]
 use docx_layout::display_list::DisplayList;
+#[cfg(feature = "docx")]
 use docx_parse::{S9PackageWire, S9ParseOptions, parse_docx_s9_wire};
+#[cfg(feature = "docx")]
 use serde_json::{Value, json};
 use vello::kurbo::Affine;
 
-use crate::chrome::{Alignment, EditingState};
+#[cfg(feature = "docx")]
+use crate::chrome::Alignment;
+use crate::chrome::EditingState;
+#[cfg(feature = "docx")]
 use crate::collaboration::BROWSER_SEED_CLIENT_ID;
+#[cfg(feature = "docx")]
 use crate::docx_scene::translate_document;
-use crate::editing::{
-    DeleteDirection, DocxEditor, MoveDirection, SceneChange, SelectionRect, TextLoc,
-};
+#[cfg(feature = "docx")]
+use crate::editing::{DocxEditor, SceneChange, SelectionRect, TextLoc};
+#[cfg(feature = "docx")]
 use crate::fonts::FontRegistry;
+#[cfg(feature = "docx")]
 use crate::images::ImageRegistry;
+#[cfg(feature = "pptx")]
 use crate::pptx_editing::{PptxEditChange, PptxEditor, PptxHit, PptxRemoteChange, PptxTextHit};
 use crate::scene_shared::PageScene;
+#[cfg(feature = "xlsx")]
 use crate::xlsx_editing::{CellMove, XlsxEditor};
+#[cfg(feature = "xlsx")]
 use crate::xlsx_scene::translate_sheet;
 
 pub struct DocumentView {
@@ -31,11 +45,15 @@ pub struct DocumentView {
 }
 
 pub enum ReferenceDocument {
+    #[cfg(feature = "docx")]
     Docx(Box<DocxReference>),
+    #[cfg(feature = "xlsx")]
     Xlsx(Box<XlsxReference>),
+    #[cfg(feature = "pptx")]
     Pptx(Box<PptxReference>),
 }
 
+#[cfg(feature = "docx")]
 pub struct DocxReference {
     pub display_list: DisplayList,
     pub fonts: FontRegistry,
@@ -43,6 +61,7 @@ pub struct DocxReference {
     pub editor: DocxEditor,
 }
 
+#[cfg(feature = "xlsx")]
 pub struct XlsxReference {
     pub editor: XlsxEditor,
     pub sheet_index: usize,
@@ -52,11 +71,13 @@ pub struct XlsxReference {
     pub chart_placeholders: usize,
 }
 
+#[cfg(feature = "xlsx")]
 pub struct XlsxOverlay {
     pub rect: xlsx_render::Rect,
     pub draft: Option<String>,
 }
 
+#[cfg(feature = "pptx")]
 pub struct PptxReference {
     pub editor: PptxEditor,
 }
@@ -71,10 +92,29 @@ pub struct ViewerCaretGeometry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DocumentFormat {
     Docx,
     Xlsx,
     Pptx,
+}
+
+#[cfg(any(feature = "docx", feature = "pptx"))]
+#[derive(Clone, Copy, Debug)]
+pub enum MoveDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+#[cfg(any(feature = "docx", feature = "pptx"))]
+#[derive(Clone, Copy, Debug)]
+pub enum DeleteDirection {
+    Backward,
+    Forward,
 }
 
 impl DocumentFormat {
@@ -85,45 +125,87 @@ impl DocumentFormat {
             .map(str::to_ascii_lowercase)
             .as_deref()
         {
-            Some("docx") => Ok(Self::Docx),
-            Some("xlsx") => Ok(Self::Xlsx),
-            Some("pptx") => Ok(Self::Pptx),
+            Some("docx") => {
+                #[cfg(feature = "docx")]
+                {
+                    Ok(Self::Docx)
+                }
+                #[cfg(not(feature = "docx"))]
+                {
+                    bail!(
+                        ".docx files open in BetterOffice Docs; this build does not include the DOCX engine"
+                    )
+                }
+            }
+            Some("xlsx") => {
+                #[cfg(feature = "xlsx")]
+                {
+                    Ok(Self::Xlsx)
+                }
+                #[cfg(not(feature = "xlsx"))]
+                {
+                    bail!(
+                        ".xlsx files open in BetterOffice Sheets; this build does not include the XLSX engine"
+                    )
+                }
+            }
+            Some("pptx") => {
+                #[cfg(feature = "pptx")]
+                {
+                    Ok(Self::Pptx)
+                }
+                #[cfg(not(feature = "pptx"))]
+                {
+                    bail!(
+                        ".pptx files open in BetterOffice Slides; this build does not include the PPTX engine"
+                    )
+                }
+            }
             _ => bail!("--document must be a .docx, .xlsx, or .pptx file"),
         }
     }
 }
 
+#[allow(irrefutable_let_patterns)]
 impl DocumentView {
-    pub fn scene_label(&self, index: usize) -> String {
+    pub fn scene_label(&self, _index: usize) -> String {
         match &self.reference {
-            ReferenceDocument::Docx(_) => format!("page {}", index + 1),
+            #[cfg(feature = "docx")]
+            ReferenceDocument::Docx(_) => format!("page {}", _index + 1),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => {
                 format!("sheet {}", reference.sheet_index + 1)
             }
-            ReferenceDocument::Pptx(_) => format!("slide {}", index + 1),
+            #[cfg(feature = "pptx")]
+            ReferenceDocument::Pptx(_) => format!("slide {}", _index + 1),
         }
     }
 
     pub fn title_summary(&self) -> String {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => format!("{} pages", self.pages.len()),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => format!(
                 "sheet {} of {} ({})",
                 reference.sheet_index + 1,
                 reference.sheet_count,
                 reference.sheet_name
             ),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => {
                 format!("{} slides", reference.editor.slide_count())
             }
         }
     }
 
-    pub fn status_position(&self, page_index: usize) -> String {
+    pub fn status_position(&self, _page_index: usize) -> String {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => {
-                format!("Page {} of {}", page_index + 1, self.pages.len())
+                format!("Page {} of {}", _page_index + 1, self.pages.len())
             }
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => {
                 let cell = reference
                     .editor
@@ -135,10 +217,11 @@ impl DocumentView {
                     reference.sheet_count
                 )
             }
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => {
                 format!(
                     "Slide {} of {}",
-                    page_index + 1,
+                    _page_index + 1,
                     reference.editor.slide_count()
                 )
             }
@@ -147,11 +230,14 @@ impl DocumentView {
 
     pub fn editing_state(&self) -> Result<EditingState> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.editing_state(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => Ok(EditingState::editable_without_selection(
                 reference.editor.can_undo(),
                 reference.editor.can_redo(),
             )),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => Ok(EditingState::editable_without_selection(
                 reference.editor.can_undo(),
                 reference.editor.can_redo(),
@@ -161,12 +247,16 @@ impl DocumentView {
 
     pub fn display_item_name(&self) -> &'static str {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => "primitives",
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => "commands",
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) => "primitives",
         }
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_hit_test(&self, page_index: usize, x: f64, y: f64) -> Result<Option<TextLoc>> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             return Ok(None);
@@ -174,6 +264,7 @@ impl DocumentView {
         reference.editor.hit_test(page_index, x, y)
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_select_point(&mut self, loc: TextLoc, extend: bool, word: bool) -> Result<bool> {
         let ReferenceDocument::Docx(reference) = &mut self.reference else {
             return Ok(false);
@@ -182,6 +273,7 @@ impl DocumentView {
         Ok(true)
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_extend_to(&mut self, loc: TextLoc) -> Result<bool> {
         let ReferenceDocument::Docx(reference) = &mut self.reference else {
             return Ok(false);
@@ -190,6 +282,7 @@ impl DocumentView {
         Ok(true)
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_move_selection(&mut self, direction: MoveDirection, extend: bool) -> Result<bool> {
         let ReferenceDocument::Docx(reference) = &mut self.reference else {
             return Ok(false);
@@ -197,35 +290,42 @@ impl DocumentView {
         reference.editor.move_selection(direction, extend)
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_insert_text(&mut self, text: &str) -> Result<bool> {
         self.apply_docx_edit(|editor| editor.insert_text(text))
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_delete(&mut self, direction: DeleteDirection) -> Result<bool> {
         self.apply_docx_edit(|editor| editor.delete(direction))
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_enter(&mut self) -> Result<bool> {
         self.apply_docx_edit(DocxEditor::enter)
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_toggle_format(&mut self, format: SimpleFormat) -> Result<bool> {
         self.apply_docx_edit(|editor| editor.toggle_format(format))
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_set_alignment(&mut self, alignment: Alignment) -> Result<bool> {
         self.apply_docx_edit(|editor| editor.set_alignment(alignment))
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_undo(&mut self) -> Result<bool> {
         self.apply_docx_edit(DocxEditor::undo)
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_redo(&mut self) -> Result<bool> {
         self.apply_docx_edit(DocxEditor::redo)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "docx"))]
     pub fn docx_state_vector(&self) -> Result<Vec<u8>> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             bail!("collaboration is available only for DOCX");
@@ -233,11 +333,12 @@ impl DocumentView {
         Ok(reference.editor.state_vector())
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_apply_remote_update(&mut self, update: &[u8]) -> Result<bool> {
         self.apply_docx_edit(|editor| editor.apply_remote_update(update).map(Some))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "docx"))]
     pub fn docx_drain_local_updates(&self) -> Vec<Vec<u8>> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             return Vec::new();
@@ -245,7 +346,7 @@ impl DocumentView {
         reference.editor.drain_local_updates()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "docx"))]
     pub fn docx_fingerprint(&self) -> Result<[u8; 32]> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             bail!("collaboration is available only for DOCX");
@@ -255,23 +356,31 @@ impl DocumentView {
 
     pub fn collaboration_state_vector(&self) -> Result<Vec<u8>> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => Ok(reference.editor.state_vector()),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.state_vector(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.state_vector(),
         }
     }
 
     pub fn collaboration_encode_diff(&self, state_vector: &[u8]) -> Result<Vec<u8>> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.encode_diff(state_vector),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.encode_diff(state_vector),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.encode_diff(state_vector),
         }
     }
 
     pub fn collaboration_apply_remote_update(&mut self, update: &[u8]) -> Result<bool> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => self.docx_apply_remote_update(update),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => {
                 let changed = {
                     let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
@@ -284,6 +393,7 @@ impl DocumentView {
                 }
                 Ok(changed)
             }
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) => {
                 let change = {
                     let ReferenceDocument::Pptx(reference) = &mut self.reference else {
@@ -309,21 +419,27 @@ impl DocumentView {
 
     pub fn collaboration_drain_local_updates(&self) -> Vec<Vec<u8>> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.drain_local_updates(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.drain_local_updates(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.drain_local_updates(),
         }
     }
 
     pub fn collaboration_fingerprint(&self) -> Result<[u8; 32]> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => Ok(reference.editor.source_fingerprint()),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.source_fingerprint(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.source_fingerprint(),
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "docx"))]
     pub fn docx_canonical_checksum(&self) -> Result<[u8; 32]> {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             bail!("collaboration is available only for DOCX");
@@ -331,7 +447,7 @@ impl DocumentView {
         reference.editor.canonical_checksum()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "docx"))]
     pub fn docx_relayout_count(&self) -> usize {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             return 0;
@@ -342,8 +458,11 @@ impl DocumentView {
     #[cfg(test)]
     pub fn collaboration_canonical_checksum(&self) -> Result<[u8; 32]> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.canonical_checksum(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.canonical_checksum(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.canonical_checksum(),
         }
     }
@@ -351,12 +470,16 @@ impl DocumentView {
     #[cfg(test)]
     pub fn collaboration_relayout_count(&self) -> usize {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.relayout_count(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.relayout_count(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.relayout_count(),
         }
     }
 
+    #[cfg(feature = "docx")]
     pub fn docx_selection_rects(&self) -> &[SelectionRect] {
         let ReferenceDocument::Docx(reference) = &self.reference else {
             return &[];
@@ -366,6 +489,7 @@ impl DocumentView {
 
     pub fn caret_geometry(&self) -> Result<Option<ViewerCaretGeometry>> {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => {
                 Ok(reference
                     .editor
@@ -378,6 +502,7 @@ impl DocumentView {
                         transform: Affine::IDENTITY,
                     }))
             }
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => {
                 Ok(reference
                     .editor
@@ -390,36 +515,47 @@ impl DocumentView {
                         transform: caret.transform,
                     }))
             }
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => Ok(None),
         }
     }
 
     pub fn has_text_caret(&self) -> bool {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.has_collapsed_selection(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.has_caret(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => false,
         }
     }
 
     pub fn is_dirty(&self) -> bool {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.is_dirty(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => {
                 reference.editor.is_dirty() || reference.editor.is_editing()
             }
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.is_dirty(),
         }
     }
 
     pub fn is_remote_only_dirty(&self) -> bool {
         match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => reference.editor.is_remote_only_dirty(),
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => reference.editor.is_remote_only_dirty(),
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => reference.editor.is_remote_only_dirty(),
         }
     }
 
+    #[cfg(feature = "docx")]
     pub fn save_docx_to(&mut self, path: &Path) -> Result<()> {
         let ReferenceDocument::Docx(reference) = &mut self.reference else {
             bail!("only DOCX documents are editable");
@@ -427,6 +563,7 @@ impl DocumentView {
         reference.editor.save_to(path)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_hit_test(&self, slide_index: usize, x: f64, y: f64) -> Option<PptxHit> {
         let ReferenceDocument::Pptx(reference) = &self.reference else {
             return None;
@@ -434,6 +571,7 @@ impl DocumentView {
         reference.editor.hit_test(slide_index, x as f32, y as f32)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_select_hit(&mut self, hit: PptxTextHit) -> bool {
         let ReferenceDocument::Pptx(reference) = &mut self.reference else {
             return false;
@@ -441,6 +579,7 @@ impl DocumentView {
         reference.editor.select_hit(hit)
     }
 
+    #[cfg(feature = "pptx")]
     pub(crate) fn pptx_select_story_position(
         &mut self,
         story_id: &str,
@@ -452,6 +591,7 @@ impl DocumentView {
         reference.editor.select_story_position(story_id, position)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_clear_caret(&mut self) -> bool {
         let ReferenceDocument::Pptx(reference) = &mut self.reference else {
             return false;
@@ -459,6 +599,7 @@ impl DocumentView {
         reference.editor.clear_caret()
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_move_caret(&mut self, direction: MoveDirection) -> bool {
         let ReferenceDocument::Pptx(reference) = &mut self.reference else {
             return false;
@@ -466,18 +607,22 @@ impl DocumentView {
         reference.editor.move_caret(direction)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_insert_text(&mut self, text: &str) -> Result<bool> {
         self.apply_pptx_edit(|editor| editor.insert_text(text))
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_delete(&mut self, direction: DeleteDirection) -> Result<bool> {
         self.apply_pptx_edit(|editor| editor.delete(direction))
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_enter(&mut self) -> Result<bool> {
         self.apply_pptx_edit(PptxEditor::enter)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_undo(&mut self) -> Result<bool> {
         let pages = {
             let ReferenceDocument::Pptx(reference) = &mut self.reference else {
@@ -492,6 +637,7 @@ impl DocumentView {
         Ok(true)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_redo(&mut self) -> Result<bool> {
         let pages = {
             let ReferenceDocument::Pptx(reference) = &mut self.reference else {
@@ -506,6 +652,7 @@ impl DocumentView {
         Ok(true)
     }
 
+    #[cfg(feature = "pptx")]
     pub fn pptx_is_dirty(&self) -> bool {
         matches!(
             &self.reference,
@@ -513,6 +660,7 @@ impl DocumentView {
         )
     }
 
+    #[cfg(feature = "pptx")]
     pub fn save_pptx_to(&mut self, path: &Path) -> Result<()> {
         let ReferenceDocument::Pptx(reference) = &mut self.reference else {
             bail!("only PPTX decks use the PPTX save path");
@@ -520,6 +668,7 @@ impl DocumentView {
         reference.editor.save_to(path)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_hit_test(&self, page_index: usize, x: f64, y: f64) -> Option<CellRef> {
         let ReferenceDocument::Xlsx(reference) = &self.reference else {
             return None;
@@ -529,6 +678,7 @@ impl DocumentView {
             .flatten()
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_select_cell(&mut self, cell: CellRef) -> bool {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return false;
@@ -536,6 +686,7 @@ impl DocumentView {
         reference.editor.select(cell)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_move_selection(&mut self, movement: CellMove) -> bool {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return false;
@@ -543,6 +694,7 @@ impl DocumentView {
         reference.editor.move_selection(movement)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_begin_edit(&mut self, seed: Option<&str>) -> Result<bool> {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return Ok(false);
@@ -550,6 +702,7 @@ impl DocumentView {
         reference.editor.begin_edit(seed)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_insert_text(&mut self, text: &str) -> bool {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return false;
@@ -557,6 +710,7 @@ impl DocumentView {
         reference.editor.insert_text(text)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_backspace(&mut self) -> bool {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return false;
@@ -564,6 +718,7 @@ impl DocumentView {
         reference.editor.backspace()
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_cancel_edit(&mut self) -> bool {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return false;
@@ -571,6 +726,7 @@ impl DocumentView {
         reference.editor.cancel()
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_commit(&mut self, movement: Option<CellMove>) -> Result<bool> {
         let changed = {
             let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
@@ -584,6 +740,7 @@ impl DocumentView {
         Ok(changed)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_undo(&mut self) -> Result<bool> {
         let changed = {
             let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
@@ -597,6 +754,7 @@ impl DocumentView {
         Ok(changed)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_redo(&mut self) -> Result<bool> {
         let changed = {
             let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
@@ -610,6 +768,7 @@ impl DocumentView {
         Ok(changed)
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_is_editing(&self) -> bool {
         matches!(
             &self.reference,
@@ -617,6 +776,7 @@ impl DocumentView {
         )
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_is_dirty(&self) -> bool {
         matches!(
             &self.reference,
@@ -624,6 +784,7 @@ impl DocumentView {
         )
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn xlsx_overlay(&self) -> Option<XlsxOverlay> {
         let ReferenceDocument::Xlsx(reference) = &self.reference else {
             return None;
@@ -634,6 +795,7 @@ impl DocumentView {
         })
     }
 
+    #[cfg(feature = "xlsx")]
     pub fn save_xlsx_to(&mut self, path: &Path) -> Result<()> {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             bail!("only XLSX workbooks use the XLSX save path");
@@ -643,8 +805,11 @@ impl DocumentView {
 
     pub fn edited_path(&self) -> Result<PathBuf> {
         let extension = match &self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(_) => "docx",
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => "xlsx",
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(_) => "pptx",
         };
         let stem = self
@@ -658,6 +823,7 @@ impl DocumentView {
 
     pub fn recover_after_edit_error(&mut self) -> Result<()> {
         match &mut self.reference {
+            #[cfg(feature = "docx")]
             ReferenceDocument::Docx(reference) => {
                 reference.editor.recover_layout()?;
                 let display_list = reference
@@ -669,6 +835,7 @@ impl DocumentView {
                     translate_document(&display_list, &reference.fonts, &reference.images)?;
                 reference.display_list = display_list;
             }
+            #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(reference) => {
                 reference.editor.recover_layout()?;
                 let display_list = reference.editor.display_list();
@@ -680,6 +847,7 @@ impl DocumentView {
                     .filter(|chart| chart.placeholder)
                     .count();
             }
+            #[cfg(feature = "pptx")]
             ReferenceDocument::Pptx(reference) => {
                 self.pages = reference.editor.recover_layout()?;
             }
@@ -687,6 +855,7 @@ impl DocumentView {
         Ok(())
     }
 
+    #[cfg(feature = "docx")]
     fn apply_docx_edit(
         &mut self,
         edit: impl FnOnce(&mut DocxEditor) -> Result<Option<SceneChange>>,
@@ -718,6 +887,7 @@ impl DocumentView {
         Ok(true)
     }
 
+    #[cfg(feature = "pptx")]
     fn apply_pptx_edit(
         &mut self,
         edit: impl FnOnce(&mut PptxEditor) -> Result<Option<PptxEditChange>>,
@@ -735,6 +905,7 @@ impl DocumentView {
         Ok(true)
     }
 
+    #[cfg(feature = "xlsx")]
     fn refresh_xlsx_scene(&mut self) -> Result<()> {
         let ReferenceDocument::Xlsx(reference) = &mut self.reference else {
             return Ok(());
@@ -768,7 +939,7 @@ pub fn load_document_for_export(
     load_document_with_xlsx_mode(path, sheet_index, max_texture_dimension_2d, false)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "docx"))]
 pub fn load_collaborative_docx(
     path: &Path,
     max_texture_dimension_2d: u32,
@@ -780,7 +951,7 @@ pub fn load_collaborative_docx(
     load_docx(path, max_texture_dimension_2d, Some(client_id))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "xlsx"))]
 pub fn load_collaborative_xlsx(
     path: &Path,
     sheet_index: usize,
@@ -799,7 +970,7 @@ pub fn load_collaborative_xlsx(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pptx"))]
 pub fn load_collaborative_pptx(
     path: &Path,
     max_texture_dimension_2d: u32,
@@ -813,42 +984,61 @@ pub fn load_collaborative_pptx(
 
 pub fn load_collaborative_document(
     path: &Path,
-    sheet_index: usize,
+    _sheet_index: usize,
     max_texture_dimension_2d: u32,
     client_id: u64,
 ) -> Result<DocumentView> {
     match DocumentFormat::from_path(path)? {
+        #[cfg(feature = "docx")]
         DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d, Some(client_id)),
+        #[cfg(feature = "xlsx")]
         DocumentFormat::Xlsx => load_xlsx(
             path,
-            sheet_index,
+            _sheet_index,
             max_texture_dimension_2d,
             true,
             Some(client_id),
         ),
+        #[cfg(feature = "pptx")]
         DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d, Some(client_id)),
+        #[cfg(not(feature = "docx"))]
+        DocumentFormat::Docx => unreachable!("DocumentFormat::from_path returned DOCX"),
+        #[cfg(not(feature = "xlsx"))]
+        DocumentFormat::Xlsx => unreachable!("DocumentFormat::from_path returned XLSX"),
+        #[cfg(not(feature = "pptx"))]
+        DocumentFormat::Pptx => unreachable!("DocumentFormat::from_path returned PPTX"),
     }
 }
 
 fn load_document_with_xlsx_mode(
     path: &Path,
-    sheet_index: usize,
+    _sheet_index: usize,
     max_texture_dimension_2d: u32,
-    recalculate_xlsx: bool,
+    _recalculate_xlsx: bool,
 ) -> Result<DocumentView> {
     match DocumentFormat::from_path(path)? {
+        #[cfg(feature = "docx")]
         DocumentFormat::Docx => load_docx(path, max_texture_dimension_2d, None),
+        #[cfg(feature = "xlsx")]
         DocumentFormat::Xlsx => load_xlsx(
             path,
-            sheet_index,
+            _sheet_index,
             max_texture_dimension_2d,
-            recalculate_xlsx,
+            _recalculate_xlsx,
             None,
         ),
+        #[cfg(feature = "pptx")]
         DocumentFormat::Pptx => load_pptx(path, max_texture_dimension_2d, None),
+        #[cfg(not(feature = "docx"))]
+        DocumentFormat::Docx => unreachable!("DocumentFormat::from_path returned DOCX"),
+        #[cfg(not(feature = "xlsx"))]
+        DocumentFormat::Xlsx => unreachable!("DocumentFormat::from_path returned XLSX"),
+        #[cfg(not(feature = "pptx"))]
+        DocumentFormat::Pptx => unreachable!("DocumentFormat::from_path returned PPTX"),
     }
 }
 
+#[cfg(feature = "pptx")]
 fn load_pptx(
     path: &Path,
     max_texture_dimension_2d: u32,
@@ -870,6 +1060,7 @@ fn load_pptx(
     })
 }
 
+#[cfg(feature = "docx")]
 fn load_docx(
     path: &Path,
     max_texture_dimension_2d: u32,
@@ -935,6 +1126,7 @@ fn load_docx(
     })
 }
 
+#[cfg(feature = "xlsx")]
 fn load_xlsx(
     path: &Path,
     sheet_index: usize,
@@ -975,6 +1167,7 @@ fn load_xlsx(
     })
 }
 
+#[cfg(feature = "docx")]
 fn region_request(
     package: &S9PackageWire,
     font_chains: Option<&BTreeMap<String, Vec<u32>>>,
@@ -1041,6 +1234,7 @@ fn region_request(
     Ok(request)
 }
 
+#[cfg(feature = "docx")]
 fn push_notes(target: &mut Vec<Value>, notes: Option<&[docx_parse::Note]>, note_kind: &str) {
     for note in notes.unwrap_or_default() {
         if !note.is_separator() {
@@ -1053,7 +1247,7 @@ fn push_notes(target: &mut Vec<Value>, notes: Option<&[docx_parse::Note]>, note_
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "docx", feature = "xlsx", feature = "pptx"))]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 

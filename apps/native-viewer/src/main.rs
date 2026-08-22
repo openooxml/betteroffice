@@ -6,20 +6,30 @@ mod collaboration_document;
 mod collaboration_protocol;
 mod collaboration_test_peer;
 mod document;
+#[cfg(feature = "docx")]
 #[path = "scene.rs"]
 mod docx_scene;
+#[cfg(feature = "docx")]
 mod editing;
 mod fonts;
 mod gpu;
+#[cfg(feature = "docx")]
 mod images;
+#[cfg(feature = "pptx")]
 mod pptx_editing;
+#[cfg(feature = "pptx")]
 mod pptx_scene;
 mod scene_shared;
 #[cfg(test)]
 mod test_fixtures;
 mod window;
+#[cfg(feature = "xlsx")]
 mod xlsx_editing;
+#[cfg(feature = "xlsx")]
 mod xlsx_scene;
+
+#[cfg(not(any(feature = "docx", feature = "xlsx", feature = "pptx")))]
+compile_error!("enable at least one of the docx, xlsx, or pptx features");
 
 use std::env;
 use std::ffi::OsString;
@@ -31,6 +41,19 @@ use collaboration::{CollaborationConfig, DEFAULT_RELAY_ORIGIN};
 use document::{
     DocumentFormat, load_collaborative_document, load_document, load_document_for_export,
 };
+
+#[cfg(feature = "docx")]
+const WELCOME_DOCUMENT: &str = "Welcome.docx";
+#[cfg(feature = "docx")]
+const DEVELOPMENT_DOCUMENT: &str = "../demo/public/betteroffice-demo.docx";
+#[cfg(all(not(feature = "docx"), feature = "xlsx"))]
+const WELCOME_DOCUMENT: &str = "Welcome.xlsx";
+#[cfg(all(not(feature = "docx"), feature = "xlsx"))]
+const DEVELOPMENT_DOCUMENT: &str = "../demo/public/sample.xlsx";
+#[cfg(all(not(feature = "docx"), not(feature = "xlsx"), feature = "pptx"))]
+const WELCOME_DOCUMENT: &str = "Welcome.pptx";
+#[cfg(all(not(feature = "docx"), not(feature = "xlsx"), feature = "pptx"))]
+const DEVELOPMENT_DOCUMENT: &str = "../demo/public/betteroffice-demo.pptx";
 
 fn main() -> Result<()> {
     let options = Options::parse()?;
@@ -80,7 +103,7 @@ impl Options {
     }
 
     fn parse_from(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
-        let mut document = default_document();
+        let mut document = None;
         let mut png = None;
         let mut page = None;
         let mut sheet = None;
@@ -98,10 +121,8 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--document") => {
-                    document = args
-                        .next()
-                        .map(PathBuf::from)
-                        .context("--document needs a path")?;
+                    let path = args.next().context("--document needs a path")?;
+                    set_document(&mut document, path)?;
                 }
                 Some("--png") => {
                     png = Some(
@@ -148,15 +169,21 @@ impl Options {
                 }
                 Some("--help" | "-h") => {
                     println!(
-                        "Usage: betteroffice-native-viewer [--document FILE] [--png OUT] [--page N | --sheet N | --slide N] [--scale N] [--room ID] [--relay-origin URL]"
+                        "Usage: betteroffice-native-viewer [FILE | --document FILE] [--png OUT] [--page N | --sheet N | --slide N] [--scale N] [--room ID] [--relay-origin URL]"
                     );
                     std::process::exit(0);
+                }
+                Some(value) if !value.starts_with('-') => {
+                    set_document(&mut document, arg)?;
+                }
+                None => {
+                    set_document(&mut document, arg)?;
                 }
                 _ => bail!("unknown argument {}", arg.to_string_lossy()),
             }
         }
         Ok(Self {
-            document,
+            document: document.unwrap_or_else(default_document),
             png,
             page,
             sheet,
@@ -202,6 +229,13 @@ impl Options {
     }
 }
 
+fn set_document(document: &mut Option<PathBuf>, path: OsString) -> Result<()> {
+    if document.replace(PathBuf::from(path)).is_some() {
+        bail!("document path specified more than once");
+    }
+    Ok(())
+}
+
 fn one_based_index(value: Option<OsString>, flag: &str) -> Result<usize> {
     let value = value
         .and_then(|value| value.into_string().ok())
@@ -216,7 +250,16 @@ fn one_based_index(value: Option<OsString>, flag: &str) -> Result<usize> {
 }
 
 fn default_document() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../demo/public/betteroffice-demo.docx")
+    if let Some(resource) = env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+        .and_then(|directory| directory.parent().map(Path::to_path_buf))
+        .map(|contents| contents.join("Resources").join(WELCOME_DOCUMENT))
+        .filter(|resource| resource.is_file())
+    {
+        return resource;
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(DEVELOPMENT_DOCUMENT)
 }
 
 #[cfg(test)]
@@ -261,6 +304,20 @@ mod tests {
     fn rejects_zero_sheet() {
         assert!(Options::parse_from(["--sheet".into(), "0".into()]).is_err());
         assert!(Options::parse_from(["--slide".into(), "0".into()]).is_err());
+    }
+
+    #[test]
+    fn accepts_one_positional_document_path() {
+        let options = Options::parse_from(["document.docx".into()]).unwrap();
+        assert_eq!(options.document, Path::new("document.docx"));
+        assert!(
+            Options::parse_from([
+                "document.docx".into(),
+                "--document".into(),
+                "other.docx".into(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

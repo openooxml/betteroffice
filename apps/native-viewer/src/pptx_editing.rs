@@ -13,7 +13,7 @@ use betteroffice_pptx::{
 use sha2::{Digest, Sha256};
 use vello::kurbo::{Affine, Point};
 
-use crate::editing::{DeleteDirection, MoveDirection};
+use crate::document::{DeleteDirection, MoveDirection};
 use crate::pptx_scene::{PptxSceneResources, PptxSlideSummary};
 use crate::scene_shared::PageScene;
 

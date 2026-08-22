@@ -38,6 +38,7 @@ pub enum Alignment {
 }
 
 impl Alignment {
+    #[cfg(feature = "docx")]
     pub fn from_engine(value: Option<&str>) -> Option<Self> {
         match value {
             Some("left" | "start") => Some(Self::Left),
@@ -48,6 +49,7 @@ impl Alignment {
         }
     }
 
+    #[cfg(feature = "docx")]
     pub fn engine_value(self) -> &'static str {
         match self {
             Self::Left => "left",

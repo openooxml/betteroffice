@@ -6,16 +6,22 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "pptx")]
 use betteroffice_pptx::ShapeSnapshot;
+#[cfg(feature = "xlsx")]
 use betteroffice_xlsx::{CellRef, SheetId};
+#[cfg(feature = "docx")]
 use docx_edit::story_checksum;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "docx")]
 use sha2::{Digest, Sha256};
+#[cfg(feature = "docx")]
 use yrs::{Map, ReadTxn, Transact};
 
 use crate::collaboration::{CollaborationClient, CollaborationConfig, TransportEvent};
 use crate::collaboration_document;
 use crate::document::{DocumentView, ReferenceDocument, load_collaborative_document};
+#[cfg(feature = "docx")]
 use crate::editing::TextLoc;
 
 #[derive(Deserialize)]
@@ -230,6 +236,7 @@ fn connect(config: &CollaborationConfig) -> Result<Connection> {
     Ok(Connection { client, events })
 }
 
+#[allow(irrefutable_let_patterns)]
 fn apply_command(
     command: PeerCommand,
     config: &CollaborationConfig,
@@ -244,12 +251,20 @@ fn apply_command(
             text,
             ..
         } => {
-            document.docx_select_point(TextLoc { para_id, offset }, false, false)?;
-            if !document.docx_insert_text(&text)? {
-                bail!("native insert made no change");
+            #[cfg(feature = "docx")]
+            {
+                document.docx_select_point(TextLoc { para_id, offset }, false, false)?;
+                if !document.docx_insert_text(&text)? {
+                    bail!("native insert made no change");
+                }
+                if let Some(active) = connection {
+                    collaboration_document::forward_local_updates(document, &mut active.client);
+                }
             }
-            if let Some(active) = connection {
-                collaboration_document::forward_local_updates(document, &mut active.client);
+            #[cfg(not(feature = "docx"))]
+            {
+                let _ = (para_id, offset, text);
+                bail!("native insert requires BetterOffice Docs");
             }
         }
         PeerCommand::SetCell {
@@ -259,21 +274,29 @@ fn apply_command(
             input,
             ..
         } => {
-            let ReferenceDocument::Xlsx(reference) = &document.reference else {
-                bail!("native setCell requires XLSX");
-            };
-            if reference.editor.sheet() != SheetId(sheet) {
-                bail!(
-                    "native peer has not opened sheet {}",
-                    sheet.saturating_add(1)
-                );
+            #[cfg(feature = "xlsx")]
+            {
+                let ReferenceDocument::Xlsx(reference) = &document.reference else {
+                    bail!("native setCell requires XLSX");
+                };
+                if reference.editor.sheet() != SheetId(sheet) {
+                    bail!(
+                        "native peer has not opened sheet {}",
+                        sheet.saturating_add(1)
+                    );
+                }
+                document.xlsx_select_cell(CellRef::new(row, col));
+                if !document.xlsx_begin_edit(Some(&input))? || !document.xlsx_commit(None)? {
+                    bail!("native cell edit made no change");
+                }
+                if let Some(active) = connection {
+                    collaboration_document::forward_local_updates(document, &mut active.client);
+                }
             }
-            document.xlsx_select_cell(CellRef::new(row, col));
-            if !document.xlsx_begin_edit(Some(&input))? || !document.xlsx_commit(None)? {
-                bail!("native cell edit made no change");
-            }
-            if let Some(active) = connection {
-                collaboration_document::forward_local_updates(document, &mut active.client);
+            #[cfg(not(feature = "xlsx"))]
+            {
+                let _ = (sheet, row, col, input);
+                bail!("native setCell requires BetterOffice Sheets");
             }
         }
         PeerCommand::InsertPptx {
@@ -282,14 +305,22 @@ fn apply_command(
             text,
             ..
         } => {
-            if !document.pptx_select_story_position(&story_id, index)? {
-                bail!("native PPTX story position is not rendered");
+            #[cfg(feature = "pptx")]
+            {
+                if !document.pptx_select_story_position(&story_id, index)? {
+                    bail!("native PPTX story position is not rendered");
+                }
+                if !document.pptx_insert_text(&text)? {
+                    bail!("native PPTX insert made no change");
+                }
+                if let Some(active) = connection {
+                    collaboration_document::forward_local_updates(document, &mut active.client);
+                }
             }
-            if !document.pptx_insert_text(&text)? {
-                bail!("native PPTX insert made no change");
-            }
-            if let Some(active) = connection {
-                collaboration_document::forward_local_updates(document, &mut active.client);
+            #[cfg(not(feature = "pptx"))]
+            {
+                let _ = (story_id, index, text);
+                bail!("native insertPptx requires BetterOffice Slides");
             }
         }
         PeerCommand::Disconnect { .. } => {
@@ -309,12 +340,16 @@ fn apply_command(
 
 fn snapshot(document: &DocumentView, connection: Option<&Connection>) -> Result<PeerSnapshot> {
     match &document.reference {
+        #[cfg(feature = "docx")]
         ReferenceDocument::Docx(reference) => snapshot_docx(document, reference, connection),
+        #[cfg(feature = "xlsx")]
         ReferenceDocument::Xlsx(reference) => snapshot_xlsx(document, reference, connection),
+        #[cfg(feature = "pptx")]
         ReferenceDocument::Pptx(reference) => snapshot_pptx(document, reference, connection),
     }
 }
 
+#[cfg(feature = "docx")]
 fn snapshot_docx(
     document: &DocumentView,
     reference: &crate::document::DocxReference,
@@ -363,6 +398,7 @@ fn snapshot_docx(
     })
 }
 
+#[cfg(feature = "xlsx")]
 fn snapshot_xlsx(
     document: &DocumentView,
     reference: &crate::document::XlsxReference,
@@ -395,6 +431,7 @@ fn snapshot_xlsx(
     })
 }
 
+#[cfg(feature = "pptx")]
 fn snapshot_pptx(
     document: &DocumentView,
     reference: &crate::document::PptxReference,
@@ -418,6 +455,7 @@ fn snapshot_pptx(
     })
 }
 
+#[cfg(feature = "pptx")]
 fn collect_pptx_stories(target: &mut Vec<PptxStoryState>, slide: usize, shapes: &[ShapeSnapshot]) {
     for shape in shapes {
         target.extend(shape.text_stories.iter().map(|story| PptxStoryState {
@@ -431,6 +469,7 @@ fn collect_pptx_stories(target: &mut Vec<PptxStoryState>, slide: usize, shapes: 
     }
 }
 
+#[cfg(feature = "docx")]
 fn canonical_checksum(stories: &[StoryState]) -> String {
     let mut checksum = Sha256::new();
     checksum.update(b"canonical-document-checksums-v1\n");

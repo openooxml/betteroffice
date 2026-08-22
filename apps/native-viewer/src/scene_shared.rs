@@ -29,6 +29,7 @@ pub struct PageScene {
     pub skipped: SkipStats,
 }
 
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 pub fn with_clip_layers<T>(
     scene: &mut Scene,
     layers: &[(Affine, Rect)],
@@ -51,6 +52,7 @@ where
     stroke.with_dashes(0.0, dashes)
 }
 
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 pub fn draw_placeholder(scene: &mut Scene, bounds: Option<Rect>) {
     draw_transformed_placeholder(scene, bounds, Affine::IDENTITY);
 }
@@ -94,12 +96,14 @@ pub fn draw_transformed_placeholder(scene: &mut Scene, bounds: Option<Rect>, tra
     );
 }
 
+#[cfg(any(feature = "docx", feature = "pptx"))]
 pub fn color(value: &str, opacity: f32) -> Result<Color, String> {
     let (red, green, blue, alpha) = parse_color(value)?;
     let alpha = (f32::from(alpha) * opacity.clamp(0.0, 1.0)).round() as u8;
     Ok(Color::from_rgba8(red, green, blue, alpha))
 }
 
+#[cfg(feature = "xlsx")]
 pub fn strict_color(value: &str) -> Result<Color, String> {
     let hex = value
         .strip_prefix('#')
@@ -203,6 +207,7 @@ mod tests {
         assert!(parse_color("navy").is_err());
     }
 
+    #[cfg(feature = "xlsx")]
     #[test]
     fn xlsx_colors_are_strict() {
         assert_eq!(

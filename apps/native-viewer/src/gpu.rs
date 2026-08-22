@@ -1,10 +1,16 @@
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(feature = "docx", feature = "xlsx"))]
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result, anyhow, bail};
+#[cfg(feature = "docx")]
 use docx_raster::RenderResources;
-use image::{DynamicImage, ImageFormat};
+#[cfg(any(feature = "docx", feature = "xlsx"))]
+use image::DynamicImage;
+use image::ImageFormat;
 use vello::kurbo::Affine;
 use vello::peniko::Color;
 use vello::util::RenderContext;
@@ -13,6 +19,7 @@ use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
 use crate::document::{DocumentView, ReferenceDocument};
 use crate::scene_shared::PageScene;
 
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 const DIFFERENCE_THRESHOLD: u8 = 8;
 const MAX_HEADLESS_PIXELS: u64 = 33_000_000;
 
@@ -33,10 +40,13 @@ pub fn render_comparison(
     output: &Path,
     scale: f64,
 ) -> Result<()> {
-    let selection = if matches!(&document.reference, ReferenceDocument::Pptx(_)) {
-        "slide"
-    } else {
-        "page"
+    let selection = match &document.reference {
+        #[cfg(feature = "docx")]
+        ReferenceDocument::Docx(_) => "page",
+        #[cfg(feature = "xlsx")]
+        ReferenceDocument::Xlsx(_) => "sheet",
+        #[cfg(feature = "pptx")]
+        ReferenceDocument::Pptx(_) => "slide",
     };
     let page = document
         .pages
@@ -53,102 +63,124 @@ pub fn render_comparison(
     )
     .with_context(|| format!("write Vello PNG {}", output.display()))?;
 
-    if let ReferenceDocument::Pptx(reference) = &document.reference {
-        let summary = reference
-            .editor
-            .summaries()
-            .get(page_index)
-            .context("PPTX slide has no translation summary")?;
-        println!("document: {}", document.source.display());
-        println!(
-            "slide: {} of {}",
-            page_index + 1,
-            reference.editor.slide_count()
-        );
-        println!("gpu: {}", rendered.adapter);
-        println!("font faces: {:?}", reference.editor.font_faces());
-        println!("vello PNG: {}", output.display());
-        println!("raster PNG: not produced (PPTX has no raster backend)");
-        println!(
-            "pptx summary: {}",
-            serde_json::to_string(&summary.structured(&page.skipped))?
-        );
-        return Ok(());
-    }
-
-    let (raster_bytes, skipped_raster_images) = match &document.reference {
-        ReferenceDocument::Docx(reference) => {
-            let resources = RenderResources::new(
-                &reference.fonts.store,
-                &reference.fonts.chains,
-                &reference.images.raw,
-            );
-            let raster = docx_raster::render_page(&reference.display_list, page_index, &resources)
-                .map_err(anyhow::Error::msg)?;
-            (raster.bytes, Some(raster.skipped_images))
-        }
-        ReferenceDocument::Xlsx(reference) => (
-            xlsx_raster::render_png(reference.editor.display_list()).map_err(anyhow::Error::msg)?,
-            None,
-        ),
-        ReferenceDocument::Pptx(_) => unreachable!(),
-    };
-    let reference_path = raster_path(output);
-    fs::write(&reference_path, &raster_bytes)
-        .with_context(|| format!("write raster PNG {}", reference_path.display()))?;
-    let reference = image::load_from_memory_with_format(&raster_bytes, ImageFormat::Png)?;
-    let metrics = compare(&rendered.rgba, rendered.width, rendered.height, reference)?;
-
-    println!("document: {}", document.source.display());
+    #[cfg(feature = "pptx")]
     match &document.reference {
-        ReferenceDocument::Docx(reference) => {
-            println!("page: {} of {}", page_index + 1, document.pages.len());
-            println!("gpu: {}", rendered.adapter);
-            println!("font requirements: {:?}", reference.fonts.requirements);
-        }
-        ReferenceDocument::Xlsx(reference) => {
+        ReferenceDocument::Pptx(reference) => {
+            let summary = reference
+                .editor
+                .summaries()
+                .get(page_index)
+                .context("PPTX slide has no translation summary")?;
+            println!("document: {}", document.source.display());
             println!(
-                "sheet: {} of {} ({})",
-                reference.sheet_index + 1,
-                reference.sheet_count,
-                reference.sheet_name
+                "slide: {} of {}",
+                page_index + 1,
+                reference.editor.slide_count()
             );
             println!("gpu: {}", rendered.adapter);
+            println!("font faces: {:?}", reference.editor.font_faces());
+            println!("vello PNG: {}", output.display());
+            println!("raster PNG: not produced (PPTX has no raster backend)");
             println!(
-                "charts: {}, placeholders: {}",
-                reference.chart_count, reference.chart_placeholders
+                "pptx summary: {}",
+                serde_json::to_string(&summary.structured(&page.skipped))?
             );
+            return Ok(());
         }
-        ReferenceDocument::Pptx(_) => unreachable!(),
+        #[cfg(any(feature = "docx", feature = "xlsx"))]
+        _ => {}
     }
-    println!("vello PNG: {}", output.display());
-    println!("raster PNG: {}", reference_path.display());
-    let skipped_label = match &document.reference {
-        ReferenceDocument::Docx(_) => "primitives",
-        ReferenceDocument::Xlsx(_) => "commands",
-        ReferenceDocument::Pptx(_) => unreachable!(),
-    };
-    println!(
-        "skipped Vello {skipped_label}: {} {:?}",
-        page.skipped.total(),
-        page.skipped.counts
-    );
-    if !page.skipped.reasons.is_empty() {
-        println!("skip reasons: {:?}", page.skipped.reasons);
+
+    #[cfg(any(feature = "docx", feature = "xlsx"))]
+    {
+        let (raster_bytes, skipped_raster_images) = match &document.reference {
+            #[cfg(feature = "docx")]
+            ReferenceDocument::Docx(reference) => {
+                let resources = RenderResources::new(
+                    &reference.fonts.store,
+                    &reference.fonts.chains,
+                    &reference.images.raw,
+                );
+                let raster =
+                    docx_raster::render_page(&reference.display_list, page_index, &resources)
+                        .map_err(anyhow::Error::msg)?;
+                (raster.bytes, Some(raster.skipped_images))
+            }
+            #[cfg(feature = "xlsx")]
+            ReferenceDocument::Xlsx(reference) => (
+                xlsx_raster::render_png(reference.editor.display_list())
+                    .map_err(anyhow::Error::msg)?,
+                None::<usize>,
+            ),
+            #[cfg(feature = "pptx")]
+            ReferenceDocument::Pptx(_) => unreachable!(),
+        };
+        let reference_path = raster_path(output);
+        fs::write(&reference_path, &raster_bytes)
+            .with_context(|| format!("write raster PNG {}", reference_path.display()))?;
+        let reference = image::load_from_memory_with_format(&raster_bytes, ImageFormat::Png)?;
+        let metrics = compare(&rendered.rgba, rendered.width, rendered.height, reference)?;
+
+        println!("document: {}", document.source.display());
+        match &document.reference {
+            #[cfg(feature = "docx")]
+            ReferenceDocument::Docx(reference) => {
+                println!("page: {} of {}", page_index + 1, document.pages.len());
+                println!("gpu: {}", rendered.adapter);
+                println!("font requirements: {:?}", reference.fonts.requirements);
+            }
+            #[cfg(feature = "xlsx")]
+            ReferenceDocument::Xlsx(reference) => {
+                println!(
+                    "sheet: {} of {} ({})",
+                    reference.sheet_index + 1,
+                    reference.sheet_count,
+                    reference.sheet_name
+                );
+                println!("gpu: {}", rendered.adapter);
+                println!(
+                    "charts: {}, placeholders: {}",
+                    reference.chart_count, reference.chart_placeholders
+                );
+            }
+            #[cfg(feature = "pptx")]
+            ReferenceDocument::Pptx(_) => unreachable!(),
+        }
+        println!("vello PNG: {}", output.display());
+        println!("raster PNG: {}", reference_path.display());
+        let skipped_label = match &document.reference {
+            #[cfg(feature = "docx")]
+            ReferenceDocument::Docx(_) => "primitives",
+            #[cfg(feature = "xlsx")]
+            ReferenceDocument::Xlsx(_) => "commands",
+            #[cfg(feature = "pptx")]
+            ReferenceDocument::Pptx(_) => unreachable!(),
+        };
+        println!(
+            "skipped Vello {skipped_label}: {} {:?}",
+            page.skipped.total(),
+            page.skipped.counts
+        );
+        if !page.skipped.reasons.is_empty() {
+            println!("skip reasons: {:?}", page.skipped.reasons);
+        }
+        if let Some(skipped_images) = skipped_raster_images {
+            println!("skipped raster images: {skipped_images}");
+        }
+        println!(
+            "mean absolute difference RGBA: {:.4}, {:.4}, {:.4}, {:.4}",
+            metrics.mean[0], metrics.mean[1], metrics.mean[2], metrics.mean[3]
+        );
+        println!(
+            "pixels differing above threshold {}: {:.4}%",
+            DIFFERENCE_THRESHOLD,
+            metrics.fraction * 100.0
+        );
+        Ok(())
     }
-    if let Some(skipped_images) = skipped_raster_images {
-        println!("skipped raster images: {skipped_images}");
-    }
-    println!(
-        "mean absolute difference RGBA: {:.4}, {:.4}, {:.4}, {:.4}",
-        metrics.mean[0], metrics.mean[1], metrics.mean[2], metrics.mean[3]
-    );
-    println!(
-        "pixels differing above threshold {}: {:.4}%",
-        DIFFERENCE_THRESHOLD,
-        metrics.fraction * 100.0
-    );
-    Ok(())
+
+    #[cfg(not(any(feature = "docx", feature = "xlsx")))]
+    unreachable!("PPTX export returned before raster comparison")
 }
 
 struct GpuImage {
@@ -306,11 +338,13 @@ fn validate_readback(rgba: &[u8], width: u32, height: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 struct DifferenceMetrics {
     mean: [f64; 4],
     fraction: f64,
 }
 
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 fn compare(
     vello: &[u8],
     width: u32,
@@ -347,6 +381,7 @@ fn compare(
     })
 }
 
+#[cfg(any(feature = "docx", feature = "xlsx"))]
 fn raster_path(output: &Path) -> PathBuf {
     let stem = output
         .file_stem()
@@ -355,7 +390,7 @@ fn raster_path(output: &Path) -> PathBuf {
     output.with_file_name(format!("{stem}.raster.png"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "docx"))]
 mod tests {
     use super::*;
     use crate::document::{ReferenceDocument, load_document};

@@ -7,23 +7,47 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["docx", "xlsx", "pptx"]
+docx = [
+    "dep:base64",
+    "dep:docx-edit",
+    "dep:docx-layout",
+    "dep:docx-parse",
+    "dep:docx-raster",
+    "dep:ooxml-opc",
+    "dep:ooxml-text",
+]
+xlsx = [
+    "dep:betteroffice-xlsx",
+    "dep:ooxml-opc",
+    "dep:xlsx-raster",
+    "dep:xlsx-render",
+]
+pptx = [
+    "dep:betteroffice-pptx",
+    "dep:ooxml-drawingml",
+    "dep:ooxml-opc",
+    "dep:pptx-render",
+]
+
 [dependencies]
 anyhow = "=1.0.104"
-base64 = "=0.22.1"
-betteroffice-pptx = { path = "../../crates/betteroffice-pptx" }
-betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx", default-features = false }
-docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit" }
-docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout" }
-docx-parse = { package = "betteroffice-docx-parse", path = "../../crates/docx-parse", default-features = false }
-docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster" }
+base64 = { version = "=0.22.1", optional = true }
+betteroffice-pptx = { path = "../../crates/betteroffice-pptx", optional = true }
+betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx", default-features = false, optional = true }
+docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit", optional = true }
+docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout", optional = true }
+docx-parse = { package = "betteroffice-docx-parse", path = "../../crates/docx-parse", default-features = false, optional = true }
+docx-raster = { package = "betteroffice-docx-raster", path = "../../crates/docx-raster", optional = true }
 futures-util = { version = "=0.3.33", features = ["sink"] }
 getrandom = "=0.4.3"
 image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
-ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml" }
-ooxml-opc = { package = "betteroffice-opc", path = "../../crates/ooxml-opc", default-features = false }
-ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text" }
+ooxml-drawingml = { package = "betteroffice-drawingml", path = "../../crates/ooxml-drawingml", optional = true }
+ooxml-opc = { package = "betteroffice-opc", path = "../../crates/ooxml-opc", default-features = false, optional = true }
+ooxml-text = { package = "betteroffice-ooxml-text", path = "../../crates/ooxml-text", optional = true }
 pollster = "=0.4.0"
-pptx-render = { package = "betteroffice-pptx-render", path = "../../crates/pptx-render" }
+pptx-render = { package = "betteroffice-pptx-render", path = "../../crates/pptx-render", optional = true }
 rustybuzz = "=0.20.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -34,9 +58,13 @@ url = "=2.5.8"
 vello = "=0.10.0"
 wgpu = "=29.0.3"
 winit = "=0.30.13"
-xlsx-raster = { package = "betteroffice-xlsx-raster", path = "../../crates/xlsx-raster" }
-xlsx-render = { package = "betteroffice-xlsx-render", path = "../../crates/xlsx-render" }
+xlsx-raster = { package = "betteroffice-xlsx-raster", path = "../../crates/xlsx-raster", optional = true }
+xlsx-render = { package = "betteroffice-xlsx-render", path = "../../crates/xlsx-render", optional = true }
 yrs = "=0.27.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.5.2"
+objc2-foundation = { version = "=0.2.2", features = ["NSArray", "NSURL"] }
 
 [patch.crates-io]
 yrs = { path = "vendor/yrs" }
