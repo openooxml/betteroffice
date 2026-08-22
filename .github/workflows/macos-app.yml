@@ -1,0 +1,347 @@
+name: macOS app
+
+on:
+  push:
+    tags: ['@betteroffice/docx@*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, optionally with a prerelease suffix
+        required: false
+        default: '0.1.0'
+  pull_request:
+    paths:
+      - 'apps/native-viewer/**'
+      - '.github/workflows/macos-app.yml'
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Resolve version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          RUN_NUMBER: ${{ github.run_number }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            prefix='refs/tags/@betteroffice/docx@'
+            case "$REF" in
+              "$prefix"*) version=${REF#"$prefix"} ;;
+              *) echo "::error::unexpected release tag '$REF'" >&2; exit 1 ;;
+            esac
+          else
+            version=${VERSION_INPUT:-0.1.0}
+          fi
+          if [[ "$version" =~ ^([0-9]+([.][0-9]+){0,2})(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            bundle_version=${BASH_REMATCH[1]}
+          else
+            echo "::error::invalid release version '$version'" >&2
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "bundle_version=$bundle_version"
+            echo "build=$RUN_NUMBER"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build app bundles
+        env:
+          BUILD_VERSION: ${{ steps.version.outputs.build }}
+          BUNDLE_VERSION: ${{ steps.version.outputs.bundle_version }}
+        run: |
+          for format in docx xlsx pptx; do
+            apps/native-viewer/macos/build-app.sh \
+              "$format" dist "$BUNDLE_VERSION" "$BUILD_VERSION"
+          done
+
+      - name: Package unsigned dmg
+        id: dmg
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          suffix=-unsigned
+          dmg="dist/BetterOffice-$VERSION$suffix.dmg"
+          apps/native-viewer/macos/package-dmg.sh \
+            "dist/BetterOffice Docs.app" \
+            "dist/BetterOffice Sheets.app" \
+            "dist/BetterOffice Slides.app" \
+            "$dmg"
+          {
+            echo "dmg=$dmg"
+            echo "suffix=$suffix"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Archive apps for signing
+        if: github.event_name != 'pull_request'
+        run: |
+          suite="$RUNNER_TEMP/suite"
+          mkdir -p "$suite"
+          for name in \
+            "BetterOffice Docs.app" \
+            "BetterOffice Sheets.app" \
+            "BetterOffice Slides.app"
+          do
+            ditto "dist/$name" "$suite/$name"
+          done
+          ditto -c -k --keepParent "$suite" dist/BetterOffice-apps.zip
+
+      - name: Upload apps for signing
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: betteroffice-macos-apps-${{ steps.version.outputs.version }}
+          path: dist/BetterOffice-apps.zip
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload unsigned dmg
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: betteroffice-macos-${{ steps.version.outputs.version }}${{ steps.dmg.outputs.suffix }}
+          path: ${{ steps.dmg.outputs.dmg }}
+          if-no-files-found: error
+
+  sign:
+    name: Sign and notarize
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 180
+    environment: apple-signing
+    permissions:
+      contents: read
+    outputs:
+      signing: ${{ steps.creds.outputs.signing }}
+    steps:
+      - name: Detect signing credentials
+        id: creds
+        if: github.event_name != 'pull_request'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$ISSUER_ID" ] && \
+             [ -n "$KEY_ID" ] && [ -n "$KEY_P8" ] && [ -n "$TEAM_ID" ]; then
+            echo "signing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apple credentials incomplete; retaining only the unsigned artifact."
+          fi
+
+      - name: Checkout packaging scripts
+        if: steps.creds.outputs.signing == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Download apps
+        if: steps.creds.outputs.signing == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: betteroffice-macos-apps-${{ needs.build.outputs.version }}
+          path: bundle
+
+      - name: Unpack apps
+        if: steps.creds.outputs.signing == 'true'
+        run: |
+          mkdir -p signed
+          ditto -x -k bundle/BetterOffice-apps.zip signed
+
+      - name: Import signing certificate
+        if: steps.creds.outputs.signing == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_list="$RUNNER_TEMP/signing-keychains.txt"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          password=$(uuidgen)
+          trap 'rm -f "$certificate"' EXIT
+          security list-keychains -d user > "$keychain_list"
+          {
+            echo "SIGNING_KEYCHAIN=$keychain"
+            echo "SIGNING_KEYCHAIN_LIST=$keychain_list"
+          } >> "$GITHUB_ENV"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CERT" | base64 --decode > "$certificate"
+          security import "$certificate" \
+            -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s \
+            "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+
+      - name: Sign apps
+        if: steps.creds.outputs.signing == 'true'
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "${#TEAM_ID}" -ne 10 ] || [[ "$TEAM_ID" == *[!A-Z0-9]* ]]; then
+            echo "::error::APPLE_TEAM_ID must be ten uppercase letters or digits" >&2
+            exit 1
+          fi
+          identity=$(security find-identity -v -p codesigning "$SIGNING_KEYCHAIN" \
+            | awk -v team="($TEAM_ID)" \
+              '/Developer ID Application/ && index($0, team) { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "::error::no Developer ID Application identity for team $TEAM_ID" >&2
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          for app in \
+            "signed/suite/BetterOffice Docs.app" \
+            "signed/suite/BetterOffice Sheets.app" \
+            "signed/suite/BetterOffice Slides.app"
+          do
+            codesign --force --timestamp --options runtime \
+              --keychain "$SIGNING_KEYCHAIN" \
+              --sign "$identity" \
+              "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+          done
+
+      - name: Notarize and staple apps
+        if: steps.creds.outputs.signing == 'true'
+        env:
+          ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/api-key.p8"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$KEY_P8" | base64 --decode > "$key"
+          for app in \
+            "signed/suite/BetterOffice Docs.app" \
+            "signed/suite/BetterOffice Sheets.app" \
+            "signed/suite/BetterOffice Slides.app"
+          do
+            archive="$RUNNER_TEMP/${app##*/}.zip"
+            ditto -c -k --keepParent "$app" "$archive"
+            xcrun notarytool submit "$archive" \
+              --key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" \
+              --wait --timeout 30m
+            rm -f "$archive"
+            xcrun stapler staple "$app"
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+          done
+
+      - name: Package signed dmg
+        if: steps.creds.outputs.signing == 'true'
+        id: dmg
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          suffix=
+          dmg="dist/BetterOffice-$VERSION$suffix.dmg"
+          apps/native-viewer/macos/package-dmg.sh \
+            "signed/suite/BetterOffice Docs.app" \
+            "signed/suite/BetterOffice Sheets.app" \
+            "signed/suite/BetterOffice Slides.app" \
+            "$dmg"
+          {
+            echo "dmg=$dmg"
+            echo "suffix=$suffix"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sign dmg
+        if: steps.creds.outputs.signing == 'true'
+        env:
+          DMG: ${{ steps.dmg.outputs.dmg }}
+        run: |
+          codesign --force --timestamp \
+            --keychain "$SIGNING_KEYCHAIN" \
+            --sign "$SIGNING_IDENTITY" \
+            "$DMG"
+          codesign --verify --strict --verbose=2 "$DMG"
+
+      - name: Notarize and staple dmg
+        if: steps.creds.outputs.signing == 'true'
+        env:
+          DMG: ${{ steps.dmg.outputs.dmg }}
+          ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/api-key.p8"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$KEY_P8" | base64 --decode > "$key"
+          xcrun notarytool submit "$DMG" \
+            --key "$key" --key-id "$KEY_ID" --issuer "$ISSUER_ID" \
+            --wait --timeout 30m
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+
+      - name: Upload signed dmg
+        if: steps.creds.outputs.signing == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: betteroffice-macos-${{ needs.build.outputs.version }}${{ steps.dmg.outputs.suffix }}
+          path: ${{ steps.dmg.outputs.dmg }}
+          if-no-files-found: error
+
+      - name: Restore keychains
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: |
+          status=0
+          keychains=()
+          while IFS= read -r keychain; do
+            keychain=${keychain#\"}
+            keychain=${keychain%\"}
+            keychains+=("$keychain")
+          done < "$SIGNING_KEYCHAIN_LIST"
+          security list-keychains -d user -s "${keychains[@]}" || status=$?
+          security delete-keychain "$SIGNING_KEYCHAIN" || status=$?
+          rm -f "$SIGNING_KEYCHAIN_LIST"
+          exit "$status"
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/@betteroffice/docx@') && needs.sign.outputs.signing == 'true'
+    needs: [build, sign]
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed dmg
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: betteroffice-macos-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Attach dmg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: gh release upload "$TAG" "release/BetterOffice-$VERSION.dmg" --clobber
