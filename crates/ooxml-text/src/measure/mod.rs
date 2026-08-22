@@ -124,8 +124,9 @@ mod prepare;
 mod tabs;
 
 pub use input::{
-    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, IndentIn, MeasureInput,
-    RunIn, SpacingIn, TabStopIn,
+    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
+    MeasureInput, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,
+    SpacingIn, TabStopIn,
 };
 
 use crate::font_store::{FontId, FontStore};
@@ -289,18 +290,29 @@ pub fn measure_paragraph(
     store: &FontStore,
     input: &MeasureInput,
 ) -> Result<ParagraphExtentOut, MeasureError> {
-    if input.block.kind != "paragraph" {
+    measure_paragraph_typed(store, &input.as_request())
+}
+
+/// Typed boundary: a borrowed [`MeasureRequest`] in, a [`ParagraphExtentOut`]
+/// out — no JSON round trip on either side. Semantics are identical to
+/// [`measure_paragraph_json`]; an `Err` starting with `"UNSUPPORTED"` means
+/// the host must measure this block with the browser.
+pub fn measure_paragraph_typed(
+    store: &FontStore,
+    request: &MeasureRequest<'_>,
+) -> Result<ParagraphExtentOut, MeasureError> {
+    if request.block.kind != "paragraph" {
         return Err(MeasureError::Unsupported(format!(
             "block kind {:?}",
-            input.block.kind
+            request.block.kind
         )));
     }
-    if !input.max_width.is_finite() {
+    if !request.max_width.is_finite() {
         return Err(MeasureError::Unsupported("non-finite maxWidth".to_string()));
     }
-    input::validate_pt_size(input.defaults.font_size, "defaults.fontSize")?;
+    input::validate_pt_size(request.defaults.font_size, "defaults.fontSize")?;
 
-    let runs = &input.block.runs;
+    let runs = &request.block.runs;
     if runs.len() > MAX_RUNS {
         return Err(MeasureError::Unsupported(format!(
             "too many runs ({} > {MAX_RUNS})",
@@ -308,7 +320,7 @@ pub fn measure_paragraph(
         )));
     }
 
-    let attrs = input.block.attrs.as_ref();
+    let attrs = request.block.attrs.as_ref();
     let spacing = attrs.and_then(|a| a.spacing.as_ref());
     if let Some(sp) = spacing {
         sp.validate()?;
@@ -319,8 +331,8 @@ pub fn measure_paragraph(
     if let Some(tabs) = attrs.and_then(|a| a.tabs.as_deref()) {
         input::validate_tabs(tabs)?;
     }
-    let zones = input.floating_zones.as_deref().unwrap_or(&[]);
-    let paragraph_y_offset = input.paragraph_y_offset.unwrap_or(0.0);
+    let zones = request.floating_zones.unwrap_or(&[]);
+    let paragraph_y_offset = request.paragraph_y_offset.unwrap_or(0.0);
     input::validate_float_context(zones, paragraph_y_offset)?;
 
     if runs.is_empty() {
@@ -333,14 +345,14 @@ pub fn measure_paragraph(
         }
         let size_pt = attrs
             .and_then(|a| a.default_font_size)
-            .unwrap_or(input.defaults.font_size);
+            .unwrap_or(request.defaults.font_size);
         input::validate_pt_size(size_pt, "attrs.defaultFontSize")?;
         let family = attrs
             .and_then(|a| a.default_font_family.as_deref())
-            .unwrap_or(&input.defaults.font_family);
+            .unwrap_or(&request.defaults.font_family);
         // Empty paragraphs use the regular face.
-        let font = regular_chain_head(store, input, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &input.compat);
+        let font = regular_chain_head(store, request, family)?;
+        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
     }
 
     // ---- single whitespace-only text run measures like an empty paragraph ----
@@ -349,26 +361,26 @@ pub fn measure_paragraph(
         let size_pt = run
             .font_size
             .or_else(|| attrs.and_then(|a| a.default_font_size))
-            .unwrap_or(input.defaults.font_size);
+            .unwrap_or(request.defaults.font_size);
         input::validate_pt_size(size_pt, "run.fontSize")?;
         let family = run
             .font_family
             .as_deref()
             .or_else(|| attrs.and_then(|a| a.default_font_family.as_deref()))
-            .unwrap_or(&input.defaults.font_family);
-        let font = regular_chain_head(store, input, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &input.compat);
+            .unwrap_or(&request.defaults.font_family);
+        let font = regular_chain_head(store, request, family)?;
+        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
     }
 
     // Visible markers consume width only at zero hanging.
     let marker_inline_width = match attrs {
         Some(a) if a.indent.as_ref().and_then(|i| i.hanging).unwrap_or(0.0) == 0.0 => {
-            list_marker::list_marker_inline_width(store, input, a)?
+            list_marker::list_marker_inline_width(store, request, a)?
         }
         _ => 0.0,
     };
 
-    let prepared = prepare::prepare_runs(store, input)?;
+    let prepared = prepare::prepare_runs(store, request)?;
 
     // Left and right indents shrink both edges; first-line offset affects only the first line.
     let indent = attrs.and_then(|a| a.indent.as_ref());
@@ -376,7 +388,7 @@ pub fn measure_paragraph(
     let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
     let first_line_offset = indent.and_then(|i| i.first_line).unwrap_or(0.0)
         - indent.and_then(|i| i.hanging).unwrap_or(0.0);
-    let body_width = (input.max_width - indent_left - indent_right).max(1.0);
+    let body_width = (request.max_width - indent_left - indent_right).max(1.0);
     let first_line_width = (body_width - first_line_offset - marker_inline_width).max(1.0);
 
     line_filler::fill(line_filler::FillParams {
@@ -385,14 +397,14 @@ pub fn measure_paragraph(
         spacing,
         body_width,
         first_line_width,
-        default_font_size_pt: input.defaults.font_size,
-        compat: &input.compat,
+        default_font_size_pt: request.defaults.font_size,
+        compat: &request.compat,
         tabs: attrs.and_then(|a| a.tabs.as_deref()).unwrap_or(&[]),
         indent_left_px: indent_left,
         first_line_offset_px: first_line_offset,
         zones,
         paragraph_y_offset,
-        authoritative_shaping: input.authoritative_shaping,
+        authoritative_shaping: request.authoritative_shaping,
     })
 }
 
@@ -403,7 +415,7 @@ pub fn measure_paragraph(
 pub fn measure_paragraph_json(store: &FontStore, input: &str) -> Result<String, String> {
     let parsed: MeasureInput =
         serde_json::from_str(input).map_err(|e| format!("invalid: parse: {e}"))?;
-    let extent = measure_paragraph(store, &parsed).map_err(|e| e.to_string())?;
+    let extent = measure_paragraph_typed(store, &parsed.as_request()).map_err(|e| e.to_string())?;
     serde_json::to_string(&extent).map_err(|e| format!("invalid: serialize: {e}"))
 }
 
@@ -440,7 +452,7 @@ fn is_whitespace_only(run: &RunIn) -> bool {
 /// italic.
 fn regular_chain_head(
     store: &FontStore,
-    input: &MeasureInput,
+    input: &MeasureRequest<'_>,
     family: &str,
 ) -> Result<FontId, MeasureError> {
     let chain = input.chain_for(family, false, false)?;

@@ -83,6 +83,8 @@ pub mod session;
 pub mod table_grid;
 pub mod table_row_break;
 
+mod typed_measure;
+
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -554,6 +556,14 @@ pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
 /// remeasures a dirty paragraph inside a larger operation.
 pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
     MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
+}
+
+/// Typed form of [`measure_paragraph_json_resident`] against the same font
+/// store, skipping both JSON round trips.
+pub(crate) fn measure_paragraph_typed_resident(
+    request: &ooxml_text::MeasureRequest<'_>,
+) -> Result<ooxml_text::ParagraphExtentOut, ooxml_text::MeasureError> {
+    MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
 }
 
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline
