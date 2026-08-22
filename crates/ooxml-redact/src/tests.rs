@@ -396,6 +396,89 @@ fn empty_shared_string_cell_does_not_leak_next_value() {
 }
 
 #[test]
+fn scheme_bearing_relationship_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/docx" TargetMode="External"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///C:/Users/jane/x.xlsx"/>"#,
+        r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="file:///\\server\share\x.xlsx"/>"#,
+        r#"<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="https://example.com""#));
+    assert!(!text.contains("secret.example"));
+    assert!(!text.contains(r"\server\share"));
+    assert!(!text.contains("/Users/jane"));
+    assert!(text.contains(r#"Target="media/image1.png""#));
+    assert_eq!(report.attributes, 4);
+}
+
+#[test]
+fn rfc3986_scheme_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49123456789"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="MAILTO:jane@example.com"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="myapp://x"/>"#,
+        r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="../fonts/x.ttf"/>"#,
+        r#"<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="media/image:1.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches(r#"Target="https://example.com""#).count(), 3);
+    assert!(!text.contains("tel:"));
+    assert!(!text.contains("jane@example.com"));
+    assert!(!text.contains("myapp:"));
+    assert!(text.contains(r#"Target="../fonts/x.ttf""#));
+    assert!(text.contains(r#"Target="media/image:1.png""#));
+    assert_eq!(report.attributes, 3);
+}
+
+#[test]
+fn uri_in_fragment_keeps_relationship_internal() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="worksheet.xml#ref=https://example.com/x"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/x"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="worksheet.xml#ref=https://example.com/x""#));
+    assert!(!text.contains(r#"Target="https://example.com/x""#));
+    assert!(text.contains(r#"Target="https://example.com""#));
+    assert_eq!(report.attributes, 1);
+}
+
+#[test]
 fn media_placeholder_keeps_each_format() {
     for (format, ext) in [
         (ImageFormat::Gif, "gif"),

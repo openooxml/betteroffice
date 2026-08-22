@@ -130,8 +130,9 @@ fn rewrite_start(
 
     let external = element.eq_ignore_ascii_case("Relationship")
         && attributes.iter().any(|(key, value)| {
-            attribute_local(key).eq_ignore_ascii_case("TargetMode")
-                && value.eq_ignore_ascii_case("External")
+            let local = attribute_local(key);
+            local.eq_ignore_ascii_case("TargetMode") && value.eq_ignore_ascii_case("External")
+                || local.eq_ignore_ascii_case("Target") && external_target(value)
         });
     if format == Format::Xlsx && element == "c" {
         *cell_type = None;
@@ -363,6 +364,23 @@ fn local_name(name: &[u8]) -> String {
 
 fn attribute_local(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+/// True for relationship targets pointing outside the package.
+fn external_target(target: &str) -> bool {
+    let lower = target.trim().to_ascii_lowercase();
+    lower.starts_with("//")
+        || lower
+            .split_once(':')
+            .is_some_and(|(scheme, _)| is_uri_scheme(scheme))
+}
+
+fn is_uri_scheme(scheme: &str) -> bool {
+    let mut chars = scheme.chars();
+    if !matches!(chars.next(), Some(first) if first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
 }
 
 fn xml_error(path: &str, error: impl fmt::Display) -> RedactError {
