@@ -64,12 +64,15 @@ fn redacts_pptx_without_changing_structure() {
 }
 
 #[test]
-fn preserves_jpeg_dimensions_and_format() {
+fn jpeg_placeholder_is_fixed_size() {
     let source = placeholder_image(ImageFormat::Jpeg);
     let mut report = RedactionReport::default();
     let output = media::replace_media("word/media/photo.jpeg", &source, &mut report).unwrap();
     assert_ne!(source, output);
-    assert_eq!(image_dimensions(&source), image_dimensions(&output));
+    assert_eq!(
+        image_dimensions(&output),
+        (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
+    );
     assert_eq!(image::guess_format(&output).unwrap(), ImageFormat::Jpeg);
 }
 
@@ -98,8 +101,8 @@ fn assert_fixture_properties(source: &[u8], output: &[u8], secrets: &[&str], med
     let after_image = part(&after, media_path);
     assert_ne!(before_image, after_image);
     assert_eq!(
-        image_dimensions(before_image),
-        image_dimensions(after_image)
+        image_dimensions(after_image),
+        (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
     );
     assert_eq!(image::guess_format(after_image).unwrap(), ImageFormat::Png);
 }
@@ -410,16 +413,155 @@ fn media_placeholder_keeps_each_format() {
             "{ext} format changed"
         );
         assert_eq!(
-            image_dimensions(&source),
             image_dimensions(&output),
+            (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE),
             "{ext} dims changed"
         );
     }
 }
 
 #[test]
-fn media_rejects_unencodable_formats() {
+fn rejects_unknown_extension_media() {
     let mut report = RedactionReport::default();
-    let error = media::replace_media("word/media/image1.emf", b"not an image", &mut report);
+    let error = media::replace_media("word/media/blob.dat", b"not an image", &mut report);
     assert!(matches!(error, Err(RedactError::Image { .. })));
+}
+
+#[test]
+fn replaces_wmf_with_valid_stub() {
+    let mut report = RedactionReport::default();
+    let output = media::replace_media(
+        "docProps/thumbnail.wmf",
+        b"\xd7\xcd\xc6\x9a metafile",
+        &mut report,
+    )
+    .unwrap();
+    assert_eq!(report.media_parts, 1);
+
+    assert_eq!(&output[..4], &0x9AC6_CDD7u32.to_le_bytes());
+    let checksum = output[..20]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .fold(0u16, |acc, chunk| acc ^ u16::from_le_bytes(*chunk));
+    assert_eq!(le_u16(&output, 20), checksum);
+    assert_eq!(le_u16(&output, 10), 2000);
+    assert_eq!(le_u16(&output, 12), 2000);
+    assert_eq!(le_u16(&output, 14), 1440);
+
+    let content = &output[22..];
+    assert_eq!(le_u16(content, 0), 1);
+    assert_eq!(le_u16(content, 2), 9);
+    assert_eq!(le_u16(content, 4), 0x0300);
+    let mt_size = le_u32(content, 6) as usize;
+    assert_eq!(mt_size * 2, content.len());
+    assert_eq!(le_u32(content, 12), 3);
+
+    let eof = &content[18..];
+    assert_eq!(le_u16(eof, 0), 3);
+    assert_eq!(le_u16(eof, 2), 0);
+    assert_eq!(le_u16(eof, 4), 0);
+    assert_eq!(eof.len(), 6);
+}
+
+#[test]
+fn replaces_emf_with_valid_stub() {
+    let mut report = RedactionReport::default();
+    let output = media::replace_media("word/media/image1.emf", b"not an emf", &mut report).unwrap();
+    assert_eq!(report.media_parts, 1);
+
+    assert_eq!(le_u32(&output, 0), 1);
+    assert_eq!(le_u32(&output, 4), 88);
+    assert_eq!(le_u32(&output, 40), 0x464D_4520);
+    assert_eq!(le_u32(&output, 44), 0x0001_0000);
+    assert_eq!(le_u32(&output, 48) as usize, output.len());
+    assert_eq!(le_u32(&output, 52), 2);
+
+    let eof = &output[88..];
+    assert_eq!(eof.len(), 20);
+    assert_eq!(le_u32(eof, 0), 14);
+    assert_eq!(le_u32(eof, 4), 20);
+    assert_eq!(le_u32(eof, 8), 0);
+    assert_eq!(le_u32(eof, 12), 16);
+    assert_eq!(le_u32(eof, 16), 20);
+}
+
+fn le_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn le_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+#[test]
+fn oversized_declared_dimensions_emit_fixed_placeholder() {
+    let mut hostile = placeholder_png();
+    hostile.truncate(40);
+    hostile[16..20].copy_from_slice(&8000u32.to_be_bytes());
+    hostile[20..24].copy_from_slice(&8000u32.to_be_bytes());
+    let mut report = RedactionReport::default();
+    let output = media::replace_media("word/media/huge.png", &hostile, &mut report).unwrap();
+    assert_eq!(
+        image_dimensions(&output),
+        (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
+    );
+    assert!(output.len() < 1024);
+}
+
+#[test]
+fn hostile_package_media_budget_is_bounded() {
+    let mut hostile = placeholder_png();
+    hostile.truncate(40);
+    hostile[16..20].copy_from_slice(&8000u32.to_be_bytes());
+    hostile[20..24].copy_from_slice(&8000u32.to_be_bytes());
+
+    let mut parts: Vec<(String, Vec<u8>)> = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="emf" ContentType="image/x-emf"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            xml(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#,
+            ),
+        ),
+        ("docProps/thumbnail.wmf".to_owned(), b"metafile".to_vec()),
+        ("ppt/media/pic.emf".to_owned(), b"metafile".to_vec()),
+    ];
+    for index in 0..32 {
+        parts.push((format!("word/media/hostile{index}.png"), hostile.clone()));
+    }
+    let packaged: Vec<(&str, Vec<u8>)> = parts
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.clone()))
+        .collect();
+    let source = package(packaged);
+
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.media_parts, 34);
+    let after = ooxml_opc::unzip_parts(&output).unwrap();
+    let mut media_total = 0;
+    for (path, bytes) in &after {
+        if !path.contains("/media/") && !path.ends_with("thumbnail.wmf") {
+            continue;
+        }
+        if path.ends_with(".png") {
+            assert_eq!(
+                image_dimensions(bytes),
+                (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
+            );
+        }
+        media_total += bytes.len();
+    }
+    assert!(media_total < 256 * 1024);
 }
