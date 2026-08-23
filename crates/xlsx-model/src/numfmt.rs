@@ -1,6 +1,9 @@
 //! number-format code interpreter (ecma-376 §18.8.30–31): value + format code
 //! -> display string and optional bracket color. unsupported degrades to general.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use serde::{Deserialize, Serialize};
 
 use crate::date::DateSystem;
@@ -145,6 +148,74 @@ impl Section {
     fn has(&self, pred: impl Fn(&Tok) -> bool) -> bool {
         self.toks.iter().any(pred)
     }
+}
+
+/// process-wide memoized parses; capped so adversarial code variety can't grow it.
+const FORMAT_CACHE_CAP: usize = 256;
+
+/// codes longer than this parse fresh every call and are never retained; excel
+/// itself rejects format codes beyond ~255 chars.
+const MAX_CACHED_CODE_LEN: usize = 256;
+
+#[derive(Default)]
+struct FormatCache {
+    entries: HashMap<String, (u64, Arc<[Section]>)>,
+    clock: u64,
+}
+
+impl FormatCache {
+    fn get(&mut self, code: &str) -> Option<Arc<[Section]>> {
+        let entry = self.entries.get_mut(code)?;
+        self.clock += 1;
+        entry.0 = self.clock;
+        Some(entry.1.clone())
+    }
+
+    fn insert(&mut self, code: &str, parsed: Arc<[Section]>) {
+        self.clock += 1;
+        if self.entries.len() >= FORMAT_CACHE_CAP {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (used, _))| *used)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(code.to_string(), (self.clock, parsed));
+    }
+}
+
+/// memoized `split_sections` + `tokenize`, keyed by the exact code string.
+fn parsed_sections(code: &str) -> Arc<[Section]> {
+    static CACHE: OnceLock<Mutex<FormatCache>> = OnceLock::new();
+    parsed_sections_in(
+        CACHE.get_or_init(|| Mutex::new(FormatCache::default())),
+        code,
+    )
+}
+
+/// the lock guards map operations only: on a miss it is released while the
+/// code is tokenized, then reacquired to insert (rechecking for a racing hit).
+fn parsed_sections_in(cache: &Mutex<FormatCache>, code: &str) -> Arc<[Section]> {
+    if code.len() > MAX_CACHED_CODE_LEN {
+        return tokenize_all(code);
+    }
+    if let Some(hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(code) {
+        return hit;
+    }
+    let parsed = tokenize_all(code);
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(raced) = guard.get(code) {
+        return raced;
+    }
+    guard.insert(code, parsed.clone());
+    parsed
+}
+
+fn tokenize_all(code: &str) -> Arc<[Section]> {
+    split_sections(code).iter().map(|s| tokenize(s)).collect()
 }
 
 /// split a code into sections on top-level `;` (quotes, brackets, and escapes guarded).
@@ -491,7 +562,7 @@ fn format_number_value(n: f64, code: &str, ds: DateSystem) -> FormattedValue {
             color: None,
         };
     }
-    let parsed: Vec<Section> = split_sections(code).iter().map(|s| tokenize(s)).collect();
+    let parsed = parsed_sections(code);
     let (idx, auto_minus) = select(&parsed, n);
     let sec = &parsed[idx];
     let color = sec.color.clone();
@@ -896,7 +967,7 @@ fn trim_trailing_zeros(s: &mut String) {
 }
 
 fn format_text_value(text: &str, code: &str) -> FormattedValue {
-    let parsed: Vec<Section> = split_sections(code).iter().map(|s| tokenize(s)).collect();
+    let parsed = parsed_sections(code);
     let sec = if parsed.len() >= 4 {
         Some(&parsed[3])
     } else {

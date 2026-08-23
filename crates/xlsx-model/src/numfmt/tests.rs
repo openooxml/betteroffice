@@ -337,3 +337,114 @@ fn escaped_and_quoted_literals() {
     assert_eq!(fv(5.0, "0\\ \\k\\g"), "5 kg");
     assert_eq!(fv(100.0, "\"$\"#,##0"), "$100");
 }
+
+#[test]
+fn repeated_codes_render_identically_through_cache() {
+    let codes = [
+        "#,##0.00",
+        "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+        "m/d/yyyy h:mm",
+        "@",
+        "\"p\"0.00",
+    ];
+    for code in codes {
+        let expected = fv(1234.5678, code);
+        for i in 0..(FORMAT_CACHE_CAP * 2) {
+            let _ = fv(i as f64, "0.000");
+            assert_eq!(fv(1234.5678, code), expected);
+        }
+    }
+    let hello = CellValue::Text {
+        value: "hello".to_string(),
+    };
+    let expected = format_value(&hello, "[Red]\"pre \"@", DateSystem::V1900);
+    for _ in 0..(FORMAT_CACHE_CAP * 2) {
+        assert_eq!(
+            format_value(&hello, "[Red]\"pre \"@", DateSystem::V1900),
+            expected
+        );
+    }
+}
+
+#[test]
+fn eviction_past_capacity_keeps_outputs_identical() {
+    let rounds = FORMAT_CACHE_CAP * 3;
+    let codes: Vec<String> = (0..rounds).map(|i| format!("\"p{i}\"0.00")).collect();
+    let first: Vec<String> = codes.iter().map(|c| fv(7.625, c)).collect();
+    for (i, code) in codes.iter().enumerate() {
+        assert_eq!(fv(7.625, code), format!("p{i}7.63"));
+    }
+    for (code, expected) in codes.iter().zip(&first) {
+        assert_eq!(fv(-7.625, code), format!("-{expected}"));
+    }
+}
+
+fn parse_code(code: &str) -> Arc<[Section]> {
+    split_sections(code).iter().map(|s| tokenize(s)).collect()
+}
+
+#[test]
+fn distinct_insertions_track_min_n_cap() {
+    let mut cache = FormatCache::default();
+    for i in 0..=FORMAT_CACHE_CAP + 16 {
+        let key = format!("\"s{i}\"0");
+        cache.insert(&key, parse_code(&key));
+        assert_eq!(cache.entries.len(), (i + 1).min(FORMAT_CACHE_CAP));
+    }
+}
+
+#[test]
+fn repeat_lookup_returns_the_same_arc() {
+    let mut cache = FormatCache::default();
+    cache.insert("0.000", parse_code("0.000"));
+    let first = cache.get("0.000").unwrap();
+    for _ in 0..3 {
+        let again = cache.get("0.000").unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+    }
+    assert!(cache.get("0.00").is_none());
+}
+
+#[test]
+fn eviction_victim_is_oldest_stamp_and_size_stays_at_cap() {
+    let mut cache = FormatCache::default();
+    let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
+        .map(|i| format!("\"e{i}\"0"))
+        .collect();
+    for key in &keys {
+        cache.insert(key, parse_code(key));
+    }
+    assert_eq!(cache.entries.len(), FORMAT_CACHE_CAP);
+    for key in keys.iter().skip(1) {
+        let _ = cache.get(key);
+    }
+    let newcomer = "\"fresh\"0";
+    cache.insert(newcomer, parse_code(newcomer));
+    assert_eq!(cache.entries.len(), FORMAT_CACHE_CAP);
+    assert!(!cache.entries.contains_key(&keys[0]));
+    assert!(cache.entries.contains_key(newcomer));
+    for key in keys.iter().skip(1) {
+        assert!(cache.entries.contains_key(key));
+    }
+}
+
+#[test]
+fn memoized_path_reuses_one_parse_across_lookups() {
+    let cache = Mutex::new(FormatCache::default());
+    let a = parsed_sections_in(&cache, "[Red]#,##0.00;(#,##0.00)");
+    let b = parsed_sections_in(&cache, "[Red]#,##0.00;(#,##0.00)");
+    assert!(Arc::ptr_eq(&a, &b));
+    assert_eq!(cache.lock().unwrap().entries.len(), 1);
+}
+
+#[test]
+fn oversize_codes_render_correctly_but_are_never_cached() {
+    let literal = "x".repeat(MAX_CACHED_CODE_LEN + 1);
+    let code = format!("\"{literal}\"0.00");
+    let cache = Mutex::new(FormatCache::default());
+    let a = parsed_sections_in(&cache, &code);
+    let b = parsed_sections_in(&cache, &code);
+    assert!(!Arc::ptr_eq(&a, &b));
+    assert!(cache.lock().unwrap().entries.is_empty());
+    assert_eq!(fv(7.625, &code), format!("{literal}7.63"));
+}
