@@ -1372,6 +1372,7 @@ mod tests {
                 },
                 ..xlsx_model::CellFormat::default()
             })
+            .unwrap()
             .unwrap();
         let mut sheet = Sheet::new("Sheet1");
         sheet.set_cell(

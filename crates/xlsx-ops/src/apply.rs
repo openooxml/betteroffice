@@ -30,6 +30,7 @@ pub enum OpError {
     ChartAnchorNotMovable { part: String },
     ChartNotFound { frame: String },
     ChartFrameShifted { frame: String },
+    NumFmtTableFull,
     InvalidStyle(String),
 }
 
@@ -37,6 +38,7 @@ impl fmt::Display for OpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OpError::SheetNotFound(id) => write!(f, "sheet {} not found", id.0),
+            OpError::NumFmtTableFull => write!(f, "number format table is full"),
             OpError::SheetIndexOutOfRange(i) => write!(f, "sheet index {i} out of range"),
             OpError::FormulaNotRewritable { sheet, cell } => write!(
                 f,
@@ -350,12 +352,21 @@ fn apply_range_formats(
             cells.push((at, sheet_ref.cell(at).cloned().unwrap_or_default()));
         }
     }
-    let mut inverse = Vec::with_capacity(cells.len());
-    for (at, old) in cells {
-        let mut format = wb.styles.cell_format(old.style);
+    let mut staged_styles = wb.styles.clone();
+    let mut staged = Vec::with_capacity(cells.len());
+    for (at, old) in &cells {
+        let mut format = staged_styles.cell_format(old.style);
         update(&mut format, at.row, at.col)?;
+        let style = staged_styles
+            .intern_cell_format(&format)
+            .map_err(|_| OpError::NumFmtTableFull)?;
         let mut next = old.clone();
-        next.style = wb.styles.intern_cell_format(&format);
+        next.style = style;
+        staged.push((*at, next));
+    }
+    wb.styles = staged_styles;
+    let mut inverse = Vec::with_capacity(staged.len());
+    for ((at, old), (_staged_at, next)) in cells.into_iter().zip(staged) {
         if next != old {
             wb.sheet_mut(sheet)
                 .ok_or(OpError::SheetNotFound(sheet))?
@@ -1832,5 +1843,57 @@ mod tests {
             wb.value(SheetId(0), r("A4")),
             CellValue::Number { value: 4.0 }
         );
+    }
+}
+
+#[cfg(test)]
+mod range_format_exhaustion_tests {
+    use super::*;
+    use crate::formatting::CapturedFormat;
+    use xlsx_model::{CellFormat, CellRange, NumberFormat, SheetId};
+
+    #[test]
+    fn mid_range_format_exhaustion_leaves_the_workbook_unchanged() {
+        let mut styles = xlsx_model::Stylesheet::default();
+        styles.num_fmts = (164..u16::MAX).map(|id| (id, format!("p{id}"))).collect();
+        let mut wb = Workbook {
+            styles,
+            ..Workbook::default()
+        };
+        wb.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        let sheet = SheetId(0);
+        let before = wb.clone();
+
+        let op = Op::ApplyRangeFormat {
+            sheet,
+            range: CellRange::new(
+                xlsx_model::CellRef::new(0, 0),
+                xlsx_model::CellRef::new(0, 1),
+            ),
+            format: CapturedFormat {
+                rows: 1,
+                columns: 2,
+                formats: vec![
+                    CellFormat {
+                        number_format: NumberFormat::Custom {
+                            pattern: "one".into(),
+                        },
+                        ..CellFormat::default()
+                    },
+                    CellFormat {
+                        number_format: NumberFormat::Custom {
+                            pattern: "two".into(),
+                        },
+                        ..CellFormat::default()
+                    },
+                ],
+            },
+        };
+
+        assert!(matches!(
+            apply_ops(&mut wb, &[op]),
+            Err(OpError::NumFmtTableFull)
+        ));
+        assert_eq!(wb, before, "exhaustion must leave the workbook untouched");
     }
 }

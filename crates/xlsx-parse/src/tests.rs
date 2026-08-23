@@ -1357,12 +1357,16 @@ fn patches_only_the_style_pool_entries_that_changed() {
     let mut workbook = parsed.workbook.clone();
     let mut format = workbook.styles.cell_format(None);
     format.font.italic = true;
-    let style = workbook.styles.intern_cell_format(&format);
+    let style = workbook
+        .styles
+        .intern_cell_format(&format)
+        .unwrap()
+        .unwrap();
     workbook.sheets[0].set_cell(
         CellRef::parse_a1("A1").unwrap(),
         Cell {
             value: CellValue::Number { value: 1.0 },
-            style,
+            style: Some(style),
             ..Cell::default()
         },
     );
