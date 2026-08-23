@@ -95,7 +95,7 @@ export interface PptxEditorCollaborationOptions {
 
 export interface PptxEditorProps {
   file?: Uint8Array;
-  /** Font faces; equivalent inline arrays do not reopen the presentation. */
+  /** Font faces; must be reference-stable across renders. */
   fonts: ReadonlyArray<PptxFontFace>;
   clientId?: number;
   collaboration?: PptxEditorCollaborationOptions;
@@ -1693,14 +1693,8 @@ function fontFaceEqual(left: PptxFontFace, right: PptxFontFace): boolean {
     left.family === right.family &&
     (left.bold ?? false) === (right.bold ?? false) &&
     (left.italic ?? false) === (right.italic ?? false) &&
-    bytesEqual(left.bytes, right.bytes)
+    left.bytes === right.bytes
   );
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-  if (left === right) return true;
-  if (left.byteLength !== right.byteLength) return false;
-  return left.every((byte, index) => byte === right[index]);
 }
 
 function storyText(story: StorySnapshot): string {

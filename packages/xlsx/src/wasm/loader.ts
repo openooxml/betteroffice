@@ -276,7 +276,12 @@ export interface WorkbookHandle extends CollaborationReplica {
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Apply a peer update. Standalone handles throw the Rust `NotCollaborative` error. */
   applyUpdate(update: Uint8Array): EditResult;
-  /** Observe owned update bytes from local commits and accepted remote updates. */
+  /**
+   * Observe owned update bytes from local commits and accepted remote updates.
+   * With multiple subscribers each receives an isolated copy; a sole subscriber
+   * receives the internal buffer directly (treat as read-only; it may be a
+   * subarray view whose `.buffer` includes the origin byte).
+   */
   onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
@@ -457,11 +462,16 @@ export function openWorkbook(
       while (!disposed && pendingUpdates.length > 0) {
         const event = pendingUpdates.shift();
         if (!event) break;
-        for (const [id, listener] of [...listeners]) {
+        const subscribers = [...listeners];
+        for (let index = 0; index < subscribers.length; index += 1) {
+          const [id, listener] = subscribers[index];
           if (disposed) return;
           if (listeners.get(id) !== listener) continue;
           try {
-            listener(event.update.slice(), event.origin);
+            listener(
+              subscribers.length === 1 ? event.update : event.update.slice(),
+              event.origin
+            );
           } catch {}
         }
       }
@@ -481,7 +491,7 @@ export function openWorkbook(
         throw new Error(`xlsx wasm returned unknown update origin ${origin}`);
       }
       pendingUpdates.push({
-        update: encoded.slice(1),
+        update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
       });
     }
@@ -544,17 +554,17 @@ export function openWorkbook(
       return wasmCall(() => doc.clientId);
     },
     encodeStateVector(): Uint8Array {
-      return wasmCall(() => doc.encodeStateVector().slice());
+      return wasmCall(() => doc.encodeStateVector());
     },
     encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
       return wasmCall(() =>
         remoteStateVector === undefined
-          ? doc.encodeStateAsUpdate().slice()
-          : doc.encodeDiff(remoteStateVector.slice()).slice()
+          ? doc.encodeStateAsUpdate()
+          : doc.encodeDiff(remoteStateVector)
       );
     },
     applyUpdate(update: Uint8Array): EditResult {
-      return parseJson(() => doc.applyUpdateJson(update.slice()), true);
+      return parseJson(() => doc.applyUpdateJson(update), true);
     },
     onUpdate(listener: WorkbookUpdateListener): () => void {
       assertAlive();
@@ -677,7 +687,7 @@ export function openWorkbook(
       });
     },
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes().slice());
+      return wasmCall(() => doc.saveBytes());
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
       return mutatingWasmCall(() => {
