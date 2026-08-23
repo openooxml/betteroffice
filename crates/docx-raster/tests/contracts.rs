@@ -4,13 +4,14 @@ use std::io::{Cursor, Write};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, ImageMap, ImageScope, MAX_IMAGE_PIXELS, MAX_PAGE_IMAGE_PIXELS, RenderResources,
-    render_page, render_png, scoped_image_key,
+    FontChains, GlyphCache, ImageMap, ImageScope, MAX_IMAGE_PIXELS, MAX_PAGE_IMAGE_PIXELS,
+    RenderResources, render_page, render_page_cached, render_png, scoped_image_key,
 };
 use ooxml_text::{FontStore, shape};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
+const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
 fn list(width: f64, height: f64, primitives: Vec<Value>) -> DisplayList {
     serde_json::from_value(json!({
@@ -26,6 +27,113 @@ fn list(width: f64, height: f64, primitives: Vec<Value>) -> DisplayList {
 
 fn empty_resources() -> (FontStore, FontChains, ImageMap) {
     (FontStore::new(), FontChains::new(), ImageMap::new())
+}
+
+/// A chain whose first face lacks Hebrew, so text mixing Latin and Hebrew
+/// shapes into one segment per font.
+fn fallback_resources() -> (FontStore, FontChains, ImageMap) {
+    let mut fonts = FontStore::new();
+    let carlito = fonts.register(FONT.to_vec()).expect("carlito");
+    let liberation = fonts.register(LIBERATION.to_vec()).expect("liberation");
+    assert!(!fonts.covers(carlito, '\u{05d0}').expect("coverage"));
+    assert!(fonts.covers(liberation, '\u{05d0}').expect("coverage"));
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![carlito, liberation])]);
+    (fonts, chains, ImageMap::new())
+}
+
+fn carlito_resources() -> (FontStore, FontChains, ImageMap) {
+    let mut fonts = FontStore::new();
+    let id = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![id])]);
+    (fonts, chains, ImageMap::new())
+}
+
+fn leader_scene(rtl: bool, glyph: &str) -> DisplayList {
+    list(
+        160.0,
+        48.0,
+        vec![json!({
+            "kind": "text",
+            "text": "Tab",
+            "x": 10,
+            "baselineY": 34,
+            "width": 130,
+            "font": "400 24px Carlito, sans-serif",
+            "color": "#000000",
+            "leaderGlyphs": {"glyph": glyph, "count": 3, "advance": 10, "rtl": rtl}
+        })],
+    )
+}
+
+fn single_glyph_scene() -> DisplayList {
+    list(
+        60.0,
+        24.0,
+        vec![json!({
+            "kind": "text",
+            "text": "A",
+            "x": 4,
+            "baselineY": 16,
+            "width": 20,
+            "font": "400 12px Carlito, sans-serif",
+            "color": "#000000"
+        })],
+    )
+}
+
+fn leader_extent(resources: &RenderResources<'_>, rtl: bool, glyph: &str) -> f64 {
+    let png = render_png(&leader_scene(rtl, glyph), 0, resources).expect("leader render");
+    let bounds = ink_bounds(&png).expect("leader ink");
+    f64::from(bounds.1 - bounds.0)
+}
+
+/// A leader whose text splits across fallback fonts has to advance the pen
+/// through every segment; resetting it at each segment overprints them.
+#[test]
+fn a_multi_segment_leader_advances_across_fallback_segments() {
+    let (fonts, chains, images) = fallback_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let single = leader_extent(&resources, false, "A");
+    let mixed = leader_extent(&resources, false, "A\u{05d0}");
+    let grew = mixed - single;
+    assert!(
+        grew > 3.0,
+        "the fallback segment must extend the leader past the first segment's ink, grew {grew}"
+    );
+}
+
+/// The same, reading right-to-left: the segments still lay out sequentially
+/// rather than stacking on the stamp origin.
+#[test]
+fn an_rtl_multi_segment_leader_advances_across_fallback_segments() {
+    let (fonts, chains, images) = fallback_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let single = leader_extent(&resources, true, "A");
+    let mixed = leader_extent(&resources, true, "A\u{05d0}");
+    let grew = mixed - single;
+    assert!(
+        grew > 3.0,
+        "the fallback segment must extend the leader past the first segment's ink, grew {grew}"
+    );
+}
+
+/// Glyph ids are store-local, so a cache filled by one store must never feed
+/// renders of another: it is bound to the store that filled it.
+#[test]
+fn a_glyph_cache_is_bound_to_the_store_that_filled_it() {
+    let mut cache = GlyphCache::default();
+    {
+        let (fonts, chains, images) = carlito_resources();
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache)
+            .expect("render into an unbound cache");
+    }
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    assert_eq!(
+        render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache).unwrap_err(),
+        "glyph cache is bound to another font store"
+    );
 }
 
 #[test]
@@ -346,6 +454,39 @@ fn a_tab_leader_paints_from_a_bare_family_name() {
     );
     let png = render_png(&list, 0, &resources).expect("a bare leader family must render");
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+/// A cache shared across pages has to paint exactly what a fresh cache paints:
+/// the second page reuses the outlines the first one extracted.
+#[test]
+fn a_shared_glyph_cache_renders_every_page_identically() {
+    let mut fonts = FontStore::new();
+    let font = fonts.register(FONT.to_vec()).expect("font");
+    let chains = FontChains::from([("carlito|0|0".to_string(), vec![font])]);
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let run = json!({
+        "kind": "text",
+        "text": "Page glyph",
+        "x": 4,
+        "baselineY": 26,
+        "width": 60,
+        "font": "400 16px Carlito, sans-serif",
+        "color": "#000000"
+    });
+    let list: DisplayList = serde_json::from_value(json!({
+        "pages": [
+            {"pageIndex": 0, "width": 120.0, "height": 40.0, "primitives": [run.clone()]},
+            {"pageIndex": 1, "width": 120.0, "height": 40.0, "primitives": [run]}
+        ]
+    }))
+    .expect("display list");
+    let mut cache = GlyphCache::default();
+    for page in 0..2 {
+        let shared = render_page_cached(&list, page, &resources, &mut cache).expect("shared");
+        let fresh = render_page(&list, page, &resources).expect("fresh");
+        assert_eq!(shared.bytes, fresh.bytes);
+    }
 }
 
 /// PNG headers declaring a bomb-sized surface, with an IDAT too short to

@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use skrifa::raw::TableProvider;
 use skrifa::raw::tables::os2::SelectionFlags;
@@ -208,15 +209,34 @@ struct FontEntry {
 /// Registry of fonts, keyed by [`FontId`], parsed from raw bytes.
 ///
 /// The store owns the byte buffers borrowed by shaping and outline extraction.
-#[derive(Default)]
 pub struct FontStore {
+    id: u64,
     fonts: Vec<FontEntry>,
     shape_cache: RefCell<ShapeCache>,
 }
 
+static NEXT_FONT_STORE_ID: AtomicU64 = AtomicU64::new(0);
+
+impl Default for FontStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FontStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            id: NEXT_FONT_STORE_ID.fetch_add(1, Ordering::Relaxed),
+            fonts: Vec::new(),
+            shape_cache: RefCell::default(),
+        }
+    }
+
+    /// Identity unique to this store within the process. [`FontId`]s are
+    /// store-local indexes, so anything keyed by them (glyph caches) binds to
+    /// this value instead of silently reusing another store's outlines.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Parse and register a font from raw bytes, returning its handle.
