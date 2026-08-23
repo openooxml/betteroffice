@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
 use std::io;
+use std::iter::Peekable;
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
@@ -2593,24 +2594,33 @@ fn write_sheet_data(
         }
     }
 
-    let mut rows: Vec<RowId> = sheet.iter_cells().map(|(r, _)| r.row).collect();
-    rows.extend(sheet.row_heights.keys().copied());
-    rows.sort_unstable();
-    rows.dedup();
+    let mut cells = sheet.iter_cells().peekable();
+    let mut heights = sheet.row_heights.keys().copied().peekable();
 
     writer
         .create_element("sheetData")
         .write_inner_content(|writer| {
-            for &row in &rows {
+            loop {
+                let cell_row = cells.peek().map(|(addr, _)| addr.row);
+                let height_row = heights.peek().copied();
+                let row = match (cell_row, height_row) {
+                    (Some(a), Some(b)) => a.min(b),
+                    (Some(a), None) | (None, Some(a)) => a,
+                    (None, None) => break,
+                };
                 write_row(
                     writer,
                     sheet,
                     row,
+                    &mut cells,
                     wb,
                     &sst_index,
                     retained,
                     shared_string_plan,
                 )?;
+                if height_row == Some(row) {
+                    heights.next();
+                }
             }
             Ok(())
         })?;
@@ -2717,15 +2727,20 @@ fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
     Ok(())
 }
 
-fn write_row(
+#[allow(clippy::too_many_arguments)]
+fn write_row<'a, I>(
     w: &mut Writer<Vec<u8>>,
     sheet: &Sheet,
     row: RowId,
+    cells: &mut Peekable<I>,
     wb: &Workbook,
     sst_index: &HashMap<&str, usize>,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    I: Iterator<Item = (CellRef, &'a Cell)>,
+{
     let r = (row as u64 + 1).to_string();
     let mut start = BytesStart::new("row");
     start.push_attribute(("r", r.as_str()));
@@ -2738,7 +2753,7 @@ fn write_row(
         }
     }
     w.write_event(Event::Start(start))?;
-    for (addr, cell) in sheet.iter_cells().filter(|(a, _)| a.row == row) {
+    while let Some((addr, cell)) = cells.next_if(|(addr, _)| addr.row == row) {
         let source = retained.get(&(addr.row, addr.col)).copied();
         let retained = match (&cell.value, shared_string_plan) {
             (CellValue::Text { value }, Some(plan)) => {

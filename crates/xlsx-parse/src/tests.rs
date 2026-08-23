@@ -5161,3 +5161,63 @@ fn a_save_keeps_its_own_cache_bound_rather_than_the_projections() {
     refs[2].formula = format!("Data!$B$2:$B${}", each + 1);
     patch_refs(CHART, &refs).expect("the save bound is charged per reference, not across the part");
 }
+
+/// Sparse cell runs, height-only rows and the stream boundaries must serialize
+/// as one ascending `sheetData` pass with byte-stable output.
+#[test]
+fn writes_sparse_and_height_only_rows_in_one_ascending_pass() {
+    let mut wb = Workbook::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet1");
+    for (a1, v) in [("A1", 7.5), ("B5", 1.0), ("C100", 42.0)] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Number { value: v },
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.row_heights.insert(0, 20.0);
+    sheet.row_heights.insert(2, 15.0);
+    sheet.row_heights.insert(119, 0.0);
+    wb.sheets.push(sheet);
+
+    let parts = serialize_workbook(&wb).unwrap();
+    let written = String::from_utf8(part_bytes(&parts, "xl/worksheets/sheet1.xml")).unwrap();
+
+    let expected = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        r#"<sheetData>"#,
+        r#"<row r="1" ht="20" customHeight="1"><c r="A1"><v>7.5</v></c></row>"#,
+        r#"<row r="3" ht="15" customHeight="1"></row>"#,
+        r#"<row r="5"><c r="B5"><v>1</v></c></row>"#,
+        r#"<row r="100"><c r="C100"><v>42</v></c></row>"#,
+        r#"<row r="120" ht="0" customHeight="1" hidden="1"></row>"#,
+        r#"</sheetData></worksheet>"#,
+    );
+    assert_eq!(written, expected);
+
+    let reparsed = parse_workbook(&parts).unwrap();
+    assert_eq!(
+        reparsed.sheets[0]
+            .cell(CellRef::parse_a1("A1").unwrap())
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number { value: 7.5 })
+    );
+    assert_eq!(
+        reparsed.sheets[0]
+            .cell(CellRef::parse_a1("B5").unwrap())
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number { value: 1.0 })
+    );
+    assert_eq!(
+        reparsed.sheets[0]
+            .cell(CellRef::parse_a1("C100").unwrap())
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number { value: 42.0 })
+    );
+    assert_eq!(reparsed.sheets[0].row_heights.get(&0), Some(&20.0));
+    assert_eq!(reparsed.sheets[0].row_heights.get(&2), Some(&15.0));
+    assert_eq!(reparsed.sheets[0].row_heights.get(&119), Some(&0.0));
+}
