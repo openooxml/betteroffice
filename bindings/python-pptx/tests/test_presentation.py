@@ -436,6 +436,150 @@ def test_path_io_releases_the_gil(sample_path, tmp_path, mode):
     assert probe.returncode == 0, probe.stderr
 
 
+GIL_PROGRESS_PROBE = """
+import ctypes
+import json
+import queue
+import sys
+import threading
+
+import betteroffice_pptx as bo
+
+source, heavy_font_path, control = sys.argv[1:4]
+
+data = open(source, "rb").read()
+heavy_font = open(heavy_font_path, "rb").read()
+
+template = bo.Presentation.open(data)
+for _ in range(200):
+    template.insert_slide(1)
+for column in range(64):
+    template.add_text_box(
+        0, x=(column % 20) * 609_600, y=(column // 20) * 457_200,
+        width=1_828_800, height=457_200,
+        text="The quick brown fox jumps over the lazy dog.",
+    )
+saved = template.save()
+del template
+
+switch_interval = sys.getswitchinterval()
+sys.setswitchinterval(1e-6)
+counter = [0]
+jobs = queue.SimpleQueue()
+
+
+def laborer():
+    while True:
+        op, started, finished, outcome = jobs.get()
+        if op is None:
+            return
+        started.set()
+        try:
+            op()
+            outcome["ok"] = True
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            finished.set()
+
+
+worker = threading.Thread(target=laborer, daemon=True)
+worker.start()
+
+
+def measure(op):
+    started = threading.Event()
+    finished = threading.Event()
+    outcome = {}
+    jobs.put((op, started, finished, outcome))
+    started.wait()
+    before = counter[0]
+    while not finished.is_set():
+        counter[0] += 1
+    if "error" in outcome:
+        raise outcome["error"]
+    return counter[0] - before
+
+
+holder = {}
+measure(lambda: holder.update(peer=bo.Presentation.open_collaborative(saved)))
+measure(lambda: holder.update(
+    update=bo.Presentation.open_collaborative(saved).state_as_update()))
+
+if control == "usleep":
+    sleep_fn = ctypes.PyDLL(None).usleep
+    held_call = lambda: sleep_fn(200_000)
+else:
+    sleep_fn = ctypes.PyDLL("kernel32").Sleep
+    held_call = lambda: sleep_fn(200)
+
+ops = {
+    "open": lambda: holder.setdefault("deck", bo.Presentation.open(saved)),
+    "register_font": lambda: holder["deck"].register_font("Noto Serif SC", heavy_font),
+    "render_slide": lambda: holder["deck"].render_slide(0),
+    "save": lambda: holder["deck"].save(),
+    "apply_update": lambda: holder["peer"].apply_update(holder["update"]),
+}
+
+deltas = {}
+try:
+    for name, op in ops.items():
+        deltas[name] = measure(op)
+    deltas["held_sleep_control"] = measure(held_call)
+finally:
+    measure(lambda: holder.clear())
+    jobs.put((None, None, None, None))
+    worker.join(timeout=5)
+    sys.setswitchinterval(switch_interval)
+
+print(json.dumps(deltas))
+
+released = [deltas[name] for name in ops]
+for name in ops:
+    assert deltas[name] > 5_000, f"{name} seems to hold the GIL: {deltas[name]} ticks in window"
+control_delta = deltas["held_sleep_control"]
+cap = min(min(released) // 20, 20_000)
+assert control_delta < cap, f"GIL-holding sleep scored {control_delta} ticks, cap {cap}"
+"""
+
+
+def held_sleep_control():
+    """Name of a platform sleep that blocks 200ms without releasing the GIL, or None."""
+    try:
+        import ctypes
+    except ImportError:
+        return None
+    try:
+        ctypes.PyDLL(None).usleep
+    except (OSError, AttributeError):
+        try:
+            ctypes.PyDLL("kernel32").Sleep
+        except (OSError, AttributeError):
+            return None
+        return "Sleep"
+    return "usleep"
+
+
+def test_heavy_ops_release_the_gil(sample_path, heavy_font_path):
+    """Ticks accrue only inside each op's event window; a GIL-holding sleep stays near zero."""
+    control = held_sleep_control()
+    if control is None:
+        pytest.skip("no GIL-holding sleep primitive on this platform")
+
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", GIL_PROGRESS_PROBE,
+             str(sample_path), str(heavy_font_path), control],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("deadlocked: the GIL was held across a heavy op")
+    assert probe.returncode == 0, probe.stderr
+    print(probe.stdout.strip())
+
+
 def test_missing_file_raises_file_not_found(tmp_path):
     missing = tmp_path / "nope.pptx"
     with pytest.raises(FileNotFoundError) as caught:

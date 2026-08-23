@@ -288,9 +288,9 @@ its own; the deck must also become garbage on its owning thread. Open, use, and
 drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
-Engine calls hold the GIL for their duration, unlike `betteroffice-xlsx`. Only
-the file I/O releases it: `open_path`'s read, and the writes in `save_path`,
-`Media.write` and `DisplayList.write`.
+The heavy operations release the GIL while they run — `open`, `open_path`,
+`render_slide`, `save`, `save_path`, `register_font`, and `apply_update` — as do
+the file writes in `Media.write` and `DisplayList.write`.
 
 ## Status
 

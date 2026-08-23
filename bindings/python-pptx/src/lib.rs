@@ -930,6 +930,17 @@ fn join_text<'a>(parts: impl Iterator<Item = &'a str>) -> String {
         .join("\n")
 }
 
+/// Moves a deck or a borrow of one across `detach`, which demands `Send`.
+///
+/// # Safety
+///
+/// The core type is `!Send` (`RefCell`s plus stored undo callbacks), but
+/// `PyPresentation` is `unsendable`, so any access from another thread panics
+/// inside pyo3 before reaching it, and `detach` keeps running on this thread.
+struct DetachedDeck<T>(T);
+
+unsafe impl<T> Send for DetachedDeck<T> {}
+
 #[pyclass(module = "betteroffice_pptx", name = "Presentation", unsendable)]
 pub struct PyPresentation {
     presentation: CorePresentation,
@@ -1037,24 +1048,44 @@ impl PyPresentation {
         ))
     }
 
-    fn saved_bytes(&self) -> PyResult<Vec<u8>> {
-        self.presentation.save().map_err(map_error)
+    fn saved_bytes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let deck = DetachedDeck(&self.presentation);
+        py.detach(move || {
+            let deck = deck;
+            deck.0.save()
+        })
+        .map_err(map_error)
     }
 
-    fn open_bytes(
-        data: &[u8],
+    fn open_bytes_inner(
+        py: Python<'_>,
+        data: Vec<u8>,
         limits: Option<&Bound<'_, PyDict>>,
         client_id: Option<u64>,
     ) -> PyResult<Self> {
         let limits = parse_limits(limits)?;
-        match client_id {
-            Some(client_id) => {
-                CorePresentation::open_collaborative_with_limits(data, client_id, &limits)
-            }
-            None => CorePresentation::open_with_limits(data, &limits),
-        }
-        .map(|presentation| Self::wrap(presentation, client_id.is_some()))
-        .map_err(map_error)
+        let opened = py
+            .detach(move || {
+                let opened = match client_id {
+                    Some(client_id) => {
+                        CorePresentation::open_collaborative_with_limits(&data, client_id, &limits)
+                    }
+                    None => CorePresentation::open_with_limits(&data, &limits),
+                };
+                opened.map(DetachedDeck)
+            })
+            .map_err(map_error)?;
+        Ok(Self::wrap(opened.0, client_id.is_some()))
+    }
+
+    /// Copies first: a borrow of a Python buffer cannot cross `detach`.
+    fn open_bytes(
+        py: Python<'_>,
+        data: &[u8],
+        limits: Option<&Bound<'_, PyDict>>,
+        client_id: Option<u64>,
+    ) -> PyResult<Self> {
+        Self::open_bytes_inner(py, data.to_vec(), limits, client_id)
     }
 }
 
@@ -1062,8 +1093,8 @@ impl PyPresentation {
 impl PyPresentation {
     #[staticmethod]
     #[pyo3(signature = (data, *, limits = None))]
-    fn open(data: &[u8], limits: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        Self::open_bytes(data, limits, None)
+    fn open(py: Python<'_>, data: &[u8], limits: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        Self::open_bytes(py, data, limits, None)
     }
 
     #[staticmethod]
@@ -1076,13 +1107,14 @@ impl PyPresentation {
         let data = py
             .detach(|| fs::read(&path))
             .map_err(|error| map_io_error(&error, &path))?;
-        Self::open_bytes(&data, limits, None)
+        Self::open_bytes_inner(py, data, limits, None)
     }
 
     /// Open a replica with a generated ID unless `client_id` is supplied.
     #[staticmethod]
     #[pyo3(signature = (data, *, client_id = None, limits = None))]
     fn open_collaborative(
+        py: Python<'_>,
         data: &[u8],
         client_id: Option<u64>,
         limits: Option<&Bound<'_, PyDict>>,
@@ -1092,7 +1124,7 @@ impl PyPresentation {
             Some(client_id) => client_id,
             None => generated_client_id(MAX_COLLABORATION_CLIENT_ID)?.max(1),
         };
-        Self::open_bytes(data, limits, Some(client_id))
+        Self::open_bytes(py, data, limits, Some(client_id))
     }
 
     #[getter]
@@ -1473,42 +1505,61 @@ impl PyPresentation {
         Ok(PyTextEdit::from_core(receipt))
     }
 
-    /// Register a face for layout. Nothing is embedded in the wheel, so text
-    /// only measures against families registered here.
+    /// Registers a face for layout, copied first since borrows of Python
+    /// objects cannot cross `detach`. Nothing is embedded in the wheel, so
+    /// text only measures against families registered here.
     #[pyo3(signature = (family, data, *, bold = false, italic = false))]
     fn register_font(
         &mut self,
+        py: Python<'_>,
         family: &str,
         data: &[u8],
         bold: bool,
         italic: bool,
     ) -> PyResult<u32> {
-        self.presentation
-            .register_font(family, bold, italic, data)
-            .map_err(map_error)
+        let family = family.to_owned();
+        let data = data.to_vec();
+        let deck = DetachedDeck(&mut self.presentation);
+        py.detach(move || {
+            let deck = deck;
+            deck.0.register_font(&family, bold, italic, &data)
+        })
+        .map_err(map_error)
     }
 
-    fn render_slide(&self, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
+    fn render_slide(&self, py: Python<'_>, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
         let index = self.resolve_slide_index(slide)?;
-        let rendered = self.presentation.render_slide(index).map_err(map_error)?;
-        let payload = serde_json::to_string(&rendered.display_list)
-            .map_err(|error| RenderError::new_err(error.to_string()))?;
-        Ok(PyDisplayList {
-            payload,
-            width: rendered.display_list.width,
-            height: rendered.display_list.height,
-            contract_version: rendered.display_list.contract_version,
-            primitives: rendered.display_list.primitives.len(),
+        let deck = DetachedDeck(&self.presentation);
+        enum Failure {
+            Engine(CoreError),
+            Json(serde_json::Error),
+        }
+
+        py.detach(move || {
+            let deck = deck;
+            let rendered = deck.0.render_slide(index).map_err(Failure::Engine)?;
+            let payload = serde_json::to_string(&rendered.display_list).map_err(Failure::Json)?;
+            Ok(PyDisplayList {
+                payload,
+                width: rendered.display_list.width,
+                height: rendered.display_list.height,
+                contract_version: rendered.display_list.contract_version,
+                primitives: rendered.display_list.primitives.len(),
+            })
+        })
+        .map_err(|failure| match failure {
+            Failure::Engine(error) => map_error(error),
+            Failure::Json(error) => RenderError::new_err(error.to_string()),
         })
     }
 
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = self.saved_bytes()?;
+        let bytes = self.saved_bytes(py)?;
         Ok(PyBytes::new(py, &bytes))
     }
 
     fn save_path(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
-        let bytes = self.saved_bytes()?;
+        let bytes = self.saved_bytes(py)?;
         py.detach(|| fs::write(&path, bytes))
             .map_err(|error| map_io_error(&error, &path))
     }
@@ -1537,7 +1588,7 @@ impl PyPresentation {
         Ok(PyBytes::new(py, &update))
     }
 
-    fn apply_update(&self, update: &[u8]) -> PyResult<PyDeck> {
+    fn apply_update(&self, py: Python<'_>, update: &[u8]) -> PyResult<PyDeck> {
         self.require_collaborative()?;
         if update.len() > MAX_COLLABORATION_BYTES {
             return Err(InvalidUpdateError::new_err(format!(
@@ -1545,9 +1596,13 @@ impl PyPresentation {
                 update.len()
             )));
         }
-        let snapshot = self
-            .presentation
-            .apply_update_v1(update)
+        let update = update.to_vec();
+        let deck = DetachedDeck(&self.presentation);
+        let snapshot = py
+            .detach(move || {
+                let deck = deck;
+                deck.0.apply_update_v1(&update)
+            })
             .map_err(map_error)?;
         self.edited.set(true);
         Ok(PyDeck::from_core(&snapshot))
