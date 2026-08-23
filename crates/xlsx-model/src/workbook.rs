@@ -54,6 +54,10 @@ pub struct Cell {
     pub style: Option<u32>,
 }
 
+/// cells to relocate: each source address with the address it moves to, or
+/// `None` when the cell is refused.
+type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
@@ -84,6 +88,64 @@ impl Sheet {
         } else {
             self.cells.insert((at.row, at.col), cell);
         }
+    }
+
+    /// moves every occupied cell to the address `remap` names; the cells it
+    /// refuses come back in address order. cells already at their target are
+    /// left untouched, and a target several cells reach keeps the one from the
+    /// largest source address.
+    pub fn remap_cells(
+        &mut self,
+        remap: impl Fn(CellRef) -> Option<CellRef>,
+    ) -> Vec<(CellRef, Cell)> {
+        let mut dropped = Vec::new();
+        self.cells.retain(|_, cell| *cell != Cell::default());
+        let mut plan: CellMoves = Vec::new();
+        let mut split: Option<(RowId, ColId)> = None;
+        let mut suffix = true;
+        for &at in self.cells.keys() {
+            let target = match remap(CellRef::new(at.0, at.1)) {
+                Some(to) if (to.row, to.col) != at => Some((to.row, to.col)),
+                Some(_) => {
+                    if split.is_some() {
+                        suffix = false;
+                    }
+                    continue;
+                }
+                None => None,
+            };
+            if split.is_none() {
+                split = Some(at);
+            }
+            plan.push((at, target));
+        }
+        let Some(split) = split else {
+            return dropped;
+        };
+        if suffix && plan.iter().all(|(_, to)| to.is_none_or(|to| to >= split)) {
+            let mut rebuilt = BTreeMap::new();
+            let mut tail = self.cells.split_off(&split).into_iter();
+            for ((row, col), target) in plan {
+                let (_, cell) = tail.next().expect("plan covers every split-off cell");
+                match target {
+                    Some(to) => {
+                        rebuilt.insert(to, cell);
+                    }
+                    None => dropped.push((CellRef::new(row, col), cell)),
+                }
+            }
+            self.cells.append(&mut rebuilt);
+        } else {
+            let old = std::mem::take(&mut self.cells);
+            for ((row, col), cell) in old {
+                let Some(to) = remap(CellRef::new(row, col)) else {
+                    dropped.push((CellRef::new(row, col), cell));
+                    continue;
+                };
+                self.cells.insert((to.row, to.col), cell);
+            }
+        }
+        dropped
     }
 
     /// ordered iteration over occupied cells (row-major).

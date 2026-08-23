@@ -629,25 +629,10 @@ fn delete_cols(
     Ok(InvertedOp(inv))
 }
 
-/// remap every occupied cell through `op`, rebuilding storage. returns the
-/// cells whose address was dropped, for the inverse.
+/// remap every occupied cell through `op` in place. returns the cells whose
+/// address was dropped, for the inverse.
 fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
-    let old: Vec<(CellRef, Cell)> = s.iter_cells().map(|(r, c)| (r, c.clone())).collect();
-    let mut moved = Vec::new();
-    let mut dropped = Vec::new();
-    for (r, c) in &old {
-        match remap_ref(*r, op) {
-            Some(nr) => moved.push((nr, c.clone())),
-            None => dropped.push((*r, c.clone())),
-        }
-    }
-    for (r, _) in &old {
-        s.set_cell(*r, Cell::default());
-    }
-    for (nr, c) in moved {
-        s.set_cell(nr, c);
-    }
-    dropped
+    s.remap_cells(|at| remap_ref(at, op))
 }
 
 fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
@@ -1670,5 +1655,182 @@ mod tests {
             assert!(matches!(error, OpError::ChartFrameShifted { .. }));
             assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
         }
+    }
+
+    fn filled(at: &str, value: f64) -> (CellRef, Cell) {
+        (
+            r(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        )
+    }
+
+    /// two cells land on one target; today's clear-then-reinsert order made
+    /// the largest source address win.
+    #[test]
+    fn remap_cells_contested_target_keeps_the_largest_source() {
+        let mut sheet = Sheet::new("S");
+        let (a1, c1) = filled("A1", 1.0);
+        let (_, c2) = filled("A6", 2.0);
+        sheet.set_cell(a1, c1.clone());
+        sheet.set_cell(r("A6"), c2.clone());
+        let dropped = sheet.remap_cells(|at| match at.row {
+            0 => Some(CellRef::new(5, 0)),
+            5 => Some(CellRef::new(5, 0)),
+            _ => Some(at),
+        });
+        assert!(dropped.is_empty());
+        assert_eq!(sheet.cell(CellRef::new(5, 0)), Some(&c2));
+        assert_eq!(sheet.iter_cells().count(), 1);
+    }
+
+    /// the same contest when every touched cell moves, so the split-off
+    /// fast path runs instead of the full-rebuild fallback.
+    #[test]
+    fn remap_cells_contested_target_resolves_on_the_fast_path_too() {
+        let mut sheet = Sheet::new("S");
+        let (_, c5) = filled("A5", 5.0);
+        let (_, c7) = filled("A7", 7.0);
+        sheet.set_cell(r("A5"), c5);
+        sheet.set_cell(r("A7"), c7.clone());
+        let dropped = sheet.remap_cells(|at| {
+            if at.row >= 4 {
+                Some(CellRef::new(6, at.col))
+            } else {
+                Some(at)
+            }
+        });
+        assert!(dropped.is_empty());
+        assert_eq!(sheet.cell(CellRef::new(6, 0)), Some(&c7));
+        assert_eq!(sheet.iter_cells().count(), 1);
+    }
+
+    /// cells that keep their address stay put, refused ones come back in
+    /// address order, and survivors move down past the refused span.
+    #[test]
+    fn remap_cells_keeps_stays_and_reports_drops_in_address_order() {
+        let mut sheet = Sheet::new("S");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0), ("B7", 7.0)] {
+            let (at, cell) = filled(at, value);
+            sheet.set_cell(at, cell);
+        }
+        let dropped = sheet.remap_cells(|at| {
+            if at.row == 1 {
+                None
+            } else if at.row == 0 {
+                Some(at)
+            } else {
+                Some(CellRef::new(at.row - 1, at.col))
+            }
+        });
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].0, r("A2"));
+        assert_eq!(dropped[0].1.value, CellValue::Number { value: 2.0 });
+        assert_eq!(
+            sheet.cell(r("A1")).unwrap().value,
+            CellValue::Number { value: 1.0 }
+        );
+        assert_eq!(
+            sheet.cell(r("A2")).unwrap().value,
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(
+            sheet.cell(r("B6")).unwrap().value,
+            CellValue::Number { value: 7.0 }
+        );
+        assert_eq!(sheet.iter_cells().count(), 3);
+    }
+
+    /// rows and columns shift through the new storage path and invert back to
+    /// exactly the workbook they started from.
+    #[test]
+    fn structural_shifts_round_trip_exactly_on_both_axes() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Data"));
+        for row in 1..=12 {
+            for col in ["A", "C", "F"] {
+                let at = format!("{col}{row}");
+                let (cell_ref, cell) = filled(&at, f64::from(row));
+                wb.sheet_mut(SheetId(0)).unwrap().set_cell(cell_ref, cell);
+            }
+            wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+                r(&format!("B{row}")),
+                Cell {
+                    formula: Some("Sheet1!A1+Sheet1!$E$9".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let before = wb.clone();
+
+        let edits = [
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 4,
+                count: 3,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 1,
+            },
+        ];
+        for op in &edits {
+            let inverse = apply(&mut wb, op).unwrap();
+            apply_ops(&mut wb, &inverse.0).unwrap();
+            assert_eq!(wb, before, "{op:?} must invert exactly");
+        }
+    }
+
+    /// a deletion whose span holds contents must report them for the inverse,
+    /// whatever sits above or below the span.
+    #[test]
+    fn deleting_rows_reports_every_dropped_cell_for_undo() {
+        let mut wb = wb_one_sheet();
+        for (at, value) in [("A1", 1.0), ("A3", 3.0), ("A4", 4.0), ("A6", 6.0)] {
+            let (at, cell) = filled(at, value);
+            wb.sheets[0].set_cell(at, cell);
+        }
+        let inverse = apply(
+            &mut wb,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.value(SheetId(0), r("A4")),
+            CellValue::Number { value: 6.0 }
+        );
+        assert!(wb.sheet(SheetId(0)).unwrap().cell(r("A3")).is_none());
+        let restores = inverse
+            .0
+            .iter()
+            .filter(|op| matches!(op, Op::SetCell { .. }))
+            .count();
+        assert_eq!(restores, 2, "rows 3 and 4 must come back");
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(
+            wb.value(SheetId(0), r("A3")),
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(
+            wb.value(SheetId(0), r("A4")),
+            CellValue::Number { value: 4.0 }
+        );
     }
 }
