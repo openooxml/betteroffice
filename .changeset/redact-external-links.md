@@ -2,4 +2,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Redact scheme-bearing relationship targets missing TargetMode.
+Redact relationship targets that point outside the package when TargetMode is missing, and declare the mode on the rewritten relationship.

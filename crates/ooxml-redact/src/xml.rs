@@ -128,12 +128,7 @@ fn rewrite_start(
         attributes.push((key, value));
     }
 
-    let external = element.eq_ignore_ascii_case("Relationship")
-        && attributes.iter().any(|(key, value)| {
-            let local = attribute_local(key);
-            local.eq_ignore_ascii_case("TargetMode") && value.eq_ignore_ascii_case("External")
-                || local.eq_ignore_ascii_case("Target") && external_target(value)
-        });
+    let (external, declare_external) = relationship_mode(path, element, &attributes);
     if format == Format::Xlsx && element == "c" {
         *cell_type = None;
     }
@@ -141,6 +136,11 @@ fn rewrite_start(
     output.clear_attributes();
     for (key, value) in attributes {
         let local = attribute_local(&key);
+        if local.eq_ignore_ascii_case("TargetMode") && value.trim().eq_ignore_ascii_case("External")
+        {
+            output.push_attribute((key.as_str(), "External"));
+            continue;
+        }
         let replacement = if external && local.eq_ignore_ascii_case("Target") {
             Some("https://example.com".to_owned())
         } else if !key.starts_with("xmlns")
@@ -161,6 +161,9 @@ fn rewrite_start(
         if format == Format::Xlsx && element == "c" && local == "t" {
             *cell_type = Some(value);
         }
+    }
+    if declare_external {
+        output.push_attribute(("TargetMode", "External"));
     }
     Ok(output)
 }
@@ -366,13 +369,37 @@ fn attribute_local(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, local)| local)
 }
 
+/// Whether a relationship points outside the package, and whether `TargetMode`
+/// has to be synthesized so the rewritten target is not read back as an internal
+/// part reference.
+fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
+    if !element.eq_ignore_ascii_case("Relationship") {
+        return (false, false);
+    }
+    let mut declared = false;
+    let mut external = false;
+    let mut inferred = false;
+    for (key, value) in attributes {
+        let local = attribute_local(key);
+        if local.eq_ignore_ascii_case("TargetMode") {
+            declared = true;
+            external |= value.trim().eq_ignore_ascii_case("External");
+        } else if local.eq_ignore_ascii_case("Target") && external_target(path, value) {
+            inferred = true;
+        }
+    }
+    (external || inferred, inferred && !declared)
+}
+
 /// True for relationship targets pointing outside the package.
-fn external_target(target: &str) -> bool {
+fn external_target(path: &str, target: &str) -> bool {
     let lower = target.trim().to_ascii_lowercase();
     lower.starts_with("//")
+        || lower.starts_with(r"\\")
         || lower
             .split_once(':')
             .is_some_and(|(scheme, _)| is_uri_scheme(scheme))
+        || escapes_package(path, &lower)
 }
 
 fn is_uri_scheme(scheme: &str) -> bool {
@@ -381,6 +408,30 @@ fn is_uri_scheme(scheme: &str) -> bool {
         return false;
     }
     chars.all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
+}
+
+/// True when a relative target climbs above the package root, which no internal
+/// part reference can do.
+fn escapes_package(path: &str, target: &str) -> bool {
+    let target = target.split(['?', '#']).next().unwrap_or_default();
+    if target.starts_with('/') || target.starts_with('\\') {
+        return false;
+    }
+    let mut depth = path
+        .replace('\\', "/")
+        .rsplit_once("/_rels/")
+        .map_or(0, |(directory, _)| {
+            directory.split('/').filter(|part| !part.is_empty()).count()
+        });
+    for segment in target.replace('\\', "/").split('/') {
+        match segment {
+            "" | "." => {}
+            ".." if depth == 0 => return true,
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
+    false
 }
 
 fn xml_error(path: &str, error: impl fmt::Display) -> RedactError {

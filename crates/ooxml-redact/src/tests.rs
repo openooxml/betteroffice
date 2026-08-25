@@ -479,6 +479,119 @@ fn uri_in_fragment_keeps_relationship_internal() {
 }
 
 #[test]
+fn unc_relationship_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\fileserver01\finance\q3.xlsx"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="\\?\UNC\fileserver02\finance\q4.xlsx"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="\word\media\image1.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches(r#"Target="https://example.com""#).count(), 2);
+    assert!(!text.contains("fileserver01"));
+    assert!(!text.contains("fileserver02"));
+    assert!(text.contains(r#"Target="\word\media\image1.png""#));
+    assert_eq!(report.attributes, 2);
+}
+
+#[test]
+fn parent_escaping_targets_redacted_without_target_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="../../../Users/rachel/book.xlsx"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image2.png"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("rachel"));
+    assert!(text.contains(r#"Target="../media/image1.png""#));
+    assert!(text.contains(r#"Target="media/image2.png""#));
+    assert_eq!(report.attributes, 1);
+}
+
+#[test]
+fn padded_target_mode_still_marks_relationship_external() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="PPTX_SECRET_SHARE/finance/q1.xlsx" TargetMode=" External "/>"#,
+    );
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"Target="https://example.com""#));
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(!rels.contains("PPTX_SECRET_SHARE"));
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn inferred_external_relationship_declares_target_mode() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49PPTX_SECRET_PHONE"/>"#,
+    );
+    pptx_parse::parse_pptx(&source).unwrap();
+
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"Target="https://example.com""#));
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(
+        parts
+            .iter()
+            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("PPTX_SECRET_PHONE")),
+        "secret survived: PPTX_SECRET_PHONE"
+    );
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn declared_target_mode_is_not_duplicated() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/pptx" TargetMode="External"/>"#,
+    );
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert_eq!(rels.matches("TargetMode").count(), 1);
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+fn pptx_fixture_with_slide_relationship(relationship: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&pptx_fixture()).unwrap();
+    for (path, data) in &mut parts {
+        if path == "ppt/slides/_rels/slide1.xml.rels" {
+            *data = xml(&format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationship}</Relationships>"#
+            ));
+        }
+    }
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
 fn media_placeholder_keeps_each_format() {
     for (format, ext) in [
         (ImageFormat::Gif, "gif"),
