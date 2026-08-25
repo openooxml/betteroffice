@@ -1093,6 +1093,22 @@ pub enum LayoutBlock {
     Unsupported,
 }
 
+// ---------------------------------------------------------------------------
+// structural equality
+// ---------------------------------------------------------------------------
+//
+// Equality across the block tree masks `pm_start`, `pm_end`, `doc_start` and
+// `doc_end`: those absolute document positions shift on every edit without
+// changing how a block measures, and the resident layout walk reuses a retained
+// measurement for every block that compares equal. So that a new field cannot
+// silently escape that decision, each variant and each field is spelled out —
+// adding either stops compiling until it is classified.
+//
+// Numbers compare as numbers, so `-0.0` equals `0.0` where the serialized
+// fingerprint this replaced saw a change. Both measure identically, so the
+// retained measurement stays right, but a serialized zero can keep its old sign
+// until something else dirties its block.
+
 impl PartialEq for LayoutBlock {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1106,7 +1122,16 @@ impl PartialEq for LayoutBlock {
             (Self::PageBreak(a), Self::PageBreak(b)) => a == b,
             (Self::ColumnBreak(a), Self::ColumnBreak(b)) => a == b,
             (Self::Unsupported, Self::Unsupported) => true,
-            _ => false,
+            (Self::Paragraph(_), _)
+            | (Self::Table(_), _)
+            | (Self::Image(_), _)
+            | (Self::Shape(_), _)
+            | (Self::Chart(_), _)
+            | (Self::TextBox(_), _)
+            | (Self::SectionBreak(_), _)
+            | (Self::PageBreak(_), _)
+            | (Self::ColumnBreak(_), _)
+            | (Self::Unsupported, _) => false,
         }
     }
 }
@@ -1120,7 +1145,12 @@ impl PartialEq for Run {
             (Self::LineBreak(a), Self::LineBreak(b)) => a == b,
             (Self::Field(a), Self::Field(b)) => a == b,
             (Self::Unsupported, Self::Unsupported) => true,
-            _ => false,
+            (Self::Text(_), _)
+            | (Self::Tab(_), _)
+            | (Self::Image(_), _)
+            | (Self::LineBreak(_), _)
+            | (Self::Field(_), _)
+            | (Self::Unsupported, _) => false,
         }
     }
 }
@@ -1237,7 +1267,11 @@ impl PartialEq for ImageRun {
 }
 
 impl PartialEq for LineBreakRun {
-    fn eq(&self, _: &Self) -> bool {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            pm_start: _,
+            pm_end: _,
+        } = other;
         true
     }
 }
