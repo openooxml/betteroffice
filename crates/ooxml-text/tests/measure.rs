@@ -2105,3 +2105,159 @@ fn float_zone_input_validation() {
     .unwrap_err();
     assert!(err.starts_with("UNSUPPORTED"), "segment count: {err:?}");
 }
+
+// ---- 15. font slot routing --------------------------------------------------
+
+const CALADEA: &[u8] = include_bytes!("../../../packages/fonts/assets/Caladea-Regular.ttf");
+
+/// Each `w:rFonts` slot must resolve through its own family: ASCII, high-ANSI,
+/// East Asian and complex-script characters each pick the slot they belong to
+/// and no other. Swapping one slot's family to a face with different metrics
+/// must change the measurement of exactly the characters that slot owns —
+/// texts that mix slots pin that a run never reuses one slot's face for
+/// another's characters.
+#[test]
+fn each_font_slot_resolves_through_its_own_family() {
+    const SLOTS: [&str; 4] = ["ascii", "hAnsi", "eastAsia", "cs"];
+    // Text, and which slots its characters belong to, in SLOTS order.
+    const CASES: [(&str, [bool; 4]); 10] = [
+        ("A", [true, false, false, false]),
+        ("é", [false, true, false, false]),
+        ("日", [false, false, true, false]),
+        ("א", [false, false, false, true]),
+        ("Aé", [true, true, false, false]),
+        ("A日", [true, false, true, false]),
+        ("Aא", [true, false, false, true]),
+        ("é日", [false, true, true, false]),
+        ("éא", [false, true, false, true]),
+        ("Aé日א", [true, true, true, true]),
+    ];
+
+    let mut store = FontStore::new();
+    store.register(FIXTURE.to_vec()).expect("base registers");
+    store.register(CALADEA.to_vec()).expect("alt registers");
+
+    // `pad` runs the same matrix with chains too long for a run to keep, so a
+    // rebuilt-per-character chain must route exactly like a kept one.
+    let measure_slots = |text: &str, alt: Option<usize>, pad: (usize, usize)| -> String {
+        let slots: serde_json::Map<String, Value> = SLOTS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let family = if Some(i) == alt { "alt" } else { "base" };
+                ((*name).to_string(), json!(family))
+            })
+            .collect();
+        let chain = |head: usize, pad: usize| {
+            let mut ids = vec![head];
+            ids.resize(1 + pad, head);
+            ids
+        };
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [
+                { "kind": "text", "text": text, "fontSlots": Value::Object(slots) }
+            ] },
+            "maxWidth": 500.0,
+            "fontChains": { "base|0|0": chain(0, pad.0), "alt|0|0": chain(1, pad.1) },
+            "defaults": { "fontSize": 12.0, "fontFamily": "base" }
+        });
+        measure_paragraph_json(&store, &input.to_string()).expect("measures")
+    };
+
+    // Both short, both oversized, and each mixed with the other, so a run can
+    // hold a kept chain for one slot and a rebuilt one for another.
+    for pad in [(0usize, 0usize), (200, 200), (0, 200), (200, 0)] {
+        for (text, used) in CASES {
+            let baseline = measure_slots(text, None, pad);
+            assert_eq!(
+                baseline,
+                measure_slots(text, None, (0, 0)),
+                "{text:?} must measure the same with a padded chain"
+            );
+            for (probe, is_used) in used.iter().enumerate() {
+                let swapped = measure_slots(text, Some(probe), pad);
+                if *is_used {
+                    assert_ne!(
+                        baseline, swapped,
+                        "{text:?} must measure through the {} slot (pad {pad:?})",
+                        SLOTS[probe]
+                    );
+                } else {
+                    assert_eq!(
+                        baseline, swapped,
+                        "{text:?} must ignore the {} slot (pad {pad:?})",
+                        SLOTS[probe]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `w:hint="eastAsia"` moves ambiguous high-ANSI characters to the East Asian
+/// slot; ASCII and complex-script characters stay where they are.
+#[test]
+fn east_asia_hint_moves_only_ambiguous_characters() {
+    let mut store = FontStore::new();
+    store.register(FIXTURE.to_vec()).expect("base registers");
+    store.register(CALADEA.to_vec()).expect("alt registers");
+
+    let measure_hinted = |text: &str, hint: &str| -> String {
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [{
+                "kind": "text", "text": text,
+                "fontSlots": { "ascii": "base", "hAnsi": "base", "eastAsia": "alt",
+                               "cs": "base", "hint": hint }
+            }] },
+            "maxWidth": 500.0,
+            "fontChains": { "base|0|0": [0], "alt|0|0": [1] },
+            "defaults": { "fontSize": 12.0, "fontFamily": "base" }
+        });
+        measure_paragraph_json(&store, &input.to_string()).expect("measures")
+    };
+
+    assert_ne!(
+        measure_hinted("é", "default"),
+        measure_hinted("é", "eastAsia"),
+        "an ambiguous high-ANSI character follows the hint"
+    );
+    assert_eq!(
+        measure_hinted("A", "default"),
+        measure_hinted("A", "eastAsia"),
+        "ASCII stays in the ASCII slot"
+    );
+    assert_eq!(
+        measure_hinted("א", "default"),
+        measure_hinted("א", "eastAsia"),
+        "complex script stays in the CS slot"
+    );
+}
+
+/// A chain longer than a run keeps resolved is rebuilt per character; it must
+/// still measure exactly as the short chain it resolves to.
+#[test]
+fn an_oversized_fallback_chain_measures_like_its_head() {
+    let mut store = FontStore::new();
+    store.register(FIXTURE.to_vec()).expect("base registers");
+    store.register(CALADEA.to_vec()).expect("alt registers");
+
+    let measure_chain = |ids: Vec<usize>| -> String {
+        let input = json!({
+            "block": { "kind": "paragraph", "runs": [
+                { "kind": "text", "text": "Aé日א mixed slots twice Aé日א", "fontFamily": "fam",
+                  "fontSlots": { "ascii": "fam", "hAnsi": "fam", "eastAsia": "fam", "cs": "fam" } }
+            ] },
+            "maxWidth": 500.0,
+            "fontChains": { "fam|0|0": ids },
+            "defaults": { "fontSize": 12.0, "fontFamily": "fam" }
+        });
+        measure_paragraph_json(&store, &input.to_string()).expect("measures")
+    };
+
+    let short = measure_chain(vec![0, 1]);
+    for len in [65usize, 200, 1000] {
+        let mut ids = vec![0, 1];
+        ids.resize(len, 1);
+        assert_eq!(short, measure_chain(ids), "chain of {len} ids");
+    }
+}

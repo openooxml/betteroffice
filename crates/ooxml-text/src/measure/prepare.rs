@@ -40,6 +40,11 @@ use crate::word_metrics::{kern_enabled, kern_features};
 use super::input::{MeasureInput, RunIn, validate_pt_size};
 use super::{MAX_RUN_TEXT_BYTES, MeasureError, pt_to_px};
 
+/// Longest fallback chain a run keeps resolved per slot. Chains past it are
+/// rebuilt per character instead, so keeping them can never cost more memory
+/// than resolving them did. Not a limit on input: nothing is refused.
+const MAX_KEPT_CHAIN_IDS: usize = 64;
+
 /// One indivisible shaped cluster of a run. A cluster may cover several
 /// source characters (ligature or combining sequence), so every downstream
 /// wrap/hit boundary is cluster-safe by construction.
@@ -620,6 +625,18 @@ fn prepare_text_run(
         Cs,
     }
 
+    impl FontSlot {
+        /// Index into a run's per-slot resolved chains.
+        fn index(self) -> usize {
+            match self {
+                FontSlot::Ascii => 0,
+                FontSlot::HAnsi => 1,
+                FontSlot::EastAsia => 2,
+                FontSlot::Cs => 3,
+            }
+        }
+    }
+
     fn is_complex(ch: char) -> bool {
         matches!(ch as u32,
             0x0590..=0x08ff | 0x0900..=0x0dff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff)
@@ -694,6 +711,13 @@ fn prepare_text_run(
     let mut plan: Vec<PlanChar> = Vec::new();
     let mut utf16_offset: u32 = 0;
     let mut previous_slot = FontSlot::HAnsi;
+    // Family and style are fixed per slot within a run, so each of the four
+    // resolves at most once instead of once per character. Keeping a chain
+    // trades memory for the next character's lookup, so a chain too large for
+    // that trade is rebuilt per character into `oversized` instead, one at a
+    // time — never more resident than resolving it per character already was.
+    let mut slot_chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
+    let mut oversized: Vec<FontId> = Vec::new();
     for (char_index, ch) in text.chars().enumerate() {
         let slot = if run.complex_script || is_complex(ch) {
             FontSlot::Cs
@@ -741,11 +765,23 @@ fn prepare_text_run(
             default_size_pt
         };
         let (font_size_pt, baseline_shift_px) = script_metrics(base_size_pt, run);
-        let family = family_for_slot(run, slot, &input.defaults.font_family);
-        let chain = input.chain_for(family, bold, italic)?;
-        validate_chain(store, &chain)?;
+        let index = slot.index();
+        if slot_chains[index].is_none() {
+            let family = family_for_slot(run, slot, &input.defaults.font_family);
+            // Release the previous rebuilt chain before allocating the next, so
+            // a run never holds two of them at once.
+            oversized = Vec::new();
+            let resolved = input.chain_for(family, bold, italic)?;
+            validate_chain(store, &resolved)?;
+            if resolved.len() <= MAX_KEPT_CHAIN_IDS {
+                slot_chains[index] = Some(resolved);
+            } else {
+                oversized = resolved;
+            }
+        }
+        let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
         let first = shaped[0];
-        let Some(mut font) = resolve_with_fallback(store, &chain, first) else {
+        let Some(mut font) = resolve_with_fallback(store, chain, first) else {
             return Err(MeasureError::Unsupported("empty font chain".to_string()));
         };
         let mut features = run.kerning_min_pt.map_or_else(Vec::new, |threshold| {
@@ -758,7 +794,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve_with_fallback(store, &chain, ch)
+            && let Some(original_font) = resolve_with_fallback(store, chain, ch)
             && supports_smcp(
                 store,
                 original_font,
