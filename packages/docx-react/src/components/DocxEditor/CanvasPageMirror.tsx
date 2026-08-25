@@ -10,29 +10,27 @@
  * Focus never lands here: the hidden input remains the editing surface.
  */
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { useTranslation } from '../../i18n';
+import { useCoalescedSubtreeMount } from './hooks/useCoalescedSubtreeMount';
 
 export function CanvasPageMirror({ page, zoom = 1 }: { page: DisplayPage; zoom?: number }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
 
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const mirror = buildMirrorPage(page, {
-      labels: {
-        page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-        header: t('a11y.headerLabel'),
-        footer: t('a11y.footerLabel'),
-      },
-    });
-    // Keep the previous mirror connected until this replacement is ready.
-    // Clearing in effect cleanup creates a detached-DOM window on every page
-    // update; unmounting already removes the host and its complete subtree.
-    host.replaceChildren(mirror);
-  }, [page, t]);
+  useCoalescedSubtreeMount(
+    hostRef,
+    () =>
+      buildMirrorPage(page, {
+        labels: {
+          page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+          header: t('a11y.headerLabel'),
+          footer: t('a11y.footerLabel'),
+        },
+      }),
+    [page, t]
+  );
 
   return (
     <div

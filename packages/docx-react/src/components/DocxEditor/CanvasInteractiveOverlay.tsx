@@ -15,29 +15,27 @@
  * trigger that re-rasters the canvas.
  */
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { buildInteractiveOverlayPage, type DisplayPage } from '@betteroffice/docx/layout/render';
 import { useTranslation } from '../../i18n';
+import { useCoalescedSubtreeMount } from './hooks/useCoalescedSubtreeMount';
 
 export function CanvasInteractiveOverlay({ page, zoom = 1 }: { page: DisplayPage; zoom?: number }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const { t } = useTranslation();
 
-  useEffect(() => {
-    const host = hostRef.current;
-    if (!host) return;
-    const overlay = buildInteractiveOverlayPage(page, {
-      labels: {
-        control: t('a11y.contentControl'),
-        addRepeatingItem: t('a11y.addRepeatingItem'),
-        removeRepeatingItem: t('a11y.removeRepeatingItem'),
-      },
-    });
-    host.replaceChildren(overlay);
-    return () => {
-      host.replaceChildren();
-    };
-  }, [page, t]);
+  useCoalescedSubtreeMount(
+    hostRef,
+    () =>
+      buildInteractiveOverlayPage(page, {
+        labels: {
+          control: t('a11y.contentControl'),
+          addRepeatingItem: t('a11y.addRepeatingItem'),
+          removeRepeatingItem: t('a11y.removeRepeatingItem'),
+        },
+      }),
+    [page, t]
+  );
 
   return (
     <div
