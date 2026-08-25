@@ -350,7 +350,7 @@ fn repeated_codes_render_identically_through_cache() {
     for code in codes {
         let expected = fv(1234.5678, code);
         for i in 0..(FORMAT_CACHE_CAP * 2) {
-            let _ = fv(i as f64, "0.000");
+            let _ = fv(i as f64, &format!("\"churn{i}\"0.000"));
             assert_eq!(fv(1234.5678, code), expected);
         }
     }
@@ -384,12 +384,13 @@ fn parse_code(code: &str) -> Arc<[Section]> {
 }
 
 #[test]
-fn distinct_insertions_track_min_n_cap() {
+fn distinct_insertions_never_exceed_two_generations() {
     let mut cache = FormatCache::default();
-    for i in 0..=FORMAT_CACHE_CAP + 16 {
+    for i in 0..=FORMAT_CACHE_CAP * 4 {
         let key = format!("\"s{i}\"0");
         cache.insert(&key, parse_code(&key));
-        assert_eq!(cache.entries.len(), (i + 1).min(FORMAT_CACHE_CAP));
+        assert!(cache.hot.len() <= FORMAT_CACHE_CAP);
+        assert!(cache.hot.len() + cache.cold.len() <= FORMAT_CACHE_CAP * 2);
     }
 }
 
@@ -406,7 +407,7 @@ fn repeat_lookup_returns_the_same_arc() {
 }
 
 #[test]
-fn eviction_victim_is_oldest_stamp_and_size_stays_at_cap() {
+fn a_full_generation_ages_out_but_still_answers_once() {
     let mut cache = FormatCache::default();
     let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
         .map(|i| format!("\"e{i}\"0"))
@@ -414,37 +415,106 @@ fn eviction_victim_is_oldest_stamp_and_size_stays_at_cap() {
     for key in &keys {
         cache.insert(key, parse_code(key));
     }
-    assert_eq!(cache.entries.len(), FORMAT_CACHE_CAP);
-    for key in keys.iter().skip(1) {
-        let _ = cache.get(key);
-    }
+    assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+    assert!(cache.cold.is_empty());
+
     let newcomer = "\"fresh\"0";
     cache.insert(newcomer, parse_code(newcomer));
-    assert_eq!(cache.entries.len(), FORMAT_CACHE_CAP);
-    assert!(!cache.entries.contains_key(&keys[0]));
-    assert!(cache.entries.contains_key(newcomer));
-    for key in keys.iter().skip(1) {
-        assert!(cache.entries.contains_key(key));
-    }
+    assert_eq!(cache.hot.len(), 1);
+    assert_eq!(cache.cold.len(), FORMAT_CACHE_CAP);
+    assert!(cache.hot.contains_key(newcomer));
+
+    assert!(cache.get(&keys[0]).is_some());
+    assert!(cache.hot.contains_key(&keys[0]));
 }
 
 #[test]
 fn memoized_path_reuses_one_parse_across_lookups() {
-    let cache = Mutex::new(FormatCache::default());
-    let a = parsed_sections_in(&cache, "[Red]#,##0.00;(#,##0.00)");
-    let b = parsed_sections_in(&cache, "[Red]#,##0.00;(#,##0.00)");
+    let mut cache = FormatCache::default();
+    let a = parsed_sections_in(&mut cache, "[Red]#,##0.00;(#,##0.00)");
+    let b = parsed_sections_in(&mut cache, "[Red]#,##0.00;(#,##0.00)");
     assert!(Arc::ptr_eq(&a, &b));
-    assert_eq!(cache.lock().unwrap().entries.len(), 1);
+    assert_eq!(cache.hot.len(), 1);
 }
 
 #[test]
 fn oversize_codes_render_correctly_but_are_never_cached() {
     let literal = "x".repeat(MAX_CACHED_CODE_LEN + 1);
     let code = format!("\"{literal}\"0.00");
-    let cache = Mutex::new(FormatCache::default());
-    let a = parsed_sections_in(&cache, &code);
-    let b = parsed_sections_in(&cache, &code);
+    let mut cache = FormatCache::default();
+    let a = parsed_sections_in(&mut cache, &code);
+    let b = parsed_sections_in(&mut cache, &code);
     assert!(!Arc::ptr_eq(&a, &b));
-    assert!(cache.lock().unwrap().entries.is_empty());
+    assert!(cache.hot.is_empty() && cache.cold.is_empty());
     assert_eq!(fv(7.625, &code), format!("{literal}7.63"));
+}
+
+/// the cache must return what a fresh parse would, however hard it is churned.
+#[test]
+fn a_cached_parse_matches_a_fresh_parse_under_churn() {
+    let corpus = [
+        "#,##0.00",
+        "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+        "m/d/yyyy h:mm",
+        "[$-409]dddd, mmmm d, yyyy",
+        "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)",
+        "0.00E+00",
+        "[>100]\"big\";[<0][Red]0.00;0.0",
+        "# ??/??",
+        "0\\ \\k\\g",
+        "@",
+        // pairs that diverge only late, so a partial key would alias them
+        "#,##0.00;[Red](#,##0.00)",
+        "#,##0.00;[Blue](#,##0.00)",
+        "0.000000000;;\"zero\";@",
+        "0.000000000;;\"nil\";@",
+    ];
+    let mut cache = FormatCache::default();
+    for round in 0..4 {
+        for (i, code) in corpus.iter().enumerate() {
+            for j in 0..FORMAT_CACHE_CAP / 2 {
+                let junk = format!("\"j{round}_{i}_{j}\"0");
+                let _ = parsed_sections_in(&mut cache, &junk);
+            }
+            assert_eq!(
+                *parsed_sections_in(&mut cache, code),
+                *tokenize_all(code),
+                "{code}"
+            );
+        }
+    }
+}
+
+/// the parse is shared but the date system is not: it is applied after lookup.
+#[test]
+fn one_cached_code_still_honours_both_date_systems() {
+    let code = "m/d/yyyy h:mm";
+    let serial = 45_000.5;
+    let v1900 = fv(serial, code);
+    let v1904 = fv04(serial, code);
+    assert_ne!(v1900, v1904);
+    for _ in 0..8 {
+        assert_eq!(fv04(serial, code), v1904);
+        assert_eq!(fv(serial, code), v1900);
+    }
+}
+
+#[test]
+fn concurrent_callers_agree_with_a_single_threaded_render() {
+    let codes: Vec<String> = (0..FORMAT_CACHE_CAP + 64)
+        .map(|i| format!("\"c{i}\"#,##0.00;[Red](#,##0.00)"))
+        .collect();
+    let expected: Vec<String> = codes.iter().map(|c| fv(-1234.5678, c)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            let (codes, expected) = (&codes, &expected);
+            s.spawn(move || {
+                for _ in 0..4 {
+                    for (code, want) in codes.iter().zip(expected) {
+                        assert_eq!(&fv(-1234.5678, code), want);
+                    }
+                }
+            });
+        }
+    });
 }

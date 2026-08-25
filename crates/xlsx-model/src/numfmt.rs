@@ -1,8 +1,9 @@
 //! number-format code interpreter (ecma-376 §18.8.30–31): value + format code
 //! -> display string and optional bracket color. unsupported degrades to general.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +123,7 @@ impl Condition {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Section {
     toks: Vec<Tok>,
     color: Option<String>,
@@ -150,67 +151,59 @@ impl Section {
     }
 }
 
-/// process-wide memoized parses; capped so adversarial code variety can't grow it.
+/// memoized parses per generation; capped so adversarial code variety can't grow the cache.
 const FORMAT_CACHE_CAP: usize = 256;
 
 /// codes longer than this parse fresh every call and are never retained; excel
 /// itself rejects format codes beyond ~255 chars.
 const MAX_CACHED_CODE_LEN: usize = 256;
 
+/// two generations, so making room costs one swap instead of a scan for a
+/// victim: inserts fill `hot`, a full `hot` ages into `cold`, and the next
+/// age-out drops it. holds at most `2 * FORMAT_CACHE_CAP` parses.
 #[derive(Default)]
 struct FormatCache {
-    entries: HashMap<String, (u64, Arc<[Section]>)>,
-    clock: u64,
+    hot: HashMap<String, Arc<[Section]>>,
+    cold: HashMap<String, Arc<[Section]>>,
 }
 
 impl FormatCache {
     fn get(&mut self, code: &str) -> Option<Arc<[Section]>> {
-        let entry = self.entries.get_mut(code)?;
-        self.clock += 1;
-        entry.0 = self.clock;
-        Some(entry.1.clone())
+        if let Some(hit) = self.hot.get(code) {
+            return Some(hit.clone());
+        }
+        let promoted = self.cold.get(code)?.clone();
+        self.insert(code, promoted.clone());
+        Some(promoted)
     }
 
     fn insert(&mut self, code: &str, parsed: Arc<[Section]>) {
-        self.clock += 1;
-        if self.entries.len() >= FORMAT_CACHE_CAP {
-            let oldest = self
-                .entries
-                .iter()
-                .min_by_key(|(_, (used, _))| *used)
-                .map(|(k, _)| k.clone());
-            if let Some(oldest) = oldest {
-                self.entries.remove(&oldest);
-            }
+        if self.hot.len() >= FORMAT_CACHE_CAP {
+            self.cold = std::mem::take(&mut self.hot);
         }
-        self.entries.insert(code.to_string(), (self.clock, parsed));
+        self.hot.insert(code.to_string(), parsed);
     }
+}
+
+thread_local! {
+    /// per thread, so concurrent renders never serialize on a shared lock.
+    static FORMAT_CACHE: RefCell<FormatCache> = RefCell::new(FormatCache::default());
 }
 
 /// memoized `split_sections` + `tokenize`, keyed by the exact code string.
 fn parsed_sections(code: &str) -> Arc<[Section]> {
-    static CACHE: OnceLock<Mutex<FormatCache>> = OnceLock::new();
-    parsed_sections_in(
-        CACHE.get_or_init(|| Mutex::new(FormatCache::default())),
-        code,
-    )
+    FORMAT_CACHE.with(|cache| parsed_sections_in(&mut cache.borrow_mut(), code))
 }
 
-/// the lock guards map operations only: on a miss it is released while the
-/// code is tokenized, then reacquired to insert (rechecking for a racing hit).
-fn parsed_sections_in(cache: &Mutex<FormatCache>, code: &str) -> Arc<[Section]> {
+fn parsed_sections_in(cache: &mut FormatCache, code: &str) -> Arc<[Section]> {
     if code.len() > MAX_CACHED_CODE_LEN {
         return tokenize_all(code);
     }
-    if let Some(hit) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(code) {
+    if let Some(hit) = cache.get(code) {
         return hit;
     }
     let parsed = tokenize_all(code);
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(raced) = guard.get(code) {
-        return raced;
-    }
-    guard.insert(code, parsed.clone());
+    cache.insert(code, parsed.clone());
     parsed
 }
 
