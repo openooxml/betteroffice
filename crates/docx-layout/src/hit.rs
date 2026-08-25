@@ -1132,6 +1132,7 @@ fn collect_range_rects(
     to: i64,
     out: &mut Vec<RangeRect>,
 ) {
+    let merge_from = out.len();
     for h in text_hits(prims) {
         // blank-line marker: zero-length span selects as a thin sliver
         if h.doc_start == h.doc_end {
@@ -1178,6 +1179,36 @@ fn collect_range_rects(
             width: img.w.as_f64().unwrap_or(0.0),
             height: img.h.as_f64().unwrap_or(0.0),
         });
+    }
+    merge_line_rects(out, merge_from);
+}
+
+const LINE_MERGE_BAND_EPSILON: f64 = 1.0;
+const LINE_MERGE_GAP: f64 = 2.0;
+
+/// Coalesce this page's freshly collected rects into per-line bands: rects on
+/// the same line (equal band within 1px) that touch or nearly touch
+/// horizontally union into one. Selection highlights are per line visually, so
+/// per-run (or per-cluster) granularity only multiplies the rect count — a
+/// full-document selection must stay O(lines), not O(runs).
+fn merge_line_rects(out: &mut Vec<RangeRect>, from: usize) {
+    if out.len() - from < 2 {
+        return;
+    }
+    let mut tail = out.split_off(from);
+    tail.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+    for rect in tail {
+        if out.len() > from
+            && let Some(previous) = out.last_mut()
+            && (rect.y - previous.y).abs() <= LINE_MERGE_BAND_EPSILON
+            && (rect.height - previous.height).abs() <= LINE_MERGE_BAND_EPSILON
+            && rect.x <= previous.x + previous.width + LINE_MERGE_GAP
+        {
+            let right = (previous.x + previous.width).max(rect.x + rect.width);
+            previous.width = right - previous.x;
+            continue;
+        }
+        out.push(rect);
     }
 }
 
@@ -1602,6 +1633,37 @@ mod tests {
     /// Selection geometry follows the same scoping: a range in a note's story
     /// highlights that note's glyphs, and the identical body range highlights
     /// the body's — the two documents never share rectangles.
+    #[test]
+    fn range_rects_merge_same_line_runs_into_one_band() {
+        // three adjacent same-line runs (a formatted or per-cluster line) and
+        // one run on the next line: selecting across them yields one rect per
+        // LINE, never one per run
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                run(100.0, 200.0, 40.0, 1),
+                run(140.0, 200.0, 40.0, 6),
+                run(180.0, 200.0, 40.0, 11),
+                run(100.0, 230.0, 40.0, 16),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 21);
+        assert_eq!(rects.len(), 2, "one merged band per line: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!(
+            (rects[0].width - 120.0).abs() < 0.01,
+            "merged width {}",
+            rects[0].width
+        );
+        assert!((rects[1].width - 40.0).abs() < 0.01);
+
+        // a selection whose runs do not touch horizontally stays split
+        let sparse = range_rects(&dl, 1, 3);
+        assert_eq!(sparse.len(), 1);
+        assert!(sparse[0].width < 40.0);
+    }
+
     #[test]
     fn range_rects_in_a_note_cover_that_note_only() {
         let dl = note_fixture();
