@@ -90,7 +90,7 @@ fn emf_stub() -> Vec<u8> {
     out.extend_from_slice(&0x00010000u32.to_le_bytes()); // version 1.0
     out.extend_from_slice(&108u32.to_le_bytes()); // nBytes
     out.extend_from_slice(&2u32.to_le_bytes()); // nRecords
-    out.extend_from_slice(&0u16.to_le_bytes()); // nHandles
+    out.extend_from_slice(&1u16.to_le_bytes()); // nHandles, GDI reserves index 0
     out.extend_from_slice(&0u16.to_le_bytes()); // reserved
     out.extend_from_slice(&0u32.to_le_bytes()); // nDescription
     out.extend_from_slice(&0u32.to_le_bytes()); // offDescription
@@ -131,9 +131,8 @@ fn wmf_stub() -> Vec<u8> {
     out.extend_from_slice(&0u16.to_le_bytes()); // mtNoObjects
     out.extend_from_slice(&3u32.to_le_bytes()); // mtMaxRecord
     out.extend_from_slice(&0u16.to_le_bytes()); // mtNoParameters
-    out.extend_from_slice(&3u16.to_le_bytes()); // META_EOF size
-    out.extend_from_slice(&0u16.to_le_bytes()); // META_EOF function
-    out.extend_from_slice(&0u16.to_le_bytes()); // META_EOF param
+    out.extend_from_slice(&3u32.to_le_bytes()); // META_EOF RecordSize words
+    out.extend_from_slice(&0u16.to_le_bytes()); // META_EOF RecordFunction
     debug_assert_eq!(out.len(), 46);
     out
 }

@@ -439,12 +439,7 @@ fn replaces_wmf_with_valid_stub() {
     assert_eq!(report.media_parts, 1);
 
     assert_eq!(&output[..4], &0x9AC6_CDD7u32.to_le_bytes());
-    let checksum = output[..20]
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .fold(0u16, |acc, chunk| acc ^ u16::from_le_bytes(*chunk));
-    assert_eq!(le_u16(&output, 20), checksum);
+    assert_eq!(le_u16(&output, 20), 0x52B1);
     assert_eq!(le_u16(&output, 10), 2000);
     assert_eq!(le_u16(&output, 12), 2000);
     assert_eq!(le_u16(&output, 14), 1440);
@@ -458,8 +453,7 @@ fn replaces_wmf_with_valid_stub() {
     assert_eq!(le_u32(content, 12), 3);
 
     let eof = &content[18..];
-    assert_eq!(le_u16(eof, 0), 3);
-    assert_eq!(le_u16(eof, 2), 0);
+    assert_eq!(le_u32(eof, 0), 3);
     assert_eq!(le_u16(eof, 4), 0);
     assert_eq!(eof.len(), 6);
 }
@@ -476,6 +470,7 @@ fn replaces_emf_with_valid_stub() {
     assert_eq!(le_u32(&output, 44), 0x0001_0000);
     assert_eq!(le_u32(&output, 48) as usize, output.len());
     assert_eq!(le_u32(&output, 52), 2);
+    assert_eq!(le_u16(&output, 56), 1);
 
     let eof = &output[88..];
     assert_eq!(eof.len(), 20);
@@ -494,12 +489,35 @@ fn le_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+/// PNG whose IHDR declares `width` x `height` with a matching chunk CRC, so a
+/// dimension-preserving encoder really would allocate that many pixels.
+fn png_declaring(width: u32, height: u32) -> Vec<u8> {
+    let mut out = placeholder_png();
+    out[16..20].copy_from_slice(&width.to_be_bytes());
+    out[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = png_crc(&out[12..29]);
+    out[29..33].copy_from_slice(&crc.to_be_bytes());
+    out
+}
+
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xEDB8_8320
+            };
+        }
+    }
+    !crc
+}
+
 #[test]
 fn oversized_declared_dimensions_emit_fixed_placeholder() {
-    let mut hostile = placeholder_png();
-    hostile.truncate(40);
-    hostile[16..20].copy_from_slice(&8000u32.to_be_bytes());
-    hostile[20..24].copy_from_slice(&8000u32.to_be_bytes());
+    let hostile = png_declaring(8000, 8000);
     let mut report = RedactionReport::default();
     let output = media::replace_media("word/media/huge.png", &hostile, &mut report).unwrap();
     assert_eq!(
@@ -509,18 +527,12 @@ fn oversized_declared_dimensions_emit_fixed_placeholder() {
     assert!(output.len() < 1024);
 }
 
-#[test]
-fn hostile_package_media_budget_is_bounded() {
-    let mut hostile = placeholder_png();
-    hostile.truncate(40);
-    hostile[16..20].copy_from_slice(&8000u32.to_be_bytes());
-    hostile[20..24].copy_from_slice(&8000u32.to_be_bytes());
-
+fn media_package(media: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut parts: Vec<(String, Vec<u8>)> = vec![
         (
             "[Content_Types].xml".to_owned(),
             xml(
-                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="emf" ContentType="image/x-emf"/></Types>"#,
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="gif" ContentType="image/gif"/><Default Extension="bmp" ContentType="image/bmp"/><Default Extension="tiff" ContentType="image/tiff"/><Default Extension="svg" ContentType="image/svg+xml"/><Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="emf" ContentType="image/x-emf"/></Types>"#,
             ),
         ),
         (
@@ -535,20 +547,24 @@ fn hostile_package_media_budget_is_bounded() {
                 r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#,
             ),
         ),
+    ];
+    parts.extend(media.iter().cloned());
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn hostile_package_media_budget_is_bounded() {
+    let hostile = png_declaring(8000, 8000);
+    let mut media: Vec<(String, Vec<u8>)> = vec![
         ("docProps/thumbnail.wmf".to_owned(), b"metafile".to_vec()),
         ("ppt/media/pic.emf".to_owned(), b"metafile".to_vec()),
     ];
     for index in 0..32 {
-        parts.push((format!("word/media/hostile{index}.png"), hostile.clone()));
+        media.push((format!("word/media/hostile{index}.png"), hostile.clone()));
     }
-    let packaged: Vec<(&str, Vec<u8>)> = parts
-        .iter()
-        .map(|(path, bytes)| (path.as_str(), bytes.clone()))
-        .collect();
-    let source = package(packaged);
 
-    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
-    assert_eq!(report.media_parts, 34);
+    let (output, report) = redact_with_report(&media_package(&media), Format::Auto).unwrap();
+    assert_eq!(report.media_parts, media.len());
     let after = ooxml_opc::unzip_parts(&output).unwrap();
     let mut media_total = 0;
     for (path, bytes) in &after {
@@ -564,4 +580,121 @@ fn hostile_package_media_budget_is_bounded() {
         media_total += bytes.len();
     }
     assert!(media_total < 256 * 1024);
+}
+
+const MEDIA_MARKER: &str = "MEDIA_SOURCE_MARKER";
+
+/// Every replaceable media shape. `mask` is XORed over each wrapped payload and
+/// its marker run, so two masks share no wrapped byte; mask 0 leaves the marker
+/// and the source images verbatim. `mask` also picks the sniffable PNGs' width
+/// and pixels, and those two encodings still share their signature, framing,
+/// IEND tail and some IDAT bytes.
+fn marked_media(mask: u8) -> Vec<(String, Vec<u8>)> {
+    let wrap = |bytes: &[u8]| {
+        let mut out = vec![mask; 8];
+        out.extend(MEDIA_MARKER.bytes().map(|byte| byte ^ mask));
+        out.extend(bytes.iter().map(|byte| byte ^ mask));
+        out.extend(MEDIA_MARKER.bytes().map(|byte| byte ^ mask));
+        out.extend_from_slice(&[mask; 8]);
+        out
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(ImageBuffer::from_pixel(
+        3 + u32::from(mask % 2),
+        2,
+        Rgb([mask, mask, mask]),
+    ))
+    .write_to(&mut encoded, ImageFormat::Png)
+    .unwrap();
+    let sniffable = encoded.into_inner();
+    vec![
+        ("word/media/image1.png".to_owned(), wrap(&placeholder_png())),
+        (
+            "word/media/photo.jpg".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Jpeg)),
+        ),
+        (
+            "word/media/anim.gif".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Gif)),
+        ),
+        (
+            "word/media/raster.bmp".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Bmp)),
+        ),
+        (
+            "word/media/scan.tiff".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Tiff)),
+        ),
+        (
+            "word/media/vector.svg".to_owned(),
+            wrap(
+                format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg"><desc>{MEDIA_MARKER}</desc></svg>"#
+                )
+                .as_bytes(),
+            ),
+        ),
+        (
+            "word/media/legacy.wmf".to_owned(),
+            wrap(&[0xd7, 0xcd, 0xc6, 0x9a]),
+        ),
+        (
+            "word/media/legacy.emf".to_owned(),
+            wrap(&[0x01, 0x00, 0x00, 0x00]),
+        ),
+        (
+            "docProps/thumbnail.wmf".to_owned(),
+            wrap(&[0xd7, 0xcd, 0xc6, 0x9a]),
+        ),
+        (
+            "word/media/MixedCase.PNG".to_owned(),
+            wrap(&placeholder_png()),
+        ),
+        ("word/media/sniffed".to_owned(), sniffable.clone()),
+        ("docProps/thumbnail".to_owned(), sniffable),
+        (
+            "word/media/mislabelled.png".to_owned(),
+            wrap(&placeholder_image(ImageFormat::Jpeg)),
+        ),
+        (
+            "word/media/mislabelled.emf".to_owned(),
+            wrap(&placeholder_png()),
+        ),
+        (
+            "word/media/oversized.png".to_owned(),
+            wrap(&png_declaring(8000, 8000)),
+        ),
+        ("word/media/empty.png".to_owned(), Vec::new()),
+        ("word/media/empty.wmf".to_owned(), Vec::new()),
+    ]
+}
+
+#[test]
+fn media_replacement_never_copies_source_bytes() {
+    let first = marked_media(0);
+    let second = marked_media(0x5f);
+    for ((path, wrapped), (_, other)) in first.iter().zip(&second) {
+        if matches!(path.as_str(), "word/media/sniffed" | "docProps/thumbnail") {
+            continue;
+        }
+        assert!(
+            wrapped.iter().zip(other).all(|(one, two)| one != two),
+            "fixtures share a byte in {path}, so a copy of it would go unnoticed"
+        );
+    }
+
+    let (output, report) = redact_with_report(&media_package(&first), Format::Auto).unwrap();
+    assert_eq!(report.media_parts, first.len());
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    for (path, bytes) in &parts {
+        assert!(
+            !bytes
+                .windows(MEDIA_MARKER.len())
+                .any(|window| window == MEDIA_MARKER.as_bytes()),
+            "source bytes survived in {path}"
+        );
+    }
+
+    let (other, _) = redact_with_report(&media_package(&second), Format::Auto).unwrap();
+    assert_eq!(parts, ooxml_opc::unzip_parts(&other).unwrap());
 }
