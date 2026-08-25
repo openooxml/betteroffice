@@ -1,24 +1,14 @@
-use std::collections::BTreeSet;
-
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::{Format, RedactError, RedactionReport};
 
-/// The part being rewritten, plus the package's part names so a relationship
-/// target can be checked against what the package actually contains.
-pub(crate) struct Part<'a> {
-    pub path: &'a str,
-    pub names: &'a BTreeSet<String>,
-}
-
 pub(crate) fn redact_xml(
     format: Format,
-    part: &Part<'_>,
+    path: &str,
     bytes: &[u8],
     report: &mut RedactionReport,
 ) -> Result<Vec<u8>, RedactError> {
-    let path = part.path;
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::with_capacity(bytes.len()));
@@ -33,7 +23,7 @@ pub(crate) fn redact_xml(
             Event::Start(start) => {
                 let local = local_name(start.name().local_name().as_ref());
                 let rewritten =
-                    rewrite_start(format, part, &reader, start, &local, report, &mut cell_type)?;
+                    rewrite_start(format, path, &reader, start, &local, report, &mut cell_type)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -42,7 +32,7 @@ pub(crate) fn redact_xml(
             Event::Empty(start) => {
                 let local = local_name(start.name().local_name().as_ref());
                 let rewritten =
-                    rewrite_start(format, part, &reader, start, &local, report, &mut cell_type)?;
+                    rewrite_start(format, path, &reader, start, &local, report, &mut cell_type)?;
                 writer
                     .write_event(Event::Empty(rewritten))
                     .map_err(|error| xml_error(path, error))?;
@@ -120,14 +110,13 @@ pub(crate) fn redact_xml(
 
 fn rewrite_start(
     format: Format,
-    part: &Part<'_>,
+    path: &str,
     reader: &Reader<&[u8]>,
     start: BytesStart<'_>,
     element: &str,
     report: &mut RedactionReport,
     cell_type: &mut Option<String>,
 ) -> Result<BytesStart<'static>, RedactError> {
-    let path = part.path;
     let mut attributes = Vec::new();
     for attribute in start.attributes() {
         let attribute = attribute.map_err(|error| xml_error(path, error))?;
@@ -139,7 +128,7 @@ fn rewrite_start(
         attributes.push((key, value));
     }
 
-    let (relationship, external) = relationship_mode(part, element, &attributes);
+    let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
         *cell_type = None;
@@ -385,13 +374,9 @@ fn attribute_local(name: &str) -> &str {
 
 /// Whether the element is a package relationship, and whether it points outside
 /// the package. Only unqualified OPC attributes take part in the decision.
-fn relationship_mode(
-    part: &Part<'_>,
-    element: &str,
-    attributes: &[(String, String)],
-) -> (bool, bool) {
+fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
     if !element.eq_ignore_ascii_case("Relationship")
-        || !part.path.to_ascii_lowercase().ends_with(".rels")
+        || !path.to_ascii_lowercase().ends_with(".rels")
     {
         return (false, false);
     }
@@ -401,7 +386,7 @@ fn relationship_mode(
         }
         let local = attribute_local(key);
         local.eq_ignore_ascii_case("TargetMode") && value.trim().eq_ignore_ascii_case("External")
-            || local.eq_ignore_ascii_case("Target") && external_target(part, value)
+            || local.eq_ignore_ascii_case("Target") && external_target(value)
     });
     (true, external)
 }
@@ -411,14 +396,13 @@ fn is_unqualified(key: &str) -> bool {
 }
 
 /// True for relationship targets pointing outside the package.
-fn external_target(part: &Part<'_>, target: &str) -> bool {
+fn external_target(target: &str) -> bool {
     let lower = target.trim().to_ascii_lowercase();
     lower.starts_with("//")
         || lower.starts_with(r"\\")
         || lower
             .split_once(':')
             .is_some_and(|(scheme, _)| is_uri_scheme(scheme))
-        || escapes_package(part, &lower)
 }
 
 fn is_uri_scheme(scheme: &str) -> bool {
@@ -427,35 +411,6 @@ fn is_uri_scheme(scheme: &str) -> bool {
         return false;
     }
     chars.all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
-}
-
-/// True when a relative target climbs above the package root and the clamped
-/// path names no part, which is how a filesystem path appears in a defective
-/// relationship.
-fn escapes_package(part: &Part<'_>, target: &str) -> bool {
-    let target = target.split(['?', '#']).next().unwrap_or_default();
-    if target.starts_with('/') || target.starts_with('\\') {
-        return false;
-    }
-    let source = part.path.replace('\\', "/");
-    let base = source
-        .rsplit_once("/_rels/")
-        .map_or("", |(directory, _)| directory);
-    let normalized = target.replace('\\', "/");
-    let mut segments: Vec<&str> = base.split('/').filter(|part| !part.is_empty()).collect();
-    let mut climbed = false;
-    for segment in normalized.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." if segments.pop().is_none() => climbed = true,
-            ".." => {}
-            other => segments.push(other),
-        }
-    }
-    climbed
-        && !part
-            .names
-            .contains(&segments.join("/").to_ascii_lowercase())
 }
 
 fn xml_error(path: &str, error: impl fmt::Display) -> RedactError {

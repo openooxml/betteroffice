@@ -90,20 +90,12 @@ pub fn redact_with_report(
         format: detected,
         ..RedactionReport::default()
     };
-    let names = parts
-        .iter()
-        .map(|(path, _)| path.trim_start_matches('/').to_ascii_lowercase())
-        .collect();
     for (path, data) in &mut parts {
         let lower = path.to_ascii_lowercase();
         if media::is_replaceable_part(&lower) {
             *data = replace_media(path, data, &mut report)?;
         } else if is_xml_part(&lower) {
-            let part = xml::Part {
-                path,
-                names: &names,
-            };
-            *data = redact_xml(detected, &part, data, &mut report)?;
+            *data = redact_xml(detected, path, data, &mut report)?;
         } else if is_sensitive_binary(&lower) {
             data.clear();
             report.binary_parts += 1;
