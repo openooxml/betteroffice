@@ -449,40 +449,103 @@ fn oversize_codes_render_correctly_but_are_never_cached() {
     assert_eq!(fv(7.625, &code), format!("{literal}7.63"));
 }
 
-/// the cache must return what a fresh parse would, however hard it is churned.
+const CACHE_CORPUS: [&str; 14] = [
+    "#,##0.00",
+    "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+    "m/d/yyyy h:mm",
+    "[$-409]dddd, mmmm d, yyyy",
+    "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)",
+    "0.00E+00",
+    "[>100]\"big\";[<0][Red]0.00;0.0",
+    "# ??/??",
+    "0\\ \\k\\g",
+    "@",
+    // pairs that diverge only late, so a partial key would alias them
+    "#,##0.00;[Red](#,##0.00)",
+    "#,##0.00;[Blue](#,##0.00)",
+    "0.000000000;;\"zero\";@",
+    "0.000000000;;\"nil\";@",
+];
+
+/// every lookup below is a proven hit, and each must equal a fresh parse.
 #[test]
-fn a_cached_parse_matches_a_fresh_parse_under_churn() {
-    let corpus = [
-        "#,##0.00",
-        "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
-        "m/d/yyyy h:mm",
-        "[$-409]dddd, mmmm d, yyyy",
-        "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)",
-        "0.00E+00",
-        "[>100]\"big\";[<0][Red]0.00;0.0",
-        "# ??/??",
-        "0\\ \\k\\g",
-        "@",
-        // pairs that diverge only late, so a partial key would alias them
-        "#,##0.00;[Red](#,##0.00)",
-        "#,##0.00;[Blue](#,##0.00)",
-        "0.000000000;;\"zero\";@",
-        "0.000000000;;\"nil\";@",
-    ];
-    let mut cache = FormatCache::default();
-    for round in 0..4 {
-        for (i, code) in corpus.iter().enumerate() {
-            for j in 0..FORMAT_CACHE_CAP / 2 {
-                let junk = format!("\"j{round}_{i}_{j}\"0");
-                let _ = parsed_sections_in(&mut cache, &junk);
-            }
-            assert_eq!(
-                *parsed_sections_in(&mut cache, code),
-                *tokenize_all(code),
-                "{code}"
-            );
+fn a_cache_hit_returns_what_a_fresh_parse_would() {
+    for code in CACHE_CORPUS {
+        let mut cache = FormatCache::default();
+        let seeded = parsed_sections_in(&mut cache, code);
+        assert_eq!(*seeded, *tokenize_all(code), "{code}");
+
+        for j in 1..FORMAT_CACHE_CAP {
+            let _ = parsed_sections_in(&mut cache, &format!("\"j{j}\"0"));
         }
+        assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+        assert!(cache.hot.contains_key(code));
+        let hot_hit = parsed_sections_in(&mut cache, code);
+        assert!(Arc::ptr_eq(&seeded, &hot_hit), "{code}: not a hot hit");
+
+        let _ = parsed_sections_in(&mut cache, "\"flip\"0");
+        assert!(cache.cold.contains_key(code) && !cache.hot.contains_key(code));
+        let cold_hit = parsed_sections_in(&mut cache, code);
+        assert!(Arc::ptr_eq(&seeded, &cold_hit), "{code}: not a cold hit");
+        assert_eq!(*cold_hit, *tokenize_all(code), "{code}");
     }
+}
+
+#[test]
+fn a_cold_hit_promotes_even_when_hot_is_already_full() {
+    let code = "[Red]#,##0.00;(#,##0.00);\"-\";@";
+    let mut cache = FormatCache::default();
+    let seeded = parsed_sections_in(&mut cache, code);
+    for j in 1..FORMAT_CACHE_CAP {
+        let _ = parsed_sections_in(&mut cache, &format!("\"a{j}\"0"));
+    }
+    let _ = parsed_sections_in(&mut cache, "\"flip\"0");
+    assert!(cache.cold.contains_key(code));
+    for j in 1..FORMAT_CACHE_CAP {
+        let _ = parsed_sections_in(&mut cache, &format!("\"b{j}\"0"));
+    }
+    assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+
+    let promoted = parsed_sections_in(&mut cache, code);
+    assert!(Arc::ptr_eq(&seeded, &promoted));
+    assert!(cache.hot.contains_key(code));
+    assert_eq!(*promoted, *tokenize_all(code));
+}
+
+#[test]
+fn reinserting_a_present_key_at_capacity_loses_nothing() {
+    let mut cache = FormatCache::default();
+    let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
+        .map(|i| format!("\"r{i}\"0"))
+        .collect();
+    for key in &keys {
+        cache.insert(key, parse_code(key));
+    }
+    let repeat = &keys[FORMAT_CACHE_CAP / 2];
+    cache.insert(repeat, parse_code(repeat));
+    assert!(cache.hot.contains_key(repeat));
+    for key in &keys {
+        assert!(
+            cache.hot.contains_key(key) || cache.cold.contains_key(key),
+            "{key} was dropped"
+        );
+    }
+}
+
+/// only the first four sections are ever selected, so the parse stops there.
+#[test]
+fn sections_past_the_fourth_are_never_selected() {
+    assert_eq!(fv(1.0, "\"a\";\"b\";\"c\";\"d\";\"e\";\"f\""), "a");
+    assert_eq!(fv(-1.0, "\"a\";\"b\";\"c\";\"d\";\"e\""), "b");
+    assert_eq!(fv(0.0, "\"a\";\"b\";\"c\";\"d\";\"e\""), "c");
+    let text = CellValue::Text {
+        value: "x".to_string(),
+    };
+    assert_eq!(
+        format_value(&text, "\"a\";\"b\";\"c\";\"d\"@;\"e\"@", DateSystem::V1900).text,
+        "dx"
+    );
+    assert_eq!(tokenize_all("0;0;0;0;0;0;0").len(), USED_SECTIONS);
 }
 
 /// the parse is shared but the date system is not: it is applied after lookup.

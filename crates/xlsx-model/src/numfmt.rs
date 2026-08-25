@@ -152,11 +152,14 @@ impl Section {
 }
 
 /// memoized parses per generation; capped so adversarial code variety can't grow the cache.
-const FORMAT_CACHE_CAP: usize = 256;
+const FORMAT_CACHE_CAP: usize = 128;
 
 /// codes longer than this parse fresh every call and are never retained; excel
 /// itself rejects format codes beyond ~255 chars.
 const MAX_CACHED_CODE_LEN: usize = 256;
+
+/// positive, negative, zero, text: the only sections any render path selects.
+const USED_SECTIONS: usize = 4;
 
 /// two generations, so making room costs one swap instead of a scan for a
 /// victim: inserts fill `hot`, a full `hot` ages into `cold`, and the next
@@ -191,8 +194,11 @@ thread_local! {
 }
 
 /// memoized `split_sections` + `tokenize`, keyed by the exact code string.
+/// falls back to parsing when the thread's cache is already torn down.
 fn parsed_sections(code: &str) -> Arc<[Section]> {
-    FORMAT_CACHE.with(|cache| parsed_sections_in(&mut cache.borrow_mut(), code))
+    FORMAT_CACHE
+        .try_with(|cache| parsed_sections_in(&mut cache.borrow_mut(), code))
+        .unwrap_or_else(|_| tokenize_all(code))
 }
 
 fn parsed_sections_in(cache: &mut FormatCache, code: &str) -> Arc<[Section]> {
@@ -207,8 +213,14 @@ fn parsed_sections_in(cache: &mut FormatCache, code: &str) -> Arc<[Section]> {
     parsed
 }
 
+/// `select` never looks past the third section and text never past the fourth,
+/// so deeper ones are dropped rather than parsed and retained.
 fn tokenize_all(code: &str) -> Arc<[Section]> {
-    split_sections(code).iter().map(|s| tokenize(s)).collect()
+    split_sections(code)
+        .iter()
+        .take(USED_SECTIONS)
+        .map(|s| tokenize(s))
+        .collect()
 }
 
 /// split a code into sections on top-level `;` (quotes, brackets, and escapes guarded).
