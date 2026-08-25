@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
+use std::sync::OnceLock;
 
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
@@ -105,6 +106,14 @@ fn assert_fixture_properties(source: &[u8], output: &[u8], secrets: &[&str], med
         (media::PLACEHOLDER_SIZE, media::PLACEHOLDER_SIZE)
     );
     assert_eq!(image::guess_format(after_image).unwrap(), ImageFormat::Png);
+}
+
+fn test_part(path: &str) -> xml::Part<'_> {
+    static NAMES: OnceLock<BTreeSet<String>> = OnceLock::new();
+    xml::Part {
+        path,
+        names: NAMES.get_or_init(BTreeSet::new),
+    }
 }
 
 fn part_names(parts: &[(String, Vec<u8>)]) -> Vec<&str> {
@@ -383,7 +392,7 @@ fn empty_shared_string_cell_does_not_leak_next_value() {
     let mut report = RedactionReport::default();
     let output = xml::redact_xml(
         Format::Xlsx,
-        "xl/worksheets/sheet1.xml",
+        &test_part("xl/worksheets/sheet1.xml"),
         sheet.as_bytes(),
         &mut report,
     )
@@ -410,7 +419,7 @@ fn scheme_bearing_relationship_targets_redacted_without_target_mode() {
     let mut report = RedactionReport::default();
     let output = xml::redact_xml(
         Format::Docx,
-        "word/_rels/document.xml.rels",
+        &test_part("word/_rels/document.xml.rels"),
         rels.as_bytes(),
         &mut report,
     )
@@ -439,7 +448,7 @@ fn rfc3986_scheme_targets_redacted_without_target_mode() {
     let mut report = RedactionReport::default();
     let output = xml::redact_xml(
         Format::Docx,
-        "word/_rels/document.xml.rels",
+        &test_part("word/_rels/document.xml.rels"),
         rels.as_bytes(),
         &mut report,
     )
@@ -466,7 +475,7 @@ fn uri_in_fragment_keeps_relationship_internal() {
     let mut report = RedactionReport::default();
     let output = xml::redact_xml(
         Format::Docx,
-        "word/_rels/document.xml.rels",
+        &test_part("word/_rels/document.xml.rels"),
         rels.as_bytes(),
         &mut report,
     )
@@ -491,7 +500,7 @@ fn unc_relationship_targets_redacted_without_target_mode() {
     let mut report = RedactionReport::default();
     let output = xml::redact_xml(
         Format::Docx,
-        "word/_rels/document.xml.rels",
+        &test_part("word/_rels/document.xml.rels"),
         rels.as_bytes(),
         &mut report,
     )
@@ -517,7 +526,7 @@ fn parent_escaping_targets_redacted_without_target_mode() {
     let mut report = RedactionReport::default();
     let output = xml::redact_xml(
         Format::Docx,
-        "word/_rels/document.xml.rels",
+        &test_part("word/_rels/document.xml.rels"),
         rels.as_bytes(),
         &mut report,
     )
@@ -579,13 +588,102 @@ fn declared_target_mode_is_not_duplicated() {
     pptx_parse::parse_pptx(&output).unwrap();
 }
 
+#[test]
+fn declared_internal_mode_is_corrected_when_the_target_is_external() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49PPTX_SECRET_PHONE" TargetMode="Internal"/>"#,
+    );
+    pptx_parse::parse_pptx(&source).unwrap();
+
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"Target="https://example.com""#));
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(!rels.contains("PPTX_SECRET_PHONE"));
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn parent_segments_resolving_to_a_package_part_stay_internal() {
+    let target = "../../xl/XLSX_LOOPBACK_SEGMENT/../worksheets/sheet1.xml";
+    let source = fixture_with_part(
+        xlsx_fixture(),
+        "xl/_rels/workbook.xml.rels",
+        xml(&format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="{target}"/></Relationships>"#
+        )),
+    );
+    let (output, _) = redact_with_report(&source, Format::Xlsx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels")).into_owned();
+    assert!(rels.contains(&format!(r#"Target="{target}""#)));
+    assert!(!rels.contains("TargetMode"));
+    xlsx_parse::parse_workbook(&parts).unwrap();
+}
+
+#[test]
+fn foreign_attributes_do_not_drive_relationship_mode() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:q="urn:qa">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml" q:Target="https://foreign.example/x"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml" q:TargetMode="External"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        &test_part("word/_rels/document.xml.rels"),
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="footnotes.xml""#));
+    assert!(text.contains(r#"Target="endnotes.xml""#));
+    assert!(text.contains(r#"q:TargetMode="External""#));
+    assert!(!text.contains(r#" TargetMode="External""#));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
+fn relationship_markup_outside_a_rels_part_is_untouched() {
+    let body = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="urn:qa">"#,
+        r#"<q:Relationship Target="tel:+49123456789"/>"#,
+        r#"</w:document>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        &test_part("word/document.xml"),
+        body.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="tel:+49123456789""#));
+    assert!(!text.contains("TargetMode"));
+}
+
 fn pptx_fixture_with_slide_relationship(relationship: &str) -> Vec<u8> {
-    let mut parts = ooxml_opc::unzip_parts(&pptx_fixture()).unwrap();
-    for (path, data) in &mut parts {
-        if path == "ppt/slides/_rels/slide1.xml.rels" {
-            *data = xml(&format!(
-                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationship}</Relationships>"#
-            ));
+    fixture_with_part(
+        pptx_fixture(),
+        "ppt/slides/_rels/slide1.xml.rels",
+        xml(&format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationship}</Relationships>"#
+        )),
+    )
+}
+
+fn fixture_with_part(source: Vec<u8>, path: &str, data: Vec<u8>) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    for (candidate, bytes) in &mut parts {
+        if candidate == path {
+            *bytes = data.clone();
         }
     }
     ooxml_opc::rezip_parts(&parts).unwrap()
