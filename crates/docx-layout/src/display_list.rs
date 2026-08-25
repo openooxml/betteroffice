@@ -5575,6 +5575,14 @@ struct LinePaintMetrics {
 /// no width is inferred from the number of Unicode scalars. `bidiSlices` wins
 /// because it carries explicit visual order, followed by cluster metadata and
 /// finally exact run slices for older authoritative payloads.
+/// Smallest member order, so a merged range sorts at its first cluster.
+fn merged_logical_order(previous: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (previous, next) {
+        (Some(previous), Some(next)) => Some(previous.min(next)),
+        (previous, next) => previous.or(next),
+    }
+}
+
 fn authoritative_line_items<'a>(
     block: &'a ParagraphBlockIn,
     line: &LineIn,
@@ -5635,6 +5643,42 @@ fn authoritative_line_items<'a>(
     } else {
         return None;
     }
+
+    // Coalesce contiguous same-run cluster slices: one primitive per cluster
+    // multiplies every downstream cost by the run length, while items only
+    // advance the pen by their summed width and the glyph path snaps the
+    // merged advance to it. Letter-spaced, char-scaled and browser-path runs
+    // stay per-cluster — their spacing lives in the measured advances.
+    let mut merged: Vec<(usize, usize, usize, f64, u8, u64, Option<u64>)> =
+        Vec::with_capacity(slices.len());
+    for slice in slices {
+        if let Some(previous) = merged.last_mut()
+            && previous.0 == slice.0
+            && previous.4 == slice.4
+            && matches!(
+                block.runs.get(slice.0),
+                Some(RunIn::Text(text))
+                    if text.fmt.letter_spacing.unwrap_or(0.0) == 0.0
+                        && horizontal_scale_of(&text.fmt).is_none()
+                        && !text_primitive_requires_browser_path(&text.fmt)
+            )
+        {
+            if previous.2 == slice.1 {
+                previous.2 = slice.2;
+                previous.3 += slice.3;
+                previous.6 = merged_logical_order(previous.6, slice.6);
+                continue;
+            }
+            if previous.1 == slice.2 {
+                previous.1 = slice.1;
+                previous.3 += slice.3;
+                previous.6 = merged_logical_order(previous.6, slice.6);
+                continue;
+            }
+        }
+        merged.push(slice);
+    }
+    let slices = merged;
 
     let item_count = slices.len();
     let mut out = Vec::with_capacity(item_count);
@@ -5897,8 +5941,13 @@ fn emit_line(
             if let Some(items) = &authoritative_items {
                 space_count = items
                     .iter()
-                    .filter(|item| matches!(item, LinePaintItem::Text(text) if text.text == " "))
-                    .count();
+                    .map(|item| match item {
+                        LinePaintItem::Text(text) => {
+                            text.text.chars().filter(|&ch| ch == ' ').count()
+                        }
+                        _ => 0,
+                    })
+                    .sum();
             } else {
                 for seg in &segments {
                     let text = match seg.run {
@@ -6035,8 +6084,8 @@ fn emit_line(
         match item {
             LinePaintItem::Text(item) => {
                 let paint_width = item.width
-                    + if item.exact_advance && item.text == " " {
-                        word_space_extra
+                    + if item.exact_advance {
+                        word_space_extra * item.text.chars().filter(|&ch| ch == ' ').count() as f64
                     } else {
                         0.0
                     };
@@ -9970,6 +10019,99 @@ mod tests {
         assert_eq!(marker["listMarkerRevision"], "ins");
         assert_eq!(marker["color"], REVISION_INS_COLOR);
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
+    }
+
+    #[test]
+    fn contiguous_cluster_advances_coalesce_into_one_primitive_per_run() {
+        let clusters = |run_index: usize, text: &str, advance: f64, x_base: f64| -> Vec<Value> {
+            (0..text.chars().count())
+                .map(|i| {
+                    json!({
+                        "runIndex": run_index,
+                        "startChar": i,
+                        "endChar": i + 1,
+                        "advance": advance,
+                        "xOffset": x_base + advance * i as f64,
+                        "bidiLevel": 0,
+                        "logicalOrder": i
+                    })
+                })
+                .collect()
+        };
+        let mut cluster_advances = clusters(0, "hello world", 4.0, 0.0);
+        cluster_advances.extend(clusters(1, "abc", 6.0, 44.0));
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "p",
+                    "runs": [
+                        { "kind": "text", "text": "hello world", "pmStart": 1, "pmEnd": 12 },
+                        { "kind": "text", "text": "abc", "pmStart": 12, "pmEnd": 15, "letterSpacing": 2 }
+                    ],
+                    "pmStart": 0,
+                    "pmEnd": 15
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 20,
+                    "lines": [{
+                        "headRun": 0,
+                        "headChar": 0,
+                        "tailRun": 1,
+                        "tailChar": 2,
+                        "width": 62,
+                        "ascent": 14,
+                        "descent": 4,
+                        "lineHeight": 20,
+                        "clusterAdvances": serde_json::Value::Array(cluster_advances)
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {
+                "pages": [{
+                    "number": 1,
+                    "size": { "w": 300, "h": 400 },
+                    "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                    "fragments": [{
+                        "kind": "paragraph", "blockId": "p", "x": 20, "y": 20,
+                        "width": 260, "height": 20, "fromLine": 0, "toLine": 1,
+                        "pmStart": 0, "pmEnd": 15
+                    }]
+                }]
+            }
+        });
+        let output: Value = serde_json::from_str(
+            &build_display_list_json(&input.to_string()).expect("display list builds"),
+        )
+        .expect("valid display JSON");
+        let text: Vec<&Value> = output["pages"][0]["primitives"]
+            .as_array()
+            .expect("primitive array")
+            .iter()
+            .filter(|primitive| primitive["kind"] == "text")
+            .collect();
+
+        // the plain run's per-cluster slices coalesce into ONE primitive with
+        // the summed advance and the full doc span
+        assert_eq!(text[0]["text"], "hello world");
+        assert_eq!(text[0]["width"], 44.0);
+        assert_eq!(text[0]["docStart"], 1);
+        assert_eq!(text[0]["docEnd"], 12);
+        assert_eq!(text[0]["logicalOrder"], 0);
+
+        // the letter-spaced run keeps per-cluster primitives: its spacing is
+        // baked into the measured advances, which shaping would not reproduce
+        assert_eq!(
+            text[1..]
+                .iter()
+                .map(|p| p["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert_eq!(text.len(), 4);
     }
 
     #[test]
