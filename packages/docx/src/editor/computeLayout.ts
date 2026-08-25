@@ -64,10 +64,16 @@ const kernelInputsByLayout = new WeakMap<
   }
 >();
 
+/**
+ * One entry per paragraph-level section break plus the final section, which
+ * comes from `finalSectionProperties` (editor mutations keep it current) —
+ * `body.sections` already ends with it, so appending both over-counts and
+ * disables the engine's single-section fast path.
+ */
 function orderedSections(document: Document | null): ResidentRegionLayoutRequest['regions']['sections'] {
   const body = document?.package.document;
   if (!body) return [{ properties: {} }];
-  const sections = (body.sections ?? []).map((section) => ({
+  const sections = (body.sections ?? []).slice(0, -1).map((section) => ({
     sectionId: section.id ?? section.properties.sectionId,
     properties: section.properties,
   }));
