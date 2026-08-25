@@ -276,12 +276,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
   /** Apply a peer update. Standalone handles throw the Rust `NotCollaborative` error. */
   applyUpdate(update: Uint8Array): EditResult;
-  /**
-   * Observe owned update bytes from local commits and accepted remote updates.
-   * With multiple subscribers each receives an isolated copy; a sole subscriber
-   * receives the internal buffer directly (treat as read-only; it may be a
-   * subarray view whose `.buffer` includes the origin byte).
-   */
+  /** Observe owned update bytes from local commits and accepted remote updates. */
   onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
@@ -462,16 +457,11 @@ export function openWorkbook(
       while (!disposed && pendingUpdates.length > 0) {
         const event = pendingUpdates.shift();
         if (!event) break;
-        const subscribers = [...listeners];
-        for (let index = 0; index < subscribers.length; index += 1) {
-          const [id, listener] = subscribers[index];
+        for (const [id, listener] of [...listeners]) {
           if (disposed) return;
           if (listeners.get(id) !== listener) continue;
           try {
-            listener(
-              subscribers.length === 1 ? event.update : event.update.slice(),
-              event.origin
-            );
+            listener(event.update.slice(), event.origin);
           } catch {}
         }
       }

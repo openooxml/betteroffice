@@ -208,6 +208,35 @@ describe('wasm collaboration', () => {
     }
   });
 
+  // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
+  // for `.buffer` must not find the origin tag riding along — and the shape must
+  // not depend on how many other listeners happen to be subscribed.
+  it('delivers exact update buffers regardless of subscriber count', () => {
+    for (const extraSubscriber of [false, true]) {
+      const source = collaborative(extraSubscriber ? 2102 : 2101);
+      const peer = collaborative(extraSubscriber ? 2104 : 2103);
+      const received: Uint8Array[] = [];
+      try {
+        source.onUpdate((update, origin) => {
+          if (origin === 'local') received.push(update);
+        });
+        if (extraSubscriber) source.onUpdate(() => {});
+
+        source.editCell(0, 22, 0, 'exact buffer');
+        expect(received).toHaveLength(1);
+        const update = received[0];
+        expect(update.byteOffset).toBe(0);
+        expect(update.buffer.byteLength).toBe(update.byteLength);
+
+        peer.applyUpdate(new Uint8Array(update.buffer));
+        expect(peer.cell(0, 22, 0).input).toBe('exact buffer');
+      } finally {
+        source.dispose();
+        peer.dispose();
+      }
+    }
+  });
+
   it('unsubscribes idempotently', () => {
     const handle = collaborative(3001);
     let calls = 0;

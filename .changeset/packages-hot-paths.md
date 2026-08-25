@@ -1,7 +1,6 @@
 ---
 "@betteroffice/xlsx": patch
 "@betteroffice/pptx": patch
-"@betteroffice/pptx-react": patch
 ---
 
-Drop redundant font-byte scans and collaboration buffer copies.
+Drop redundant buffer copies around the wasm boundary and per collaboration update.
