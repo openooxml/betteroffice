@@ -1132,17 +1132,21 @@ fn collect_range_rects(
     to: i64,
     out: &mut Vec<RangeRect>,
 ) {
+    let mut pending: Vec<(RectOwner<'_>, RangeRect)> = Vec::new();
     for h in text_hits(prims) {
         // blank-line marker: zero-length span selects as a thin sliver
         if h.doc_start == h.doc_end {
             if h.doc_start >= from && h.doc_start < to {
-                out.push(RangeRect {
-                    page_index,
-                    x: h.x,
-                    y: h.top,
-                    width: BLANK_LINE_SELECTION_WIDTH,
-                    height: h.bottom - h.top,
-                });
+                pending.push((
+                    rect_owner(h.attrs),
+                    RangeRect {
+                        page_index,
+                        x: h.x,
+                        y: h.top,
+                        width: BLANK_LINE_SELECTION_WIDTH,
+                        height: h.bottom - h.top,
+                    },
+                ));
             }
             continue;
         }
@@ -1153,15 +1157,19 @@ fn collect_range_rects(
         let end = to.max(h.doc_start).min(h.doc_end);
         let x0 = x_at_position(&h, start);
         let x1 = x_at_position(&h, end);
-        out.push(RangeRect {
-            page_index,
-            x: x0.min(x1),
-            y: h.top,
-            // degenerate overlaps keep a 1px floor like lineSpanRect
-            width: (x1 - x0).abs().max(1.0),
-            height: h.bottom - h.top,
-        });
+        pending.push((
+            rect_owner(h.attrs),
+            RangeRect {
+                page_index,
+                x: x0.min(x1),
+                y: h.top,
+                // degenerate overlaps keep a 1px floor like lineSpanRect
+                width: (x1 - x0).abs().max(1.0),
+                height: h.bottom - h.top,
+            },
+        ));
     }
+    merge_line_rects(pending, out);
 
     for p in prims {
         let Primitive::Image(img) = p else { continue };
@@ -1178,6 +1186,64 @@ fn collect_range_rects(
             width: img.w.as_f64().unwrap_or(0.0),
             height: img.h.as_f64().unwrap_or(0.0),
         });
+    }
+}
+
+const LINE_MERGE_BAND_EPSILON: f64 = 1.0;
+const LINE_MERGE_GAP: f64 = 2.0;
+
+/// Line identity for band merging, strict variant of [`same_line_owner`]:
+/// rects union only within one table cell, line, and block, so bands never
+/// bridge adjacent columns or cells that happen to align.
+#[derive(PartialEq)]
+struct RectOwner<'a> {
+    table_id: Option<&'a str>,
+    cell: Option<(u64, u64, Option<&'a str>)>,
+    line_index: Option<u64>,
+    para_id: Option<&'a str>,
+    block_key: Option<&'a str>,
+    block_id: Option<&'a Number>,
+}
+
+fn rect_owner(attrs: &DocAttrs) -> RectOwner<'_> {
+    RectOwner {
+        table_id: attrs.table.as_ref().map(|table| table.table_id.as_str()),
+        cell: attrs
+            .cell
+            .as_ref()
+            .map(|cell| (cell.row, cell.col, cell.cell_id.as_deref())),
+        line_index: attrs.line_index,
+        para_id: attrs.para_id.as_deref(),
+        block_key: attrs.block_key.as_deref(),
+        block_id: attrs.block_id.as_ref(),
+    }
+}
+
+/// Coalesce one page's text rects into per-line bands: same-owner rects on the
+/// same band that touch or nearly touch horizontally union into one. Selection
+/// highlights are per line visually, so per-run granularity only multiplies
+/// the rect count — a full-document selection must stay O(lines), not O(runs).
+fn merge_line_rects(mut pending: Vec<(RectOwner<'_>, RangeRect)>, out: &mut Vec<RangeRect>) {
+    pending.sort_by(|a, b| a.1.y.total_cmp(&b.1.y).then(a.1.x.total_cmp(&b.1.x)));
+    let mut current: Option<(RectOwner<'_>, RangeRect)> = None;
+    for (owner, rect) in pending {
+        if let Some((held_owner, held)) = current.as_mut()
+            && *held_owner == owner
+            && (rect.y - held.y).abs() <= LINE_MERGE_BAND_EPSILON
+            && (rect.height - held.height).abs() <= LINE_MERGE_BAND_EPSILON
+            && rect.x <= held.x + held.width + LINE_MERGE_GAP
+        {
+            let right = (held.x + held.width).max(rect.x + rect.width);
+            held.width = right - held.x;
+            continue;
+        }
+        if let Some((_, held)) = current.take() {
+            out.push(held);
+        }
+        current = Some((owner, rect));
+    }
+    if let Some((_, held)) = current {
+        out.push(held);
     }
 }
 
@@ -1597,6 +1663,70 @@ mod tests {
         assert_eq!(note.note_id, None);
         assert_eq!(note.pos, None);
         assert_eq!(note.target, HoverTarget::None);
+    }
+
+    #[test]
+    fn range_rects_merge_same_line_runs_into_one_band() {
+        // three adjacent same-line runs (a formatted or per-cluster line) and
+        // one run on the next line: selecting across them yields one rect per
+        // LINE, never one per run
+        let owned = |x: f64, baseline: f64, doc_start: i64, line_index: u64| {
+            let mut prim = run(x, baseline, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["lineIndex"] = line_index.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                owned(100.0, 200.0, 1, 0),
+                owned(140.0, 200.0, 6, 0),
+                owned(180.0, 200.0, 11, 0),
+                owned(100.0, 230.0, 16, 1),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 21);
+        assert_eq!(rects.len(), 2, "one merged band per line: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!(
+            (rects[0].width - 120.0).abs() < 0.01,
+            "merged width {}",
+            rects[0].width
+        );
+        assert!((rects[1].width - 40.0).abs() < 0.01);
+
+        // a selection whose runs do not touch horizontally stays split
+        let sparse = range_rects(&dl, 1, 3);
+        assert_eq!(sparse.len(), 1);
+        assert!(sparse[0].width < 40.0);
+    }
+
+    #[test]
+    fn range_rects_never_merge_across_table_cells() {
+        // two aligned, touching runs in adjacent cells of one table: the band
+        // may not bridge the cell boundary even though the geometry allows it
+        let celled = |x: f64, doc_start: i64, col: u64| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["table"] = serde_json::json!({
+                "tableId": "t1", "rowStart": 0, "rowEnd": 1,
+                "rowCount": 1, "columnCount": 2
+            });
+            prim["cell"] = serde_json::json!({
+                "row": 0, "col": col, "rowSpan": 1, "colSpan": 1
+            });
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![celled(100.0, 1, 0), celled(140.0, 6, 1)],
+        );
+
+        let rects = range_rects(&dl, 1, 11);
+        assert_eq!(rects.len(), 2, "one band per cell: {rects:?}");
+        assert!((rects[0].width - 40.0).abs() < 0.01);
+        assert!((rects[1].width - 40.0).abs() < 0.01);
     }
 
     /// Selection geometry follows the same scoping: a range in a note's story
