@@ -33,14 +33,6 @@ def font_bytes() -> bytes:
 
 
 @pytest.fixture(scope="session")
-def font_path() -> Path:
-    path = FONTS / "LiberationSans-Regular.ttf"
-    if not path.exists():
-        pytest.skip(f"fixture missing: {path}")
-    return path
-
-
-@pytest.fixture(scope="session")
 def heavy_font_path() -> Path:
     if not HEAVY_FONT.exists():
         pytest.skip(f"fixture missing: {HEAVY_FONT}")

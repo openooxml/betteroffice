@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyIndexError, PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
 use python_common::{generated_client_id, map_io_error};
 
@@ -930,6 +931,13 @@ fn join_text<'a>(parts: impl Iterator<Item = &'a str>) -> String {
         .join("\n")
 }
 
+/// Holds the argument's own reference so its bytes stay readable and immutable
+/// for as long as the caller keeps the result, `detach` included. Nothing is
+/// copied: `bytes` is already immutable, and pyo3 only ever binds one here.
+fn borrow_bytes(data: &Bound<'_, PyBytes>) -> PyBackedBytes {
+    PyBackedBytes::from(data.clone())
+}
+
 /// Moves a deck or a borrow of one across `detach`, which demands `Send`.
 ///
 /// # Safety
@@ -937,9 +945,14 @@ fn join_text<'a>(parts: impl Iterator<Item = &'a str>) -> String {
 /// The core type is `!Send` (`RefCell`s plus stored undo callbacks), but
 /// `PyPresentation` is `unsendable`, so any access from another thread panics
 /// inside pyo3 before reaching it, and `detach` keeps running on this thread.
+///
+/// Each deck shape is named on its own below: a blanket `impl<T>` would also
+/// hand `Send` to a `Bound` or a `Py<T>`, which pyo3 exists to keep out.
 struct DetachedDeck<T>(T);
 
-unsafe impl<T> Send for DetachedDeck<T> {}
+unsafe impl Send for DetachedDeck<CorePresentation> {}
+unsafe impl Send for DetachedDeck<&'_ CorePresentation> {}
+unsafe impl Send for DetachedDeck<&'_ mut CorePresentation> {}
 
 #[pyclass(module = "betteroffice_pptx", name = "Presentation", unsendable)]
 pub struct PyPresentation {
@@ -1059,18 +1072,17 @@ impl PyPresentation {
 
     fn open_bytes_inner(
         py: Python<'_>,
-        data: Vec<u8>,
-        limits: Option<&Bound<'_, PyDict>>,
+        data: &[u8],
+        limits: ParseLimits,
         client_id: Option<u64>,
     ) -> PyResult<Self> {
-        let limits = parse_limits(limits)?;
         let opened = py
             .detach(move || {
                 let opened = match client_id {
                     Some(client_id) => {
-                        CorePresentation::open_collaborative_with_limits(&data, client_id, &limits)
+                        CorePresentation::open_collaborative_with_limits(data, client_id, &limits)
                     }
-                    None => CorePresentation::open_with_limits(&data, &limits),
+                    None => CorePresentation::open_with_limits(data, &limits),
                 };
                 opened.map(DetachedDeck)
             })
@@ -1078,14 +1090,17 @@ impl PyPresentation {
         Ok(Self::wrap(opened.0, client_id.is_some()))
     }
 
-    /// Copies first: a borrow of a Python buffer cannot cross `detach`.
+    /// The limits are parsed before anything touches the input, so a rejected
+    /// argument costs nothing whatever it was handed.
     fn open_bytes(
         py: Python<'_>,
-        data: &[u8],
+        data: &Bound<'_, PyBytes>,
         limits: Option<&Bound<'_, PyDict>>,
         client_id: Option<u64>,
     ) -> PyResult<Self> {
-        Self::open_bytes_inner(py, data.to_vec(), limits, client_id)
+        let limits = parse_limits(limits)?;
+        let data = borrow_bytes(data);
+        Self::open_bytes_inner(py, &data, limits, client_id)
     }
 }
 
@@ -1093,7 +1108,11 @@ impl PyPresentation {
 impl PyPresentation {
     #[staticmethod]
     #[pyo3(signature = (data, *, limits = None))]
-    fn open(py: Python<'_>, data: &[u8], limits: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+    fn open(
+        py: Python<'_>,
+        data: &Bound<'_, PyBytes>,
+        limits: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         Self::open_bytes(py, data, limits, None)
     }
 
@@ -1107,7 +1126,7 @@ impl PyPresentation {
         let data = py
             .detach(|| fs::read(&path))
             .map_err(|error| map_io_error(&error, &path))?;
-        Self::open_bytes_inner(py, data, limits, None)
+        Self::open_bytes_inner(py, &data, parse_limits(limits)?, None)
     }
 
     /// Open a replica with a generated ID unless `client_id` is supplied.
@@ -1115,7 +1134,7 @@ impl PyPresentation {
     #[pyo3(signature = (data, *, client_id = None, limits = None))]
     fn open_collaborative(
         py: Python<'_>,
-        data: &[u8],
+        data: &Bound<'_, PyBytes>,
         client_id: Option<u64>,
         limits: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
@@ -1505,24 +1524,26 @@ impl PyPresentation {
         Ok(PyTextEdit::from_core(receipt))
     }
 
-    /// Registers a face for layout, copied first since borrows of Python
-    /// objects cannot cross `detach`. Nothing is embedded in the wheel, so
-    /// text only measures against families registered here.
+    /// Register a face for layout. Nothing is embedded in the wheel, so text
+    /// only measures against families registered here. The face itself is not
+    /// copied, so the engine's own size and count limits still reject one
+    /// before it costs anything.
     #[pyo3(signature = (family, data, *, bold = false, italic = false))]
     fn register_font(
         &mut self,
         py: Python<'_>,
         family: &str,
-        data: &[u8],
+        data: &Bound<'_, PyBytes>,
         bold: bool,
         italic: bool,
     ) -> PyResult<u32> {
         let family = family.to_owned();
-        let data = data.to_vec();
+        let owned = borrow_bytes(data);
+        let data: &[u8] = &owned;
         let deck = DetachedDeck(&mut self.presentation);
         py.detach(move || {
             let deck = deck;
-            deck.0.register_font(&family, bold, italic, &data)
+            deck.0.register_font(&family, bold, italic, data)
         })
         .map_err(map_error)
     }
@@ -1588,20 +1609,21 @@ impl PyPresentation {
         Ok(PyBytes::new(py, &update))
     }
 
-    fn apply_update(&self, py: Python<'_>, update: &[u8]) -> PyResult<PyDeck> {
+    fn apply_update(&self, py: Python<'_>, update: &Bound<'_, PyBytes>) -> PyResult<PyDeck> {
         self.require_collaborative()?;
-        if update.len() > MAX_COLLABORATION_BYTES {
+        let owned = borrow_bytes(update);
+        if owned.len() > MAX_COLLABORATION_BYTES {
             return Err(InvalidUpdateError::new_err(format!(
                 "collaboration payload is {} bytes, exceeds the {MAX_COLLABORATION_BYTES}-byte limit",
-                update.len()
+                owned.len()
             )));
         }
-        let update = update.to_vec();
+        let update: &[u8] = &owned;
         let deck = DetachedDeck(&self.presentation);
         let snapshot = py
             .detach(move || {
                 let deck = deck;
-                deck.0.apply_update_v1(&update)
+                deck.0.apply_update_v1(update)
             })
             .map_err(map_error)?;
         self.edited.set(true);
