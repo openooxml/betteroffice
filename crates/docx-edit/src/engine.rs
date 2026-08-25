@@ -39,7 +39,9 @@ use crate::frame_delta::{
 struct LoweredStory {
     doc_epoch: u64,
     env: RenderEnv,
-    blocks: Vec<LayoutBlock>,
+    /// Shared so a reader can hold the lowering it asked for without the cache
+    /// borrow, and without copying the story.
+    blocks: Rc<Vec<LayoutBlock>>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
 }
@@ -601,38 +603,69 @@ impl EngineSession {
         env: &RenderEnv,
         read: impl FnOnce(&[LayoutBlock]) -> T,
     ) -> Result<T, BridgeError> {
-        let epoch = self.doc_epoch();
-        let is_hit = self
-            .render
+        self.with_lowered_story_observed(story, env, &mut || {}, read)
+    }
+
+    /// Whether `story` is already lowered for this document epoch and
+    /// environment.
+    fn story_is_resident(&self, story: &str, epoch: u64, env: &RenderEnv) -> bool {
+        self.render
             .borrow()
             .stories
             .get(story)
-            .is_some_and(|cached| cached.doc_epoch == epoch && cached.env == *env);
+            .is_some_and(|cached| cached.doc_epoch == epoch && cached.env == *env)
+    }
 
-        if !is_hit {
-            let blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
-            let mut render = self.render.borrow_mut();
-            render.cache_misses = render.cache_misses.wrapping_add(1);
-            render.stories.insert(
-                story.to_owned(),
-                LoweredStory {
-                    doc_epoch: epoch,
-                    env: env.clone(),
-                    blocks,
-                    serialized_blocks: None,
-                },
-            );
-        } else {
+    fn lower_story_into_cache(
+        &self,
+        story: &str,
+        epoch: u64,
+        env: &RenderEnv,
+    ) -> Result<(), BridgeError> {
+        let blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
+        let mut render = self.render.borrow_mut();
+        render.cache_misses = render.cache_misses.wrapping_add(1);
+        render.stories.insert(
+            story.to_owned(),
+            LoweredStory {
+                doc_epoch: epoch,
+                env: env.clone(),
+                blocks: Rc::new(blocks),
+                serialized_blocks: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// [`Self::with_lowered_story`] with a hook between lowering and the read.
+    /// The lowering is claimed before `after_lower` fires, so an observer
+    /// supplied by the host may re-enter the engine — even re-lowering this
+    /// story — without disturbing what the caller reads.
+    fn with_lowered_story_observed<T>(
+        &self,
+        story: &str,
+        env: &RenderEnv,
+        after_lower: &mut dyn FnMut(),
+        read: impl FnOnce(&[LayoutBlock]) -> T,
+    ) -> Result<T, BridgeError> {
+        let epoch = self.doc_epoch();
+        if self.story_is_resident(story, epoch, env) {
             let mut render = self.render.borrow_mut();
             render.cache_hits = render.cache_hits.wrapping_add(1);
+        } else {
+            self.lower_story_into_cache(story, epoch, env)?;
         }
-
-        let render = self.render.borrow();
-        let cached = render
-            .stories
-            .get(story)
-            .expect("resident story exists after lowering");
-        Ok(read(&cached.blocks))
+        let blocks = Rc::clone(
+            &self
+                .render
+                .borrow()
+                .stories
+                .get(story)
+                .expect("resident story exists after lowering")
+                .blocks,
+        );
+        after_lower();
+        Ok(read(&blocks))
     }
 
     /// Serializes resident lowered blocks.
@@ -1289,8 +1322,7 @@ impl EngineSession {
             .get(story)
             .map(|story| story.env.clone())
             .ok_or_else(|| format!("resident render environment missing for story {story:?}"))?;
-        self.with_lowered_story(story, &env, |blocks| {
-            after_lower();
+        self.with_lowered_story_observed(story, &env, after_lower, |blocks| {
             self.resident_layout_input_from_blocks(
                 blocks,
                 &mut |_, key, previous_block, next_block| {
@@ -1518,11 +1550,11 @@ impl EngineSession {
             lowered.env.clone()
         };
         let outcome = self
-            .with_lowered_story(
+            .with_lowered_story_observed(
                 story,
                 &env,
+                &mut || phase(RegionResidentPhase::Lowered),
                 |blocks| -> Result<Option<(ResidentLayoutInput, usize)>, String> {
-                    phase(RegionResidentPhase::Lowered);
                     let (widths, geometry, previous_pages) = {
                         let pagination = self.pagination.borrow();
                         let (Some(input), Some(layout)) =
@@ -2958,6 +2990,262 @@ mod tests {
         assert_eq!(stats.pagination_calls, 3);
         assert_eq!(stats.incremental_pagination_calls, 2);
         assert_eq!(stats.display_builds, 3);
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// The profiler clock is host code: re-entering the engine from it must not
+    /// abort an edit the document has already committed.
+    #[test]
+    fn a_reentrant_profiler_clock_does_not_abort_the_edit() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(4242);
+        engine
+            .doc()
+            .create_story("body", "hello", "Normal", "left")
+            .unwrap();
+        let env = RenderEnv::default();
+        let block = engine
+            .with_lowered_story("body", &env, |blocks| blocks[0].clone())
+            .unwrap();
+        let extent: ParagraphExtent = serde_json::from_str(
+            &engine
+                .measure_paragraph_json(
+                    &serde_json::json!({
+                        "block": block,
+                        "maxWidth": 180,
+                        "fontChains": { "liberation sans|0|0": [font_id] },
+                        "defaults": { "fontSize": 12, "fontFamily": "Liberation Sans" },
+                        "authoritativeShaping": true
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        engine
+            .layout_document_value(LayoutInput {
+                measured: vec![MeasuredBlock {
+                    block,
+                    measure: BlockExtent::Paragraph(extent),
+                }],
+                options: serde_json::from_value(serde_json::json!({
+                    "pageSize": { "w": 200, "h": 120 },
+                    "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                "!",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+
+        let foreign_env = RenderEnv {
+            default_tab_stop_twips: Some(720.0),
+            ..RenderEnv::default()
+        };
+        let mut ticks = 0_u32;
+        let mut clock = || {
+            ticks += 1;
+            // Tick 2 is the post-lowering hook; re-lowering under another
+            // environment there must not steal the story the edit is reading.
+            let env = if ticks == 2 { &foreign_env } else { &env };
+            engine.lower_story_json("body", env).unwrap();
+            ticks as f64
+        };
+        let (frame, _) = engine
+            .apply_and_layout_profiled("body", 1, &mut clock)
+            .unwrap();
+        assert!(!frame.is_empty());
+        let pagination = engine.pagination.borrow();
+        let LayoutBlock::Paragraph(paragraph) =
+            &pagination.input.as_ref().unwrap().measured[0].block
+        else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(
+            paragraph
+                .attrs
+                .as_ref()
+                .and_then(|attrs| attrs.default_tab_stop_twips),
+            None,
+            "the edit keeps the environment it asked for, not the observer's"
+        );
+        drop(pagination);
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// The region twin of [`a_reentrant_profiler_clock_does_not_abort_the_edit`].
+    #[test]
+    fn a_reentrant_profiler_clock_does_not_abort_a_region_edit() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(4243);
+        engine
+            .doc()
+            .create_story("body", "AlphaBravo", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .split_paragraph(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                None,
+            )
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine
+            .build_display_list_frame(
+                &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                0,
+            )
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 2),
+                "xx",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+
+        let env = RenderEnv::default();
+        let mut ticks = 0_u32;
+        let mut clock = || {
+            ticks += 1;
+            engine.lower_story_json("body", &env).unwrap();
+            ticks as f64
+        };
+        let (frame, _) = engine
+            .apply_and_layout_profiled("body", 1, &mut clock)
+            .unwrap();
+        assert!(!frame.is_empty());
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// Rust float equality makes `-0.0 == 0.0`, so a sign-only change to a
+    /// layout number keeps its retained measurement. Signed zero measures
+    /// identically, so the reuse still matches a full pass.
+    #[test]
+    fn a_sign_only_zero_change_reuses_a_measurement_matching_the_full_pass() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(777);
+        let ctx = crate::EditCtx::local("", "");
+        engine
+            .doc()
+            .create_story(
+                "body",
+                "Alpha bravo charlie delta echo foxtrot",
+                "Normal",
+                "left",
+            )
+            .unwrap();
+        engine
+            .doc()
+            .split_paragraph(&ctx, crate::Position::new("body", 5), None)
+            .unwrap();
+        let para_ids: Vec<String> = engine
+            .with_lowered_story("body", &RenderEnv::default(), |blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| {
+                        paragraph_identity(block).map(|(id, _)| block_key(id).into_owned())
+                    })
+                    .collect()
+            })
+            .unwrap();
+        engine
+            .doc()
+            .set_paragraph_attr(&para_ids[0], "indentLeft", yrs::Any::Number(0.0))
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine
+            .build_display_list_frame(
+                &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                0,
+            )
+            .unwrap();
+
+        engine
+            .doc()
+            .set_paragraph_attr(&para_ids[0], "indentLeft", yrs::Any::Number(-0.0))
+            .unwrap();
+        let lowered = engine
+            .with_lowered_story("body", &RenderEnv::default(), |blocks| {
+                serde_json::to_string(&blocks[0]).unwrap()
+            })
+            .unwrap();
+        assert!(
+            lowered.contains("-0.0"),
+            "the sign-only change must reach the lowered block: {lowered}"
+        );
+
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.resident_measure_calls, before.resident_measure_calls,
+            "a sign-only zero change is structurally clean"
+        );
+        assert_eq!(
+            after.resident_reused_blocks,
+            before.resident_reused_blocks + 2,
+            "both paragraphs reuse their retained extents"
+        );
+        let fast_json = {
+            let pagination = engine.pagination.borrow();
+            let regions_state = engine.regions.borrow();
+            serialize_region_layout(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                regions_state.as_ref().unwrap().headers_footers.as_ref(),
+                true,
+            )
+            .unwrap()
+        };
+        let full_json = engine.layout_document_with_regions_json(&request).unwrap();
+        assert_eq!(
+            fast_json, full_json,
+            "the reused measurement matches a full pass"
+        );
         docx_layout::clear_measure_fonts();
     }
 
