@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
 use docx_layout::display_list::{
@@ -82,26 +81,43 @@ struct ParsedFont {
     chain_key: String,
 }
 
+/// Distinct shorthands one page keeps parsed, and the raw bytes their keys may
+/// copy out of the display list. A `font` string is untrusted and unbounded, so
+/// the cache stops keeping them rather than growing with the page.
+const MAX_CACHED_FONT_SPECS: usize = 256;
+const MAX_FONT_SPEC_KEY_BYTES: usize = 65_536;
+
 /// Parsed font shorthands keyed by the raw display-list string.
 #[derive(Default)]
 pub(crate) struct FontSpecCache {
     entries: HashMap<Box<str>, Rc<ParsedFont>>,
+    key_bytes: usize,
 }
 
 impl FontSpecCache {
     fn font(&mut self, font: &str) -> Result<Rc<ParsedFont>, String> {
-        match self.entries.entry(font.into()) {
-            Entry::Occupied(entry) => Ok(entry.get().clone()),
-            Entry::Vacant(entry) => {
-                let spec = parse_font(font)?;
-                let parsed = Rc::new(ParsedFont {
-                    chain_key: chain_key(&spec),
-                    spec,
-                });
-                entry.insert(parsed.clone());
-                Ok(parsed)
-            }
+        if let Some(parsed) = self.entries.get(font) {
+            return Ok(parsed.clone());
         }
+        let spec = parse_font(font)?;
+        let parsed = Rc::new(ParsedFont {
+            chain_key: chain_key(&spec),
+            spec,
+        });
+        self.remember(font, &parsed);
+        Ok(parsed)
+    }
+
+    /// Keeps one parse against its raw shorthand, while the map has room. The
+    /// key is a copy of display-list bytes, so it is the copy that is budgeted.
+    fn remember(&mut self, font: &str, parsed: &Rc<ParsedFont>) {
+        if self.entries.len() >= MAX_CACHED_FONT_SPECS
+            || self.key_bytes + font.len() > MAX_FONT_SPEC_KEY_BYTES
+        {
+            return;
+        }
+        self.key_bytes += font.len();
+        self.entries.insert(font.into(), parsed.clone());
     }
 }
 
@@ -710,12 +726,8 @@ fn cached_glyph<'a>(
     font: FontId,
     glyph_id: u32,
 ) -> Result<&'a CachedGlyph, String> {
-    match cache.store {
-        Some(bound) if bound != fonts.id() => {
-            return Err("glyph cache is bound to another font store".to_string());
-        }
-        None => cache.store = Some(fonts.id()),
-        _ => {}
+    if cache.store.is_some_and(|bound| bound != fonts.id()) {
+        return Err("glyph cache is bound to another font store".to_string());
     }
     let key = (font.to_u32(), glyph_id);
     if !cache.entries.contains_key(&key) {
@@ -725,6 +737,7 @@ fn cached_glyph<'a>(
             .outline_glyph(font, id)
             .map_err(|error| error.to_string())?;
         let path = outline_path(&outline.cmds)?;
+        cache.store = Some(fonts.id());
         cache.remember(
             key,
             CachedGlyph {
@@ -955,6 +968,28 @@ mod tests {
         assert!(cache.font("16 Liberation Sans").is_err());
         assert!(cache.font("px").is_err());
         assert_eq!(cache.entries.len(), 3);
+    }
+
+    /// Shorthands are untrusted display-list strings, so the cache parses every
+    /// one but stops copying them once either budget is spent.
+    #[test]
+    fn the_spec_cache_stops_keeping_shorthands_past_its_budgets() {
+        let mut counted = FontSpecCache::default();
+        for index in 0..MAX_CACHED_FONT_SPECS + 8 {
+            let font = format!("400 {}12px Carlito, sans-serif", " ".repeat(index));
+            assert_eq!(counted.font(&font).expect("parse").spec.family, "Carlito");
+        }
+        assert_eq!(counted.entries.len(), MAX_CACHED_FONT_SPECS);
+        assert!(counted.key_bytes <= MAX_FONT_SPEC_KEY_BYTES);
+
+        let mut oversized = FontSpecCache::default();
+        let padding = " ".repeat(MAX_FONT_SPEC_KEY_BYTES);
+        for index in 0..4 {
+            let font = format!("400 {padding}{}12px Carlito, sans-serif", " ".repeat(index));
+            assert_eq!(oversized.font(&font).expect("parse").spec.family, "Carlito");
+        }
+        assert!(oversized.entries.is_empty());
+        assert_eq!(oversized.key_bytes, 0);
     }
 
     #[test]

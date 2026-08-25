@@ -166,8 +166,10 @@ pub fn render_page(
     )
 }
 
-/// Renders one display-list page into a caller-owned glyph cache, so
-/// multi-page exports extract every glyph outline once.
+/// Renders one display-list page into a caller-owned glyph cache, so a
+/// multi-page export reuses the outlines the cache still holds instead of
+/// extracting them again. The cache is bounded, so a page that needs more
+/// outlines than it retains re-extracts the ones it evicted.
 pub fn render_page_cached(
     display_list: &DisplayList,
     page_ordinal: usize,

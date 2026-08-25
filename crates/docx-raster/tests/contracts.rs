@@ -81,6 +81,23 @@ fn single_glyph_scene() -> DisplayList {
     )
 }
 
+/// A glyph id past the outline range, so the page fails before the cache holds
+/// anything.
+fn missing_glyph_scene() -> DisplayList {
+    list(
+        60.0,
+        24.0,
+        vec![json!({
+            "kind": "glyphRun",
+            "fontId": 0,
+            "size": 12,
+            "color": "#000000",
+            "text": "A",
+            "glyphs": [{"id": 65_536, "x": 4, "y": 16, "cluster": 0, "advance": 8}]
+        })],
+    )
+}
+
 fn leader_extent(resources: &RenderResources<'_>, rtl: bool, glyph: &str) -> f64 {
     let png = render_png(&leader_scene(rtl, glyph), 0, resources).expect("leader render");
     let bounds = ink_bounds(&png).expect("leader ink");
@@ -134,6 +151,25 @@ fn a_glyph_cache_is_bound_to_the_store_that_filled_it() {
         render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache).unwrap_err(),
         "glyph cache is bound to another font store"
     );
+}
+
+/// A page that fails before it caches anything leaves the cache unbound: only
+/// an outline the cache actually holds can tie it to the store it came from.
+#[test]
+fn a_failed_page_leaves_a_glyph_cache_free_to_bind_elsewhere() {
+    let mut cache = GlyphCache::default();
+    {
+        let (fonts, chains, images) = carlito_resources();
+        let resources = RenderResources::new(&fonts, &chains, &images);
+        assert_eq!(
+            render_page_cached(&missing_glyph_scene(), 0, &resources, &mut cache).unwrap_err(),
+            "glyph id 65536 exceeds the font outline range"
+        );
+    }
+    let (fonts, chains, images) = carlito_resources();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache)
+        .expect("render into a cache no failed page bound");
 }
 
 #[test]
