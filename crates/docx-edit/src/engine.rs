@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use docx_layout::display_list::DisplayList;
@@ -508,6 +508,115 @@ fn resident_block_slots_match(previous: &LayoutBlock, next: &LayoutBlock) -> boo
         }
         (None, None) => true,
         _ => false,
+    }
+}
+
+/// Keys of blocks whose measure fingerprints changed in this apply.
+fn dirty_block_keys(
+    previous_fingerprints: &[u64],
+    next_fingerprints: &[u64],
+    measured: &[MeasuredBlock],
+) -> HashSet<String> {
+    previous_fingerprints
+        .iter()
+        .zip(next_fingerprints)
+        .zip(measured)
+        .filter(|((previous, next), _)| previous != next)
+        .filter_map(|(_, measured)| {
+            paragraph_identity(&measured.block).map(|(id, _)| block_key(id).into_owned())
+        })
+        .collect()
+}
+
+fn pm_matches_shifted(previous: Option<f64>, next: Option<f64>, delta: f64) -> bool {
+    match (previous, next) {
+        (Some(previous), Some(next)) => next == previous + delta,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// A paragraph fragment is unchanged-modulo-shift when its block's measure is
+/// clean, its geometry and line window are identical, and its document range
+/// moved by exactly the block's known position delta. Resolved lines derive
+/// deterministically from those inputs, so they need no deep comparison.
+/// Non-paragraph fragments conservatively report damage.
+fn fragment_matches_shifted(
+    previous: &docx_layout::types::Fragment,
+    next: &docx_layout::types::Fragment,
+    dirty: &HashSet<String>,
+    deltas: &HashMap<String, i64>,
+) -> bool {
+    let (
+        docx_layout::types::Fragment::Paragraph(previous),
+        docx_layout::types::Fragment::Paragraph(next),
+    ) = (previous, next)
+    else {
+        return false;
+    };
+    let key = block_key(&previous.block_id);
+    if key != block_key(&next.block_id) || dirty.contains(key.as_ref()) {
+        return false;
+    }
+    let delta = deltas.get(key.as_ref()).copied().unwrap_or(0) as f64;
+    previous.x == next.x
+        && previous.y == next.y
+        && previous.width == next.width
+        && previous.height == next.height
+        && previous.from_line == next.from_line
+        && previous.to_line == next.to_line
+        && previous.carried_from_prev == next.carried_from_prev
+        && previous.carried_to_next == next.carried_to_next
+        && pm_matches_shifted(previous.pm_start, next.pm_start, delta)
+        && pm_matches_shifted(previous.pm_end, next.pm_end, delta)
+}
+
+fn page_matches_shifted(
+    previous: &docx_layout::types::Page,
+    next: &docx_layout::types::Page,
+    dirty: &HashSet<String>,
+    deltas: &HashMap<String, i64>,
+) -> bool {
+    previous.number == next.number
+        && previous.margins == next.margins
+        && previous.size == next.size
+        && previous.orientation == next.orientation
+        && previous.columns == next.columns
+        && previous.footnote_ids == next.footnote_ids
+        && previous.footnote_reserved_height == next.footnote_reserved_height
+        && previous.fragments.len() == next.fragments.len()
+        && previous
+            .fragments
+            .iter()
+            .zip(&next.fragments)
+            .all(|(previous, next)| fragment_matches_shifted(previous, next, dirty, deltas))
+}
+
+/// Contiguous page range whose content genuinely changed, comparing the new
+/// layout against the retained one modulo the per-block position deltas. A
+/// non-converged incremental placement re-emits every page, but almost all of
+/// them are byte-equal-modulo-shift; the display rebuild and frame encoding
+/// only need the truly damaged span. `None` when the page count changed.
+fn damaged_page_span(
+    previous: &Layout,
+    next: &Layout,
+    dirty: &HashSet<String>,
+    deltas: &HashMap<String, i64>,
+) -> Option<(usize, usize)> {
+    if previous.pages.len() != next.pages.len() {
+        return None;
+    }
+    let mut first = None;
+    let mut last = None;
+    for (index, (previous, next)) in previous.pages.iter().zip(&next.pages).enumerate() {
+        if !page_matches_shifted(previous, next, dirty, deltas) {
+            first.get_or_insert(index);
+            last = Some(index);
+        }
+    }
+    match (first, last) {
+        (Some(first), Some(last)) => Some((first, last + 1)),
+        _ => Some((0, 0)),
     }
 }
 
@@ -1224,8 +1333,20 @@ impl EngineSession {
                     dirty_index,
                 );
                 match attempted {
-                    Ok(run) => {
+                    Ok(mut run) => {
                         incremental = true;
+                        let dirty = dirty_block_keys(
+                            &previous.block_fingerprints,
+                            &block_fingerprints,
+                            &input.measured,
+                        );
+                        if let Some(previous_layout) = previous.layout.as_ref()
+                            && let Some((start, end)) =
+                                damaged_page_span(previous_layout, &run.layout, &dirty, &deltas)
+                        {
+                            run.rebuilt_page_start = start;
+                            run.rebuilt_page_end = end;
+                        }
                         run
                     }
                     Err(docx_layout::LayoutError::Unsupported(_)) => {
