@@ -175,7 +175,11 @@ pub fn serialize_table_cell(
                 emitted = true;
             }
             BlockContent::BlockSdt(_) => {}
-            BlockContent::RawXml(_) => {}
+            BlockContent::RawXml(raw) => {
+                super::raw::validate_replayed_fragment(&raw.xml)?;
+                append_generated(&mut writer, &raw.xml);
+                emitted = true;
+            }
         }
     }
     if !emitted {

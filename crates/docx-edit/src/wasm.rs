@@ -974,6 +974,7 @@ fn thin_header_footer(
                         story_type: part.story_type.clone(),
                         hdr_ftr_type: part.hdr_ftr_type.clone(),
                         content: Vec::new(),
+                        custom_root_bindings: part.custom_root_bindings.clone(),
                         watermark: part.watermark.clone(),
                     },
                 )

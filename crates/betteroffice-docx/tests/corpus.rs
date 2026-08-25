@@ -1,7 +1,5 @@
-//! Corpus gate: every manifest-pinned fixture through the unedited round-trip
-//! oracles, its findings pinned exactly. A finding that appears or disappears
-//! without regenerating the golden under `GOLDEN_UPDATE=1` fails, so drift
-//! stays a deliberate act and a fixed defect must claim its fix.
+//! Every manifest-pinned fixture through the round-trip oracles, findings
+//! pinned exactly; goldens move only under `GOLDEN_UPDATE=1`.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-corpus`.
 
 mod common;

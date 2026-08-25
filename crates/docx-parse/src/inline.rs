@@ -846,18 +846,6 @@ const MODELLED_PREFIXES: [&str; 26] = [
     "w16cid", "w16du", "w16sdtdh", "w16sdtfl", "w16se", "wne", "wpc", "wpg", "wpi", "wps", "xml",
 ];
 
-/// Modelled prefixes the serializer re-emits, plus the ones it declares on a
-/// story root without modelling their elements.
-const UNMODELLED_DECLARED_PREFIXES: [&str; 12] = [
-    "cx", "cx1", "cx2", "cx3", "cx4", "cx5", "cx6", "cx7", "cx8", "aink", "am3d", "oel",
-];
-
-/// True when the serializer writes this prefix's declaration itself, so an
-/// authored declaration for it is boilerplate rather than the author's own.
-pub(crate) fn is_serializer_declared_prefix(prefix: &str) -> bool {
-    MODELLED_PREFIXES.contains(&prefix) || UNMODELLED_DECLARED_PREFIXES.contains(&prefix)
-}
-
 pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<InlineNode> {
     let prefix = match element.name.split_once(':') {
         Some((prefix, _)) => prefix,

@@ -1,7 +1,5 @@
-//! Ceilings: every defect the ledger enumerates is probed here and pinned with
-//! exact equality — never `<=`. Fixing one without lowering its ceiling fails,
-//! and so does a probe that stops reproducing while the ledger still lists it,
-//! so a fix must claim its fix and a regression cannot hide in headroom.
+//! Every ledger defect probed and pinned with exact equality, so a fix must
+//! claim its fix and a regression cannot hide in headroom.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-meta`.
 
 mod common;
@@ -44,10 +42,8 @@ const PROBES: &[Probe] = &[
     },
 ];
 
-/// The save path preserves foreign markup (`fidelity.rs` gates that), but the
-/// collaborative model is seeded without it: nothing the editor session can
-/// project mentions the foreign namespace, so an edit round trip cannot put
-/// back what it never held.
+/// The save path preserves foreign markup; the collaborative model is seeded
+/// without it, so an edit round trip cannot put back what it never held.
 fn the_edit_lane_cannot_see_foreign_markup() -> bool {
     let package = with_document_xml(&sample_docx(), |xml| {
         xml.replace(
@@ -132,8 +128,7 @@ fn typing_holds_at_one_defect() {
     assert_eq!(reproducing("edit.typing").len(), 1);
 }
 
-/// The count alone would let a fixed defect pay for a new one, so the names
-/// bind too: the ledger's enumeration is exactly what still reproduces.
+/// The names bind, not just the count: a fixed defect cannot pay for a new one.
 #[test]
 fn the_ledger_enumerates_exactly_the_defects_that_still_reproduce() {
     let observed: BTreeSet<(String, String)> = PROBES

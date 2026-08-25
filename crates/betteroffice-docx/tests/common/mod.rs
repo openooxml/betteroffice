@@ -18,10 +18,8 @@ pub fn roundtrip_report(before: &Parts, after: &Parts) -> Vec<String> {
     ooxml_fidelity::roundtrip_findings(before, after).unwrap()
 }
 
-/// A package small enough to reason about and wide enough to exercise the
-/// byte rules: a modelled story, a header, media, and an unmodelled XML part.
-/// Paragraph `11111111` carries bookmark markers; `22222222` is a plain
-/// table-cell paragraph.
+/// A modelled story, a header, media, and an unmodelled XML part. Paragraph
+/// `11111111` carries bookmarks; `22222222` is a plain table-cell paragraph.
 pub fn sample_docx() -> Vec<u8> {
     let parts = vec![
         (

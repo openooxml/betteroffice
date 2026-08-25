@@ -104,6 +104,19 @@ const FULL_NAMESPACES: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\""
 );
 
+/// Prefixes both story-root boilerplates declare; an authored declaration for
+/// any other prefix must survive as a custom binding or replayed raw markup
+/// under it stops resolving.
+const STORY_ROOT_PREFIXES: [&str; 20] = [
+    "wpc", "mc", "o", "r", "m", "v", "wp14", "wp", "w10", "w", "w14", "w15", "w16se", "w16cid",
+    "w16", "w16cex", "w16sdtdh", "wne", "wpg", "wps",
+];
+
+/// True when the document, header, and footer writers declare this prefix.
+pub(crate) fn is_story_root_prefix(prefix: &str) -> bool {
+    prefix == "xml" || STORY_ROOT_PREFIXES.contains(&prefix)
+}
+
 const MC_IGNORABLE: &str =
     "mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh w16sdtfl w16du wp14\"";
 
@@ -653,6 +666,23 @@ mod tests {
             palette_index: 0.0,
             block_content: vec![BlockContent::Paragraph(paragraph)],
         }
+    }
+
+    #[test]
+    fn the_story_root_prefix_set_matches_both_boilerplates() {
+        fn declared(boilerplate: &str) -> Vec<&str> {
+            let mut prefixes: Vec<&str> = boilerplate
+                .split("xmlns:")
+                .skip(1)
+                .filter_map(|entry| entry.split('=').next())
+                .collect();
+            prefixes.sort_unstable();
+            prefixes
+        }
+        let mut pinned = STORY_ROOT_PREFIXES.to_vec();
+        pinned.sort_unstable();
+        assert_eq!(declared(DOCUMENT_NAMESPACES), pinned);
+        assert_eq!(declared(HEADER_FOOTER_NAMESPACES), pinned);
     }
 
     #[test]

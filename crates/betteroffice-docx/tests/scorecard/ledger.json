@@ -211,7 +211,9 @@
         "preserve": [
           "betteroffice-docx corpus::every_fixture_round_trips_within_its_pinned_findings",
           "betteroffice-docx fidelity::an_unknown_element_in_a_modelled_part_survives_the_round_trip",
-          "betteroffice-docx fidelity::an_unknown_attribute_on_a_known_element_survives_the_round_trip"
+          "betteroffice-docx fidelity::an_unknown_attribute_on_a_known_element_survives_the_round_trip",
+          "betteroffice-docx fidelity::an_unknown_element_in_a_table_cell_survives_the_round_trip",
+          "betteroffice-docx fidelity::chartex_declarations_on_story_roots_survive_the_round_trip"
         ]
       },
       "ceilings": [

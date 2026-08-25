@@ -1,7 +1,5 @@
-//! Round-trip fidelity gates: open → save → reopen through the package
-//! oracles. The oracles parse bytes with their own reader (`ooxml-fidelity`),
-//! never this crate's model, so a model gap cannot hide a save loss. What the
-//! round trip still loses is pinned as a ceiling in `defects.rs`.
+//! Round-trip gates through the package oracles, which parse bytes with
+//! their own reader so a model gap cannot hide a save loss.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-oracles`.
 
 mod common;
@@ -120,6 +118,43 @@ fn root_declared_foreign_markup_in_a_header_survives_the_round_trip() {
         roundtrip_report(&parts_of(&original), &parts_of(&saved)),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn an_unknown_element_in_a_table_cell_survives_the_round_trip() {
+    let original = with_document_xml(&sample_docx(), |xml| {
+        xml.replace(
+            r#"<w:p w14:paraId="22222222">"#,
+            r#"<cx:cellmark xmlns:cx="urn:custom-x"/><w:p w14:paraId="22222222">"#,
+        )
+    });
+    let saved = save_unedited(&original);
+    assert_eq!(
+        roundtrip_report(&parts_of(&original), &parts_of(&saved)),
+        Vec::<String>::new()
+    );
+}
+
+/// The story roots do not declare the chartex family, so an authored `cx*`
+/// declaration is a custom binding, not boilerplate to filter.
+#[test]
+fn chartex_declarations_on_story_roots_survive_the_round_trip() {
+    let with_cx = |xml: String| {
+        xml.replace(
+            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#,
+            r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:cx1="http://schemas.microsoft.com/office/drawing/2015/9/8/chartex""#,
+        )
+        .replace("<w:p ", r#"<cx1:mark/><w:p "#)
+    };
+    for part in ["word/document.xml", "word/header1.xml"] {
+        let original = with_part(&sample_docx(), part, with_cx);
+        let saved = save_unedited(&original);
+        assert_eq!(
+            roundtrip_report(&parts_of(&original), &parts_of(&saved)),
+            Vec::<String>::new(),
+            "{part}"
+        );
+    }
 }
 
 /// The census is blind to attributes; the digest is the net here.

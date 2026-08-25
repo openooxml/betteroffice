@@ -1,7 +1,6 @@
-//! Ledger gate: the ledger matches the catalogue, every claim names a test
-//! that exists, and every measured number recomputes exactly. Regeneration
-//! under `GOLDEN_UPDATE=1` refuses a number that moved the wrong way — that
-//! refusal is where the ratchet bites.
+//! The ledger matches the catalogue, every claim names an existing test,
+//! and every measured number recomputes exactly; regeneration refuses a
+//! number that moved the wrong way.
 //! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-scorecard`.
 
 use std::collections::{BTreeMap, BTreeSet};
