@@ -119,6 +119,14 @@ struct DisplayListUpdate {
     reuse: Vec<(usize, usize)>,
     #[serde(default)]
     replace: Vec<(usize, DisplayPage)>,
+    /// Retained pages whose doc positions moved: `[next_index, previous_index,
+    /// run_lists]`, where each run list is applied in order and a run is
+    /// `[start, count, mask, delta]` over the canonical primitive order (body,
+    /// note separators+primitives per area, header, footer). Mask bits: 1
+    /// docStart, 2 docEnd, 4 fragmentDocStart, 8 fragmentDocEnd, 16 inline
+    /// widget pos — the owned frame-delta shift contract.
+    #[serde(default)]
+    shift: Vec<(usize, usize, Vec<Vec<(usize, usize, u8, i64)>>)>,
 }
 
 /// Apply a page-delta update to a stored display list, so an incremental
@@ -147,11 +155,146 @@ pub fn update_display_list(handle: u32, update_json: &str) -> Result<(), String>
     result
 }
 
+const SHIFT_DOC_START: u8 = 1 << 0;
+const SHIFT_DOC_END: u8 = 1 << 1;
+const SHIFT_FRAGMENT_START: u8 = 1 << 2;
+const SHIFT_FRAGMENT_END: u8 = 1 << 3;
+const SHIFT_INLINE_WIDGET: u8 = 1 << 4;
+
+fn primitive_attrs_mut(
+    primitive: &mut crate::display_list::Primitive,
+) -> &mut crate::display_list::DocAttrs {
+    use crate::display_list::Primitive;
+    match primitive {
+        Primitive::Text(value) => &mut value.attrs,
+        Primitive::GlyphRun(value) => &mut value.attrs,
+        Primitive::Rect(value) => &mut value.attrs,
+        Primitive::Line(value) => &mut value.attrs,
+        Primitive::Image(value) => &mut value.attrs,
+        Primitive::Shape(value) => &mut value.attrs,
+        Primitive::Decoration(value) => &mut value.attrs,
+    }
+}
+
+fn shift_position_field(
+    mask: u8,
+    bit: u8,
+    field: &mut Option<i64>,
+    name: &str,
+    delta: i64,
+) -> Result<(), String> {
+    if mask & bit == 0 {
+        return Ok(());
+    }
+    let value = field.ok_or_else(|| format!("position shift requires retained {name}"))?;
+    *field = Some(
+        value
+            .checked_add(delta)
+            .ok_or_else(|| format!("position shift overflows {name}"))?,
+    );
+    Ok(())
+}
+
+fn shift_primitive_positions(
+    primitive: &mut crate::display_list::Primitive,
+    mask: u8,
+    delta: i64,
+) -> Result<(), String> {
+    let attrs = primitive_attrs_mut(primitive);
+    shift_position_field(
+        mask,
+        SHIFT_DOC_START,
+        &mut attrs.doc_start,
+        "docStart",
+        delta,
+    )?;
+    shift_position_field(mask, SHIFT_DOC_END, &mut attrs.doc_end, "docEnd", delta)?;
+    shift_position_field(
+        mask,
+        SHIFT_FRAGMENT_START,
+        &mut attrs.fragment_doc_start,
+        "fragmentDocStart",
+        delta,
+    )?;
+    shift_position_field(
+        mask,
+        SHIFT_FRAGMENT_END,
+        &mut attrs.fragment_doc_end,
+        "fragmentDocEnd",
+        delta,
+    )?;
+    if mask & SHIFT_INLINE_WIDGET != 0 {
+        let widget = attrs
+            .inline_sdt_widget
+            .as_mut()
+            .ok_or_else(|| "position shift requires retained inline widget metadata".to_owned())?;
+        widget.pos = widget
+            .pos
+            .checked_add(delta)
+            .ok_or_else(|| "position shift overflows inline widget pos".to_owned())?;
+    }
+    Ok(())
+}
+
+/// Replays one owned-frame position-shift run list onto a retained page, in
+/// the same canonical primitive order the encoder used: body primitives, each
+/// note area's separators then primitives, header, footer.
+fn shift_page_positions(
+    page: &mut DisplayPage,
+    runs: &[(usize, usize, u8, i64)],
+) -> Result<(), String> {
+    let mut index = 0usize;
+    let mut cursor = 0usize;
+    let mut apply = |primitive: &mut crate::display_list::Primitive| -> Result<(), String> {
+        while cursor < runs.len() && runs[cursor].0 + runs[cursor].1 <= index {
+            cursor += 1;
+        }
+        if let Some(run) = runs.get(cursor)
+            && index >= run.0
+            && index < run.0 + run.1
+        {
+            shift_primitive_positions(primitive, run.2, run.3)?;
+        }
+        index += 1;
+        Ok(())
+    };
+    for primitive in &mut page.primitives {
+        apply(primitive)?;
+    }
+    for area in &mut page.note_areas {
+        for primitive in &mut area.separator_primitives {
+            apply(primitive)?;
+        }
+        for primitive in &mut area.primitives {
+            apply(primitive)?;
+        }
+    }
+    if let Some(header) = &mut page.header {
+        for primitive in &mut header.primitives {
+            apply(primitive)?;
+        }
+    }
+    if let Some(footer) = &mut page.footer {
+        for primitive in &mut footer.primitives {
+            apply(primitive)?;
+        }
+    }
+    if runs.last().is_some_and(|run| run.0 + run.1 > index) {
+        return Err("position shift range exceeds page primitive count".to_owned());
+    }
+    Ok(())
+}
+
 fn apply_display_list_update(
     dl: &mut DisplayList,
     update: DisplayListUpdate,
 ) -> Result<(), String> {
-    if update.reuse.len().saturating_add(update.replace.len()) != update.total {
+    let slots = update
+        .reuse
+        .len()
+        .saturating_add(update.replace.len())
+        .saturating_add(update.shift.len());
+    if slots != update.total {
         return Err("update slots do not cover the page total exactly".to_owned());
     }
     let mut previous: Vec<Option<DisplayPage>> = dl.pages.drain(..).map(Some).collect();
@@ -171,6 +314,22 @@ fn apply_display_list_update(
         *slot = Some(page);
     }
     for (next_index, page) in update.replace {
+        let slot = next
+            .get_mut(next_index)
+            .ok_or_else(|| format!("page target {next_index} out of range"))?;
+        if slot.is_some() {
+            return Err(format!("duplicate page target {next_index}"));
+        }
+        *slot = Some(page);
+    }
+    for (next_index, previous_index, run_lists) in update.shift {
+        let mut page = previous
+            .get_mut(previous_index)
+            .and_then(Option::take)
+            .ok_or_else(|| format!("shifted page {previous_index} is missing"))?;
+        for runs in &run_lists {
+            shift_page_positions(&mut page, runs)?;
+        }
         let slot = next
             .get_mut(next_index)
             .ok_or_else(|| format!("page target {next_index} out of range"))?;
@@ -418,6 +577,66 @@ mod tests {
         }
         close_display_list(handle);
         close_display_list(fresh);
+    }
+
+    #[test]
+    fn shift_update_matches_a_fresh_open_of_shifted_positions() {
+        drain();
+        let two_pages = |first_start: i64, second_start: i64| {
+            format!(
+                r##"{{"pages": [
+                    {{"pageIndex": 0, "width": 816, "height": 1056, "primitives": [{{
+                        "kind": "text", "text": "Hello", "x": 100, "baselineY": 200,
+                        "width": 50, "font": "400 16px Arial", "color": "#000000",
+                        "docStart": {first_start}, "docEnd": {first_end}
+                    }}]}},
+                    {{"pageIndex": 1, "width": 816, "height": 1056, "primitives": [{{
+                        "kind": "text", "text": "World", "x": 100, "baselineY": 200,
+                        "width": 50, "font": "400 16px Arial", "color": "#000000",
+                        "docStart": {second_start}, "docEnd": {second_end}
+                    }}]}}
+                ]}}"##,
+                first_end = first_start + 5,
+                second_end = second_start + 5,
+            )
+        };
+        let handle = open_display_list(&two_pages(1, 7)).expect("opens");
+
+        // shift page 1's doc positions by +3 (mask 15: doc + fragment fields;
+        // fragments are absent here so only doc positions move) — applied as
+        // two sequential run lists (+2 then +1) to cover multi-revision replay
+        let update = serde_json::json!({
+            "total": 2,
+            "reuse": [[0, 0]],
+            "shift": [[1, 1, [[[0, 1, 3, 2]], [[0, 1, 3, 1]]]]],
+        });
+        update_display_list(handle, &update.to_string()).expect("updates");
+
+        let fresh = open_display_list(&two_pages(1, 10)).expect("opens");
+        for (from, to) in [(1, 6), (10, 15), (7, 12), (0, 0)] {
+            assert_eq!(
+                range_rects_by_handle(handle, from, to).unwrap(),
+                range_rects_by_handle(fresh, from, to).unwrap(),
+                "range ({from},{to}) differs from a fresh open"
+            );
+        }
+        close_display_list(handle);
+        close_display_list(fresh);
+    }
+
+    #[test]
+    fn shift_update_beyond_primitive_count_closes_the_handle() {
+        drain();
+        let handle = open_display_list(SAMPLE).expect("opens");
+        let bad = serde_json::json!({
+            "total": 1,
+            "shift": [[0, 0, [[[0, 2, 3, 1]]]]],
+        });
+        assert!(update_display_list(handle, &bad.to_string()).is_err());
+        assert!(
+            hit_test_regions_by_handle(handle, 0, 120.0, 195.0).is_err(),
+            "a failed shift update closes the handle so callers fall back"
+        );
     }
 
     #[test]
