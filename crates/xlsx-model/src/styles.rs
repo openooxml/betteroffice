@@ -370,7 +370,7 @@ impl BorderKey {
 }
 
 /// intern cache: key -> index, tagged with the pool length it was synced to.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PoolMemo<K> {
     map: HashMap<K, u32>,
     pool_len: usize,
@@ -389,6 +389,14 @@ impl<K> Default for PoolMemo<K> {
     }
 }
 
+/// the memo is a pure accelerator, so a clone starts cold instead of copying
+/// the map; the first intern on the clone rebuilds only what it needs.
+impl<K> Clone for PoolMemo<K> {
+    fn clone(&self) -> Self {
+        PoolMemo::default()
+    }
+}
+
 impl<K: Eq + std::hash::Hash> PoolMemo<K> {
     fn invalidate(&mut self, pool_len: usize) {
         self.map.clear();
@@ -401,13 +409,19 @@ impl<K: Eq + std::hash::Hash> PoolMemo<K> {
 }
 
 /// intern cache for `num_fmts`; hits re-verify against the live table.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct FmtMemo {
     patterns: HashMap<String, (u16, usize)>,
     used: HashSet<u16>,
     pool_len: usize,
     #[cfg(test)]
     rebuilds: u64,
+}
+
+impl Clone for FmtMemo {
+    fn clone(&self) -> Self {
+        FmtMemo::default()
+    }
 }
 
 impl FmtMemo {
@@ -428,6 +442,16 @@ impl FmtMemo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NumFmtTableFull;
+
+/// pool lengths captured before a batch of interning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolMarks {
+    fonts: usize,
+    fills: usize,
+    borders: usize,
+    cell_xfs: usize,
+    num_fmts: usize,
+}
 
 /// parsed style tables plus theme; private memos accelerate interning and
 /// are invalidated by any pool length change.
@@ -650,6 +674,27 @@ impl Stylesheet {
             alignment,
         };
         Ok(Some(self.intern_xf(&xf)))
+    }
+
+    /// current pool lengths; interning only ever appends, so truncating back to
+    /// a mark restores exactly the pools that were live when it was taken.
+    pub fn pool_marks(&self) -> PoolMarks {
+        PoolMarks {
+            fonts: self.fonts.len(),
+            fills: self.fills.len(),
+            borders: self.borders.len(),
+            cell_xfs: self.cell_xfs.len(),
+            num_fmts: self.num_fmts.len(),
+        }
+    }
+
+    /// drop every pool entry interned since `marks` was taken.
+    pub fn restore_pools(&mut self, marks: PoolMarks) {
+        self.fonts.truncate(marks.fonts);
+        self.fills.truncate(marks.fills);
+        self.borders.truncate(marks.borders);
+        self.cell_xfs.truncate(marks.cell_xfs);
+        self.num_fmts.truncate(marks.num_fmts);
     }
 
     fn intern_font(&mut self, value: &Font) -> u32 {
@@ -1435,6 +1480,78 @@ mod tests {
         );
         assert_eq!(reloaded.cell_format(Some(warm_index)), warm);
         assert_eq!(reloaded.num_fmts.len(), 1);
+    }
+
+    #[test]
+    fn a_clone_starts_cold_and_still_dedups_against_the_pools() {
+        let mut styles = Stylesheet::default();
+        let format = CellFormat {
+            font: Font {
+                bold: true,
+                name: Some("Calibri".into()),
+                ..Font::default()
+            },
+            fill: Fill::Solid(Color::Rgb("#ff0000".into())),
+            number_format: NumberFormat::Custom {
+                pattern: "0.00".into(),
+            },
+            ..CellFormat::default()
+        };
+        let index = styles.intern_cell_format(&format).unwrap().unwrap();
+
+        let mut cloned = styles.clone();
+        assert!(cloned.font_memo.map.is_empty(), "clone must start cold");
+        assert!(cloned.fmt_memo.patterns.is_empty(), "clone must start cold");
+        assert_eq!(cloned, styles, "a cold memo must not change equality");
+
+        assert_eq!(cloned.intern_cell_format(&format).unwrap(), Some(index));
+        assert_eq!(cloned.fonts.len(), styles.fonts.len());
+        assert_eq!(cloned.fills.len(), styles.fills.len());
+        assert_eq!(cloned.cell_xfs.len(), styles.cell_xfs.len());
+        assert_eq!(cloned.num_fmts.len(), styles.num_fmts.len());
+        assert_eq!(cloned, styles);
+    }
+
+    #[test]
+    fn restore_pools_drops_everything_interned_since_the_mark() {
+        let mut ss = Stylesheet::default();
+        let first = CellFormat {
+            font: Font {
+                bold: true,
+                ..Font::default()
+            },
+            number_format: NumberFormat::Custom {
+                pattern: "0.0".into(),
+            },
+            ..CellFormat::default()
+        };
+        ss.intern_cell_format(&first).unwrap().unwrap();
+        let marks = ss.pool_marks();
+        let before = ss.clone();
+
+        let second = CellFormat {
+            font: Font {
+                italic: true,
+                name: Some("Arial".into()),
+                ..Font::default()
+            },
+            fill: Fill::Solid(Color::Indexed(7)),
+            number_format: NumberFormat::Custom {
+                pattern: "#,##0".into(),
+            },
+            ..CellFormat::default()
+        };
+        ss.intern_cell_format(&second).unwrap().unwrap();
+        assert_ne!(ss, before);
+
+        ss.restore_pools(marks);
+        assert_eq!(ss, before, "truncating to a mark must restore the pools");
+        assert_eq!(
+            ss.intern_cell_format(&first).unwrap(),
+            before.cell_xfs.len().checked_sub(1).map(|i| i as u32),
+            "the memo must not hand back a truncated index"
+        );
+        assert_eq!(ss, before);
     }
 
     #[test]
