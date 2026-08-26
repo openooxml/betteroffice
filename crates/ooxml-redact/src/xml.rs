@@ -1,6 +1,7 @@
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
+use crate::rels::{self, attribute_local, is_unqualified};
 use crate::{Format, RedactError, RedactionReport};
 
 pub(crate) fn redact_xml(
@@ -371,50 +372,17 @@ fn local_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-fn attribute_local(name: &str) -> &str {
-    name.rsplit_once(':').map_or(name, |(_, local)| local)
-}
-
 /// Whether the element is a relationship in a package relationship part, and
-/// whether it points outside the package. Only unqualified OPC attributes take
-/// part in the decision; a target shape is read only from the exact-case
-/// `Target` a `.rels` part's consumers resolve.
+/// whether it points outside the package.
 fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
     if !element.eq_ignore_ascii_case("Relationship") {
         return (false, false);
     }
     let package_part = path.to_ascii_lowercase().ends_with(".rels");
-    let external = attributes.iter().any(|(key, value)| {
-        if !is_unqualified(key) {
-            return false;
-        }
-        let local = attribute_local(key);
-        local.eq_ignore_ascii_case("TargetMode") && value.trim().eq_ignore_ascii_case("External")
-            || package_part && local == "Target" && external_target(value)
-    });
-    (package_part, external)
-}
-
-fn is_unqualified(key: &str) -> bool {
-    !key.contains(':')
-}
-
-/// True for relationship targets pointing outside the package.
-fn external_target(target: &str) -> bool {
-    let lower = target.trim().to_ascii_lowercase();
-    lower.starts_with("//")
-        || lower.starts_with(r"\\")
-        || lower
-            .split_once(':')
-            .is_some_and(|(scheme, _)| is_uri_scheme(scheme))
-}
-
-fn is_uri_scheme(scheme: &str) -> bool {
-    let mut chars = scheme.chars();
-    if !matches!(chars.next(), Some(first) if first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.'))
+    (
+        package_part,
+        rels::external_relationship(attributes, package_part),
+    )
 }
 
 fn xml_error(path: &str, error: impl fmt::Display) -> RedactError {
