@@ -81,6 +81,22 @@ fn single_glyph_scene() -> DisplayList {
     )
 }
 
+/// One glyph id, painted from whichever face the run names.
+fn glyph_id_scene(font_id: u32, glyph_id: u32) -> DisplayList {
+    list(
+        60.0,
+        24.0,
+        vec![json!({
+            "kind": "glyphRun",
+            "fontId": font_id,
+            "size": 18,
+            "color": "#000000",
+            "text": "A",
+            "glyphs": [{"id": glyph_id, "x": 6, "y": 19, "cluster": 0, "advance": 12}]
+        })],
+    )
+}
+
 /// A glyph id past the outline range, so the page fails before the cache holds
 /// anything.
 fn missing_glyph_scene() -> DisplayList {
@@ -150,6 +166,41 @@ fn a_glyph_cache_is_bound_to_the_store_that_filled_it() {
     assert_eq!(
         render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache).unwrap_err(),
         "glyph cache is bound to another font store"
+    );
+}
+
+/// Glyph ids are face-local, so a cache spanning pages has to key on the face
+/// too. The same id from a second face must paint that face's outline, not the
+/// one an earlier page cached.
+#[test]
+fn a_shared_cache_keeps_one_glyph_id_apart_per_face() {
+    let mut fonts = FontStore::new();
+    let carlito = fonts.register(FONT.to_vec()).expect("carlito");
+    let liberation = fonts.register(LIBERATION.to_vec()).expect("liberation");
+    let chains = FontChains::new();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let first = glyph_id_scene(carlito.to_u32(), 36);
+    let second = glyph_id_scene(liberation.to_u32(), 36);
+    let fresh_first = render_page(&first, 0, &resources).expect("first").bytes;
+    let fresh_second = render_page(&second, 0, &resources).expect("second").bytes;
+    assert_ne!(
+        fresh_first, fresh_second,
+        "the fixture faces must draw glyph 36 differently"
+    );
+
+    let mut cache = GlyphCache::default();
+    assert_eq!(
+        render_page_cached(&first, 0, &resources, &mut cache)
+            .expect("shared first")
+            .bytes,
+        fresh_first
+    );
+    assert_eq!(
+        render_page_cached(&second, 0, &resources, &mut cache)
+            .expect("shared second")
+            .bytes,
+        fresh_second
     );
 }
 

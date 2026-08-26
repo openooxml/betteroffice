@@ -199,6 +199,23 @@ fn text_page() -> DisplayList {
     })])
 }
 
+/// Latin and Hebrew in one run, so the chain resolves a glyph per face.
+fn mixed_script_page() -> DisplayList {
+    sized_page(
+        96,
+        32,
+        vec![json!({
+            "kind": "text",
+            "text": "A\u{05d0}o\u{05d1}",
+            "x": 2,
+            "baselineY": 20,
+            "width": 90,
+            "font": "400 16px Carlito, sans-serif",
+            "color": "#101010"
+        })],
+    )
+}
+
 fn decode(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
     let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
         .read_info()
@@ -243,6 +260,62 @@ fn renders_text_only_once_its_family_is_registered() {
     let (quads, _) = pixels.as_chunks::<4>();
     let painted = quads.iter().filter(|p| **p != [255, 255, 255, 255]).count();
     assert!(painted > 0, "no glyphs were painted");
+}
+
+/// The glyph cache outlives every page and keys on font id, so a face
+/// registered mid-export must take a new id rather than renumber the outlines
+/// already cached under the old ones. A document whose cache was warmed before
+/// the registration has to paint what one that registered both faces up front
+/// paints.
+#[test]
+fn a_face_registered_between_pages_leaves_the_cached_outlines_alone() {
+    let mut warmed = document();
+    assert_eq!(
+        warmed
+            .register_font("Carlito", false, false, CARLITO)
+            .unwrap(),
+        0
+    );
+    let latin = warmed.render_png(&text_page(), 0).unwrap().bytes;
+    assert_eq!(
+        warmed
+            .register_font("Carlito", false, false, SMALL_FONT)
+            .unwrap(),
+        1
+    );
+
+    let mut cold = document();
+    cold.register_font("Carlito", false, false, CARLITO)
+        .unwrap();
+    cold.register_font("Carlito", false, false, SMALL_FONT)
+        .unwrap();
+
+    let page = mixed_script_page();
+    assert_eq!(
+        warmed.render_png(&page, 0).unwrap().bytes,
+        cold.render_png(&page, 0).unwrap().bytes
+    );
+    assert_eq!(warmed.render_png(&text_page(), 0).unwrap().bytes, latin);
+}
+
+/// Font ids are store-local. Two documents registering different faces under
+/// one family name must not paint each other's outlines.
+#[test]
+fn two_documents_sharing_a_family_name_paint_their_own_faces() {
+    let mut latin = document();
+    latin
+        .register_font("Carlito", false, false, CARLITO)
+        .unwrap();
+    let mut hebrew = document();
+    hebrew
+        .register_font("Carlito", false, false, SMALL_FONT)
+        .unwrap();
+
+    let page = mixed_script_page();
+    assert_ne!(
+        latin.render_png(&page, 0).unwrap().bytes,
+        hebrew.render_png(&page, 0).unwrap().bytes
+    );
 }
 
 #[test]

@@ -36,9 +36,8 @@ pub fn measure_text(
 const MAX_CACHED_GLYPH_OUTLINES: usize = 8_192;
 
 /// Extracted glyph outlines keyed by font and glyph id, reusable across pages.
-/// Bound to the first [`FontStore`] that fills it — ids are store-local, so a
-/// render against another store is refused — and capped at
-/// [`MAX_CACHED_GLYPH_OUTLINES`] entries with oldest-insert-first eviction.
+/// Ids are store-local, so the cache binds to the store that fills it and
+/// refuses any other; entries past the cap evict oldest-first.
 #[derive(Default)]
 pub struct GlyphCache {
     entries: HashMap<(u32, u32), CachedGlyph>,

@@ -154,9 +154,9 @@ impl Document {
     /// Rasterizes one display-list page to deterministic PNG bytes. A page past
     /// [`MAX_PIXMAP_DIM`] or [`MAX_PIXMAP_PIXELS`] is refused before any surface
     /// is allocated; an image the backend cannot draw is skipped and counted.
-    /// Glyph outlines are cached on the document, so a page reuses the outlines
-    /// earlier pages extracted. The cache is bounded, so an export needing more
-    /// outlines than it retains re-extracts the ones it evicted.
+    /// Glyph outlines are cached on the document, so a page reuses what earlier
+    /// pages extracted; an export past the cache's cap re-extracts what it
+    /// evicted.
     pub fn render_png(
         &self,
         display_list: &DisplayList,
