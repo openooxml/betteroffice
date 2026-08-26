@@ -226,7 +226,9 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   if (snapshot.layoutWithRegions) {
-    session.layoutDocumentWithRegionsJson(snapshot.layoutInput);
+    // retained variant: the reply is discarded here, and the full envelope
+    // serializes the measured arena — tens of MB on a large document
+    session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }

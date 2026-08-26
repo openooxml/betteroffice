@@ -530,9 +530,17 @@ export function useRustDisplayList(
     // Merged doc-wide font chains from the Rust measure source (when active).
     // A non-empty map activates GlyphRun emission; absent ⇒ TextRunPrimitive.
     const fontChains = fontChainsProviderRef?.current?.();
+    // `measured`/`options` delegate to the kernel-input getters so the
+    // worker-rendered path (which only encodes extras) never materializes the
+    // retained measured arena; the main-thread fallback build reads them and
+    // pays the fetch exactly once.
     const buildInputs = {
-      measured: inputs.measured,
-      options: inputs.options,
+      get measured() {
+        return inputs.measured;
+      },
+      get options() {
+        return inputs.options;
+      },
       layout,
       ...(inputs.headersFooters ? { headersFooters: inputs.headersFooters } : {}),
       ...(fontChains ? { fontChains } : {}),

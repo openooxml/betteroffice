@@ -1,21 +1,18 @@
 import type { ResidentMeasurementConfig } from '../layout/measure';
-import type {
-  BlockExtent,
-  Layout,
-  LayoutBlock,
-  LayoutOptions,
-  MeasuredBlock,
-} from '../layout/pagination';
+import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
 import type { Document, NoteKind, SectionProperties } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
 
-interface ResidentRegionLayoutOutput {
-  measured: MeasuredBlock[];
-  options: LayoutOptions;
+interface ResidentRegionLayoutRetainedOutput {
   layout: Layout;
   headersFooters?: DisplayListHeadersFooters;
   notesConverged: boolean;
+}
+
+interface RetainedKernelInputs {
+  measured: MeasuredBlock[];
+  options: LayoutOptions;
 }
 
 export interface ResidentRegionLayoutRequest {
@@ -43,14 +40,15 @@ export interface ResidentRegionLayoutRequest {
 export interface ComputeLayoutInputs {
   document: Document | null;
   pageGap: number;
-  session: Pick<YrsSession, 'layoutDocumentWithRegionsJson'>;
+  session: Pick<
+    YrsSession,
+    'layoutDocumentWithRegionsRetainedJson' | 'retainedKernelInputsJson'
+  >;
   renderEnv: YrsRenderEnv;
   measurement: ResidentMeasurementConfig;
 }
 
 export interface LayoutComputation {
-  blocks: LayoutBlock[];
-  measures: BlockExtent[];
   layout: Layout;
   notesConverged: boolean;
 }
@@ -134,16 +132,29 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
   );
   request.measurement = inputs.measurement;
   const output = JSON.parse(
-    inputs.session.layoutDocumentWithRegionsJson(JSON.stringify(request))
-  ) as ResidentRegionLayoutOutput;
+    inputs.session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
+  ) as ResidentRegionLayoutRetainedOutput;
+  // The measured arena is tens of MB of shaping JSON on a large document and
+  // the worker-rendered path never reads it, so it stays wasm-side until the
+  // main-thread display fallback actually asks. The fetch reads the CURRENT
+  // retained state: coherent for same-commit readers (the display effect runs
+  // against the layout it was just given); an async fallback racing a newer
+  // relayout renders one transiently newer arena, then reconverges on the
+  // next pipeline pass.
+  const session = inputs.session;
+  let kernel: RetainedKernelInputs | null = null;
+  const fetchKernel = (): RetainedKernelInputs =>
+    (kernel ??= JSON.parse(session.retainedKernelInputsJson()) as RetainedKernelInputs);
   kernelInputsByLayout.set(output.layout, {
-    measured: output.measured,
-    options: output.options,
+    get measured() {
+      return fetchKernel().measured;
+    },
+    get options() {
+      return fetchKernel().options;
+    },
     ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
   });
   return {
-    blocks: output.measured.map((item) => item.block),
-    measures: output.measured.map((item) => item.measure),
     layout: output.layout,
     notesConverged: output.notesConverged,
   };

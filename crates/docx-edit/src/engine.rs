@@ -479,6 +479,24 @@ fn measure_template_is_resident_safe(value: &serde_json::Value) -> bool {
             .is_none_or(|offset| offset == 0.0)
 }
 
+/// Stable identity of any layout block, for retained-measure reuse across a
+/// full region pass (paragraph splits and merges keep every other key).
+fn layout_block_key(block: &LayoutBlock) -> Option<String> {
+    let id = match block {
+        LayoutBlock::Paragraph(value) => &value.id,
+        LayoutBlock::Table(value) => &value.id,
+        LayoutBlock::Image(value) => &value.id,
+        LayoutBlock::TextBox(value) => &value.id,
+        LayoutBlock::Shape(value) => &value.id,
+        LayoutBlock::Chart(value) => &value.id,
+        LayoutBlock::SectionBreak(value) => &value.id,
+        LayoutBlock::PageBreak(value) => &value.id,
+        LayoutBlock::ColumnBreak(value) => &value.id,
+        LayoutBlock::Unsupported => return None,
+    };
+    Some(block_key(id))
+}
+
 fn options_fingerprint(input: &LayoutInput) -> Result<u64, String> {
     serde_json::to_vec(&input.options)
         .map(|bytes| hash_bytes(&bytes))
@@ -959,6 +977,155 @@ impl EngineSession {
         )
     }
 
+    /// Measurement for the full region pass. Shaping every block is the
+    /// dominant cost of a structural relayout (Enter, paste), so when the
+    /// measurement world is unchanged — one uniform measure width, identical
+    /// layout options, no floating zones — fingerprint-identical blocks reuse
+    /// their retained measures by stable block key, which survives paragraph
+    /// splits and merges. Anything else falls back to the float-aware
+    /// full measurement.
+    fn measure_full_pass_blocks(
+        &self,
+        blocks: &mut [LayoutBlock],
+        widths: &[f64],
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        geometry: &docx_layout::measure_blocks::FloatPageGeometry,
+        input: &LayoutInput,
+    ) -> Result<(Vec<BlockExtent>, Option<Vec<Option<u64>>>), String> {
+        let default_width = widths.first().copied().unwrap_or(0.0);
+        let uniform_width =
+            !widths.is_empty() && widths.iter().all(|width| *width == default_width);
+        let retained = {
+            let pagination = self.pagination.borrow();
+            let eligible = uniform_width
+                && pagination.input.is_some()
+                && pagination.options_fingerprint == options_fingerprint(input)?
+                && !docx_layout::measure_blocks::has_floating_zones(
+                    blocks,
+                    default_width,
+                    measurement,
+                    Some(geometry),
+                )?;
+            eligible.then(|| {
+                let previous = pagination
+                    .input
+                    .as_ref()
+                    .expect("eligibility checked input");
+                let mut retained = HashMap::with_capacity(previous.measured.len());
+                for (index, measured) in previous.measured.iter().enumerate() {
+                    if let Some(key) = layout_block_key(&measured.block)
+                        && let Ok(fingerprint) = block_fingerprint(&measured.block)
+                    {
+                        let measured_fingerprint =
+                            pagination.block_fingerprints.get(index).copied();
+                        retained.insert(
+                            key,
+                            (fingerprint, measured.measure.clone(), measured_fingerprint),
+                        );
+                    }
+                }
+                retained
+            })
+        };
+        let Some(retained) = retained else {
+            let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
+                blocks,
+                widths,
+                measurement,
+                Some(geometry),
+            )?;
+            return Ok((measures, None));
+        };
+        let mut measures = Vec::with_capacity(blocks.len());
+        // Reused blocks also carry their retained MEASURED fingerprint, so the
+        // pagination step never re-serializes the (large) clean measures just
+        // to hash them; only re-measured blocks fingerprint afresh.
+        let mut fingerprints = Vec::with_capacity(blocks.len());
+        let mut measure_calls = 0_u64;
+        let mut reused_blocks = 0_u64;
+        for block in blocks.iter_mut() {
+            let reuse = layout_block_key(block)
+                .and_then(|key| retained.get(&key))
+                .filter(|(fingerprint, _, _)| {
+                    block_fingerprint(block).is_ok_and(|next| next == *fingerprint)
+                })
+                .map(|(_, measure, measured_fingerprint)| (measure.clone(), *measured_fingerprint));
+            if let Some((measure, measured_fingerprint)) = reuse {
+                measures.push(measure);
+                fingerprints.push(measured_fingerprint);
+                reused_blocks = reused_blocks.wrapping_add(1);
+            } else {
+                measures.push(docx_layout::measure_blocks::measure_block(
+                    block,
+                    default_width,
+                    measurement,
+                )?);
+                fingerprints.push(None);
+                measure_calls = measure_calls.wrapping_add(1);
+            }
+        }
+        let mut state = self.measurement.borrow_mut();
+        state.resident_measure_calls = state.resident_measure_calls.wrapping_add(measure_calls);
+        state.resident_reused_blocks = state.resident_reused_blocks.wrapping_add(reused_blocks);
+        Ok((measures, Some(fingerprints)))
+    }
+
+    /// Region layout that only returns the pagination result: the full pass
+    /// runs and lands in retained state, but the reply omits the measured
+    /// arena — tens of MB of shaping data on a large document that hosts on
+    /// the render path never read. A host that needs the compat display-list
+    /// inputs fetches them on demand via
+    /// [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input_json: &str,
+    ) -> Result<String, String> {
+        let notes_converged = self.layout_document_with_regions_value(input_json)?;
+        let pagination = self.pagination.borrow();
+        let regions_state = self.regions.borrow();
+        let state = regions_state
+            .as_ref()
+            .expect("region state retained after successful region layout");
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedRegionLayoutOutput<'a> {
+            layout: &'a Layout,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            headers_footers: Option<&'a serde_json::Value>,
+            notes_converged: bool,
+        }
+        serde_json::to_string(&RetainedRegionLayoutOutput {
+            layout: pagination
+                .layout
+                .as_ref()
+                .expect("layout retained after successful pagination"),
+            headers_footers: state.headers_footers.as_ref(),
+            notes_converged,
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
+    /// The retained measured arena and layout options, for a host taking the
+    /// main-thread display-list fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, String> {
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedKernelInputs<'a> {
+            measured: &'a [MeasuredBlock],
+            options: &'a docx_layout::types::LayoutOptions,
+        }
+        serde_json::to_string(&RetainedKernelInputs {
+            measured: &input.measured,
+            options: &input.options,
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
     /// The full region pass minus the JSON envelope: pagination, note
     /// stabilization, and header/footer measurement all land in retained
     /// state. `apply_input`'s fallback consumes this directly so a keystroke
@@ -976,6 +1143,7 @@ impl EngineSession {
             )
         };
         let resident_body = body_story.is_some();
+        let mut measured_fingerprint_hints: Option<Vec<Option<u64>>> = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
                 .as_ref()
@@ -986,17 +1154,19 @@ impl EngineSession {
             apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
             let widths = region_measurement_widths(&blocks, &input, &regions);
             let geometry = initial_float_page_geometry(&input, &regions);
-            let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
+            let (measures, fingerprints) = self.measure_full_pass_blocks(
                 &mut blocks,
                 &widths,
                 &measurement,
-                Some(&geometry),
+                &geometry,
+                &input,
             )?;
             input.measured = blocks
                 .into_iter()
                 .zip(measures)
                 .map(|(block, measure)| MeasuredBlock { block, measure })
                 .collect();
+            measured_fingerprint_hints = fingerprints;
         } else {
             apply_section_geometry(&mut input, &regions);
         }
@@ -1005,7 +1175,20 @@ impl EngineSession {
         } else {
             None
         };
-        self.layout_document_value(input.clone())?;
+        match measured_fingerprint_hints.take() {
+            Some(hints) => {
+                let fingerprints = hints
+                    .iter()
+                    .zip(&input.measured)
+                    .map(|(hint, measured)| match hint {
+                        Some(fingerprint) => Ok(*fingerprint),
+                        None => measured_fingerprint(measured),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.layout_document_value_with_fingerprints(input.clone(), fingerprints)?;
+            }
+            None => self.layout_document_value(input.clone())?,
+        }
         let mut initial_layout = self
             .pagination
             .borrow()
