@@ -61,6 +61,7 @@ use unicode_segmentation::UnicodeSegmentation;
 thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CARET_STOPS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Vertical slack (px) added on each side of a run's band when testing a
@@ -87,6 +88,9 @@ fn font_px(font: &str) -> f64 {
 }
 
 /// a positioned text-bearing primitive flattened to shared hit geometry.
+/// Caret stops are built lazily: most queries walk every text primitive of a
+/// region for range overlap but resolve caret x for only the few that
+/// intersect, and stop construction is the expensive part.
 struct TextHit<'a> {
     attrs: &'a DocAttrs,
     x: f64,
@@ -96,7 +100,49 @@ struct TextHit<'a> {
     bottom: f64,
     doc_start: i64,
     doc_end: i64,
-    caret_stops: Vec<CaretStop>,
+    stops_source: StopsSource<'a>,
+    caret_stops: std::cell::OnceCell<Vec<CaretStop>>,
+}
+
+enum StopsSource<'a> {
+    Text {
+        text: &'a str,
+        rtl: bool,
+    },
+    Glyphs {
+        text: &'a str,
+        glyphs: &'a [crate::display_list::PlacedGlyph],
+        rtl: bool,
+    },
+}
+
+impl TextHit<'_> {
+    fn stops(&self) -> &[CaretStop] {
+        self.caret_stops.get_or_init(|| {
+            #[cfg(test)]
+            CARET_STOPS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+            match self.stops_source {
+                StopsSource::Text { text, rtl } => {
+                    text_caret_stops(text, self.x, self.width, rtl, self.doc_start, self.doc_end)
+                }
+                StopsSource::Glyphs { text, glyphs, rtl } => {
+                    let stops = glyph_caret_stops(text, glyphs, rtl, self.doc_start, self.doc_end);
+                    if stops.is_empty() {
+                        text_caret_stops(
+                            text,
+                            self.x,
+                            self.width,
+                            rtl,
+                            self.doc_start,
+                            self.doc_end,
+                        )
+                    } else {
+                        stops
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -190,18 +236,23 @@ fn glyph_caret_stops(
         .collect();
     let utf16_len = text.encode_utf16().count() as i64;
     let mut stops = Vec::with_capacity(clusters.len() * 2);
+    // clusters are byte-ordered and contiguous (each ends where the next
+    // starts), so UTF-16 offsets accumulate in one linear pass — a per-cluster
+    // prefix rescan would be quadratic in the run length
+    let mut logical_cursor = clusters.first().map_or(0, |(byte, _, _)| {
+        text.get(..*byte)
+            .map_or(0, |prefix| prefix.encode_utf16().count() as i64)
+    });
     for (index, (byte_start, left, right)) in clusters.iter().copied().enumerate() {
         let byte_end = clusters
             .get(index + 1)
             .map_or(text.len(), |(byte, _, _)| *byte);
-        let Some(prefix) = text.get(..byte_start) else {
-            continue;
-        };
         let Some(cluster_text) = text.get(byte_start..byte_end) else {
             continue;
         };
-        let logical_start = prefix.encode_utf16().count() as i64;
+        let logical_start = logical_cursor;
         let logical_end = logical_start + cluster_text.encode_utf16().count() as i64;
+        logical_cursor = logical_end;
         let start_position = doc_position_at_utf16(doc_start, doc_end, logical_start, utf16_len);
         let end_position = doc_position_at_utf16(doc_start, doc_end, logical_end, utf16_len);
         stops.push(CaretStop {
@@ -253,7 +304,11 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                caret_stops: text_caret_stops(&t.text, x, width, is_rtl(&t.attrs, t.rtl), ds, de),
+                stops_source: StopsSource::Text {
+                    text: &t.text,
+                    rtl: is_rtl(&t.attrs, t.rtl),
+                },
+                caret_stops: std::cell::OnceCell::new(),
             })
         }
         Primitive::GlyphRun(g) => {
@@ -280,10 +335,6 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 .fold(f64::NEG_INFINITY, f64::max);
             let width = (right - min_x).max(0.0);
             let rtl = is_rtl(&g.attrs, g.rtl);
-            let mut caret_stops = glyph_caret_stops(&g.text, &g.glyphs, rtl, ds, de);
-            if caret_stops.is_empty() {
-                caret_stops = text_caret_stops(&g.text, min_x, width, rtl, ds, de);
-            }
             Some(TextHit {
                 attrs: &g.attrs,
                 x: min_x,
@@ -293,7 +344,12 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                caret_stops,
+                stops_source: StopsSource::Glyphs {
+                    text: &g.text,
+                    glyphs: &g.glyphs,
+                    rtl,
+                },
+                caret_stops: std::cell::OnceCell::new(),
             })
         }
         _ => None,
@@ -305,12 +361,13 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
 }
 
 fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
-    let mut best = hit.caret_stops.first().copied().unwrap_or(CaretStop {
+    let stops = hit.stops();
+    let mut best = stops.first().copied().unwrap_or(CaretStop {
         x: hit.x,
         position: hit.doc_start,
     });
     let mut best_distance = (x - best.x).abs();
-    for stop in hit.caret_stops.iter().copied().skip(1) {
+    for stop in stops.iter().copied().skip(1) {
         let distance = (x - stop.x).abs();
         if distance < best_distance || (distance == best_distance && stop.x > best.x) {
             best = stop;
@@ -321,7 +378,7 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
 }
 
 fn x_at_position(hit: &TextHit<'_>, position: i64) -> f64 {
-    hit.caret_stops
+    hit.stops()
         .iter()
         .min_by(|left, right| {
             (left.position - position)
@@ -1841,6 +1898,44 @@ mod tests {
 
         assert_eq!(movement.position, 2511);
         assert_eq!(hit_builds, 4);
+    }
+
+    /// Range queries walk every text primitive for overlap, but caret-stop
+    /// construction (grapheme/cluster segmentation) must only run for the
+    /// primitives the range actually touches.
+    #[test]
+    fn range_rects_build_caret_stops_only_for_overlapping_runs() {
+        let runs: Vec<serde_json::Value> = (0..200)
+            .map(|index| {
+                let doc_start = 1 + index * 10;
+                serde_json::json!({
+                    "kind": "text",
+                    "text": "aaaaaaaaaa",
+                    "x": 100.0 + index as f64,
+                    "baselineY": 200,
+                    "width": 40,
+                    "font": "400 16px Calibri",
+                    "color": "#000000",
+                    "docStart": doc_start,
+                    "docEnd": doc_start + 10,
+                    "blockId": index,
+                    "lineIndex": index
+                })
+            })
+            .collect();
+        let dl: DisplayList = serde_json::from_value(serde_json::json!({
+            "pages": [{ "pageIndex": 0, "width": 816, "height": 1056, "primitives": runs }]
+        }))
+        .unwrap();
+
+        CARET_STOPS_BUILD_COUNT.with(|count| count.set(0));
+        let rects = range_rects(&dl, 15, 18);
+        let stop_builds = CARET_STOPS_BUILD_COUNT.with(std::cell::Cell::get);
+        assert_eq!(rects.len(), 1);
+        assert!(
+            stop_builds <= 2,
+            "a 3-char selection must not segment every run on the page ({stop_builds} builds)"
+        );
     }
 
     /// Dense pages (fine-print tables, per-character formatting) must not cost
