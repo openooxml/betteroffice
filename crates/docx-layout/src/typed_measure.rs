@@ -10,6 +10,7 @@ use ooxml_text::measure::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatZoneIn, FontChains, IndentIn, MeasureRequest,
     RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn, TabStopIn,
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::measure_blocks::{FloatingZone, MeasurementConfig};
@@ -30,7 +31,15 @@ pub(crate) fn measure_paragraph(
     let block = block_in(paragraph)?;
     let defaults = defaults_in(&config.defaults)?;
     let compat = compat_in(&config.compat)?;
-    let zones = floating_zones.map(|zones| zones.iter().map(zone_in).collect::<Vec<FloatZoneIn>>());
+    let zones = match floating_zones {
+        None => None,
+        Some(zones) => Some(
+            zones
+                .iter()
+                .map(zone_in)
+                .collect::<Option<Vec<FloatZoneIn>>>()?,
+        ),
+    };
     let request = MeasureRequest {
         block: &block,
         max_width: content_width as f32,
@@ -38,7 +47,10 @@ pub(crate) fn measure_paragraph(
         defaults: &defaults,
         compat,
         floating_zones: zones.as_deref(),
-        paragraph_y_offset: floating_zones.is_some().then(|| cumulative_y as f32),
+        paragraph_y_offset: floating_zones
+            .is_some()
+            .then_some(cumulative_y)
+            .and_then(finite),
         authoritative_shaping: config.authoritative_shaping,
     };
     let extent = crate::measure_paragraph_typed_resident(&request).ok()?;
@@ -53,96 +65,79 @@ fn block_in(paragraph: &ParagraphBlock) -> Option<BlockIn> {
             .iter()
             .map(run_in)
             .collect::<Option<Vec<_>>>()?,
-        attrs: paragraph.attrs.as_ref().map(attrs_in),
+        attrs: match paragraph.attrs.as_ref() {
+            None => None,
+            Some(attrs) => Some(attrs_in(attrs)?),
+        },
     })
+}
+
+/// A non-finite float serialized as `null`, which the JSON boundary read back
+/// as absent; the typed path drops it the same way.
+fn finite(value: f64) -> Option<f32> {
+    value.is_finite().then_some(value as f32)
 }
 
 fn defaults_in(defaults: &Value) -> Option<DefaultsIn> {
-    let fields = defaults.as_object()?;
-    Some(DefaultsIn {
-        font_size: fields.get("fontSize")?.as_f64()? as f32,
-        font_family: fields.get("fontFamily")?.as_str()?.to_owned(),
-    })
+    DefaultsIn::deserialize(defaults).ok()
 }
 
 fn compat_in(compat: &Value) -> Option<CompatIn> {
-    match compat {
-        Value::Null => Some(CompatIn::default()),
-        Value::Object(fields) => {
-            let mut parsed = CompatIn::default();
-            parsed.no_leading = bool_flag(fields.get("noLeading"))?;
-            parsed.do_not_expand_shift_return = bool_flag(fields.get("doNotExpandShiftReturn"))?;
-            Some(parsed)
-        }
-        _ => None,
+    if compat.is_null() {
+        return Some(CompatIn::default());
     }
+    CompatIn::deserialize(compat).ok()
 }
 
-fn bool_flag(value: Option<&Value>) -> Option<bool> {
-    match value {
-        None => Some(false),
-        Some(Value::Bool(flag)) => Some(*flag),
-        Some(_) => None,
-    }
-}
-
-fn number_f32(value: Option<&Value>) -> Option<Option<f32>> {
-    match value {
-        None | Some(Value::Null) => Some(None),
-        Some(Value::Number(number)) => Some(Some(number.as_f64()? as f32)),
-        Some(_) => None,
-    }
-}
-
-fn zone_in(zone: &FloatingZone) -> FloatZoneIn {
-    FloatZoneIn {
-        left_margin: zone.left_margin as f32,
-        right_margin: zone.right_margin as f32,
-        top_y: zone.top_y as f32,
-        bottom_y: zone.bottom_y as f32,
+fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
+    Some(FloatZoneIn {
+        left_margin: finite(zone.left_margin)?,
+        right_margin: finite(zone.right_margin)?,
+        top_y: finite(zone.top_y)?,
+        bottom_y: finite(zone.bottom_y)?,
         segments: None,
         full_width_block: zone.full_width_block,
-    }
+    })
 }
 
-fn attrs_in(attrs: &ParagraphAttrs) -> AttrsIn {
-    AttrsIn {
+fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
+    Some(AttrsIn {
         alignment: attrs.alignment.clone(),
         spacing: attrs.spacing.as_ref().map(|spacing| SpacingIn {
-            before: spacing.before.map(|px| px as f32),
-            after: spacing.after.map(|px| px as f32),
-            line: spacing.line.map(|px| px as f32),
+            before: spacing.before.and_then(finite),
+            after: spacing.after.and_then(finite),
+            line: spacing.line.and_then(finite),
             line_unit: spacing.line_unit.clone(),
             line_rule: spacing.line_rule.clone(),
         }),
         indent: attrs.indent.as_ref().map(|indent| IndentIn {
-            left: indent.left.map(|px| px as f32),
-            right: indent.right.map(|px| px as f32),
-            first_line: indent.first_line.map(|px| px as f32),
-            hanging: indent.hanging.map(|px| px as f32),
+            left: indent.left.and_then(finite),
+            right: indent.right.and_then(finite),
+            first_line: indent.first_line.and_then(finite),
+            hanging: indent.hanging.and_then(finite),
         }),
-        tabs: attrs
-            .tabs
-            .as_ref()
-            .map(|stops| stops.iter().map(tab_stop_in).collect()),
+        tabs: match attrs.tabs.as_ref() {
+            None => None,
+            Some(stops) => Some(stops.iter().map(tab_stop_in).collect::<Option<Vec<_>>>()?),
+        },
         bidi: attrs.bidi.unwrap_or(false),
-        default_font_size: attrs.default_font_size.map(|pt| pt as f32),
+        default_font_size: attrs.default_font_size.and_then(finite),
         default_font_family: attrs.default_font_family.clone(),
         suppress_empty_paragraph_height: attrs.suppress_empty_paragraph_height.unwrap_or(false),
         list_marker: attrs.list_marker.clone(),
         list_marker_hidden: attrs.list_marker_hidden.unwrap_or(false),
         list_marker_font_family: attrs.list_marker_font_family.clone(),
-        list_marker_font_size: attrs.list_marker_font_size.map(|pt| pt as f32),
+        list_marker_font_size: attrs.list_marker_font_size.and_then(finite),
         list_marker_suffix: attrs.list_marker_suffix.clone(),
-        default_tab_stop_twips: attrs.default_tab_stop_twips.map(|twips| twips as f32),
-    }
+        default_tab_stop_twips: attrs.default_tab_stop_twips.and_then(finite),
+    })
 }
 
-fn tab_stop_in(stop: &TabStop) -> TabStopIn {
-    TabStopIn {
+fn tab_stop_in(stop: &TabStop) -> Option<TabStopIn> {
+    Some(TabStopIn {
         val: stop.val.clone(),
-        pos: stop.pos as f32,
-    }
+        pos: finite(stop.pos)?,
+    })
 }
 
 fn run_in(run: &Run) -> Option<RunIn> {
@@ -170,8 +165,8 @@ fn formatted_run(kind: &str, fmt: &RunFormatting) -> RunIn {
     out.italic = fmt.italic.unwrap_or(false);
     out.bold_cs = fmt.bold_cs;
     out.italic_cs = fmt.italic_cs;
-    out.font_size = fmt.font_size.map(|pt| pt as f32);
-    out.font_size_cs = fmt.font_size_cs.map(|pt| pt as f32);
+    out.font_size = fmt.font_size.and_then(finite);
+    out.font_size_cs = fmt.font_size_cs.and_then(finite);
     out.font_family = fmt.font_family.clone();
     out.font_slots = fmt.font_slots.as_ref().map(|slots| RunFontSlotsIn {
         ascii: slots.ascii.clone(),
@@ -186,11 +181,11 @@ fn formatted_run(kind: &str, fmt: &RunFormatting) -> RunIn {
         east_asia: slots.east_asia.clone(),
         bidi: slots.bidi.clone(),
     });
-    out.letter_spacing = fmt.letter_spacing.map(|spacing| spacing as f32);
+    out.letter_spacing = fmt.letter_spacing.and_then(finite);
     out.all_caps = fmt.all_caps.unwrap_or(false);
     out.small_caps = fmt.small_caps.unwrap_or(false);
-    out.horizontal_scale = fmt.horizontal_scale.map(|scale| scale as f32);
-    out.kerning_min_pt = fmt.kerning_min_pt.map(|kerning| kerning as f32);
+    out.horizontal_scale = fmt.horizontal_scale.and_then(finite);
+    out.kerning_min_pt = fmt.kerning_min_pt.and_then(finite);
     out.superscript = fmt.superscript.unwrap_or(false);
     out.subscript = fmt.subscript.unwrap_or(false);
     out.hidden = fmt.hidden.unwrap_or(false);
@@ -235,39 +230,23 @@ fn bare_run(kind: &str) -> RunIn {
 
 fn image_run(image: &ImageRun) -> Option<RunIn> {
     let mut out = bare_run("image");
-    out.width = Some(image.width as f32);
-    out.height = Some(image.height as f32);
+    out.width = finite(image.width);
+    out.height = finite(image.height);
     out.rotation_bounds = rotation_bounds_in(image.rotation_bounds.as_ref())?;
-    out.dist_top = image.dist_top.map(|distance| distance as f32);
-    out.dist_bottom = image.dist_bottom.map(|distance| distance as f32);
+    out.dist_top = image.dist_top.and_then(finite);
+    out.dist_bottom = image.dist_bottom.and_then(finite);
     out.wrap_type = image.wrap_type.clone();
     out.display_mode = image.display_mode.clone();
     out.position = image.position.as_ref().map(|_| serde::de::IgnoredAny);
     Some(out)
 }
 
-/// Mirrors serde's strictness at the old JSON boundary: absent or `null` is
-/// no bounds; anything else must be an object or a positional sequence of
-/// the two optional dimensions, exactly as serde's derived `Deserialize`
-/// accepts — any deviation fails the whole request (`None`) where envelope
-/// parsing used to.
+/// Defers to the same derived `Deserialize` the envelope parse used, so
+/// object, positional-sequence and rejected forms all behave as before.
 fn rotation_bounds_in(bounds: Option<&Value>) -> Option<Option<RotationBoundsIn>> {
     match bounds {
-        None | Some(Value::Null) => Some(None),
-        Some(Value::Object(fields)) => Some(Some(RotationBoundsIn {
-            width: number_f32(fields.get("width"))?,
-            height: number_f32(fields.get("height"))?,
-        })),
-        Some(Value::Array(items)) => {
-            if items.len() > 2 {
-                return None;
-            }
-            Some(Some(RotationBoundsIn {
-                width: number_f32(items.first())?,
-                height: number_f32(items.get(1))?,
-            }))
-        }
-        Some(_) => None,
+        None => Some(None),
+        Some(value) => Option::<RotationBoundsIn>::deserialize(value).ok(),
     }
 }
 
@@ -778,5 +757,604 @@ mod parity_tests {
         let fixture = fixture();
         let block = paragraph(vec![Run::Unsupported, text_run("after")], None);
         assert_parity("unsupported", &block, 200.0, &fixture.config, None, 0.0);
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn chance(&mut self, n: u64) -> bool {
+            self.below(n) == 0
+        }
+    }
+
+    const FAMILIES: [&str; 4] = ["Liberation Sans", "Arial", "MS Mincho", ""];
+    const TEXTS: [&str; 8] = [
+        "The quick brown fox jumps over the lazy dog",
+        "short",
+        "",
+        " ",
+        "\t\t",
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd} mixed \u{627}\u{644}\u{639}",
+        "\u{65e5}\u{672c}\u{8a9e}\u{306e}\u{30c6}\u{30ad}\u{30b9}\u{30c8}",
+        "ligature ffi fi fl and combining e\u{301}",
+    ];
+
+    fn num(rng: &mut Rng) -> f64 {
+        match rng.below(7) {
+            0 => 0.0,
+            1 => 1.0,
+            2 => 12.0,
+            3 => 720.0,
+            4 => (rng.below(4000) as f64) / 16.0,
+            5 => -((rng.below(400) as f64) / 8.0),
+            _ => (rng.below(100_000) as f64) / 1000.0,
+        }
+    }
+
+    fn maybe_num(rng: &mut Rng) -> Option<Value> {
+        (!rng.chance(3)).then(|| json!(num(rng)))
+    }
+
+    fn maybe_bool(rng: &mut Rng) -> Option<Value> {
+        (!rng.chance(3)).then(|| json!(rng.chance(2)))
+    }
+
+    fn maybe_str(rng: &mut Rng, pool: &[&str]) -> Option<Value> {
+        (!rng.chance(3)).then(|| json!(pool[rng.below(pool.len() as u64) as usize]))
+    }
+
+    fn put(map: &mut serde_json::Map<String, Value>, key: &str, value: Option<Value>) {
+        if let Some(value) = value {
+            map.insert(key.to_owned(), value);
+        }
+    }
+
+    /// `RunFormatting` is `#[serde(flatten)]`, so its fields sit at run level;
+    /// nesting them under `fmt` would silently drop every one.
+    fn formatting(rng: &mut Rng, target: &mut serde_json::Map<String, Value>) {
+        put(target, "bold", maybe_bool(rng));
+        put(target, "italic", maybe_bool(rng));
+        put(target, "boldCs", maybe_bool(rng));
+        put(target, "italicCs", maybe_bool(rng));
+        put(target, "fontSize", maybe_num(rng));
+        put(target, "fontSizeCs", maybe_num(rng));
+        put(target, "fontFamily", maybe_str(rng, &FAMILIES));
+        put(target, "complexScript", maybe_bool(rng));
+        put(target, "letterSpacing", maybe_num(rng));
+        put(target, "allCaps", maybe_bool(rng));
+        put(target, "smallCaps", maybe_bool(rng));
+        put(target, "horizontalScale", maybe_num(rng));
+        put(target, "kerningMinPt", maybe_num(rng));
+        put(target, "superscript", maybe_bool(rng));
+        put(target, "subscript", maybe_bool(rng));
+        put(target, "hidden", maybe_bool(rng));
+        put(target, "rtl", maybe_bool(rng));
+        if !rng.chance(3) {
+            let mut slots = serde_json::Map::new();
+            put(&mut slots, "ascii", maybe_str(rng, &FAMILIES));
+            put(&mut slots, "hAnsi", maybe_str(rng, &FAMILIES));
+            put(&mut slots, "eastAsia", maybe_str(rng, &FAMILIES));
+            put(&mut slots, "cs", maybe_str(rng, &FAMILIES));
+            put(&mut slots, "hint", maybe_str(rng, &["eastAsia", "default"]));
+            target.insert("fontSlots".to_owned(), Value::Object(slots));
+        }
+        if !rng.chance(4) {
+            let mut lang = serde_json::Map::new();
+            put(&mut lang, "latin", maybe_str(rng, &["en-US"]));
+            put(&mut lang, "eastAsia", maybe_str(rng, &["ja-JP"]));
+            put(&mut lang, "bidi", maybe_str(rng, &["he-IL"]));
+            target.insert("language".to_owned(), Value::Object(lang));
+        }
+    }
+
+    fn random_run(rng: &mut Rng) -> Value {
+        let mut m = serde_json::Map::new();
+        match rng.below(7) {
+            0..=2 => {
+                m.insert("kind".to_owned(), json!("text"));
+                let text = TEXTS[rng.below(TEXTS.len() as u64) as usize];
+                m.insert("text".to_owned(), json!(text));
+                formatting(rng, &mut m);
+            }
+            3 => {
+                m.insert("kind".to_owned(), json!("tab"));
+                formatting(rng, &mut m);
+            }
+            4 => {
+                m.insert("kind".to_owned(), json!("lineBreak"));
+            }
+            5 => {
+                m.insert("kind".to_owned(), json!("field"));
+                m.insert("fieldType".to_owned(), json!("PAGE"));
+                put(&mut m, "fallback", maybe_str(rng, &["42", "", "iv"]));
+                formatting(rng, &mut m);
+            }
+            _ => {
+                m.insert("kind".to_owned(), json!("image"));
+                m.insert("src".to_owned(), json!("a.png"));
+                m.insert("width".to_owned(), json!(num(rng)));
+                m.insert("height".to_owned(), json!(num(rng)));
+                put(&mut m, "distTop", maybe_num(rng));
+                put(&mut m, "distBottom", maybe_num(rng));
+                put(&mut m, "wrapType", maybe_str(rng, &["inline", "square"]));
+                put(&mut m, "displayMode", maybe_str(rng, &["inline", "block"]));
+                if !rng.chance(3) {
+                    m.insert("position".to_owned(), json!({ "behindDoc": false }));
+                }
+                if !rng.chance(3) {
+                    let bounds = match rng.below(5) {
+                        0 => json!({ "width": num(rng), "height": num(rng) }),
+                        1 => json!([num(rng), num(rng)]),
+                        2 => json!([]),
+                        3 => Value::Null,
+                        _ => json!({ "width": num(rng) }),
+                    };
+                    m.insert("rotationBounds".to_owned(), bounds);
+                }
+            }
+        }
+        Value::Object(m)
+    }
+
+    fn random_attrs(rng: &mut Rng) -> Value {
+        let mut m = serde_json::Map::new();
+        put(
+            &mut m,
+            "alignment",
+            maybe_str(rng, &["left", "center", "both"]),
+        );
+        if !rng.chance(3) {
+            let mut sp = serde_json::Map::new();
+            put(&mut sp, "before", maybe_num(rng));
+            put(&mut sp, "after", maybe_num(rng));
+            put(&mut sp, "line", maybe_num(rng));
+            put(&mut sp, "lineUnit", maybe_str(rng, &["px", "multiple"]));
+            put(
+                &mut sp,
+                "lineRule",
+                maybe_str(rng, &["auto", "exact", "atLeast"]),
+            );
+            m.insert("spacing".to_owned(), Value::Object(sp));
+        }
+        if !rng.chance(3) {
+            let mut ind = serde_json::Map::new();
+            put(&mut ind, "left", maybe_num(rng));
+            put(&mut ind, "right", maybe_num(rng));
+            put(&mut ind, "firstLine", maybe_num(rng));
+            put(&mut ind, "hanging", maybe_num(rng));
+            m.insert("indent".to_owned(), Value::Object(ind));
+        }
+        if !rng.chance(3) {
+            let stops: Vec<Value> = (0..rng.below(4))
+                .map(|_| {
+                    let val = ["start", "end", "center", "decimal"][rng.below(4) as usize];
+                    let pos = num(rng);
+                    json!({ "val": val, "pos": pos })
+                })
+                .collect();
+            m.insert("tabs".to_owned(), json!(stops));
+        }
+        put(&mut m, "bidi", maybe_bool(rng));
+        put(&mut m, "defaultFontSize", maybe_num(rng));
+        put(&mut m, "defaultFontFamily", maybe_str(rng, &FAMILIES));
+        put(&mut m, "suppressEmptyParagraphHeight", maybe_bool(rng));
+        put(
+            &mut m,
+            "listMarker",
+            maybe_str(rng, &["1.", "\u{2022}", ""]),
+        );
+        put(&mut m, "listMarkerHidden", maybe_bool(rng));
+        put(&mut m, "listMarkerFontFamily", maybe_str(rng, &FAMILIES));
+        put(&mut m, "listMarkerFontSize", maybe_num(rng));
+        put(
+            &mut m,
+            "listMarkerSuffix",
+            maybe_str(rng, &["tab", "space"]),
+        );
+        put(&mut m, "defaultTabStopTwips", maybe_num(rng));
+        Value::Object(m)
+    }
+
+    fn random_paragraph(rng: &mut Rng) -> Value {
+        let runs: Vec<Value> = (0..1 + rng.below(4)).map(|_| random_run(rng)).collect();
+        let mut m = serde_json::Map::new();
+        m.insert("id".to_owned(), json!(0.0));
+        m.insert("runs".to_owned(), json!(runs));
+        if !rng.chance(4) {
+            m.insert("attrs".to_owned(), random_attrs(rng));
+        }
+        Value::Object(m)
+    }
+
+    /// The `BlockIn` the legacy envelope actually delivered to the engine.
+    fn legacy_block_in(paragraph: &ParagraphBlock) -> Option<ooxml_text::measure::BlockIn> {
+        let envelope = json!({ "block": LayoutBlock::Paragraph(paragraph.clone()) }).to_string();
+        let parsed: Value = serde_json::from_str(&envelope).ok()?;
+        serde_json::from_value(parsed.get("block")?.clone()).ok()
+    }
+
+    /// Re-narrows to f32 so the JSON path's f32 -> shortest-decimal -> f64
+    /// widening cannot mask a real difference.
+    fn narrow(value: &Value) -> Value {
+        match value {
+            Value::Number(n) => json!(format!("{:?}", n.as_f64().unwrap_or(f64::NAN) as f32)),
+            Value::Array(items) => Value::Array(items.iter().map(narrow).collect()),
+            Value::Object(map) => {
+                Value::Object(map.iter().map(|(k, v)| (k.clone(), narrow(v))).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    fn legacy_measure(
+        paragraph: &ParagraphBlock,
+        content_width: f64,
+        config: &MeasurementConfig,
+        zones: Option<&[FloatingZone]>,
+        cumulative_y: f64,
+    ) -> Option<ParagraphExtent> {
+        let envelope = legacy_envelope(paragraph, content_width, config, zones, cumulative_y);
+        let extent = crate::measure_paragraph_json_resident(&envelope).ok()?;
+        serde_json::from_str::<ParagraphExtent>(&extent).ok()
+    }
+
+    /// Randomised whole-surface differential. Every mapped field varies, so a
+    /// dropped or mistyped mapping shows up as a `BlockIn` difference before it
+    /// can reach measurement.
+    #[test]
+    fn randomised_paragraphs_match_the_json_path() {
+        let fixture = fixture();
+        let mut rng = Rng(0x2f6e_2b13);
+        let mut measured = 0usize;
+        let mut fell_back = 0usize;
+        for case in 0..3000 {
+            let spec = random_paragraph(&mut rng);
+            let paragraph: ParagraphBlock =
+                serde_json::from_value(spec.clone()).expect("generated paragraph parses");
+            let width = [200.0_f64, 60.0, 1000.0, 13.5][rng.below(4) as usize];
+            let size = [8.0_f64, 11.0, 12.0, 24.0][rng.below(4) as usize];
+            let family = FAMILIES[rng.below(FAMILIES.len() as u64) as usize];
+            let no_leading = rng.chance(2);
+            let no_expand = rng.chance(2);
+            let config = MeasurementConfig {
+                font_chains: fixture.config.font_chains.clone(),
+                defaults: json!({ "fontSize": size, "fontFamily": family }),
+                compat: json!({
+                    "noLeading": no_leading,
+                    "doNotExpandShiftReturn": no_expand,
+                }),
+                authoritative_shaping: rng.chance(2),
+            };
+            let full_width = rng.chance(2);
+            let zones = rng.chance(4).then(|| {
+                vec![FloatingZone {
+                    left_margin: 40.0,
+                    right_margin: 8.0,
+                    top_y: -4.0,
+                    bottom_y: 60.0,
+                    full_width_block: full_width,
+                }]
+            });
+
+            assert_eq!(
+                legacy_block_in(&paragraph).map(|b| format!("{b:?}")),
+                block_in(&paragraph).map(|b| format!("{b:?}")),
+                "case {case}: BlockIn differs for {spec}"
+            );
+
+            let legacy = legacy_measure(&paragraph, width, &config, zones.as_deref(), 12.0);
+            let typed = measure_paragraph(&paragraph, width, &config, zones.as_deref(), 12.0);
+            match (&legacy, &typed) {
+                (None, None) => fell_back += 1,
+                (Some(a), Some(b)) => {
+                    measured += 1;
+                    assert_eq!(
+                        narrow(&serde_json::to_value(a).unwrap()),
+                        narrow(&serde_json::to_value(b).unwrap()),
+                        "case {case}: extent differs for {spec}"
+                    );
+                }
+                _ => panic!(
+                    "case {case}: fallback differs (legacy {}, typed {}) for {spec}",
+                    legacy.is_some(),
+                    typed.is_some()
+                ),
+            }
+        }
+        assert!(measured > 500, "corpus measured only {measured} paragraphs");
+        assert!(
+            fell_back > 100,
+            "corpus exercised only {fell_back} fallbacks"
+        );
+    }
+
+    /// `serde_json` writes a non-finite float as `null`, which the envelope read
+    /// back as absent. Every site that crosses the boundary must still do that.
+    #[test]
+    fn non_finite_numbers_match_the_json_path() {
+        use crate::types::{ParagraphIndent, ParagraphSpacing};
+        let fixture = fixture();
+        for site in 0..24 {
+            for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut fmt = RunFormatting::default();
+                let mut attrs = crate::types::ParagraphAttrs::default();
+                let mut spacing = ParagraphSpacing {
+                    before: Some(2.0),
+                    after: Some(3.0),
+                    line: Some(1.0),
+                    line_unit: Some("multiple".to_owned()),
+                    line_rule: Some("auto".to_owned()),
+                };
+                let mut indent = ParagraphIndent {
+                    left: Some(4.0),
+                    right: Some(2.0),
+                    first_line: Some(6.0),
+                    hanging: Some(0.0),
+                };
+                let mut tab = crate::types::TabStop {
+                    val: "end".to_owned(),
+                    pos: 2000.0,
+                    leader: None,
+                };
+                let mut image: crate::types::ImageRun = serde_json::from_value(json!({
+                    "src": "a.png", "width": 20.0, "height": 14.0,
+                    "displayMode": "inline", "distTop": 1.0, "distBottom": 1.0,
+                }))
+                .unwrap();
+                let mut cumulative_y = 10.0_f64;
+                let mut zone = [40.0_f64, 8.0, -4.0, 60.0];
+                let mut width = 200.0_f64;
+                let mut with_image = false;
+                let mut with_zones = false;
+
+                let name = match site {
+                    0 => {
+                        fmt.font_size = Some(value);
+                        "run.fontSize"
+                    }
+                    1 => {
+                        fmt.font_size_cs = Some(value);
+                        "run.fontSizeCs"
+                    }
+                    2 => {
+                        fmt.letter_spacing = Some(value);
+                        "run.letterSpacing"
+                    }
+                    3 => {
+                        fmt.horizontal_scale = Some(value);
+                        "run.horizontalScale"
+                    }
+                    4 => {
+                        fmt.kerning_min_pt = Some(value);
+                        "run.kerningMinPt"
+                    }
+                    5 => {
+                        attrs.default_font_size = Some(value);
+                        "attrs.defaultFontSize"
+                    }
+                    6 => {
+                        attrs.list_marker = Some("1.".to_owned());
+                        attrs.list_marker_font_size = Some(value);
+                        "attrs.listMarkerFontSize"
+                    }
+                    7 => {
+                        attrs.default_tab_stop_twips = Some(value);
+                        "attrs.defaultTabStopTwips"
+                    }
+                    8 => {
+                        spacing.before = Some(value);
+                        attrs.spacing = Some(spacing);
+                        "spacing.before"
+                    }
+                    9 => {
+                        spacing.after = Some(value);
+                        attrs.spacing = Some(spacing);
+                        "spacing.after"
+                    }
+                    10 => {
+                        spacing.line = Some(value);
+                        attrs.spacing = Some(spacing);
+                        "spacing.line"
+                    }
+                    11 => {
+                        indent.left = Some(value);
+                        attrs.indent = Some(indent);
+                        "indent.left"
+                    }
+                    12 => {
+                        indent.right = Some(value);
+                        attrs.indent = Some(indent);
+                        "indent.right"
+                    }
+                    13 => {
+                        indent.first_line = Some(value);
+                        attrs.indent = Some(indent);
+                        "indent.firstLine"
+                    }
+                    14 => {
+                        indent.hanging = Some(value);
+                        attrs.indent = Some(indent);
+                        "indent.hanging"
+                    }
+                    15 => {
+                        tab.pos = value;
+                        attrs.tabs = Some(vec![tab]);
+                        "tab.pos"
+                    }
+                    16 => {
+                        image.width = value;
+                        with_image = true;
+                        "image.width"
+                    }
+                    17 => {
+                        image.height = value;
+                        with_image = true;
+                        "image.height"
+                    }
+                    18 => {
+                        image.dist_top = Some(value);
+                        with_image = true;
+                        "image.distTop"
+                    }
+                    19 => {
+                        image.dist_bottom = Some(value);
+                        with_image = true;
+                        "image.distBottom"
+                    }
+                    20 => {
+                        cumulative_y = value;
+                        with_zones = true;
+                        "paragraphYOffset"
+                    }
+                    21 => {
+                        zone[0] = value;
+                        with_zones = true;
+                        "zone.leftMargin"
+                    }
+                    22 => {
+                        zone[2] = value;
+                        with_zones = true;
+                        "zone.topY"
+                    }
+                    _ => {
+                        width = value;
+                        "maxWidth"
+                    }
+                };
+
+                let mut runs = vec![Run::Text(TextRun {
+                    fmt,
+                    text: "hello world wrapping across a few lines".to_owned(),
+                    pm_start: None,
+                    pm_end: None,
+                    inline_sdt_widget: None,
+                })];
+                if with_image {
+                    runs.push(Run::Image(image));
+                }
+                let block = paragraph(runs, Some(attrs));
+                let zones = with_zones.then(|| {
+                    vec![FloatingZone {
+                        left_margin: zone[0],
+                        right_margin: zone[1],
+                        top_y: zone[2],
+                        bottom_y: zone[3],
+                        full_width_block: false,
+                    }]
+                });
+                assert_eq!(
+                    legacy_block_in(&block).map(|b| format!("{b:?}")),
+                    block_in(&block).map(|b| format!("{b:?}")),
+                    "{name} = {value}: BlockIn differs"
+                );
+                let legacy = legacy_measure(
+                    &block,
+                    width,
+                    &fixture.config,
+                    zones.as_deref(),
+                    cumulative_y,
+                );
+                let typed = measure_paragraph(
+                    &block,
+                    width,
+                    &fixture.config,
+                    zones.as_deref(),
+                    cumulative_y,
+                );
+                match (&legacy, &typed) {
+                    (None, None) => {}
+                    (Some(a), Some(b)) => assert_eq!(
+                        narrow(&serde_json::to_value(a).unwrap()),
+                        narrow(&serde_json::to_value(b).unwrap()),
+                        "{name} = {value}: extent differs"
+                    ),
+                    _ => panic!(
+                        "{name} = {value}: fallback differs (legacy {}, typed {})",
+                        legacy.is_some(),
+                        typed.is_some()
+                    ),
+                }
+            }
+        }
+    }
+
+    /// serde's derived `Deserialize` also takes a struct from a positional
+    /// sequence, so the envelope accepted these and the typed path must too.
+    #[test]
+    fn sequence_form_defaults_and_compat_match_the_json_path() {
+        let base = fixture();
+        let block = paragraph(vec![text_run("hello world")], None);
+        for (name, defaults, compat) in [
+            ("defaults-seq", json!([12.0, "Liberation Sans"]), json!({})),
+            (
+                "compat-seq",
+                json!({ "fontSize": 12.0, "fontFamily": "Liberation Sans" }),
+                json!([true, false]),
+            ),
+            (
+                "compat-seq-one",
+                json!({ "fontSize": 12.0, "fontFamily": "Liberation Sans" }),
+                json!([true]),
+            ),
+            (
+                "compat-seq-empty",
+                json!({ "fontSize": 12.0, "fontFamily": "Liberation Sans" }),
+                json!([]),
+            ),
+            ("defaults-null", Value::Null, json!({})),
+            (
+                "compat-null",
+                json!({ "fontSize": 12.0, "fontFamily": "Liberation Sans" }),
+                Value::Null,
+            ),
+            ("defaults-scalar", json!(3), json!({})),
+            (
+                "compat-scalar",
+                json!({ "fontSize": 12.0, "fontFamily": "Liberation Sans" }),
+                json!(3),
+            ),
+            (
+                "defaults-missing-key",
+                json!({ "fontSize": 12.0 }),
+                json!({}),
+            ),
+            (
+                "defaults-wrong-type",
+                json!({ "fontSize": "big", "fontFamily": "Liberation Sans" }),
+                json!({}),
+            ),
+            (
+                "compat-wrong-type",
+                json!({ "fontSize": 12.0, "fontFamily": "Liberation Sans" }),
+                json!({ "noLeading": "yes" }),
+            ),
+        ] {
+            let config = MeasurementConfig {
+                font_chains: base.config.font_chains.clone(),
+                defaults,
+                compat,
+                authoritative_shaping: true,
+            };
+            let legacy = legacy_measure(&block, 200.0, &config, None, 0.0);
+            let typed = measure_paragraph(&block, 200.0, &config, None, 0.0);
+            assert_eq!(
+                legacy.is_some(),
+                typed.is_some(),
+                "{name}: fallback differs (legacy {}, typed {})",
+                legacy.is_some(),
+                typed.is_some()
+            );
+        }
     }
 }
