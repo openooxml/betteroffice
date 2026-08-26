@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
-import type { LayoutBlock, Layout, BlockExtent } from '@betteroffice/docx/layout/pagination';
+import type { LayoutBlock, Layout } from '@betteroffice/docx/layout/pagination';
 import {
   buildResidentRegionLayoutRequest,
   computeLayout,
@@ -92,8 +92,6 @@ export interface UseLayoutPipelineOptions {
 
 export interface UseLayoutPipelineReturn {
   layout: Layout | null;
-  blocks: LayoutBlock[];
-  measures: BlockExtent[];
   layoutUpdateOrigin: LayoutUpdateOrigin;
   runLayoutPipeline: () => void;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
@@ -124,8 +122,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   } = opts;
 
   const [layout, setLayout] = useState<Layout | null>(null);
-  const [blocks, setBlocks] = useState<LayoutBlock[]>([]);
-  const [measures, setMeasures] = useState<BlockExtent[]>([]);
 
   // Callback refs — parent may hand in a fresh closure every render. Mirroring
   // these in refs keeps `runLayoutPipeline`'s dep array stable; otherwise
@@ -270,7 +266,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
       // Step 4+: paint + scroll/events with the computed values.
       const applyComputation = (computation: LayoutComputation) => {
-        const { blocks: newBlocks, measures: newMeasures, layout: newLayout } = computation;
+        const { layout: newLayout } = computation;
 
         const pagesEl = pagesContainerRef.current;
         const scrollParent =
@@ -299,8 +295,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             : null;
 
         viewportAnchorCaptureReadyRef.current = false;
-        setBlocks(newBlocks);
-        setMeasures(newMeasures);
         layoutUpdateOriginRef.current = layoutUpdateOrigin;
         setLayout(newLayout);
 
@@ -320,7 +314,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         if (totalTime > 2000) {
           console.warn(
             `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
-              `(${newBlocks.length} blocks, ${newMeasures.length} measures)`
+              `(${newLayout.pages.length} pages)`
           );
         }
       };
@@ -502,8 +496,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   return {
     layout,
-    blocks,
-    measures,
     layoutUpdateOrigin: layoutUpdateOriginRef.current,
     runLayoutPipeline,
     scheduleLayout,

@@ -1090,7 +1090,7 @@ fn load_docx(
     let request = region_request(&package, Some(&fonts.chain_ids))?;
     let layout_request = request.to_string();
     engine
-        .layout_document_with_regions_json(&layout_request)
+        .layout_document_with_regions_retained_json(&layout_request)
         .map_err(anyhow::Error::msg)?;
     let extras = json!({ "fontChains": fonts.chain_ids }).to_string();
     engine

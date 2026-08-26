@@ -1236,6 +1236,27 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Same full region pass as [`Self::layout_document_with_regions_json`],
+    /// but the reply carries only `{ layout, headersFooters?, notesConverged }`
+    /// — the measured arena stays retained wasm-side and is fetched on demand
+    /// via [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input: &str,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_retained_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Retained `{ measured, options }` for the main-thread display-list
+    /// fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
+        self.engine
+            .retained_kernel_inputs_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
