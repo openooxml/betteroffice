@@ -138,12 +138,12 @@ fn rewrite_start(
     for (key, value) in attributes {
         let local = attribute_local(&key);
         if relationship && is_unqualified(&key) && local.eq_ignore_ascii_case("TargetMode") {
-            wrote_target_mode = true;
-            if external {
-                output.push_attribute(("TargetMode", "External"));
-            } else {
+            if !external {
                 output.push_attribute((key.as_str(), value.as_str()));
+            } else if !wrote_target_mode {
+                output.push_attribute(("TargetMode", "External"));
             }
+            wrote_target_mode = true;
             continue;
         }
         let replacement =
@@ -377,7 +377,8 @@ fn attribute_local(name: &str) -> &str {
 
 /// Whether the element is a relationship in a package relationship part, and
 /// whether it points outside the package. Only unqualified OPC attributes take
-/// part in the decision, and a target is inspected only inside a `.rels` part.
+/// part in the decision; a target shape is read only from the exact-case
+/// `Target` a `.rels` part's consumers resolve.
 fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
     if !element.eq_ignore_ascii_case("Relationship") {
         return (false, false);
@@ -389,7 +390,7 @@ fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)])
         }
         let local = attribute_local(key);
         local.eq_ignore_ascii_case("TargetMode") && value.trim().eq_ignore_ascii_case("External")
-            || package_part && local.eq_ignore_ascii_case("Target") && external_target(value)
+            || package_part && local == "Target" && external_target(value)
     });
     (package_part, external)
 }

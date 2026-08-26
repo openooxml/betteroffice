@@ -563,6 +563,57 @@ fn lowercase_target_mode_attribute_is_written_back_canonically() {
 }
 
 #[test]
+fn a_case_variant_target_does_not_externalize_the_real_one() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml" target="mailto:jane@example.com"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Pptx,
+        "ppt/_rels/presentation.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"Target="slides/slide1.xml""#));
+    assert!(!text.contains("TargetMode"));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
+fn repeated_target_mode_spellings_collapse_to_one_attribute() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://secret.example/x" TargetMode="External" targetmode="external"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert_eq!(text.matches("TargetMode").count(), 1);
+    assert!(!text.contains("secret.example"));
+    let mut again = RedactionReport::default();
+    xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        text.as_bytes(),
+        &mut again,
+    )
+    .unwrap();
+}
+
+#[test]
 fn internal_target_mode_keeps_the_producer_spelling() {
     let rels = concat!(
         r#"<?xml version="1.0"?>"#,
