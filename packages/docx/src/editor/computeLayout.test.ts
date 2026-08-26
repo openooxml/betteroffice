@@ -55,6 +55,19 @@ describe('buildResidentRegionLayoutRequest sections', () => {
     const request = buildResidentRegionLayoutRequest(document, 24, {});
     expect(request.regions.sections).toEqual([{ sectionId: 'final', properties: final }]);
   });
+
+  test('without finalSectionProperties, a trailing break keeps its own geometry', () => {
+    const intermediate = { sectionId: 'one', pageWidth: 10000 };
+    const trailing = { sectionId: 'two', pageWidth: 11906 };
+    const document = documentWith({
+      sections: [{ properties: intermediate }, { properties: trailing }],
+    });
+    const request = buildResidentRegionLayoutRequest(document, 24, {});
+    expect(request.regions.sections).toEqual([
+      { sectionId: 'one', properties: intermediate },
+      { sectionId: 'two', properties: trailing },
+    ]);
+  });
 });
 
 describe('computeLayout retained kernel inputs', () => {
