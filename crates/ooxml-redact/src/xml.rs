@@ -139,8 +139,11 @@ fn rewrite_start(
         let local = attribute_local(&key);
         if relationship && is_unqualified(&key) && local.eq_ignore_ascii_case("TargetMode") {
             wrote_target_mode = true;
-            let mode = if external { "External" } else { value.as_str() };
-            output.push_attribute((key.as_str(), mode));
+            if external {
+                output.push_attribute(("TargetMode", "External"));
+            } else {
+                output.push_attribute((key.as_str(), value.as_str()));
+            }
             continue;
         }
         let replacement =
@@ -165,7 +168,7 @@ fn rewrite_start(
             *cell_type = Some(value);
         }
     }
-    if external && !wrote_target_mode {
+    if relationship && external && !wrote_target_mode {
         output.push_attribute(("TargetMode", "External"));
     }
     Ok(output)
@@ -372,23 +375,23 @@ fn attribute_local(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, local)| local)
 }
 
-/// Whether the element is a package relationship, and whether it points outside
-/// the package. Only unqualified OPC attributes take part in the decision.
+/// Whether the element is a relationship in a package relationship part, and
+/// whether it points outside the package. Only unqualified OPC attributes take
+/// part in the decision, and a target is inspected only inside a `.rels` part.
 fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
-    if !element.eq_ignore_ascii_case("Relationship")
-        || !path.to_ascii_lowercase().ends_with(".rels")
-    {
+    if !element.eq_ignore_ascii_case("Relationship") {
         return (false, false);
     }
+    let package_part = path.to_ascii_lowercase().ends_with(".rels");
     let external = attributes.iter().any(|(key, value)| {
         if !is_unqualified(key) {
             return false;
         }
         let local = attribute_local(key);
         local.eq_ignore_ascii_case("TargetMode") && value.trim().eq_ignore_ascii_case("External")
-            || local.eq_ignore_ascii_case("Target") && external_target(value)
+            || package_part && local.eq_ignore_ascii_case("Target") && external_target(value)
     });
-    (true, external)
+    (package_part, external)
 }
 
 fn is_unqualified(key: &str) -> bool {

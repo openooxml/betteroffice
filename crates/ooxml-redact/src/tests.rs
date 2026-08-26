@@ -548,6 +548,42 @@ fn padded_target_mode_still_marks_relationship_external() {
 }
 
 #[test]
+fn lowercase_target_mode_attribute_is_written_back_canonically() {
+    let source = pptx_fixture_with_slide_relationship(
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://PPTX_SECRET_HOST/x" targetmode="external"/>"#,
+    );
+    let (output, _) = redact_with_report(&source, Format::Pptx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let rels =
+        String::from_utf8_lossy(part(&parts, "ppt/slides/_rels/slide1.xml.rels")).into_owned();
+    assert!(rels.contains(r#"TargetMode="External""#));
+    assert!(!rels.contains("targetmode"));
+    assert!(!rels.contains("PPTX_SECRET_HOST"));
+    pptx_parse::parse_pptx(&output).unwrap();
+}
+
+#[test]
+fn internal_target_mode_keeps_the_producer_spelling() {
+    let rels = concat!(
+        r#"<?xml version="1.0"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png" targetmode="internal"/>"#,
+        r#"</Relationships>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Docx,
+        "word/_rels/document.xml.rels",
+        rels.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains(r#"targetmode="internal""#));
+    assert_eq!(report.attributes, 0);
+}
+
+#[test]
 fn inferred_external_relationship_declares_target_mode() {
     let source = pptx_fixture_with_slide_relationship(
         r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="tel:+49PPTX_SECRET_PHONE"/>"#,
@@ -643,11 +679,12 @@ fn foreign_attributes_do_not_drive_relationship_mode() {
 }
 
 #[test]
-fn relationship_markup_outside_a_rels_part_is_untouched() {
+fn target_inspection_is_limited_to_rels_parts() {
     let body = concat!(
         r#"<?xml version="1.0"?>"#,
         r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="urn:qa">"#,
         r#"<q:Relationship Target="tel:+49123456789"/>"#,
+        r#"<q:Relationship Target="https://secret.example/x" TargetMode="External"/>"#,
         r#"</w:document>"#,
     );
     let mut report = RedactionReport::default();
@@ -660,7 +697,9 @@ fn relationship_markup_outside_a_rels_part_is_untouched() {
     .unwrap();
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains(r#"Target="tel:+49123456789""#));
-    assert!(!text.contains("TargetMode"));
+    assert!(!text.contains("secret.example"));
+    assert_eq!(text.matches("TargetMode").count(), 1);
+    assert_eq!(report.attributes, 1);
 }
 
 fn pptx_fixture_with_slide_relationship(relationship: &str) -> Vec<u8> {
