@@ -250,10 +250,18 @@ fn rotation_bounds_in(bounds: Option<&Value>) -> Option<Option<RotationBoundsIn>
     }
 }
 
+fn normalize_output(value: f32) -> f64 {
+    if !value.is_finite() {
+        return f64::from(value);
+    }
+    let mut buffer = zmij::Buffer::new();
+    serde_json::from_str(buffer.format_finite(value)).unwrap_or_else(|_| f64::from(value))
+}
+
 fn extent_from_out(extent: ooxml_text::ParagraphExtentOut) -> crate::types::ParagraphExtent {
     crate::types::ParagraphExtent {
         lines: extent.lines.into_iter().map(row_from_out).collect(),
-        total_height: extent.total_height as f64,
+        total_height: normalize_output(extent.total_height),
     }
 }
 
@@ -263,13 +271,13 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
         head_char: row.head_char as usize,
         tail_run: row.tail_run as usize,
         tail_char: row.tail_char as usize,
-        width: row.width as f64,
-        ascent: row.ascent as f64,
-        descent: row.descent as f64,
-        line_height: row.line_height as f64,
+        width: normalize_output(row.width),
+        ascent: normalize_output(row.ascent),
+        descent: normalize_output(row.descent),
+        line_height: normalize_output(row.line_height),
         synthetic_fallback: None,
-        left_offset: row.left_offset.map(f64::from),
-        right_offset: row.right_offset.map(f64::from),
+        left_offset: row.left_offset.map(normalize_output),
+        right_offset: row.right_offset.map(normalize_output),
         segments: row.segments.map(|segments| {
             segments
                 .into_iter()
@@ -278,13 +286,13 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                     head_char: segment.head_char as usize,
                     tail_run: segment.tail_run as usize,
                     tail_char: segment.tail_char as usize,
-                    left_offset: segment.left_offset as f64,
-                    available_width: segment.available_width as f64,
-                    width: segment.width as f64,
+                    left_offset: normalize_output(segment.left_offset),
+                    available_width: normalize_output(segment.available_width),
+                    width: normalize_output(segment.width),
                 })
                 .collect()
         }),
-        float_skip_before: row.float_skip_before.map(f64::from),
+        float_skip_before: row.float_skip_before.map(normalize_output),
         run_advances: row.run_advances.map(|advances| {
             advances
                 .into_iter()
@@ -292,7 +300,7 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                     run_index: Some(u64::from(advance.run_index)),
                     start_char: Some(u64::from(advance.start_char)),
                     end_char: Some(u64::from(advance.end_char)),
-                    advance: Some(advance.advance as f64),
+                    advance: Some(normalize_output(advance.advance)),
                     logical_order: Some(u64::from(advance.logical_order)),
                 })
                 .collect()
@@ -304,8 +312,8 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                     run_index: Some(u64::from(cluster.run_index)),
                     start_char: Some(u64::from(cluster.start_char)),
                     end_char: Some(u64::from(cluster.end_char)),
-                    advance: Some(cluster.advance as f64),
-                    x_offset: Some(cluster.x_offset as f64),
+                    advance: Some(normalize_output(cluster.advance)),
+                    x_offset: Some(normalize_output(cluster.x_offset)),
                     bidi_level: Some(cluster.bidi_level),
                     logical_order: Some(u64::from(cluster.logical_order)),
                 })
@@ -318,7 +326,7 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                     run_index: Some(u64::from(slice.run_index)),
                     start_char: Some(u64::from(slice.start_char)),
                     end_char: Some(u64::from(slice.end_char)),
-                    advance: Some(slice.advance as f64),
+                    advance: Some(normalize_output(slice.advance)),
                     bidi_level: Some(slice.bidi_level),
                     visual_order: Some(u64::from(slice.visual_order)),
                     logical_order: Some(u64::from(slice.logical_order)),
@@ -427,36 +435,6 @@ mod parity_tests {
         envelope.to_string()
     }
 
-    fn assert_close(name: &str, left: &Value, right: &Value, path: &str) {
-        match (left, right) {
-            (Value::Number(left), Value::Number(right)) => {
-                let left = left.as_f64().unwrap();
-                let right = right.as_f64().unwrap();
-                let tolerance = 1e-4_f64.max(left.abs() * 1e-5);
-                assert!(
-                    (left - right).abs() <= tolerance,
-                    "{name}: {path} {left} != {right}"
-                );
-            }
-            (Value::Array(left), Value::Array(right)) => {
-                assert_eq!(left.len(), right.len(), "{name}: {path} length");
-                for (index, (a, b)) in left.iter().zip(right).enumerate() {
-                    assert_close(name, a, b, &format!("{path}[{index}]"));
-                }
-            }
-            (Value::Object(left), Value::Object(right)) => {
-                assert_eq!(left.len(), right.len(), "{name}: {path} keys");
-                for (key, value) in left {
-                    let other = right
-                        .get(key)
-                        .unwrap_or_else(|| panic!("{name}: {path}.{key} missing"));
-                    assert_close(name, value, other, &format!("{path}.{key}"));
-                }
-            }
-            (left, right) => assert_eq!(left, right, "{name}: {path}"),
-        }
-    }
-
     fn assert_parity(
         name: &str,
         block: &ParagraphBlock,
@@ -476,22 +454,103 @@ mod parity_tests {
         .and_then(|out| serde_json::from_str::<ParagraphExtent>(&out).ok());
         let typed = measure_paragraph(block, content_width, config, floating_zones, cumulative_y);
         match (legacy, typed) {
-            (Some(legacy), Some(typed)) => {
-                // The JSON path quantized every f32 through its shortest
-                // decimal form before widening to f64; the typed path widens
-                // exactly, so compare numerically with a tight tolerance.
-                assert_close(
-                    name,
-                    &serde_json::to_value(&legacy).unwrap(),
-                    &serde_json::to_value(&typed).unwrap(),
-                    "$",
-                );
-            }
+            (Some(legacy), Some(typed)) => assert_eq!(
+                serde_json::to_string(&legacy).unwrap(),
+                serde_json::to_string(&typed).unwrap(),
+                "{name}: extent differs"
+            ),
             (None, None) => {}
             (legacy, typed) => {
                 panic!("{name}: fallback divergence — legacy {legacy:?}, typed {typed:?}")
             }
         }
+    }
+
+    #[test]
+    fn output_numbers_match_the_json_round_trip_exactly() {
+        let mut corpus = vec![
+            0.0,
+            -0.0,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            f32::from_bits(0x007f_ffff),
+            f32::from_bits(0x807f_ffff),
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            16.865234,
+            -16.865234,
+            3.9881866e36,
+            -3.9881866e36,
+            f32::MAX,
+            f32::MIN,
+        ];
+        for base in [
+            0x007f_ffff_u32,
+            0x0080_0000,
+            0x3f7f_ffff,
+            0x3f80_0000,
+            16.865234_f32.to_bits(),
+            3.9881866e36_f32.to_bits(),
+            0x7f7f_ffff,
+        ] {
+            for bits in base.saturating_sub(8)..=base.saturating_add(8) {
+                corpus.push(f32::from_bits(bits));
+                corpus.push(f32::from_bits(bits | 0x8000_0000));
+            }
+        }
+        let mut bits = 0x8ad9_31e7_u32;
+        for _ in 0..65_536 {
+            bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            corpus.push(f32::from_bits(bits));
+        }
+        for value in corpus.into_iter().filter(|value| value.is_finite()) {
+            let encoded = serde_json::to_string(&value).unwrap();
+            let expected: f64 = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                normalize_output(value).to_bits(),
+                expected.to_bits(),
+                "{value:?} encoded as {encoded}"
+            );
+        }
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                normalize_output(value).to_bits(),
+                f64::from(value).to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_heights_keep_threshold_paragraphs_on_one_page() {
+        let mut fixture = fixture();
+        fixture.config.defaults = json!({ "fontSize": 11.0, "fontFamily": "Liberation Sans" });
+        let first = paragraph(vec![text_run("Hello world")], None);
+        let mut second = paragraph(vec![text_run("Hello world")], None);
+        second.id = BlockId::Num(1.0);
+        let mut blocks = vec![
+            LayoutBlock::Paragraph(first),
+            LayoutBlock::Paragraph(second),
+        ];
+        let measures =
+            crate::measure_blocks::measure_blocks(&mut blocks, 624.0, &fixture.config).unwrap();
+        let heights: Vec<f64> = measures
+            .iter()
+            .map(crate::measure_blocks::extent_height)
+            .collect();
+        let measured = blocks
+            .into_iter()
+            .zip(measures)
+            .map(|(block, measure)| crate::types::MeasuredBlock { block, measure })
+            .collect();
+        let options = serde_json::from_value(json!({
+            "pageSize": { "w": 624.0, "h": 33.730468375 },
+            "margins": { "top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0 }
+        }))
+        .unwrap();
+        let mut input = crate::types::Input { measured, options };
+        let layout = crate::compute_layout_input(&mut input).unwrap();
+        assert_eq!(layout.pages.len(), 1);
+        assert_eq!(heights, vec![16.865234, 16.865234]);
     }
 
     #[test]
@@ -984,19 +1043,6 @@ mod parity_tests {
         serde_json::from_value(parsed.get("block")?.clone()).ok()
     }
 
-    /// Re-narrows to f32 so the JSON path's f32 -> shortest-decimal -> f64
-    /// widening cannot mask a real difference.
-    fn narrow(value: &Value) -> Value {
-        match value {
-            Value::Number(n) => json!(format!("{:?}", n.as_f64().unwrap_or(f64::NAN) as f32)),
-            Value::Array(items) => Value::Array(items.iter().map(narrow).collect()),
-            Value::Object(map) => {
-                Value::Object(map.iter().map(|(k, v)| (k.clone(), narrow(v))).collect())
-            }
-            other => other.clone(),
-        }
-    }
-
     fn legacy_measure(
         paragraph: &ParagraphBlock,
         content_width: f64,
@@ -1060,8 +1106,8 @@ mod parity_tests {
                 (Some(a), Some(b)) => {
                     measured += 1;
                     assert_eq!(
-                        narrow(&serde_json::to_value(a).unwrap()),
-                        narrow(&serde_json::to_value(b).unwrap()),
+                        serde_json::to_string(a).unwrap(),
+                        serde_json::to_string(b).unwrap(),
                         "case {case}: extent differs for {spec}"
                     );
                 }
@@ -1275,8 +1321,8 @@ mod parity_tests {
                 match (&legacy, &typed) {
                     (None, None) => {}
                     (Some(a), Some(b)) => assert_eq!(
-                        narrow(&serde_json::to_value(a).unwrap()),
-                        narrow(&serde_json::to_value(b).unwrap()),
+                        serde_json::to_string(a).unwrap(),
+                        serde_json::to_string(b).unwrap(),
                         "{name} = {value}: extent differs"
                     ),
                     _ => panic!(

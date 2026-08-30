@@ -104,6 +104,7 @@ dependencies = [
  "serde_json",
  "unicode-segmentation",
  "wasm-bindgen",
+ "zmij",
 ]
 
 [[package]]
