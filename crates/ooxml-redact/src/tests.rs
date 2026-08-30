@@ -1122,6 +1122,68 @@ fn an_unresolvable_internal_target_blanks_instead_of_deleting() {
 }
 
 #[test]
+fn a_reference_to_scrubbed_owned_relationships_blanks_instead_of_deleting() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/></Types>"#,
+            ),
+        ),
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/workbook.xml",
+            xml(
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><extLst><ext uri="{8D4A375A-586D-4F93-8092-10DB64A2B4A1}"><relsRef r:id="rIdRels"/></ext></extLst></workbook>"#,
+            ),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRels" Type="http://example.com/relationships/ownedRelationships" Target="embeddings/_rels/oleObject1.bin.rels"/></Relationships>"#,
+            ),
+        ),
+        (
+            "xl/embeddings/oleObject1.bin",
+            b"OWNED_RELATIONSHIPS_SECRET".to_vec(),
+        ),
+        (
+            "xl/embeddings/_rels/oleObject1.bin.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+            ),
+        ),
+    ]);
+    let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
+    assert_eq!(report.binary_parts, 1);
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let workbook = String::from_utf8_lossy(part(&parts, "xl/workbook.xml"));
+    assert!(workbook.contains(r#"r:id="rIdRels""#));
+    let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
+    assert!(
+        workbook_rels.contains(r#"Id="rIdRels""#),
+        "host r:id must resolve to a surviving relationship: {workbook_rels}"
+    );
+    assert!(
+        parts
+            .iter()
+            .any(|(path, _)| path == "xl/embeddings/_rels/oleObject1.bin.rels"),
+        "the surviving relationship target must survive"
+    );
+    assert_eq!(part(&parts, "xl/embeddings/oleObject1.bin"), b"");
+    assert!(
+        parts.iter().all(
+            |(_, bytes)| !String::from_utf8_lossy(bytes).contains("OWNED_RELATIONSHIPS_SECRET")
+        )
+    );
+}
+
+#[test]
 fn the_exact_case_target_is_the_one_followed() {
     let source = package(vec![
         (

@@ -46,9 +46,8 @@ const CONTENT_TYPES: &str = "[content_types].xml";
 const ROOT_RELATIONSHIPS: &str = "_rels/.rels";
 
 /// Whether a relationship part that can outlive scrubbing names an internal
-/// target that resolves to no stored entry. Which parts such a target stands
-/// for is then unknown, so no deletion can be proven safe and every scrubbed
-/// part is blanked in place instead.
+/// target that would not survive deletion. No deletion can then be proven safe,
+/// so every scrubbed part is blanked in place instead.
 fn has_unresolvable_reference(
     parts: &[(String, Vec<u8>)],
     scrubbed: &HashSet<String>,
@@ -64,17 +63,18 @@ fn has_unresolvable_reference(
             None if name != ROOT_RELATIONSHIPS => continue,
             _ => {}
         }
-        if names_a_missing_part(bytes, &name, known)? {
+        if names_an_unresolvable_part(bytes, &name, scrubbed, known)? {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Whether any internal relationship here fails to name a stored entry.
-fn names_a_missing_part(
+/// Whether any internal relationship here would lose its target.
+fn names_an_unresolvable_part(
     bytes: &[u8],
     relationship_path: &str,
+    scrubbed: &HashSet<String>,
     known: &HashSet<String>,
 ) -> Result<bool, RedactError> {
     let mut reader = Reader::from_reader(bytes);
@@ -94,7 +94,10 @@ fn names_a_missing_part(
                     continue;
                 };
                 match resolve_relationship_target(relationship_path, target, known) {
-                    Some(resolved) if known.contains(&resolved) => {}
+                    Some(resolved)
+                        if known.contains(&resolved)
+                            && !owner_of_rels_path(&resolved)
+                                .is_some_and(|owner| scrubbed.contains(&owner)) => {}
                     _ => return Ok(true),
                 }
             }
