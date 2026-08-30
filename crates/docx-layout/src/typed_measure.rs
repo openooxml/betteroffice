@@ -507,7 +507,7 @@ mod parity_tests {
         assert_eq!(
             serde_json::to_value(&via_entry).unwrap(),
             serde_json::to_value(&via_typed).unwrap(),
-            "the production entry point must agree bit-for-bit with the typed path"
+            "the production entry point must delegate to the typed core"
         );
     }
 
