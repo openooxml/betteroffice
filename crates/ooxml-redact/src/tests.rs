@@ -353,7 +353,7 @@ fn case_folded_entry_names_match_the_opc_layer() {
 }
 
 #[test]
-fn percent_encoded_targets_resolve_to_their_decoded_parts() {
+fn percent_encoded_targets_resolve_to_literal_parts() {
     let source = package(vec![
         (
             "[Content_Types].xml",
@@ -376,40 +376,69 @@ fn percent_encoded_targets_resolve_to_their_decoded_parts() {
         (
             "xl/_rels/workbook.xml.rels",
             xml(
-                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/ole%20one%7Ea.bin"/></Relationships>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/payload%40one.bin"/></Relationships>"#,
             ),
         ),
         (
-            "xl/embeddings/ole one~a.bin",
-            b"ENCODED_TARGET_SECRET".to_vec(),
+            "xl/embeddings/payload%40one.bin",
+            b"LITERAL_TARGET_SECRET".to_vec(),
         ),
+        (
+            "xl/embeddings/payload@one.bin",
+            b"DECODED_DECOY_SECRET".to_vec(),
+        ),
+        ("xl/embeddings/orphan.bin", b"ORPHAN_SECRET".to_vec()),
     ]);
     let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
     let parts = ooxml_opc::unzip_parts(&output).unwrap();
-    assert_eq!(
-        part(&parts, "xl/embeddings/ole one~a.bin"),
-        b"",
-        "a percent-encoded target must be recognised as pointing at its part"
-    );
     let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
     assert!(
-        workbook_rels.contains(r#"Id="rIdOle""#),
-        "the relationship must not be left dangling: {workbook_rels}"
+        workbook_rels.contains(r#"Target="embeddings/payload%40one.bin""#),
+        "the literal relationship must survive: {workbook_rels}"
     );
     assert!(
         parts
             .iter()
-            .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains("ENCODED_TARGET_SECRET"))
+            .any(|(path, _)| path == "xl/embeddings/payload%40one.bin"),
+        "relationship target is dangling: {workbook_rels}"
     );
+    assert_eq!(
+        part(&parts, "xl/embeddings/payload%40one.bin"),
+        b"",
+        "the literal target must be blanked in place"
+    );
+    for path in ["xl/embeddings/payload@one.bin", "xl/embeddings/orphan.bin"] {
+        assert!(
+            parts.iter().all(|(candidate, _)| candidate != path),
+            "unreferenced part survived, so relationship resolution fell back: {path}"
+        );
+    }
+    let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
+    assert!(
+        content_types.contains(r#"Extension="bin""#),
+        "the retained literal target needs content-type coverage: {content_types}"
+    );
+    for secret in [
+        "LITERAL_TARGET_SECRET",
+        "DECODED_DECOY_SECRET",
+        "ORPHAN_SECRET",
+    ] {
+        assert!(
+            parts
+                .iter()
+                .all(|(_, bytes)| !String::from_utf8_lossy(bytes).contains(secret)),
+            "secret survived: {secret}"
+        );
+    }
 }
 
 #[test]
-fn encoded_spellings_resolve_after_case_folding_and_prefer_the_stored_part() {
+fn encoded_relationships_and_overrides_name_literal_parts() {
     let source = package(vec![
         (
             "[Content_Types].xml",
             xml(
-                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.embedded"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/custom/%4Bey.bin" ContentType="application/vnd.ms-office.opaque"/></Types>"#,
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/custom/twin%2Ebin" ContentType="application/vnd.ms-office.literal"/><Override PartName="/xl/custom/twin.bin" ContentType="application/vnd.ms-office.decoy"/></Types>"#,
             ),
         ),
         (
@@ -427,38 +456,40 @@ fn encoded_spellings_resolve_after_case_folding_and_prefer_the_stored_part() {
         (
             "xl/_rels/workbook.xml.rels",
             xml(
-                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdKey" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="custom/%4Bey.bin"/><Relationship Id="rIdTwin" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="custom/twin%2Ebin"/></Relationships>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTwin" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="custom/twin%2Ebin"/></Relationships>"#,
             ),
         ),
-        // `%4B` is uppercase `K`: resolution lowercases before decoding, so the
-        // decoded spelling has to be normalized again to match the entry key.
-        ("xl/custom/Key.bin", b"ENCODED_CASE_SECRET".to_vec()),
-        ("xl/custom/twin.bin", b"TWIN_TARGET_SECRET".to_vec()),
-        ("xl/custom/twin%2Ebin", b"TWIN_LITERAL_SECRET".to_vec()),
+        ("xl/custom/twin.bin", b"DECODED_PART_SECRET".to_vec()),
+        ("xl/custom/twin%2Ebin", b"LITERAL_PART_SECRET".to_vec()),
     ]);
     let (output, _) = redact_with_report(&source, Format::Auto).unwrap();
     let parts = ooxml_opc::unzip_parts(&output).unwrap();
-    assert_eq!(part(&parts, "xl/custom/Key.bin"), b"");
-    assert_eq!(part(&parts, "xl/custom/twin.bin"), b"");
-    assert!(
-        parts.iter().all(|(path, _)| path != "xl/custom/twin%2Ebin"),
-        "the literal spelling nothing targets must be deleted"
-    );
     let workbook_rels = String::from_utf8_lossy(part(&parts, "xl/_rels/workbook.xml.rels"));
     assert!(
-        workbook_rels.contains(r#"Id="rIdKey""#) && workbook_rels.contains(r#"Id="rIdTwin""#),
-        "relationships to retained parts must survive: {workbook_rels}"
+        workbook_rels.contains(r#"Target="custom/twin%2Ebin""#),
+        "the encoded relationship must survive: {workbook_rels}"
+    );
+    assert!(
+        parts.iter().any(|(path, _)| path == "xl/custom/twin%2Ebin"),
+        "relationship target is dangling: {workbook_rels}"
+    );
+    assert_eq!(part(&parts, "xl/custom/twin%2Ebin"), b"");
+    assert!(
+        parts.iter().all(|(path, _)| path != "xl/custom/twin.bin"),
+        "the decoded decoy must not alias the literal target"
     );
     let content_types = String::from_utf8_lossy(part(&parts, "[Content_Types].xml"));
     assert!(
-        content_types.contains("ms-office.opaque"),
-        "the encoded Override names a retained part: {content_types}"
+        content_types.contains(r#"PartName="/xl/custom/twin%2Ebin""#)
+            && content_types.contains("ms-office.literal"),
+        "the retained literal part needs its encoded Override: {content_types}"
     );
-    for secret in [
-        "ENCODED_CASE_SECRET",
-        "TWIN_TARGET_SECRET",
-        "TWIN_LITERAL_SECRET",
-    ] {
+    assert!(
+        !content_types.contains(r#"PartName="/xl/custom/twin.bin""#)
+            && !content_types.contains("ms-office.decoy"),
+        "the decoded decoy's Override outlived its part: {content_types}"
+    );
+    for secret in ["DECODED_PART_SECRET", "LITERAL_PART_SECRET"] {
         assert!(
             parts
                 .iter()

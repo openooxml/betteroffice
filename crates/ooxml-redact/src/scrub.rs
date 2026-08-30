@@ -24,7 +24,7 @@ pub(crate) fn prune_scrubbed_parts(
     if has_unresolvable_reference(parts, scrubbed, &known)? {
         return Ok(scrubbed.clone());
     }
-    let (mut removed, blanked) = cascade_owned_relationships(parts, scrubbed, &known)?;
+    let (mut removed, blanked) = cascade_owned_relationships(parts, scrubbed)?;
     removed.retain(|name| !blanked.contains(name));
     parts.retain(|(path, _)| !removed.contains(&normalize_part_name(path)));
     let kept_extensions: HashSet<String> = parts
@@ -34,9 +34,9 @@ pub(crate) fn prune_scrubbed_parts(
     for (path, bytes) in parts.iter_mut() {
         let lower = normalize_part_name(path);
         if lower == CONTENT_TYPES {
-            *bytes = prune_content_types(bytes, &removed, &kept_extensions, &known, path)?;
+            *bytes = prune_content_types(bytes, &removed, &kept_extensions, path)?;
         } else if lower.ends_with(".rels") {
-            *bytes = prune_relationships(bytes, &removed, &known, path)?;
+            *bytes = prune_relationships(bytes, &removed, path)?;
         }
     }
     Ok(blanked)
@@ -93,7 +93,7 @@ fn names_an_unresolvable_part(
                 let Some(target) = unqualified_value(&values, "Target") else {
                     continue;
                 };
-                match resolve_relationship_target(relationship_path, target, known) {
+                match resolve_relationship_target(relationship_path, target) {
                     Some(resolved)
                         if known.contains(&resolved)
                             && !owner_of_rels_path(&resolved)
@@ -118,7 +118,6 @@ fn control_part(name: &str) -> bool {
 fn cascade_owned_relationships(
     parts: &[(String, Vec<u8>)],
     scrubbed: &HashSet<String>,
-    known: &HashSet<String>,
 ) -> Result<(HashSet<String>, HashSet<String>), RedactError> {
     let by_name: HashMap<String, &Vec<u8>> = parts
         .iter()
@@ -127,8 +126,8 @@ fn cascade_owned_relationships(
     let mut spared: HashSet<String> = HashSet::new();
     let mut target_cache: HashMap<String, Vec<String>> = HashMap::new();
     loop {
-        let removed = removal_closure(&by_name, scrubbed, &spared, known, &mut target_cache)?;
-        let targets = survivor_targets(&by_name, &removed, known, &mut target_cache)?;
+        let removed = removal_closure(&by_name, scrubbed, &spared, &mut target_cache)?;
+        let targets = survivor_targets(&by_name, &removed, &mut target_cache)?;
         let mut changed = false;
         for target in &targets {
             if scrubbed.contains(target)
@@ -155,7 +154,6 @@ fn removal_closure(
     by_name: &HashMap<String, &Vec<u8>>,
     scrubbed: &HashSet<String>,
     spared: &HashSet<String>,
-    known: &HashSet<String>,
     target_cache: &mut HashMap<String, Vec<String>>,
 ) -> Result<HashSet<String>, RedactError> {
     let mut removed = scrubbed.clone();
@@ -170,7 +168,7 @@ fn removal_closure(
             let parsed = match target_cache.get_mut(&owned) {
                 Some(parsed) => parsed,
                 None => {
-                    let parsed = internal_targets(bytes, &owned, known)?;
+                    let parsed = internal_targets(bytes, &owned)?;
                     target_cache.insert(owned.clone(), parsed);
                     target_cache.get(&owned).unwrap()
                 }
@@ -195,7 +193,6 @@ fn removal_closure(
 fn survivor_targets(
     by_name: &HashMap<String, &Vec<u8>>,
     removed: &HashSet<String>,
-    known: &HashSet<String>,
     cache: &mut HashMap<String, Vec<String>>,
 ) -> Result<Vec<String>, RedactError> {
     let mut targets = Vec::new();
@@ -214,7 +211,7 @@ fn survivor_targets(
         let parsed = match cache.get(name) {
             Some(parsed) => parsed,
             None => {
-                let parsed = internal_targets(bytes, name, known)?;
+                let parsed = internal_targets(bytes, name)?;
                 cache.insert(name.clone(), parsed);
                 cache.get(name).unwrap()
             }
@@ -240,11 +237,7 @@ fn owner_of_rels_path(path: &str) -> Option<String> {
     }
 }
 
-fn internal_targets(
-    bytes: &[u8],
-    relationship_path: &str,
-    known: &HashSet<String>,
-) -> Result<Vec<String>, RedactError> {
+fn internal_targets(bytes: &[u8], relationship_path: &str) -> Result<Vec<String>, RedactError> {
     let mut reader = Reader::from_reader(bytes);
     let mut targets = Vec::new();
     loop {
@@ -259,9 +252,9 @@ fn internal_targets(
                 if rels::external_relationship(&values, true) {
                     continue;
                 }
-                if let Some(target) = unqualified_value(&values, "Target").and_then(|target| {
-                    resolve_relationship_target(relationship_path, target, known)
-                }) {
+                if let Some(target) = unqualified_value(&values, "Target")
+                    .and_then(|target| resolve_relationship_target(relationship_path, target))
+                {
                     targets.push(target);
                 }
             }
@@ -282,7 +275,6 @@ fn prune_content_types(
     bytes: &[u8],
     removed: &HashSet<String>,
     kept_extensions: &HashSet<String>,
-    known: &HashSet<String>,
     path: &str,
 ) -> Result<Vec<u8>, RedactError> {
     let mut reader = Reader::from_reader(bytes);
@@ -304,7 +296,7 @@ fn prune_content_types(
         match event {
             Event::Start(start) => {
                 let values = attributes(&reader, &start, path)?;
-                if drops_entry(&start, &values, removed, kept_extensions, known) {
+                if drops_entry(&start, &values, removed, kept_extensions) {
                     skip_depth = 1;
                 } else {
                     write_start(&mut writer, start.into_owned(), false, path)?;
@@ -312,7 +304,7 @@ fn prune_content_types(
             }
             Event::Empty(start) => {
                 let values = attributes(&reader, &start, path)?;
-                if !drops_entry(&start, &values, removed, kept_extensions, known) {
+                if !drops_entry(&start, &values, removed, kept_extensions) {
                     write_start(&mut writer, start.into_owned(), true, path)?;
                 }
             }
@@ -327,12 +319,10 @@ fn drops_entry(
     values: &[(String, String)],
     removed: &HashSet<String>,
     kept_extensions: &HashSet<String>,
-    known: &HashSet<String>,
 ) -> bool {
     match start.name().local_name().as_ref() {
-        b"Override" => unqualified_value(values, "PartName").is_some_and(|name| {
-            removed.contains(&preferred_spelling(normalize_part_name(name), known))
-        }),
+        b"Override" => unqualified_value(values, "PartName")
+            .is_some_and(|name| removed.contains(&normalize_part_name(name))),
         b"Default" => unqualified_value(values, "Extension")
             .is_some_and(|ext| !kept_extensions.contains(&ext.to_lowercase())),
         _ => false,
@@ -342,7 +332,6 @@ fn drops_entry(
 fn prune_relationships(
     bytes: &[u8],
     removed: &HashSet<String>,
-    known: &HashSet<String>,
     path: &str,
 ) -> Result<Vec<u8>, RedactError> {
     let mut reader = Reader::from_reader(bytes);
@@ -364,7 +353,7 @@ fn prune_relationships(
         match event {
             Event::Start(start) => {
                 let remove = start.name().local_name().as_ref() == b"Relationship"
-                    && removes_target(&attributes(&reader, &start, path)?, removed, known, path);
+                    && removes_target(&attributes(&reader, &start, path)?, removed, path);
                 if remove {
                     skip_depth = 1;
                 } else {
@@ -373,7 +362,7 @@ fn prune_relationships(
             }
             Event::Empty(start) => {
                 let remove = start.name().local_name().as_ref() == b"Relationship"
-                    && removes_target(&attributes(&reader, &start, path)?, removed, known, path);
+                    && removes_target(&attributes(&reader, &start, path)?, removed, path);
                 if !remove {
                     write_start(&mut writer, start.into_owned(), true, path)?;
                 }
@@ -387,73 +376,21 @@ fn prune_relationships(
 fn removes_target(
     values: &[(String, String)],
     removed: &HashSet<String>,
-    known: &HashSet<String>,
     relationship_path: &str,
 ) -> bool {
     if rels::external_relationship(values, true) {
         return false;
     }
     unqualified_value(values, "Target")
-        .and_then(|target| resolve_relationship_target(relationship_path, target, known))
+        .and_then(|target| resolve_relationship_target(relationship_path, target))
         .is_some_and(|target| removed.contains(&target))
 }
 
 /// Resolves a relationship target against the source part's directory,
-/// handling absolute, relative, and `..` targets. Separators are normalized
-/// before the root test, the way `ooxml-opc`'s `normalized_security_path` keys
-/// the entries this has to match. A target is an IRI, so its percent-decoded
-/// spelling names the part when the literal one does not; `known` decides
-/// which of the two the package holds.
-fn resolve_relationship_target(
-    relationship_path: &str,
-    target: &str,
-    known: &HashSet<String>,
-) -> Option<String> {
-    let resolved = resolve_target_path(relationship_path, target)?;
-    Some(preferred_spelling(resolved, known))
-}
-
-/// The decoded name when the package holds it, otherwise the literal one.
-fn preferred_spelling(canonical: String, known: &HashSet<String>) -> String {
-    match percent_decoded(&canonical).map(|decoded| normalize_part_name(&decoded)) {
-        Some(decoded) if known.contains(&decoded) => decoded,
-        _ => canonical,
-    }
-}
-
-/// Decodes `%NN` escapes, or `None` when the value has none that decode to
-/// different, valid UTF-8.
-fn percent_decoded(value: &str) -> Option<String> {
-    if !value.contains('%') {
-        return None;
-    }
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match hex_pair(bytes, index) {
-            Some(byte) => {
-                decoded.push(byte);
-                index += 3;
-            }
-            None => {
-                decoded.push(bytes[index]);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded)
-        .ok()
-        .filter(|decoded| decoded != value)
-}
-
-fn hex_pair(bytes: &[u8], index: usize) -> Option<u8> {
-    if bytes.get(index) != Some(&b'%') {
-        return None;
-    }
-    let high = (*bytes.get(index + 1)? as char).to_digit(16)?;
-    let low = (*bytes.get(index + 2)? as char).to_digit(16)?;
-    u8::try_from(high * 16 + low).ok()
+/// handling absolute, relative, and `..` targets while preserving literal
+/// percent escapes.
+fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<String> {
+    resolve_target_path(relationship_path, target)
 }
 
 fn resolve_target_path(relationship_path: &str, target: &str) -> Option<String> {
