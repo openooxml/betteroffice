@@ -3,7 +3,8 @@
 use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, Sheet, SheetId, Workbook};
 use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CellState, HorizontalAlignment,
-    NumberFormatMutation, Op, Provenance, StylePatch, TextWrapping, Transaction, UndoStack, apply,
+    NumberFormatMutation, Op, Provenance, StylePatch, StyleProperty, TextWrapping, Transaction,
+    UndoStack, apply,
 };
 
 fn r(a1: &str) -> CellRef {
@@ -269,4 +270,38 @@ fn range_style_and_number_format_are_undoable() {
             .font
             .bold
     );
+}
+
+#[test]
+fn clearing_a_style_only_cell_restores_sparse_storage() {
+    let mut wb = Workbook::default();
+    wb.sheets.push(Sheet::new("Sheet1"));
+    let range = CellRange::parse_a1("A1").unwrap();
+    apply(
+        &mut wb,
+        &Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range,
+            patch: StylePatch {
+                italic: Some(true),
+                ..StylePatch::default()
+            },
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].cell(r("A1")).is_some());
+
+    apply(
+        &mut wb,
+        &Op::PatchRangeStyle {
+            sheet: SheetId(0),
+            range,
+            patch: StylePatch {
+                clear: vec![StyleProperty::Italic],
+                ..StylePatch::default()
+            },
+        },
+    )
+    .unwrap();
+    assert!(wb.sheets[0].cell(r("A1")).is_none());
 }

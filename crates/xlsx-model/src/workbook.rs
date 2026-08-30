@@ -82,6 +82,10 @@ impl Sheet {
         self.cells.get(&(at.row, at.col))
     }
 
+    pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {
+        self.cells.get_mut(&(at.row, at.col))
+    }
+
     pub fn set_cell(&mut self, at: CellRef, cell: Cell) {
         if cell == Cell::default() {
             self.cells.remove(&(at.row, at.col));

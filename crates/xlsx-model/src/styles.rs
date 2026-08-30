@@ -1,7 +1,8 @@
 //! style types (fonts, fills, borders, xf chains, theme colors). pure data;
 //! the cellXfs indirection chain is walked through the `Stylesheet` accessors.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
@@ -257,17 +258,17 @@ impl Theme {
 
 /// hashable stand-in for a color; float tints become raw bits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ColorKey {
-    Rgb(String),
+enum ColorKey<'a> {
+    Rgb(&'a str),
     Theme { idx: u8, tint: Option<u64> },
     Indexed(u8),
     Auto,
 }
 
-impl ColorKey {
-    fn new(color: &Color) -> Option<Self> {
+impl<'a> ColorKey<'a> {
+    fn new(color: &'a Color) -> Option<Self> {
         Some(match color {
-            Color::Rgb(s) => ColorKey::Rgb(s.clone()),
+            Color::Rgb(s) => ColorKey::Rgb(s),
             Color::Theme { idx, tint } => ColorKey::Theme {
                 idx: *idx,
                 tint: Some(float_key(*tint)?),
@@ -280,20 +281,20 @@ impl ColorKey {
 
 /// hashable stand-in for a font; `None` when a NaN size/color tint blocks keying.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct FontKey {
-    name: Option<String>,
+struct FontKey<'a> {
+    name: Option<&'a str>,
     size_pt: Option<u64>,
     bold: bool,
     italic: bool,
     underline: bool,
     strike: bool,
-    color: Option<ColorKey>,
+    color: Option<ColorKey<'a>>,
 }
 
-impl FontKey {
-    fn new(font: &Font) -> Option<Self> {
+impl<'a> FontKey<'a> {
+    fn new(font: &'a Font) -> Option<Self> {
         Some(FontKey {
-            name: font.name.clone(),
+            name: font.name.as_deref(),
             size_pt: match font.size_pt {
                 None => None,
                 Some(size) => Some(float_key(size)?),
@@ -312,13 +313,13 @@ impl FontKey {
 
 /// hashable stand-in for a fill.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum FillKey {
+enum FillKey<'a> {
     None,
-    Solid(ColorKey),
+    Solid(ColorKey<'a>),
 }
 
-impl FillKey {
-    fn new(fill: &Fill) -> Option<Self> {
+impl<'a> FillKey<'a> {
+    fn new(fill: &'a Fill) -> Option<Self> {
         Some(match fill {
             Fill::None => FillKey::None,
             Fill::Solid(color) => FillKey::Solid(ColorKey::new(color)?),
@@ -328,13 +329,13 @@ impl FillKey {
 
 /// hashable stand-in for a border edge.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct EdgeKey {
+struct EdgeKey<'a> {
     style: BorderStyle,
-    color: Option<ColorKey>,
+    color: Option<ColorKey<'a>>,
 }
 
-impl EdgeKey {
-    fn new(edge: &BorderEdge) -> Option<Self> {
+impl<'a> EdgeKey<'a> {
+    fn new(edge: &'a BorderEdge) -> Option<Self> {
         Some(EdgeKey {
             style: edge.style,
             color: match &edge.color {
@@ -347,57 +348,54 @@ impl EdgeKey {
 
 /// hashable stand-in for a border.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BorderKey {
-    left: Option<EdgeKey>,
-    right: Option<EdgeKey>,
-    top: Option<EdgeKey>,
-    bottom: Option<EdgeKey>,
+struct BorderKey<'a> {
+    left: Option<EdgeKey<'a>>,
+    right: Option<EdgeKey<'a>>,
+    top: Option<EdgeKey<'a>>,
+    bottom: Option<EdgeKey<'a>>,
 }
 
-impl BorderKey {
-    fn new(border: &Border) -> Option<Self> {
-        let edge = |e: &Option<BorderEdge>| match e {
-            None => Some(None),
-            Some(e) => Some(Some(EdgeKey::new(e)?)),
-        };
+impl<'a> BorderKey<'a> {
+    fn new(border: &'a Border) -> Option<Self> {
         Some(BorderKey {
-            left: edge(&border.left)?,
-            right: edge(&border.right)?,
-            top: edge(&border.top)?,
-            bottom: edge(&border.bottom)?,
+            left: match &border.left {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+            right: match &border.right {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+            top: match &border.top {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
+            bottom: match &border.bottom {
+                None => None,
+                Some(edge) => Some(EdgeKey::new(edge)?),
+            },
         })
     }
 }
 
-/// intern cache: key -> index, tagged with the pool length it was synced to.
-#[derive(Debug)]
-struct PoolMemo<K> {
-    map: HashMap<K, u32>,
+/// intern cache: fingerprint -> index, tagged with its synced pool length.
+#[derive(Debug, Default)]
+struct PoolMemo {
+    map: HashMap<u64, u32>,
     pool_len: usize,
     #[cfg(test)]
     rebuilds: u64,
 }
 
-impl<K> Default for PoolMemo<K> {
-    fn default() -> Self {
-        PoolMemo {
-            map: HashMap::new(),
-            pool_len: 0,
-            #[cfg(test)]
-            rebuilds: 0,
-        }
-    }
-}
-
 /// the memo is a pure accelerator, so a clone starts cold instead of copying
 /// the map; the first intern on the clone rebuilds only what it needs.
-impl<K> Clone for PoolMemo<K> {
+impl Clone for PoolMemo {
     fn clone(&self) -> Self {
         PoolMemo::default()
     }
 }
 
-impl<K: Eq + std::hash::Hash> PoolMemo<K> {
+impl PoolMemo {
     fn invalidate(&mut self, pool_len: usize) {
         self.map.clear();
         self.pool_len = pool_len;
@@ -412,7 +410,6 @@ impl<K: Eq + std::hash::Hash> PoolMemo<K> {
 #[derive(Debug, Default)]
 struct FmtMemo {
     patterns: HashMap<String, (u16, usize)>,
-    used: HashSet<u16>,
     pool_len: usize,
     #[cfg(test)]
     rebuilds: u64,
@@ -427,11 +424,9 @@ impl Clone for FmtMemo {
 impl FmtMemo {
     fn rebuild(&mut self, formats: &[(u16, String)]) {
         self.patterns.clear();
-        self.used.clear();
         self.pool_len = formats.len();
         for (slot, (id, code)) in formats.iter().enumerate() {
             self.patterns.entry(code.clone()).or_insert((*id, slot));
-            self.used.insert(*id);
         }
         #[cfg(test)]
         {
@@ -464,13 +459,13 @@ pub struct Stylesheet {
     pub num_fmts: Vec<(u16, String)>,
     pub theme: Theme,
     #[serde(skip)]
-    font_memo: PoolMemo<FontKey>,
+    font_memo: PoolMemo,
     #[serde(skip)]
-    fill_memo: PoolMemo<FillKey>,
+    fill_memo: PoolMemo,
     #[serde(skip)]
-    border_memo: PoolMemo<BorderKey>,
+    border_memo: PoolMemo,
     #[serde(skip)]
-    xf_memo: PoolMemo<Xf>,
+    xf_memo: PoolMemo,
     #[serde(skip)]
     fmt_memo: FmtMemo,
 }
@@ -649,6 +644,7 @@ impl Stylesheet {
         }
     }
 
+    #[inline]
     pub fn intern_cell_format(
         &mut self,
         format: &CellFormat,
@@ -656,12 +652,126 @@ impl Stylesheet {
         if format == &CellFormat::default() {
             return Ok(None);
         }
-        let num_fmt_id = match &format.number_format {
-            NumberFormat::Builtin { id } => Some(*id).filter(|id| *id != 0),
-            NumberFormat::Custom { pattern } => {
-                Some(self.intern_number_format(pattern).ok_or(NumFmtTableFull)?)
+        match &format.number_format {
+            NumberFormat::Builtin { id } => Ok(Some(self.intern_builtin_cell_format(format, *id))),
+            NumberFormat::Custom { pattern } => self.intern_custom_cell_format(format, pattern),
+        }
+    }
+
+    #[inline(never)]
+    fn intern_builtin_cell_format(&mut self, format: &CellFormat, num_fmt_id: u16) -> u32 {
+        if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
+            let font = intern_linear(&mut self.fonts, &format.font);
+            let fill = intern_linear(&mut self.fills, &format.fill);
+            let border = intern_linear(&mut self.borders, &format.border);
+            let num_fmt_id = Some(num_fmt_id).filter(|id| *id != 0);
+            let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+            let xf = Xf {
+                font: (format.font != Font::default()).then_some(font),
+                fill: (format.fill != Fill::default()).then_some(fill),
+                border: (format.border != Border::default()).then_some(border),
+                num_fmt_id,
+                alignment,
+            };
+            if let Some(index) = xf.font
+                && xf.fill.is_none()
+                && xf.border.is_none()
+                && xf.num_fmt_id.is_none()
+                && xf.alignment.is_none()
+                && self
+                    .cell_xfs
+                    .get(index as usize)
+                    .is_some_and(|candidate| candidate == &xf)
+            {
+                return index;
             }
-        };
+            return intern_linear(&mut self.cell_xfs, &xf);
+        }
+        self.intern_cell_format_large(format, Some(num_fmt_id).filter(|id| *id != 0))
+    }
+
+    #[inline(never)]
+    fn intern_custom_cell_format(
+        &mut self,
+        format: &CellFormat,
+        pattern: &str,
+    ) -> Result<Option<u32>, NumFmtTableFull> {
+        let num_fmt_id = Some(self.intern_number_format(pattern).ok_or(NumFmtTableFull)?);
+        if self.cell_xfs.len() < INTERN_CACHE_MIN_POOL {
+            let font = intern_linear(&mut self.fonts, &format.font);
+            let fill = intern_linear(&mut self.fills, &format.fill);
+            let border = intern_linear(&mut self.borders, &format.border);
+            let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+            let xf = Xf {
+                font: (format.font != Font::default()).then_some(font),
+                fill: (format.fill != Fill::default()).then_some(fill),
+                border: (format.border != Border::default()).then_some(border),
+                num_fmt_id,
+                alignment,
+            };
+            return Ok(Some(intern_linear(&mut self.cell_xfs, &xf)));
+        }
+        Ok(Some(self.intern_cell_format_large(format, num_fmt_id)))
+    }
+
+    #[inline(never)]
+    fn intern_cell_format_large(&mut self, format: &CellFormat, num_fmt_id: Option<u16>) -> u32 {
+        if self.xf_memo.map.is_empty() {
+            let font_len = self.fonts.len();
+            let fill_len = self.fills.len();
+            let border_len = self.borders.len();
+            let font = intern_linear(&mut self.fonts, &format.font);
+            let fill = intern_linear(&mut self.fills, &format.fill);
+            let border = intern_linear(&mut self.borders, &format.border);
+            let has_font = format.font != Font::default();
+            let has_fill = format.fill != Fill::default();
+            let has_border = format.border != Border::default();
+            let alignment = (!format.alignment.is_empty()).then(|| format.alignment.clone());
+            let xf = Xf {
+                font: has_font.then_some(font),
+                fill: has_fill.then_some(fill),
+                border: has_border.then_some(border),
+                num_fmt_id,
+                alignment,
+            };
+            let has_new_facet = (self.fonts.len() != font_len && has_font)
+                || (self.fills.len() != fill_len && has_fill)
+                || (self.borders.len() != border_len && has_border);
+            let index = if has_new_facet {
+                self.cell_xfs.len()
+            } else {
+                scan_index(&self.cell_xfs, &xf)
+            };
+            if index == self.cell_xfs.len() {
+                self.cell_xfs.push(xf);
+            } else {
+                seed_memo(
+                    &mut self.font_memo,
+                    self.fonts.len(),
+                    FontKey::new(&format.font).map(|key| fingerprint(&key)),
+                    font,
+                );
+                seed_memo(
+                    &mut self.fill_memo,
+                    self.fills.len(),
+                    FillKey::new(&format.fill).map(|key| fingerprint(&key)),
+                    fill,
+                );
+                seed_memo(
+                    &mut self.border_memo,
+                    self.borders.len(),
+                    BorderKey::new(&format.border).map(|key| fingerprint(&key)),
+                    border,
+                );
+                seed_memo(
+                    &mut self.xf_memo,
+                    self.cell_xfs.len(),
+                    Some(fingerprint(&xf)),
+                    index as u32,
+                );
+            }
+            return index as u32;
+        }
         let font = self.intern_font(&format.font);
         let fill = self.intern_fill(&format.fill);
         let border = self.intern_border(&format.border);
@@ -673,7 +783,7 @@ impl Stylesheet {
             num_fmt_id,
             alignment,
         };
-        Ok(Some(self.intern_xf(&xf)))
+        self.intern_xf(&xf)
     }
 
     /// current pool lengths; interning only ever appends, so truncating back to
@@ -698,39 +808,27 @@ impl Stylesheet {
     }
 
     fn intern_font(&mut self, value: &Font) -> u32 {
-        intern(
-            &mut self.fonts,
-            &mut self.font_memo,
-            FontKey::new(value),
-            value,
-        )
+        intern(&mut self.fonts, &mut self.font_memo, value, |value| {
+            FontKey::new(value).map(|key| fingerprint(&key))
+        })
     }
 
     fn intern_fill(&mut self, value: &Fill) -> u32 {
-        intern(
-            &mut self.fills,
-            &mut self.fill_memo,
-            FillKey::new(value),
-            value,
-        )
+        intern(&mut self.fills, &mut self.fill_memo, value, |value| {
+            FillKey::new(value).map(|key| fingerprint(&key))
+        })
     }
 
     fn intern_border(&mut self, value: &Border) -> u32 {
-        intern(
-            &mut self.borders,
-            &mut self.border_memo,
-            BorderKey::new(value),
-            value,
-        )
+        intern(&mut self.borders, &mut self.border_memo, value, |value| {
+            BorderKey::new(value).map(|key| fingerprint(&key))
+        })
     }
 
     fn intern_xf(&mut self, value: &Xf) -> u32 {
-        intern(
-            &mut self.cell_xfs,
-            &mut self.xf_memo,
-            Some(value.clone()),
-            value,
-        )
+        intern(&mut self.cell_xfs, &mut self.xf_memo, value, |value| {
+            Some(fingerprint(value))
+        })
     }
 
     /// true when a cell using `id` resolves to `pattern` via `format_code_for`:
@@ -783,31 +881,63 @@ impl Stylesheet {
         self.fmt_memo
             .patterns
             .insert(pattern.to_string(), (candidate, slot));
-        self.fmt_memo.used.insert(candidate);
         self.fmt_memo.pool_len = self.num_fmts.len();
         Some(candidate)
     }
 }
 
-/// intern `value` under `key`; hits are re-verified against the pool, misses rescan.
-fn intern<T, K>(values: &mut Vec<T>, memo: &mut PoolMemo<K>, key: Option<K>, value: &T) -> u32
+const INTERN_CACHE_MIN_POOL: usize = 128;
+
+fn seed_memo(memo: &mut PoolMemo, pool_len: usize, key: Option<u64>, index: u32) {
+    if let Some(key) = key {
+        memo.map.insert(key, index);
+    }
+    memo.pool_len = pool_len;
+}
+
+fn intern<T>(
+    values: &mut Vec<T>,
+    memo: &mut PoolMemo,
+    value: &T,
+    make_key: impl FnOnce(&T) -> Option<u64>,
+) -> u32
 where
     T: PartialEq + Clone,
-    K: Eq + std::hash::Hash,
 {
-    let Some(key) = key else {
+    if values.len() < INTERN_CACHE_MIN_POOL {
+        return intern_linear(values, value);
+    }
+
+    if !memo.map.is_empty() && memo.pool_len != values.len() {
+        memo.invalidate(values.len());
+    }
+
+    if memo.map.is_empty() {
         let index = scan_index(values, value);
         if index == values.len() {
             values.push(value.clone());
+        } else if values.len() >= INTERN_CACHE_MIN_POOL
+            && let Some(key) = make_key(value)
+        {
+            memo.map.insert(key, index as u32);
+            memo.pool_len = values.len();
         }
-        memo.invalidate(values.len());
+        return index as u32;
+    }
+
+    let Some(key) = make_key(value) else {
+        let index = scan_index(values, value);
+        if index == values.len() {
+            values.push(value.clone());
+            memo.pool_len = values.len();
+        }
         return index as u32;
     };
-    if memo.pool_len != values.len() {
-        memo.invalidate(values.len());
-    }
-    if let Some(&index) = memo.map.get(&key)
-        && values[index as usize] == *value
+    let cached = memo.map.get(&key).copied();
+    if let Some(index) = cached
+        && values
+            .get(index as usize)
+            .is_some_and(|candidate| candidate == value)
     {
         return index;
     }
@@ -817,16 +947,37 @@ where
     }
     let index = values.len() as u32;
     values.push(value.clone());
-    memo.map.insert(key, index);
+    if cached.is_some() {
+        memo.map.insert(key, index);
+    }
     memo.pool_len = values.len();
     index
 }
 
+#[inline(always)]
+fn intern_linear<T: PartialEq + Clone>(values: &mut Vec<T>, value: &T) -> u32 {
+    for (index, candidate) in values.iter().enumerate() {
+        if candidate == value {
+            return index as u32;
+        }
+    }
+    values.push(value.clone());
+    (values.len() - 1) as u32
+}
+
 fn scan_index<T: PartialEq>(values: &[T], value: &T) -> usize {
-    values
-        .iter()
-        .position(|candidate| candidate == value)
-        .unwrap_or(values.len())
+    for (index, candidate) in values.iter().enumerate() {
+        if candidate == value {
+            return index;
+        }
+    }
+    values.len()
+}
+
+fn fingerprint(value: &impl Hash) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// hashable stand-in for an f64; `None` for NaN (which never compares equal)
@@ -1116,6 +1267,92 @@ mod tests {
     }
 
     #[test]
+    fn font_key_covers_every_font_equality_field() {
+        let base = Font::default();
+        let variants = [
+            Font {
+                name: Some("Aptos".into()),
+                ..base.clone()
+            },
+            Font {
+                size_pt: Some(11.0),
+                ..base.clone()
+            },
+            Font {
+                bold: true,
+                ..base.clone()
+            },
+            Font {
+                italic: true,
+                ..base.clone()
+            },
+            Font {
+                underline: true,
+                ..base.clone()
+            },
+            Font {
+                strike: true,
+                ..base.clone()
+            },
+            Font {
+                color: Some(Color::Rgb("#123456".into())),
+                ..base.clone()
+            },
+        ];
+        let base_key = FontKey::new(&base).unwrap();
+        for variant in variants {
+            assert_ne!(FontKey::new(&variant).unwrap(), base_key);
+        }
+    }
+
+    #[test]
+    fn adaptive_interning_skips_small_and_unique_pool_keys() {
+        let mut small = Stylesheet::default();
+        let common = Font {
+            name: Some("Aptos".into()),
+            ..Font::default()
+        };
+        for _ in 0..100 {
+            assert_eq!(small.intern_font(&common), 0);
+        }
+        assert!(small.font_memo.map.is_empty());
+
+        let mut unique = Stylesheet::default();
+        let mut formats = Vec::new();
+        for index in 0..(INTERN_CACHE_MIN_POOL + 8) {
+            let format = CellFormat {
+                font: Font {
+                    name: Some(format!("font-{index}")),
+                    ..Font::default()
+                },
+                ..CellFormat::default()
+            };
+            assert_eq!(
+                unique.intern_cell_format(&format).unwrap(),
+                Some(index as u32)
+            );
+            formats.push(format);
+        }
+        assert!(unique.font_memo.map.is_empty());
+        assert!(unique.xf_memo.map.is_empty());
+
+        let repeated = formats.last().unwrap();
+        let repeated_index = (formats.len() - 1) as u32;
+        assert_eq!(
+            unique.intern_cell_format(repeated).unwrap(),
+            Some(repeated_index)
+        );
+        assert_eq!(unique.font_memo.map.len(), 1);
+        assert_eq!(unique.xf_memo.map.len(), 1);
+        assert_eq!(
+            unique.intern_cell_format(repeated).unwrap(),
+            Some(repeated_index)
+        );
+        assert_eq!(unique.font_memo.map.len(), 1);
+        assert_eq!(unique.xf_memo.map.len(), 1);
+    }
+
+    #[test]
     fn number_format_interning_reuses_ids_and_allocates_lowest_free() {
         let mut ss = Stylesheet::default();
         assert_eq!(ss.intern_number_format("0.000"), Some(164));
@@ -1190,10 +1427,10 @@ mod tests {
         ss.fonts = vec![plain.clone(), plain.clone(), nan.clone()];
 
         assert_eq!(ss.intern_font(&plain), 0);
-        assert_eq!(ss.font_memo.rebuilds, 1);
+        assert_eq!(ss.font_memo.rebuilds, 0);
 
         assert_eq!(ss.intern_font(&plain), 0);
-        assert_eq!(ss.font_memo.rebuilds, 1);
+        assert_eq!(ss.font_memo.rebuilds, 0);
 
         let first = ss.intern_font(&nan);
         let second = ss.intern_font(&nan);

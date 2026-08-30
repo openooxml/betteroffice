@@ -344,46 +344,90 @@ fn apply_range_formats(
     range: CellRange,
     mut update: impl FnMut(&mut xlsx_model::CellFormat, u32, u32) -> Result<(), OpError>,
 ) -> Result<InvertedOp, OpError> {
-    let sheet_ref = wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
-    let mut cells = Vec::new();
-    for row in range.start.row..=range.end.row {
-        for col in range.start.col..=range.end.col {
-            let at = CellRef::new(row, col);
-            cells.push((at, sheet_ref.cell(at).cloned().unwrap_or_default()));
-        }
+    if wb.sheet(sheet).is_none() {
+        return Err(OpError::SheetNotFound(sheet));
     }
     let marks = wb.styles.pool_marks();
-    let mut staged = Vec::with_capacity(cells.len());
-    for (at, old) in &cells {
-        let staged_cell = (|| {
-            let mut format = wb.styles.cell_format(old.style);
-            update(&mut format, at.row, at.col)?;
-            let style = wb
-                .styles
-                .intern_cell_format(&format)
-                .map_err(|_| OpError::NumFmtTableFull)?;
-            let mut next = old.clone();
-            next.style = style;
-            Ok(next)
-        })();
-        match staged_cell {
-            Ok(next) => staged.push((*at, next)),
-            Err(error) => {
-                wb.styles.restore_pools(marks);
-                return Err(error);
+    let rows = range
+        .end
+        .row
+        .checked_sub(range.start.row)
+        .map_or(0, |rows| u64::from(rows) + 1);
+    let cols = range
+        .end
+        .col
+        .checked_sub(range.start.col)
+        .map_or(0, |cols| u64::from(cols) + 1);
+    let range_cells = rows.saturating_mul(cols);
+    let mut staged = Vec::with_capacity(usize::try_from(range_cells).unwrap_or(0));
+    {
+        let sheet_ref = &wb.sheets[sheet.0 as usize];
+        let styles = &mut wb.styles;
+        let mut occupied = sheet_ref
+            .iter_cells_in_rect(
+                range.start.row..range.end.row.saturating_add(1),
+                range.start.col..range.end.col.saturating_add(1),
+            )
+            .peekable();
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let old_style = if occupied
+                    .peek()
+                    .is_some_and(|(candidate, _)| (candidate.row, candidate.col) == (row, col))
+                {
+                    occupied.next().and_then(|(_, cell)| cell.style)
+                } else {
+                    None
+                };
+                let mut format = styles.cell_format(old_style);
+                if let Err(error) = update(&mut format, at.row, at.col) {
+                    styles.restore_pools(marks);
+                    return Err(error);
+                }
+                match styles.intern_cell_format(&format) {
+                    Ok(style) => staged.push(style),
+                    Err(_) => {
+                        styles.restore_pools(marks);
+                        return Err(OpError::NumFmtTableFull);
+                    }
+                }
             }
         }
     }
     let mut inverse = Vec::with_capacity(staged.len());
-    for ((at, old), (_staged_at, next)) in cells.into_iter().zip(staged) {
-        if next != old {
-            wb.sheet_mut(sheet)
-                .ok_or(OpError::SheetNotFound(sheet))?
-                .set_cell(at, next);
+    let sheet_ref = wb.sheet_mut(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let mut staged = staged.into_iter();
+    for row in range.start.row..=range.end.row {
+        for col in range.start.col..=range.end.col {
+            let at = CellRef::new(row, col);
+            let style = staged.next().expect("stage covers the range");
+            let (old, remove) = match sheet_ref.cell_mut(at) {
+                Some(cell) if style != cell.style => {
+                    let old = CellState::from(&*cell);
+                    cell.style = style;
+                    (old, *cell == Cell::default())
+                }
+                Some(_) => continue,
+                None if style.is_some() => {
+                    sheet_ref.set_cell(
+                        at,
+                        Cell {
+                            style,
+                            ..Cell::default()
+                        },
+                    );
+                    (CellState::default(), false)
+                }
+                None => continue,
+            };
+            if remove {
+                sheet_ref.set_cell(at, Cell::default());
+            }
             inverse.push(Op::SetCell {
                 sheet,
                 at,
-                cell: CellState::from(old),
+                cell: old,
             });
         }
     }
