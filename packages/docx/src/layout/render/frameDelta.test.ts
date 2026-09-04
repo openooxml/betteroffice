@@ -9,10 +9,13 @@ import {
   decodeFrameDelta,
   displayPageRevision,
   displayPageShiftsSince,
+  FRAME_DELTA_VERSION,
+  type DecodedFrameDelta,
+  type RetainedFrame,
 } from './frameDelta';
 import { createDisplayListQueries } from './displayListQueries';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
-import type { DisplayList } from './displayList';
+import type { DisplayList, DisplayPage } from './displayList';
 
 const WASM = resolve(import.meta.dir, '../../wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -179,5 +182,65 @@ describe('FrameDelta wire round-trip', () => {
     const trailingIndex = next.displayList.pages.length - 1;
     expect(update.shift?.some(([to]) => to === trailingIndex)).toBe(true);
     expect(update.replace?.some(([to]) => to === trailingIndex)).toBeFalsy();
+  });
+
+  it('records owned shifts only after every run applies', () => {
+    const page: DisplayPage = {
+      pageIndex: 0,
+      width: 100,
+      height: 100,
+      primitives: [
+        {
+          kind: 'text',
+          text: 'x',
+          x: 10,
+          baselineY: 20,
+          width: 10,
+          font: '400 16px Calibri',
+          color: '#000000',
+        },
+      ],
+    };
+    const previous: RetainedFrame = {
+      protocolVersion: FRAME_DELTA_VERSION,
+      docEpoch: 1,
+      layoutEpoch: 1,
+      frameEpoch: 1,
+      pages: [
+        {
+          pageIndex: 0,
+          pageId: 1n,
+          fingerprint: 1n,
+          primitiveIds: new BigUint64Array([1n]),
+          page,
+        },
+      ],
+      damagedPageIds: new Set(),
+      removedPageIds: new Set(),
+      displayList: { pages: [page] },
+    };
+    const delta: DecodedFrameDelta = {
+      protocolVersion: FRAME_DELTA_VERSION,
+      full: false,
+      docEpoch: 1,
+      layoutEpoch: 2,
+      frameEpoch: 2,
+      baseFrameEpoch: 1,
+      pageCount: 1,
+      operations: [
+        {
+          kind: 'shift-positions',
+          pageIndex: 0,
+          pageId: 1n,
+          fingerprint: 2n,
+          runs: [{ start: 0, count: 1, changedMask: 1, delta: 1 }],
+        },
+      ],
+      bytes: new Uint8Array(),
+    };
+
+    expect(() => applyFrameDeltaOwned(previous, delta)).toThrow('requires retained docStart');
+    expect(displayPageRevision(page)).toBe(0);
+    expect(displayPageShiftsSince(page, 0)).toEqual([]);
   });
 });

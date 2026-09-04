@@ -608,8 +608,6 @@ function shiftDisplayPagePositionsOwned(
 ): DisplayPage {
   // primitives are mutated through this object below, whether or not a new
   // page wrapper is returned
-  bumpDisplayPageRevision(page);
-  recordDisplayPageShift(page, runs);
   let primitiveIndex = 0;
   let runIndex = 0;
   const visit = (primitives: readonly DisplayPrimitive[]): void => {
@@ -637,6 +635,8 @@ function shiftDisplayPagePositionsOwned(
   if (runs.some((run) => run.start + run.count > primitiveIndex)) {
     invalid('position shift range exceeds retained primitive count');
   }
+  bumpDisplayPageRevision(page);
+  recordDisplayPageShift(page, runs);
   return page.pageIndex === pageIndex ? page : { ...page, pageIndex };
 }
 
