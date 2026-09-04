@@ -118,8 +118,6 @@ function nextPageWindow(
   return { start, end };
 }
 
-/** Replays display-list pages to canvas with accessibility mirrors. */
-
 /**
  * One page's surface: canvas + a11y mirror + optional interactive overlay.
  * Memoized so a keystroke's snapshot commit re-renders only the pages whose
