@@ -1659,6 +1659,19 @@ mod tests {
         assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::None);
     }
 
+    #[test]
+    fn hit_and_caret_resolve_combining_and_surrogate_clusters() {
+        let mut primitive = run(100.0, 200.0, 60.0, 10);
+        primitive["text"] = "a\u{301}😀b".into();
+        primitive["docEnd"] = 15.into();
+        let dl = page(serde_json::Value::Null, vec![primitive]);
+
+        assert_eq!(hit_test(&dl, 0, 126.0, 195.0), Some(12));
+        assert_eq!(hit_test(&dl, 0, 134.0, 195.0), Some(14));
+        assert!((caret_rect(&dl, 12).unwrap().x - 120.0).abs() < 0.01);
+        assert!((caret_rect(&dl, 14).unwrap().x - 140.0).abs() < 0.01);
+    }
+
     /// Content positioned outside the content box — a floating text box in a
     /// margin — reads as text over its glyphs but not over the blank tail of
     /// its lines, which no container rect in the display list describes. The
