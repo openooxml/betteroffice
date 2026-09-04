@@ -62,25 +62,16 @@ const kernelInputsByLayout = new WeakMap<
   }
 >();
 
-/**
- * One entry per paragraph-level section break plus the final section. The
- * parser mirrors the last entry's properties into `finalSectionProperties`,
- * so the final entry is replaced, not appended — appending both over-counts
- * and disables the engine's single-section fast path. Without
- * `finalSectionProperties`, the replaced entry's own properties stand in.
- */
 function orderedSections(document: Document | null): ResidentRegionLayoutRequest['regions']['sections'] {
   const body = document?.package.document;
   if (!body) return [{ properties: {} }];
-  const parsed = body.sections ?? [];
-  const last = parsed[parsed.length - 1];
-  const sections = parsed.slice(0, -1).map((section) => ({
+  const sections = (body.sections ?? []).map((section) => ({
     sectionId: section.id ?? section.properties.sectionId,
     properties: section.properties,
   }));
   sections.push({
-    sectionId: body.finalSectionProperties?.sectionId ?? last?.id ?? last?.properties.sectionId,
-    properties: body.finalSectionProperties ?? last?.properties ?? {},
+    sectionId: body.finalSectionProperties?.sectionId,
+    properties: body.finalSectionProperties ?? {},
   });
   return sections;
 }
