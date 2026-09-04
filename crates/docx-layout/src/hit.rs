@@ -1314,6 +1314,7 @@ fn merge_line_rects(mut pending: Vec<(RectOwner<'_>, RangeRect)>, out: &mut Vec<
             && (rect.y - held.y).abs() <= LINE_MERGE_BAND_EPSILON
             && (rect.height - held.height).abs() <= LINE_MERGE_BAND_EPSILON
             && rect.x <= held.x + held.width + LINE_MERGE_GAP
+            && held.x <= rect.x + rect.width + LINE_MERGE_GAP
         {
             let left = held.x.min(rect.x);
             let right = (held.x + held.width).max(rect.x + rect.width);
@@ -1820,6 +1821,36 @@ mod tests {
         assert_eq!(rects.len(), 1, "one merged band: {rects:?}");
         assert!((rects[0].x - 100.0).abs() < 0.01);
         assert!((rects[0].x + rects[0].width - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn range_rects_do_not_bridge_unselected_text_between_leftward_runs() {
+        let sized = |text: &str, x: f64, doc_start: i64, font: &str| {
+            let mut prim = run(x, 200.0, 20.0, doc_start);
+            prim["text"] = text.into();
+            prim["docEnd"] = (doc_start + 2).into();
+            prim["blockId"] = 7.into();
+            prim["paraId"] = "paragraph-1".into();
+            prim["font"] = font.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                sized("ab", 100.0, 10, "400 14.666667px Calibri"),
+                sized("middle", 120.0, 20, "400 14.666667px Calibri"),
+                sized("cd", 140.0, 12, "400 15.333333px Calibri"),
+            ],
+        );
+
+        let rects = range_rects(&dl, 10, 14);
+        assert_eq!(rects.len(), 2, "separate selected bands: {rects:?}");
+        assert!(
+            rects
+                .iter()
+                .all(|rect| rect.x + rect.width <= 120.0 || rect.x >= 140.0),
+            "unselected middle range must remain uncovered: {rects:?}"
+        );
     }
 
     #[test]
