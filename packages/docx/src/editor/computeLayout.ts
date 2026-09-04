@@ -8,6 +8,7 @@ interface ResidentRegionLayoutRetainedOutput {
   layout: Layout;
   headersFooters?: DisplayListHeadersFooters;
   notesConverged: boolean;
+  layoutRevision: number;
 }
 
 interface RetainedKernelInputs {
@@ -126,14 +127,12 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
   const output = JSON.parse(
     inputs.session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
   ) as ResidentRegionLayoutRetainedOutput;
-  // The measured arena (tens of MB of shaping JSON on a large document) stays
-  // wasm-side until the main-thread display fallback asks. The fetch reads the
-  // CURRENT retained state: a fallback racing a newer relayout renders one
-  // transiently newer arena, then reconverges on the next pipeline pass.
   const session = inputs.session;
   let kernel: RetainedKernelInputs | null = null;
   const fetchKernel = (): RetainedKernelInputs =>
-    (kernel ??= JSON.parse(session.retainedKernelInputsJson()) as RetainedKernelInputs);
+    (kernel ??= JSON.parse(
+      session.retainedKernelInputsJson(output.layoutRevision)
+    ) as RetainedKernelInputs);
   kernelInputsByLayout.set(output.layout, {
     get measured() {
       return fetchKernel().measured;

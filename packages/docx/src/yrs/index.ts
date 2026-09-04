@@ -640,7 +640,7 @@ export interface YrsSession extends CollaborationReplica {
    * through {@link YrsSession.retainedKernelInputsJson}). */
   layoutDocumentWithRegionsRetainedJson(input: string): string;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
-  retainedKernelInputsJson(): string;
+  retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -1166,13 +1166,23 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return output;
     },
     layoutDocumentWithRegionsRetainedJson: (input) => {
-      const output = session.layout_document_with_regions_retained_json(input);
+      const output = JSON.parse(session.layout_document_with_regions_retained_json(input)) as Record<
+        string,
+        unknown
+      >;
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
-      return output;
+      return JSON.stringify({ ...output, layoutRevision: residentLayoutRevision });
     },
-    retainedKernelInputsJson: () => session.retained_kernel_inputs_json(),
+    retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (expectedLayoutRevision !== residentLayoutRevision) {
+        throw new Error(
+          `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
+        );
+      }
+      return session.retained_kernel_inputs_json();
+    },
     buildDisplayListJson: (input) => session.build_display_list_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
