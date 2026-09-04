@@ -24,7 +24,8 @@ describe('computeLayout retained kernel inputs', () => {
     let kernelFetches = 0;
     const session = {
       layoutDocumentWithRegionsRetainedJson: () =>
-        JSON.stringify({ layout, notesConverged: true, layoutRevision: 1 }),
+        JSON.stringify({ layout, notesConverged: true }),
+      residentWorkerProbe: () => ({ layoutRevision: 1 }),
       retainedKernelInputsJson: (expectedLayoutRevision: number) => {
         expect(expectedLayoutRevision).toBe(1);
         kernelFetches += 1;

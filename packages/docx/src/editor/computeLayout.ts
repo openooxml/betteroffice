@@ -8,7 +8,6 @@ interface ResidentRegionLayoutRetainedOutput {
   layout: Layout;
   headersFooters?: DisplayListHeadersFooters;
   notesConverged: boolean;
-  layoutRevision: number;
 }
 
 interface RetainedKernelInputs {
@@ -43,7 +42,9 @@ export interface ComputeLayoutInputs {
   pageGap: number;
   session: Pick<
     YrsSession,
-    'layoutDocumentWithRegionsRetainedJson' | 'retainedKernelInputsJson'
+    | 'layoutDocumentWithRegionsRetainedJson'
+    | 'residentWorkerProbe'
+    | 'retainedKernelInputsJson'
   >;
   renderEnv: YrsRenderEnv;
   measurement: ResidentMeasurementConfig;
@@ -124,14 +125,15 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
     inputs.renderEnv
   );
   request.measurement = inputs.measurement;
-  const output = JSON.parse(
-    inputs.session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
-  ) as ResidentRegionLayoutRetainedOutput;
   const session = inputs.session;
+  const output = JSON.parse(
+    session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
+  ) as ResidentRegionLayoutRetainedOutput;
+  const layoutRevision = session.residentWorkerProbe()!.layoutRevision;
   let kernel: RetainedKernelInputs | null = null;
   const fetchKernel = (): RetainedKernelInputs =>
     (kernel ??= JSON.parse(
-      session.retainedKernelInputsJson(output.layoutRevision)
+      session.retainedKernelInputsJson(layoutRevision)
     ) as RetainedKernelInputs);
   kernelInputsByLayout.set(output.layout, {
     get measured() {

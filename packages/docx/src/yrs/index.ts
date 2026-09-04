@@ -1166,14 +1166,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return output;
     },
     layoutDocumentWithRegionsRetainedJson: (input) => {
-      const output = JSON.parse(session.layout_document_with_regions_retained_json(input)) as Record<
-        string,
-        unknown
-      >;
+      const output = session.layout_document_with_regions_retained_json(input);
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
-      return JSON.stringify({ ...output, layoutRevision: residentLayoutRevision });
+      return output;
     },
     retainedKernelInputsJson: (expectedLayoutRevision) => {
       if (expectedLayoutRevision !== residentLayoutRevision) {
