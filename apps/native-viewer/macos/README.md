@@ -8,7 +8,7 @@ and assembles the matching BetterOffice app with its icon and Welcome file.
 
 The `macOS app` workflow runs for `@betteroffice/docx@<version>` tags, pull
 requests and manual dispatches. Every run uploads an artifact suffixed
-`-unsigned`. Non-PR runs can pass the `apple-signing` environment gate to also
+`-unsigned`. Non-PR runs can pass the `native-macos` environment gate to also
 sign, notarize, and staple all three apps and the disk image, then upload a
 signed artifact. Tagged signed runs attach the disk image to that GitHub
 release. A prerelease tag such as `@betteroffice/docx@0.2.0-rc.1` uses `0.2.0`
@@ -17,7 +17,7 @@ names.
 
 ## Secrets
 
-Create an `apple-signing` environment with required reviewers, then create
+Create an `native-macos` environment with required reviewers, then create
 these as environment secrets. All six are required for the signed path; if any
 is missing the workflow retains only the unsigned artifact.
 

@@ -127,7 +127,7 @@ jobs:
     needs: build
     runs-on: macos-15
     timeout-minutes: 180
-    environment: apple-signing
+    environment: native-macos
     permissions:
       contents: read
     outputs:
@@ -143,10 +143,14 @@ jobs:
           KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/@betteroffice/docx@') }}
         run: |
           if [ -n "$CERT" ] && [ -n "$CERT_PASSWORD" ] && [ -n "$ISSUER_ID" ] && \
              [ -n "$KEY_ID" ] && [ -n "$KEY_P8" ] && [ -n "$TEAM_ID" ]; then
             echo "signing=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RELEASE_TAG" = "true" ]; then
+            echo "::error::Apple credentials unavailable; refusing to publish this release unsigned."
+            exit 1
           else
             echo "signing=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Apple credentials incomplete; retaining only the unsigned artifact."
