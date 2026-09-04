@@ -1195,7 +1195,7 @@ fn collect_range_rects(
         if h.doc_start == h.doc_end {
             if h.doc_start >= from && h.doc_start < to {
                 pending.push((
-                    rect_owner(h.attrs),
+                    rect_owner(&h),
                     RangeRect {
                         page_index,
                         x: h.x,
@@ -1215,7 +1215,7 @@ fn collect_range_rects(
         let x0 = x_at_position(&h, start);
         let x1 = x_at_position(&h, end);
         pending.push((
-            rect_owner(h.attrs),
+            rect_owner(&h),
             RangeRect {
                 page_index,
                 x: x0.min(x1),
@@ -1252,7 +1252,6 @@ const LINE_MERGE_GAP: f64 = 2.0;
 /// Line identity for band merging, strict variant of [`same_line_owner`]:
 /// rects union only within one table cell, line, and block, so bands never
 /// bridge adjacent columns or cells that happen to align.
-#[derive(PartialEq)]
 struct RectOwner<'a> {
     table_id: Option<&'a str>,
     cell: Option<(u64, u64, Option<&'a str>)>,
@@ -1260,9 +1259,33 @@ struct RectOwner<'a> {
     para_id: Option<&'a str>,
     block_key: Option<&'a str>,
     block_id: Option<&'a Number>,
+    doc_start: i64,
+    doc_end: i64,
 }
 
-fn rect_owner(attrs: &DocAttrs) -> RectOwner<'_> {
+impl RectOwner<'_> {
+    fn matches(&self, other: &Self) -> bool {
+        self.table_id == other.table_id
+            && self.cell == other.cell
+            && self.line_index == other.line_index
+            && self.para_id == other.para_id
+            && self.block_key == other.block_key
+            && self.block_id == other.block_id
+            && (self.para_id.is_some()
+                || self.block_key.is_some()
+                || self.block_id.is_some()
+                || self.doc_end == other.doc_start
+                || other.doc_end == self.doc_start)
+    }
+
+    fn absorb(&mut self, other: &Self) {
+        self.doc_start = self.doc_start.min(other.doc_start);
+        self.doc_end = self.doc_end.max(other.doc_end);
+    }
+}
+
+fn rect_owner<'a>(hit: &TextHit<'a>) -> RectOwner<'a> {
+    let attrs = hit.attrs;
     RectOwner {
         table_id: attrs.table.as_ref().map(|table| table.table_id.as_str()),
         cell: attrs
@@ -1273,6 +1296,8 @@ fn rect_owner(attrs: &DocAttrs) -> RectOwner<'_> {
         para_id: attrs.para_id.as_deref(),
         block_key: attrs.block_key.as_deref(),
         block_id: attrs.block_id.as_ref(),
+        doc_start: hit.doc_start,
+        doc_end: hit.doc_end,
     }
 }
 
@@ -1285,13 +1310,16 @@ fn merge_line_rects(mut pending: Vec<(RectOwner<'_>, RangeRect)>, out: &mut Vec<
     let mut current: Option<(RectOwner<'_>, RangeRect)> = None;
     for (owner, rect) in pending {
         if let Some((held_owner, held)) = current.as_mut()
-            && *held_owner == owner
+            && held_owner.matches(&owner)
             && (rect.y - held.y).abs() <= LINE_MERGE_BAND_EPSILON
             && (rect.height - held.height).abs() <= LINE_MERGE_BAND_EPSILON
             && rect.x <= held.x + held.width + LINE_MERGE_GAP
         {
+            let left = held.x.min(rect.x);
             let right = (held.x + held.width).max(rect.x + rect.width);
-            held.width = right - held.x;
+            held.x = left;
+            held.width = right - left;
+            held_owner.absorb(&owner);
             continue;
         }
         if let Some((_, held)) = current.take() {
@@ -1757,6 +1785,48 @@ mod tests {
         let sparse = range_rects(&dl, 1, 3);
         assert_eq!(sparse.len(), 1);
         assert!(sparse[0].width < 40.0);
+    }
+
+    #[test]
+    fn range_rects_cover_both_half_point_runs_in_one_band() {
+        let sized = |x: f64, doc_start: i64, font: &str| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["font"] = font.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                sized(140.0, 6, "400 15.333333px Calibri"),
+                sized(100.0, 1, "400 14.666667px Calibri"),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 11);
+        assert_eq!(rects.len(), 1, "one merged band: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!((rects[0].x + rects[0].width - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn range_rects_do_not_merge_unowned_nonadjacent_runs() {
+        let unowned = |x: f64, doc_start: i64| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim.as_object_mut().unwrap().remove("blockId");
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![unowned(100.0, 1), unowned(140.0, 20)],
+        );
+
+        let rects = range_rects(&dl, 1, 25);
+        assert_eq!(
+            rects.len(),
+            2,
+            "unowned document gaps stay split: {rects:?}"
+        );
     }
 
     #[test]
