@@ -1394,6 +1394,82 @@ fn hyperlink_to_units(
     units
 }
 
+fn field_to_units(
+    value: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    projection_id: usize,
+) -> Vec<InlineUnit> {
+    let result = array(field(field(Some(value), "structuredResult"), "inline"));
+    let code = array(field(field(Some(value), "structuredCode"), "inline"));
+    let projected_children: Vec<_> = code
+        .iter()
+        .enumerate()
+        .map(|(index, child)| (-(index as isize) - 1, child))
+        .chain(
+            result
+                .iter()
+                .enumerate()
+                .map(|(index, child)| (index as isize, child)),
+        )
+        .collect();
+    if string(field(Some(value), "type")) != Some("complexField")
+        || !projected_children.iter().any(|(_, child)| {
+            matches!(
+                string(field(Some(child), "type")),
+                Some("hyperlink" | "simpleField")
+            )
+        })
+    {
+        let (payload, marks) = field_payload(value, style_formatting, source);
+        return vec![embed_unit("field", payload, &marks, None, 1)];
+    }
+    let mut units = Vec::new();
+    let mut children = Vec::new();
+    for (index, child) in projected_children {
+        let mut projected = match string(field(Some(child), "type")) {
+            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("simpleField") => {
+                let (payload, marks) = field_payload(child, style_formatting, source);
+                vec![embed_unit("field", payload, &marks, None, 1)]
+            }
+            _ => continue,
+        };
+        let items: Vec<Value> = projected.iter().map(|unit| match &unit.content {
+            UnitContent::Text(text) => json!({"kind":"text", "text":text, "attributes":unit.attrs}),
+            UnitContent::Embed {kind, payload} => json!({"kind":"embed", "embedKind":kind, "payload":payload, "attributes":unit.attrs}),
+        }).collect();
+        children.push(json!({"index":index, "items":items}));
+        for unit in &mut projected {
+            unit.attrs.insert(
+                "fieldResult".to_owned(),
+                json!({"id":projection_id, "index":index}),
+            );
+        }
+        units.extend(projected);
+    }
+    let mut visible = value.clone();
+    visible["fieldResult"] = Value::Array(
+        result
+            .iter()
+            .filter(|child| string(field(Some(child), "type")) == Some("run"))
+            .cloned()
+            .collect(),
+    );
+    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    payload.insert(
+        "fieldData".to_owned(),
+        Value::String(source_json(value, source)),
+    );
+    payload.insert(
+        "resultProjection".to_owned(),
+        json!({"id":projection_id, "children":children}),
+    );
+    units.push(embed_unit("field", payload, &marks, None, 1));
+    units
+}
+
 fn tracked_mark(info: &Value, kind: &str, is_move_pair: bool) -> Mark {
     mark(
         kind,
@@ -1651,6 +1727,16 @@ fn paragraph_attrs(
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let list = field(Some(paragraph), "listRendering");
+    let direct_first =
+        field(formatting, "indentFirstLine").filter(|value| number(Some(value)) != Some(0.0));
+    let first_line = direct_first
+        .or_else(|| field(list, "indentFirstLine"))
+        .or_else(|| field(formatting, "indentFirstLine"));
+    let hanging = if direct_first.is_none() && field(list, "indentFirstLine").is_some() {
+        field(list, "hangingIndent")
+    } else {
+        field(formatting, "hangingIndent").or_else(|| field(list, "hangingIndent"))
+    };
     let mut attrs = map_from_value(json!({
         "paraId": nullish(field(Some(paragraph), "paraId")),
         "textId": nullish(field(Some(paragraph), "textId")),
@@ -1711,32 +1797,30 @@ fn paragraph_attrs(
         attrs.insert(
             "indentLeft".to_owned(),
             field(formatting, "indentLeft")
-                .or_else(|| field(style_ppr_ref, "indentLeft"))
                 .or_else(|| field(list, "indentLeft"))
+                .or_else(|| field(style_ppr_ref, "indentLeft"))
                 .cloned()
                 .unwrap_or(Value::Null),
         );
         attrs.insert(
             "indentFirstLine".to_owned(),
-            field(formatting, "indentFirstLine")
+            first_line
                 .or_else(|| {
                     (!numbering_removed)
                         .then(|| field(style_ppr_ref, "indentFirstLine"))
                         .flatten()
                 })
-                .or_else(|| field(list, "indentFirstLine"))
                 .cloned()
                 .unwrap_or(Value::Null),
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            field(formatting, "hangingIndent")
+            hanging
                 .or_else(|| {
                     (!numbering_removed)
                         .then(|| field(style_ppr_ref, "hangingIndent"))
                         .flatten()
                 })
-                .or_else(|| field(list, "hangingIndent"))
                 .cloned()
                 .unwrap_or(Value::Bool(false)),
         );
@@ -1800,17 +1884,11 @@ fn paragraph_attrs(
         );
         attrs.insert(
             "indentFirstLine".to_owned(),
-            field(formatting, "indentFirstLine")
-                .or_else(|| field(list, "indentFirstLine"))
-                .cloned()
-                .unwrap_or(Value::Null),
+            first_line.cloned().unwrap_or(Value::Null),
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            field(formatting, "hangingIndent")
-                .or_else(|| field(list, "hangingIndent"))
-                .cloned()
-                .unwrap_or(Value::Bool(false)),
+            hanging.cloned().unwrap_or(Value::Bool(false)),
         );
         attrs.insert(
             "defaultTextFormatting".to_owned(),
@@ -1984,8 +2062,13 @@ fn paragraph_units(
             }
             "simpleField" | "complexField" => {
                 boundaries = None;
-                let (payload, marks) = field_payload(content, style_formatting.as_ref(), source);
-                units.push(embed_unit("field", payload, &marks, None, 1));
+                units.extend(field_to_units(
+                    content,
+                    style_formatting.as_ref(),
+                    styles,
+                    source,
+                    unit_counts.len(),
+                ));
             }
             "inlineSdt" => {
                 boundaries = None;
@@ -2011,7 +2094,7 @@ fn paragraph_units(
                 boundaries = None;
                 units.push(embed_unit("math", math_payload(content), &[], None, 1));
             }
-            "bookmarkStart" | "bookmarkEnd" => {}
+            "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
         }
         unit_counts.push(units.len() - start);
@@ -2789,6 +2872,7 @@ fn visit_story(
                 }
                 last_kind = Some("table");
             }
+            "rawXml" => continue,
             _ => {
                 let current_sdt = sdt_index;
                 sdt_index += 1;
@@ -3122,6 +3206,156 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn complex_field_results_keep_hyperlink_units_and_style() {
+        let link = json!({"type":"hyperlink","anchor":"_Toc1","children":[{"type":"run","formatting":{"styleId":"Hyperlink"},"content":[{"type":"text","text":"Heading"}]}]});
+        let value = json!({"type":"complexField","fieldType":"TOC","instruction":"TOC", "fieldCode":[], "fieldResult":link["children"], "structuredResult":{"inline":[link, {"type":"simpleField","fieldType":"PAGE","instruction":" PAGE ","content":[{"type":"run","content":[{"type":"text","text":"1"}]}]}]}});
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"type":"character","styleId":"Hyperlink","rPr":{"color":{"rgb":"0563C1"}}}]}),
+        ));
+        let (units, _) =
+            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new());
+        assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Heading"));
+        assert_eq!(units[0].attrs["hyperlink"]["href"], json!("#_Toc1"));
+        assert_eq!(units[0].attrs["textColor"]["rgb"], json!("0563C1"));
+        let UnitContent::Embed {
+            payload: nested, ..
+        } = &units[1].content
+        else {
+            panic!("missing nested field")
+        };
+        assert_eq!(nested["fieldType"], json!("PAGE"));
+        let UnitContent::Embed { payload, .. } = &units[2].content else {
+            panic!("missing field")
+        };
+        assert_eq!(payload["displayText"], json!(""));
+        assert!(
+            payload["fieldData"]
+                .as_str()
+                .unwrap()
+                .contains("structuredResult")
+        );
+    }
+
+    #[test]
+    fn comprehensive_native_layout_accepts_authored_page_number_start() {
+        let bytes = include_bytes!(
+            "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+        );
+        let parsed =
+            docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default()).unwrap();
+        let package = parsed.document.package;
+        let mut sections: Vec<Value> = package
+            .document
+            .sections
+            .unwrap()
+            .into_iter()
+            .map(|section| json!({"properties":section.properties}))
+            .collect();
+        assert!(
+            sections.iter().any(
+                |section| section["properties"]["pageNumbering"]["start"].as_f64() == Some(1.0)
+            )
+        );
+        sections.push(json!({"properties":package.document.final_section_properties}));
+        let request = json!({"bodyStory":"body", "options":{"pageGap":24}, "regions":{"sections":sections, "settings":package.settings}, "renderEnv":{}}).to_string();
+        let engine = crate::EngineSession::new(74003);
+        seed_from_docx(engine.doc(), bytes).unwrap();
+        engine.layout_font_requirements_json(&request).unwrap();
+        let layout: Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
+        assert!(!layout["layout"]["pages"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn raw_blocks_seed_no_content_control_or_child_story() {
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            &[
+                json!({"type":"paragraph","content":[]}),
+                json!({"type":"rawXml","xml":"<x:block/>"}),
+                json!({"type":"paragraph","content":[]}),
+            ],
+            StoryOptions {
+                include_page_breaks: true,
+                append_body_tail: true,
+                seed_comments: true,
+            },
+        );
+        assert_eq!(context.plans.len(), 1);
+        assert_eq!(context.plans[0].units.len(), 2);
+        assert!(context.plans[0].units.iter().all(
+            |unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pilcrow")
+        ));
+    }
+
+    #[test]
+    fn raw_inline_nodes_leave_run_boundaries_intact() {
+        let (_, properties) = paragraph_units(
+            &json!({"content":[
+                {"type":"run","content":[{"type":"text","text":"A"}]},
+                {"type":"rawXml","xml":"<x:mark/>"},
+                {"type":"run","content":[{"type":"text","text":"B"}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            properties["_originalRunBoundaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn numbering_indents_precede_styles_and_ignore_zero_first_line() {
+        let style_data = json!({"styles":[{"styleId":"List","type":"paragraph","pPr":{"indentLeft":720,"indentFirstLine":180,"hangingIndent":false}}]});
+        for styles in [
+            StyleResolver::new(Some(&style_data)),
+            StyleResolver::new(None),
+        ] {
+            for direct in [
+                json!({}),
+                json!({"indentFirstLine":0}),
+                json!({"indentFirstLine":0,"hangingIndent":true}),
+            ] {
+                let mut formatting = direct;
+                formatting["styleId"] = json!("List");
+                let properties = paragraph_attrs(
+                    &json!({"formatting":formatting,"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+                    &styles,
+                    &[],
+                    &[],
+                    None,
+                );
+                assert_eq!(properties["indentLeft"], json!(1440));
+                assert_eq!(properties["indentFirstLine"], json!(-360));
+                assert_eq!(properties["hangingIndent"], json!(true));
+            }
+            let properties = paragraph_attrs(
+                &json!({"formatting":{"styleId":"List","indentLeft":0,"indentFirstLine":240,"hangingIndent":false},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+                &styles,
+                &[],
+                &[],
+                None,
+            );
+            assert_eq!(properties["indentLeft"], json!(0));
+            assert_eq!(properties["indentFirstLine"], json!(240));
+            assert_eq!(properties["hangingIndent"], json!(false));
+        }
+    }
+
     use super::*;
 
     #[test]

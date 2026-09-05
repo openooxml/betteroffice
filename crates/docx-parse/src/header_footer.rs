@@ -22,8 +22,7 @@ pub struct HeaderFooter {
     pub story_type: String,
     pub hdr_ftr_type: String,
     pub content: Vec<BlockContent>,
-    /// Root-level namespace declarations outside the serializer's standard
-    /// set, kept so replayed foreign markup keeps resolving after a save.
+    /// Root namespace bindings and attributes retained outside the standard boilerplate.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]

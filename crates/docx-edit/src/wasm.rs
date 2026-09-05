@@ -989,6 +989,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
             .iter()
             .map(|note| docx_parse::Note {
                 story_type: note.story_type.clone(),
+                custom_root_bindings: note.custom_root_bindings.clone(),
                 id: note.id,
                 note_type: note.note_type.clone(),
                 content: Vec::new(),

@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
 import {
   applyContentControlValue,
@@ -941,7 +942,83 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
   }
 }
 
+function projectionSignature(items: InlineItem[]): string {
+  const normalized: InlineItem[] = [];
+  for (const source of items) {
+    const attributes = { ...source.attributes };
+    delete attributes.fieldResult;
+    const item: InlineItem = source.kind === 'embed' && source.embedKind === 'tab'
+      ? { kind: 'text', text: '\t', attributes }
+      : { ...source, attributes };
+    const previous = normalized.at(-1);
+    if (item.kind === 'text' && previous?.kind === 'text' && stableStringify(previous.attributes) === stableStringify(attributes)) {
+      previous.text += item.text;
+    } else normalized.push(item);
+  }
+  return stableStringify(normalized);
+}
+
+function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
+  const owners: { id: number; owner: EmbedItem; position: number }[] = [];
+  for (const [position, item] of items.entries()) {
+    if (item.kind !== 'embed' || item.embedKind !== 'field') continue;
+    const id = asFiniteNumber(asObject(item.payload.resultProjection)?.id);
+    if (id !== undefined) owners.push({ id, owner: item, position });
+  }
+  if (owners.length === 0) return items;
+  const groups = new Map<EmbedItem, Map<number, InlineItem[]>>();
+  const remaining = items.filter((item, position) => {
+    const marker = asObject(item.attributes.fieldResult);
+    const id = asFiniteNumber(marker?.id);
+    const index = asFiniteNumber(marker?.index);
+    const owner = owners.find((entry) => entry.id === id && entry.position > position)?.owner;
+    if (index === undefined || !owner) return true;
+    const children = groups.get(owner) ?? new Map<number, InlineItem[]>();
+    const group = children.get(index) ?? [];
+    const attributes = { ...item.attributes };
+    delete attributes.fieldResult;
+    group.push({ ...item, attributes });
+    children.set(index, group);
+    groups.set(owner, children);
+    return false;
+  });
+  for (const { owner } of owners) {
+    const stored = fieldFromPayload(owner.payload, owner.attributes);
+    if (stored.type !== 'complexField') continue;
+    const projection = asObject(owner.payload.resultProjection);
+    const originals = Array.isArray(projection?.children) ? projection.children : [];
+    const replacements = new Map<number, ReturnType<typeof inlineSdtContent>>();
+    for (const raw of originals) {
+      const child = asObject(raw);
+      const index = asFiniteNumber(child?.index);
+      if (index === undefined || !Array.isArray(child?.items)) continue;
+      const current = groups.get(owner)?.get(index) ?? [];
+      if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
+      const rebuilt = inlineSdtContent(buildParagraphContent(current));
+      const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
+      if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
+        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+      }
+      replacements.set(index, rebuilt);
+    }
+    if (replacements.size === 0) continue;
+    const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
+    const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
+    stored.structuredResult = { ...stored.structuredResult, inline };
+    if (code) stored.structuredCode = { ...stored.structuredCode, inline: code };
+    if (stored.fieldTree) {
+      stored.fieldTree.result = { ...stored.fieldTree.result, inline };
+      if (code) stored.fieldTree.code = { ...stored.fieldTree.code, inline: code };
+    }
+    stored.fieldResult = inline.flatMap((child) => child.type === 'run' ? [child]
+      : child.type === 'hyperlink' ? child.children.filter((entry): entry is Run => entry.type === 'run') : []);
+    owner.payload = { ...owner.payload, fieldData: JSON.stringify(stored) };
+  }
+  return remaining;
+}
+
 function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
+  items = restoreProjectedFieldResults(items);
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
@@ -1252,6 +1329,18 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
   return result;
 }
 
+function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
+  if (!base) return content;
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const boundaries: CommentBoundary[] = [];
+  let offset = 0;
+  for (const [index, child] of base.content.entries()) {
+    if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    offset += paragraphContentLength(child);
+  }
+  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+}
+
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   const attrs = { ...PARAGRAPH_ATTR_DEFAULTS, ...properties } as Attrs;
   attrs.styleId = properties.pStyle ?? null;
@@ -1277,6 +1366,7 @@ function paragraphFromStory(
       ? (attrs._originalRunBoundaries as OriginalRunBoundary[])
       : undefined
   );
+  content = restoreRawInlines(content, baseParagraph);
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -1410,12 +1500,7 @@ function tableCellFromPayload(context: SaveContext, payload: TableCellPayload): 
   } as unknown as TableCellSaveAttrs;
   const content =
     payload.story && context.storyIds.has(payload.story)
-      ? context
-          .storyToBlocks(payload.story)
-          .filter(
-            (block): block is Paragraph | Table =>
-              block.type === 'paragraph' || block.type === 'table'
-          )
+      ? context.storyToBlocks(payload.story)
       : [];
   const cell: TableCell = {
     type: 'tableCell',
@@ -1621,7 +1706,7 @@ function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
         if (block.paraId && !paragraphs.has(block.paraId)) paragraphs.set(block.paraId, block);
       } else if (block.type === 'table') {
         for (const row of block.rows) for (const cell of row.cells) visit(cell.content);
-      } else {
+      } else if (block.type === 'blockSdt') {
         visit(block.content);
       }
     }
@@ -1639,7 +1724,12 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
     stories.set(storyId, blocks);
     let tableIndex = 0;
+    let sdtIndex = 0;
     for (const block of blocks) {
+      if (block.type === 'blockSdt') {
+        visit(`${storyId}:sdt${sdtIndex++}`, block.content);
+        continue;
+      }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
       block.rows.forEach((row, rowIndex) => {
@@ -1688,6 +1778,24 @@ function commentRanges(
   return byStory;
 }
 
+function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[]): BlockContent[] {
+  let offset = 0;
+  for (let index = 0; index < base.length; index += 1) {
+    const block = base[index]!;
+    if (!isRawXml(block)) continue;
+    const following = base.slice(index + 1).find((candidate) =>
+      candidate.type === 'paragraph' && candidate.paraId && projected.some((entry) =>
+        entry.type === 'paragraph' && entry.paraId === candidate.paraId));
+    const anchor = following?.type === 'paragraph'
+      ? projected.findIndex((entry) => entry.type === 'paragraph' && entry.paraId === following.paraId)
+      : -1;
+    const position = anchor >= 0 ? anchor : Math.min(index + offset, projected.length);
+    projected.splice(position, 0, block);
+    offset = Math.max(0, position - index);
+  }
+  return projected;
+}
+
 class SaveContext {
   readonly storyIds: Set<string>;
   private readonly baseParagraphs: Map<string, Paragraph>;
@@ -1707,6 +1815,7 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const blocks: BlockContent[] = [];
     const baseBlocks = this.baseStories.get(storyId);
+    const baseParagraphBlocks = baseBlocks?.filter((block): block is Paragraph => block.type === 'paragraph');
     const segments = this.session.storySegments(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
     let items: InlineItem[] = [];
@@ -1757,7 +1866,9 @@ class SaveContext {
             segment.properties,
             items,
             paragraphCommentBoundaries(storyOffset),
-            this.baseParagraphs.get(segment.paraId)
+            this.baseParagraphs.get(segment.paraId) ?? (segment.paraId === generatedId
+              ? baseParagraphBlocks?.[paragraphIndex]
+              : undefined)
           )
         );
         items = [];
@@ -1814,7 +1925,7 @@ class SaveContext {
     if (items.length > 0) {
       blocks.push({ type: 'paragraph', content: buildParagraphContent(items) });
     }
-    return blocks;
+    return restoreRawBlocks(blocks, baseBlocks ?? []);
   }
 }
 
