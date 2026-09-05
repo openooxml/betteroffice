@@ -10,8 +10,8 @@ use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, sin
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
     ChartSpace, CustomGeometryPath, GraphicFrameData, ParagraphProperties, Picture, PictureCrop,
-    Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, TextAutofit, TextBody,
+    PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide,
+    SlideLayout, SlideMaster, TextAutofit, TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +24,7 @@ use crate::{
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
+const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const DEFAULT_INSET_HORIZONTAL_EMU: i64 = 91_440;
 const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
@@ -448,11 +449,11 @@ impl<'a> LayoutBuilder<'a> {
         let inherited = [original, layout_node, master_node];
         let inherited_fill = self.resolved_fill(&inherited);
         let inherited_outline = self.resolved_outline(&inherited);
-        let fill = shape
-            .fill
-            .as_ref()
-            .or(inherited_fill.as_ref())
-            .and_then(|fill| paint(fill, self.theme));
+        let effective_fill = shape.fill.as_ref().or(inherited_fill.as_ref());
+        let picture = effective_fill
+            .filter(|fill| fill.fill_type == PICTURE_FILL)
+            .and_then(|_| picture_fill(&inherited));
+        let fill = effective_fill.and_then(|fill| paint(fill, self.theme));
         let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
             inherited_outline
         } else {
@@ -501,6 +502,7 @@ impl<'a> LayoutBuilder<'a> {
                         transform,
                     },
                     custom_paths(original),
+                    picture,
                 )?;
             }
             ShapeKind::Picture => {
@@ -591,6 +593,7 @@ impl<'a> LayoutBuilder<'a> {
         };
         match shape {
             ShapeNode::Shape(value) => {
+                let resolved_fill = self.resolved_fill(&[Some(shape)]);
                 self.push_shape(
                     Primitive::Shape {
                         object_id: base.id,
@@ -611,15 +614,19 @@ impl<'a> LayoutBuilder<'a> {
                             .iter()
                             .map(|(name, value)| (name.clone(), *value as f32))
                             .collect(),
-                        fill: self
-                            .resolved_fill(&[Some(shape)])
-                            .and_then(|fill| paint(&fill, self.theme)),
+                        fill: resolved_fill
+                            .as_ref()
+                            .and_then(|fill| paint(fill, self.theme)),
                         stroke: self
                             .resolved_outline(&[Some(shape)])
                             .and_then(|outline| stroke(&outline, self.theme)),
                         transform,
                     },
                     &value.paths,
+                    resolved_fill
+                        .as_ref()
+                        .filter(|fill| fill.fill_type == PICTURE_FILL)
+                        .and(value.picture_fill.as_deref()),
                 )?;
             }
             ShapeNode::Picture(value) => {
@@ -685,11 +692,12 @@ impl<'a> LayoutBuilder<'a> {
         &mut self,
         primitive: Primitive,
         paths: &[CustomGeometryPath],
+        picture: Option<&PictureFill>,
     ) -> Result<(), RenderError> {
         if paths.is_empty()
             || !matches!(&primitive, Primitive::Shape { geometry, .. } if geometry == "custom")
         {
-            self.primitives.push(primitive);
+            self.primitives.push(picture_filled(primitive, picture));
             return Ok(());
         }
         for (index, custom) in paths.iter().enumerate() {
@@ -709,7 +717,8 @@ impl<'a> LayoutBuilder<'a> {
                     *stroke = None;
                 }
             }
-            self.primitives.push(primitive);
+            let picture = picture.filter(|_| !custom.no_fill);
+            self.primitives.push(picture_filled(primitive, picture));
         }
         Ok(())
     }
@@ -2296,6 +2305,80 @@ fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
     }
 }
 
+/// Looks up the blip behind a snapshot shape's picture fill.
+fn picture_fill<'a>(nodes: &[Option<&'a ShapeNode>]) -> Option<&'a PictureFill> {
+    nodes.iter().flatten().find_map(|node| match node {
+        ShapeNode::Shape(shape) => shape.picture_fill.as_deref(),
+        _ => None,
+    })
+}
+
+/// Redraws a picture-filled shape as an image masked by the shape's own outline.
+fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primitive {
+    let Some(picture) = picture else {
+        return primitive;
+    };
+    match primitive {
+        Primitive::Shape {
+            object_id,
+            shape_id,
+            name,
+            x,
+            y,
+            w,
+            h,
+            geometry,
+            path,
+            stroke,
+            transform,
+            ..
+        } => Primitive::Image {
+            object_id,
+            shape_id,
+            name,
+            x,
+            y,
+            w,
+            h,
+            asset_id: picture.media_part_path.clone(),
+            crop: picture_fill_crop(picture),
+            path: (geometry != "rect").then_some(path),
+            stroke,
+            transform,
+        },
+        other => other,
+    }
+}
+
+/// Folds `a:srcRect` and the `a:stretch/a:fillRect` band into source fractions.
+/// Insets that letterbox the image rather than crop it stretch to the box instead.
+fn picture_fill_crop(picture: &PictureFill) -> ImageCrop {
+    let source = image_crop(&picture.crop);
+    let (kept_x, kept_y) = source.kept();
+    let band = |near: i32, far: i32| {
+        let (near, far) = (near as f32 / 100_000.0, far as f32 / 100_000.0);
+        let span = 1.0 - near - far;
+        if span <= 0.0 {
+            return (0.0, 0.0);
+        }
+        ((-near).max(0.0) / span, (-far).max(0.0) / span)
+    };
+    let (left, right) = band(picture.fill_rect.left, picture.fill_rect.right);
+    let (top, bottom) = band(picture.fill_rect.top, picture.fill_rect.bottom);
+    let cropped = ImageCrop {
+        left: source.left + left * kept_x,
+        top: source.top + top * kept_y,
+        right: source.right + right * kept_x,
+        bottom: source.bottom + bottom * kept_y,
+    };
+    let (kept_x, kept_y) = cropped.kept();
+    if kept_x <= 0.0 || kept_y <= 0.0 {
+        source
+    } else {
+        cropped
+    }
+}
+
 fn geometry_path(
     geometry: &str,
     adjustments: &BTreeMap<String, f64>,
@@ -3694,6 +3777,7 @@ mod tests {
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
             fill: None,
+            picture_fill: None,
             outline: None,
             text: None,
         });

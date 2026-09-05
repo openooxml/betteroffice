@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use ooxml_text::{FontId, FontStore};
 use pptx_raster::{AssetMap, Background, RenderOptions, RenderResources, render_slide};
 use pptx_render::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, Paint, PositionedGlyph,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, Paint, PositionedGlyph,
     PositionedTextLine, PositionedTextRun, Primitive, Stroke, SurfaceDisplayList, TextAnchor,
     TextParagraph, Transform,
 };
@@ -305,6 +305,46 @@ fn golden_image() {
                 head_end: None,
                 tail_end: None,
             }),
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+/// The shape of a picture-filled `p:sp`: a cropped image masked by a two-contour
+/// path whose reverse-wound counter has to stay unpainted.
+#[test]
+fn golden_picture_fill() {
+    use ooxml_drawingml::GeometryPathCommand as Cmd;
+    check(
+        "picture-fill",
+        &slide(vec![Primitive::Image {
+            object_id: 4,
+            shape_id: Some("shape-2".into()),
+            name: "ring".into(),
+            x: 20.0,
+            y: 15.0,
+            w: 200.0,
+            h: 105.0,
+            asset_id: Some("ppt/media/image1.png".into()),
+            crop: ImageCrop {
+                left: 0.25,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            path: Some(vec![
+                Cmd::Move { x: 0.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 1.0 },
+                Cmd::Line { x: 0.0, y: 1.0 },
+                Cmd::Close,
+                Cmd::Move { x: 0.25, y: 0.25 },
+                Cmd::Line { x: 0.25, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.25 },
+                Cmd::Close,
+            ]),
+            stroke: None,
             transform: Transform::default(),
         }]),
     );

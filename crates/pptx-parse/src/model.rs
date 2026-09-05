@@ -255,8 +255,26 @@ pub struct Shape {
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
+    /// The image behind an `a:blipFill`, when the fill is a stretched picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_fill: Option<Box<PictureFill>>,
     pub outline: Option<ShapeOutline>,
     pub text: Option<TextBody>,
+}
+
+/// An `a:blipFill` on a shape: the image, and the box it stretches into.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureFill {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_part_path: Option<String>,
+    #[serde(default, skip_serializing_if = "PictureCrop::is_whole")]
+    pub crop: PictureCrop,
+    /// `a:stretch/a:fillRect` insets, in thousandths of a percent of the box.
+    #[serde(default, skip_serializing_if = "PictureCrop::is_whole")]
+    pub fill_rect: PictureCrop,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -302,6 +320,12 @@ pub struct PictureCrop {
     pub top: i32,
     pub right: i32,
     pub bottom: i32,
+}
+
+impl PictureCrop {
+    pub fn is_whole(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
