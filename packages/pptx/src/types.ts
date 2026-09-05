@@ -23,6 +23,9 @@ export interface TextRunSnapshot {
   style: TextStyleSnapshot;
 }
 
+/** OOXML `a:pPr@algn` token. */
+export type ParagraphAlignment = 'l' | 'ctr' | 'r' | 'just';
+
 export interface ParagraphSnapshot {
   id: string;
   alignment: string | null;
@@ -72,6 +75,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** Hides this shape and its descendants; omitted when false. */
+  hidden?: boolean;
   geometry: string;
   adjustValues: Record<string, number>;
   placeholder: unknown | null;
@@ -208,10 +213,18 @@ export type Paint =
       stops: Array<{ position: number; color: string }>;
     };
 
+export interface StrokeEnd {
+  kind: string;
+  width: number;
+  length: number;
+}
+
 export interface Stroke {
   color: string;
   width: number;
   dashed?: boolean;
+  headEnd?: StrokeEnd;
+  tailEnd?: StrokeEnd;
 }
 
 export interface PrimitiveTransform {
@@ -240,10 +253,21 @@ export interface ShapePrimitive extends PrimitiveBase {
   stroke?: Stroke;
 }
 
+export interface ImageCrop {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+
 export interface ImagePrimitive extends PrimitiveBase {
   kind: 'image';
   name: string;
   assetId?: string;
+  /** Fraction of the source discarded per edge, from `a:srcRect`. */
+  crop?: ImageCrop;
+  /** Outline the picture is masked to, when its `spPr` gives it one. */
+  path?: GeometryPathCommand[];
   stroke?: Stroke;
 }
 

@@ -14,8 +14,8 @@ pub use pptx_parse::{
     ThemePart,
 };
 pub use pptx_render::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, HitTestResult, Paint, PositionedGlyph,
-    PositionedTextLine, PositionedTextRun, Primitive, RenderError, RenderedSlide, Stroke,
-    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph as DisplayTextParagraph,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, HitTestResult, ImageCrop, Paint,
+    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, RenderError, RenderedSlide,
+    Stroke, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph as DisplayTextParagraph,
     TextRun as DisplayTextRun, Transform,
 };

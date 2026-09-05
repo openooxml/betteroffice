@@ -6,6 +6,8 @@ use pptx_edit::{
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+const NUMBERED_FIXTURE: &[u8] =
+    include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
 
 fn open_fixture() -> DeckSession {
     DeckSession::open(FIXTURE, 7).unwrap()
@@ -75,6 +77,20 @@ fn shape_stories(shape: &ShapeSnapshot) -> Vec<&pptx_edit::StorySnapshot> {
 fn an_unedited_deck_saves_part_identical() {
     let session = open_fixture();
     assert_eq!(parts(&session.save().unwrap()), parts(FIXTURE));
+}
+
+#[test]
+fn an_unedited_deck_numbered_from_ten_saves_part_identical() {
+    let session = DeckSession::open(NUMBERED_FIXTURE, 7).unwrap();
+    assert_eq!(session.package().presentation.first_slide_num, 10);
+    assert_eq!(parts(&session.save().unwrap()), parts(NUMBERED_FIXTURE));
+    let restored = DeckSession::open_from_update_with_source(
+        &session.encode_state_as_update_v1(),
+        NUMBERED_FIXTURE,
+        8,
+    )
+    .unwrap();
+    assert_eq!(parts(&restored.save().unwrap()), parts(NUMBERED_FIXTURE));
 }
 
 #[test]
@@ -162,6 +178,52 @@ fn a_formatted_range_survives_reopen() {
     let first_run = &story.paragraphs[0].runs[0];
     assert_eq!(first_run.style.bold, Some(true));
     assert_eq!(first_run.style.color.as_deref(), Some("#FF00AA"));
+}
+
+#[test]
+fn a_paragraph_alignment_survives_reopen() {
+    let session = open_fixture();
+    let (_, _, story_id) = first_story(&session.snapshot().unwrap());
+    session
+        .set_paragraph_alignment(&context(), &story_id, 0, 0, Some("ctr"))
+        .unwrap();
+
+    let reopened = reopen(&session);
+    let snapshot = reopened.snapshot().unwrap();
+    let story = snapshot
+        .slides
+        .iter()
+        .flat_map(|slide| &slide.shapes)
+        .flat_map(shape_stories)
+        .find(|story| story.id == story_id)
+        .unwrap();
+    assert_eq!(story.paragraphs[0].alignment.as_deref(), Some("ctr"));
+}
+
+#[test]
+fn an_alignment_with_the_caret_at_the_story_end_reaches_the_last_paragraph() {
+    let session = open_fixture();
+    let (_, _, story_id) = first_story(&session.snapshot().unwrap());
+    let length = session.story(&story_id).unwrap().length;
+    session
+        .set_paragraph_alignment(&context(), &story_id, length, length, Some("r"))
+        .unwrap();
+
+    let story = session.story(&story_id).unwrap();
+    assert_eq!(
+        story.paragraphs.last().unwrap().alignment.as_deref(),
+        Some("r")
+    );
+}
+
+#[test]
+fn an_unknown_paragraph_alignment_is_rejected() {
+    let session = open_fixture();
+    let (_, _, story_id) = first_story(&session.snapshot().unwrap());
+    let error = session
+        .set_paragraph_alignment(&context(), &story_id, 0, 0, Some("middle"))
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidText(message) if message.contains("middle")));
 }
 
 #[test]

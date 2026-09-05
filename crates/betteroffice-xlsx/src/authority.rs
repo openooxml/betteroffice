@@ -2495,7 +2495,9 @@ fn materialize_cell_formats<T: ReadTxn>(
         let index = match known.get(&key) {
             Some(index) => *index,
             None => {
-                let index = styles.intern_cell_format(&format);
+                let index = styles
+                    .intern_cell_format(&format)
+                    .map_err(|_| "number format table is full".to_string())?;
                 known.insert(key.clone(), index);
                 index
             }

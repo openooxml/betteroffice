@@ -39,8 +39,10 @@ export class PptxDocument {
      * Serializes the deck back to `.pptx` bytes, edits included.
      */
     saveBytes(): Uint8Array;
+    setParagraphAlignmentJson(args: string): string;
     setShapeAdjustJson(args: string): string;
     setShapeFillJson(args: string): string;
+    setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
     snapshotJson(): string;
     startUpdateObservation(): void;
@@ -116,8 +118,10 @@ export interface InitOutput {
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];

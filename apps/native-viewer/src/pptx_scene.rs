@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, bail};
 use betteroffice_pptx::{
-    GradientType, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, PptxPackage,
-    Presentation, Primitive, Stroke as DisplayStroke, SurfaceDisplayList, Transform,
+    GradientType, ImageCrop, Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun,
+    PptxPackage, Presentation, Primitive, Stroke as DisplayStroke, SurfaceDisplayList, Transform,
 };
 use ooxml_drawingml::GeometryPathCommand;
 use serde_json::{Value, json};
-use vello::kurbo::{Affine, BezPath, Rect, Stroke};
+use vello::kurbo::{Affine, BezPath, Rect, Shape, Stroke};
 use vello::peniko::{
     Blob, Color, Fill, FontData, Gradient, ImageAlphaType, ImageBrush, ImageData, ImageFormat,
 };
@@ -371,13 +371,19 @@ impl Translator<'_> {
                 w,
                 h,
                 asset_id,
+                crop,
+                path,
                 stroke,
                 transform,
                 ..
             } => Frame::new(*x, *y, *w, *h).and_then(|frame| {
                 self.draw_image(
                     frame,
-                    asset_id.as_deref(),
+                    PictureSource {
+                        asset_id: asset_id.as_deref(),
+                        crop: *crop,
+                        path: path.as_deref(),
+                    },
                     stroke.as_ref(),
                     *transform,
                     parent,
@@ -483,32 +489,30 @@ impl Translator<'_> {
     fn draw_image(
         &mut self,
         frame: Frame,
-        asset_id: Option<&str>,
+        source: PictureSource<'_>,
         stroke: Option<&DisplayStroke>,
         transform: Transform,
         parent: Affine,
     ) -> Result<(), String> {
-        let asset_id = asset_id.ok_or_else(|| "image has no asset id".to_owned())?;
+        let asset_id = source
+            .asset_id
+            .ok_or_else(|| "image has no asset id".to_owned())?;
         let image = self.images.get(asset_id)?;
         if image.width == 0 || image.height == 0 {
             return Err(format!("image asset {asset_id} has no pixels"));
         }
         let stroke = stroke.map(prepare_stroke).transpose()?;
         let affine = frame.transform(transform, parent)?;
-        let mapping = Affine::translate((frame.rect.x0, frame.rect.y0))
-            * Affine::scale_non_uniform(
-                frame.rect.width() / f64::from(image.width),
-                frame.rect.height() / f64::from(image.height),
-            );
-        self.scene
-            .push_clip_layer(Fill::NonZero, affine, &frame.rect);
+        let outline = image_outline(frame, source.path)?;
+        let mapping = image_mapping(frame, image.width, image.height, source.crop)?;
+        self.scene.push_clip_layer(Fill::NonZero, affine, &outline);
         self.scene
             .draw_image(&ImageBrush::new(image.clone()), affine * mapping);
         self.scene.pop_layer();
         if let Some((style, color)) = stroke
             && style.width > 0.0
         {
-            self.scene.stroke(&style, affine, color, None, &frame.rect);
+            self.scene.stroke(&style, affine, color, None, &outline);
         }
         Ok(())
     }
@@ -697,6 +701,52 @@ impl Translator<'_> {
             }
         }
     }
+}
+
+struct PictureSource<'a> {
+    asset_id: Option<&'a str>,
+    crop: ImageCrop,
+    path: Option<&'a [GeometryPathCommand]>,
+}
+
+/// The picture's own outline when it has one, else its frame.
+fn image_outline(frame: Frame, path: Option<&[GeometryPathCommand]>) -> Result<BezPath, String> {
+    match path {
+        Some(commands) => {
+            let outline = build_path(commands, frame)?;
+            if outline.is_empty() {
+                return Err("image mask path is empty".to_owned());
+            }
+            Ok(outline)
+        }
+        None => Ok(frame.rect.to_path(0.1)),
+    }
+}
+
+/// Maps the kept part of the source bitmap onto the frame.
+fn image_mapping(frame: Frame, width: u32, height: u32, crop: ImageCrop) -> Result<Affine, String> {
+    let (kept_x, kept_y) = crop.kept();
+    if [crop.left, crop.top, crop.right, crop.bottom]
+        .iter()
+        .any(|edge| !edge.is_finite() || *edge < 0.0 || *edge > 1.0)
+        || kept_x <= 0.0
+        || kept_y <= 0.0
+    {
+        return Err("image crop is invalid".to_owned());
+    }
+    let source_width = f64::from(width);
+    let source_height = f64::from(height);
+    let kept_width = f64::from(kept_x) * source_width;
+    let kept_height = f64::from(kept_y) * source_height;
+    Ok(Affine::translate((frame.rect.x0, frame.rect.y0))
+        * Affine::scale_non_uniform(
+            frame.rect.width() / kept_width,
+            frame.rect.height() / kept_height,
+        )
+        * Affine::translate((
+            -f64::from(crop.left) * source_width,
+            -f64::from(crop.top) * source_height,
+        )))
 }
 
 struct PreparedTextRun {
@@ -978,7 +1028,160 @@ fn positive(value: f32, label: &str) -> Result<f32, String> {
 mod tests {
     use super::*;
     use betteroffice_pptx::{CONTRACT_VERSION, GradientStop};
-    use vello::kurbo::Shape;
+    use vello::kurbo::Point;
+
+    const ELLIPSE: [GeometryPathCommand; 6] = [
+        GeometryPathCommand::Move { x: 1.0, y: 0.5 },
+        GeometryPathCommand::Cubic {
+            cp1x: 1.0,
+            cp1y: 0.75,
+            cp2x: 0.75,
+            cp2y: 1.0,
+            x: 0.5,
+            y: 1.0,
+        },
+        GeometryPathCommand::Cubic {
+            cp1x: 0.25,
+            cp1y: 1.0,
+            cp2x: 0.0,
+            cp2y: 0.75,
+            x: 0.0,
+            y: 0.5,
+        },
+        GeometryPathCommand::Cubic {
+            cp1x: 0.0,
+            cp1y: 0.25,
+            cp2x: 0.25,
+            cp2y: 0.0,
+            x: 0.5,
+            y: 0.0,
+        },
+        GeometryPathCommand::Cubic {
+            cp1x: 0.75,
+            cp1y: 0.0,
+            cp2x: 1.0,
+            cp2y: 0.25,
+            x: 1.0,
+            y: 0.5,
+        },
+        GeometryPathCommand::Close,
+    ];
+
+    fn maps(affine: Affine, from: (f64, f64), to: (f64, f64)) -> bool {
+        let point = affine * Point::new(from.0, from.1);
+        (point.x - to.0).abs() < 1e-3 && (point.y - to.1).abs() < 1e-3
+    }
+
+    #[test]
+    fn a_cropped_picture_maps_its_kept_source_onto_the_frame() {
+        let frame = Frame::new(100.0, 50.0, 200.0, 100.0).unwrap();
+        let crop = ImageCrop {
+            left: 0.1,
+            top: 0.2,
+            right: 0.3,
+            bottom: 0.1,
+        };
+        let mapping = image_mapping(frame, 1024, 1024, crop).unwrap();
+        assert!(maps(mapping, (102.4, 204.8), (100.0, 50.0)));
+        assert!(maps(mapping, (716.8, 921.6), (300.0, 150.0)));
+        let whole = image_mapping(frame, 1024, 1024, ImageCrop::default()).unwrap();
+        assert!(maps(whole, (0.0, 0.0), (100.0, 50.0)));
+        assert!(maps(whole, (1024.0, 1024.0), (300.0, 150.0)));
+        let nothing = ImageCrop {
+            left: 0.6,
+            right: 0.6,
+            ..ImageCrop::default()
+        };
+        assert_eq!(
+            image_mapping(frame, 1024, 1024, nothing).err().as_deref(),
+            Some("image crop is invalid")
+        );
+    }
+
+    #[test]
+    fn a_picture_is_outlined_by_its_own_geometry_or_its_frame() {
+        let frame = Frame::new(100.0, 50.0, 200.0, 100.0).unwrap();
+        assert_eq!(
+            image_outline(frame, Some(&ELLIPSE)).unwrap(),
+            build_path(&ELLIPSE, frame).unwrap()
+        );
+        let outline = image_outline(frame, None).unwrap();
+        assert_eq!(outline.bounding_box(), frame.rect);
+        assert!(
+            outline
+                .elements()
+                .iter()
+                .all(|element| !matches!(element, vello::kurbo::PathEl::CurveTo(..)))
+        );
+        assert!(image_outline(frame, Some(&[])).is_err());
+    }
+
+    #[test]
+    fn a_cropped_masked_picture_translates_through_its_mask() {
+        let crop = ImageCrop {
+            left: 0.1,
+            top: 0.2,
+            right: 0.3,
+            bottom: 0.1,
+        };
+        let display_list = SurfaceDisplayList {
+            contract_version: CONTRACT_VERSION,
+            width: 400.0,
+            height: 200.0,
+            background: None,
+            primitives: vec![Primitive::Image {
+                object_id: 1,
+                shape_id: None,
+                name: "Photo".to_owned(),
+                x: 100.0,
+                y: 50.0,
+                w: 200.0,
+                h: 100.0,
+                asset_id: Some("ppt/media/image1.png".to_owned()),
+                crop,
+                path: Some(ELLIPSE.to_vec()),
+                stroke: Some(DisplayStroke {
+                    color: "#ff00ff".to_owned(),
+                    width: 2.0,
+                    dashed: false,
+                    head_end: None,
+                    tail_end: None,
+                }),
+                transform: Transform::default(),
+            }],
+        };
+        let fonts = PptxFonts {
+            vello: HashMap::new(),
+            labels: Vec::new(),
+        };
+        let images = PptxImages {
+            assets: HashMap::from([(
+                "ppt/media/image1.png".to_owned(),
+                PptxImage::Decoded(ImageData {
+                    data: Blob::from(vec![0u8; 1024 * 1024 * 4]),
+                    format: ImageFormat::Rgba8,
+                    alpha_type: ImageAlphaType::Alpha,
+                    width: 1024,
+                    height: 1024,
+                }),
+            )]),
+        };
+        let (page, summary) = translate_slide(&display_list, &fonts, &images, 8_192).unwrap();
+        let structured = summary.structured(&page.skipped);
+        assert_eq!(structured["primitives"]["image"]["translated"], 1);
+        let encoding = page.scene.encoding();
+        assert!(encoding.transforms.iter().any(|transform| {
+            let affine = transform.to_kurbo();
+            maps(affine, (102.4, 204.8), (100.0, 50.0))
+                && maps(affine, (716.8, 921.6), (300.0, 150.0))
+        }));
+        let cubics = encoding
+            .path_tags
+            .iter()
+            .filter(|tag| tag.0 & 0x3 == 0x3)
+            .count();
+        assert_eq!(cubics, 8);
+    }
 
     #[test]
     fn rejects_advanced_gradient_types_with_visible_reasons() {

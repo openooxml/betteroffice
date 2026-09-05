@@ -5,7 +5,7 @@ compile_error!("betteroffice-docx-raster is server-side only");
 
 mod font;
 
-pub use font::measure_text;
+pub use font::{GlyphCache, measure_text};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -26,7 +26,7 @@ use tiny_skia::{
     RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use font::{GlyphCache, PaintContext};
+use font::{FontSpecCache, PaintContext};
 
 /// Layout font chains keyed as `"<family lowercase>|<bold>|<italic>"`.
 pub type FontChains = HashMap<String, Vec<FontId>>;
@@ -151,10 +151,29 @@ pub fn render_png(
 }
 
 /// Renders one display-list page, reporting the image references it skipped.
+/// Each call starts from a fresh glyph cache; pass a shared one to
+/// [`render_page_cached`] when rendering many pages of one export.
 pub fn render_page(
     display_list: &DisplayList,
     page_ordinal: usize,
     resources: &RenderResources<'_>,
+) -> Result<RenderedPage, String> {
+    render_page_cached(
+        display_list,
+        page_ordinal,
+        resources,
+        &mut GlyphCache::default(),
+    )
+}
+
+/// Renders one display-list page into a caller-owned glyph cache, so a
+/// multi-page export reuses the outlines it still holds. The cache is bounded:
+/// an export past its cap re-extracts what it evicted.
+pub fn render_page_cached(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+    glyphs: &mut GlyphCache,
 ) -> Result<RenderedPage, String> {
     let page = display_list
         .pages
@@ -165,7 +184,7 @@ pub fn render_page(
     validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
-    let mut renderer = Renderer::new(width, height);
+    let mut renderer = Renderer::new(width, height, glyphs);
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
@@ -347,7 +366,8 @@ fn mask_bytes(width: u32, height: u32) -> u64 {
 /// Everything one page render accumulates: the caches that keep repeated work
 /// from repeating, and the budget that bounds the work left over.
 struct Scratch<'k> {
-    glyphs: GlyphCache,
+    glyphs: &'k mut GlyphCache,
+    specs: FontSpecCache,
     images: ImageCache<'k>,
     masks: MaskCache,
     budget: PageBudget,
@@ -359,11 +379,12 @@ struct Renderer<'k> {
 }
 
 impl<'k> Renderer<'k> {
-    fn new(width: u32, height: u32) -> Self {
+    fn new(width: u32, height: u32, glyphs: &'k mut GlyphCache) -> Self {
         Self {
             clips: ClipSurface::default(),
             scratch: Scratch {
-                glyphs: GlyphCache::default(),
+                glyphs,
+                specs: FontSpecCache::default(),
                 images: ImageCache::default(),
                 masks: MaskCache::new(width, height),
                 budget: PageBudget::new(width, height),
@@ -470,7 +491,8 @@ fn paint_primitive_core<'k>(
             let mut context = PaintContext {
                 pixmap,
                 resources,
-                cache: &mut scratch.glyphs,
+                cache: &mut *scratch.glyphs,
+                specs: &mut scratch.specs,
                 budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
@@ -484,7 +506,8 @@ fn paint_primitive_core<'k>(
             let mut context = PaintContext {
                 pixmap,
                 resources,
-                cache: &mut scratch.glyphs,
+                cache: &mut *scratch.glyphs,
+                specs: &mut scratch.specs,
                 budget: &mut scratch.budget,
                 base_transform: transform,
                 mask,
@@ -2602,7 +2625,8 @@ mod tests {
     #[test]
     fn a_clip_surface_shrinks_back_to_the_clip_it_serves() {
         let mut pixmap = Pixmap::new(800, 1120).expect("page");
-        let mut renderer = Renderer::new(800, 1120);
+        let mut glyphs = GlyphCache::default();
+        let mut renderer = Renderer::new(800, 1120, &mut glyphs);
         let mut surface = ClipSurface::default();
         for rect in [clip(0.0, 0.0, 800.0, 1120.0), clip(8.0, 8.0, 64.0, 16.0)] {
             surface
@@ -2622,7 +2646,8 @@ mod tests {
     #[test]
     fn a_resized_clip_surface_is_charged_once_at_its_high_water_mark() {
         let mut pixmap = Pixmap::new(400, 560).expect("page");
-        let mut renderer = Renderer::new(400, 560);
+        let mut glyphs = GlyphCache::default();
+        let mut renderer = Renderer::new(400, 560, &mut glyphs);
         let mut surface = ClipSurface::default();
         for index in 0..32 {
             let rect = if index % 2 == 0 {

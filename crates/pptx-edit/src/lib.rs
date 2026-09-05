@@ -149,8 +149,12 @@ impl DeckSession {
                 "source bytes do not match the fingerprint recorded in the update".to_owned(),
             ));
         }
-        let package =
-            pptx_parse::parse_pptx(source).map_err(|error| EditError::Parse(error.to_string()))?;
+        let package = if session.package.models_connectors() {
+            pptx_parse::parse_pptx(source)
+        } else {
+            pptx_parse::parse_pptx_without_connectors(source)
+        }
+        .map_err(|error| EditError::Parse(error.to_string()))?;
         Ok(Self {
             package: Arc::new(package),
             ..session

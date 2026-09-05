@@ -63,6 +63,28 @@ fn eval(src: &str) -> CellValue {
     evaluate(&expr, &ctx)
 }
 
+#[test]
+fn vlookup_accepts_whole_columns() {
+    for columns in [
+        "E:F",
+        "$E:$F",
+        "E:$F",
+        "$E:F",
+        "Sheet1!E:F",
+        "'Sheet1'!$E:$F",
+    ] {
+        assert_eq!(eval(&format!("VLOOKUP(2,{columns},2,FALSE)")), t("two"));
+    }
+    check(&[
+        ("VLOOKUP(2.5,E:F,2)", t("two")),
+        ("VLOOKUP(9,E:F,2,FALSE)", e(ErrorValue::NA)),
+        ("VLOOKUP(2,E:F,3,FALSE)", e(ErrorValue::Ref)),
+        ("VLOOKUP(2,E:F,0,FALSE)", e(ErrorValue::Value)),
+        ("SUM(E:E)", n(10.0)),
+        ("MATCH(2,E:E,0)", n(2.0)),
+    ]);
+}
+
 /// like `eval` but with an injected clock (2020-01-01 12:00) for TODAY/NOW.
 fn eval_now(src: &str) -> CellValue {
     let wb = fixture();

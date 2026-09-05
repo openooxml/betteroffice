@@ -1,6 +1,7 @@
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
+use crate::rels::{self, attribute_local, is_unqualified};
 use crate::{Format, RedactError, RedactionReport};
 
 pub(crate) fn redact_xml(
@@ -128,11 +129,8 @@ fn rewrite_start(
         attributes.push((key, value));
     }
 
-    let external = element.eq_ignore_ascii_case("Relationship")
-        && attributes.iter().any(|(key, value)| {
-            attribute_local(key).eq_ignore_ascii_case("TargetMode")
-                && value.eq_ignore_ascii_case("External")
-        });
+    let (relationship, external) = relationship_mode(path, element, &attributes);
+    let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
         *cell_type = None;
     }
@@ -140,15 +138,25 @@ fn rewrite_start(
     output.clear_attributes();
     for (key, value) in attributes {
         let local = attribute_local(&key);
-        let replacement = if external && local.eq_ignore_ascii_case("Target") {
-            Some("https://example.com".to_owned())
-        } else if !key.starts_with("xmlns")
-            && sensitive_attribute(format, path, element, local, &value)
-        {
-            Some(placeholder(&value))
-        } else {
-            None
-        };
+        if relationship && is_unqualified(&key) && local.eq_ignore_ascii_case("TargetMode") {
+            if !external {
+                output.push_attribute((key.as_str(), value.as_str()));
+            } else if !wrote_target_mode {
+                output.push_attribute(("TargetMode", "External"));
+            }
+            wrote_target_mode = true;
+            continue;
+        }
+        let replacement =
+            if external && is_unqualified(&key) && local.eq_ignore_ascii_case("Target") {
+                Some("https://example.com".to_owned())
+            } else if !key.starts_with("xmlns")
+                && sensitive_attribute(format, path, element, local, &value)
+            {
+                Some(placeholder(&value))
+            } else {
+                None
+            };
         if let Some(replacement) = replacement {
             if replacement != value {
                 report.attributes += 1;
@@ -160,6 +168,9 @@ fn rewrite_start(
         if format == Format::Xlsx && element == "c" && local == "t" {
             *cell_type = Some(value);
         }
+    }
+    if relationship && external && !wrote_target_mode {
+        output.push_attribute(("TargetMode", "External"));
     }
     Ok(output)
 }
@@ -361,8 +372,17 @@ fn local_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-fn attribute_local(name: &str) -> &str {
-    name.rsplit_once(':').map_or(name, |(_, local)| local)
+/// Whether the element is a relationship in a package relationship part, and
+/// whether it points outside the package.
+fn relationship_mode(path: &str, element: &str, attributes: &[(String, String)]) -> (bool, bool) {
+    if !element.eq_ignore_ascii_case("Relationship") {
+        return (false, false);
+    }
+    let package_part = path.to_ascii_lowercase().ends_with(".rels");
+    (
+        package_part,
+        rels::external_relationship(attributes, package_part),
+    )
 }
 
 fn xml_error(path: &str, error: impl fmt::Display) -> RedactError {

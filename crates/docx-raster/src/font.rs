@@ -1,13 +1,15 @@
 //! Shared-store text shaping and glyph rasterization.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::VecDeque;
+use std::rc::Rc;
 
 use docx_layout::display_list::{
     ClipRect, GlyphRunPrimitive, LeaderGlyphMetadata, PlacedGlyph, TextRunPrimitive,
 };
 use ooxml_text::{
-    FontId, FontStore, PathCmd, ShapeDirection, ShapeFeature, shape, shape::shape_with_properties,
+    FontId, FontStore, PathCmd, ShapeDirection, ShapeFeature, ShapedGlyph, shape,
+    shape::shape_with_properties,
 };
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, Pixmap, Rect, Transform};
 
@@ -30,9 +32,32 @@ pub fn measure_text(
     Ok(glyphs.iter().map(|glyph| glyph.x_advance).sum())
 }
 
+/// Most glyph outlines one cache retains; the oldest insertion evicts first.
+const MAX_CACHED_GLYPH_OUTLINES: usize = 8_192;
+
+/// Extracted glyph outlines keyed by font and glyph id, reusable across pages.
+/// Ids are store-local, so the cache binds to the store that fills it and
+/// refuses any other; entries past the cap evict oldest-first.
 #[derive(Default)]
-pub(crate) struct GlyphCache {
+pub struct GlyphCache {
     entries: HashMap<(u32, u32), CachedGlyph>,
+    order: VecDeque<(u32, u32)>,
+    store: Option<u64>,
+}
+
+impl GlyphCache {
+    fn remember(&mut self, key: (u32, u32), glyph: CachedGlyph) {
+        if self.entries.insert(key, glyph).is_none() {
+            self.order.push_back(key);
+        }
+        while self.order.len() > MAX_CACHED_GLYPH_OUTLINES {
+            let oldest = self
+                .order
+                .pop_front()
+                .expect("the queue tracks every cached entry");
+            self.entries.remove(&oldest);
+        }
+    }
 }
 
 struct CachedGlyph {
@@ -49,6 +74,61 @@ struct FontSpec {
     small_caps: bool,
 }
 
+/// A parsed shorthand plus the font-chain key its family resolves under.
+struct ParsedFont {
+    spec: FontSpec,
+    chain_key: String,
+}
+
+/// Distinct shorthands one page keeps parsed, and the raw bytes their keys may
+/// copy out of the display list. A `font` string is untrusted and unbounded, so
+/// the cache stops keeping them rather than growing with the page.
+const MAX_CACHED_FONT_SPECS: usize = 256;
+const MAX_FONT_SPEC_KEY_BYTES: usize = 65_536;
+
+/// Parsed font shorthands keyed by the raw display-list string.
+#[derive(Default)]
+pub(crate) struct FontSpecCache {
+    entries: HashMap<Box<str>, Rc<ParsedFont>>,
+    key_bytes: usize,
+}
+
+impl FontSpecCache {
+    fn font(&mut self, font: &str) -> Result<Rc<ParsedFont>, String> {
+        if let Some(parsed) = self.entries.get(font) {
+            return Ok(parsed.clone());
+        }
+        let spec = parse_font(font)?;
+        let parsed = Rc::new(ParsedFont {
+            chain_key: chain_key(&spec),
+            spec,
+        });
+        self.remember(font, &parsed);
+        Ok(parsed)
+    }
+
+    /// Keeps one parse against its raw shorthand, while the map has room. The
+    /// key is a copy of display-list bytes, so it is the copy that is budgeted.
+    fn remember(&mut self, font: &str, parsed: &Rc<ParsedFont>) {
+        if self.entries.len() >= MAX_CACHED_FONT_SPECS
+            || self.key_bytes + font.len() > MAX_FONT_SPEC_KEY_BYTES
+        {
+            return;
+        }
+        self.key_bytes += font.len();
+        self.entries.insert(font.into(), parsed.clone());
+    }
+}
+
+fn chain_key(spec: &FontSpec) -> String {
+    format!(
+        "{}|{}|{}",
+        spec.family.to_lowercase(),
+        u8::from(spec.bold),
+        u8::from(spec.italic)
+    )
+}
+
 struct FontSegment {
     start: usize,
     end: usize,
@@ -59,6 +139,7 @@ pub(crate) struct PaintContext<'a, 'b> {
     pub pixmap: &'a mut Pixmap,
     pub resources: &'a RenderResources<'b>,
     pub cache: &'a mut GlyphCache,
+    pub specs: &'a mut FontSpecCache,
     pub budget: &'a mut PageBudget,
     pub base_transform: Transform,
     pub mask: Option<&'a Mask>,
@@ -72,6 +153,7 @@ impl<'a, 'b> PaintContext<'a, 'b> {
             pixmap: self.pixmap,
             resources: self.resources,
             cache: self.cache,
+            specs: self.specs,
             budget: self.budget,
             base_transform: self.base_transform,
             mask: Some(mask),
@@ -101,11 +183,11 @@ fn paint_text_core(
     if run.text.is_empty() {
         return Ok(());
     }
-    let spec = parse_font(&run.font)?;
-    if run.small_caps || spec.small_caps {
+    let parsed = context.specs.font(&run.font)?;
+    if run.small_caps || parsed.spec.small_caps {
         return Err("unsupported text field: smallCaps".to_string());
     }
-    let rect = text_rect(run, spec.size)?;
+    let rect = text_rect(run, parsed.spec.size)?;
     let visual = primitive_visual_transform(
         rect,
         run.rotation_deg.as_ref(),
@@ -114,7 +196,7 @@ fn paint_text_core(
     let transform = context.base_transform.pre_concat(visual);
     let color = color_with_opacity(&run.color, context.opacity)?;
     if let Some(leader) = active_leader(&run.attrs.leader_glyphs) {
-        return paint_leader(context, run, leader, &spec, color, transform);
+        return paint_leader(context, run, leader, &parsed, color, transform);
     }
     context.budget.charge_glyphs(painted_chars(run))?;
     let text = if run.all_caps {
@@ -139,7 +221,8 @@ fn paint_text_core(
         &text,
         number_f32(&run.x)?,
         number_f32(&run.baseline_y)?,
-        &spec,
+        &parsed.spec,
+        &parsed.chain_key,
         run.rtl == Some(true),
         run.attrs.lang.as_deref(),
         letter_spacing,
@@ -311,7 +394,7 @@ fn paint_leader(
     context: &mut PaintContext<'_, '_>,
     run: &TextRunPrimitive,
     leader: &LeaderGlyphMetadata,
-    run_spec: &FontSpec,
+    run_font: &ParsedFont,
     fallback_color: tiny_skia::Color,
     transform: Transform,
 ) -> Result<(), String> {
@@ -345,7 +428,7 @@ fn paint_leader(
         .map(number_f32)
         .transpose()?
         .unwrap_or(number_f32(&run.baseline_y)?);
-    let mut spec = run_spec.clone();
+    let mut spec = run_font.spec.clone();
     if let Some(family) = leader.font.as_deref() {
         spec.family = family.to_string();
     }
@@ -355,6 +438,10 @@ fn paint_leader(
             return Err("leader glyph size must be positive".to_string());
         }
     }
+    let chain_key = match leader.font.as_deref() {
+        Some(_) => chain_key(&spec),
+        None => run_font.chain_key.clone(),
+    };
     let color = leader
         .color
         .as_deref()
@@ -364,39 +451,135 @@ fn paint_leader(
     let mut paint = Paint::default();
     paint.set_color(color);
     paint.anti_alias = true;
-    let direction = leader.rtl == Some(true);
+    let rtl = leader.rtl == Some(true);
+    let direction = if rtl {
+        ShapeDirection::Rtl
+    } else {
+        ShapeDirection::Ltr
+    };
+    let stamp = shape_stamp(
+        context,
+        glyph,
+        &spec,
+        &chain_key,
+        direction,
+        count,
+        leader.font_id,
+    )?;
     for index in 0..count {
-        let visual_index = if direction { count - 1 - index } else { index };
+        let visual_index = if rtl { count - 1 - index } else { index };
         let origin = x + visual_index as f32 * advance;
-        if let Some(raw) = leader.font_id {
-            paint_single_font_text(
-                context,
-                glyph,
-                FontId::from_u32(raw),
-                spec.size,
-                origin,
-                baseline,
-                direction,
-                None,
-                &[],
-                &paint,
-                transform,
-            )?;
-        } else {
-            paint_resolved_text(
-                context,
-                glyph,
-                origin,
-                baseline,
-                &spec,
-                direction,
-                None,
-                0.0,
-                0.0,
-                &[],
-                color,
-                transform,
-            )?;
+        paint_shaped_stamp(context, &stamp, origin, baseline, &paint, transform)?;
+    }
+    Ok(())
+}
+
+/// One shaped leader text, ready to be stamped at every repeat position.
+struct ShapedStamp {
+    size: f32,
+    segments: Vec<ShapedSegment>,
+}
+
+struct ShapedSegment {
+    font: FontId,
+    glyphs: Vec<ShapedGlyph>,
+}
+
+/// Shapes the leader text once in the order its glyphs are painted, charging
+/// what every repeat will paint. Shaping never depends on the pen origin, so
+/// one pass covers every repeat.
+#[allow(clippy::too_many_arguments)]
+fn shape_stamp(
+    context: &mut PaintContext<'_, '_>,
+    glyph: &str,
+    spec: &FontSpec,
+    key: &str,
+    direction: ShapeDirection,
+    count: usize,
+    font_id: Option<u32>,
+) -> Result<ShapedStamp, String> {
+    let mut segments = Vec::new();
+    let mut excess = 0u64;
+    if let Some(raw) = font_id {
+        let font = FontId::from_u32(raw);
+        let glyphs = shape_segment(context, glyph, font, spec.size, direction)?;
+        excess = (glyphs.len() as u64).saturating_sub(glyph.chars().count() as u64);
+        segments.push(ShapedSegment { font, glyphs });
+    } else {
+        let chain = context
+            .resources
+            .font_chains
+            .get(key)
+            .ok_or_else(|| format!("missing font chain for `{key}`"))?;
+        if chain.is_empty() {
+            return Err(format!("font chain `{key}` is empty"));
+        }
+        for segment in font_segments(context.resources.fonts, chain, glyph)? {
+            let text = &glyph[segment.start..segment.end];
+            let glyphs = shape_segment(context, text, segment.font, spec.size, direction)?;
+            excess = excess
+                .saturating_add((glyphs.len() as u64).saturating_sub(text.chars().count() as u64));
+            segments.push(ShapedSegment {
+                font: segment.font,
+                glyphs,
+            });
+        }
+        if matches!(direction, ShapeDirection::Rtl) {
+            segments.reverse();
+        }
+    }
+    context
+        .budget
+        .charge_glyphs(excess.saturating_mul(count as u64))?;
+    Ok(ShapedStamp {
+        size: spec.size,
+        segments,
+    })
+}
+
+fn shape_segment(
+    context: &PaintContext<'_, '_>,
+    text: &str,
+    font: FontId,
+    size: f32,
+    direction: ShapeDirection,
+) -> Result<Vec<ShapedGlyph>, String> {
+    shape_with_properties(
+        context.resources.fonts,
+        font,
+        text,
+        size,
+        &[],
+        direction,
+        None,
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Replays one shaping at a stamp origin, painting exactly what a fresh shape
+/// at that origin would.
+fn paint_shaped_stamp(
+    context: &mut PaintContext<'_, '_>,
+    stamp: &ShapedStamp,
+    origin: f32,
+    baseline: f32,
+    paint: &Paint<'_>,
+    transform: Transform,
+) -> Result<(), String> {
+    let mut pen = origin;
+    for segment in &stamp.segments {
+        for glyph in &segment.glyphs {
+            let placed = PlacedGlyph {
+                id: glyph.glyph_id,
+                x: f64::from(pen + glyph.x_offset),
+                y: f64::from(baseline - glyph.y_offset),
+                cluster: glyph.cluster,
+                advance: f64::from(glyph.x_advance),
+                logical_order: None,
+                bidi_level: None,
+            };
+            paint_placed_glyph(context, segment.font, &placed, stamp.size, paint, transform)?;
+            pen += glyph.x_advance;
         }
     }
     Ok(())
@@ -409,6 +592,7 @@ fn paint_resolved_text(
     x: f32,
     baseline: f32,
     spec: &FontSpec,
+    key: &str,
     rtl: bool,
     language: Option<&str>,
     letter_spacing: f32,
@@ -417,16 +601,10 @@ fn paint_resolved_text(
     color: tiny_skia::Color,
     transform: Transform,
 ) -> Result<(), String> {
-    let key = format!(
-        "{}|{}|{}",
-        spec.family.to_lowercase(),
-        u8::from(spec.bold),
-        u8::from(spec.italic)
-    );
     let chain = context
         .resources
         .font_chains
-        .get(&key)
+        .get(key)
         .ok_or_else(|| format!("missing font chain for `{key}`"))?;
     if chain.is_empty() {
         return Err(format!("font chain `{key}` is empty"));
@@ -497,53 +675,6 @@ fn paint_resolved_text(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paint_single_font_text(
-    context: &mut PaintContext<'_, '_>,
-    text: &str,
-    font: FontId,
-    size: f32,
-    x: f32,
-    baseline: f32,
-    rtl: bool,
-    language: Option<&str>,
-    features: &[ShapeFeature],
-    paint: &Paint<'_>,
-    transform: Transform,
-) -> Result<(), String> {
-    let direction = if rtl {
-        ShapeDirection::Rtl
-    } else {
-        ShapeDirection::Ltr
-    };
-    let glyphs = shape_with_properties(
-        context.resources.fonts,
-        font,
-        text,
-        size,
-        features,
-        direction,
-        language,
-    )
-    .map_err(|error| error.to_string())?;
-    charge_shaped_excess(context, text, glyphs.len())?;
-    let mut pen = x;
-    for glyph in glyphs {
-        let placed = PlacedGlyph {
-            id: glyph.glyph_id,
-            x: f64::from(pen + glyph.x_offset),
-            y: f64::from(baseline - glyph.y_offset),
-            cluster: glyph.cluster,
-            advance: f64::from(glyph.x_advance),
-            logical_order: None,
-            bidi_level: None,
-        };
-        paint_placed_glyph(context, font, &placed, size, paint, transform)?;
-        pen += glyph.x_advance;
-    }
-    Ok(())
-}
-
 /// Shaping can place more glyphs than the text had characters. The caller
 /// charged the characters before the shaper ran, so only the excess is left.
 fn charge_shaped_excess(
@@ -594,22 +725,30 @@ fn cached_glyph<'a>(
     font: FontId,
     glyph_id: u32,
 ) -> Result<&'a CachedGlyph, String> {
+    if cache.store.is_some_and(|bound| bound != fonts.id()) {
+        return Err("glyph cache is bound to another font store".to_string());
+    }
     let key = (font.to_u32(), glyph_id);
-    match cache.entries.entry(key) {
-        Entry::Occupied(entry) => Ok(entry.into_mut()),
-        Entry::Vacant(entry) => {
-            let id = u16::try_from(glyph_id)
-                .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))?;
-            let outline = fonts
-                .outline_glyph(font, id)
-                .map_err(|error| error.to_string())?;
-            let path = outline_path(&outline.cmds)?;
-            Ok(entry.insert(CachedGlyph {
+    if !cache.entries.contains_key(&key) {
+        let id = u16::try_from(glyph_id)
+            .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))?;
+        let outline = fonts
+            .outline_glyph(font, id)
+            .map_err(|error| error.to_string())?;
+        let path = outline_path(&outline.cmds)?;
+        cache.store = Some(fonts.id());
+        cache.remember(
+            key,
+            CachedGlyph {
                 path,
                 upem: f32::from(outline.upem),
-            }))
-        }
+            },
+        );
     }
+    Ok(cache
+        .entries
+        .get(&key)
+        .expect("a just-inserted or occupied key is present"))
 }
 
 fn outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {
@@ -778,6 +917,8 @@ fn f64_to_f32(value: f64, field: &str) -> Result<f32, String> {
 mod tests {
     use super::*;
 
+    const CARLITO: &[u8] = include_bytes!("../tests/assets/Carlito-Regular.ttf");
+
     #[test]
     fn parses_layout_font_shorthands() {
         let regular = parse_font("400 16px Liberation Sans, sans-serif").unwrap();
@@ -793,5 +934,113 @@ mod tests {
         assert!(styled.bold);
         assert!(styled.italic);
         assert!(styled.small_caps);
+    }
+
+    #[test]
+    fn spec_cache_reuses_one_parse_per_raw_string() {
+        let mut cache = FontSpecCache::default();
+        let first = cache
+            .font("400 16px Liberation Sans, sans-serif")
+            .expect("parse");
+        let second = cache
+            .font("400 16px Liberation Sans, sans-serif")
+            .expect("parse");
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(first.spec.family, "Liberation Sans");
+        assert_eq!(first.chain_key, "liberation sans|0|0");
+        assert_eq!(cache.entries.len(), 1);
+
+        let bold = cache
+            .font("700 16px Liberation Sans, sans-serif")
+            .expect("parse");
+        assert!(!Rc::ptr_eq(&bold, &first));
+        assert!(bold.spec.bold && !bold.spec.italic);
+        assert_ne!(bold.chain_key, first.chain_key);
+
+        let italic = cache
+            .font("italic 16px Liberation Sans, sans-serif")
+            .expect("parse");
+        assert!(italic.spec.italic && !italic.spec.bold);
+        assert_ne!(italic.chain_key, bold.chain_key);
+        assert_eq!(cache.entries.len(), 3);
+
+        assert!(cache.font("16 Liberation Sans").is_err());
+        assert!(cache.font("px").is_err());
+        assert_eq!(cache.entries.len(), 3);
+    }
+
+    /// Shorthands are untrusted display-list strings, so the cache parses every
+    /// one but stops copying them once either budget is spent.
+    #[test]
+    fn the_spec_cache_stops_keeping_shorthands_past_its_budgets() {
+        let mut counted = FontSpecCache::default();
+        for index in 0..MAX_CACHED_FONT_SPECS + 8 {
+            let font = format!("400 {}12px Carlito, sans-serif", " ".repeat(index));
+            assert_eq!(counted.font(&font).expect("parse").spec.family, "Carlito");
+        }
+        assert_eq!(counted.entries.len(), MAX_CACHED_FONT_SPECS);
+        assert!(counted.key_bytes <= MAX_FONT_SPEC_KEY_BYTES);
+
+        let mut oversized = FontSpecCache::default();
+        let padding = " ".repeat(MAX_FONT_SPEC_KEY_BYTES);
+        for index in 0..4 {
+            let font = format!("400 {padding}{}12px Carlito, sans-serif", " ".repeat(index));
+            assert_eq!(oversized.font(&font).expect("parse").spec.family, "Carlito");
+        }
+        assert!(oversized.entries.is_empty());
+        assert_eq!(oversized.key_bytes, 0);
+    }
+
+    #[test]
+    fn the_glyph_cache_evicts_its_oldest_entries_past_the_cap() {
+        let mut cache = GlyphCache::default();
+        for index in 0..MAX_CACHED_GLYPH_OUTLINES as u32 + 2 {
+            cache.remember(
+                (index, 0),
+                CachedGlyph {
+                    path: None,
+                    upem: 1000.0,
+                },
+            );
+        }
+        assert_eq!(cache.entries.len(), MAX_CACHED_GLYPH_OUTLINES);
+        assert_eq!(cache.order.len(), MAX_CACHED_GLYPH_OUTLINES);
+        assert!(!cache.entries.contains_key(&(0, 0)));
+        assert!(cache.entries.contains_key(&(2, 0)));
+        assert!(
+            cache
+                .entries
+                .contains_key(&(MAX_CACHED_GLYPH_OUTLINES as u32 + 1, 0))
+        );
+    }
+
+    /// Distinct outlines past the cap evict earlier ones; a render that asks
+    /// for an evicted outline gets a fresh extraction, not a stale or missing
+    /// path.
+    #[test]
+    fn an_evicted_glyph_outline_is_extracted_again_on_demand() {
+        let mut fonts = FontStore::new();
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            ids.push(fonts.register(CARLITO.to_vec()).expect("font"));
+        }
+        let mut cache = GlyphCache::default();
+        let mut inserted = 0usize;
+        for id in &ids {
+            for gid in 0..u16::MAX {
+                if cached_glyph(&mut cache, &fonts, *id, u32::from(gid)).is_err() {
+                    break;
+                }
+                inserted += 1;
+            }
+        }
+        assert!(inserted > MAX_CACHED_GLYPH_OUTLINES);
+        assert_eq!(cache.entries.len(), MAX_CACHED_GLYPH_OUTLINES);
+        assert!(!cache.entries.contains_key(&(ids[0].to_u32(), 0)));
+        let refilled =
+            cached_glyph(&mut cache, &fonts, ids[0], 0).expect("re-extract after eviction");
+        let upem = fonts.metrics(ids[0]).expect("metrics").units_per_em;
+        assert_eq!(refilled.upem, f32::from(upem));
+        assert!(cache.entries.contains_key(&(ids[0].to_u32(), 0)));
     }
 }

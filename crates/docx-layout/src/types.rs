@@ -97,7 +97,7 @@ pub enum SectionBreakType {
 // runs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum UnderlineSpec {
     Flag(bool),
@@ -109,7 +109,7 @@ pub enum UnderlineSpec {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HyperlinkInfo {
     pub href: String,
@@ -125,7 +125,7 @@ pub struct HyperlinkInfo {
     pub doc_location: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunFontSlots {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,7 +148,7 @@ pub struct RunFontSlots {
     pub hint: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLanguageSlots {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,7 +159,7 @@ pub struct RunLanguageSlots {
     pub bidi: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -277,7 +277,7 @@ pub struct TabRun {
     pub leader_glyphs: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AxisPosition {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,7 +288,7 @@ pub struct AxisPosition {
     pub relative_to: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRunPosition {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,7 +462,7 @@ impl Run {
 // paragraph attributes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphSpacing {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,7 +477,7 @@ pub struct ParagraphSpacing {
     pub line_rule: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SpacingExplicit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before: Option<bool>,
@@ -485,7 +485,7 @@ pub struct SpacingExplicit {
     pub after: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphIndent {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -498,7 +498,7 @@ pub struct ParagraphIndent {
     pub hanging: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TabStop {
     pub val: String,
     pub pos: f64,
@@ -506,7 +506,7 @@ pub struct TabStop {
     pub leader: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BorderStyle {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -518,7 +518,7 @@ pub struct BorderStyle {
     pub space: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParagraphBorders {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top: Option<BorderStyle>,
@@ -534,7 +534,7 @@ pub struct ParagraphBorders {
     pub bar: Option<BorderStyle>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListNumPr {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -543,7 +543,7 @@ pub struct ListNumPr {
     pub ilvl: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -605,7 +605,7 @@ pub struct ParagraphAttrs {
     pub p_pr_del: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SdtGroup {
     pub id: String,
@@ -653,7 +653,7 @@ pub struct ParagraphBlock {
     pub pm_end: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CellBorderSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<f64>,
@@ -663,7 +663,7 @@ pub struct CellBorderSpec {
     pub style: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CellBorders {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top: Option<CellBorderSpec>,
@@ -675,7 +675,7 @@ pub struct CellBorders {
     pub left: Option<CellBorderSpec>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BoxEdges {
     pub top: f64,
     pub right: f64,
@@ -684,7 +684,7 @@ pub struct BoxEdges {
 }
 
 /// Typed `tblW`/`tcW`/row-before/after preferred width.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PreferredWidth {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
@@ -692,7 +692,7 @@ pub struct PreferredWidth {
     pub r#type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCell {
     pub id: BlockId,
@@ -729,7 +729,7 @@ pub struct TableCell {
     pub tracked_marker: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TableRow {
     pub id: BlockId,
@@ -756,7 +756,7 @@ pub struct TableRow {
     pub tracked_del: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FloatingTablePosition {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -820,7 +820,7 @@ pub struct TableBlock {
     pub pm_end: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnchor {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -977,7 +977,7 @@ pub struct ChartBlock {
     pub pm_end: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SectionBreakBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1094,10 +1094,484 @@ pub enum LayoutBlock {
 }
 
 // ---------------------------------------------------------------------------
+// structural equality
+// ---------------------------------------------------------------------------
+//
+// Equality across the block tree masks `pm_start`, `pm_end`, `doc_start` and
+// `doc_end`: those absolute document positions shift on every edit without
+// changing how a block measures, and the resident layout walk reuses a retained
+// measurement for every block that compares equal. So that a new field cannot
+// silently escape that decision, each variant and each field is spelled out —
+// adding either stops compiling until it is classified.
+//
+// Numbers compare as numbers, so `-0.0` equals `0.0` where the serialized
+// fingerprint this replaced saw a change. Both measure identically, so the
+// retained measurement stays right, but a serialized zero can keep its old sign
+// until something else dirties its block.
+
+impl PartialEq for LayoutBlock {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Paragraph(a), Self::Paragraph(b)) => a == b,
+            (Self::Table(a), Self::Table(b)) => a == b,
+            (Self::Image(a), Self::Image(b)) => a == b,
+            (Self::Shape(a), Self::Shape(b)) => a == b,
+            (Self::Chart(a), Self::Chart(b)) => a == b,
+            (Self::TextBox(a), Self::TextBox(b)) => a == b,
+            (Self::SectionBreak(a), Self::SectionBreak(b)) => a == b,
+            (Self::PageBreak(a), Self::PageBreak(b)) => a == b,
+            (Self::ColumnBreak(a), Self::ColumnBreak(b)) => a == b,
+            (Self::Unsupported, Self::Unsupported) => true,
+            (Self::Paragraph(_), _)
+            | (Self::Table(_), _)
+            | (Self::Image(_), _)
+            | (Self::Shape(_), _)
+            | (Self::Chart(_), _)
+            | (Self::TextBox(_), _)
+            | (Self::SectionBreak(_), _)
+            | (Self::PageBreak(_), _)
+            | (Self::ColumnBreak(_), _)
+            | (Self::Unsupported, _) => false,
+        }
+    }
+}
+
+impl PartialEq for Run {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Tab(a), Self::Tab(b)) => a == b,
+            (Self::Image(a), Self::Image(b)) => a == b,
+            (Self::LineBreak(a), Self::LineBreak(b)) => a == b,
+            (Self::Field(a), Self::Field(b)) => a == b,
+            (Self::Unsupported, Self::Unsupported) => true,
+            (Self::Text(_), _)
+            | (Self::Tab(_), _)
+            | (Self::Image(_), _)
+            | (Self::LineBreak(_), _)
+            | (Self::Field(_), _)
+            | (Self::Unsupported, _) => false,
+        }
+    }
+}
+
+impl PartialEq for TextRun {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            fmt: _,
+            text: _,
+            inline_sdt_widget: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.fmt == other.fmt
+            && self.text == other.text
+            && self.inline_sdt_widget == other.inline_sdt_widget
+    }
+}
+
+impl PartialEq for TabRun {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            fmt: _,
+            width: _,
+            leader_glyphs: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.fmt == other.fmt
+            && self.width == other.width
+            && self.leader_glyphs == other.leader_glyphs
+    }
+}
+
+impl PartialEq for ImageRun {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            src: _,
+            width: _,
+            height: _,
+            alt: _,
+            transform: _,
+            position: _,
+            wrap_type: _,
+            display_mode: _,
+            css_float: _,
+            dist_top: _,
+            dist_bottom: _,
+            dist_left: _,
+            dist_right: _,
+            crop_top: _,
+            crop_right: _,
+            crop_bottom: _,
+            crop_left: _,
+            opacity: _,
+            rotation_deg: _,
+            flip_h: _,
+            flip_v: _,
+            rotation_bounds: _,
+            wrap_text: _,
+            wrap_polygon: _,
+            allow_overlap: _,
+            layout_in_cell: _,
+            effect_extent: _,
+            effects: _,
+            outline: _,
+            decorative: _,
+            hyperlink: _,
+            is_insertion: _,
+            is_deletion: _,
+            change_author: _,
+            change_date: _,
+            change_revision_id: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.src == other.src
+            && self.width == other.width
+            && self.height == other.height
+            && self.alt == other.alt
+            && self.transform == other.transform
+            && self.position == other.position
+            && self.wrap_type == other.wrap_type
+            && self.display_mode == other.display_mode
+            && self.css_float == other.css_float
+            && self.dist_top == other.dist_top
+            && self.dist_bottom == other.dist_bottom
+            && self.dist_left == other.dist_left
+            && self.dist_right == other.dist_right
+            && self.crop_top == other.crop_top
+            && self.crop_right == other.crop_right
+            && self.crop_bottom == other.crop_bottom
+            && self.crop_left == other.crop_left
+            && self.opacity == other.opacity
+            && self.rotation_deg == other.rotation_deg
+            && self.flip_h == other.flip_h
+            && self.flip_v == other.flip_v
+            && self.rotation_bounds == other.rotation_bounds
+            && self.wrap_text == other.wrap_text
+            && self.wrap_polygon == other.wrap_polygon
+            && self.allow_overlap == other.allow_overlap
+            && self.layout_in_cell == other.layout_in_cell
+            && self.effect_extent == other.effect_extent
+            && self.effects == other.effects
+            && self.outline == other.outline
+            && self.decorative == other.decorative
+            && self.hyperlink == other.hyperlink
+            && self.is_insertion == other.is_insertion
+            && self.is_deletion == other.is_deletion
+            && self.change_author == other.change_author
+            && self.change_date == other.change_date
+            && self.change_revision_id == other.change_revision_id
+    }
+}
+
+impl PartialEq for LineBreakRun {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        true
+    }
+}
+
+impl PartialEq for FieldRun {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            fmt: _,
+            field_type: _,
+            raw_type: _,
+            instruction: _,
+            fallback: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.fmt == other.fmt
+            && self.field_type == other.field_type
+            && self.raw_type == other.raw_type
+            && self.instruction == other.instruction
+            && self.fallback == other.fallback
+    }
+}
+
+impl PartialEq for ParagraphBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            para_id: _,
+            runs: _,
+            attrs: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.para_id == other.para_id
+            && self.runs == other.runs
+            && self.attrs == other.attrs
+    }
+}
+
+impl PartialEq for TableBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            rows: _,
+            column_widths: _,
+            grid_widths: _,
+            width: _,
+            width_type: _,
+            preferred_width: _,
+            layout_mode: _,
+            width_algorithm: _,
+            style_cascade: _,
+            background: _,
+            justification: _,
+            bidi: _,
+            indent: _,
+            floating: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.rows == other.rows
+            && self.column_widths == other.column_widths
+            && self.grid_widths == other.grid_widths
+            && self.width == other.width
+            && self.width_type == other.width_type
+            && self.preferred_width == other.preferred_width
+            && self.layout_mode == other.layout_mode
+            && self.width_algorithm == other.width_algorithm
+            && self.style_cascade == other.style_cascade
+            && self.background == other.background
+            && self.justification == other.justification
+            && self.bidi == other.bidi
+            && self.indent == other.indent
+            && self.floating == other.floating
+    }
+}
+
+impl PartialEq for ImageBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            src: _,
+            width: _,
+            height: _,
+            alt: _,
+            transform: _,
+            opacity: _,
+            rotation_deg: _,
+            flip_h: _,
+            flip_v: _,
+            rotation_bounds: _,
+            anchor: _,
+            hlink_href: _,
+            hlink_title: _,
+            decorative: _,
+            crop: _,
+            effects: _,
+            outline: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.src == other.src
+            && self.width == other.width
+            && self.height == other.height
+            && self.alt == other.alt
+            && self.transform == other.transform
+            && self.opacity == other.opacity
+            && self.rotation_deg == other.rotation_deg
+            && self.flip_h == other.flip_h
+            && self.flip_v == other.flip_v
+            && self.rotation_bounds == other.rotation_bounds
+            && self.anchor == other.anchor
+            && self.hlink_href == other.hlink_href
+            && self.hlink_title == other.hlink_title
+            && self.decorative == other.decorative
+            && self.crop == other.crop
+            && self.effects == other.effects
+            && self.outline == other.outline
+    }
+}
+
+impl PartialEq for ShapeBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            shape_type: _,
+            geometry_path: _,
+            fill: _,
+            stroke: _,
+            transform: _,
+            width: _,
+            height: _,
+            x: _,
+            y: _,
+            inner_text: _,
+            inner_measures: _,
+            children: _,
+            scene: _,
+            effects: _,
+            text_body_properties: _,
+            position: _,
+            wrap_type: _,
+            wrap_text: _,
+            relative_height: _,
+            behind_doc: _,
+            decorative: _,
+            title: _,
+            description: _,
+            doc_start: _,
+            doc_end: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.shape_type == other.shape_type
+            && self.geometry_path == other.geometry_path
+            && self.fill == other.fill
+            && self.stroke == other.stroke
+            && self.transform == other.transform
+            && self.width == other.width
+            && self.height == other.height
+            && self.x == other.x
+            && self.y == other.y
+            && self.inner_text == other.inner_text
+            && self.inner_measures == other.inner_measures
+            && self.children == other.children
+            && self.scene == other.scene
+            && self.effects == other.effects
+            && self.text_body_properties == other.text_body_properties
+            && self.position == other.position
+            && self.wrap_type == other.wrap_type
+            && self.wrap_text == other.wrap_text
+            && self.relative_height == other.relative_height
+            && self.behind_doc == other.behind_doc
+            && self.decorative == other.decorative
+            && self.title == other.title
+            && self.description == other.description
+    }
+}
+
+impl PartialEq for ChartBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            chart: _,
+            width: _,
+            height: _,
+            position: _,
+            wrap_type: _,
+            wrap_text: _,
+            relative_height: _,
+            behind_doc: _,
+            doc_start: _,
+            doc_end: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.chart == other.chart
+            && self.width == other.width
+            && self.height == other.height
+            && self.position == other.position
+            && self.wrap_type == other.wrap_type
+            && self.wrap_text == other.wrap_text
+            && self.relative_height == other.relative_height
+            && self.behind_doc == other.behind_doc
+    }
+}
+
+impl PartialEq for PageBreakBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups && self.id == other.id
+    }
+}
+
+impl PartialEq for ColumnBreakBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups && self.id == other.id
+    }
+}
+
+impl PartialEq for TextBoxBlock {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            sdt_groups: _,
+            id: _,
+            width: _,
+            height: _,
+            fill_color: _,
+            outline_width: _,
+            outline_color: _,
+            outline_style: _,
+            margins: _,
+            content: _,
+            display_mode: _,
+            css_float: _,
+            wrap_type: _,
+            wrap_text: _,
+            anchor_target: _,
+            position: _,
+            dist_top: _,
+            dist_bottom: _,
+            dist_left: _,
+            dist_right: _,
+            pm_start: _,
+            pm_end: _,
+        } = other;
+        self.sdt_groups == other.sdt_groups
+            && self.id == other.id
+            && self.width == other.width
+            && self.height == other.height
+            && self.fill_color == other.fill_color
+            && self.outline_width == other.outline_width
+            && self.outline_color == other.outline_color
+            && self.outline_style == other.outline_style
+            && self.margins == other.margins
+            && self.content == other.content
+            && self.display_mode == other.display_mode
+            && self.css_float == other.css_float
+            && self.wrap_type == other.wrap_type
+            && self.wrap_text == other.wrap_text
+            && self.anchor_target == other.anchor_target
+            && self.position == other.position
+            && self.dist_top == other.dist_top
+            && self.dist_bottom == other.dist_bottom
+            && self.dist_left == other.dist_left
+            && self.dist_right == other.dist_right
+    }
+}
+
+// ---------------------------------------------------------------------------
 // extents (measurement results)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRowSegment {
     pub head_run: usize,
@@ -1109,7 +1583,7 @@ pub struct TypesetRowSegment {
     pub width: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRunAdvance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1124,7 +1598,7 @@ pub struct TypesetRunAdvance {
     pub logical_order: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetClusterAdvance {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1143,7 +1617,7 @@ pub struct TypesetClusterAdvance {
     pub logical_order: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetBidiSlice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1166,7 +1640,7 @@ pub struct TypesetBidiSlice {
 /// range, `float_skip_before` is vertical room the line had to skip past a
 /// float, and `left_offset` / `right_offset` are the exclusions measurement
 /// already applied.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRow {
     pub head_run: usize,
@@ -1195,7 +1669,7 @@ pub struct TypesetRow {
     pub bidi_slices: Option<Vec<TypesetBidiSlice>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphExtent {
     pub lines: Vec<TypesetRow>,

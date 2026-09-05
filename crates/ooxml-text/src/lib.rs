@@ -48,8 +48,8 @@ pub use bidi::{
 pub use font_store::{FontError, FontId, FontMetrics, FontStore};
 pub use line_break::{BreakOpportunity, break_opportunities};
 pub use measure::{
-    MeasureError, MeasureInput, ParagraphExtentOut, TypesetRowOut, measure_paragraph,
-    measure_paragraph_json,
+    FontChains, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut, TypesetRowOut,
+    measure_paragraph, measure_paragraph_json, measure_paragraph_typed,
 };
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};

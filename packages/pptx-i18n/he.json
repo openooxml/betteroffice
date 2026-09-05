@@ -3,6 +3,7 @@
   "toolbar": {
     "label": null,
     "save": "שמירה",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -24,7 +25,14 @@
       "tools": null,
       "font": null,
       "text": null,
-      "shape": null
+      "shape": null,
+      "alignment": "יישור טקסט"
+    },
+    "align": {
+      "left": "יישור לשמאל",
+      "center": "יישור למרכז",
+      "right": "יישור לימין",
+      "justify": "יישור מלא"
     },
     "newSlide": null,
     "newSlideWithLayout": null,

@@ -481,7 +481,7 @@ export function openWorkbook(
         throw new Error(`xlsx wasm returned unknown update origin ${origin}`);
       }
       pendingUpdates.push({
-        update: encoded.slice(1),
+        update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
       });
     }
@@ -544,17 +544,17 @@ export function openWorkbook(
       return wasmCall(() => doc.clientId);
     },
     encodeStateVector(): Uint8Array {
-      return wasmCall(() => doc.encodeStateVector().slice());
+      return wasmCall(() => doc.encodeStateVector());
     },
     encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
       return wasmCall(() =>
         remoteStateVector === undefined
-          ? doc.encodeStateAsUpdate().slice()
-          : doc.encodeDiff(remoteStateVector.slice()).slice()
+          ? doc.encodeStateAsUpdate()
+          : doc.encodeDiff(remoteStateVector)
       );
     },
     applyUpdate(update: Uint8Array): EditResult {
-      return parseJson(() => doc.applyUpdateJson(update.slice()), true);
+      return parseJson(() => doc.applyUpdateJson(update), true);
     },
     onUpdate(listener: WorkbookUpdateListener): () => void {
       assertAlive();
@@ -677,7 +677,7 @@ export function openWorkbook(
       });
     },
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes().slice());
+      return wasmCall(() => doc.saveBytes());
     },
     propose(agentId: string, note: string | null, edits: ProposalEdit[]): Proposal {
       return mutatingWasmCall(() => {

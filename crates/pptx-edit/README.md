@@ -13,6 +13,11 @@ stay out of local history.
 State vectors, diffs, and updates are standard Yrs v1, so any transport that
 speaks Yjs sync-v1 works.
 
+New snapshots use schema v4. Opening a v1 or v2 update first applies the v3
+connector migration, preserving legacy source ordinals, then the v4 slide-number
+migration. A v3 update applies only the v4 migration. Missing starting numbers
+default to one and stay omitted from package JSON; older readers reject v4.
+
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
 `wasm` feature exposes the JavaScript surface consumed by
 [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx).

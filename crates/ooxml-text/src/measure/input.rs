@@ -36,7 +36,7 @@
 //! `floatingZones` and `paragraphYOffset` are optional; absent means no float
 //! context. See [`FloatZoneIn`] for their coordinate space.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
 
@@ -72,6 +72,58 @@ pub struct MeasureInput {
 }
 
 impl MeasureInput {
+    /// Borrowed view consumed by [`super::measure_paragraph_typed`].
+    pub(super) fn as_request(&self) -> MeasureRequest<'_> {
+        MeasureRequest {
+            block: &self.block,
+            max_width: self.max_width,
+            font_chains: FontChains::Hash(&self.font_chains),
+            defaults: &self.defaults,
+            compat: self.compat,
+            floating_zones: self.floating_zones.as_deref(),
+            paragraph_y_offset: self.paragraph_y_offset,
+            authoritative_shaping: self.authoritative_shaping,
+        }
+    }
+}
+
+/// Borrowed measurement request, field-for-field equivalent to
+/// [`MeasureInput`]. The JSON boundary borrows an owned [`MeasureInput`] via
+/// [`MeasureInput::as_request`]; hosts with typed blocks (docx-layout)
+/// construct it directly so nothing is serialized or cloned on the way in.
+///
+/// `font_chains` is a borrowed table rather than a `Cow` because the two
+/// boundaries own different map types (`HashMap` parsed from JSON,
+/// docx-layout's `BTreeMap` config) and both must stay zero-copy.
+#[derive(Debug, Clone, Copy)]
+pub struct MeasureRequest<'a> {
+    pub block: &'a BlockIn,
+    pub max_width: f32,
+    pub font_chains: FontChains<'a>,
+    pub defaults: &'a DefaultsIn,
+    pub compat: CompatIn,
+    pub floating_zones: Option<&'a [FloatZoneIn]>,
+    pub paragraph_y_offset: Option<f32>,
+    pub authoritative_shaping: bool,
+}
+
+/// Borrowed fallback-chain table for [`MeasureRequest`].
+#[derive(Debug, Clone, Copy)]
+pub enum FontChains<'a> {
+    Hash(&'a HashMap<String, Vec<u32>>),
+    BTree(&'a BTreeMap<String, Vec<u32>>),
+}
+
+impl FontChains<'_> {
+    fn get(&self, key: &str) -> Option<&[u32]> {
+        match self {
+            FontChains::Hash(map) => map.get(key).map(Vec::as_slice),
+            FontChains::BTree(map) => map.get(key).map(Vec::as_slice),
+        }
+    }
+}
+
+impl MeasureRequest<'_> {
     /// Look up the fallback chain for a `(family, bold, italic)` combination.
     pub(super) fn chain_for(
         &self,

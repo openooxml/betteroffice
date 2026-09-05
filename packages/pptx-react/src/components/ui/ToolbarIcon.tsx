@@ -2,6 +2,7 @@ import type { CSSProperties } from 'react';
 
 export type ToolbarIconName =
   | 'save'
+  | 'image'
   | 'undo'
   | 'redo'
   | 'newSlide'
@@ -15,6 +16,10 @@ export type ToolbarIconName =
   | 'italic'
   | 'underline'
   | 'textColor'
+  | 'alignLeft'
+  | 'alignCenter'
+  | 'alignRight'
+  | 'alignJustify'
   | 'more'
   | 'chevronDown'
   | 'remove'
@@ -42,6 +47,13 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
       style={{ display: 'inline-flex', flexShrink: 0, ...style }}
     >
       {name === 'save' && <path d="M12 3v11m0 0 4-4m-4 4-4-4M5 19h14" />}
+      {name === 'image' && (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <circle cx="8.5" cy="9.5" r="1.25" />
+          <path d="m6 17 4.5-4.5 3.25 3.25L16 13.5l2 2" />
+        </>
+      )}
       {name === 'undo' && <path d="m9 7-5 5 5 5M5 12h9a6 6 0 0 1 6 6" />}
       {name === 'redo' && <path d="m15 7 5 5-5 5m4-5h-9a6 6 0 0 0-6 6" />}
       {name === 'newSlide' && (
@@ -90,6 +102,10 @@ export function ToolbarIcon({ name, size = 20, style }: ToolbarIconProps) {
           <path d="M5 20h14" strokeWidth="3" />
         </>
       )}
+      {name === 'alignLeft' && <path d="M4 6h16M4 10h10M4 14h16M4 18h10" />}
+      {name === 'alignCenter' && <path d="M4 6h16M7 10h10M4 14h16M7 18h10" />}
+      {name === 'alignRight' && <path d="M4 6h16M10 10h10M4 14h16M10 18h10" />}
+      {name === 'alignJustify' && <path d="M4 6h16M4 10h16M4 14h16M4 18h16" />}
       {name === 'more' && (
         <>
           <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />

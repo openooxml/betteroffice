@@ -74,11 +74,19 @@ behind a feature, because the default build still targets
 cargo add betteroffice-docx --features raster
 ```
 
-PPTX has no rasterizer. `render_slide` returns the display list the browser
-editor paints — vector geometry, images, shaped text, caret data — alongside
-hit-test metadata, and it fails until at least one font face has been registered.
-Yrs edits reach that display list but are not projected back into
-PresentationML, so `save` re-zips the parts it retained rather than your edits.
+PPTX keeps its rasterizer behind a feature, for the same reason DOCX does:
+
+```bash
+cargo add betteroffice-pptx --features raster
+```
+
+`render_slide` returns the display list the browser editor paints — vector
+geometry, images, shaped text, caret data — alongside hit-test metadata, and it
+fails until at least one font face has been registered. With the feature on,
+`render_png` rasterizes a slide straight from the deck, resolving pictures out of
+the package, so only fonts need registering. Yrs edits reach that display list
+but are not projected back into PresentationML, so `save` re-zips the parts it
+retained rather than your edits.
 
 ## The facades
 
@@ -108,6 +116,7 @@ PresentationML, so `save` re-zips the parts it retained rather than your edits.
 | `betteroffice-pptx-parse` | Bounded PresentationML parsing and part-preserving package writes. |
 | `betteroffice-pptx-edit` | The Yrs deck model for PPTX. |
 | `betteroffice-pptx-render` | Slide layout and the PPTX display-list compiler. |
+| `betteroffice-pptx-raster` | The tiny-skia backend that paints a PPTX display list to PNG. Never part of the wasm build. |
 
 Every crate publishes to crates.io from one release train, so they always share a
 version.

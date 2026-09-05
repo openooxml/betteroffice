@@ -10,7 +10,7 @@ use ooxml_drawingml::{
 
 use crate::PptxError;
 use crate::drawing::parse_run_properties;
-use crate::model::{Bullet, PptxPackage, RunProperties, SlideReference};
+use crate::model::{Bullet, PptxPackage, RunProperties, ShapeElements, SlideReference};
 use crate::xml::{ParseBudget, ParseLimits, XmlElement, XmlNode, parse_xml, serialize_xml};
 
 const DRAWINGML_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -165,7 +165,7 @@ pub fn write_pptx_with_edits(
                 .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
             let mut root = parse_xml(bytes, part_path, &mut budget)?;
             let theme = slide_theme(package, part_path);
-            patch_slide(&mut root, shapes, theme, part_path)?;
+            patch_slide(&mut root, shapes, theme, part_path, package.shape_elements)?;
             replacements.insert(part_path.clone(), serialize_xml(&root));
         }
     }
@@ -679,15 +679,13 @@ impl Prefixes {
 
 // --- slide patching ---------------------------------------------------------
 
-fn is_shape_element(local: &str) -> bool {
-    matches!(local, "sp" | "pic" | "graphicFrame" | "grpSp")
-}
-
+/// Resolves source ordinals with the original parser filter.
 fn patch_slide(
     root: &mut XmlElement,
     shapes: &[ShapeWrite],
     theme: Option<&Theme>,
     part: &str,
+    elements: ShapeElements,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
     let mut next_shape_id = max_shape_id(root) + 1;
@@ -695,7 +693,15 @@ fn patch_slide(
         .child_mut("cSld")
         .and_then(|common| common.child_mut("spTree"))
         .ok_or_else(|| write_error(part, "slide has no shape tree"))?;
-    patch_shape_children(tree, shapes, &mut next_shape_id, theme, &prefixes, part)
+    patch_shape_children(
+        tree,
+        shapes,
+        &mut next_shape_id,
+        theme,
+        &prefixes,
+        part,
+        elements,
+    )
 }
 
 /// The theme a slide's colours resolve against, via its layout's master.
@@ -757,6 +763,7 @@ fn patch_shape_children(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
+    elements: ShapeElements,
 ) -> Result<(), PptxError> {
     let mut slots: Vec<Option<XmlNode>> = std::mem::take(&mut parent.children)
         .into_iter()
@@ -766,7 +773,7 @@ fn patch_shape_children(
         .iter()
         .enumerate()
         .filter_map(|(position, slot)| match slot {
-            Some(XmlNode::Element(element)) if is_shape_element(element.local_name()) => {
+            Some(XmlNode::Element(element)) if elements.contains(element.local_name()) => {
                 Some(position)
             }
             _ => None,
@@ -785,7 +792,7 @@ fn patch_shape_children(
         .first()
         .copied()
         .unwrap_or_else(|| first_ext_list(&slots));
-    emit_sibling_slots(&mut slots, &mut children, prologue_end);
+    emit_sibling_slots(&mut slots, &mut children, prologue_end, elements);
     let last_kept = writes
         .iter()
         .rposition(|write| !matches!(write, ShapeWrite::Add(_)));
@@ -795,7 +802,7 @@ fn patch_shape_children(
                 let position = *shape_slots.get(*source_index).ok_or_else(|| {
                     write_error(part, format!("shape index {source_index} is not available"))
                 })?;
-                emit_sibling_slots(&mut slots, &mut children, position);
+                emit_sibling_slots(&mut slots, &mut children, position, elements);
                 let mut element = match slots[position].take() {
                     Some(XmlNode::Element(element)) => element,
                     _ => {
@@ -806,7 +813,15 @@ fn patch_shape_children(
                     }
                 };
                 if let ShapeWrite::Patch { patch, .. } = write {
-                    patch_shape(&mut element, patch, next_shape_id, theme, prefixes, part)?;
+                    patch_shape(
+                        &mut element,
+                        patch,
+                        next_shape_id,
+                        theme,
+                        prefixes,
+                        part,
+                        elements,
+                    )?;
                 }
                 children.push(XmlNode::Element(element));
             }
@@ -815,7 +830,7 @@ fn patch_shape_children(
                 // except a final extLst.
                 if last_kept.is_none_or(|kept| index > kept) {
                     let flush_end = first_ext_list(&slots);
-                    emit_sibling_slots(&mut slots, &mut children, flush_end);
+                    emit_sibling_slots(&mut slots, &mut children, flush_end, elements);
                 }
                 children.push(XmlNode::Element(shape_element(
                     add,
@@ -827,7 +842,7 @@ fn patch_shape_children(
         }
     }
     for slot in slots.into_iter().flatten() {
-        if !matches!(&slot, XmlNode::Element(element) if is_shape_element(element.local_name())) {
+        if !matches!(&slot, XmlNode::Element(element) if elements.contains(element.local_name())) {
             children.push(slot);
         }
     }
@@ -836,11 +851,16 @@ fn patch_shape_children(
 }
 
 /// Emits the not-yet-written non-shape nodes that precede `position`.
-fn emit_sibling_slots(slots: &mut [Option<XmlNode>], children: &mut Vec<XmlNode>, position: usize) {
+fn emit_sibling_slots(
+    slots: &mut [Option<XmlNode>],
+    children: &mut Vec<XmlNode>,
+    position: usize,
+    elements: ShapeElements,
+) {
     for slot in slots.iter_mut().take(position) {
         let is_other = !matches!(
             slot,
-            Some(XmlNode::Element(element)) if is_shape_element(element.local_name())
+            Some(XmlNode::Element(element)) if elements.contains(element.local_name())
         );
         if is_other && let Some(node) = slot.take() {
             children.push(node);
@@ -855,6 +875,7 @@ fn patch_shape(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
+    elements: ShapeElements,
 ) -> Result<(), PptxError> {
     if patch.offset.is_some() || patch.extent.is_some() {
         patch_transform(element, patch, prefixes, part)?;
@@ -882,6 +903,7 @@ fn patch_shape(
             theme,
             prefixes,
             part,
+            elements,
         )?;
     }
     Ok(())
@@ -1848,4 +1870,33 @@ fn slide_relationships_xml(part_path: &str, layout_part_path: &str) -> Vec<u8> {
                 .with_attribute("Target", relative_target(part_path, layout_part_path)),
         );
     serialize_xml(&root)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::ShapeElements;
+
+    #[test]
+    fn the_writer_recognises_exactly_what_the_parser_reads() {
+        for local in ["sp", "cxnSp", "pic", "graphicFrame", "grpSp"] {
+            assert!(
+                ShapeElements::WithConnectors.contains(local),
+                "{local} is parsed as a shape but not recognised here"
+            );
+        }
+        for local in ["txBody", "nvGrpSpPr", "extLst"] {
+            assert!(
+                !ShapeElements::WithConnectors.contains(local),
+                "{local} is not a shape element"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pre_connector_set_leaves_out_only_connectors() {
+        assert!(!ShapeElements::WithoutConnectors.contains("cxnSp"));
+        for local in ["sp", "pic", "graphicFrame", "grpSp"] {
+            assert!(ShapeElements::WithoutConnectors.contains(local));
+        }
+    }
 }

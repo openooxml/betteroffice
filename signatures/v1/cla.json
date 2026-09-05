@@ -11,6 +11,18 @@
       "id": 8360823,
       "signed_at": "2026-08-15T06:19:53Z",
       "pull_request_no": 191
+    },
+    {
+      "name": "PSchmiedl",
+      "id": 187971636,
+      "signed_at": "2026-08-29T22:36:45Z",
+      "pull_request_no": 249
+    },
+    {
+      "name": "dsaad68",
+      "id": 6844325,
+      "signed_at": "2026-09-05T08:05:19Z",
+      "pull_request_no": 275
     }
   ]
 }

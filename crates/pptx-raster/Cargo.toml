@@ -1,0 +1,33 @@
+[package]
+name = "betteroffice-pptx-raster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Server-side raster backend for PPTX slide display lists. Never part of the wasm build."
+readme = "README.md"
+keywords = ["pptx", "powerpoint", "ooxml", "render", "raster"]
+categories = ["rendering", "multimedia::images"]
+
+[lib]
+name = "pptx_raster"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = [
+  "bmp",
+  "gif",
+  "jpeg",
+  "png",
+  "tiff",
+  "webp",
+] }
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true
+png = "0.18"
+pptx-render.workspace = true
+tiny-skia = "0.12"
+
+[dev-dependencies]
+png = "0.18"

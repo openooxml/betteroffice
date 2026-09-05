@@ -17,7 +17,10 @@ use wasm_bindgen::prelude::*;
 
 mod sanitize;
 
-pub use sanitize::{sanitize_package, sanitize_package_for_format};
+pub use sanitize::{
+    DocumentKind, DocumentKindError, detect_package_kind, sanitize_package,
+    sanitize_package_for_format,
+};
 
 /// A well-formed document stays far under this; a decompression bomb blows past it.
 const MAX_TOTAL_UNCOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;

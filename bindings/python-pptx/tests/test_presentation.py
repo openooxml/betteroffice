@@ -115,6 +115,24 @@ def test_resize_shape(deck):
     assert (deck[0].shapes[0].width, deck[0].shapes[0].height) == (4000, 5000)
 
 
+def test_set_shape_rect_is_one_undo_step(deck):
+    shape = deck[0].shapes[0]
+    before = (shape.x, shape.y, shape.width, shape.height)
+
+    edit = deck.set_shape_rect(0, shape.id, 111, 222, 4000, 5000)
+
+    assert (edit.after.x, edit.after.y, edit.after.width, edit.after.height) == (
+        111,
+        222,
+        4000,
+        5000,
+    )
+    assert deck.undo() is True
+    restored = deck[0].shapes[0]
+    assert (restored.x, restored.y, restored.width, restored.height) == before
+    assert deck.can_undo is False
+
+
 def test_add_text_box_creates_an_editable_story(deck):
     before = len(deck[0].shapes)
     edit = deck.add_text_box(
@@ -434,6 +452,207 @@ def test_path_io_releases_the_gil(sample_path, tmp_path, mode):
     except subprocess.TimeoutExpired:
         pytest.fail(f"{mode} deadlocked: the GIL was held across the file IO")
     assert probe.returncode == 0, probe.stderr
+
+
+GIL_PROGRESS_PROBE = """
+import ctypes
+import json
+import queue
+import sys
+import threading
+import time
+
+import betteroffice_pptx as bo
+
+source, heavy_font_path, control = sys.argv[1:4]
+
+data = open(source, "rb").read()
+heavy_font = open(heavy_font_path, "rb").read()
+
+template = bo.Presentation.open(data)
+for _ in range(200):
+    template.insert_slide(1)
+for column in range(64):
+    template.add_text_box(
+        0, x=(column % 20) * 609_600, y=(column // 20) * 457_200,
+        width=1_828_800, height=457_200,
+        text="The quick brown fox jumps over the lazy dog. " * 8,
+    )
+saved = template.save()
+del template
+
+switch_interval = sys.getswitchinterval()
+# Long on purpose. Releasing the GIL hands it over whatever this is set to, but
+# plain bytecode no longer does, so the probe cannot slip into the handshake
+# below and read an op that never let go as if it had.
+sys.setswitchinterval(0.1)
+jobs = queue.SimpleQueue()
+
+
+def laborer():
+    while True:
+        op, started, finished, outcome = jobs.get()
+        if op is None:
+            return
+        # Banked before the handshake, so subtracting the handoff below can
+        # never eat into the probe's own reading.
+        outcome["clock"] = time.perf_counter()
+        started.set()
+        try:
+            op()
+        except BaseException as error:
+            outcome["error"] = error
+        finally:
+            outcome["elapsed"] = time.perf_counter() - outcome["clock"]
+            finished.set()
+
+
+worker = threading.Thread(target=laborer, daemon=True)
+worker.start()
+
+spin_steps = 100_000
+
+
+def spin():
+    for _ in range(spin_steps):
+        pass
+
+
+def timed_spin():
+    clock = time.perf_counter()
+    spin()
+    return time.perf_counter() - clock
+
+
+def once(op):
+    started = threading.Event()
+    finished = threading.Event()
+    outcome = {}
+    # The clock starts before the worker can claim the job: an op that keeps the
+    # GIL strands this thread inside `started.wait()` for its whole run, and that
+    # wait has to land inside the reading.
+    clock = time.perf_counter()
+    jobs.put((op, started, finished, outcome))
+    started.wait()
+    spin()
+    blocked = time.perf_counter() - clock
+    finished.wait()
+    if "error" in outcome:
+        raise outcome["error"]
+    handoff = outcome["clock"] - clock
+    return max(blocked - handoff, 0.0), outcome["elapsed"]
+
+
+def measure(op, samples=4, best=min):
+    \"\"\"How much of the op's own runtime this thread needed for one fixed slice
+    of pure Python: near zero once the op lets go of the GIL, about one while it
+    holds on. Reading it as a share is what survives a loaded machine, where a
+    raw progress count collapses because this thread is slower too. Whether this
+    thread can get through at all is the question, so an op that should release
+    takes its best sample and one that should not takes its worst.\"\"\"
+    trials = [once(op) for _ in range(samples)]
+    blocked, run = best(trials, key=lambda trial: trial[0] / trial[1])
+    return blocked / run, run
+
+
+holder = {}
+once(lambda: holder.update(
+    deck=bo.Presentation.open(saved),
+    peer=bo.Presentation.open_collaborative(saved),
+    update=bo.Presentation.open_collaborative(saved).state_as_update(),
+))
+
+if control == "usleep":
+    sleep_fn = ctypes.PyDLL(None).usleep
+    held_call = lambda: sleep_fn(200_000)
+else:
+    sleep_fn = ctypes.PyDLL("kernel32").Sleep
+    held_call = lambda: sleep_fn(200)
+
+# One binding call each. Two calls in a window would let a build that never
+# releases the GIL hand the probe the gap between them and read as if it had.
+ops = {
+    "open": lambda: bo.Presentation.open(saved),
+    "register_font": lambda: holder["deck"].register_font("Probe", heavy_font),
+    "render_slide": lambda: holder["deck"].render_slide(0),
+    "render_png": lambda: holder["deck"].render_png(0),
+    "save": lambda: holder["deck"].save(),
+    "apply_update": lambda: holder["peer"].apply_update(holder["update"]),
+}
+
+shares = {}
+try:
+    # Size the probe's slice against the shortest op there is to read, so the
+    # share stays small on every one of them however fast the box is. The floor
+    # keeps the slice longer than the worker's own run-up into the binding,
+    # which a shorter one can slip through and read as released.
+    shortest = min(once(op)[1] for _ in range(2) for op in ops.values())
+    reference = min(timed_spin() for _ in range(5))
+    spin_steps = max(1, round(spin_steps * max(shortest / 30, 2e-5) / reference))
+    solo = min(timed_spin() for _ in range(5))
+
+    for name, op in ops.items():
+        shares[name] = measure(op)
+    shares["held_sleep_control"] = measure(held_call, best=max)
+finally:
+    once(lambda: holder.clear())
+    jobs.put((None, None, None, None))
+    worker.join(timeout=5)
+    sys.setswitchinterval(switch_interval)
+
+print(json.dumps({name: round(share, 4) for name, (share, _) in shares.items()}))
+
+for name in ops:
+    share, run = shares[name]
+    assert run > 4 * solo, (
+        f"{name} ran {run * 1e3:.1f} ms, too short to read against a "
+        f"{solo * 1e3:.3f} ms slice")
+    assert share < 0.4, (
+        f"{name} seems to hold the GIL: the probe thread needed "
+        f"{share:.1%} of its runtime to finish")
+control_share, control_run = shares["held_sleep_control"]
+assert control_run > 4 * solo, f"control ran only {control_run * 1e3:.1f} ms"
+assert control_share > 0.75, (
+    f"the GIL-holding sleep let the probe thread through at {control_share:.1%}, "
+    "so the control proves nothing")
+"""
+
+
+def held_sleep_control():
+    """Name of a platform sleep that blocks 200ms without releasing the GIL, or None."""
+    try:
+        import ctypes
+    except ImportError:
+        return None
+    try:
+        ctypes.PyDLL(None).usleep
+    except (OSError, AttributeError):
+        try:
+            ctypes.PyDLL("kernel32").Sleep
+        except (OSError, AttributeError):
+            return None
+        return "Sleep"
+    return "usleep"
+
+
+def test_heavy_ops_release_the_gil(sample_path, heavy_font_path):
+    """Each op leaves a probe thread free to run; a GIL-holding sleep does not."""
+    control = held_sleep_control()
+    if control is None:
+        pytest.skip("no GIL-holding sleep primitive on this platform")
+
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", GIL_PROGRESS_PROBE,
+             str(sample_path), str(heavy_font_path), control],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("deadlocked: the GIL was held across a heavy op")
+    assert probe.returncode == 0, probe.stderr
+    print(probe.stdout.strip())
 
 
 def test_missing_file_raises_file_not_found(tmp_path):

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
 use crate::types::{
@@ -15,15 +15,13 @@ const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 const ANCHOR_PROXIMITY: usize = 4;
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FloatingZone {
-    left_margin: f64,
-    right_margin: f64,
-    top_y: f64,
-    bottom_y: f64,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    full_width_block: bool,
+#[derive(Clone, Debug)]
+pub(crate) struct FloatingZone {
+    pub(crate) left_margin: f64,
+    pub(crate) right_margin: f64,
+    pub(crate) top_y: f64,
+    pub(crate) bottom_y: f64,
+    pub(crate) full_width_block: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -463,34 +461,16 @@ fn measure_paragraph_with_context(
     if !content_width.is_finite() || content_width <= 0.0 {
         return Ok(synthetic_paragraph_extent(paragraph, content_width));
     }
-    let mut envelope = json!({
-        "block": LayoutBlock::Paragraph(paragraph.clone()),
-        "maxWidth": content_width,
-        "fontChains": config.font_chains,
-        "authoritativeShaping": config.authoritative_shaping,
-    });
-    let fields = envelope
-        .as_object_mut()
-        .expect("measurement envelope object");
-    if !config.defaults.is_null() {
-        fields.insert("defaults".to_owned(), config.defaults.clone());
+    match crate::typed_measure::measure_paragraph(
+        paragraph,
+        content_width,
+        config,
+        floating_zones,
+        cumulative_y,
+    ) {
+        Some(extent) => Ok(extent),
+        None => Ok(synthetic_paragraph_extent(paragraph, content_width)),
     }
-    if !config.compat.is_null() {
-        fields.insert("compat".to_owned(), config.compat.clone());
-    }
-    if let Some(zones) = floating_zones {
-        fields.insert(
-            "floatingZones".to_owned(),
-            serde_json::to_value(zones).expect("floating zones serialize"),
-        );
-        fields.insert("paragraphYOffset".to_owned(), json!(cumulative_y));
-    }
-    let Ok(extent) = crate::measure_paragraph_json_resident(&envelope.to_string()) else {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
-    };
-    serde_json::from_str(&extent)
-        .map_err(|error| format!("parse paragraph extent: {error}"))
-        .or_else(|_| Ok(synthetic_paragraph_extent(paragraph, content_width)))
 }
 
 const SYNTHETIC_ADVANCE_EM: f64 = 1.0;
@@ -1264,6 +1244,7 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn measures_non_text_blocks_without_host_callbacks() {

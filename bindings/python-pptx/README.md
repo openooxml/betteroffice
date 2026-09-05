@@ -124,8 +124,19 @@ every slide — in that one typeface, at its metrics. Register the real faces wh
 line breaking has to match what PowerPoint would do.
 
 `render_slide` returns the display list — the same drawing contract the browser
-editor paints, as JSON. There is no PPTX rasterizer yet, so this is a scene
-description rather than pixels; feed it to your own canvas or renderer.
+editor paints, as JSON — for hosts that paint it themselves. `render_png`
+rasterizes a slide instead, resolving pictures out of the package so only fonts
+need registering:
+
+```python
+png = deck.render_png(0, scale=2.0)
+print(png.width, png.height, png.skipped_images)   # 2560 1440 0
+png.write("slide-0.png")
+```
+
+`background` picks what fills the pixels the slide leaves uncovered: `"slide"`
+(the default, opaque white under the slide's own background), `"transparent"`,
+or a `#rrggbb` color.
 
 ## Collaboration
 
@@ -288,9 +299,9 @@ its own; the deck must also become garbage on its owning thread. Open, use, and
 drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
-Engine calls hold the GIL for their duration, unlike `betteroffice-xlsx`. Only
-the file I/O releases it: `open_path`'s read, and the writes in `save_path`,
-`Media.write` and `DisplayList.write`.
+The heavy operations release the GIL while they run — `open`, `open_path`,
+`render_slide`, `save`, `save_path`, `register_font`, and `apply_update` — as do
+the file writes in `Media.write` and `DisplayList.write`.
 
 ## Status
 

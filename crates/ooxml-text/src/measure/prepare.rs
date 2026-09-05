@@ -37,8 +37,13 @@ use crate::line_break::break_opportunities;
 use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_with_properties};
 use crate::word_metrics::{kern_enabled, kern_features};
 
-use super::input::{MeasureInput, RunIn, validate_pt_size};
+use super::input::{MeasureRequest, RunIn, validate_pt_size};
 use super::{MAX_RUN_TEXT_BYTES, MeasureError, pt_to_px};
+
+/// Longest fallback chain a run keeps resolved per slot. Chains past it are
+/// rebuilt per character instead, so keeping them can never cost more memory
+/// than resolving them did. Not a limit on input: nothing is refused.
+const MAX_KEPT_CHAIN_IDS: usize = 64;
 
 /// One indivisible shaped cluster of a run. A cluster may cover several
 /// source characters (ligature or combining sequence), so every downstream
@@ -190,7 +195,7 @@ fn shape_direction(level: u8) -> ShapeDirection {
 /// (a Word paragraph is LTR unless `bidi` is set — never first-strong).
 /// The base only affects neutral characters' levels, i.e. segmentation,
 /// never advance sums.
-fn base_direction(run_rtl: bool, input: &MeasureInput) -> crate::bidi::BaseDirection {
+fn base_direction(run_rtl: bool, input: &MeasureRequest<'_>) -> crate::bidi::BaseDirection {
     if run_rtl || input.block.attrs.as_ref().is_some_and(|a| a.bidi) {
         crate::bidi::BaseDirection::Rtl
     } else {
@@ -216,7 +221,7 @@ pub(super) fn validate_chain(store: &FontStore, chain: &[FontId]) -> Result<(), 
 /// An unrecognized `kind` is refused.
 pub(super) fn prepare_runs(
     store: &FontStore,
-    input: &MeasureInput,
+    input: &MeasureRequest<'_>,
 ) -> Result<Vec<PreparedRun>, MeasureError> {
     let bidi_levels = paragraph_run_levels(input);
     let mut prepared = Vec::with_capacity(input.block.runs.len());
@@ -262,7 +267,7 @@ pub(super) fn prepare_runs(
 /// concatenated text so neutrals see their real context. Non-text runs stand
 /// in as one object-replacement character each. A run carrying `w:rtl`
 /// re-resolves on its own text under an RTL base instead.
-fn paragraph_run_levels(input: &MeasureInput) -> Vec<Vec<u8>> {
+fn paragraph_run_levels(input: &MeasureRequest<'_>) -> Vec<Vec<u8>> {
     let mut combined = String::new();
     let mut spans = Vec::with_capacity(input.block.runs.len());
     let mut char_cursor = 0usize;
@@ -307,7 +312,7 @@ fn paragraph_run_levels(input: &MeasureInput) -> Vec<Vec<u8>> {
 /// Resolves a tab run's font for line metrics.
 fn prepare_tab_run(
     store: &FontStore,
-    input: &MeasureInput,
+    input: &MeasureRequest<'_>,
     run: &RunIn,
     bidi_level: u8,
 ) -> Result<PreparedTab, MeasureError> {
@@ -422,7 +427,7 @@ fn prepare_image_run(run: &RunIn, bidi_level: u8) -> Result<PreparedRun, Measure
 /// to fields; super/subscript scaling does.
 fn prepare_field_run(
     store: &FontStore,
-    input: &MeasureInput,
+    input: &MeasureRequest<'_>,
     run: &RunIn,
     bidi_level: u8,
 ) -> Result<PreparedField, MeasureError> {
@@ -534,7 +539,7 @@ pub(super) fn measure_plain_text(
 /// and record the UAX-14 break opportunities.
 fn prepare_text_run(
     store: &FontStore,
-    input: &MeasureInput,
+    input: &MeasureRequest<'_>,
     run: &RunIn,
     resolved_levels: &[u8],
 ) -> Result<PreparedText, MeasureError> {
@@ -620,6 +625,18 @@ fn prepare_text_run(
         Cs,
     }
 
+    impl FontSlot {
+        /// Index into a run's per-slot resolved chains.
+        fn index(self) -> usize {
+            match self {
+                FontSlot::Ascii => 0,
+                FontSlot::HAnsi => 1,
+                FontSlot::EastAsia => 2,
+                FontSlot::Cs => 3,
+            }
+        }
+    }
+
     fn is_complex(ch: char) -> bool {
         matches!(ch as u32,
             0x0590..=0x08ff | 0x0900..=0x0dff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff)
@@ -694,6 +711,13 @@ fn prepare_text_run(
     let mut plan: Vec<PlanChar> = Vec::new();
     let mut utf16_offset: u32 = 0;
     let mut previous_slot = FontSlot::HAnsi;
+    // Family and style are fixed per slot within a run, so each of the four
+    // resolves at most once instead of once per character. Keeping a chain
+    // trades memory for the next character's lookup, so a chain too large for
+    // that trade is rebuilt per character into `oversized` instead, one at a
+    // time — never more resident than resolving it per character already was.
+    let mut slot_chains: [Option<Vec<FontId>>; 4] = [None, None, None, None];
+    let mut oversized: Vec<FontId> = Vec::new();
     for (char_index, ch) in text.chars().enumerate() {
         let slot = if run.complex_script || is_complex(ch) {
             FontSlot::Cs
@@ -741,11 +765,23 @@ fn prepare_text_run(
             default_size_pt
         };
         let (font_size_pt, baseline_shift_px) = script_metrics(base_size_pt, run);
-        let family = family_for_slot(run, slot, &input.defaults.font_family);
-        let chain = input.chain_for(family, bold, italic)?;
-        validate_chain(store, &chain)?;
+        let index = slot.index();
+        if slot_chains[index].is_none() {
+            let family = family_for_slot(run, slot, &input.defaults.font_family);
+            // Release the previous rebuilt chain before allocating the next, so
+            // a run never holds two of them at once.
+            oversized = Vec::new();
+            let resolved = input.chain_for(family, bold, italic)?;
+            validate_chain(store, &resolved)?;
+            if resolved.len() <= MAX_KEPT_CHAIN_IDS {
+                slot_chains[index] = Some(resolved);
+            } else {
+                oversized = resolved;
+            }
+        }
+        let chain = slot_chains[index].as_deref().unwrap_or(&oversized);
         let first = shaped[0];
-        let Some(mut font) = resolve_with_fallback(store, &chain, first) else {
+        let Some(mut font) = resolve_with_fallback(store, chain, first) else {
             return Err(MeasureError::Unsupported("empty font chain".to_string()));
         };
         let mut features = run.kerning_min_pt.map_or_else(Vec::new, |threshold| {
@@ -758,7 +794,7 @@ fn prepare_text_run(
             && run.small_caps
             && !run.all_caps
             && ch.is_lowercase()
-            && let Some(original_font) = resolve_with_fallback(store, &chain, ch)
+            && let Some(original_font) = resolve_with_fallback(store, chain, ch)
             && supports_smcp(
                 store,
                 original_font,
@@ -952,6 +988,7 @@ fn prepare_text_run(
 
 #[cfg(test)]
 mod tests {
+    use super::super::input::MeasureInput;
     use super::*;
     use crate::font_store::FontStore;
 
@@ -977,7 +1014,7 @@ mod tests {
         // 'é' is 2 UTF-8 bytes but 1 UTF-16 unit: byte offsets [0, 2, 3],
         // UTF-16 offsets must be [0, 1, 2].
         let input = input_with(serde_json::json!([{ "kind": "text", "text": "éab" }]));
-        let prepared = prepare_runs(&store, &input).unwrap();
+        let prepared = prepare_runs(&store, &input.as_request()).unwrap();
         let PreparedRun::Text(t) = &prepared[0] else {
             panic!("expected text run");
         };
@@ -996,7 +1033,8 @@ mod tests {
         let mut store = FontStore::new();
         store.register(FIXTURE.to_vec()).unwrap();
         let input = input_with(serde_json::json!([{ "kind": "text", "text": "a😀b" }]));
-        let prepared = prepare_runs(&store, &input).expect("uncovered char no longer bails");
+        let prepared =
+            prepare_runs(&store, &input.as_request()).expect("uncovered char no longer bails");
         assert!(!prepared.is_empty());
     }
 
@@ -1010,7 +1048,7 @@ mod tests {
             "letterSpacing": 2.0
         }]));
         input.authoritative_shaping = true;
-        let prepared = prepare_runs(&store, &input).unwrap();
+        let prepared = prepare_runs(&store, &input.as_request()).unwrap();
         let PreparedRun::Text(text) = &prepared[0] else {
             panic!("expected text run");
         };

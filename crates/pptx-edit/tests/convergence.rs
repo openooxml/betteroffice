@@ -251,6 +251,37 @@ fn cross_paragraph_format_is_one_undoable_operation() {
 }
 
 #[test]
+fn cross_paragraph_alignment_is_one_undoable_operation() {
+    let session = DeckSession::open(FIXTURE, 407).unwrap();
+    let story_id = first_multi_paragraph_story(&session);
+    let before = session.story(&story_id).unwrap();
+
+    session
+        .set_paragraph_alignment(
+            &EditCtx::local("local"),
+            &story_id,
+            0,
+            before.length,
+            Some("r"),
+        )
+        .unwrap();
+
+    let aligned = session.story(&story_id).unwrap();
+    assert!(aligned.paragraphs.len() >= 2);
+    assert!(
+        aligned
+            .paragraphs
+            .iter()
+            .all(|paragraph| paragraph.alignment.as_deref() == Some("r"))
+    );
+
+    session.add_undo_barrier();
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(!session.can_undo());
+}
+
+#[test]
 fn cross_paragraph_format_rejects_out_of_bounds_ranges() {
     let session = DeckSession::open(FIXTURE, 406).unwrap();
     let story_id = first_multi_paragraph_story(&session);

@@ -3,6 +3,7 @@
   "toolbar": {
     "label": "Presentation formatting toolbar",
     "save": "Save",
+    "exportPng": "Export PNG",
     "historyLabel": "History",
     "undo": "Undo",
     "redo": "Redo",
@@ -24,7 +25,14 @@
       "tools": "Tools",
       "font": "Font",
       "text": "Text formatting",
-      "shape": "Shape formatting"
+      "shape": "Shape formatting",
+      "alignment": "Alignment"
+    },
+    "align": {
+      "left": "Align Left",
+      "center": "Center",
+      "right": "Align Right",
+      "justify": "Justify"
     },
     "newSlide": "New slide",
     "newSlideWithLayout": "New slide with layout",

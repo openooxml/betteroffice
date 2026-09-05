@@ -1,11 +1,12 @@
 //! rewriting stored formulas on row/column insert/delete: refs shift, ranges
 //! clip, wholly deleted refs collapse to `#REF!`. runs before cells shift.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use xlsx_calc::lexer::MAX_FORMULA_BYTES;
-use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
+use xlsx_calc::{ColumnRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
@@ -15,6 +16,9 @@ use xlsx_model::{
 use crate::apply::OpError;
 use crate::apply::remap_ref;
 use crate::op::{CellState, Op};
+
+/// distinct parsed formulas kept in the memo before oldest-entry eviction.
+const PARSE_MEMO_CAP: usize = 1024;
 
 /// the outcome of remapping one reference or range under a structural op.
 enum Remapped<T> {
@@ -62,6 +66,8 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
 
     let mut restores: Vec<Op> = Vec::new();
     let mut edits: Vec<(SheetId, CellRef, String)> = Vec::new();
+    let mut parsed: HashMap<&str, Rc<Expr>> = HashMap::new();
+    let mut parsed_order: VecDeque<&str> = VecDeque::new();
     for (i, sheet) in wb.sheets.iter().enumerate() {
         let owner = SheetId(i as u32);
         let matches = |ref_sheet: &Option<String>| resolves_to_target(ref_sheet, owner, &index);
@@ -72,8 +78,22 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
             if has_unresolvable_binding(src, &index) {
                 return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
             }
-            let expr = parse_formula(src)
-                .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?;
+            let expr = if let Some(expr) = parsed.get(src.as_str()) {
+                Rc::clone(expr)
+            } else {
+                let expr = Rc::new(
+                    parse_formula(src)
+                        .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?,
+                );
+                if parsed.len() >= PARSE_MEMO_CAP
+                    && let Some(oldest) = parsed_order.pop_front()
+                {
+                    parsed.remove(oldest);
+                }
+                parsed.insert(src.as_str(), Rc::clone(&expr));
+                parsed_order.push_back(src.as_str());
+                expr
+            };
             let mut changed = false;
             let new_expr = transform(&expr, op, &matches, &mut changed);
             if changed {
@@ -733,7 +753,11 @@ fn rewrite_defined_name(
             }
             continue;
         }
-        let Ok(expr) = parse_formula(component) else {
+        // Whole-column names still need the token rewriter's ambiguity checks.
+        let Some(expr) = parse_formula(component)
+            .ok()
+            .filter(|expr| !contains_column_range(expr))
+        else {
             match rewrite_reference_tokens(component, op, matches_target, global, names) {
                 DefinedNameRewrite::Unchanged => {
                     rewritten.push(component.to_owned());
@@ -1234,12 +1258,24 @@ fn endpoints_share_a_sheet(first: &Endpoint<'_>, second: &Endpoint<'_>) -> bool 
 
 fn contains_unqualified_reference(expr: &Expr) -> bool {
     match expr {
-        Expr::Ref { sheet: None, .. } | Expr::Range { sheet: None, .. } => true,
+        Expr::Ref { sheet: None, .. }
+        | Expr::Range { sheet: None, .. }
+        | Expr::ColumnRange { sheet: None, .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_unqualified_reference(expr),
         Expr::Binary { lhs, rhs, .. } => {
             contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
         }
         Expr::FuncCall { args, .. } => args.iter().any(contains_unqualified_reference),
+        _ => false,
+    }
+}
+
+fn contains_column_range(expr: &Expr) -> bool {
+    match expr {
+        Expr::ColumnRange { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_column_range(expr),
+        Expr::Binary { lhs, rhs, .. } => contains_column_range(lhs) || contains_column_range(rhs),
+        Expr::FuncCall { args, .. } => args.iter().any(contains_column_range),
         _ => false,
     }
 }
@@ -1330,8 +1366,7 @@ fn split_union(source: &str) -> Option<Vec<&str>> {
     Some(components)
 }
 
-/// A whole-row (`Sheet!$1:$5`) or whole-column (`Sheet!$A:$C`) reference. Print
-/// titles are written this way and the formula lexer has no token for it.
+/// A whole-row or whole-column reference, including print titles.
 struct AxisRange<'a> {
     qualifier: &'a str,
     sheet: Option<String>,
@@ -1984,6 +2019,22 @@ fn transform(
                 Expr::Error(ErrorValue::Ref)
             }
         },
+        Expr::ColumnRange { sheet, range } if matches_target(sheet) => {
+            match remap_columns(*range, op) {
+                Remapped::Unchanged => expr.clone(),
+                Remapped::Moved(range) => {
+                    *changed = true;
+                    Expr::ColumnRange {
+                        sheet: sheet.clone(),
+                        range,
+                    }
+                }
+                Remapped::Deleted => {
+                    *changed = true;
+                    Expr::Error(ErrorValue::Ref)
+                }
+            }
+        }
         Expr::Unary { op: u, expr: e } => Expr::Unary {
             op: *u,
             expr: Box::new(transform(e, op, matches_target, changed)),
@@ -2002,6 +2053,27 @@ fn transform(
                 .collect(),
         },
         _ => expr.clone(),
+    }
+}
+
+fn remap_columns(range: ColumnRange, op: &Op) -> Remapped<ColumnRange> {
+    let axis = AxisRange {
+        qualifier: "",
+        sheet: None,
+        axis: Axis::Col,
+        start: range.start,
+        end: range.end,
+        start_absolute: range.abs_start,
+        end_absolute: range.abs_end,
+    };
+    match axis.shifted(op) {
+        Remapped::Unchanged => Remapped::Unchanged,
+        Remapped::Moved((start, end)) => Remapped::Moved(ColumnRange {
+            start,
+            end,
+            ..range
+        }),
+        Remapped::Deleted => Remapped::Deleted,
     }
 }
 
@@ -2143,6 +2215,84 @@ mod tests {
 
     fn formula(wb: &Workbook, sheet: SheetId, at: &str) -> Option<String> {
         wb.formula(sheet, r(at)).map(str::to_string)
+    }
+
+    #[test]
+    fn whole_column_formulas_survive_row_edits_and_follow_column_edits() {
+        for (op, expected) in [
+            (
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+                "$S:V",
+            ),
+            (
+                Op::DeleteRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 100,
+                },
+                "$S:V",
+            ),
+            (
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+                "$T:W",
+            ),
+            (
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 19,
+                    count: 1,
+                },
+                "$S:W",
+            ),
+            (
+                Op::DeleteCols {
+                    sheet: SheetId(0),
+                    at: 19,
+                    count: 1,
+                },
+                "$S:U",
+            ),
+            (
+                Op::DeleteCols {
+                    sheet: SheetId(0),
+                    at: 18,
+                    count: 4,
+                },
+                "#REF!",
+            ),
+        ] {
+            let mut workbook = wb(&["Data", "Other"]);
+            set_formula(&mut workbook, SheetId(0), "A1", "VLOOKUP(2,$S:V,4,FALSE)");
+            set_formula(&mut workbook, SheetId(1), "A1", "VLOOKUP(2,$S:V,4,FALSE)");
+            set_formula(
+                &mut workbook,
+                SheetId(1),
+                "A2",
+                "VLOOKUP(2,Data!$S:V,4,FALSE)",
+            );
+            remap_formulas(&mut workbook, &op).unwrap();
+            assert_eq!(
+                formula(&workbook, SheetId(0), "A1").unwrap(),
+                format!("VLOOKUP(2,{expected},4,FALSE)")
+            );
+            assert_eq!(
+                formula(&workbook, SheetId(1), "A1").unwrap(),
+                "VLOOKUP(2,$S:V,4,FALSE)"
+            );
+            let qualifier = if expected == "#REF!" { "" } else { "Data!" };
+            assert_eq!(
+                formula(&workbook, SheetId(1), "A2").unwrap(),
+                format!("VLOOKUP(2,{qualifier}{expected},4,FALSE)")
+            );
+        }
     }
 
     fn charted(wb: &mut Workbook, sheet: SheetId, formulas: &[&str]) {
@@ -3452,5 +3602,121 @@ mod tests {
         assert_eq!(clip_interval(4, 6, 4, 3), None);
         assert_eq!(clip_interval(2, 9, 2, 4), Some((2, 5)));
         assert_eq!(clip_interval(0, 1, 5, 2), Some((0, 1)));
+    }
+
+    /// a filled-down column parses one text many times; every copy must come
+    /// out rewritten alike.
+    #[test]
+    fn identical_formulas_in_many_cells_all_rewrite_alike() {
+        let mut w = wb(&["Data", "Other"]);
+        for row in 1..=40 {
+            set_formula(&mut w, SheetId(0), &format!("C{row}"), "SUM($A$1:$A$10)+B5");
+            set_formula(
+                &mut w,
+                SheetId(1),
+                &format!("C{row}"),
+                "Data!$A$1:$A$10+Data!B5",
+            );
+        }
+        let op = Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 3,
+        };
+        let inv = remap_formulas(&mut w, &op).unwrap();
+        for row in 1..=40 {
+            assert_eq!(
+                formula(&w, SheetId(0), &format!("C{row}")).as_deref(),
+                Some("SUM($A$4:$A$13)+B8")
+            );
+            assert_eq!(
+                formula(&w, SheetId(1), &format!("C{row}")).as_deref(),
+                Some("Data!$A$4:$A$13+Data!B8")
+            );
+        }
+        assert_eq!(inv.len(), 80);
+        apply_inverse_removes(&mut w, &inv);
+        for row in 1..=40 {
+            assert_eq!(
+                formula(&w, SheetId(0), &format!("C{row}")).as_deref(),
+                Some("SUM($A$1:$A$10)+B5")
+            );
+            assert_eq!(
+                formula(&w, SheetId(1), &format!("C{row}")).as_deref(),
+                Some("Data!$A$1:$A$10+Data!B5")
+            );
+        }
+    }
+
+    fn apply_inverse_removes(w: &mut Workbook, inv: &[Op]) {
+        let restores = inv
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetCell { sheet, at, cell } => Some((*sheet, *at, cell.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (sheet, at, cell) in restores {
+            w.sheet_mut(sheet)
+                .expect("sheet exists during restore")
+                .set_cell(at, cell.into());
+        }
+    }
+
+    /// the parse cache is keyed on text alone; the rewrite must still resolve
+    /// against each owning sheet, so identical text can diverge per sheet.
+    #[test]
+    fn duplicated_formula_text_is_rewritten_per_owning_sheet() {
+        let mut w = wb(&["Data", "Other"]);
+        set_formula(&mut w, SheetId(0), "B1", "A5*2");
+        set_formula(&mut w, SheetId(0), "B9", "A5*2");
+        set_formula(&mut w, SheetId(1), "B1", "A5*2");
+        set_formula(&mut w, SheetId(1), "B9", "Data!A5*2");
+        remap_formulas(
+            &mut w,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 4,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(formula(&w, SheetId(0), "B1").as_deref(), Some("#REF!*2"));
+        assert_eq!(formula(&w, SheetId(0), "B9").as_deref(), Some("#REF!*2"));
+        assert_eq!(formula(&w, SheetId(1), "B1").as_deref(), Some("A5*2"));
+        assert_eq!(
+            formula(&w, SheetId(1), "B9").as_deref(),
+            Some("#REF!*2"),
+            "a deleted qualified ref collapses like an unqualified one"
+        );
+    }
+
+    /// more distinct formulas than the memo can hold: entries evicted before
+    /// their cell is reached must still rewrite exactly as if parsed fresh.
+    #[test]
+    fn distinct_formulas_beyond_memo_cap_all_rewrite_correctly() {
+        let count = PARSE_MEMO_CAP * 2 + 7;
+        let mut w = wb(&["Sheet1"]);
+        for row in 1..=count {
+            set_formula(
+                &mut w,
+                SheetId(0),
+                &format!("A{row}"),
+                &format!("B{row}+{row}"),
+            );
+        }
+        let op = Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 3,
+        };
+        let inv = remap_formulas(&mut w, &op).unwrap();
+        assert_eq!(inv.len(), count);
+        for row in 1..=count {
+            assert_eq!(
+                formula(&w, SheetId(0), &format!("A{row}")).as_deref(),
+                Some(format!("B{}+{row}", row + 3)).as_deref()
+            );
+        }
     }
 }

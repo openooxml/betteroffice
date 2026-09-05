@@ -3,6 +3,7 @@
   "toolbar": {
     "label": null,
     "save": "Kaydet",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -24,7 +25,14 @@
       "tools": null,
       "font": null,
       "text": null,
-      "shape": null
+      "shape": null,
+      "alignment": "Hizalama"
+    },
+    "align": {
+      "left": "Sola hizala",
+      "center": "Ortala",
+      "right": "Sağa hizala",
+      "justify": "İki yana yasla"
     },
     "newSlide": null,
     "newSlideWithLayout": null,

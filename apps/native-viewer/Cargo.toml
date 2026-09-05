@@ -34,7 +34,9 @@ pptx = [
 [dependencies]
 anyhow = "=1.0.104"
 base64 = { version = "=0.22.1", optional = true }
-betteroffice-pptx = { path = "../../crates/betteroffice-pptx", optional = true }
+betteroffice-pptx = { path = "../../crates/betteroffice-pptx", features = [
+    "raster",
+], optional = true }
 betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx", default-features = false, optional = true }
 docx-edit = { package = "betteroffice-docx-edit", path = "../../crates/docx-edit", optional = true }
 docx-layout = { package = "betteroffice-docx-layout", path = "../../crates/docx-layout", optional = true }

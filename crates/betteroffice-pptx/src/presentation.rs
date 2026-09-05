@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use pptx_edit::{
     CaretAnchor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt,
-    ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt,
-    StorySnapshot, TextReceipt, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent,
-    UpdateSubscription,
+    ShapeDraft, ShapeFillReceipt, ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt,
+    SlideReceipt, StorySnapshot, TextReceipt, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -19,6 +19,8 @@ const STANDALONE_CLIENT_ID: u64 = 1;
 pub struct Presentation {
     session: DeckSession,
     renderer: SlideRenderer,
+    #[cfg(feature = "raster")]
+    glyphs: crate::render::GlyphRegistry,
 }
 
 impl Presentation {
@@ -52,6 +54,8 @@ impl Presentation {
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
+            #[cfg(feature = "raster")]
+            glyphs: crate::render::GlyphRegistry::default(),
         })
     }
 
@@ -214,6 +218,18 @@ impl Presentation {
             .resize_shape(context, slide_id, shape_id, width, height)?)
     }
 
+    pub fn set_shape_rect(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        rect: ShapeRect,
+    ) -> Result<TransformReceipt> {
+        Ok(self
+            .session
+            .set_shape_rect(context, slide_id, shape_id, rect)?)
+    }
+
     pub fn insert_text(
         &self,
         context: &EditCtx,
@@ -250,6 +266,19 @@ impl Presentation {
             .format_text(context, story_id, start, end, patch)?)
     }
 
+    pub fn set_paragraph_alignment(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        alignment: Option<&str>,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .set_paragraph_alignment(context, story_id, start, end, alignment)?)
+    }
+
     pub fn insert_paragraph_break(
         &self,
         context: &EditCtx,
@@ -280,6 +309,16 @@ impl Presentation {
         bytes: &[u8],
     ) -> Result<u32> {
         Ok(self.renderer.register_font(family, bold, italic, bytes)?)
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn renderer(&self) -> &SlideRenderer {
+        &self.renderer
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn glyphs(&self) -> &crate::render::GlyphRegistry {
+        &self.glyphs
     }
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {

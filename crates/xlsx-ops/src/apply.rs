@@ -30,6 +30,7 @@ pub enum OpError {
     ChartAnchorNotMovable { part: String },
     ChartNotFound { frame: String },
     ChartFrameShifted { frame: String },
+    NumFmtTableFull,
     InvalidStyle(String),
 }
 
@@ -37,6 +38,7 @@ impl fmt::Display for OpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             OpError::SheetNotFound(id) => write!(f, "sheet {} not found", id.0),
+            OpError::NumFmtTableFull => write!(f, "number format table is full"),
             OpError::SheetIndexOutOfRange(i) => write!(f, "sheet index {i} out of range"),
             OpError::FormulaNotRewritable { sheet, cell } => write!(
                 f,
@@ -342,28 +344,90 @@ fn apply_range_formats(
     range: CellRange,
     mut update: impl FnMut(&mut xlsx_model::CellFormat, u32, u32) -> Result<(), OpError>,
 ) -> Result<InvertedOp, OpError> {
-    let sheet_ref = wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
-    let mut cells = Vec::new();
+    if wb.sheet(sheet).is_none() {
+        return Err(OpError::SheetNotFound(sheet));
+    }
+    let marks = wb.styles.pool_marks();
+    let rows = range
+        .end
+        .row
+        .checked_sub(range.start.row)
+        .map_or(0, |rows| u64::from(rows) + 1);
+    let cols = range
+        .end
+        .col
+        .checked_sub(range.start.col)
+        .map_or(0, |cols| u64::from(cols) + 1);
+    let range_cells = rows.saturating_mul(cols);
+    let mut staged = Vec::with_capacity(usize::try_from(range_cells).unwrap_or(0));
+    {
+        let sheet_ref = &wb.sheets[sheet.0 as usize];
+        let styles = &mut wb.styles;
+        let mut occupied = sheet_ref
+            .iter_cells_in_rect(
+                range.start.row..range.end.row.saturating_add(1),
+                range.start.col..range.end.col.saturating_add(1),
+            )
+            .peekable();
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let at = CellRef::new(row, col);
+                let old_style = if occupied
+                    .peek()
+                    .is_some_and(|(candidate, _)| (candidate.row, candidate.col) == (row, col))
+                {
+                    occupied.next().and_then(|(_, cell)| cell.style)
+                } else {
+                    None
+                };
+                let mut format = styles.cell_format(old_style);
+                if let Err(error) = update(&mut format, at.row, at.col) {
+                    styles.restore_pools(marks);
+                    return Err(error);
+                }
+                match styles.intern_cell_format(&format) {
+                    Ok(style) => staged.push(style),
+                    Err(_) => {
+                        styles.restore_pools(marks);
+                        return Err(OpError::NumFmtTableFull);
+                    }
+                }
+            }
+        }
+    }
+    let mut inverse = Vec::with_capacity(staged.len());
+    let sheet_ref = wb.sheet_mut(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let mut staged = staged.into_iter();
     for row in range.start.row..=range.end.row {
         for col in range.start.col..=range.end.col {
             let at = CellRef::new(row, col);
-            cells.push((at, sheet_ref.cell(at).cloned().unwrap_or_default()));
-        }
-    }
-    let mut inverse = Vec::with_capacity(cells.len());
-    for (at, old) in cells {
-        let mut format = wb.styles.cell_format(old.style);
-        update(&mut format, at.row, at.col)?;
-        let mut next = old.clone();
-        next.style = wb.styles.intern_cell_format(&format);
-        if next != old {
-            wb.sheet_mut(sheet)
-                .ok_or(OpError::SheetNotFound(sheet))?
-                .set_cell(at, next);
+            let style = staged.next().expect("stage covers the range");
+            let (old, remove) = match sheet_ref.cell_mut(at) {
+                Some(cell) if style != cell.style => {
+                    let old = CellState::from(&*cell);
+                    cell.style = style;
+                    (old, *cell == Cell::default())
+                }
+                Some(_) => continue,
+                None if style.is_some() => {
+                    sheet_ref.set_cell(
+                        at,
+                        Cell {
+                            style,
+                            ..Cell::default()
+                        },
+                    );
+                    (CellState::default(), false)
+                }
+                None => continue,
+            };
+            if remove {
+                sheet_ref.set_cell(at, Cell::default());
+            }
             inverse.push(Op::SetCell {
                 sheet,
                 at,
-                cell: CellState::from(old),
+                cell: old,
             });
         }
     }
@@ -629,25 +693,10 @@ fn delete_cols(
     Ok(InvertedOp(inv))
 }
 
-/// remap every occupied cell through `op`, rebuilding storage. returns the
-/// cells whose address was dropped, for the inverse.
+/// remap every occupied cell through `op` in place. returns the cells whose
+/// address was dropped, for the inverse.
 fn shift_cells(s: &mut Sheet, op: &Op) -> Vec<(CellRef, Cell)> {
-    let old: Vec<(CellRef, Cell)> = s.iter_cells().map(|(r, c)| (r, c.clone())).collect();
-    let mut moved = Vec::new();
-    let mut dropped = Vec::new();
-    for (r, c) in &old {
-        match remap_ref(*r, op) {
-            Some(nr) => moved.push((nr, c.clone())),
-            None => dropped.push((*r, c.clone())),
-        }
-    }
-    for (r, _) in &old {
-        s.set_cell(*r, Cell::default());
-    }
-    for (nr, c) in moved {
-        s.set_cell(nr, c);
-    }
-    dropped
+    s.remap_cells(|at| remap_ref(at, op))
 }
 
 fn shift_row_heights_up(s: &mut Sheet, at: RowId, count: u32) {
@@ -1670,5 +1719,280 @@ mod tests {
             assert!(matches!(error, OpError::ChartFrameShifted { .. }));
             assert_eq!(wb.sheets[0].charts[0].anchor, anchor(0, 0));
         }
+    }
+
+    fn filled(at: &str, value: f64) -> (CellRef, Cell) {
+        (
+            r(at),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        )
+    }
+
+    /// two cells land on one target; today's clear-then-reinsert order made
+    /// the largest source address win.
+    #[test]
+    fn remap_cells_contested_target_keeps_the_largest_source() {
+        let mut sheet = Sheet::new("S");
+        let (a1, c1) = filled("A1", 1.0);
+        let (_, c2) = filled("A6", 2.0);
+        sheet.set_cell(a1, c1.clone());
+        sheet.set_cell(r("A6"), c2.clone());
+        let dropped = sheet.remap_cells(|at| match at.row {
+            0 => Some(CellRef::new(5, 0)),
+            5 => Some(CellRef::new(5, 0)),
+            _ => Some(at),
+        });
+        assert!(dropped.is_empty());
+        assert_eq!(sheet.cell(CellRef::new(5, 0)), Some(&c2));
+        assert_eq!(sheet.iter_cells().count(), 1);
+    }
+
+    /// the same contest when every touched cell moves, so the split-off
+    /// fast path runs instead of the full-rebuild fallback.
+    #[test]
+    fn remap_cells_contested_target_resolves_on_the_fast_path_too() {
+        let mut sheet = Sheet::new("S");
+        let (_, c5) = filled("A5", 5.0);
+        let (_, c7) = filled("A7", 7.0);
+        sheet.set_cell(r("A5"), c5);
+        sheet.set_cell(r("A7"), c7.clone());
+        let dropped = sheet.remap_cells(|at| {
+            if at.row >= 4 {
+                Some(CellRef::new(6, at.col))
+            } else {
+                Some(at)
+            }
+        });
+        assert!(dropped.is_empty());
+        assert_eq!(sheet.cell(CellRef::new(6, 0)), Some(&c7));
+        assert_eq!(sheet.iter_cells().count(), 1);
+    }
+
+    /// cells that keep their address stay put, refused ones come back in
+    /// address order, and survivors move down past the refused span.
+    #[test]
+    fn remap_cells_keeps_stays_and_reports_drops_in_address_order() {
+        let mut sheet = Sheet::new("S");
+        for (at, value) in [("A1", 1.0), ("A2", 2.0), ("A3", 3.0), ("B7", 7.0)] {
+            let (at, cell) = filled(at, value);
+            sheet.set_cell(at, cell);
+        }
+        let dropped = sheet.remap_cells(|at| {
+            if at.row == 1 {
+                None
+            } else if at.row == 0 {
+                Some(at)
+            } else {
+                Some(CellRef::new(at.row - 1, at.col))
+            }
+        });
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].0, r("A2"));
+        assert_eq!(dropped[0].1.value, CellValue::Number { value: 2.0 });
+        assert_eq!(
+            sheet.cell(r("A1")).unwrap().value,
+            CellValue::Number { value: 1.0 }
+        );
+        assert_eq!(
+            sheet.cell(r("A2")).unwrap().value,
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(
+            sheet.cell(r("B6")).unwrap().value,
+            CellValue::Number { value: 7.0 }
+        );
+        assert_eq!(sheet.iter_cells().count(), 3);
+    }
+
+    /// rows and columns shift through the new storage path and invert back to
+    /// exactly the workbook they started from.
+    #[test]
+    fn structural_shifts_round_trip_exactly_on_both_axes() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Data"));
+        for row in 1..=12 {
+            for col in ["A", "C", "F"] {
+                let at = format!("{col}{row}");
+                let (cell_ref, cell) = filled(&at, f64::from(row));
+                wb.sheet_mut(SheetId(0)).unwrap().set_cell(cell_ref, cell);
+            }
+            wb.sheet_mut(SheetId(1)).unwrap().set_cell(
+                r(&format!("B{row}")),
+                Cell {
+                    formula: Some("Sheet1!A1+Sheet1!$E$9".into()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let before = wb.clone();
+
+        let edits = [
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 4,
+                count: 3,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 1,
+            },
+        ];
+        for op in &edits {
+            let inverse = apply(&mut wb, op).unwrap();
+            apply_ops(&mut wb, &inverse.0).unwrap();
+            assert_eq!(wb, before, "{op:?} must invert exactly");
+        }
+    }
+
+    /// a deletion whose span holds contents must report them for the inverse,
+    /// whatever sits above or below the span.
+    #[test]
+    fn deleting_rows_reports_every_dropped_cell_for_undo() {
+        let mut wb = wb_one_sheet();
+        for (at, value) in [("A1", 1.0), ("A3", 3.0), ("A4", 4.0), ("A6", 6.0)] {
+            let (at, cell) = filled(at, value);
+            wb.sheets[0].set_cell(at, cell);
+        }
+        let inverse = apply(
+            &mut wb,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.value(SheetId(0), r("A4")),
+            CellValue::Number { value: 6.0 }
+        );
+        assert!(wb.sheet(SheetId(0)).unwrap().cell(r("A3")).is_none());
+        let restores = inverse
+            .0
+            .iter()
+            .filter(|op| matches!(op, Op::SetCell { .. }))
+            .count();
+        assert_eq!(restores, 2, "rows 3 and 4 must come back");
+        apply_ops(&mut wb, &inverse.0).unwrap();
+        assert_eq!(
+            wb.value(SheetId(0), r("A3")),
+            CellValue::Number { value: 3.0 }
+        );
+        assert_eq!(
+            wb.value(SheetId(0), r("A4")),
+            CellValue::Number { value: 4.0 }
+        );
+    }
+}
+
+#[cfg(test)]
+mod range_format_exhaustion_tests {
+    use super::*;
+    use crate::formatting::CapturedFormat;
+    use xlsx_model::{CellFormat, CellRange, NumberFormat, SheetId};
+
+    #[test]
+    fn mid_range_format_exhaustion_leaves_the_workbook_unchanged() {
+        let mut styles = xlsx_model::Stylesheet::default();
+        styles.num_fmts = (164..u16::MAX).map(|id| (id, format!("p{id}"))).collect();
+        let mut wb = Workbook {
+            styles,
+            ..Workbook::default()
+        };
+        wb.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        let sheet = SheetId(0);
+        let before = wb.clone();
+
+        let op = Op::ApplyRangeFormat {
+            sheet,
+            range: CellRange::new(
+                xlsx_model::CellRef::new(0, 0),
+                xlsx_model::CellRef::new(0, 1),
+            ),
+            format: CapturedFormat {
+                rows: 1,
+                columns: 2,
+                formats: vec![
+                    CellFormat {
+                        number_format: NumberFormat::Custom {
+                            pattern: "one".into(),
+                        },
+                        ..CellFormat::default()
+                    },
+                    CellFormat {
+                        number_format: NumberFormat::Custom {
+                            pattern: "two".into(),
+                        },
+                        ..CellFormat::default()
+                    },
+                ],
+            },
+        };
+
+        assert!(matches!(
+            apply_ops(&mut wb, &[op]),
+            Err(OpError::NumFmtTableFull)
+        ));
+        assert_eq!(wb, before, "exhaustion must leave the workbook untouched");
+    }
+
+    /// `apply_ops` stages on its own clone, so only the single-op entry point
+    /// proves `apply_range_formats` rolls its own pool writes back.
+    #[test]
+    fn mid_range_exhaustion_rolls_back_pools_without_an_outer_clone() {
+        let mut styles = xlsx_model::Stylesheet::default();
+        styles.num_fmts = (164..u16::MAX).map(|id| (id, format!("p{id}"))).collect();
+        let mut wb = Workbook {
+            styles,
+            ..Workbook::default()
+        };
+        wb.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        let before = wb.clone();
+
+        let op = Op::ApplyRangeFormat {
+            sheet: SheetId(0),
+            range: CellRange::new(
+                xlsx_model::CellRef::new(0, 0),
+                xlsx_model::CellRef::new(0, 1),
+            ),
+            format: CapturedFormat {
+                rows: 1,
+                columns: 2,
+                formats: vec![
+                    CellFormat {
+                        number_format: NumberFormat::Custom {
+                            pattern: "one".into(),
+                        },
+                        ..CellFormat::default()
+                    },
+                    CellFormat {
+                        number_format: NumberFormat::Custom {
+                            pattern: "two".into(),
+                        },
+                        ..CellFormat::default()
+                    },
+                ],
+            },
+        };
+
+        assert!(matches!(apply(&mut wb, &op), Err(OpError::NumFmtTableFull)));
+        assert_eq!(
+            wb, before,
+            "a failed range format must not leave interned entries behind"
+        );
     }
 }

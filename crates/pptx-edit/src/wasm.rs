@@ -6,8 +6,8 @@ use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeStroke, TextStyle,
-    TextStylePatch, UpdateEvent, UpdateOrigin,
+    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeRect, ShapeStroke,
+    TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -53,6 +53,16 @@ struct FormatTextArgs {
     end: u32,
     #[serde(default)]
     patch: TextStylePatch,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetParagraphAlignmentArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    #[serde(default)]
+    alignment: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +129,14 @@ struct ResizeShapeArgs {
     shape_id: String,
     width: i64,
     height: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeRectArgs {
+    slide_id: String,
+    shape_id: String,
+    rect: ShapeRect,
 }
 
 #[derive(Deserialize)]
@@ -336,6 +354,22 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = setParagraphAlignmentJson)]
+    pub fn set_paragraph_alignment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetParagraphAlignmentArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_paragraph_alignment(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    args.alignment.as_deref(),
+                )
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = insertParagraphBreakJson)]
     pub fn insert_paragraph_break_json(&self, args: &str) -> Result<String, JsValue> {
         let args: ParagraphBreakArgs = parse_args(args)?;
@@ -438,6 +472,16 @@ impl PptxDocument {
                     args.width,
                     args.height,
                 )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setShapeRectJson)]
+    pub fn set_shape_rect_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetShapeRectArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_shape_rect(&local_context(), &args.slide_id, &args.shape_id, args.rect)
                 .map_err(js_error)?,
         )
     }

@@ -636,6 +636,11 @@ export interface YrsSession extends CollaborationReplica {
   layoutFontRequirementsJson(input: string): string;
   /** Paginate and compose section/page regions in the resident engine. */
   layoutDocumentWithRegionsJson(input: string): string;
+  /** Same pass, but the reply omits the measured arena (fetch it on demand
+   * through {@link YrsSession.retainedKernelInputsJson}). */
+  layoutDocumentWithRegionsRetainedJson(input: string): string;
+  /** Retained `{ measured, options }` for the main-thread display fallback. */
+  retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -1159,6 +1164,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
       return output;
+    },
+    layoutDocumentWithRegionsRetainedJson: (input) => {
+      const output = session.layout_document_with_regions_retained_json(input);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      return output;
+    },
+    retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (expectedLayoutRevision !== residentLayoutRevision) {
+        throw new Error(
+          `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
+        );
+      }
+      return session.retained_kernel_inputs_json();
     },
     buildDisplayListJson: (input) => session.build_display_list_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>

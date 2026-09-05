@@ -766,7 +766,7 @@ impl DocxEditor {
 
     pub fn recover_layout(&mut self) -> Result<()> {
         self.engine
-            .layout_document_with_regions_json(&self.layout_request)
+            .layout_document_with_regions_retained_json(&self.layout_request)
             .map_err(anyhow::Error::msg)?;
         let frame = self
             .engine

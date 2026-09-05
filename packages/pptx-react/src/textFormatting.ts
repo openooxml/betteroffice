@@ -1,4 +1,9 @@
-import type { StorySnapshot, TextStyleSnapshot } from '@betteroffice/pptx';
+import type {
+  ParagraphAlignment,
+  StorySnapshot,
+  TextBoxPrimitive,
+  TextStyleSnapshot,
+} from '@betteroffice/pptx';
 import type { SelectionFormatting } from './components/Toolbar';
 
 export interface EffectiveTextStyle {
@@ -39,6 +44,60 @@ export function storyFormattingFromStory(
   fallback: EffectiveTextStyle
 ): SelectionFormatting {
   return selectionFormattingFromStory(story, 0, story.length, fallback);
+}
+
+const RESOLVED_ALIGNMENTS: Record<string, ParagraphAlignment> = {
+  left: 'l',
+  center: 'ctr',
+  right: 'r',
+  justify: 'just',
+};
+
+const STORED_ALIGNMENTS: Record<string, ParagraphAlignment> = {
+  l: 'l',
+  ctr: 'ctr',
+  r: 'r',
+  just: 'just',
+  justLow: 'just',
+  dist: 'just',
+  thaiDist: 'just',
+};
+
+/** The alignment shared by every paragraph the selection touches, or
+ *  `undefined` when they differ. The laid-out text box supplies the value a
+ *  paragraph inherits from its layout or master. */
+export function paragraphAlignmentFromSelection(
+  story: StorySnapshot,
+  textBox: TextBoxPrimitive | undefined,
+  anchor: number,
+  focus: number
+): ParagraphAlignment | undefined {
+  const ranges = storyTextRanges(story);
+  const limit = ranges[ranges.length - 1]?.end ?? 0;
+  const start = Math.min(Math.min(anchor, focus), limit);
+  const end = Math.max(anchor, focus);
+  const alignments = ranges
+    .map((range, index) => ({ range, index }))
+    .filter(({ range }) =>
+      start === end
+        ? start >= range.start && start <= range.end
+        : start <= range.end && end > range.start
+    )
+    .map(({ index }) => paragraphAlignment(story, textBox, index));
+  if (alignments.length === 0) return undefined;
+  const first = alignments[0];
+  return alignments.every((alignment) => alignment === first) ? first : undefined;
+}
+
+function paragraphAlignment(
+  story: StorySnapshot,
+  textBox: TextBoxPrimitive | undefined,
+  index: number
+): ParagraphAlignment {
+  const stored = story.paragraphs[index]?.alignment;
+  if (stored) return STORED_ALIGNMENTS[stored] ?? 'l';
+  const resolved = textBox?.paragraphs[index]?.align;
+  return resolved ? RESOLVED_ALIGNMENTS[resolved] ?? 'l' : 'l';
 }
 
 export function storyTextRanges(story: StorySnapshot): Array<{ start: number; end: number }> {

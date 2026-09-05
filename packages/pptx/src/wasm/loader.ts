@@ -13,12 +13,14 @@ import type {
   DeckSnapshot,
   HistoryResult,
   HitTestResult,
+  ParagraphAlignment,
   PresetShapeDraft,
   PptxFontFace,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFillReceipt,
   ShapeReceipt,
+  ShapeRect,
   ShapeStroke,
   ShapeStrokeReceipt,
   SlideDisplayList,
@@ -58,6 +60,14 @@ export interface PresentationHandle extends CollaborationReplica {
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
   insertParagraphBreak(storyId: string, index: number): TextReceipt;
+  /** Sets the alignment of every paragraph the range touches; `null` restores
+   *  the inherited value. */
+  setParagraphAlignment(
+    storyId: string,
+    start: number,
+    end: number,
+    alignment: ParagraphAlignment | null
+  ): TextReceipt;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -77,6 +87,7 @@ export interface PresentationHandle extends CollaborationReplica {
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
   moveShape(slideId: string, shapeId: string, x: number, y: number): TransformReceipt;
   resizeShape(slideId: string, shapeId: string, width: number, height: number): TransformReceipt;
+  setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
   canUndo(): boolean;
   canRedo(): boolean;
   undo(): HistoryResult;
@@ -191,7 +202,7 @@ export function openPresentation(
         throw new Error(`pptx wasm returned unknown update origin ${origin}`);
       }
       pendingUpdates.push({
-        update: encoded.slice(1),
+        update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
       });
     }
@@ -264,10 +275,10 @@ export function openPresentation(
       return jsonWasmCall(() => renderer.hitTestJson(x, y));
     },
     mediaBytes(partPath: string): Uint8Array {
-      return wasmCall(() => doc.mediaBytes(partPath).slice());
+      return wasmCall(() => doc.mediaBytes(partPath));
     },
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes().slice());
+      return wasmCall(() => doc.saveBytes());
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(
@@ -290,6 +301,13 @@ export function openPresentation(
     insertParagraphBreak(storyId, index): TextReceipt {
       return jsonWasmCall(
         () => doc.insertParagraphBreakJson(JSON.stringify({ storyId, index })),
+        true
+      );
+    },
+    setParagraphAlignment(storyId, start, end, alignment): TextReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.setParagraphAlignmentJson(JSON.stringify({ storyId, start, end, alignment })),
         true
       );
     },
@@ -351,6 +369,12 @@ export function openPresentation(
         true
       );
     },
+    setShapeRect(slideId, shapeId, rect): TransformReceipt {
+      return jsonWasmCall(
+        () => doc.setShapeRectJson(JSON.stringify({ slideId, shapeId, rect })),
+        true
+      );
+    },
     canUndo(): boolean {
       return wasmCall(() => doc.canUndo());
     },
@@ -364,20 +388,20 @@ export function openPresentation(
       return jsonWasmCall(() => doc.redoJson(), true);
     },
     encodeStateVector(): Uint8Array {
-      return wasmCall(() => doc.encodeStateVector().slice());
+      return wasmCall(() => doc.encodeStateVector());
     },
     encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
       return wasmCall(() =>
         remoteStateVector === undefined
-          ? doc.encodeStateAsUpdate().slice()
-          : doc.encodeDiff(remoteStateVector.slice()).slice()
+          ? doc.encodeStateAsUpdate()
+          : doc.encodeDiff(remoteStateVector)
       );
     },
     encodeDiff(remoteStateVector): Uint8Array {
-      return wasmCall(() => doc.encodeDiff(remoteStateVector.slice()).slice());
+      return wasmCall(() => doc.encodeDiff(remoteStateVector));
     },
     applyUpdate(update): DeckSnapshot {
-      return jsonWasmCall(() => doc.applyUpdateJson(update.slice()), true);
+      return jsonWasmCall(() => doc.applyUpdateJson(update), true);
     },
     onUpdate(listener): () => void {
       assertAlive();

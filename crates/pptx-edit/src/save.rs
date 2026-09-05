@@ -16,14 +16,21 @@ use crate::{
     ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot, doc_with_client_id,
 };
 
-/// The parsed parts a slide's shapes may inherit geometry from.
+/// Source shapes and inherited geometry.
 struct SlideContext<'a> {
     layout: Option<&'a SlideLayout>,
     master: Option<&'a SlideMaster>,
+    source_shapes: &'a [ShapeNode],
 }
 
 impl<'a> SlideContext<'a> {
     fn new(package: &'a PptxPackage, snapshot: &SlideSnapshot) -> Self {
+        let source_shapes = snapshot
+            .source_part_path
+            .as_deref()
+            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path))
+            .map(|slide| slide.shapes.as_slice())
+            .unwrap_or_default();
         let layout = snapshot
             .layout_part_path
             .as_deref()
@@ -53,7 +60,11 @@ impl<'a> SlideContext<'a> {
                 })
             })
             .or_else(|| package.masters.first());
-        Self { layout, master }
+        Self {
+            layout,
+            master,
+            source_shapes,
+        }
     }
 }
 
@@ -104,11 +115,10 @@ fn deck_write(
             },
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
-                shapes: shape_writes(
-                    &slide.shapes,
-                    &base.shapes,
-                    &SlideContext::new(package, slide),
-                )?,
+                shapes: {
+                    let context = SlideContext::new(package, slide);
+                    shape_writes(&slide.shapes, &base.shapes, &context, context.source_shapes)?
+                },
             },
             None => SlideWrite::Add {
                 name: slide.name.clone(),
@@ -136,6 +146,7 @@ fn shape_writes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     context: &SlideContext<'_>,
+    source: &[ShapeNode],
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -145,17 +156,45 @@ fn shape_writes(
     for shape in current {
         let write = match baseline_shapes.get(shape.id.as_str()) {
             Some(base) if *base == shape => ShapeWrite::Keep {
-                source_index: source_index(&shape.id)?,
+                source_index: addressed_source_index(shape, source)?,
             },
-            Some(base) => ShapeWrite::Patch {
-                source_index: source_index(&shape.id)?,
-                patch: Box::new(shape_patch(shape, base, context)?),
-            },
+            Some(base) => {
+                let index = addressed_source_index(shape, source)?;
+                ShapeWrite::Patch {
+                    source_index: index,
+                    patch: Box::new(shape_patch(
+                        shape,
+                        base,
+                        context,
+                        group_children(source, index),
+                    )?),
+                }
+            }
             None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
         };
         writes.push(write);
     }
     Ok(writes)
+}
+
+/// Checks the source identity before resolving an ordinal.
+fn addressed_source_index(shape: &ShapeSnapshot, source: &[ShapeNode]) -> EditResult<usize> {
+    let index = source_index(&shape.id)?;
+    match source.get(index) {
+        Some(node) if node.id() == shape.source_id => Ok(index),
+        _ => Err(EditError::Write(format!(
+            "shape {} no longer addresses source shape {}: this update was seeded by a \
+             different parse of the file and has to be re-seeded from it",
+            shape.id, shape.source_id
+        ))),
+    }
+}
+
+fn group_children(source: &[ShapeNode], index: usize) -> &[ShapeNode] {
+    match source.get(index) {
+        Some(ShapeNode::Group(group)) => &group.children,
+        _ => &[],
+    }
 }
 
 fn source_index(shape_id: &str) -> EditResult<usize> {
@@ -171,6 +210,7 @@ fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
     context: &SlideContext<'_>,
+    source_children: &[ShapeNode],
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     let moved = (shape.x, shape.y) != (base.x, base.y);
@@ -231,7 +271,7 @@ fn shape_patch(
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, context)?;
+        patch.children = shape_writes(&shape.children, &base.children, context, source_children)?;
     }
     Ok(patch)
 }

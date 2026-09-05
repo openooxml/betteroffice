@@ -154,6 +154,20 @@ class Media:
     def __len__(self) -> int: ...
 
 @final
+class Png:
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def skipped_images(self) -> int: ...
+    @property
+    def bytes(self) -> bytes: ...
+    def write(self, path: str | os.PathLike[str]) -> None: ...
+    def __len__(self) -> int:
+        """Byte count."""
+
+@final
 class DisplayList:
     @property
     def width(self) -> float: ...
@@ -333,6 +347,15 @@ class Presentation:
     def resize_shape(
         self, slide: int | str, shape_id: str, width: int, height: int
     ) -> TransformEdit: ...
+    def set_shape_rect(
+        self,
+        slide: int | str,
+        shape_id: str,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> TransformEdit: ...
     def insert_text(
         self,
         story_id: str,
@@ -365,6 +388,13 @@ class Presentation:
         self, family: str, data: bytes, *, bold: bool = ..., italic: bool = ...
     ) -> int: ...
     def render_slide(self, slide: int | str) -> DisplayList: ...
+    def render_png(
+        self,
+        slide: int | str,
+        *,
+        scale: float = 1.0,
+        background: str = "slide",
+    ) -> Png: ...
     def save(self) -> bytes:
         """Serialize back to PPTX bytes, edits included."""
     def save_path(self, path: str | os.PathLike[str]) -> None:

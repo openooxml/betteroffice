@@ -3,6 +3,7 @@
   "toolbar": {
     "label": null,
     "save": "Zapisz",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -24,7 +25,14 @@
       "tools": null,
       "font": null,
       "text": null,
-      "shape": null
+      "shape": null,
+      "alignment": "Wyrównanie"
+    },
+    "align": {
+      "left": "Wyrównaj do lewej",
+      "center": "Wyśrodkuj",
+      "right": "Wyrównaj do prawej",
+      "justify": "Wyjustuj"
     },
     "newSlide": null,
     "newSlideWithLayout": null,

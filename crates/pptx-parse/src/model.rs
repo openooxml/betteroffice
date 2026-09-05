@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
-use ooxml_drawingml::{ColorValue, ShapeFill, ShapeOutline, Theme};
+pub use ooxml_drawingml::ShapeStyle;
+use ooxml_drawingml::{ColorValue, ShapeFill, ShapeOutline, Theme, ThemeFormatScheme};
 use serde::{Deserialize, Serialize};
 
 use crate::relationships::Relationship;
@@ -9,6 +10,26 @@ pub use ooxml_drawingml::chart::{
     ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
     ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
 };
+
+/// Shape elements counted by source ordinals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ShapeElements {
+    WithConnectors,
+    #[default]
+    WithoutConnectors,
+}
+
+impl ShapeElements {
+    fn is_legacy(&self) -> bool {
+        *self == Self::WithoutConnectors
+    }
+
+    pub(crate) fn contains(self, local: &str) -> bool {
+        matches!(local, "sp" | "pic" | "graphicFrame" | "grpSp")
+            || (self == Self::WithConnectors && local == "cxnSp")
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +46,8 @@ pub struct PptxPackage {
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
+    #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
+    pub(crate) shape_elements: ShapeElements,
 }
 
 impl PptxPackage {
@@ -39,6 +62,11 @@ impl PptxPackage {
     /// the parsed model but not the raw part bytes.
     pub fn has_parts(&self) -> bool {
         !self.parts.is_empty()
+    }
+
+    /// Whether source ordinals include connectors.
+    pub fn models_connectors(&self) -> bool {
+        self.shape_elements == ShapeElements::WithConnectors
     }
 
     pub fn replace_part(&mut self, path: &str, bytes: Vec<u8>) -> bool {
@@ -62,8 +90,22 @@ pub struct Presentation {
     pub part_path: String,
     pub width_emu: i64,
     pub height_emu: i64,
+    /// `p:presentation/@firstSlideNum`.
+    #[serde(
+        default = "default_first_slide_num",
+        skip_serializing_if = "is_default_first_slide_num"
+    )]
+    pub first_slide_num: i32,
     pub slides: Vec<SlideReference>,
     pub master_part_paths: Vec<String>,
+}
+
+fn default_first_slide_num() -> i32 {
+    1
+}
+
+fn is_default_first_slide_num(value: &i32) -> bool {
+    *value == default_first_slide_num()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +156,9 @@ pub struct SlideMaster {
 pub struct ThemePart {
     pub part_path: String,
     pub theme: Theme,
+    /// Absent from packages serialized before `a:fmtScheme` was parsed.
+    #[serde(default, skip_serializing_if = "ThemeFormatScheme::is_empty")]
+    pub format_scheme: ThemeFormatScheme,
 }
 
 /// A chart part resolved against one referenced presentation theme.
@@ -199,6 +244,9 @@ pub struct Shape {
     #[serde(flatten)]
     pub base: ShapeBase,
     pub geometry: String,
+    /// Theme formatting and text defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<Box<ShapeStyle>>,
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
@@ -214,8 +262,23 @@ pub struct Picture {
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
+    /// Preset mask; defaults to the frame rectangle.
+    #[serde(default = "rect_geometry", skip_serializing_if = "is_rect")]
+    pub geometry: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<Box<ShapeStyle>>,
+}
+
+fn rect_geometry() -> String {
+    "rect".to_owned()
+}
+
+fn is_rect(geometry: &str) -> bool {
+    geometry == "rect"
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

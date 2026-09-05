@@ -628,9 +628,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       textEngine: yrsCore.session,
     });
 
-    // Layout pipeline — owns layout/blocks/measures state, the rAF-coalesced
-    // scheduler, scroll-restore plumbing, and the page-count
-    // notifier.
+    // Layout pipeline — owns layout state, the rAF-coalesced scheduler,
+    // scroll-restore plumbing, and the page-count notifier.
     const publishResidentLayout = useCallback(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]

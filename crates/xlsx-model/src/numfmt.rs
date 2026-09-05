@@ -1,6 +1,10 @@
 //! number-format code interpreter (ecma-376 §18.8.30–31): value + format code
 //! -> display string and optional bracket color. unsupported degrades to general.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::date::DateSystem;
@@ -119,7 +123,7 @@ impl Condition {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Section {
     toks: Vec<Tok>,
     color: Option<String>,
@@ -145,6 +149,78 @@ impl Section {
     fn has(&self, pred: impl Fn(&Tok) -> bool) -> bool {
         self.toks.iter().any(pred)
     }
+}
+
+/// memoized parses per generation; capped so adversarial code variety can't grow the cache.
+const FORMAT_CACHE_CAP: usize = 128;
+
+/// codes longer than this parse fresh every call and are never retained; excel
+/// itself rejects format codes beyond ~255 chars.
+const MAX_CACHED_CODE_LEN: usize = 256;
+
+/// positive, negative, zero, text: the only sections any render path selects.
+const USED_SECTIONS: usize = 4;
+
+/// two generations, so making room costs one swap instead of a scan for a
+/// victim: inserts fill `hot`, a full `hot` ages into `cold`, and the next
+/// age-out drops it. holds at most `2 * FORMAT_CACHE_CAP` parses.
+#[derive(Default)]
+struct FormatCache {
+    hot: HashMap<String, Arc<[Section]>>,
+    cold: HashMap<String, Arc<[Section]>>,
+}
+
+impl FormatCache {
+    fn get(&mut self, code: &str) -> Option<Arc<[Section]>> {
+        if let Some(hit) = self.hot.get(code) {
+            return Some(hit.clone());
+        }
+        let promoted = self.cold.get(code)?.clone();
+        self.insert(code, promoted.clone());
+        Some(promoted)
+    }
+
+    fn insert(&mut self, code: &str, parsed: Arc<[Section]>) {
+        if self.hot.len() >= FORMAT_CACHE_CAP {
+            self.cold = std::mem::take(&mut self.hot);
+        }
+        self.hot.insert(code.to_string(), parsed);
+    }
+}
+
+thread_local! {
+    /// per thread, so concurrent renders never serialize on a shared lock.
+    static FORMAT_CACHE: RefCell<FormatCache> = RefCell::new(FormatCache::default());
+}
+
+/// memoized `split_sections` + `tokenize`, keyed by the exact code string.
+/// falls back to parsing when the thread's cache is already torn down.
+fn parsed_sections(code: &str) -> Arc<[Section]> {
+    FORMAT_CACHE
+        .try_with(|cache| parsed_sections_in(&mut cache.borrow_mut(), code))
+        .unwrap_or_else(|_| tokenize_all(code))
+}
+
+fn parsed_sections_in(cache: &mut FormatCache, code: &str) -> Arc<[Section]> {
+    if code.len() > MAX_CACHED_CODE_LEN {
+        return tokenize_all(code);
+    }
+    if let Some(hit) = cache.get(code) {
+        return hit;
+    }
+    let parsed = tokenize_all(code);
+    cache.insert(code, parsed.clone());
+    parsed
+}
+
+/// `select` never looks past the third section and text never past the fourth,
+/// so deeper ones are dropped rather than parsed and retained.
+fn tokenize_all(code: &str) -> Arc<[Section]> {
+    split_sections(code)
+        .iter()
+        .take(USED_SECTIONS)
+        .map(|s| tokenize(s))
+        .collect()
 }
 
 /// split a code into sections on top-level `;` (quotes, brackets, and escapes guarded).
@@ -491,7 +567,7 @@ fn format_number_value(n: f64, code: &str, ds: DateSystem) -> FormattedValue {
             color: None,
         };
     }
-    let parsed: Vec<Section> = split_sections(code).iter().map(|s| tokenize(s)).collect();
+    let parsed = parsed_sections(code);
     let (idx, auto_minus) = select(&parsed, n);
     let sec = &parsed[idx];
     let color = sec.color.clone();
@@ -896,7 +972,7 @@ fn trim_trailing_zeros(s: &mut String) {
 }
 
 fn format_text_value(text: &str, code: &str) -> FormattedValue {
-    let parsed: Vec<Section> = split_sections(code).iter().map(|s| tokenize(s)).collect();
+    let parsed = parsed_sections(code);
     let sec = if parsed.len() >= 4 {
         Some(&parsed[3])
     } else {

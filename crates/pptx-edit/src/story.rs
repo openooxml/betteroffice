@@ -38,6 +38,8 @@ const UNDERLINE_TYPES: [&str; 18] = [
     "wavyDbl",
 ];
 
+const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thaiDist"];
+
 /// The values land in schema-typed attributes, so junk must fail the edit
 /// rather than the file.
 pub(crate) fn validate_style_values(
@@ -69,6 +71,17 @@ pub(crate) fn validate_style_values(
     {
         return Err(EditError::InvalidText(format!(
             "font size {size}pt is outside the 1-4000pt range"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_alignment(alignment: Option<&str>) -> EditResult<()> {
+    if let Some(alignment) = alignment
+        && !ALIGNMENTS.contains(&alignment)
+    {
+        return Err(EditError::InvalidText(format!(
+            "unrecognized paragraph alignment {alignment:?}"
         )));
     }
     Ok(())
@@ -282,6 +295,40 @@ impl DeckSession {
         })
     }
 
+    /// Sets `a:pPr@algn` on every paragraph the range touches; `None` clears
+    /// the value so the placeholder cascade applies again.
+    pub fn set_paragraph_alignment(
+        &self,
+        context: &crate::EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        alignment: Option<&str>,
+    ) -> EditResult<TextReceipt> {
+        validate_alignment(alignment)?;
+        let mut txn = self.transact_for(context);
+        let story = story_ref(&txn, story_id)?;
+        check_text_bounds(&story, &txn, start, end)?;
+        let text = text_in_range(&story, &txn, start, end);
+        let pilcrows = selected_pilcrows(&story, &txn, start, end);
+        for pilcrow in pilcrows {
+            match alignment {
+                Some(alignment) => {
+                    pilcrow.insert(&mut txn, "alignment", alignment);
+                }
+                None => {
+                    pilcrow.remove(&mut txn, "alignment");
+                }
+            }
+        }
+        Ok(TextReceipt {
+            story_id: story_id.to_owned(),
+            start,
+            end,
+            text,
+        })
+    }
+
     pub fn insert_paragraph_break(
         &self,
         context: &crate::EditCtx,
@@ -452,6 +499,28 @@ fn check_text_bounds<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32)
         });
     }
     Ok(())
+}
+
+/// The pilcrow of every paragraph the range touches. A collapsed caret picks
+/// the paragraph it sits in; a range stopping at a paragraph start does not.
+fn selected_pilcrows<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Vec<MapRef> {
+    let start = start.min(story.len(txn).saturating_sub(1));
+    let mut pilcrows = Vec::new();
+    let mut paragraph_start = 0;
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let item_length = out_len(&diff.insert);
+        if let Out::YMap(map) = diff.insert {
+            let touches = start <= offset
+                && (end > paragraph_start || (start == end && start >= paragraph_start));
+            if touches {
+                pilcrows.push(map);
+            }
+            paragraph_start = offset + item_length;
+        }
+        offset += item_length;
+    }
+    pilcrows
 }
 
 fn paragraph_text_segments<T: ReadTxn>(
