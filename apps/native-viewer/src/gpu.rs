@@ -1,14 +1,14 @@
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 use std::fs;
 use std::path::Path;
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 use std::path::PathBuf;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result, anyhow, bail};
 #[cfg(feature = "docx")]
 use docx_raster::RenderResources;
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 use image::DynamicImage;
 use image::ImageFormat;
 use vello::kurbo::Affine;
@@ -19,7 +19,7 @@ use vello::{AaConfig, RenderParams, Renderer, RendererOptions, Scene};
 use crate::document::{DocumentView, ReferenceDocument};
 use crate::scene_shared::PageScene;
 
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 const DIFFERENCE_THRESHOLD: u8 = 8;
 const MAX_HEADLESS_PIXELS: u64 = 33_000_000;
 
@@ -63,35 +63,7 @@ pub fn render_comparison(
     )
     .with_context(|| format!("write Vello PNG {}", output.display()))?;
 
-    #[cfg(feature = "pptx")]
-    match &document.reference {
-        ReferenceDocument::Pptx(reference) => {
-            let summary = reference
-                .editor
-                .summaries()
-                .get(page_index)
-                .context("PPTX slide has no translation summary")?;
-            println!("document: {}", document.source.display());
-            println!(
-                "slide: {} of {}",
-                page_index + 1,
-                reference.editor.slide_count()
-            );
-            println!("gpu: {}", rendered.adapter);
-            println!("font faces: {:?}", reference.editor.font_faces());
-            println!("vello PNG: {}", output.display());
-            println!("raster PNG: not produced (PPTX has no raster backend)");
-            println!(
-                "pptx summary: {}",
-                serde_json::to_string(&summary.structured(&page.skipped))?
-            );
-            return Ok(());
-        }
-        #[cfg(any(feature = "docx", feature = "xlsx"))]
-        _ => {}
-    }
-
-    #[cfg(any(feature = "docx", feature = "xlsx"))]
+    #[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
     {
         let (raster_bytes, skipped_raster_images) = match &document.reference {
             #[cfg(feature = "docx")]
@@ -113,7 +85,10 @@ pub fn render_comparison(
                 None::<usize>,
             ),
             #[cfg(feature = "pptx")]
-            ReferenceDocument::Pptx(_) => unreachable!(),
+            ReferenceDocument::Pptx(reference) => {
+                let raster = reference.editor.render_reference_png(page_index)?;
+                (raster.bytes, Some(raster.skipped_images))
+            }
         };
         let reference_path = raster_path(output);
         fs::write(&reference_path, &raster_bytes)
@@ -144,7 +119,24 @@ pub fn render_comparison(
                 );
             }
             #[cfg(feature = "pptx")]
-            ReferenceDocument::Pptx(_) => unreachable!(),
+            ReferenceDocument::Pptx(reference) => {
+                println!(
+                    "slide: {} of {}",
+                    page_index + 1,
+                    reference.editor.slide_count()
+                );
+                println!("gpu: {}", rendered.adapter);
+                println!("font faces: {:?}", reference.editor.font_faces());
+                let summary = reference
+                    .editor
+                    .summaries()
+                    .get(page_index)
+                    .context("PPTX slide has no translation summary")?;
+                println!(
+                    "pptx summary: {}",
+                    serde_json::to_string(&summary.structured(&page.skipped))?
+                );
+            }
         }
         println!("vello PNG: {}", output.display());
         println!("raster PNG: {}", reference_path.display());
@@ -154,7 +146,7 @@ pub fn render_comparison(
             #[cfg(feature = "xlsx")]
             ReferenceDocument::Xlsx(_) => "commands",
             #[cfg(feature = "pptx")]
-            ReferenceDocument::Pptx(_) => unreachable!(),
+            ReferenceDocument::Pptx(_) => "primitives",
         };
         println!(
             "skipped Vello {skipped_label}: {} {:?}",
@@ -179,8 +171,8 @@ pub fn render_comparison(
         Ok(())
     }
 
-    #[cfg(not(any(feature = "docx", feature = "xlsx")))]
-    unreachable!("PPTX export returned before raster comparison")
+    #[cfg(not(any(feature = "docx", feature = "xlsx", feature = "pptx")))]
+    unreachable!("no format feature builds a reference document")
 }
 
 struct GpuImage {
@@ -338,13 +330,13 @@ fn validate_readback(rgba: &[u8], width: u32, height: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 struct DifferenceMetrics {
     mean: [f64; 4],
     fraction: f64,
 }
 
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 fn compare(
     vello: &[u8],
     width: u32,
@@ -381,7 +373,7 @@ fn compare(
     })
 }
 
-#[cfg(any(feature = "docx", feature = "xlsx"))]
+#[cfg(any(feature = "docx", feature = "xlsx", feature = "pptx"))]
 fn raster_path(output: &Path) -> PathBuf {
     let stem = output
         .file_stem()

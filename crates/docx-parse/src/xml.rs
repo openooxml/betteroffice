@@ -503,10 +503,12 @@ impl XmlElement {
             output.push_str(name);
             output.push_str("=\"");
             for character in value.chars() {
-                if character == '"' {
-                    output.push_str("&quot;");
-                } else {
-                    output.push(character);
+                match character {
+                    '&' => output.push_str("&amp;"),
+                    '<' => output.push_str("&lt;"),
+                    '>' => output.push_str("&gt;"),
+                    '"' => output.push_str("&quot;"),
+                    _ => output.push(character),
                 }
             }
             output.push('"');
@@ -539,9 +541,18 @@ pub fn parse_xml(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<XmlDocument, ParseError> {
-    budget.charge_xml_bytes(xml.len(), part)?;
     let repaired = escape_stray_ampersands(xml);
-    let mut reader = Reader::from_reader(repaired.as_ref());
+    parse_xml_strict(repaired.as_ref(), part, budget)
+}
+
+/// Parse emitted XML without repairing malformed entity references.
+pub(crate) fn parse_xml_strict(
+    xml: &[u8],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<XmlDocument, ParseError> {
+    budget.charge_xml_bytes(xml.len(), part)?;
+    let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     reader.config_mut().check_end_names = true;
 
@@ -685,6 +696,13 @@ fn decode_element(
             });
         }
         let attribute = attribute.map_err(|error| malformed(reader, part, error))?;
+        if attribute.value.contains(&b'<') {
+            return Err(ParseError::MalformedXml {
+                part: part.to_owned(),
+                offset: reader.buffer_position(),
+                message: "unescaped '<' in attribute value".to_owned(),
+            });
+        }
         let key = reader
             .decoder()
             .decode(attribute.key.as_ref())
@@ -914,11 +932,11 @@ mod tests {
     }
 
     #[test]
-    fn raw_inline_xml_only_escapes_attribute_quotes() {
+    fn raw_inline_xml_escapes_attribute_values() {
         let doc = parse(r#"<x a="x&apos;y&gt;z&quot;q&lt;l&amp;m"/>"#).unwrap();
         assert_eq!(
             doc.root().unwrap().to_raw_inline_xml(),
-            r#"<x a="x'y>z&quot;q<l&m"/>"#
+            r#"<x a="x'y&gt;z&quot;q&lt;l&amp;m"/>"#
         );
         assert_eq!(
             doc.root().unwrap().to_xml(),

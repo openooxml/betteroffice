@@ -5,6 +5,9 @@ use std::fmt;
 
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
+use crate::ColumnRange;
+use crate::reference::column;
+
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
 
@@ -71,6 +74,10 @@ pub enum TokKind {
     Range {
         sheet: Option<String>,
         range: CellRange,
+    },
+    ColumnRange {
+        sheet: Option<String>,
+        range: ColumnRange,
     },
     Plus,
     Minus,
@@ -332,6 +339,9 @@ impl Lexer<'_> {
             return Ok(TokKind::Ident(word));
         }
 
+        if self.input[self.pos..].trim_start().starts_with(':') && column(&word).is_ok() {
+            return self.finish_columns(None, &word, start);
+        }
         if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
             return self.finish_range(None, &word, start);
         }
@@ -351,6 +361,9 @@ impl Lexer<'_> {
         let word = self.read_word();
         if word.is_empty() {
             return Err(ParseError::new(start, "expected reference or defined name"));
+        }
+        if self.input[self.pos..].trim_start().starts_with(':') && column(&word).is_ok() {
+            return self.finish_columns(sheet, &word, start);
         }
         if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
             return self.finish_range(sheet, &word, start);
@@ -382,6 +395,21 @@ impl Lexer<'_> {
             sheet,
             range: CellRange::new(a, b),
         })
+    }
+
+    fn finish_columns(
+        &mut self,
+        sheet: Option<String>,
+        start_word: &str,
+        start: usize,
+    ) -> Result<TokKind, ParseError> {
+        self.skip_ws();
+        self.bump();
+        self.skip_ws();
+        let end_word = self.read_word();
+        let range = ColumnRange::parse_a1(&format!("{start_word}:{end_word}"))
+            .map_err(|error| ParseError::new(start, format!("invalid column range: {error}")))?;
+        Ok(TokKind::ColumnRange { sheet, range })
     }
 }
 
