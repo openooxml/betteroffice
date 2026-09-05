@@ -166,9 +166,12 @@ pub fn write_pptx_with_edits(
                 .part_bytes(part_path)
                 .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
             let mut root = parse_xml(bytes, part_path, &mut budget)?;
+            let original_root = root.clone();
             let theme = slide_theme(package, part_path);
             patch_slide(&mut root, shapes, theme, part_path, package.shape_elements)?;
-            replacements.insert(part_path.clone(), serialize_xml(&root));
+            if root != original_root {
+                replacements.insert(part_path.clone(), serialize_xml(&root));
+            }
         }
     }
 
@@ -1892,17 +1895,28 @@ fn build_paragraph(
     let template = (tail_start - front == 1 && source_runs[front].local_name() == "r")
         .then(|| source_runs[front].child("rPr").cloned())
         .flatten();
+    let rebuilt = gradient_segment_elements(
+        &segments[front..segments.len() - back],
+        &source_runs[front..tail_start],
+        theme,
+        prefixes,
+    );
     let mut runs: Vec<XmlNode> = Vec::with_capacity(segments.len());
     let mut source_runs = source_runs.into_iter();
     for element in source_runs.by_ref().take(front) {
         runs.push(XmlNode::Element(element));
     }
-    for segment in &segments[front..segments.len() - back] {
-        runs.push(XmlNode::Element(segment_element(
-            segment,
-            template.as_ref(),
-            prefixes,
-        )));
+    if let Some(rebuilt) = rebuilt {
+        runs.extend(rebuilt);
+    } else {
+        for segment in &segments[front..segments.len() - back] {
+            runs.push(XmlNode::Element(segment_element(
+                segment,
+                template.as_ref(),
+                theme,
+                prefixes,
+            )));
+        }
     }
     for element in source_runs.skip(tail_start - front) {
         runs.push(XmlNode::Element(element));
@@ -1918,31 +1932,155 @@ fn build_paragraph(
     paragraph
 }
 
+fn gradient_segment_elements(
+    segments: &[RunSegment<'_>],
+    source_runs: &[XmlElement],
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) -> Option<Vec<XmlNode>> {
+    if !source_runs
+        .iter()
+        .all(|run| matches!(run.local_name(), "r" | "br"))
+        || !source_runs.iter().any(|run| {
+            run.child("rPr")
+                .and_then(|properties| properties.child("gradFill"))
+                .is_some()
+        })
+    {
+        return None;
+    }
+    let mut source_text = String::new();
+    let mut source_ends = Vec::with_capacity(source_runs.len());
+    for run in source_runs {
+        if run.local_name() == "br" {
+            source_text.push('\n');
+        } else if let Some(text) = run.child("t") {
+            source_text.push_str(&text.text_content());
+        }
+        source_ends.push(source_text.len());
+    }
+    let target_text: String = segments
+        .iter()
+        .map(|segment| {
+            if segment.line_break {
+                "\n"
+            } else {
+                segment.text
+            }
+        })
+        .collect();
+    let prefix: usize = source_text
+        .chars()
+        .zip(target_text.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    let suffix: usize = source_text[prefix..]
+        .chars()
+        .rev()
+        .zip(target_text[prefix..].chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    let source_end = source_text.len() - suffix;
+    let target_end = target_text.len() - suffix;
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut push_range = |end: usize, index: usize| {
+        if let Some(last) = ranges.last_mut() {
+            if end <= last.0 {
+                return;
+            }
+            if last.1 == index {
+                last.0 = end;
+                return;
+            }
+        }
+        if end > 0 {
+            ranges.push((end, index));
+        }
+    };
+    for (index, &end) in source_ends.iter().enumerate() {
+        push_range(end.min(prefix), index);
+    }
+    if target_end > prefix {
+        let index = source_ends
+            .iter()
+            .position(|&end| end > prefix)
+            .unwrap_or(source_runs.len() - 1);
+        push_range(target_end, index);
+    }
+    for (index, &end) in source_ends.iter().enumerate() {
+        if end > source_end {
+            push_range(target_end + end - source_end, index);
+        }
+    }
+    let mut output = Vec::new();
+    let mut offset = 0;
+    let mut range_index = 0;
+    for segment in segments {
+        if segment.line_break {
+            while ranges[range_index].0 <= offset {
+                range_index += 1;
+            }
+            output.push(XmlNode::Element(segment_element(
+                segment,
+                source_runs[ranges[range_index].1].child("rPr"),
+                theme,
+                prefixes,
+            )));
+            offset += 1;
+            continue;
+        }
+        let mut remaining = segment.text;
+        while !remaining.is_empty() {
+            while ranges[range_index].0 <= offset {
+                range_index += 1;
+            }
+            let (end, source_index) = ranges[range_index];
+            let length = remaining.len().min(end - offset);
+            let piece = RunSegment {
+                text: &remaining[..length],
+                ..*segment
+            };
+            output.push(XmlNode::Element(segment_element(
+                &piece,
+                source_runs[source_index].child("rPr"),
+                theme,
+                prefixes,
+            )));
+            offset += length;
+            remaining = &remaining[length..];
+        }
+    }
+    Some(output)
+}
+
 fn segment_element(
     segment: &RunSegment<'_>,
     template: Option<&XmlElement>,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> XmlElement {
-    if segment.line_break {
-        let mut line_break = XmlElement::new(prefixes.drawing("br"));
-        if let Some(properties) = run_properties_element(segment.properties, prefixes) {
-            line_break = line_break.with_child(properties);
-        }
-        return line_break;
-    }
-    let properties = match template {
+    let properties = match template
+        .filter(|template| !segment.line_break || template.child("gradFill").is_some())
+    {
         Some(template) => {
             let mut base = template.clone();
-            apply_run_properties(&mut base, segment.properties, prefixes);
+            apply_run_properties(&mut base, segment.properties, theme, prefixes);
             Some(base)
         }
         None => run_properties_element(segment.properties, prefixes),
     };
-    let mut element = XmlElement::new(prefixes.drawing("r"));
+    let mut element =
+        XmlElement::new(prefixes.drawing(if segment.line_break { "br" } else { "r" }));
     if let Some(properties) = properties {
         element = element.with_child(properties);
     }
-    element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
+    if segment.line_break {
+        element
+    } else {
+        element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
+    }
 }
 
 const POST_LATIN_ELEMENTS: [&str; 7] = [
@@ -1957,7 +2095,12 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
 
 /// Overwrites the modeled styling on a cloned source `rPr`, leaving what the
 /// model does not carry (hyperlinks, strike, spacing, language) in place.
-fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefixes: &Prefixes) {
+fn apply_run_properties(
+    base: &mut XmlElement,
+    properties: &RunProperties,
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) {
     match properties.font_size_pt {
         Some(size) => base.set_attribute("sz", format_fixed(size * 100.0)),
         None => {
@@ -1979,13 +2122,18 @@ fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefi
             base.attributes.remove("u");
         }
     }
-    // A colour still equal to the run's authored gradFill was flattened by the parser rather than
-    // chosen by an edit, so the gradient stays. Without this, saving a deck after editing any
-    // paragraph containing gradient-filled text would silently rewrite it as a flat colour.
     let keeps_gradient = properties.color.as_ref().is_some_and(|color| {
         base.child("gradFill")
             .and_then(crate::drawing::run_gradient_color)
-            .is_some_and(|authored| &authored == color)
+            .is_some_and(|authored| {
+                &authored == color
+                    || resolve_color_value_to_hex_with_theme(Some(&authored), theme).is_some_and(
+                        |authored| {
+                            Some(authored)
+                                == resolve_color_value_to_hex_with_theme(Some(color), theme)
+                        },
+                    )
+            })
     });
     // A colour write replaces the whole fill choice; clearing the colour only
     // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
@@ -2306,6 +2454,7 @@ mod tests {
     use super::*;
     use crate::ParseLimits;
     use crate::drawing::parse_run_properties;
+    use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml};
 
     fn run_properties(xml: &[u8]) -> (XmlElement, Prefixes, RunProperties) {
@@ -2317,8 +2466,6 @@ mod tests {
         (root, prefixes, properties)
     }
 
-    /// A gradient the parser flattened must survive a save. Editing any paragraph rebuilds every
-    /// run in it, so without this an authored gradient would be rewritten as a flat colour.
     #[test]
     fn an_unedited_gradient_fill_survives_a_rewrite() {
         let (mut element, prefixes, properties) = run_properties(
@@ -2328,7 +2475,9 @@ mod tests {
             properties.color.is_some(),
             "the gradient should flatten to a colour"
         );
-        apply_run_properties(&mut element, &properties, &prefixes);
+        let gradient = element.child("gradFill").unwrap().clone();
+        apply_run_properties(&mut element, &properties, None, &prefixes);
+        assert_eq!(element.child("gradFill"), Some(&gradient));
         let serialized = String::from_utf8(serialize_xml(&element)).unwrap();
         assert!(
             serialized.contains("gradFill"),
@@ -2340,7 +2489,6 @@ mod tests {
         );
     }
 
-    /// A colour the user actually changed still replaces the gradient.
     #[test]
     fn an_edited_colour_replaces_the_gradient() {
         let (mut element, prefixes, mut properties) = run_properties(
@@ -2350,13 +2498,12 @@ mod tests {
             rgb: Some("FF0000".to_owned()),
             ..ColorValue::default()
         });
-        apply_run_properties(&mut element, &properties, &prefixes);
+        apply_run_properties(&mut element, &properties, None, &prefixes);
         let serialized = String::from_utf8(serialize_xml(&element)).unwrap();
         assert!(!serialized.contains("gradFill"));
         assert!(serialized.contains("solidFill"));
+        assert_eq!(parse_run_properties(Some(&element)).color, properties.color);
     }
-
-    use crate::model::ShapeElements;
 
     #[test]
     fn the_writer_recognises_exactly_what_the_parser_reads() {
