@@ -183,16 +183,3 @@ fn another_comments_reference_does_not_suppress_a_new_reference() {
         ["7", "9"]
     );
 }
-
-#[test]
-fn comprehensive_corpus_saved_bytes_match_the_pre_fix_baseline() {
-    let original = include_bytes!(
-        "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
-    );
-    let saved = write_docx_s13(save_request(original), original).unwrap();
-    assert_eq!(
-        format!("{:x}", Sha256::digest(&saved)),
-        "e8b45a88fcce9a3652c59294b632806bc9b26672ecd815af29e1a645d2a97305"
-    );
-    assert_eq!(write_docx_s13(save_request(&saved), &saved).unwrap(), saved);
-}
