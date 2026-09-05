@@ -1,6 +1,5 @@
 //! Every manifest-pinned fixture through the round-trip oracles, findings
 //! pinned exactly; goldens move only under `GOLDEN_UPDATE=1`.
-//! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-corpus`.
 
 mod common;
 

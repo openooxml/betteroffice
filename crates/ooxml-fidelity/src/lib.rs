@@ -2,7 +2,6 @@
 //! cannot share the engine's blind spots. Neither covers for the other: the
 //! fingerprint answers "the same tree?", the digest "the same meaning after a
 //! save→reopen?", the census catches drops nobody predicted.
-//! Governed by `openspec/changes/docx-word-fidelity/`.
 
 mod census;
 mod error;

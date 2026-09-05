@@ -1,5 +1,4 @@
-//! Shared round-trip helpers for the fidelity, corpus, and defect gates.
-//! Each gate binary uses a subset, so unused helpers are expected here.
+//! Shared package helpers for the round-trip tests.
 #![allow(dead_code)]
 
 use betteroffice_docx::Document;
@@ -18,8 +17,7 @@ pub fn roundtrip_report(before: &Parts, after: &Parts) -> Vec<String> {
     ooxml_fidelity::roundtrip_findings(before, after).unwrap()
 }
 
-/// A modelled story, a header, media, and an unmodelled XML part. Paragraph
-/// `11111111` carries bookmarks; `22222222` is a plain table-cell paragraph.
+/// A document with bookmarks, a table, a header, media, and unmodelled XML.
 pub fn sample_docx() -> Vec<u8> {
     let parts = vec![
         (

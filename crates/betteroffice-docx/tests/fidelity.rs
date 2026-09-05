@@ -1,6 +1,5 @@
 //! Round-trip gates through the package oracles, which parse bytes with
 //! their own reader so a model gap cannot hide a save loss.
-//! Governed by `openspec/changes/docx-word-fidelity/specs/fidelity-oracles`.
 
 mod common;
 
