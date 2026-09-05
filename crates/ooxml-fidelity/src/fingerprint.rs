@@ -9,7 +9,7 @@
 use serde_json::{Value, json};
 
 use crate::registry::STANDARD_WML_NAMESPACE_URIS;
-use crate::xml::{XML_NAMESPACE, XmlElement, XmlNode};
+use crate::xml::{XML_NAMESPACE, XmlElement, XmlNode, is_xml_whitespace};
 
 /// Canonical projection of one part's tree, serialized as JSON.
 pub fn structural_fingerprint(root: &XmlElement) -> String {
@@ -92,14 +92,38 @@ fn project_element(
     ])
 }
 
-/// Drops whitespace-only text between elements unless preservation is in
-/// scope; an element with no element children keeps all of its text.
-fn significant_children(element: &XmlElement, preserve: bool) -> impl Iterator<Item = &XmlNode> {
-    let has_element_children = element.element_children().next().is_some();
+/// Excludes insignificant XML whitespace, including in empty WML containers.
+pub(crate) fn significant_children(
+    element: &XmlElement,
+    preserve: bool,
+) -> impl Iterator<Item = &XmlNode> {
+    let preserve = match element.attribute(XML_NAMESPACE, "space") {
+        Some("preserve") => true,
+        Some("default") => false,
+        _ => preserve,
+    };
+    let has_element_children = element.element_children().next().is_some()
+        || (element.namespace == crate::wml::W
+            && matches!(
+                element.local.as_str(),
+                "pPr"
+                    | "rPr"
+                    | "tblPr"
+                    | "trPr"
+                    | "tcPr"
+                    | "sectPr"
+                    | "tblGrid"
+                    | "p"
+                    | "r"
+                    | "body"
+                    | "document"
+                    | "hdr"
+                    | "ftr"
+            ));
     element.children.iter().filter(move |child| match child {
         XmlNode::Element(_) => true,
         XmlNode::Text(text) => {
-            preserve || !has_element_children || !text.chars().all(char::is_whitespace)
+            preserve || !has_element_children || !text.chars().all(is_xml_whitespace)
         }
     })
 }

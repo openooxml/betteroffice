@@ -63,19 +63,30 @@ fn an_edited_round_trip_loses_nothing_beyond_its_footprint() {
 
 #[test]
 fn the_guard_has_teeth() {
-    let saved = save_unedited(&sample_docx());
-    let broken = with_document_xml(&saved, |xml| {
-        xml.replace(r#"<w:bookmarkStart w:id="1" w:name="mark"/>"#, "")
+    let original = with_document_xml(&sample_docx(), |mut xml| {
+        let start = xml.find("<w:body>").unwrap() + "<w:body>".len();
+        let end = xml.find("</w:body>").unwrap();
+        xml.replace_range(start..end, "<w:p><w:r><w:t>removed</w:t></w:r></w:p>");
+        xml
     });
-    let before = parts_of(&saved);
-    let after = parts_of(&broken);
-    let census_losses = losses(
-        &element_census(&before).unwrap(),
-        &element_census(&after).unwrap(),
+    let saved = save_unedited(&original);
+    let broken = with_document_xml(&saved, |mut xml| {
+        let start = xml.find("<w:p>").or_else(|| xml.find("<w:p ")).unwrap();
+        let end = start + xml[start..].find("</w:p>").unwrap() + "</w:p>".len();
+        xml.replace_range(start..end, "");
+        xml
+    });
+    assert_eq!(
+        roundtrip_report(&parts_of(&saved), &parts_of(&broken)),
+        vec![
+            "fingerprint differs: word/document.xml",
+            "census loss: http://schemas.openxmlformats.org/wordprocessingml/2006/main:p 1 -> 0",
+            "census loss: http://schemas.openxmlformats.org/wordprocessingml/2006/main:r 1 -> 0",
+            "census loss: http://schemas.openxmlformats.org/wordprocessingml/2006/main:t 1 -> 0",
+            "digest: word/document.xml blocks | 1 -> 0",
+            "digest: word/document.xml structure[0] | 0 p -> absent",
+        ]
     );
-    assert_eq!(census_losses.len(), 1);
-    assert_eq!(census_losses[0].local, "bookmarkStart");
-    assert_ne!(digest_diff(&before, &after), vec![]);
 }
 
 #[test]
@@ -167,4 +178,36 @@ fn an_unknown_attribute_on_a_known_element_survives_the_round_trip() {
     });
     let saved = save_unedited(&original);
     assert_eq!(digest_diff(&parts_of(&original), &parts_of(&saved)), vec![]);
+}
+
+#[test]
+fn unmodelled_xml_bytes_survive_without_requiring_oracle_parsing() {
+    let mut utf16 = vec![0xff, 0xfe];
+    for unit in "<?xml version=\"1.0\" encoding=\"UTF-16\"?><data>kept</data>".encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    for bytes in [
+        utf16,
+        b"<!DOCTYPE data><data>kept</data>".to_vec(),
+        b"<data>a&undefined;b</data>".to_vec(),
+    ] {
+        let mut parts = parts_of(&sample_docx());
+        parts
+            .iter_mut()
+            .find(|(name, _)| name == "customXml/item1.xml")
+            .unwrap()
+            .1 = bytes.clone();
+        let original = ooxml_opc::rezip_parts(&parts).unwrap();
+        let saved = save_unedited(&original);
+        let after = parts_of(&saved);
+        assert_eq!(
+            after
+                .iter()
+                .find(|(name, _)| name == "customXml/item1.xml")
+                .unwrap()
+                .1,
+            bytes
+        );
+        assert!(roundtrip_report(&parts, &after).is_empty());
+    }
 }

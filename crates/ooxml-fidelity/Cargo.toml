@@ -12,6 +12,6 @@ description = "Fidelity oracles over package bytes: structural fingerprint, WML 
 name = "ooxml_fidelity"
 
 [dependencies]
-quick-xml = "0.41"
+quick-xml = { version = "0.41", features = ["encoding"] }
 serde_json = "1"
 thiserror = "2"

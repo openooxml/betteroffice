@@ -3,6 +3,10 @@
 //!
 //! Nothing outside this registry may loosen a comparison; an undeclared
 //! serializer deviation is a bug, not a tolerance.
+//!
+//! Property child order is significant, including pPr and rPr. The demo
+//! builder's spacing-before-indentation change corrects its Word schema order;
+//! it does not declare serializer reordering as a normalization.
 
 use crate::error::FidelityError;
 use crate::xml::XmlAttribute;

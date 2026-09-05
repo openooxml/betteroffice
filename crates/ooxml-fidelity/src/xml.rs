@@ -100,6 +100,9 @@ pub fn parse_part(
         let event = reader
             .read_event()
             .map_err(|error| malformed(part, error))?;
+        if !reader.decoder().encoding().is_ascii_compatible() {
+            return Err(malformed(part, "unsupported XML encoding"));
+        }
         events += 1;
         if events > limits.max_events {
             return Err(limit(part, "xmlEvents"));
@@ -126,17 +129,19 @@ pub fn parse_part(
                 append_element(element, &mut stack, &mut roots);
             }
             Event::Text(text) => {
-                let decoded = text.decode().map_err(|error| malformed(part, error))?;
+                let decoded = text
+                    .xml10_content()
+                    .map_err(|error| malformed(part, error))?;
                 let unescaped = quick_xml::escape::unescape(&decoded)
                     .map_err(|error| malformed(part, error))?;
-                append_text(unescaped.into_owned(), &mut stack);
+                append_text(unescaped.into_owned(), &mut stack, part)?;
             }
             Event::CData(text) => {
                 let decoded = text
-                    .decode()
+                    .xml10_content()
                     .map_err(|error| malformed(part, error))?
                     .into_owned();
-                append_text(decoded, &mut stack);
+                append_text(decoded, &mut stack, part)?;
             }
             Event::GeneralRef(reference) => {
                 let decoded = reference.decode().map_err(|error| malformed(part, error))?;
@@ -154,7 +159,7 @@ pub fn parse_part(
                         kind: "non-predefined entity reference",
                     });
                 };
-                append_text(resolved, &mut stack);
+                append_text(resolved, &mut stack, part)?;
             }
             Event::DocType(_) => {
                 return Err(FidelityError::UnsafeXml {
@@ -322,15 +327,24 @@ fn append_element(element: XmlElement, stack: &mut [XmlElement], roots: &mut Vec
     }
 }
 
-fn append_text(text: String, stack: &mut [XmlElement]) {
+fn append_text(text: String, stack: &mut [XmlElement], part: &str) -> Result<(), FidelityError> {
     let Some(parent) = stack.last_mut() else {
-        return;
+        return if text.chars().all(is_xml_whitespace) {
+            Ok(())
+        } else {
+            Err(malformed(part, "text outside the root element"))
+        };
     };
     if let Some(XmlNode::Text(existing)) = parent.children.last_mut() {
         existing.push_str(&text);
-        return;
+        return Ok(());
     }
     parent.children.push(XmlNode::Text(text));
+    Ok(())
+}
+
+pub(crate) fn is_xml_whitespace(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\r' | '\n')
 }
 
 fn malformed(part: &str, error: impl std::fmt::Display) -> FidelityError {

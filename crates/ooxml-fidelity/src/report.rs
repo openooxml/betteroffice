@@ -5,21 +5,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::census::{element_census, losses};
+use crate::census::{Census, count, losses};
 use crate::error::FidelityError;
 use crate::fingerprint::{structural_fingerprint, structural_fingerprint_excluding};
 use crate::registry::{
     COMPANION_PART_NAMES, ComparisonMode, MANAGED_IDENTITY_ATTRIBUTES, comparison_mode,
     is_modelled_xml_part, normalize_root_ignorable,
 };
-use crate::wml::{Difference, diff_digests, semantic_digest};
-use crate::xml::{XmlLimits, parse_part};
+use crate::wml::{Difference, SemanticDigest, diff_digests, digest_part};
+use crate::xml::{XmlElement, XmlLimits, parse_part};
 use crate::{Part, is_xml_part};
 
 /// One line per violated rule; an unedited round trip must report nothing.
 pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>, FidelityError> {
     let mut findings = Vec::new();
-    let allowed_entries = companion_entries(after)?;
     let limits = XmlLimits::default();
     require_exact("non-xml-part-bytes")?;
     require_exact("unmodelled-xml-part-bytes")?;
@@ -27,6 +26,42 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
         .iter()
         .map(|(name, bytes)| (name.as_str(), bytes))
         .collect();
+    let before_bytes: BTreeMap<&str, &Vec<u8>> = before
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes))
+        .collect();
+    let names: BTreeSet<_> = before_bytes
+        .keys()
+        .chain(after_bytes.keys())
+        .copied()
+        .collect();
+    let mut before_roots = BTreeMap::new();
+    let mut after_roots = BTreeMap::new();
+    for name in names {
+        let original = before_bytes.get(name);
+        let saved = after_bytes.get(name);
+        if original == saved || !is_xml_part(name) {
+            continue;
+        }
+        let original = original
+            .map(|bytes| parse_part(bytes, name, &limits))
+            .transpose();
+        let saved = saved
+            .map(|bytes| parse_part(bytes, name, &limits))
+            .transpose();
+        match (original, saved) {
+            (Ok(original), Ok(saved)) => {
+                if let Some(root) = original {
+                    before_roots.insert(name, root);
+                }
+                if let Some(root) = saved {
+                    after_roots.insert(name, root);
+                }
+            }
+            _ => findings.push(format!("unparseable part: {name}")),
+        }
+    }
+    let allowed_entries = companion_entries(&after_roots);
     for (name, bytes) in before {
         match after_bytes.get(name.as_str()) {
             None => findings.push(format!("part dropped: {name}")),
@@ -41,15 +76,20 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
                     findings.push(format!("unmodelled part rewritten: {name}"));
                 }
             }
-            Some(saved) if is_xml_part(name) => {
-                let original = parse_part(bytes, name, &limits)?;
-                let mut reopened = parse_part(saved, name, &limits)?;
+            Some(_) if is_xml_part(name) => {
+                let (Some(original), Some(reopened)) = (
+                    before_roots.get(name.as_str()),
+                    after_roots.get(name.as_str()),
+                ) else {
+                    continue;
+                };
+                let mut reopened = reopened.clone();
                 normalize_root_ignorable(&original.attributes, &mut reopened.attributes);
                 // Identity-stripped equality classifies the difference as the
                 // "paragraph-id-minting" normalization; a lost or changed
                 // identity still surfaces through the digest below.
-                if structural_fingerprint(&original) != structural_fingerprint(&reopened)
-                    && structural_fingerprint_excluding(&original, MANAGED_IDENTITY_ATTRIBUTES)
+                if structural_fingerprint(original) != structural_fingerprint(&reopened)
+                    && structural_fingerprint_excluding(original, MANAGED_IDENTITY_ATTRIBUTES)
                         != structural_fingerprint_excluding(&reopened, MANAGED_IDENTITY_ATTRIBUTES)
                 {
                     findings.push(format!("fingerprint differs: {name}"));
@@ -67,13 +107,26 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
             findings.push(format!("part added: {name}"));
         }
     }
-    for loss in losses(&element_census(before)?, &element_census(after)?) {
+    let census = |roots: &BTreeMap<&str, XmlElement>| {
+        let mut census = Census::new();
+        for root in roots.values() {
+            count(root, &mut census);
+        }
+        census
+    };
+    for loss in losses(&census(&before_roots), &census(&after_roots)) {
         findings.push(format!(
             "census loss: {}:{} {} -> {}",
             loss.namespace, loss.local, loss.before, loss.after
         ));
     }
-    for difference in diff_digests(&semantic_digest(before)?, &semantic_digest(after)?) {
+    let digest = |roots: &BTreeMap<&str, XmlElement>| SemanticDigest {
+        stories: roots
+            .iter()
+            .map(|(name, root)| digest_part(name, root))
+            .collect(),
+    };
+    for difference in diff_digests(&digest(&before_roots), &digest(&after_roots)) {
         if allowed_difference(&difference, &allowed_entries) {
             continue;
         }
@@ -101,13 +154,12 @@ fn is_companion_part(name: &str) -> bool {
     COMPANION_PART_NAMES.contains(&name)
 }
 
-fn companion_entries(parts: &[Part]) -> Result<BTreeSet<(String, String)>, FidelityError> {
+fn companion_entries(roots: &BTreeMap<&str, XmlElement>) -> BTreeSet<(String, String)> {
     let mut allowed = BTreeSet::new();
-    for (part, bytes) in parts {
+    for (&part, root) in roots {
         if part != "[Content_Types].xml" && !part.ends_with(".rels") {
             continue;
         }
-        let root = parse_part(bytes, part, &XmlLimits::default())?;
         for entry in root.element_children() {
             let target = if part == "[Content_Types].xml"
                 && entry.is(
@@ -138,7 +190,7 @@ fn companion_entries(parts: &[Part]) -> Result<BTreeSet<(String, String)>, Fidel
             }
         }
     }
-    Ok(allowed)
+    allowed
 }
 
 fn relationship_target(part: &str, target: &str) -> Option<String> {

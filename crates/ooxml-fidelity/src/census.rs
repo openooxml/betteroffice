@@ -50,7 +50,7 @@ pub fn losses(before: &Census, after: &Census) -> Vec<Loss> {
         .collect()
 }
 
-fn count(element: &XmlElement, census: &mut Census) {
+pub(crate) fn count(element: &XmlElement, census: &mut Census) {
     *census
         .entry((element.namespace.clone(), element.local.clone()))
         .or_insert(0) += 1;

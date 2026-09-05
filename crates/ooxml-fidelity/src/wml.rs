@@ -222,7 +222,7 @@ struct StoryState {
     structure: Vec<String>,
 }
 
-fn digest_part(part: &str, root: &XmlElement) -> StoryDigest {
+pub(crate) fn digest_part(part: &str, root: &XmlElement) -> StoryDigest {
     let mut state = StoryState {
         blocks: Vec::new(),
         structure: Vec::new(),
@@ -263,7 +263,7 @@ fn collect_blocks(container: &XmlElement, path: &str, state: &mut StoryState, de
     for child in &container.children {
         match child {
             XmlNode::Text(text) => {
-                if !text.chars().all(char::is_whitespace) {
+                if !text.chars().all(crate::xml::is_xml_whitespace) {
                     state.structure.push(format!("{path}/#text {text}"));
                 }
             }
@@ -339,7 +339,10 @@ fn inline_walk(
             } else {
                 inline_walk(element, record, path, state, depth + 1);
             }
-        } else if element.children.is_empty() {
+        } else if crate::fingerprint::significant_children(element, false)
+            .next()
+            .is_none()
+        {
             record.generic_structure.push(element_token(element));
         } else {
             record.generic_structure.push(subtree_token(element));
@@ -392,7 +395,10 @@ fn digest_run(
                 _ => {}
             }
         }
-        if element.children.is_empty() {
+        if crate::fingerprint::significant_children(element, false)
+            .next()
+            .is_none()
+        {
             record.generic_structure.push(element_token(element));
         } else {
             record.generic_structure.push(subtree_token(element));
@@ -446,7 +452,7 @@ fn property_tokens(properties: &XmlElement, depth: usize) -> Vec<String> {
         .filter_map(|child| match child {
             XmlNode::Element(element) => Some(property_token(element, depth)),
             XmlNode::Text(text) => {
-                (!text.chars().all(char::is_whitespace)).then(|| format!("#{text}"))
+                (!text.chars().all(crate::xml::is_xml_whitespace)).then(|| format!("#{text}"))
             }
         })
         .collect();
@@ -456,7 +462,11 @@ fn property_tokens(properties: &XmlElement, depth: usize) -> Vec<String> {
 
 fn property_token(element: &XmlElement, depth: usize) -> String {
     let head = element_token(element);
-    if depth >= MAX_DEPTH || element.children.is_empty() {
+    if depth >= MAX_DEPTH
+        || crate::fingerprint::significant_children(element, false)
+            .next()
+            .is_none()
+    {
         return head;
     }
     let nested = property_tokens(element, depth + 1);

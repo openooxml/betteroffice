@@ -3,14 +3,17 @@ use ooxml_fidelity::{Part, roundtrip_findings};
 const RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 
-fn rels(target: &str) -> Vec<Part> {
-    vec![("word/_rels/document.xml.rels".to_owned(), format!(r#"<Relationships xmlns="{RELS}"><Relationship Id="rId5" Type="hyperlink" TargetMode="External" Target="{target}"/></Relationships>"#).into_bytes())]
+fn rels(target: &str, mode: &str) -> Vec<Part> {
+    vec![("word/_rels/document.xml.rels".to_owned(), format!(r#"<Relationships xmlns="{RELS}"><Relationship Id="rId5" Type="hyperlink" TargetMode="{mode}" Target="{target}"/></Relationships>"#).into_bytes())]
 }
 
 #[test]
 fn retargeting_a_companion_relationship_is_a_finding() {
-    let findings =
-        roundtrip_findings(&rels("commentsIds.xml"), &rels("commentsIds-other.xml")).unwrap();
+    let findings = roundtrip_findings(
+        &rels("commentsIds.xml", "Internal"),
+        &rels("commentsIds-other.xml", "Internal"),
+    )
+    .unwrap();
     assert_eq!(findings.len(), 2, "{findings:?}");
     assert!(
         findings
@@ -22,8 +25,8 @@ fn retargeting_a_companion_relationship_is_a_finding() {
 #[test]
 fn companion_words_in_hyperlinks_do_not_allow_changes() {
     let findings = roundtrip_findings(
-        &rels("https://example.org/commentsExtended"),
-        &rels("https://example.org/commentsIds"),
+        &rels("https://example.org/commentsExtended", "External"),
+        &rels("https://example.org/commentsIds", "External"),
     )
     .unwrap();
     assert_eq!(findings.len(), 2, "{findings:?}");
