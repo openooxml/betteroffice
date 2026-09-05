@@ -62,9 +62,7 @@ pub(crate) fn chart_primitive(
     })
 }
 
-/// The shared geometry reads `c:dLbls` itself. A part that only carries the
-/// legacy `show_data_labels` flag — one with no switches of its own — still
-/// gets the values Excel would default to.
+/// Supplies value labels only for legacy charts without `c:dLbls`.
 fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
     let mut chart = PlotChart::from(space);
     for (group, plotted) in space.plot_groups.iter().zip(chart.plot_groups.iter_mut()) {
@@ -72,9 +70,6 @@ fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
             continue;
         }
         for (model, series) in group.series.iter().zip(plotted.series.iter_mut()) {
-            // Once a c:dLbls exists anywhere on the cascade the shared geometry has already
-            // resolved it, including when it resolves to showing nothing. Only a part that
-            // declared no switches at all gets Excel's default filled in.
             if model.data_labels.is_some() || group.data_labels.is_some() {
                 continue;
             }
@@ -355,8 +350,6 @@ mod tests {
             show_bubble_size: Some(false),
             ..ChartDataLabels::default()
         };
-        // The legacy flag says "labels on", but the part then declared every switch off. The
-        // cascade has already resolved that to "show nothing" and must not be overruled.
         let mut declared = group("bar", vec![series("Series 1", &[4.0, 2.0, 3.0], "#4472C4")]);
         declared.show_data_labels = true;
         declared.data_labels = Some(all_off);
@@ -369,7 +362,6 @@ mod tests {
             "a declared c:dLbls that shows nothing must stay showing nothing"
         );
 
-        // A part carrying only the legacy flag still gets Excel's default.
         let mut legacy = group("bar", vec![series("Series 1", &[4.0, 2.0, 3.0], "#4472C4")]);
         legacy.show_data_labels = true;
         let legacy_space = space("bar", vec![legacy]);
