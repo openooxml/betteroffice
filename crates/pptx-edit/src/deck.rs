@@ -21,9 +21,10 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 8.0;
+const SCHEMA_VERSION: f64 = 9.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 9] =
+    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -722,6 +723,142 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
+pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
+    let mut package = package_from_doc(doc)?;
+    let sources = source
+        .slides
+        .iter()
+        .map(|part| (&part.part_path, &part.shapes))
+        .chain(
+            source
+                .layouts
+                .iter()
+                .map(|part| (&part.part_path, &part.shapes)),
+        )
+        .chain(
+            source
+                .masters
+                .iter()
+                .map(|part| (&part.part_path, &part.shapes)),
+        )
+        .collect::<HashMap<_, _>>();
+    let mut changed = false;
+    for (path, shapes) in package
+        .slides
+        .iter_mut()
+        .map(|part| (&part.part_path, &mut part.shapes))
+        .chain(
+            package
+                .layouts
+                .iter_mut()
+                .map(|part| (&part.part_path, &mut part.shapes)),
+        )
+        .chain(
+            package
+                .masters
+                .iter_mut()
+                .map(|part| (&part.part_path, &mut part.shapes)),
+        )
+    {
+        if let Some(source) = sources.get(path) {
+            changed |= merge_source_list_shapes(shapes, source);
+        }
+    }
+    for master in &mut package.masters {
+        if let Some(source) = source
+            .masters
+            .iter()
+            .find(|source| source.part_path == master.part_path)
+        {
+            let target = &mut master.text_styles;
+            let source = &source.text_styles;
+            for (target, source) in target
+                .title
+                .iter_mut()
+                .zip(&source.title)
+                .chain(target.body.iter_mut().zip(&source.body))
+                .chain(target.other.iter_mut().zip(&source.other))
+            {
+                changed |= merge_source_bullet_properties(target, source);
+            }
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
+    Ok(())
+}
+
+fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
+    let mut changed = false;
+    for source in source {
+        let Some(target) = target
+            .iter_mut()
+            .find(|target| shape_base(target).id == shape_base(source).id)
+        else {
+            continue;
+        };
+        match (target, source) {
+            (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
+                if let (Some(target), Some(source)) = (&mut target.text, &source.text) {
+                    changed |= merge_source_list_body(target, source);
+                }
+            }
+            (ShapeNode::Group(target), ShapeNode::Group(source)) => {
+                changed |= merge_source_list_shapes(&mut target.children, &source.children);
+            }
+            (ShapeNode::GraphicFrame(target), ShapeNode::GraphicFrame(source)) => {
+                if let (
+                    pptx_parse::GraphicFrameData::Table { rows: target },
+                    pptx_parse::GraphicFrameData::Table { rows: source },
+                ) = (&mut target.data, &source.data)
+                {
+                    for (target, source) in target.iter_mut().zip(source) {
+                        for (target, source) in target.iter_mut().zip(source) {
+                            changed |= merge_source_list_body(target, source);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    changed
+}
+
+fn merge_source_list_body(
+    target: &mut pptx_parse::TextBody,
+    source: &pptx_parse::TextBody,
+) -> bool {
+    let mut changed = target.list_style != source.list_style
+        || target.default_list_style != source.default_list_style;
+    target.list_style.clone_from(&source.list_style);
+    target
+        .default_list_style
+        .clone_from(&source.default_list_style);
+    for (target, source) in target.paragraphs.iter_mut().zip(&source.paragraphs) {
+        changed |= merge_source_bullet_properties(&mut target.properties, &source.properties);
+    }
+    changed
+}
+
+fn merge_source_bullet_properties(
+    target: &mut pptx_parse::ParagraphProperties,
+    source: &pptx_parse::ParagraphProperties,
+) -> bool {
+    let changed = target.bullet_font != source.bullet_font
+        || target.bullet_color != source.bullet_color
+        || target.bullet_size != source.bullet_size;
+    target.bullet_font.clone_from(&source.bullet_font);
+    target.bullet_color.clone_from(&source.bullet_color);
+    target.bullet_size.clone_from(&source.bullet_size);
+    changed
+}
+
 pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -753,6 +890,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 8.0 {
         migrate_doc_to_v8(doc)?;
+    }
+    if version < 9.0 {
+        migrate_doc_to_v9(doc)?;
     }
     Ok(())
 }
@@ -859,7 +999,7 @@ fn migrate_doc_to_v8(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     let package = package_from_meta(&meta, &txn)?;
-    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    meta.insert(&mut txn, "schemaVersion", 8.0);
     if !meta.contains_key(&txn, "commentFlavor") {
         if !package.comments.is_empty()
             || package
@@ -879,6 +1019,22 @@ fn migrate_doc_to_v8(doc: &Doc) -> EditResult<()> {
             flavor_key(package.comment_flavor.unwrap_or_default()),
         );
     }
+    Ok(())
+}
+
+/// Persists list styles in schema 9.
+fn migrate_doc_to_v9(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", 9.0);
     Ok(())
 }
 
@@ -1432,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8() {
+    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8_then_v9() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1442,9 +1598,9 @@ mod tests {
         const V3: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
         for (update, expected_versions) in [
-            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0]),
+            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1514,9 +1670,9 @@ mod tests {
             include_bytes!("../tests/fixtures/deck-schema-v4-slide-number-fields.update.bin");
 
         for (update, oracle, versions, first_slide_num) in [
-            (V2, V4_LEGACY, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 1),
-            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0], 1),
-            (V4_NUMBERED, V4_NUMBERED, vec![5.0, 6.0, 7.0, 8.0], 10),
+            (V2, V4_LEGACY, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 1),
+            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0, 9.0], 1),
+            (V4_NUMBERED, V4_NUMBERED, vec![5.0, 6.0, 7.0, 8.0, 9.0], 10),
         ] {
             let doc = crate::doc_with_client_id(9340);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1578,9 +1734,9 @@ mod tests {
         const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
         const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
         for (update, versions) in [
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
-            (V5, vec![6.0, 7.0, 8.0]),
-            (V6, vec![7.0, 8.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            (V5, vec![6.0, 7.0, 8.0, 9.0]),
+            (V6, vec![7.0, 8.0, 9.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -1784,7 +1940,7 @@ mod tests {
     }
 
     #[test]
-    fn a_current_main_v7_snapshot_commits_only_v8_with_a_pending_comment_import() {
+    fn a_main_v7_snapshot_migrates_comments_before_list_styles() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1818,7 +1974,10 @@ mod tests {
         let events = observed.lock().unwrap();
         assert_eq!(
             *events,
-            [(8.0, before, Some("legacy".to_owned()), Some(true))]
+            [
+                (8.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (9.0, before, Some("legacy".to_owned()), Some(true))
+            ]
         );
     }
 }
