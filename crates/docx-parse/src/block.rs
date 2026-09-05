@@ -115,8 +115,6 @@ impl StoryParser<'_, '_> {
                 "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
             );
             if !recognized {
-                // Foreign block markup survives as an authored raw node;
-                // dropping an element the parser never read is a loss.
                 if let Some(crate::inline::InlineNode::RawXml(raw)) =
                     crate::inline::raw_foreign_inline(child)
                 {

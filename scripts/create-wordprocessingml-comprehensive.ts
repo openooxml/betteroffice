@@ -1,14 +1,4 @@
-/**
- * Generate the corpus comprehensive document.
- *
- * One deterministic DOCX exercising, in numbered sections that tests cite:
- * §1 character formatting, §2 paragraph formatting, §3 lists, §4 tables,
- * §5 sections and columns, §6 drawings and text boxes, §7 notes, §8 fields
- * and links, §9 tracked changes, §10 comments, §11 content controls,
- * §12 math, §13 RTL and CJK, §14 unknown markup.
- *
- * Run: bun scripts/create-wordprocessingml-comprehensive.ts [output.docx]
- */
+/** Generate the corpus fixture: bun scripts/create-wordprocessingml-comprehensive.ts [output.docx]. */
 
 import JSZip from 'jszip';
 import * as fs from 'node:fs';
@@ -87,10 +77,6 @@ const HEADER3_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 const FOOTER1_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:ftr ${NS_W}><w:p><w:pPr><w:spacing w:after="0"/><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>1</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>4</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:ftr>`;
 
-// ---------------------------------------------------------------------------
-// Document body, one numbered section at a time
-// ---------------------------------------------------------------------------
-
 function heading(text: string, bookmark?: { id: number; name: string }): string {
   const open = bookmark ? `<w:bookmarkStart w:id="${bookmark.id}" w:name="${bookmark.name}"/>` : '';
   const close = bookmark ? `<w:bookmarkEnd w:id="${bookmark.id}"/>` : '';
@@ -135,14 +121,12 @@ const S4 = `${heading('4. Tables')}
 <w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:left w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:bottom w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:right w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="999999"/><w:insideV w:val="single" w:sz="4" w:space="0" w:color="999999"/></w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>Outer cell with a nested table:</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders><w:top w:val="dashed" w:sz="4" w:space="0" w:color="C00000"/><w:left w:val="dashed" w:sz="4" w:space="0" w:color="C00000"/><w:bottom w:val="dashed" w:sz="4" w:space="0" w:color="C00000"/><w:right w:val="dashed" w:sz="4" w:space="0" w:color="C00000"/><w:insideH w:val="dashed" w:sz="4" w:space="0" w:color="C00000"/><w:insideV w:val="dashed" w:sz="4" w:space="0" w:color="C00000"/></w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2160"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2160" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>inner 1</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="2160" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>inner 2</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/><w:tcMar><w:top w:w="216" w:type="dxa"/><w:left w:w="216" w:type="dxa"/><w:bottom w:w="216" w:type="dxa"/><w:right w:w="216" w:type="dxa"/></w:tcMar></w:tcPr><w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>Cell with wide custom margins.</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
 <w:p><w:pPr><w:spacing w:after="0"/></w:pPr></w:p>`;
 
-// Section break: everything above is section one (portrait, all header kinds).
 const SECT_BREAK_1 = `<w:p><w:pPr><w:sectPr><w:headerReference w:type="even" r:id="rIdHeader3"/><w:headerReference w:type="default" r:id="rIdHeader1"/><w:headerReference w:type="first" r:id="rIdHeader2"/><w:footerReference w:type="default" r:id="rIdFooter1"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:pgNumType w:start="1"/><w:cols w:space="708"/><w:titlePg/></w:sectPr></w:pPr></w:p>`;
 
 const S5 = `${heading('5. Sections and columns')}
 <w:p><w:r><w:t>This section is landscape with two columns. The text fills the first column and then continues into the second column after an explicit column break, which is the deterministic way to prove column flow without depending on measurement.</w:t></w:r></w:p>
 <w:p><w:r><w:t>Still the first column.</w:t></w:r><w:r><w:br w:type="column"/></w:r><w:r><w:t>This text starts the second column.</w:t></w:r></w:p>`;
 
-// Section two: landscape, two columns.
 const SECT_BREAK_2 = `<w:p><w:pPr><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/><w:cols w:num="2" w:space="708"/></w:sectPr></w:pPr></w:p>`;
 
 const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
