@@ -3,6 +3,7 @@
   "toolbar": {
     "label": null,
     "save": "Salvar",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,

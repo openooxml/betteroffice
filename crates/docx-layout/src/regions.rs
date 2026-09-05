@@ -348,10 +348,35 @@ fn twips_to_pixels(twips: f64) -> f64 {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageNumbering {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_page_start"
+    )]
     pub start: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+}
+
+fn deserialize_page_start<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let value = Option::<serde_json::Number>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            value
+                .as_u64()
+                .or_else(|| {
+                    value.as_f64().and_then(|value| {
+                        (value >= 0.0 && value < u64::MAX as f64 && value.fract() == 0.0)
+                            .then_some(value as u64)
+                    })
+                })
+                .ok_or_else(|| {
+                    serde::de::Error::custom("page numbering start must be a nonnegative integer")
+                })
+        })
+        .transpose()
 }
 
 #[derive(Debug, Deserialize)]
@@ -647,6 +672,27 @@ fn ordinal(number: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_numbering_accepts_integral_native_json_numbers() {
+        for source in [r#"{"start":1.0}"#, r#"{"start":1}"#] {
+            let numbering: super::PageNumbering = serde_json::from_str(source).unwrap();
+            assert_eq!(numbering.start, Some(1));
+        }
+        for source in [
+            r#"{"start":1.5}"#,
+            r#"{"start":-1}"#,
+            r#"{"start":18446744073709551616.0}"#,
+        ] {
+            assert!(serde_json::from_str::<super::PageNumbering>(source).is_err());
+        }
+        assert_eq!(
+            serde_json::from_str::<super::PageNumbering>(r#"{"start":null}"#)
+                .unwrap()
+                .start,
+            None
+        );
+    }
+
     use serde_json::json;
 
     use super::*;

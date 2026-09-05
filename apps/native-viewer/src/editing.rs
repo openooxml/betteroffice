@@ -1861,6 +1861,7 @@ impl SaveProjection {
             content: self.package.document.content.clone(),
             sections: None,
             final_section_properties: self.package.document.final_section_properties.clone(),
+            custom_root_bindings: self.package.document.custom_root_bindings.clone(),
             comments: self.package.document.comments.clone(),
         };
         let request = S13SaveRequest {
@@ -2027,6 +2028,7 @@ fn paragraph_projection_risks(paragraph: &Paragraph) -> Vec<&'static str> {
             ParagraphContent::Inline(InlineNode::SimpleField(_))
             | ParagraphContent::Inline(InlineNode::ComplexField(_)) => risks.push("fields"),
             ParagraphContent::Inline(InlineNode::Math(_)) => risks.push("math"),
+            ParagraphContent::Inline(InlineNode::RawXml(_)) => risks.push("foreign markup"),
             ParagraphContent::Tracked(_)
             | ParagraphContent::RangeStart(_)
             | ParagraphContent::RangeEnd(_) => risks.push("revision marks"),
@@ -2689,6 +2691,18 @@ mod tests {
             r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{paragraphs}</w:body></w:document>"#
         );
         ooxml_opc::rezip_parts(&[("word/document.xml".to_owned(), document.into_bytes())]).unwrap()
+    }
+
+    #[test]
+    fn foreign_inline_markup_requires_lossless_projection() {
+        let paragraph: Paragraph = serde_json::from_value(serde_json::json!({
+            "type": "paragraph", "content": [{"type":"rawXml","xml":"<x:marker/>"}]
+        }))
+        .unwrap();
+        assert_eq!(
+            paragraph_projection_risks(&paragraph),
+            vec!["foreign markup"]
+        );
     }
 
     #[test]
