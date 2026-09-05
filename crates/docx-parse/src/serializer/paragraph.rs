@@ -3,8 +3,8 @@
 use crate::borders::Borders;
 use crate::formatting::{NumberingProperties, ParagraphFormatting, ParagraphFrame};
 use crate::inline::{
-    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation,
-    SdtProperties, SimpleField,
+    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
+    RunContent, SdtProperties, SimpleField,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -69,9 +69,34 @@ fn serialize_paragraph_inner(
         paragraph.section_properties.as_ref(),
     )?;
     append_generated(&mut writer, &properties);
+    let mut generated_comment_references = Vec::new();
     for content in &paragraph.content {
-        let content = serialize_paragraph_content(content, context)?;
-        append_generated(&mut writer, &content);
+        append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
+        if let ParagraphContent::CommentRange(marker) = content
+            && marker.node_type == "commentRangeEnd"
+            && !generated_comment_references.contains(&marker.id)
+            && !paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
+                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
+                    matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_))
+                        && has_comment_reference(node, marker.id)
+                }),
+                _ => false,
+            })
+        {
+            writer
+                .start_element("w:r")
+                .start_element("w:rPr")
+                .start_element("w:rStyle")
+                .attribute("w:val", "CommentReference")
+                .end_element()
+                .end_element()
+                .start_element("w:commentReference")
+                .attribute("w:id", &js_number(marker.id))
+                .end_element()
+                .end_element();
+            generated_comment_references.push(marker.id);
+        }
     }
     writer.end_element();
     Ok(writer.finish())
@@ -550,6 +575,51 @@ fn serialize_range_end(marker: &RangeEnd) -> Result<String, ParseError> {
     Ok(writer.finish())
 }
 
+fn run_has_comment_reference(run: &Run, id: f64) -> bool {
+    run.content.iter().any(
+        |content| matches!(content, RunContent::CommentReference { id: reference } if *reference == Some(id)),
+    )
+}
+
+fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
+    match node {
+        InlineNode::Run(run) => run_has_comment_reference(run, id),
+        InlineNode::Hyperlink(hyperlink) => hyperlink
+            .children
+            .iter()
+            .any(|node| matches!(node, InlineNode::Run(run) if run_has_comment_reference(run, id))),
+        InlineNode::InlineSdt(sdt) => sdt
+            .content
+            .iter()
+            .any(|node| has_comment_reference(node, id)),
+        InlineNode::SimpleField(field) => field
+            .content
+            .iter()
+            .any(|run| run_has_comment_reference(run, id)),
+        InlineNode::ComplexField(field) => {
+            field
+                .field_code
+                .iter()
+                .any(|run| run_has_comment_reference(run, id))
+                || field
+                    .structured_result
+                    .as_ref()
+                    .filter(|content| content.blocks.is_none())
+                    .and_then(|content| content.inline.as_ref())
+                    .map_or_else(
+                        || {
+                            field
+                                .field_result
+                                .iter()
+                                .any(|run| run_has_comment_reference(run, id))
+                        },
+                        |nodes| nodes.iter().any(|node| has_comment_reference(node, id)),
+                    )
+        }
+        _ => false,
+    }
+}
+
 fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(180);
     match marker.node_type.as_str() {
@@ -559,9 +629,6 @@ fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> 
                 .attribute("w:id", &js_number(marker.id))
                 .end_element();
         }
-        // The reference run beside the range end serializes itself; a
-        // synthesized copy here would add a run every save and never let the
-        // package reach a fixed point.
         "commentRangeEnd" => {
             writer
                 .start_element("w:commentRangeEnd")
