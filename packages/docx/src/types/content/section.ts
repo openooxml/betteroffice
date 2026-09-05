@@ -9,6 +9,7 @@ import type { ColorValue, ThemeColorSlot, BorderSpec } from '../colors';
 import type { Paragraph } from './paragraph';
 import type { Table } from './table';
 import type { BlockSdt } from './sdt';
+import type { RawXml } from './rawXml';
 import type {
   HeaderFooter,
   HeaderFooterType,
@@ -203,7 +204,7 @@ export interface SectionProperties {
 /**
  * Block-level content types
  */
-export type BlockContent = Paragraph | Table | BlockSdt;
+export type BlockContent = Paragraph | Table | BlockSdt | RawXml;
 
 /**
  * One section of the document — a `SectionProperties` plus the block

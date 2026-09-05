@@ -3,6 +3,6 @@ export interface RawXml {
   xml: string;
 }
 
-export function isRawXml(value: { type: string }): boolean {
+export function isRawXml(value: { type: string }): value is RawXml {
   return value.type === 'rawXml';
 }
