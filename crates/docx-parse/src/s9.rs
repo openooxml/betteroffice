@@ -83,6 +83,8 @@ pub struct S9DocumentBodyWire {
     pub sections: Option<Vec<S9SectionWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_section_properties: Option<crate::section::SectionProperties>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comments: Option<Vec<crate::comments::Comment>>,
 }
@@ -134,6 +136,7 @@ impl From<DocumentBody> for S9DocumentBodyWire {
             content: body.content,
             sections,
             final_section_properties: body.final_section_properties,
+            custom_root_bindings: body.custom_root_bindings,
             comments: body.comments,
         }
     }
@@ -516,6 +519,7 @@ fn dedupe_blocks(
                 }
             }
             BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut sdt.content, seen, ids),
+            BlockContent::RawXml(_) => {}
         }
     }
 }

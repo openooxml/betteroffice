@@ -3,6 +3,7 @@
   "toolbar": {
     "label": null,
     "save": "Kaydet",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,
