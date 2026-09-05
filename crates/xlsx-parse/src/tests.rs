@@ -101,6 +101,22 @@ fn parses_shared_string_number_formula_bool_error() {
 }
 
 #[test]
+fn parses_absolute_and_relative_concatenation() {
+    for formula in [
+        r#"$B$6&"A"&$B$4&"B"&$D$2"#,
+        r#"B6&"A"&B4&"B"&D2"#,
+        r#"$B6&"A"&B$4&"B"&D2"#,
+    ] {
+        let body = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="str"><f>{}</f><v/></c></row></sheetData>"#,
+            formula.replace('&', "&amp;")
+        );
+        let wb = parse_workbook(&package(&body, &[], false)).unwrap();
+        assert_eq!(cell_at(&wb, "A1").formula.as_deref(), Some(formula));
+    }
+}
+
+#[test]
 fn parses_inline_string() {
     let body = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>inline &lt;here&gt;</t></is></c></row></sheetData>"#;
     let wb = parse_workbook(&package(body, &[], false)).unwrap();
