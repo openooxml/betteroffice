@@ -42,7 +42,6 @@ fn the_corpus_is_pinned_by_the_manifest() {
     }
     for file in std::fs::read_dir(corpus_dir().join("fixtures")).unwrap() {
         let name = file.unwrap().file_name().to_string_lossy().to_string();
-        // Word writes a `~$` owner file beside any fixture opened in it.
         if name.starts_with("~$") {
             continue;
         }
@@ -86,26 +85,50 @@ fn every_fixture_round_trips_within_its_pinned_findings() {
         }
         let expected = std::fs::read_to_string(&expected_path).unwrap_or_default();
         if actual != expected {
-            let expected_count = expected.lines().count();
-            failures.push(format!(
-                "{file}: {} finding(s) but {} pinned; first divergence:\n  pinned: {}\n  actual: {}\n\
-                 regenerate deliberately with GOLDEN_UPDATE=1 and review the diff",
-                findings.len(),
-                expected_count,
-                expected
-                    .lines()
-                    .zip(actual.lines().chain(std::iter::repeat("absent")))
-                    .find(|(e, a)| e != a)
-                    .map(|(e, _)| e)
-                    .unwrap_or("absent"),
-                actual
-                    .lines()
-                    .zip(expected.lines().chain(std::iter::repeat("absent")))
-                    .find(|(a, e)| a != e)
-                    .map(|(a, _)| a)
-                    .unwrap_or("absent"),
-            ));
+            failures.push(finding_mismatch(file, &expected, &actual));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+fn finding_mismatch(file: &str, expected: &str, actual: &str) -> String {
+    fn lines(findings: &str) -> String {
+        let mut lines: Vec<_> = findings.lines().collect();
+        lines.sort_by_key(|line| {
+            if line.starts_with("census loss:") {
+                0
+            } else if line.starts_with("digest:") {
+                1
+            } else {
+                2
+            }
+        });
+        if lines.is_empty() {
+            return "    absent".to_owned();
+        }
+        lines
+            .into_iter()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    format!(
+        "{file}: {} finding(s) but {} pinned;\n  pinned:\n{}\n  actual:\n{}\nregenerate deliberately with GOLDEN_UPDATE=1 and review the diff",
+        actual.lines().count(),
+        expected.lines().count(),
+        lines(expected),
+        lines(actual)
+    )
+}
+
+#[test]
+fn a_mismatch_displays_every_finding_with_census_and_digest_first() {
+    assert_eq!(
+        finding_mismatch(
+            "sample.docx",
+            "",
+            "fingerprint differs: word/document.xml\ncensus loss: p 2 -> 1\ndigest: word/document.xml blocks | 2 -> 1\n"
+        ),
+        "sample.docx: 3 finding(s) but 0 pinned;\n  pinned:\n    absent\n  actual:\n    census loss: p 2 -> 1\n    digest: word/document.xml blocks | 2 -> 1\n    fingerprint differs: word/document.xml\nregenerate deliberately with GOLDEN_UPDATE=1 and review the diff"
+    );
 }
