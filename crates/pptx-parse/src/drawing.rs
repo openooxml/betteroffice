@@ -907,6 +907,11 @@ pub(crate) fn parse_text_body(
         inset_top: numeric_attribute(body_properties, "tIns"),
         inset_right: numeric_attribute(body_properties, "rIns"),
         inset_bottom: numeric_attribute(body_properties, "bIns"),
+        list_style: parse_style_levels(element.child("lstStyle")),
+        default_list_style: element
+            .child("lstStyle")
+            .and_then(|style| style.child("defPPr"))
+            .map(|properties| Box::new(parse_paragraph_properties(Some(properties)))),
         paragraphs,
     })
 }
@@ -997,6 +1002,33 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
         margin_left: numeric_attribute(Some(element), "marL"),
         indent: numeric_attribute(Some(element), "indent"),
         bullet,
+        bullet_font: if element.child("buFontTx").is_some() {
+            Some(BulletFont::FollowText)
+        } else {
+            element
+                .child("buFont")
+                .and_then(|font| font.attribute("typeface"))
+                .map(|font| BulletFont::Typeface(font.to_owned()))
+        },
+        bullet_color: if element.child("buClrTx").is_some() {
+            Some(BulletColor::FollowText)
+        } else {
+            element
+                .child("buClr")
+                .and_then(parse_color_container)
+                .map(BulletColor::Color)
+        },
+        bullet_size: if element.child("buSzTx").is_some() {
+            Some(BulletSize::FollowText)
+        } else if let Some(size) = element.child("buSzPct") {
+            percentage_attribute(size, "val")
+                .filter(|size| (0.25..=4.0).contains(size))
+                .map(BulletSize::Percent)
+        } else {
+            numeric_attribute(element.child("buSzPts"), "val")
+                .filter(|size| (100..=400_000).contains(size))
+                .map(|size| BulletSize::Points(size as f64 / 100.0))
+        },
         default_run: element
             .child("defRPr")
             .map(|value| parse_run_properties(Some(value))),
@@ -1359,6 +1391,118 @@ mod tests {
                 .font_size_pt,
             Some(24.0)
         );
+    }
+
+    #[test]
+    fn reads_a_shape_list_style_into_its_text_body() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr marL="342900" indent="-342900"><a:buChar char="&#8226;"/><a:defRPr sz="6600" b="1"/></a:lvl1pPr><a:lvl3pPr><a:buChar char="&#8211;"/></a:lvl3pPr></a:lstStyle><a:p><a:r><a:rPr lang="en"/><a:t>Item</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let body = shape.text.as_ref().expect("text body");
+        assert_eq!(body.list_style.len(), 9);
+        let level1 = &body.list_style[0];
+        assert_eq!(level1.margin_left, Some(342_900));
+        assert_eq!(level1.indent, Some(-342_900));
+        assert_eq!(
+            level1.bullet,
+            Some(Bullet::Character {
+                value: "\u{2022}".to_owned()
+            })
+        );
+        assert_eq!(
+            level1.default_run.as_ref().and_then(|run| run.font_size_pt),
+            Some(66.0)
+        );
+        assert_eq!(body.list_style[1].bullet, None);
+        assert_eq!(
+            body.list_style[2].bullet,
+            Some(Bullet::Character {
+                value: "\u{2013}".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_body_without_a_list_style_carries_none() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="3" name="Plain"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en"/><a:t>Hi</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let body = shape.text.as_ref().unwrap();
+        assert!(body.list_style.is_empty());
+        let json = serde_json::to_value(body).unwrap();
+        assert!(json.get("listStyle").is_none());
+        assert!(json.get("defaultListStyle").is_none());
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), *body);
+    }
+
+    #[test]
+    fn reads_default_list_properties_and_bullet_overrides() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:lstStyle><a:defPPr><a:buFont typeface="Arial"/><a:buClr><a:srgbClr val="D02020"/></a:buClr><a:buSzPct val="50000"/><a:defRPr sz="2400"/></a:defPPr><a:lvl1pPr><a:buSzPts val="1200"/></a:lvl1pPr><a:lvl2pPr><a:buFontTx/><a:buClrTx/><a:buSzTx/></a:lvl2pPr></a:lstStyle><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        ).unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        let defaults = body.default_list_style.as_ref().unwrap();
+        assert_eq!(
+            defaults.default_run.as_ref().unwrap().font_size_pt,
+            Some(24.0)
+        );
+        assert_eq!(
+            defaults.bullet_font,
+            Some(BulletFont::Typeface("Arial".to_owned()))
+        );
+        let Some(BulletColor::Color(color)) = &defaults.bullet_color else {
+            panic!("bullet color")
+        };
+        assert_eq!(color.rgb.as_deref(), Some("D02020"));
+        assert_eq!(defaults.bullet_size, Some(BulletSize::Percent(0.5)));
+        assert_eq!(
+            body.list_style[0].bullet_size,
+            Some(BulletSize::Points(12.0))
+        );
+        assert_eq!(body.list_style[1].bullet_size, Some(BulletSize::FollowText));
+        assert_eq!(body.list_style[1].bullet_font, Some(BulletFont::FollowText));
+        assert_eq!(
+            body.list_style[1].bullet_color,
+            Some(BulletColor::FollowText)
+        );
+        let json = serde_json::to_string(&body).unwrap();
+        assert_eq!(serde_json::from_str::<TextBody>(&json).unwrap(), body);
     }
 
     #[test]
