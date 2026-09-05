@@ -46,6 +46,7 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-pptx-parse](https://crates.io/crates/betteroffice-pptx-parse): PresentationML parsing and part-preserving package writes.
 - [betteroffice-pptx-edit](https://crates.io/crates/betteroffice-pptx-edit): the Yrs deck model for PPTX.
 - [betteroffice-pptx-render](https://crates.io/crates/betteroffice-pptx-render): slide layout and the PPTX display-list compiler.
+- [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): the tiny-skia backend that paints a PPTX display list to PNG.
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all three formats.
 
@@ -55,7 +56,7 @@ Published to PyPI, Apache-2.0. The Rust engine is compiled into each wheel — n
 
 - [betteroffice-docx](https://pypi.org/project/betteroffice-docx/): `pip install betteroffice-docx`. Read paragraphs, tables, and sections, rewrite the text of a plain single-run paragraph, and save back to DOCX with everything the model does not represent reused from the package it opened. It also paginates an already-measured projection of the document and rasterizes one page of the resulting display list; no font is compiled into the wheel, so a family you never registered is an error rather than invisible text.
 - [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): `pip install betteroffice-xlsx`. Open, recalculate, style, render to PNG, and save XLSX workbooks; formulas are evaluated by this engine rather than read back from the file. Yrs collaboration and agent proposals are exposed as byte-level primitives, and opening, recalculating, rendering, and saving release the GIL.
-- [betteroffice-pptx](https://pypi.org/project/betteroffice-pptx/): `pip install betteroffice-pptx`. Read, edit, and save PPTX decks, and lay slides out into the display-list contract the canvas paints; no rasterizer yet, so it returns a scene description rather than pixels. No font ships in the wheel, so `register_font` must supply at least one face before a slide with text lays out. Yrs collaboration is exposed as byte-level primitives, and a deck is pinned to the thread that opened it.
+- [betteroffice-pptx](https://pypi.org/project/betteroffice-pptx/): `pip install betteroffice-pptx`. Read, edit, and save PPTX decks, lay slides out into the display-list contract the canvas paints, and rasterize a slide to PNG with `render_png`, which resolves pictures out of the package. No font ships in the wheel, so `register_font` must supply at least one face before a slide with text lays out. Yrs collaboration is exposed as byte-level primitives, and a deck is pinned to the thread that opened it.
 
 ## Collaboration
 

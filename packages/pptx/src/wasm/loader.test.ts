@@ -386,6 +386,96 @@ describe('PPTX wasm boundary', () => {
     source.dispose();
     reopened.dispose();
   });
+
+  test('anchors a legacy comment and carries it through a save', () => {
+    const deck = openPresentation(fixture, { clientId: 9201 });
+    expect(deck.snapshot().commentFlavor).toBeUndefined();
+    expect(deck.comments()).toEqual([]);
+
+    const slideId = deck.snapshot().slides[0].id;
+    const receipt = deck.addComment(slideId, {
+      author: 'Ada Lovelace',
+      initials: 'AL',
+      text: 'Does this claim hold?',
+      created: '2026-09-01T21:40:00.000',
+      xEmu: 914_400,
+      yEmu: 457_200,
+    });
+    expect(receipt.slideId).toBe(slideId);
+    expect(receipt.parentId).toBeNull();
+    expect(receipt.resolved).toBe(false);
+
+    const [comment] = deck.comments();
+    expect([comment.author, comment.initials]).toEqual(['Ada Lovelace', 'AL']);
+    expect([comment.xEmu, comment.yEmu]).toEqual([914_400, 457_200]);
+    expect(deck.snapshot().comments).toHaveLength(1);
+
+    const reopened = openPresentation(deck.save(), { clientId: 9202 });
+    expect(reopened.comments()[0]?.text).toBe('Does this claim hold?');
+    expect(reopened.snapshot().commentFlavor).toBeUndefined();
+
+    deck.removeComment(receipt.commentId);
+    expect(deck.comments()).toEqual([]);
+
+    deck.dispose();
+    reopened.dispose();
+  });
+
+  test('legacy decks refuse replies, status, and a flavour switch', () => {
+    const deck = openPresentation(fixture, { clientId: 9203 });
+    const receipt = deck.addComment(deck.snapshot().slides[0].id, {
+      author: 'Ada',
+      initials: 'AL',
+      text: 'Root.',
+      created: '2026-09-01T21:40:00.000',
+    });
+
+    expect(() =>
+      deck.replyToComment(receipt.commentId, {
+        author: 'Grace',
+        initials: 'GH',
+        text: 'Agreed.',
+        created: '2026-09-01T21:41:00.000',
+      })
+    ).toThrow();
+    expect(() => deck.setCommentStatus(receipt.commentId, true)).toThrow();
+    expect(() => deck.setCommentFlavor('modern')).toThrow();
+
+    deck.dispose();
+  });
+
+  test('a modern thread keeps its reply and resolved state across a save', () => {
+    const deck = openPresentation(fixture, { clientId: 9204 });
+    expect(deck.setCommentFlavor('modern')).toBe('modern');
+
+    const root = deck.addComment(deck.snapshot().slides[0].id, {
+      author: 'Ada Lovelace',
+      initials: 'AL',
+      text: 'Does this claim hold?',
+      created: '2026-09-01T21:40:00.000',
+    });
+    const reply = deck.replyToComment(root.commentId, {
+      author: 'Grace Hopper',
+      initials: 'GH',
+      text: 'Checked, it holds.',
+      created: '2026-09-01T21:41:00.000',
+    });
+    expect(reply.parentId).toBe(root.commentId);
+    expect(deck.setCommentStatus(root.commentId, true).resolved).toBe(true);
+
+    const reopened = openPresentation(deck.save(), { clientId: 9205 });
+    expect(reopened.snapshot().commentFlavor).toBe('modern');
+    const comments = reopened.comments();
+    expect(comments).toHaveLength(2);
+    const roots = comments.filter((candidate) => candidate.parentId === null);
+    const replies = comments.filter((candidate) => candidate.parentId !== null);
+    expect(roots[0]?.resolved).toBe(true);
+    expect(replies[0]?.text).toBe('Checked, it holds.');
+    expect(replies[0]?.parentId).toBe(roots[0]?.id);
+
+    deck.dispose();
+    reopened.dispose();
+  });
 });
 
 function shapeSnapshot(shapeId: string) {

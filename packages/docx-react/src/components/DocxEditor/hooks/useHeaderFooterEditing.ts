@@ -1,9 +1,9 @@
 import { useCallback, useMemo } from 'react';
-import type {
-  Document,
-  HeaderFooter,
-  SectionProperties,
-} from '@betteroffice/docx/types/document';
+import type { Document, HeaderFooter } from '@betteroffice/docx/types/document';
+import {
+  resolvedFinalSectionProperties,
+  updateFinalSectionProperties,
+} from '@betteroffice/docx/editor';
 import { resolveHeaderFooter } from '@betteroffice/docx/layout';
 
 import type { PartEditTarget } from '../partEdit';
@@ -15,6 +15,10 @@ import type { PartEditTarget } from '../partEdit';
  * content for the current section, plus the double-click → edit, save,
  * remove, and "click out" workflows.
  *
+ * References and `titlePg` are read from the resolved last section, which
+ * inherits them from earlier sections; the authored body sectPr may carry
+ * neither. Edits are written to both views.
+ *
  * Empty headers/footers are materialised on first double-click so the
  * user can start typing — the helper writes the new HeaderFooter into
  * `package.headers` / `package.footers` and registers the relationship
@@ -23,25 +27,26 @@ import type { PartEditTarget } from '../partEdit';
 export function useHeaderFooterEditing({
   document,
   pushDocument,
-  initialSectionProperties,
-  finalSectionProperties,
   partEditTarget,
   setPartEditTarget,
 }: {
   document: Document | null;
   pushDocument: (doc: Document) => void;
-  initialSectionProperties: SectionProperties | undefined;
-  finalSectionProperties: SectionProperties | undefined;
   // State + setter live in the parent so selection and canvas overlays can
   // route to the open part's story.
   partEditTarget: PartEditTarget | null;
   setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
 }) {
+  const finalSectionProperties = useMemo(
+    () => resolvedFinalSectionProperties(document?.package.document),
+    [document]
+  );
+
   const { headerContent, footerContent, firstPageHeaderContent, firstPageFooterContent } =
     useMemo(() => {
       const { header, footer, firstHeader, firstFooter } = resolveHeaderFooter(
         document ?? null,
-        finalSectionProperties ?? initialSectionProperties
+        finalSectionProperties
       );
       return {
         headerContent: header,
@@ -49,7 +54,7 @@ export function useHeaderFooterEditing({
         firstPageHeaderContent: firstHeader,
         firstPageFooterContent: firstFooter,
       };
-    }, [document, initialSectionProperties, finalSectionProperties]);
+    }, [document, finalSectionProperties]);
 
   const handleHeaderFooterDoubleClick = useCallback(
     (position: 'header' | 'footer', pageNumber?: number) => {
@@ -57,8 +62,7 @@ export function useHeaderFooterEditing({
       // `r:id`, so the painter renders the same edits on every page in real
       // time. Whichever page the user double-clicked, the chrome bar floats
       // over THAT page's header and edits propagate visually to all others.
-      const sectProps = document?.package?.document?.finalSectionProperties;
-      const isFirstPage = sectProps?.titlePg === true && (pageNumber ?? 1) === 1;
+      const isFirstPage = finalSectionProperties?.titlePg === true && (pageNumber ?? 1) === 1;
       const opened: PartEditTarget = {
         kind: position,
         isFirstPage,
@@ -77,10 +81,8 @@ export function useHeaderFooterEditing({
       }
 
       // Materialise an empty header/footer so the user can start typing.
-      if (!document?.package) return;
+      if (!document?.package || !finalSectionProperties) return;
       const pkg = document.package;
-      const sectionProps = pkg.document?.finalSectionProperties;
-      if (!sectionProps) return;
 
       const hdrFtrType = isFirstPage ? 'first' : 'default';
       const rId = `rId_new_${position}_${hdrFtrType}`;
@@ -95,7 +97,6 @@ export function useHeaderFooterEditing({
       newMap.set(rId, emptyHf);
 
       const refKey = position === 'header' ? 'headerReferences' : 'footerReferences';
-      const existingRefs = sectionProps[refKey] ?? [];
       const newRef = { type: hdrFtrType as 'default' | 'first', rId };
 
       // Register the rel so the serializer wires up content types + doc rels (#274).
@@ -123,15 +124,10 @@ export function useHeaderFooterEditing({
           ...pkg,
           [mapKey]: newMap,
           relationships: newRelationships,
-          document: pkg.document
-            ? {
-                ...pkg.document,
-                finalSectionProperties: {
-                  ...sectionProps,
-                  [refKey]: [...existingRefs, newRef],
-                },
-              }
-            : pkg.document,
+          document: updateFinalSectionProperties(pkg.document, (properties) => ({
+            ...properties,
+            [refKey]: [...(properties[refKey] ?? []), newRef],
+          })),
         },
       };
       pushDocument(newDoc);
@@ -142,6 +138,7 @@ export function useHeaderFooterEditing({
       footerContent,
       firstPageHeaderContent,
       firstPageFooterContent,
+      finalSectionProperties,
       document,
       pushDocument,
       setPartEditTarget,
@@ -163,50 +160,46 @@ export function useHeaderFooterEditing({
     }
 
     const pkg = document.package;
-    const sectionProps = pkg.document?.finalSectionProperties;
     const refKey = band.kind === 'header' ? 'headerReferences' : 'footerReferences';
     const mapKey = band.kind === 'header' ? 'headers' : 'footers';
-    const refs = sectionProps?.[refKey];
+    const refs = finalSectionProperties?.[refKey];
     const delTargetType = band.isFirstPage ? 'first' : 'default';
-    const activeRef =
+    const removedId = (
       refs?.find((r) => r.type === delTargetType) ??
       refs?.find((r) => r.type === 'default') ??
       refs?.find((r) => r.type === 'first') ??
-      refs?.[0];
+      refs?.[0]
+    )?.rId;
 
-    if (activeRef?.rId) {
+    if (removedId) {
       const newMap = new Map(pkg[mapKey] ?? []);
-      newMap.delete(activeRef.rId);
-
-      const newRefs = (refs ?? []).filter((r) => r.rId !== activeRef.rId);
+      newMap.delete(removedId);
 
       const newDoc: Document = {
         ...document,
         package: {
           ...pkg,
           [mapKey]: newMap,
-          document: pkg.document
-            ? {
-                ...pkg.document,
-                finalSectionProperties: {
-                  ...sectionProps,
-                  [refKey]: newRefs,
-                },
-              }
-            : pkg.document,
+          document: updateFinalSectionProperties(pkg.document, (properties) => {
+            const own = properties[refKey];
+            return own
+              ? { ...properties, [refKey]: own.filter((r) => r.rId !== removedId) }
+              : properties;
+          }),
         },
       };
       pushDocument(newDoc);
     }
 
     setPartEditTarget(null);
-  }, [partEditTarget, document, pushDocument, setPartEditTarget]);
+  }, [partEditTarget, document, finalSectionProperties, pushDocument, setPartEditTarget]);
 
   return {
     headerContent,
     footerContent,
     firstPageHeaderContent,
     firstPageFooterContent,
+    finalSectionProperties,
     handleHeaderFooterDoubleClick,
     handleBodyClick,
     handleRemoveHeaderFooter,

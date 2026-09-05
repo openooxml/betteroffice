@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, PresetShapeDraft, ShapeDraft, ShapeKind,
-    ShapeRect, ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditError, PresetShapeDraft, ShapeDraft,
+    ShapeKind, ShapeRect, ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
+const NUMBERED_FIXTURE: &[u8] =
+    include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
 
 fn open_fixture() -> DeckSession {
     DeckSession::open(FIXTURE, 7).unwrap()
@@ -75,6 +77,20 @@ fn shape_stories(shape: &ShapeSnapshot) -> Vec<&pptx_edit::StorySnapshot> {
 fn an_unedited_deck_saves_part_identical() {
     let session = open_fixture();
     assert_eq!(parts(&session.save().unwrap()), parts(FIXTURE));
+}
+
+#[test]
+fn an_unedited_deck_numbered_from_ten_saves_part_identical() {
+    let session = DeckSession::open(NUMBERED_FIXTURE, 7).unwrap();
+    assert_eq!(session.package().presentation.first_slide_num, 10);
+    assert_eq!(parts(&session.save().unwrap()), parts(NUMBERED_FIXTURE));
+    let restored = DeckSession::open_from_update_with_source(
+        &session.encode_state_as_update_v1(),
+        NUMBERED_FIXTURE,
+        8,
+    )
+    .unwrap();
+    assert_eq!(parts(&restored.save().unwrap()), parts(NUMBERED_FIXTURE));
 }
 
 #[test]
@@ -558,4 +574,199 @@ fn undo_restores_a_part_identical_save() {
         .unwrap();
     assert!(session.undo());
     assert_eq!(parts(&session.save().unwrap()), parts(FIXTURE));
+}
+
+#[test]
+fn a_comment_added_to_the_demo_deck_survives_a_reopen() {
+    let session = open_fixture();
+    let slide = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .add_comment(
+            &context(),
+            &slide,
+            "Ada Lovelace",
+            "AL",
+            "Tighten this claim.",
+            "2026-09-01T10:00:00.000",
+            1_828_800,
+            914_400,
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let written = parts(&saved);
+    assert!(written.contains_key("ppt/comments/comment2.xml"));
+    assert!(written.contains_key("ppt/commentAuthors.xml"));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.comments.len(), 1);
+    assert_eq!(snapshot.comments[0].text, "Tighten this claim.");
+    assert_eq!(snapshot.comments[0].author, "Ada Lovelace");
+    assert_eq!(snapshot.comments[0].slide_id, snapshot.slides[1].id);
+    assert_eq!(snapshot.comments[0].x_emu, 1_828_800);
+    assert_eq!(snapshot.comments[0].y_emu, 914_400);
+}
+
+#[test]
+fn a_deck_with_no_comment_edits_keeps_every_part_untouched() {
+    let source = include_bytes!("fixtures/modern-comments.pptx");
+    let session = DeckSession::open(source, 719).unwrap();
+    assert_eq!(parts(&session.save().unwrap()), parts(source));
+}
+
+#[test]
+fn two_authors_on_one_slide_each_get_their_own_index_run() {
+    let session = open_fixture();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    for (author, initials, text, created) in [
+        (
+            "Ada Lovelace",
+            "AL",
+            "First from Ada.",
+            "2026-09-01T10:00:00.000",
+        ),
+        (
+            "Grace Hopper",
+            "GH",
+            "First from Grace.",
+            "2026-09-01T10:01:00.000",
+        ),
+        (
+            "Ada Lovelace",
+            "AL",
+            "Second from Ada.",
+            "2026-09-01T10:02:00.000",
+        ),
+    ] {
+        session
+            .add_comment(&context(), &slide, author, initials, text, created, 0, 0)
+            .unwrap();
+    }
+
+    let saved = parts(&session.save().unwrap());
+    let authors = String::from_utf8(saved["ppt/commentAuthors.xml"].clone()).unwrap();
+    assert!(authors.contains(r#"id="0" initials="AL" lastIdx="2" name="Ada Lovelace""#));
+    assert!(authors.contains(r#"id="1" initials="GH" lastIdx="1" name="Grace Hopper""#));
+
+    let comments = String::from_utf8(saved["ppt/comments/comment1.xml"].clone()).unwrap();
+    assert_eq!(comments.matches(r#"authorId="0""#).count(), 2);
+    assert_eq!(comments.matches(r#"authorId="1""#).count(), 1);
+    assert!(
+        comments.contains(r#"idx="2""#),
+        "Ada's second comment takes index 2"
+    );
+}
+
+#[test]
+fn an_empty_comment_is_rejected_at_the_edit() {
+    let session = open_fixture();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    assert!(matches!(
+        session.add_comment(
+            &context(),
+            &slide,
+            "Ada",
+            "AL",
+            "",
+            "2026-09-01T10:00:00.000",
+            0,
+            0
+        ),
+        Err(EditError::InvalidComment(_))
+    ));
+}
+
+#[test]
+fn a_comment_on_an_unknown_slide_is_rejected() {
+    let session = open_fixture();
+    assert!(matches!(
+        session.add_comment(
+            &context(),
+            "slide:404:404",
+            "Ada",
+            "AL",
+            "Nowhere.",
+            "2026-09-01T10:00:00.000",
+            0,
+            0
+        ),
+        Err(EditError::SlideNotFound(_))
+    ));
+}
+
+#[test]
+fn removing_a_thread_root_removes_its_replies() {
+    let session = open_fixture();
+    session
+        .set_comment_flavor(&context(), CommentFlavor::Modern)
+        .unwrap();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    let root = session
+        .add_comment(
+            &context(),
+            &slide,
+            "Ada",
+            "AL",
+            "Root.",
+            "2026-09-01T10:00:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+    session
+        .reply_to_comment(
+            &context(),
+            &root.comment_id,
+            "Grace",
+            "GH",
+            "Reply.",
+            "2026-09-01T10:01:00.000",
+        )
+        .unwrap();
+    assert_eq!(session.comments().unwrap().len(), 2);
+
+    session
+        .remove_comment(&context(), &root.comment_id)
+        .unwrap();
+    assert!(session.comments().unwrap().is_empty());
+}
+
+#[test]
+fn an_unknown_comment_is_reported_not_ignored() {
+    let session = open_fixture();
+    assert!(matches!(
+        session.remove_comment(&context(), "comment:0:0"),
+        Err(EditError::CommentNotFound(_))
+    ));
+}
+
+#[test]
+fn a_comment_on_a_newly_inserted_slide_survives_the_save() {
+    let session = open_fixture();
+    let slide = session.insert_slide(&context(), 1, None).unwrap();
+    session
+        .add_comment(
+            &context(),
+            &slide.slide_id,
+            "Ada Lovelace",
+            "AL",
+            "Fresh slide, fresh comment.",
+            "2026-09-02T10:00:00.000",
+            914_400,
+            457_200,
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides.len(), 4);
+    assert_eq!(
+        snapshot.comments.len(),
+        1,
+        "a comment anchored to a minted slide must reach the saved deck"
+    );
+    assert_eq!(snapshot.comments[0].text, "Fresh slide, fresh comment.");
+    assert_eq!(snapshot.comments[0].slide_id, snapshot.slides[1].id);
 }
