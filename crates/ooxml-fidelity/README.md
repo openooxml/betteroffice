@@ -22,6 +22,10 @@ allowed; removals and custom additions are findings. `mc:ProcessContent`,
 `mc:Choice/@Requires` and `xsi:type` also resolve values through in-scope
 namespace bindings. Unbound prefixes are rejected.
 
+A source root that binds a standard WML prefix such as `w16` to another namespace
+is saved with the serializer's fixed Word binding, which can change
+`mc:Choice/@Requires` meaning; the oracles report this loss.
+
 The companion exception permits only newly added `word/commentsIds.xml`,
 `word/commentsExtended.xml` and `word/commentsExtensible.xml` parts, plus
 new content-type overrides and internal relationship entries resolving to those
