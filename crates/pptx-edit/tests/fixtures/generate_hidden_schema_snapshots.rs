@@ -2,7 +2,7 @@ use std::{env, fs, path::Path};
 
 use pptx_edit::{DeckSession, EditCtx, ShapeDraft, ShapeRect, TextStyle};
 use pptx_parse::{PptxPackage, ShapeNode};
-use yrs::{Any, Map, Out, ReadTxn, Transact};
+use yrs::{Any, Map, MapRef, Out, ReadTxn, Transact};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -12,6 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (version, package) in [
         (2, legacy_package(&source)),
         (5, pptx_parse::parse_pptx(&source)?),
+        (6, pptx_parse::parse_pptx(&source)?),
     ] {
         let session = DeckSession::from_package_with_source(package, &source, 4343)?;
         assert_main(&session);
@@ -40,8 +41,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         session.remove_shape(&ctx, "slide:1:257", "slide:1:257:shape:4")?;
         session.move_slide(&ctx, "slide:2:258", 0)?;
-        if version == 2 {
-            restamp_v2(&session);
+        if version < 6 {
+            restamp_legacy(&session, version as f64);
         }
         fs::write(
             fixtures.join(format!("deck-schema-v{version}-hidden.update.bin")),
@@ -65,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session = DeckSession::from_package(package, 4343)?;
     assert_main(&session);
     assert!(!session.package().themes[0].format_scheme.is_empty());
+    restamp_legacy(&session, 5.0);
     fs::write(
         fixtures.join("deck-schema-v5-theme-hidden.update.bin"),
         session.encode_state_as_update_v1(),
@@ -85,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "persisted-v2 ",
         &TextStyle::default(),
     )?;
-    restamp_v2(&session);
+    restamp_legacy(&session, 2.0);
     fs::write(
         fixtures.join("deck-schema-v2.update.bin"),
         session.encode_state_as_update_v1(),
@@ -94,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let source = fs::read(fixtures.join(format!("deck-schema-v2-{name}.pptx")))?;
         let session = DeckSession::from_package_with_source(legacy_package(&source), &source, 273)?;
         assert_main(&session);
-        restamp_v2(&session);
+        restamp_legacy(&session, 2.0);
         fs::write(
             fixtures.join(format!("deck-schema-v2-{name}.update.bin")),
             session.encode_state_as_update_v1(),
@@ -113,6 +115,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
     }
+    let source = fs::read(branch.join("crates/pptx-parse/tests/fixtures/custom-geometry.pptx"))?;
+    for (version, package) in [
+        (2, legacy_package(&source)),
+        (6, pptx_parse::parse_pptx(&source)?),
+    ] {
+        let session = DeckSession::from_package_with_source(package, &source, 285)?;
+        assert_main(&session);
+        if version == 2 {
+            restamp_legacy(&session, 2.0);
+        }
+        fs::write(
+            fixtures.join(format!("deck-custom-schema-v{version}.update.bin")),
+            session.encode_state_as_update_v1(),
+        )?;
+    }
     Ok(())
 }
 
@@ -121,14 +138,22 @@ fn assert_main(session: &DeckSession) {
     let meta = txn.get_map("pptx:meta").unwrap();
     assert_eq!(
         meta.get(&txn, "schemaVersion"),
-        Some(Out::Any(Any::Number(5.0)))
+        Some(Out::Any(Any::Number(6.0)))
     );
 }
 
-fn restamp_v2(session: &DeckSession) {
+fn restamp_legacy(session: &DeckSession, version: f64) {
     let mut txn = session.yrs_doc().transact_mut();
     let meta = txn.get_map("pptx:meta").unwrap();
-    meta.insert(&mut txn, "schemaVersion", 2.0);
+    meta.insert(&mut txn, "schemaVersion", version);
+    let shapes = txn.get_map("pptx:shapes").unwrap();
+    let maps: Vec<MapRef> = shapes
+        .iter(&txn)
+        .map(|(_, value)| value.cast().unwrap())
+        .collect();
+    for shape in maps {
+        shape.remove(&mut txn, "hidden");
+    }
 }
 
 fn legacy_package(source: &[u8]) -> PptxPackage {

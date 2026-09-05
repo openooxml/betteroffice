@@ -9,9 +9,9 @@ use ooxml_drawingml::{
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    ChartSpace, GraphicFrameData, ParagraphProperties, Picture, PictureCrop, Placeholder,
-    PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster,
-    TextAutofit, TextBody,
+    ChartSpace, CustomGeometryPath, GraphicFrameData, ParagraphProperties, Picture, PictureCrop,
+    Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
+    SlideMaster, TextAutofit, TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -476,29 +476,32 @@ impl<'a> LayoutBuilder<'a> {
         };
         match shape.kind {
             ShapeKind::Shape => {
-                self.primitives.push(Primitive::Shape {
-                    object_id: shape.source_id,
-                    shape_id: Some(stable_id.clone()),
-                    name: shape.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: shape.geometry.clone(),
-                    path: geometry_path(
-                        &shape.geometry,
-                        &shape.adjust_values,
-                        f64::from(rect.w) / f64::from(rect.h),
-                    ),
-                    adjust_values: shape
-                        .adjust_values
-                        .iter()
-                        .map(|(name, value)| (name.clone(), *value as f32))
-                        .collect(),
-                    fill,
-                    stroke: outline,
-                    transform,
-                });
+                self.push_shape(
+                    Primitive::Shape {
+                        object_id: shape.source_id,
+                        shape_id: Some(stable_id.clone()),
+                        name: shape.name.clone(),
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        geometry: shape.geometry.clone(),
+                        path: geometry_path(
+                            &shape.geometry,
+                            &shape.adjust_values,
+                            f64::from(rect.w) / f64::from(rect.h),
+                        ),
+                        adjust_values: shape
+                            .adjust_values
+                            .iter()
+                            .map(|(name, value)| (name.clone(), *value as f32))
+                            .collect(),
+                        fill,
+                        stroke: outline,
+                        transform,
+                    },
+                    custom_paths(original),
+                )?;
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
@@ -588,33 +591,36 @@ impl<'a> LayoutBuilder<'a> {
         };
         match shape {
             ShapeNode::Shape(value) => {
-                self.primitives.push(Primitive::Shape {
-                    object_id: base.id,
-                    shape_id: Some(stable_id.to_owned()),
-                    name: base.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    geometry: value.geometry.clone(),
-                    path: geometry_path(
-                        &value.geometry,
-                        &value.adjust_values,
-                        f64::from(rect.w) / f64::from(rect.h),
-                    ),
-                    adjust_values: value
-                        .adjust_values
-                        .iter()
-                        .map(|(name, value)| (name.clone(), *value as f32))
-                        .collect(),
-                    fill: self
-                        .resolved_fill(&[Some(shape)])
-                        .and_then(|fill| paint(&fill, self.theme)),
-                    stroke: self
-                        .resolved_outline(&[Some(shape)])
-                        .and_then(|outline| stroke(&outline, self.theme)),
-                    transform,
-                });
+                self.push_shape(
+                    Primitive::Shape {
+                        object_id: base.id,
+                        shape_id: Some(stable_id.to_owned()),
+                        name: base.name.clone(),
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        geometry: value.geometry.clone(),
+                        path: geometry_path(
+                            &value.geometry,
+                            &value.adjust_values,
+                            f64::from(rect.w) / f64::from(rect.h),
+                        ),
+                        adjust_values: value
+                            .adjust_values
+                            .iter()
+                            .map(|(name, value)| (name.clone(), *value as f32))
+                            .collect(),
+                        fill: self
+                            .resolved_fill(&[Some(shape)])
+                            .and_then(|fill| paint(&fill, self.theme)),
+                        stroke: self
+                            .resolved_outline(&[Some(shape)])
+                            .and_then(|outline| stroke(&outline, self.theme)),
+                        transform,
+                    },
+                    &value.paths,
+                )?;
             }
             ShapeNode::Picture(value) => {
                 self.primitives.push(Primitive::Image {
@@ -672,6 +678,39 @@ impl<'a> LayoutBuilder<'a> {
             transform,
             text: text_hit,
         });
+        Ok(())
+    }
+
+    fn push_shape(
+        &mut self,
+        primitive: Primitive,
+        paths: &[CustomGeometryPath],
+    ) -> Result<(), RenderError> {
+        if paths.is_empty()
+            || !matches!(&primitive, Primitive::Shape { geometry, .. } if geometry == "custom")
+        {
+            self.primitives.push(primitive);
+            return Ok(());
+        }
+        for (index, custom) in paths.iter().enumerate() {
+            if index > 0 {
+                self.charge_shape()?;
+            }
+            let mut primitive = primitive.clone();
+            if let Primitive::Shape {
+                path, fill, stroke, ..
+            } = &mut primitive
+            {
+                *path = custom.commands.clone();
+                if custom.no_fill {
+                    *fill = None;
+                }
+                if custom.no_stroke {
+                    *stroke = None;
+                }
+            }
+            self.primitives.push(primitive);
+        }
         Ok(())
     }
 
@@ -2250,6 +2289,13 @@ fn picture_mask(
     (!path.is_empty()).then_some(path)
 }
 
+fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
+    match shape {
+        Some(ShapeNode::Shape(shape)) => &shape.paths,
+        _ => &[],
+    }
+}
+
 fn geometry_path(
     geometry: &str,
     adjustments: &BTreeMap<String, f64>,
@@ -3630,6 +3676,7 @@ mod tests {
         };
         let layout_shape = ShapeNode::Shape(pptx_parse::Shape {
             style: None,
+            paths: Vec::new(),
             base: pptx_parse::ShapeBase {
                 id: 2,
                 name: "Layout title".to_owned(),

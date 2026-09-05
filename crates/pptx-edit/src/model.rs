@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
 use pptx_parse::{GraphicFrameData, Placeholder};
+
+pub use pptx_parse::CommentFlavor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -153,6 +155,38 @@ pub struct DeckSnapshot {
     pub width_emu: i64,
     pub height_emu: i64,
     pub slides: Vec<SlideSnapshot>,
+    #[serde(default, skip_serializing_if = "legacy_comment_flavor")]
+    pub comment_flavor: CommentFlavor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CommentSnapshot>,
+}
+
+fn legacy_comment_flavor(flavor: &CommentFlavor) -> bool {
+    *flavor == CommentFlavor::Legacy
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentSnapshot {
+    pub id: String,
+    pub slide_id: String,
+    pub author: String,
+    pub initials: String,
+    pub text: String,
+    pub created: Option<String>,
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub parent_id: Option<String>,
+    pub resolved: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentReceipt {
+    pub comment_id: String,
+    pub slide_id: String,
+    pub parent_id: Option<String>,
+    pub resolved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -279,6 +313,10 @@ pub enum EditError {
     ShapeNotFound(String),
     #[error("story {0:?} was not found")]
     StoryNotFound(String),
+    #[error("comment {0:?} was not found")]
+    CommentNotFound(String),
+    #[error("invalid comment: {0}")]
+    InvalidComment(String),
     #[error("index {index} is outside length {length}")]
     OutOfBounds { index: u32, length: u32 },
     #[error("text range {start}..{end} crosses a paragraph boundary")]

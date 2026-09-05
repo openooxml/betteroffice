@@ -16,7 +16,7 @@ text boxes. Thirteen children have no hidden flag of their own. Slide 2 loses
 the two marked shapes; slide 3 is unchanged.
 
 The schema fixtures are generated with current `origin/main` at
-`2710a419282950442f5218975aedbd395fef64b5` (schema 5), using its locked
+`54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4` (schema 6), using its locked
 dependencies and a separate Cargo target directory. Copy
 `generate_hidden_schema_snapshots.rs` into that checkout's
 `crates/pptx-edit/examples/`, then run from that checkout:
@@ -25,7 +25,7 @@ dependencies and a separate Cargo target directory. Copy
 CARGO_TARGET_DIR=/absolute/path/to/main-target cargo run --locked -p betteroffice-pptx-edit --example generate_hidden_schema_snapshots -- /absolute/path/to/this/branch
 ```
 
-The generator asserts that main seeds schema 5. `deck-schema-v5.snapshot.json`
+The generator asserts that main seeds schema 6. `deck-schema-v5.snapshot.json`
 is main's serialized snapshot of the unmodified demo deck, with no hidden keys.
 
 `deck-schema-v2-hidden.update.bin` and `deck-schema-v5-hidden.update.bin`
@@ -37,11 +37,11 @@ come from the hidden fixture with client ID 4343. Before encoding each update:
 3. Remove `slide:1:257:shape:4`.
 4. Move `slide:2:258` to index 0.
 
-Both updates contain no hidden shape-map keys. Migration must recover four
+Both legacy updates have main’s seeded hidden shape-map keys removed before encoding; `deck-schema-v6-hidden.update.bin` retains them. Migration must recover four
 flags, preserve the edits, and leave the deleted shape absent. The v2 fixture
 uses main's legacy parser without connectors, defaults the slide numbering,
 and omits later shape/picture style references and theme formatting before
-seeding and stamping version 2. The v5 fixture uses main's normal parser.
+seeding and stamping version 2. The v5 fixture uses main's normal parser and is stamped version 5.
 
 `deck-schema-v5-theme-hidden.update.bin` is main's seed of
 `style-matrix-deck.pptx` with the first shape marked hidden and numbering set to
@@ -53,6 +53,15 @@ same legacy parser and defaults. The moved connector keeps `(952500, 1047750)`
 and the style fixture keeps `persisted-v2 Styled`. Released v1 and historical
 v3/v4 fixtures remain their independent migration oracles.
 
+The generator also opens `custom-geometry.pptx` with client ID 285. The
+legacy parser/defaults produce `deck-custom-schema-v2.update.bin`; main’s
+normal writer produces `deck-custom-schema-v6.update.bin`. Both omit custom
+paths, which current main does not model.
+
 The migration-order tests observe separate transactions: legacy v2 commits
-3, 4, 5, then 6; current main v5 commits only 6. Hidden keys appear only in the
-schema-6 transaction. Main's schema-5 package rewrite remains a separate step.
+3, 4, 5, 6, 7, then 8; v5 commits 6, 7, then 8; v6 commits 7 then 8; current
+main v7 commits only 8. Hidden keys first appear in the schema-6 transaction and
+survive schema 7’s package rewrite and schema 8’s comment metadata. Main’s
+migrations retain their original version numbers.
+
+`deck-schema-v7-comments.update.bin` is documented in `modern-comments.md`.

@@ -6,6 +6,7 @@ use ooxml_drawingml::{
 };
 
 use crate::PptxError;
+use crate::custom_geometry::parse_custom_geometry;
 use crate::model::*;
 use crate::relationships::Relationship;
 use crate::xml::{ParseBudget, XmlElement};
@@ -152,6 +153,11 @@ fn parse_shape(
     let properties = element.child("spPr");
     let transform = properties.and_then(|value| value.child("xfrm"));
     Ok(Shape {
+        paths: properties
+            .filter(|value| value.child("prstGeom").is_none())
+            .and_then(|value| value.child("custGeom"))
+            .and_then(|custom| parse_custom_geometry(custom, parse_shape_extent(transform)))
+            .unwrap_or_default(),
         base: parse_base(
             element
                 .child("nvSpPr")
@@ -1063,6 +1069,56 @@ mod tests {
     use super::*;
     use crate::ParseLimits;
     use crate::xml::parse_xml;
+    use ooxml_drawingml::GeometryPathCommand;
+
+    #[test]
+    fn a_custom_geometry_becomes_a_path_normalised_to_the_shape() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Freeform"/><p:nvPr/></p:nvSpPr><p:spPr><a:custGeom><a:pathLst><a:path w="200" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="200" y="50"/></a:lnTo><a:cubicBezTo><a:pt x="150" y="100"/><a:pt x="50" y="100"/><a:pt x="0" y="50"/></a:cubicBezTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Guided"/><p:nvPr/></p:nvSpPr><p:spPr><a:custGeom><a:gdLst><a:gd name="x1" fmla="*/ w 1 2"/></a:gdLst><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="x1" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+
+        let ShapeNode::Shape(freeform) = &data.shapes[0] else {
+            panic!("expected a shape");
+        };
+        assert_eq!(freeform.geometry, "custom");
+        let path = &freeform.paths[0].commands;
+        assert_eq!(
+            path[0],
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+            "coordinates are fractions of the path box, not raw units"
+        );
+        assert_eq!(path[1], GeometryPathCommand::Line { x: 1.0, y: 0.5 });
+        assert_eq!(
+            path[2],
+            GeometryPathCommand::Cubic {
+                cp1x: 0.75,
+                cp1y: 1.0,
+                cp2x: 0.25,
+                cp2y: 1.0,
+                x: 0.0,
+                y: 0.5
+            }
+        );
+        assert_eq!(path[3], GeometryPathCommand::Close);
+
+        let ShapeNode::Shape(guided) = &data.shapes[1] else {
+            panic!("expected a shape");
+        };
+        assert!(guided.paths.is_empty());
+    }
 
     #[test]
     fn a_shape_style_supplies_the_default_text_colour() {

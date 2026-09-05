@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use ooxml_drawingml::Theme;
 
 use crate::chart::parse_chart_part;
+use crate::comments::{
+    Comment, CommentAuthor, CommentFlavor, authors_part, parse_comment_authors, parse_comments,
+    slide_comment_parts,
+};
 use crate::drawing::{common_slide_data, parse_text_styles};
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
@@ -193,6 +197,14 @@ fn parse_package(
         limits,
     );
 
+    let deck_comments = parse_package_comments(
+        &parts,
+        &presentation,
+        presentation_relationships,
+        &relationships,
+        &mut budget,
+    )?;
+
     let content_types = parse_content_types(&parts, &mut budget)?;
     let media = source_parts
         .iter()
@@ -215,6 +227,9 @@ fn parse_package(
         themes,
         charts,
         media,
+        comment_authors: deck_comments.authors,
+        comments: deck_comments.comments,
+        comment_flavor: deck_comments.flavor,
         relationships,
         parts,
         shape_elements: if has_connectors {
@@ -223,6 +238,73 @@ fn parse_package(
             ShapeElements::WithoutConnectors
         },
     })
+}
+
+fn parse_package_comments(
+    parts: &HashMap<&str, &[u8]>,
+    presentation: &Presentation,
+    presentation_relationships: &[Relationship],
+    relationships: &BTreeMap<String, Vec<Relationship>>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<PackageComments, PptxError> {
+    let mut found: Vec<(CommentFlavor, String, String)> = Vec::new();
+    for reference in &presentation.slides {
+        let slide_relationships = relationships
+            .get(&reference.part_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let slide_parts = slide_comment_parts(slide_relationships);
+        if let Some(part) = slide_parts.legacy {
+            found.push((CommentFlavor::Legacy, reference.part_path.clone(), part));
+        }
+        if let Some(part) = slide_parts.modern {
+            found.push((CommentFlavor::Modern, reference.part_path.clone(), part));
+        }
+    }
+    let Some(flavor) = found
+        .iter()
+        .any(|(flavor, _, _)| *flavor == CommentFlavor::Legacy)
+        .then_some(CommentFlavor::Legacy)
+        .or_else(|| (!found.is_empty()).then_some(CommentFlavor::Modern))
+    else {
+        return Ok(PackageComments::default());
+    };
+
+    let mut comments = Vec::new();
+    for (_, slide_part_path, part) in found
+        .iter()
+        .filter(|(candidate, _, _)| *candidate == flavor)
+    {
+        let Some(bytes) = parts.get(part.as_str()) else {
+            continue;
+        };
+        comments.extend(parse_comments(
+            bytes,
+            part,
+            slide_part_path,
+            flavor,
+            budget,
+        )?);
+    }
+
+    let comment_authors = match authors_part(presentation_relationships, flavor)
+        .and_then(|part| parts.get(part.as_str()).map(|bytes| (part, *bytes)))
+    {
+        Some((part, bytes)) => parse_comment_authors(bytes, &part, flavor, budget)?,
+        None => Vec::new(),
+    };
+    Ok(PackageComments {
+        authors: comment_authors,
+        comments,
+        flavor: Some(flavor),
+    })
+}
+
+#[derive(Default)]
+struct PackageComments {
+    authors: Vec<CommentAuthor>,
+    comments: Vec<Comment>,
+    flavor: Option<CommentFlavor>,
 }
 
 pub fn write_pptx(package: &PptxPackage) -> Result<Vec<u8>, PptxError> {
