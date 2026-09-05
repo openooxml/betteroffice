@@ -28,7 +28,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.23.0",
-    "next": "16.2.11",
+    "next": "16.3.3",
     "radix-ui": "^1.6.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
@@ -44,8 +44,8 @@
   "devDependencies": {
     "@opennextjs/cloudflare": "^1.20.1",
     "@types/node": "^26.1.0",
-    "@types/react": "^19.2.17",
-    "@types/react-dom": "^19.2.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
     "typescript": "^6.0.3",
     "wrangler": "^4.106.0"
   }
