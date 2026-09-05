@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::error::FidelityError;
 use crate::fingerprint::short_fingerprint;
-use crate::xml::{XmlElement, XmlLimits, XmlNode, parse_part};
+use crate::xml::{XmlAttribute, XmlElement, XmlLimits, XmlNode, parse_part};
 use crate::{Part, is_xml_part};
 
 pub const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -27,6 +27,7 @@ pub struct SemanticDigest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoryDigest {
     pub part: String,
+    pub root_attributes: Vec<XmlAttribute>,
     pub blocks: Vec<BlockRecord>,
     pub structure: Vec<String>,
     /// True for parts whose entries carry no authored order (relationships,
@@ -101,6 +102,17 @@ pub fn diff_digests(before: &SemanticDigest, after: &SemanticDigest) -> Vec<Diff
 }
 
 fn diff_story(part: &str, before: &StoryDigest, after: &StoryDigest, out: &mut Vec<Difference>) {
+    let mut after_attributes = after.root_attributes.clone();
+    crate::registry::normalize_root_ignorable(&before.root_attributes, &mut after_attributes);
+    let before_attributes = sorted_attribute_tokens(&before.root_attributes).join(",");
+    let after_attributes = sorted_attribute_tokens(&after_attributes).join(",");
+    if before_attributes != after_attributes {
+        out.push(difference(
+            &format!("{part} root.attributes"),
+            &before_attributes,
+            &after_attributes,
+        ));
+    }
     if before.blocks.len() != after.blocks.len() {
         out.push(difference(
             &format!("{part} blocks"),
@@ -236,6 +248,7 @@ fn digest_part(part: &str, root: &XmlElement) -> StoryDigest {
     }
     StoryDigest {
         part: part.to_owned(),
+        root_attributes: root.attributes.clone(),
         blocks: state.blocks,
         structure: state.structure,
         unordered,
@@ -465,8 +478,11 @@ fn element_token(element: &XmlElement) -> String {
 }
 
 fn attribute_tokens(element: &XmlElement) -> Vec<String> {
-    let mut attributes: Vec<String> = element
-        .attributes
+    sorted_attribute_tokens(&element.attributes)
+}
+
+fn sorted_attribute_tokens(attributes: &[XmlAttribute]) -> Vec<String> {
+    let mut attributes: Vec<String> = attributes
         .iter()
         .map(|attribute| {
             if attribute.namespace.is_empty() {

@@ -4,14 +4,18 @@
 reader independent of the serializer. The structural fingerprint compares
 resolved element names, attributes, text, namespace declarations and child
 order. The WML digest compares paragraph text, containment, properties,
-identities and generic subtrees. The element census reports decreasing counts
+identities, root attributes and generic subtrees. The element census reports decreasing counts
 by expanded name. Findings identify the affected part or digest field.
 
 Non-XML parts and XML parts outside `MODELLED_XML_PARTS` must retain identical
 bytes. Missing parts and unexpected additions are findings. Serializer
 exceptions are listed in `DECLARED_NORMALIZATIONS` in `src/registry.rs`;
 relationship and content-type entries compare as sets, and paragraph identities
-may be added but never changed or removed.
+may be added but never changed or removed. Root `mc:Ignorable` values compare as
+resolved URI sets: additions from the registered standard WML namespaces are
+allowed; removals and custom additions are findings. `mc:ProcessContent`,
+`mc:Choice/@Requires` and `xsi:type` also resolve values through in-scope
+namespace bindings. Unbound prefixes are rejected.
 
 Synthetic pairs exercise differences that a census alone cannot detect:
 attribute values, text, field instructions, properties, containment, markers,

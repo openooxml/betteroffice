@@ -5,6 +5,7 @@
 //! serializer deviation is a bug, not a tolerance.
 
 use crate::error::FidelityError;
+use crate::xml::XmlAttribute;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ComparisonMode {
@@ -73,11 +74,7 @@ pub struct Normalization {
 /// The markup-compatibility namespace, home of `mc:Ignorable`.
 pub const MC_NAMESPACE: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
-/// The declaration boilerplate Word writes on every WML part root. A
-/// declaration binds a prefix and carries no meaning of its own: an unused
-/// one can appear or vanish freely, and a used-but-undeclared prefix fails
-/// the parse outright, so excluding these URIs from the fingerprint's
-/// binding set forgives exactly the inert difference and nothing else.
+/// Standard declaration URIs; QName attribute values are resolved before comparison.
 pub const STANDARD_WML_NAMESPACE_URIS: &[&str] = &[
     "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -144,8 +141,8 @@ pub const DECLARED_NORMALIZATIONS: &[Normalization] = &[
     },
     Normalization {
         id: "root-mc-ignorable",
-        description: "Modelled WML parts re-emit Word's standard mc:Ignorable list on the root; \
-                      the fingerprint excludes mc:Ignorable on root elements only.",
+        description: "Root mc:Ignorable compares resolved URI sets; only additions from \
+                      STANDARD_WML_NAMESPACE_URIS are tolerated, never removals.",
     },
     Normalization {
         id: "relationship-and-content-type-order",
@@ -164,6 +161,34 @@ pub const DECLARED_NORMALIZATIONS: &[Normalization] = &[
                       Additions are tolerated; a changed or lost identity is never forgiven.",
     },
 ];
+
+pub(crate) fn normalize_root_ignorable(before: &[XmlAttribute], after: &mut Vec<XmlAttribute>) {
+    let is_ignorable = |attribute: &&XmlAttribute| {
+        attribute.namespace == MC_NAMESPACE && attribute.local == "Ignorable"
+    };
+    let original = before.iter().find(is_ignorable);
+    let saved = after.iter().find(is_ignorable);
+    let before_set: std::collections::BTreeSet<_> = original
+        .map(|attribute| attribute.value.as_str())
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    let after_set: std::collections::BTreeSet<_> = saved
+        .map(|attribute| attribute.value.as_str())
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    if before_set.is_subset(&after_set)
+        && after_set
+            .difference(&before_set)
+            .all(|uri| STANDARD_WML_NAMESPACE_URIS.contains(uri))
+    {
+        after.retain(|attribute| !is_ignorable(&attribute));
+        if let Some(attribute) = original {
+            after.push(attribute.clone());
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -10,7 +10,7 @@ use crate::error::FidelityError;
 use crate::fingerprint::{structural_fingerprint, structural_fingerprint_excluding};
 use crate::registry::{
     COMPANION_PART_MARKERS, ComparisonMode, MANAGED_IDENTITY_ATTRIBUTES, comparison_mode,
-    is_modelled_xml_part,
+    is_modelled_xml_part, normalize_root_ignorable,
 };
 use crate::wml::{Difference, diff_digests, semantic_digest};
 use crate::xml::{XmlLimits, parse_part};
@@ -42,7 +42,8 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
             }
             Some(saved) if is_xml_part(name) => {
                 let original = parse_part(bytes, name, &limits)?;
-                let reopened = parse_part(saved, name, &limits)?;
+                let mut reopened = parse_part(saved, name, &limits)?;
+                normalize_root_ignorable(&original.attributes, &mut reopened.attributes);
                 // Identity-stripped equality classifies the difference as the
                 // "paragraph-id-minting" normalization; a lost or changed
                 // identity still surfaces through the digest below.

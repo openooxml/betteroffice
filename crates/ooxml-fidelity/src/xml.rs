@@ -229,10 +229,17 @@ fn decode_element(
     let (namespace, local) = resolve_name(&name, true, scopes, part)?;
     let mut attributes = Vec::with_capacity(raw_attributes.len());
     for (key, value) in raw_attributes {
-        let (namespace, local) = resolve_name(&key, false, scopes, part)?;
+        let (attribute_namespace, attribute_local) = resolve_name(&key, false, scopes, part)?;
+        let value = resolve_attribute_value(
+            (&namespace, &local),
+            (&attribute_namespace, &attribute_local),
+            value,
+            scopes,
+            part,
+        )?;
         attributes.push(XmlAttribute {
-            namespace,
-            local,
+            namespace: attribute_namespace,
+            local: attribute_local,
             value,
         });
     }
@@ -243,6 +250,39 @@ fn decode_element(
         bindings,
         children: Vec::new(),
     })
+}
+
+fn resolve_attribute_value(
+    element: (&str, &str),
+    attribute: (&str, &str),
+    value: String,
+    scopes: &[Vec<(String, String)>],
+    part: &str,
+) -> Result<String, FidelityError> {
+    let prefixes = attribute == (crate::registry::MC_NAMESPACE, "Ignorable")
+        || (element == (crate::registry::MC_NAMESPACE, "Choice") && attribute == ("", "Requires"));
+    let qnames = attribute == (crate::registry::MC_NAMESPACE, "ProcessContent")
+        || attribute == ("http://www.w3.org/2001/XMLSchema-instance", "type");
+    if !prefixes && !qnames {
+        return Ok(value);
+    }
+    let mut resolved = Vec::new();
+    for token in value.split_whitespace() {
+        let name = if prefixes {
+            format!("{token}:_")
+        } else {
+            token.to_owned()
+        };
+        let (namespace, local) = resolve_name(&name, true, scopes, part)?;
+        resolved.push(if prefixes {
+            namespace
+        } else {
+            format!("{{{namespace}}}{local}")
+        });
+    }
+    resolved.sort_unstable();
+    resolved.dedup();
+    Ok(resolved.join(" "))
 }
 
 fn resolve_name(
