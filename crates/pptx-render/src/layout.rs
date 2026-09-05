@@ -9,9 +9,9 @@ use ooxml_drawingml::{
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    Bullet, ChartSpace, CustomGeometryPath, GraphicFrameData, ParagraphProperties, Picture,
-    PictureCrop, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide,
-    SlideLayout, SlideMaster, TextAutofit, TextBody,
+    Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
+    ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage, RunProperties, ShapeNode,
+    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -948,9 +948,9 @@ impl BodyCascade<'_> {
             .into_iter()
             .flatten()
         {
-            // ECMA-376 orders the cascade as master txStyles, then each body's own lstStyle, then
-            // that body's paragraph. Index the list style by level only: one that defines just
-            // lvl1pPr must contribute nothing to a level-3 paragraph.
+            if let Some(source) = &body.default_list_style {
+                merge_paragraph_properties(&mut properties, source);
+            }
             if let Some(source) = body.list_style.get(level as usize) {
                 merge_paragraph_properties(&mut properties, source);
             }
@@ -1064,10 +1064,9 @@ struct ResolvedParagraph {
     justify: bool,
     level: u32,
     margin_left_px: f32,
-    /// Where the bullet sits relative to the text column. Negative in every deck that uses one,
-    /// which is what puts the marker in the hanging-indent gutter.
     indent_px: f32,
     bullet: Option<Bullet>,
+    bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
 }
 
@@ -1159,11 +1158,44 @@ fn resolve_content(
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
             bullet: properties.bullet.clone(),
+            bullet_style: matches!(properties.bullet, Some(Bullet::Character { .. }))
+                .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
+                .transpose()?,
             runs,
         });
         story_offset = story_offset.saturating_add(1);
     }
     Ok(ResolvedContent { paragraphs })
+}
+
+fn resolve_bullet_style(
+    renderer: &SlideRenderer,
+    theme: &Theme,
+    properties: &ParagraphProperties,
+    text: &ResolvedStyle,
+) -> Result<ResolvedStyle, RenderError> {
+    let mut style = text.clone();
+    if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
+        let family = if family.starts_with('+') {
+            resolve_theme_font_ref(Some(theme), family)
+        } else {
+            family.clone()
+        };
+        style.face = renderer.resolve_face(&family, style.bold, style.italic)?;
+        style.family = style.face.family.clone();
+    }
+    if let Some(BulletColor::Color(color)) = &properties.bullet_color
+        && let Some(color) = resolve_color_value_to_hex_with_theme(Some(color), Some(theme))
+    {
+        style.color = color;
+    }
+    style.font_size_pt = match properties.bullet_size {
+        Some(BulletSize::Percent(size)) => text.font_size_pt * size as f32,
+        Some(BulletSize::Points(size)) => size as f32,
+        _ => text.font_size_pt,
+    }
+    .clamp(1.0, 4_096.0);
+    Ok(style)
 }
 
 fn resolve_style(
@@ -1455,11 +1487,7 @@ fn layout_paragraph(
     Ok(output)
 }
 
-/// Draw a `buChar` marker as a leading run on the paragraph's first line.
-///
-/// The marker is not part of the story, so `start`, `end`, `width` and `caret_stops` are left
-/// alone: hit testing reads only `caret_stops`, and giving the bullet a character position would
-/// put the caret inside a glyph the document does not contain.
+/// Prepends a marker outside the story's character space.
 fn prepend_bullet(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
@@ -1470,17 +1498,12 @@ fn prepend_bullet(
     let Some(Bullet::Character { value }) = &paragraph.bullet else {
         return Ok(());
     };
-    let (Some(first), Some(style)) = (
-        lines.first_mut(),
-        paragraph.runs.first().map(|run| &run.style),
-    ) else {
+    let (Some(first), Some(style)) = (lines.first_mut(), paragraph.bullet_style.as_ref()) else {
         return Ok(());
     };
     if value.trim().is_empty() || first.runs.is_empty() {
         return Ok(());
     }
-    // `x` is already the text column, so the indent walks back from it into the gutter; never
-    // past the shape's own left edge.
     let bullet_x = (x + paragraph.indent_px).max(x - paragraph.margin_left_px.max(0.0));
     let marker = ResolvedParagraph {
         align: paragraph.align,
@@ -1489,6 +1512,7 @@ fn prepend_bullet(
         margin_left_px: 0.0,
         indent_px: 0.0,
         bullet: None,
+        bullet_style: None,
         runs: vec![ResolvedRun {
             text: value.clone(),
             start: paragraph.runs[0].start,
@@ -1499,9 +1523,17 @@ fn prepend_bullet(
     if clusters.is_empty() {
         return Ok(());
     }
-    let mut runs = positioned_runs(&clusters, bullet_x, first.baseline, scale);
+    let advances = clusters
+        .iter()
+        .map(|cluster| cluster.width)
+        .collect::<Vec<_>>();
+    let mut runs = positioned_runs(&clusters, &advances, bullet_x, first.baseline, scale);
     for run in &mut runs {
+        run.start = paragraph.runs[0].start;
         run.end = run.start;
+        for glyph in &mut run.glyphs {
+            glyph.cluster = run.start;
+        }
     }
     runs.append(&mut first.runs);
     first.runs = runs;
@@ -2149,6 +2181,15 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     if source.bullet.is_some() {
         target.bullet.clone_from(&source.bullet);
     }
+    if source.bullet_font.is_some() {
+        target.bullet_font.clone_from(&source.bullet_font);
+    }
+    if source.bullet_color.is_some() {
+        target.bullet_color.clone_from(&source.bullet_color);
+    }
+    if source.bullet_size.is_some() {
+        target.bullet_size.clone_from(&source.bullet_size);
+    }
     if let Some(source) = &source.default_run {
         let target = target
             .default_run
@@ -2615,6 +2656,9 @@ mod tests {
             justify: is_full_justification(Some(alignment)),
             level: 0,
             margin_left_px: 0.0,
+            indent_px: 0.0,
+            bullet: None,
+            bullet_style: None,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
                 start: 0,
@@ -3838,6 +3882,7 @@ mod tests {
                 positioned.extend(lines.iter().flat_map(|line| {
                     line.runs
                         .iter()
+                        .filter(|run| run.start != run.end)
                         .map(|run| (run.text.as_str(), run.color.as_str()))
                 }));
             }
