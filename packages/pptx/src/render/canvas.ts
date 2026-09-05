@@ -9,6 +9,7 @@ import type {
   SlideDisplayList,
   SlidePrimitive,
   Stroke,
+  StrokeEnd,
   TextBoxPrimitive,
 } from '../types';
 
@@ -120,7 +121,170 @@ function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void 
     ctx.fillStyle = paintStyle(ctx, shape.fill, shape.x, shape.y, shape.w, shape.h);
     ctx.fill();
   }
-  if (shape.stroke) strokeCurrentPath(ctx, shape.stroke);
+  if (shape.stroke) {
+    strokeCurrentPath(ctx, shape.stroke);
+    paintLineEnds(ctx, shape);
+  }
+}
+
+function pathPoints(shape: ShapePrimitive): Array<[number, number]> {
+  const points: Array<[number, number]> = [];
+  for (const command of shape.path) {
+    if (command.type === 'close') continue;
+    if (command.type === 'quad') {
+      points.push([shape.x + command.cpx * shape.w, shape.y + command.cpy * shape.h]);
+    } else if (command.type === 'cubic') {
+      points.push([shape.x + command.cp1x * shape.w, shape.y + command.cp1y * shape.h]);
+      points.push([shape.x + command.cp2x * shape.w, shape.y + command.cp2y * shape.h]);
+    }
+    points.push([shape.x + command.x * shape.w, shape.y + command.y * shape.h]);
+  }
+  return points.filter(
+    (point, index) => index === 0 || point[0] !== points[index - 1][0] || point[1] !== points[index - 1][1]
+  );
+}
+
+const LINE_END_KINDS = new Set(['triangle', 'stealth', 'arrow', 'diamond', 'oval']);
+
+function paintLineEnds(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void {
+  const stroke = shape.stroke;
+  if (!stroke || (!stroke.headEnd && !stroke.tailEnd)) return;
+  const points = pathPoints(shape);
+  if (points.length < 2) return;
+  const ends: Array<[StrokeEnd | undefined, [number, number], [number, number]]> = [
+    [stroke.headEnd, points[1], points[0]],
+    [stroke.tailEnd, points[points.length - 2], points[points.length - 1]],
+  ];
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.fillStyle = stroke.color;
+  ctx.strokeStyle = stroke.color;
+  ctx.lineWidth = stroke.width;
+  ctx.lineJoin = 'miter';
+  for (const [end, from, tip] of ends) {
+    if (!end || !LINE_END_KINDS.has(end.kind)) continue;
+    const [dx, dy] = [tip[0] - from[0], tip[1] - from[1]];
+    const distance = Math.hypot(dx, dy);
+    if (distance < 1e-6) continue;
+    paintLineEnd(ctx, end, tip, dx / distance, dy / distance);
+  }
+  ctx.restore();
+}
+
+function paintLineEnd(
+  ctx: CanvasRenderingContext2D,
+  end: StrokeEnd,
+  [tx, ty]: [number, number],
+  ux: number,
+  uy: number
+): void {
+  const half = end.width / 2;
+  const [nx, ny] = [-uy * half, ux * half];
+  const [bx, by] = [tx - ux * end.length, ty - uy * end.length];
+  ctx.beginPath();
+  switch (end.kind) {
+    case 'triangle':
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(bx + nx, by + ny);
+      ctx.lineTo(bx - nx, by - ny);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'stealth':
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(bx + nx, by + ny);
+      ctx.lineTo(tx - ux * end.length * 0.6, ty - uy * end.length * 0.6);
+      ctx.lineTo(bx - nx, by - ny);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'arrow':
+      ctx.moveTo(bx + nx, by + ny);
+      ctx.lineTo(tx, ty);
+      ctx.lineTo(bx - nx, by - ny);
+      ctx.stroke();
+      break;
+    case 'diamond': {
+      const [ax, ay] = [(ux * end.length) / 2, (uy * end.length) / 2];
+      ctx.moveTo(tx + ax, ty + ay);
+      ctx.lineTo(tx + nx, ty + ny);
+      ctx.lineTo(tx - ax, ty - ay);
+      ctx.lineTo(tx - nx, ty - ny);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    }
+    case 'oval':
+      ctx.ellipse(tx, ty, end.length / 2, half, Math.atan2(uy, ux), 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+}
+
+/** Draws the cropped source through the picture's outline. */
+function drawCropped(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  image: ImagePrimitive
+): void {
+  const crop = image.crop;
+  const left = clampCrop(crop?.left);
+  const top = clampCrop(crop?.top);
+  const keptX = 1 - left - clampCrop(crop?.right);
+  const keptY = 1 - top - clampCrop(crop?.bottom);
+  const masked = image.path !== undefined || keptX !== 1 || keptY !== 1;
+  if (keptX <= 0 || keptY <= 0) return;
+  if (masked) {
+    ctx.save();
+    buildImageOutline(ctx, image);
+    ctx.clip();
+  }
+  const width = sourceWidth(source);
+  const height = sourceHeight(source);
+  if (width > 0 && height > 0) {
+    ctx.drawImage(
+      source,
+      left * width,
+      top * height,
+      keptX * width,
+      keptY * height,
+      image.x,
+      image.y,
+      image.w,
+      image.h
+    );
+  } else {
+    ctx.drawImage(source, image.x, image.y, image.w, image.h);
+  }
+  if (masked) ctx.restore();
+}
+
+/** The picture's own outline when it has one, else its frame. */
+function buildImageOutline(ctx: CanvasRenderingContext2D, image: ImagePrimitive): void {
+  if (image.path) buildPath(ctx, image.path, image.x, image.y, image.w, image.h);
+  else {
+    ctx.beginPath();
+    ctx.rect(image.x, image.y, image.w, image.h);
+  }
+}
+
+/** `a:srcRect` also encodes outsets as negatives, which canvas cannot express. */
+function clampCrop(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), 1);
+}
+
+function sourceWidth(source: CanvasImageSource): number {
+  if ('naturalWidth' in source && typeof source.naturalWidth === 'number') return source.naturalWidth;
+  if ('width' in source && typeof source.width === 'number') return source.width;
+  return 0;
+}
+
+function sourceHeight(source: CanvasImageSource): number {
+  if ('naturalHeight' in source && typeof source.naturalHeight === 'number')
+    return source.naturalHeight;
+  if ('height' in source && typeof source.height === 'number') return source.height;
+  return 0;
 }
 
 function buildPath(
@@ -205,11 +369,10 @@ async function paintImage(
 ): Promise<void> {
   if (image.assetId && resolver) {
     const source = await resolver(image.assetId);
-    if (source) ctx.drawImage(source, image.x, image.y, image.w, image.h);
+    if (source) drawCropped(ctx, source, image);
   }
   if (image.stroke) {
-    ctx.beginPath();
-    ctx.rect(image.x, image.y, image.w, image.h);
+    buildImageOutline(ctx, image);
     strokeCurrentPath(ctx, image.stroke);
   }
 }

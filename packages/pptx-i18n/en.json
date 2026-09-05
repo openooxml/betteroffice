@@ -3,6 +3,7 @@
   "toolbar": {
     "label": "Presentation formatting toolbar",
     "save": "Save",
+    "exportPng": "Export PNG",
     "historyLabel": "History",
     "undo": "Undo",
     "redo": "Redo",

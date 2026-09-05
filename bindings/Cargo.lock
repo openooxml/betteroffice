@@ -178,6 +178,7 @@ version = "0.1.0"
 dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
 ]
 
@@ -213,6 +214,18 @@ dependencies = [
  "betteroffice-python-common",
  "pyo3",
  "serde_json",
+]
+
+[[package]]
+name = "betteroffice-pptx-raster"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-pptx-render",
+ "image",
+ "png",
+ "tiny-skia",
 ]
 
 [[package]]

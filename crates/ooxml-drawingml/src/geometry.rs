@@ -16,7 +16,7 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         "rightArrow" | "leftArrow" | "upArrow" | "downArrow" => {
             vec![("adj1", 0.5), ("adj2", 0.5)]
         }
-        "chevron" => vec![("adj", 0.35)],
+        "chevron" | "homePlate" => vec![("adj", 0.5)],
         value
             if value
                 .strip_prefix("star")
@@ -35,6 +35,7 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         .collect()
 }
 
+/// Adjustments use ECMA-376 guide values divided by 100000.
 pub fn preset_geometry_to_path(
     shape_type: &str,
     adjustments: &HashMap<String, f64>,
@@ -197,17 +198,28 @@ pub fn preset_geometry_to_path(
             (0.0, 0.25),
         ]),
         "chevron" => {
-            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.35).min(0.5);
+            let notch =
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, aspect_ratio);
             polygon(&[
                 (0.0, 0.0),
-                (1.0 - adjustment, 0.0),
+                (1.0 - notch, 0.0),
                 (1.0, 0.5),
-                (1.0 - adjustment, 1.0),
+                (1.0 - notch, 1.0),
                 (0.0, 1.0),
-                (adjustment, 0.5),
+                (notch, 0.5),
             ])
         }
-        "homePlate" => polygon(&[(0.0, 0.0), (0.75, 0.0), (1.0, 0.5), (0.75, 1.0), (0.0, 1.0)]),
+        "homePlate" => {
+            let point =
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, aspect_ratio);
+            polygon(&[
+                (0.0, 0.0),
+                (1.0 - point, 0.0),
+                (1.0, 0.5),
+                (1.0 - point, 1.0),
+                (0.0, 1.0),
+            ])
+        }
         "flowChartProcess"
         | "flowChartAlternateProcess"
         | "flowChartPredefinedProcess"
@@ -227,6 +239,20 @@ pub fn preset_geometry_to_path(
         _ => return None,
     };
     Some(result)
+}
+
+/// Pins to `w / ss`, then converts from shortest-side to width units.
+fn shortest_side_adjustment(adjustment: Option<f64>, fallback: f64, aspect_ratio: f64) -> f64 {
+    let width = width_in_shortest_sides(aspect_ratio);
+    pin(adjustment, fallback, width) / width
+}
+
+fn width_in_shortest_sides(aspect_ratio: f64) -> f64 {
+    if aspect_ratio.is_finite() && aspect_ratio > 0.0 {
+        aspect_ratio.max(1.0)
+    } else {
+        1.0
+    }
 }
 
 fn rounded_rect(aspect_ratio: f64, adjustment: f64) -> Vec<GeometryPathCommand> {
@@ -326,11 +352,14 @@ fn star(points: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
 }
 
 fn clamp_fraction(value: Option<f64>, fallback: f64) -> f64 {
+    pin(value, fallback, 1.0)
+}
+
+fn pin(value: Option<f64>, fallback: f64, max: f64) -> f64 {
     value
-        .filter(|v| v.is_finite())
-        .map(|v| if v > 1.0 { v / 100_000.0 } else { v })
+        .filter(|value| value.is_finite())
         .unwrap_or(fallback)
-        .clamp(0.0, 1.0)
+        .clamp(0.0, max)
 }
 
 fn arrow(
@@ -443,6 +472,110 @@ mod tests {
             panic!("round rectangle must curve its first corner");
         };
         (rx, ry)
+    }
+
+    /// Where the leading edge stops before the point begins.
+    fn leading_edge(shape: &str, adjust: Option<f64>, aspect_ratio: f64) -> f64 {
+        let mut adjustments = HashMap::new();
+        if let Some(value) = adjust {
+            adjustments.insert("adj".to_owned(), value);
+        }
+        let path = preset_geometry_to_path(shape, &adjustments, aspect_ratio).unwrap();
+        let GeometryPathCommand::Line { x, .. } = path[1] else {
+            panic!("expected a line after the opening move");
+        };
+        x
+    }
+
+    #[test]
+    fn an_adjust_value_is_a_fraction_of_the_shortest_side() {
+        assert_close(1.0 - leading_edge("chevron", Some(0.5), 1.0), 0.5);
+
+        let aspect = 171.3 / 55.6;
+        assert_close(
+            1.0 - leading_edge("chevron", Some(0.5), aspect),
+            0.5 / aspect,
+        );
+
+        assert_close(1.0 - leading_edge("homePlate", Some(0.5), 1.0), 0.5);
+        let aspect = 280.9 / 37.5;
+        assert_close(
+            1.0 - leading_edge("homePlate", Some(0.5), aspect),
+            0.5 / aspect,
+        );
+        assert_close(
+            1.0 - leading_edge("homePlate", Some(0.25), aspect),
+            0.25 / aspect,
+        );
+    }
+
+    #[test]
+    fn chevron_and_home_plate_default_to_half_the_shortest_side() {
+        for shape in ["chevron", "homePlate"] {
+            assert_eq!(
+                preset_geometry_default_adjustments(shape)
+                    .get("adj")
+                    .copied(),
+                Some(0.5),
+                "{shape} must default to the value the spec gives it"
+            );
+            let aspect = 4.0;
+            assert_close(1.0 - leading_edge(shape, None, aspect), 0.5 / aspect);
+        }
+    }
+
+    #[test]
+    fn an_adjust_value_above_half_is_honoured() {
+        for shape in ["chevron", "homePlate"] {
+            assert_close(1.0 - leading_edge(shape, Some(0.75), 1.0), 0.75);
+            assert_close(1.0 - leading_edge(shape, Some(1.0), 1.0), 1.0);
+        }
+    }
+
+    #[test]
+    fn wide_shape_adjustments_may_exceed_the_shortest_side() {
+        for shape in ["chevron", "homePlate"] {
+            assert_close(leading_edge(shape, Some(2.0), 4.0), 0.5);
+        }
+        let adjustments = HashMap::from([("adj".to_owned(), 2.0)]);
+        let chevron = preset_geometry_to_path("chevron", &adjustments, 4.0).unwrap();
+        let GeometryPathCommand::Line { x, y } = chevron[5] else {
+            panic!("expected the notch vertex");
+        };
+        assert_close(x, 0.5);
+        assert_close(y, 0.5);
+    }
+
+    #[test]
+    fn adjustments_pin_at_the_width() {
+        for shape in ["chevron", "homePlate"] {
+            assert_close(leading_edge(shape, Some(6.0), 4.0), 0.0);
+            assert_close(leading_edge(shape, Some(2.0), 0.25), 0.0);
+            assert_close(leading_edge(shape, Some(-0.25), 4.0), 1.0);
+        }
+    }
+
+    #[test]
+    fn normalized_adjustments_do_not_guess_raw_guide_units() {
+        for shape in [
+            "roundRect",
+            "triangle",
+            "parallelogram",
+            "trapezoid",
+            "hexagon",
+            "octagon",
+            "rightArrow",
+            "star5",
+            "bentConnector3",
+        ] {
+            let path = |value| {
+                let adjustments = ["adj", "adj1", "adj2"]
+                    .map(|name| (name.to_owned(), value))
+                    .into();
+                preset_geometry_to_path(shape, &adjustments, 1.0).unwrap()
+            };
+            assert_eq!(path(2.0), path(1.0), "{shape}");
+        }
     }
 
     fn assert_close(actual: f64, expected: f64) {

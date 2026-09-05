@@ -7,9 +7,11 @@ import { Toolbar } from './Toolbar';
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 const elementPrototype = HTMLElement.prototype;
 const clientWidth = Object.getOwnPropertyDescriptor(elementPrototype, 'clientWidth');
+// Wide enough for every section to stay out of the overflow menu, so a
+// `getByTestId` here reaches the control the toolbar renders inline.
 Object.defineProperty(elementPrototype, 'clientWidth', {
   configurable: true,
-  get: () => 1_200,
+  get: () => 1_320,
 });
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 

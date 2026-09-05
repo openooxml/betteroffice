@@ -212,6 +212,7 @@ fn collect_paragraphs<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Parag
                 }
             }
             BlockContent::BlockSdt(sdt) => collect_paragraphs(&sdt.content, output),
+            BlockContent::RawXml(_) => {}
         }
     }
 }
@@ -225,7 +226,7 @@ fn paragraphs_of(blocks: &[BlockContent]) -> Vec<PyParagraph> {
 fn collect_tables<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Table>) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(_) => {}
+            BlockContent::Paragraph(_) | BlockContent::RawXml(_) => {}
             BlockContent::Table(table) => {
                 output.push(table);
                 for row in &table.rows {

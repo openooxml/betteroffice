@@ -10,6 +10,7 @@ use xlsx_model::{
     Hyperlink, Sheet, SheetId, Workbook,
 };
 
+use crate::formula::SharedFormulas;
 use crate::styles::parse_stylesheet;
 use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
@@ -355,6 +356,7 @@ fn parse_worksheet(
     let mut cur: Option<CellBuild> = None;
     let mut cell_count: u64 = 0;
     let mut hyperlink_count: usize = 0;
+    let mut shared_formulas = SharedFormulas::default();
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -404,6 +406,9 @@ fn parse_worksheet(
                 b"f" => {
                     let text = collect_text(&mut reader, &mut buf, &mut depth)?;
                     if let Some(c) = cur.as_mut() {
+                        if let Some(origin) = c.addr {
+                            shared_formulas.record(&e, origin, &text)?;
+                        }
                         c.formula = Some(text);
                     }
                 }
@@ -454,6 +459,7 @@ fn parse_worksheet(
             _ => {}
         }
     }
+    shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
     Ok(sheet)
 }

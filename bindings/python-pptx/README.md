@@ -124,8 +124,19 @@ every slide — in that one typeface, at its metrics. Register the real faces wh
 line breaking has to match what PowerPoint would do.
 
 `render_slide` returns the display list — the same drawing contract the browser
-editor paints, as JSON. There is no PPTX rasterizer yet, so this is a scene
-description rather than pixels; feed it to your own canvas or renderer.
+editor paints, as JSON — for hosts that paint it themselves. `render_png`
+rasterizes a slide instead, resolving pictures out of the package so only fonts
+need registering:
+
+```python
+png = deck.render_png(0, scale=2.0)
+print(png.width, png.height, png.skipped_images)   # 2560 1440 0
+png.write("slide-0.png")
+```
+
+`background` picks what fills the pixels the slide leaves uncovered: `"slide"`
+(the default, opaque white under the slide's own background), `"transparent"`,
+or a `#rrggbb` color.
 
 ## Collaboration
 
