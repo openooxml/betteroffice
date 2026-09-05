@@ -39,18 +39,18 @@ function render() {
 }
 
 describe('usePageSetupControls', () => {
-  test('a margin change reaches the resolved last section the layout request is built from', () => {
+  test('a margin change reaches the layout request through the resolved last section', () => {
     const { hook, changed } = render();
     act(() => hook.result.current.handleLeftMarginChange(2880));
     expect(changed).toHaveLength(1);
+    const request = buildResidentRegionLayoutRequest(changed[0], 24, {});
+    expect(request.regions.sections.at(-1)?.properties.marginLeft).toBe(2880);
     const body = changed[0].package.document;
     expect(body.finalSectionProperties?.marginLeft).toBe(2880);
     expect(body.sections?.at(-1)?.properties).toMatchObject({
       marginLeft: 2880,
       headerReferences: inheritedHeader,
     });
-    const request = buildResidentRegionLayoutRequest(changed[0], 24, {});
-    expect(request.regions.sections.at(-1)?.properties.marginLeft).toBe(2880);
   });
 
   test('page setup keeps the authored sectPr free of the inherited references', () => {
