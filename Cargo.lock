@@ -71,6 +71,7 @@ dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
  "betteroffice-docx-raster",
+ "betteroffice-ooxml-fidelity",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "png",
@@ -143,6 +144,15 @@ version = "0.1.0"
 dependencies = [
  "indexmap",
  "serde",
+]
+
+[[package]]
+name = "betteroffice-ooxml-fidelity"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
