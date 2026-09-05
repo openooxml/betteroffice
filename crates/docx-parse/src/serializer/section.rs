@@ -98,8 +98,7 @@ fn page_margins_have_content(properties: &SectionProperties) -> bool {
 }
 
 fn columns_have_content(properties: &SectionProperties) -> bool {
-    // `<w:cols w:space="708"/>` is authored content: the space differs from
-    // Word's implied default, so a count-less cols element must survive.
+    // A count-less cols element still carries an authored space.
     properties.column_count.is_some_and(|value| value > 1.0)
         || properties.column_space.is_some()
         || properties.equal_width.is_some()

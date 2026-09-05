@@ -65,12 +65,9 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
     for (name, bytes) in before {
         match after_bytes.get(name.as_str()) {
             None => findings.push(format!("part dropped: {name}")),
-            // Relationship and content-type parts carry no authored order;
-            // their oracle is the digest's sorted identity set, not the
-            // ordered fingerprint ("relationship-and-content-type-order").
+            // Unordered parts: the digest's identity set is their oracle.
             Some(_) if name == "[Content_Types].xml" || name.ends_with(".rels") => {}
-            // Byte rule 2: an XML part the engine does not model is never
-            // re-emitted, so no lexical difference is allowed either.
+            // Byte rule 2: unmodelled parts allow no lexical difference.
             Some(saved) if is_xml_part(name) && !is_modelled_xml_part(name) => {
                 if *saved != bytes {
                     findings.push(format!("unmodelled part rewritten: {name}"));
@@ -85,9 +82,7 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
                 };
                 let mut reopened = reopened.clone();
                 normalize_root_ignorable(&original.attributes, &mut reopened.attributes);
-                // Identity-stripped equality classifies the difference as the
-                // "paragraph-id-minting" normalization; a lost or changed
-                // identity still surfaces through the digest below.
+                // Minted ids only; a lost or changed id surfaces in the digest below.
                 if structural_fingerprint(original) != structural_fingerprint(&reopened)
                     && structural_fingerprint_excluding(original, MANAGED_IDENTITY_ATTRIBUTES)
                         != structural_fingerprint_excluding(&reopened, MANAGED_IDENTITY_ATTRIBUTES)

@@ -63,8 +63,7 @@ fn project_element(
         })
         .collect();
     attributes.sort_unstable();
-    // A declaration means which URIs enter scope, never which prefix spells
-    // them; `STANDARD_WML_NAMESPACE_URIS` documents the excluded boilerplate.
+    // Declarations compare by URI, never by prefix spelling.
     let mut bindings: Vec<&str> = element
         .bindings
         .iter()

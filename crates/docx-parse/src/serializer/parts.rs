@@ -410,8 +410,7 @@ fn serialize_comment(
     para_infos: &mut Vec<CommentParaInfo>,
     context: &mut SerializerContext,
 ) -> String {
-    // Reuse the identities the package already carries; minting fresh ones
-    // every save would keep the package from ever reaching a fixed point.
+    // Minting fresh ids every save would never reach a fixed point.
     let comment_para_id = comment
         .para_id
         .clone()
@@ -499,9 +498,7 @@ fn serialize_comment_paragraph(
             "<w:r><w:rPr><w:rStyle w:val=\"CommentReference\"/></w:rPr><w:annotationRef/></w:r>",
         );
     }
-    // An authored annotation-reference run reaches the model with no
-    // serializable content; re-emitting it beside the injected one above
-    // would add an empty run the input never had.
+    // Re-emitting the authored reference run would add an empty run.
     for item in &paragraph.content {
         if let ParagraphContent::Inline(InlineNode::Run(run)) = item
             && comment_run_has_content(run)

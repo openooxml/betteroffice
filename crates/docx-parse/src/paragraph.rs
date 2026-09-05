@@ -1311,8 +1311,6 @@ fn apply_list_rendering(
                     })
                 })
         });
-        // Consumers apply the level's indents at layout time; materializing
-        // them into w:ind on save would rewrite the authored properties.
         if !direct_left && !style_indents.0 {
             rendering.indent_left = level_properties.indent_left;
         }

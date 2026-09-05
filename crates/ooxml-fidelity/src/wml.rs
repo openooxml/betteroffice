@@ -232,9 +232,7 @@ pub(crate) fn digest_part(part: &str, root: &XmlElement) -> StoryDigest {
     } else {
         root
     };
-    // Relationship and content-type entries carry no authored order, so they
-    // digest as an identity set: entry tokens without positions, sorted (the
-    // declared "relationship-and-content-type-order" normalization).
+    // Unordered entries digest as a sorted identity set.
     let unordered =
         root.is(PACKAGE_RELATIONSHIPS, "Relationships") || root.is(CONTENT_TYPES, "Types");
     if unordered {

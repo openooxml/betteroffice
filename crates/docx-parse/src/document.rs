@@ -348,8 +348,7 @@ mod tests {
             sections[1].properties.header_references.as_ref().unwrap()[0].relationship_id,
             "rH"
         );
-        // The final body sectPr stays as authored: a save must not rehome
-        // the inherited reference; resolution is read from `sections`.
+        // Kept as authored; header inheritance is resolved through `sections`.
         let final_properties = body.final_section_properties.as_ref().unwrap();
         assert_eq!(final_properties.margin_left, Some(720.0));
         assert!(final_properties.header_references.is_none());

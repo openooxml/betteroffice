@@ -366,9 +366,7 @@ fn serialize_complex_field(
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    // The structured result keeps links, bookmarks, and nested fields in
-    // their authored positions; the run-level view is the fallback for
-    // multi-block results and fields rebuilt by the edit path.
+    // Run-level fallback: multi-block results and fields rebuilt by the edit path.
     let structured = field
         .structured_result
         .as_ref()
