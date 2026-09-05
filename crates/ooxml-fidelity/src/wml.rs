@@ -468,7 +468,7 @@ fn property_token(element: &XmlElement, depth: usize) -> String {
 }
 
 /// Name plus sorted attributes, no children.
-fn element_token(element: &XmlElement) -> String {
+pub(crate) fn element_token(element: &XmlElement) -> String {
     let name = qualified_name(element);
     let attributes = attribute_tokens(element);
     if attributes.is_empty() {

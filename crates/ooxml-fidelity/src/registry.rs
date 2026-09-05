@@ -117,8 +117,11 @@ pub const STANDARD_WML_NAMESPACE_URIS: &[&str] = &[
 
 /// The comment companion parts the serializer materializes on save, exactly
 /// as Word does when it writes threaded comments.
-pub const COMPANION_PART_MARKERS: &[&str] =
-    &["commentsExtended", "commentsIds", "commentsExtensible"];
+pub const COMPANION_PART_NAMES: &[&str] = &[
+    "word/commentsExtended.xml",
+    "word/commentsIds.xml",
+    "word/commentsExtensible.xml",
+];
 
 /// Managed paragraph identity the serializer may mint where absent.
 pub const MANAGED_IDENTITY_ATTRIBUTES: &[(&str, &str)] = &[

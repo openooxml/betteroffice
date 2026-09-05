@@ -17,6 +17,11 @@ allowed; removals and custom additions are findings. `mc:ProcessContent`,
 `mc:Choice/@Requires` and `xsi:type` also resolve values through in-scope
 namespace bindings. Unbound prefixes are rejected.
 
+The companion exception permits only newly added `word/commentsIds.xml`,
+`word/commentsExtended.xml` and `word/commentsExtensible.xml` parts, plus
+new content-type overrides and internal relationship entries resolving to those
+exact part names. Existing entries and unrelated names remain significant.
+
 Synthetic pairs exercise differences that a census alone cannot detect:
 attribute values, text, field instructions, properties, containment, markers,
 relationships and unknown subtrees. Run `cargo test -p betteroffice-ooxml-fidelity`

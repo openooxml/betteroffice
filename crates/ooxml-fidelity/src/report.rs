@@ -9,7 +9,7 @@ use crate::census::{element_census, losses};
 use crate::error::FidelityError;
 use crate::fingerprint::{structural_fingerprint, structural_fingerprint_excluding};
 use crate::registry::{
-    COMPANION_PART_MARKERS, ComparisonMode, MANAGED_IDENTITY_ATTRIBUTES, comparison_mode,
+    COMPANION_PART_NAMES, ComparisonMode, MANAGED_IDENTITY_ATTRIBUTES, comparison_mode,
     is_modelled_xml_part, normalize_root_ignorable,
 };
 use crate::wml::{Difference, diff_digests, semantic_digest};
@@ -19,6 +19,7 @@ use crate::{Part, is_xml_part};
 /// One line per violated rule; an unedited round trip must report nothing.
 pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>, FidelityError> {
     let mut findings = Vec::new();
+    let allowed_entries = companion_entries(after)?;
     let limits = XmlLimits::default();
     require_exact("non-xml-part-bytes")?;
     require_exact("unmodelled-xml-part-bytes")?;
@@ -73,7 +74,7 @@ pub fn roundtrip_findings(before: &[Part], after: &[Part]) -> Result<Vec<String>
         ));
     }
     for difference in diff_digests(&semantic_digest(before)?, &semantic_digest(after)?) {
-        if allowed_difference(&difference) {
+        if allowed_difference(&difference, &allowed_entries) {
             continue;
         }
         findings.push(format!(
@@ -97,16 +98,80 @@ fn require_exact(artifact: &str) -> Result<(), FidelityError> {
 
 /// The "comment-companion-parts" normalization.
 fn is_companion_part(name: &str) -> bool {
-    COMPANION_PART_MARKERS
-        .iter()
-        .any(|marker| name.contains(marker))
+    COMPANION_PART_NAMES.contains(&name)
 }
 
-fn allowed_difference(difference: &Difference) -> bool {
-    if is_companion_part(&difference.path)
-        || COMPANION_PART_MARKERS
-            .iter()
-            .any(|marker| difference.before.contains(marker) || difference.after.contains(marker))
+fn companion_entries(parts: &[Part]) -> Result<BTreeSet<(String, String)>, FidelityError> {
+    let mut allowed = BTreeSet::new();
+    for (part, bytes) in parts {
+        if part != "[Content_Types].xml" && !part.ends_with(".rels") {
+            continue;
+        }
+        let root = parse_part(bytes, part, &XmlLimits::default())?;
+        for entry in root.element_children() {
+            let target = if part == "[Content_Types].xml"
+                && entry.is(
+                    "http://schemas.openxmlformats.org/package/2006/content-types",
+                    "Override",
+                ) {
+                entry
+                    .attribute("", "PartName")
+                    .and_then(|name| name.strip_prefix('/'))
+                    .map(str::to_owned)
+            } else if part.ends_with(".rels")
+                && entry.is(
+                    "http://schemas.openxmlformats.org/package/2006/relationships",
+                    "Relationship",
+                )
+                && entry
+                    .attribute("", "TargetMode")
+                    .is_none_or(|mode| mode == "Internal")
+            {
+                entry
+                    .attribute("", "Target")
+                    .and_then(|target| relationship_target(part, target))
+            } else {
+                None
+            };
+            if target.as_deref().is_some_and(is_companion_part) {
+                allowed.insert((format!("{part} entry"), crate::wml::element_token(entry)));
+            }
+        }
+    }
+    Ok(allowed)
+}
+
+fn relationship_target(part: &str, target: &str) -> Option<String> {
+    let directory = if part == "_rels/.rels" {
+        ""
+    } else {
+        part.rsplit_once("/_rels/")?.0
+    };
+    let path = if target.starts_with('/') || directory.is_empty() {
+        target.to_owned()
+    } else {
+        format!("{directory}/{target}")
+    };
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            _ => segments.push(segment),
+        }
+    }
+    Some(segments.join("/"))
+}
+
+fn allowed_difference(
+    difference: &Difference,
+    allowed_entries: &BTreeSet<(String, String)>,
+) -> bool {
+    if difference.before == "absent"
+        && ((difference.after == "present" && is_companion_part(&difference.path))
+            || allowed_entries.contains(&(difference.path.clone(), difference.after.clone())))
     {
         return true;
     }
