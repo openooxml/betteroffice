@@ -1656,11 +1656,6 @@ fn positioned_runs(
     scale: f32,
 ) -> Vec<PositionedTextRun> {
     let mut output: Vec<PositionedTextRun> = Vec::new();
-    // The source run that opened `output.last()`. A positioned run is a paint unit, so clusters
-    // may only join one that came from the same run: matching on font id alone merged
-    // neighbouring runs that differ only in colour, weight, underline or size, and the merged run
-    // took all of them from whichever cluster opened it.
-    let mut open_run: Option<usize> = None;
     let mut cursor_x = line_x;
     for (index, cluster) in clusters.iter().enumerate() {
         if cluster.text == "\n" {
@@ -1669,10 +1664,14 @@ fn positioned_runs(
         let append = output.last().is_some_and(|run| {
             run.end == cluster.start
                 && run.font_id == cluster.style.face.id.to_u32()
-                && open_run == Some(cluster.run_index)
+                && run.font_family == cluster.style.family
+                && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
+                && run.bold == cluster.style.bold
+                && run.italic == cluster.style.italic
+                && run.underline == cluster.style.underline
+                && run.color == cluster.style.color
         });
         if !append {
-            open_run = Some(cluster.run_index);
             output.push(PositionedTextRun {
                 text: String::new(),
                 start: cluster.start,
@@ -2706,52 +2705,108 @@ mod tests {
     #[test]
     fn adjacent_runs_keep_their_own_paint_attributes() {
         let renderer = renderer();
-        let face = renderer.resolve_face("Arial", false, false).unwrap();
-        let style = |color: &str, bold: bool| ResolvedStyle {
-            face: face.clone(),
+        let style = ResolvedStyle {
+            face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
-            bold,
+            bold: false,
             italic: false,
             underline: false,
-            color: color.to_owned(),
+            color: "#000000".to_owned(),
         };
-        // Three runs that differ only in colour and weight: matching on font id alone folded them
-        // into one, which then took its paint from whichever run opened it.
-        let paragraph = ResolvedParagraph {
-            align: TextAlign::Left,
-            justify: false,
-            level: 0,
-            margin_left_px: 0.0,
-            runs: vec![
-                ResolvedRun {
-                    text: "gold ".to_owned(),
-                    start: 0,
-                    style: style("#A99A72", false),
-                },
-                ResolvedRun {
-                    text: "black ".to_owned(),
-                    start: 5,
-                    style: style("#000000", false),
-                },
-                ResolvedRun {
-                    text: "bold".to_owned(),
-                    start: 11,
-                    style: style("#000000", true),
-                },
-            ],
+        let mut variants = vec![style.clone(); 7];
+        variants[0].color = "#A99A72".to_owned();
+        variants[1].bold = true;
+        variants[2].italic = true;
+        variants[3].underline = true;
+        variants[4].font_size_pt = 28.0;
+        variants[5].family = "Fallback".to_owned();
+        variants[6].face = renderer.resolve_face("Arial", true, false).unwrap();
+        for changed in variants {
+            let paragraph = ResolvedParagraph {
+                align: TextAlign::Left,
+                justify: false,
+                level: 0,
+                margin_left_px: 0.0,
+                runs: [style.clone(), changed.clone(), style.clone()]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, style)| ResolvedRun {
+                        text: "word ".to_owned(),
+                        start: index as u32 * 5,
+                        style,
+                    })
+                    .collect(),
+            };
+            for scale in [1.0, 0.5] {
+                let lines =
+                    layout_paragraph(&renderer.fonts, &paragraph, 10.0, 20.0, 10_000.0, scale)
+                        .unwrap();
+                assert_eq!(lines.len(), 1);
+                let runs = &lines[0].runs;
+                assert_eq!(runs.len(), 3);
+                for (index, (actual, expected)) in runs.iter().zip(&paragraph.runs).enumerate() {
+                    assert_eq!(actual.text, expected.text);
+                    assert_eq!(
+                        (actual.start, actual.end),
+                        (index as u32 * 5, index as u32 * 5 + 5)
+                    );
+                    assert_eq!(actual.color, expected.style.color);
+                    assert_eq!(actual.bold, expected.style.bold);
+                    assert_eq!(actual.italic, expected.style.italic);
+                    assert_eq!(actual.underline, expected.style.underline);
+                    assert_eq!(actual.font_id, expected.style.face.id.to_u32());
+                    assert_eq!(actual.font_family, expected.style.family);
+                    assert_eq!(
+                        actual.font_size_px,
+                        points_to_px(expected.style.font_size_pt * scale)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_adjacent_runs_keep_the_same_display_list() {
+        let renderer = renderer();
+        let style = ResolvedStyle {
+            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            family: "Arial".to_owned(),
+            font_size_pt: 14.0,
+            bold: false,
+            italic: false,
+            underline: true,
+            color: "#A99A72".to_owned(),
         };
-        let lines = layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 10_000.0, 1.0).unwrap();
-        let runs = &lines[0].runs;
-        assert_eq!(
-            runs.len(),
-            3,
-            "each source run must stay its own paint unit"
-        );
-        assert_eq!(runs[0].color, "#A99A72");
-        assert_eq!(runs[1].color, "#000000");
-        assert!(!runs[1].bold);
-        assert!(runs[2].bold);
+        let paragraph = |parts: &[&str]| {
+            let mut start = 0;
+            ResolvedParagraph {
+                align: TextAlign::Justify,
+                justify: true,
+                level: 0,
+                margin_left_px: 0.0,
+                runs: parts
+                    .iter()
+                    .map(|text| {
+                        let run = ResolvedRun {
+                            text: (*text).to_owned(),
+                            start,
+                            style: style.clone(),
+                        };
+                        start += utf16_len(text);
+                        run
+                    })
+                    .collect(),
+            }
+        };
+        let split = paragraph(&["alpha ", "", "beta ", "gamma ", "delta"]);
+        let joined = paragraph(&["alpha beta gamma delta"]);
+        for width in [100.0, 10_000.0] {
+            let render = |paragraph| {
+                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0).unwrap()
+            };
+            assert_eq!(render(&split), render(&joined));
+        }
     }
 
     #[test]
