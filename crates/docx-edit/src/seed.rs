@@ -3122,6 +3122,37 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn comprehensive_native_layout_accepts_authored_page_number_start() {
+        let bytes = include_bytes!(
+            "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+        );
+        let parsed =
+            docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default()).unwrap();
+        let package = parsed.document.package;
+        let mut sections: Vec<Value> = package
+            .document
+            .sections
+            .unwrap()
+            .into_iter()
+            .map(|section| json!({"properties":section.properties}))
+            .collect();
+        assert!(
+            sections.iter().any(
+                |section| section["properties"]["pageNumbering"]["start"].as_f64() == Some(1.0)
+            )
+        );
+        sections.push(json!({"properties":package.document.final_section_properties}));
+        let request = json!({"bodyStory":"body", "options":{"pageGap":24}, "regions":{"sections":sections, "settings":package.settings}, "renderEnv":{}}).to_string();
+        let engine = crate::EngineSession::new(74003);
+        seed_from_docx(engine.doc(), bytes).unwrap();
+        engine.layout_font_requirements_json(&request).unwrap();
+        let layout: Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
+        assert!(!layout["layout"]["pages"].as_array().unwrap().is_empty());
+    }
+
     use super::*;
 
     #[test]
