@@ -2843,6 +2843,9 @@ mod tests {
                 justify: false,
                 level: 0,
                 margin_left_px: 0.0,
+                indent_px: 0.0,
+                bullet: None,
+                bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
                     .enumerate()
@@ -2900,6 +2903,9 @@ mod tests {
                 justify: true,
                 level: 0,
                 margin_left_px: 0.0,
+                indent_px: 0.0,
+                bullet: None,
+                bullet_style: None,
                 runs: parts
                     .iter()
                     .map(|text| {
