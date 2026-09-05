@@ -236,6 +236,15 @@ fn parse_graphic_frame(
             .map(|(_, value)| value.clone())
             .collect();
         GraphicFrameData::Diagram { relationship_ids }
+    } else if let Some(picture) =
+        data.and_then(|value| value.descendants_named("pic").first().copied())
+    {
+        // An OLE object's `mc:Fallback` holds the picture PowerPoint paints
+        // until the object is activated; without it the frame degrades to an
+        // empty dashed box.
+        GraphicFrameData::Ole {
+            picture: Box::new(parse_picture(picture, relationships, part, budget)?),
+        }
     } else {
         GraphicFrameData::Unknown {
             uri: data
@@ -986,6 +995,39 @@ mod tests {
                 .properties
                 .font_size_pt,
             Some(24.0)
+        );
+    }
+
+    #[test]
+    fn an_ole_graphic_frame_keeps_its_fallback_picture() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="9" name="Object 8"/></p:nvGraphicFramePr><p:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="v"><p:oleObj r:id="rId9" progId="MSGraph.Chart.8"><p:embed/></p:oleObj></mc:Choice><mc:Fallback><p:oleObj r:id="rId9" progId="MSGraph.Chart.8"><p:embed/><p:pic><p:nvPicPr><p:cNvPr id="9" name="Object 8"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId10"/></p:blipFill><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></a:xfrm></p:spPr></p:pic></p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let relationships = [Relationship {
+            id: "rId10".to_owned(),
+            relationship_type: String::new(),
+            target: "../media/image1.emf".to_owned(),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some("ppt/media/image1.emf".to_owned()),
+        }];
+
+        let data =
+            common_slide_data(&root, &relationships, "ppt/slides/slide1.xml", &mut budget).unwrap();
+
+        let ShapeNode::GraphicFrame(frame) = &data.shapes[0] else {
+            panic!("expected a graphic frame");
+        };
+        let GraphicFrameData::Ole { picture } = &frame.data else {
+            panic!("expected the OLE fallback picture, got {:?}", frame.data);
+        };
+        assert_eq!(
+            picture.media_part_path.as_deref(),
+            Some("ppt/media/image1.emf")
         );
     }
 

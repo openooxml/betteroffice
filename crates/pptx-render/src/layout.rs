@@ -2,19 +2,21 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::chart::PlotRect;
 use ooxml_drawingml::{
-    ShapeFill, ShapeOutline, Theme, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
-    resolve_theme_font_ref,
+    GeometryPathCommand, ShapeFill, ShapeOutline, Theme, preset_geometry_to_path,
+    resolve_color_value_to_hex_with_theme, resolve_theme_font_ref,
 };
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    ChartSpace, GraphicFrameData, ParagraphProperties, Placeholder, PptxPackage, RunProperties,
-    ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    ChartSpace, GraphicFrameData, ParagraphProperties, PictureCrop, Placeholder, PptxPackage,
+    RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit,
+    TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
+use crate::metafile::{MetafileDrawing, decode as decode_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, Paint, PositionedGlyph,
     PositionedTextLine, PositionedTextRun, Primitive, Stroke, SurfaceDisplayList, TextAlign,
@@ -35,6 +37,8 @@ const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
+/// Metafile fills and strokes one slide may draw, shared across its pictures.
+const MAX_METAFILE_PRIMITIVES: usize = 4_000;
 
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -189,6 +193,7 @@ impl SlideRenderer {
             shape_count: 0,
             line_count: 0,
             chart_budget: MAX_CHART_PRIMITIVES,
+            metafile_budget: MAX_METAFILE_PRIMITIVES,
         };
         let root_space = Space::root();
         let show_master = parsed_slide.is_none_or(|slide| slide.show_master_shapes)
@@ -312,6 +317,7 @@ struct LayoutBuilder<'a> {
     shape_count: usize,
     line_count: usize,
     chart_budget: usize,
+    metafile_budget: usize,
 }
 
 impl<'a> LayoutBuilder<'a> {
@@ -411,18 +417,22 @@ impl<'a> LayoutBuilder<'a> {
                 });
             }
             ShapeKind::Picture => {
-                self.primitives.push(Primitive::Image {
-                    object_id: shape.source_id,
-                    shape_id: Some(stable_id.clone()),
-                    name: shape.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    asset_id: shape.media_part_path.clone(),
-                    stroke: outline,
+                // The snapshot carries no `srcRect`, so the crop comes from the
+                // parsed node the snapshot was taken from.
+                let crop = original
+                    .and_then(node_crop)
+                    .or_else(|| layout_node.and_then(node_crop))
+                    .or_else(|| master_node.and_then(node_crop));
+                self.render_picture(
+                    shape.source_id,
+                    &stable_id,
+                    &shape.name,
+                    rect,
                     transform,
-                });
+                    shape.media_part_path.as_deref(),
+                    crop,
+                    outline,
+                );
             }
             ShapeKind::GraphicFrame => {
                 self.render_graphic_frame(
@@ -520,21 +530,20 @@ impl<'a> LayoutBuilder<'a> {
                 });
             }
             ShapeNode::Picture(value) => {
-                self.primitives.push(Primitive::Image {
-                    object_id: base.id,
-                    shape_id: Some(stable_id.to_owned()),
-                    name: base.name.clone(),
-                    x: rect.x,
-                    y: rect.y,
-                    w: rect.w,
-                    h: rect.h,
-                    asset_id: value.media_part_path.clone(),
-                    stroke: value
-                        .outline
-                        .as_ref()
-                        .and_then(|outline| stroke(outline, self.theme)),
+                let outline = value
+                    .outline
+                    .as_ref()
+                    .and_then(|outline| stroke(outline, self.theme));
+                self.render_picture(
+                    base.id,
+                    stable_id,
+                    &base.name,
+                    rect,
                     transform,
-                });
+                    value.media_part_path.as_deref(),
+                    Some(&value.crop),
+                    outline,
+                );
             }
             ShapeNode::GraphicFrame(value) => {
                 self.render_graphic_frame(
@@ -576,6 +585,113 @@ impl<'a> LayoutBuilder<'a> {
         Ok(())
     }
 
+    /// Draws a picture: as replayed metafile paths when its media is EMF or
+    /// WMF, which no image decoder on either backend accepts, and otherwise as
+    /// the `Image` the backends resolve through their asset map.
+    #[allow(clippy::too_many_arguments)]
+    fn render_picture(
+        &mut self,
+        object_id: u32,
+        shape_id: &str,
+        name: &str,
+        rect: PxRect,
+        transform: Transform,
+        media_part_path: Option<&str>,
+        crop: Option<&PictureCrop>,
+        outline: Option<Stroke>,
+    ) {
+        if self.push_metafile(object_id, name, rect, transform, media_part_path, crop) {
+            if let Some(outline) = outline {
+                self.primitives.push(Primitive::Shape {
+                    object_id,
+                    shape_id: Some(shape_id.to_owned()),
+                    name: name.to_owned(),
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    geometry: "rect".to_owned(),
+                    path: geometry_path("rect", &BTreeMap::new(), 1.0),
+                    adjust_values: BTreeMap::new(),
+                    fill: None,
+                    stroke: Some(outline),
+                    transform,
+                });
+            }
+            return;
+        }
+        self.primitives.push(Primitive::Image {
+            object_id,
+            shape_id: Some(shape_id.to_owned()),
+            name: name.to_owned(),
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: rect.h,
+            asset_id: media_part_path.map(str::to_owned),
+            stroke: outline,
+            transform,
+        });
+    }
+
+    /// One `Shape` per metafile fill or stroke, each carrying the picture's own
+    /// box so a rotated picture turns as one piece and the paths stay inside
+    /// the frame. Returns false when the media is not a metafile this
+    /// understands, leaving the caller to emit the `Image` as before.
+    fn push_metafile(
+        &mut self,
+        object_id: u32,
+        name: &str,
+        rect: PxRect,
+        transform: Transform,
+        media_part_path: Option<&str>,
+        crop: Option<&PictureCrop>,
+    ) -> bool {
+        let Some(drawing) = self.metafile(media_part_path) else {
+            return false;
+        };
+        if drawing.ops.len() > self.metafile_budget {
+            return false;
+        }
+        self.metafile_budget -= drawing.ops.len();
+        let crop = source_rect(crop);
+        for mut op in drawing.ops {
+            place_in_source_rect(&mut op.path, crop);
+            self.primitives.push(Primitive::Shape {
+                object_id,
+                shape_id: None,
+                name: name.to_owned(),
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                geometry: "custom".to_owned(),
+                path: op.path,
+                adjust_values: BTreeMap::new(),
+                fill: op.fill.map(|color| Paint::Solid { color }),
+                // The picture box scales the pen with the paths, and a pen GDI
+                // would draw as a hairline still has to cover a pixel.
+                stroke: op.stroke.map(|stroke| Stroke {
+                    color: stroke.color,
+                    width: ((stroke.width * crop.2 * f64::from(rect.w)) as f32).max(1.0),
+                    dashed: false,
+                }),
+                transform,
+            });
+        }
+        true
+    }
+
+    fn metafile(&self, media_part_path: Option<&str>) -> Option<MetafileDrawing> {
+        let part_path = media_part_path?;
+        let part = self
+            .package
+            .media
+            .iter()
+            .find(|part| part.part_path == part_path)?;
+        decode_metafile(&part.bytes)
+    }
+
     /// Plots a chart frame, or keeps the placeholder for graphics that carry
     /// no drawable data.
     fn render_graphic_frame(
@@ -608,6 +724,25 @@ impl<'a> LayoutBuilder<'a> {
                 self.chart_budget -= primitives.len();
             }
             self.primitives.push(chart);
+            return Ok(());
+        }
+        // The frame's own extent places the fallback picture; the nested
+        // `p:pic` repeats it but PowerPoint honours the frame.
+        if let Some(GraphicFrameData::Ole { picture }) = graphic {
+            let outline = picture
+                .outline
+                .as_ref()
+                .and_then(|outline| stroke(outline, self.theme));
+            self.render_picture(
+                object_id,
+                shape_id,
+                name,
+                rect,
+                transform,
+                picture.media_part_path.as_deref(),
+                Some(&picture.crop),
+                outline,
+            );
             return Ok(());
         }
         self.primitives.push(Primitive::Placeholder {
@@ -1851,6 +1986,67 @@ fn node_outline(node: &ShapeNode) -> Option<&ShapeOutline> {
     }
 }
 
+/// `a:srcRect` as the fraction of the picture box the metafile's own frame
+/// covers: `(x, y, w, h)`. The edges are percentages of the source image that
+/// the box crops away, and a negative one pads instead — `cc-os-lecture`
+/// insets its diagrams by 27% on both sides that way.
+fn source_rect(crop: Option<&PictureCrop>) -> (f64, f64, f64, f64) {
+    let Some(crop) = crop else {
+        return (0.0, 0.0, 1.0, 1.0);
+    };
+    let fraction = |value: i32| f64::from(value) / 100_000.0;
+    let (left, top) = (fraction(crop.left), fraction(crop.top));
+    let (width, height) = (
+        1.0 - left - fraction(crop.right),
+        1.0 - top - fraction(crop.bottom),
+    );
+    if width <= 0.0 || height <= 0.0 {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+    (-left / width, -top / height, 1.0 / width, 1.0 / height)
+}
+
+/// Maps a path measured in the metafile's frame into the picture box.
+fn place_in_source_rect(path: &mut [GeometryPathCommand], rect: (f64, f64, f64, f64)) {
+    if rect == (0.0, 0.0, 1.0, 1.0) {
+        return;
+    }
+    let (x0, y0, w, h) = rect;
+    let place = |x: &mut f64, y: &mut f64| {
+        *x = x0 + *x * w;
+        *y = y0 + *y * h;
+    };
+    for command in path {
+        match command {
+            GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => place(x, y),
+            GeometryPathCommand::Quad { cpx, cpy, x, y } => {
+                place(cpx, cpy);
+                place(x, y);
+            }
+            GeometryPathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                place(cp1x, cp1y);
+                place(cp2x, cp2y);
+                place(x, y);
+            }
+            GeometryPathCommand::Close => {}
+        }
+    }
+}
+
+fn node_crop(node: &ShapeNode) -> Option<&PictureCrop> {
+    match node {
+        ShapeNode::Picture(shape) => Some(&shape.crop),
+        _ => None,
+    }
+}
+
 fn node_text(node: &ShapeNode) -> Option<&TextBody> {
     match node {
         ShapeNode::Shape(shape) => shape.text.as_ref(),
@@ -2044,6 +2240,7 @@ fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {
         Some(GraphicFrameData::Table { .. }) => Some("Table".to_owned()),
         Some(GraphicFrameData::Chart { .. }) => Some("Chart".to_owned()),
         Some(GraphicFrameData::Diagram { .. }) => Some("Diagram".to_owned()),
+        Some(GraphicFrameData::Ole { .. }) => Some("Object".to_owned()),
         Some(GraphicFrameData::Unknown { .. }) | None => None,
     }
 }
@@ -2623,6 +2820,183 @@ mod tests {
             )),
             "chart text is not shaped"
         );
+    }
+
+    /// A one-record EMF: a black triangle filling the left half of its frame.
+    fn triangle_emf() -> Vec<u8> {
+        let mut bytes = vec![0u8; 88];
+        let mut put = |offset: usize, value: i32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        put(0, 1);
+        put(4, 88);
+        put(16, 99);
+        put(20, 99);
+        put(32, 10_000);
+        put(36, 10_000);
+        put(40, 0x464D_4520);
+        put(56, 4);
+        put(72, 100);
+        put(76, 100);
+        put(80, 100);
+        put(84, 100);
+        let record = |kind: u32, body: Vec<u8>| {
+            let mut out = kind.to_le_bytes().to_vec();
+            out.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+            out.extend(body);
+            out
+        };
+        let i32s =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        bytes.extend(record(39, i32s(&[1, 0, 0, 0])));
+        bytes.extend(record(37, i32s(&[1])));
+        let mut polygon = i32s(&[0, 0, 0, 0, 3]);
+        for (x, y) in [(0i16, 0i16), (50, 0), (0, 100)] {
+            polygon.extend_from_slice(&x.to_le_bytes());
+            polygon.extend_from_slice(&y.to_le_bytes());
+        }
+        bytes.extend(record(86, polygon));
+        bytes.extend(record(14, i32s(&[0, 0, 0])));
+        bytes
+    }
+
+    /// The demo deck with one extra master picture pointing at `media`.
+    fn deck_with_master_picture(media: Vec<u8>) -> (PptxPackage, DeckSnapshot) {
+        deck_with_cropped_master_picture(media, PictureCrop::default())
+    }
+
+    fn deck_with_cropped_master_picture(
+        media: Vec<u8>,
+        crop: PictureCrop,
+    ) -> (PptxPackage, DeckSnapshot) {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_100).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.media.push(pptx_parse::MediaPart {
+            part_path: "ppt/media/logo.emf".to_owned(),
+            content_type: "image/x-emf".to_owned(),
+            bytes: media,
+        });
+        let picture = pptx_parse::Picture {
+            base: pptx_parse::ShapeBase {
+                id: 4_242,
+                name: "Logo".to_owned(),
+                description: None,
+                hidden: false,
+                placeholder: None,
+                transform: ShapeTransform {
+                    width: 914_400,
+                    height: 914_400,
+                    ..ShapeTransform::default()
+                },
+            },
+            relationship_id: None,
+            media_part_path: Some("ppt/media/logo.emf".to_owned()),
+            crop,
+            fill: None,
+            outline: None,
+        };
+        package.masters[0].shapes.push(ShapeNode::Picture(picture));
+        (package, snapshot)
+    }
+
+    #[test]
+    fn a_metafile_picture_paints_shapes_instead_of_an_undecodable_image() {
+        let (package, snapshot) = deck_with_master_picture(triangle_emf());
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        assert!(
+            !primitives.iter().any(|primitive| matches!(
+                primitive,
+                Primitive::Image { asset_id: Some(asset), .. } if asset == "ppt/media/logo.emf"
+            )),
+            "the metafile is still handed to the image decoder"
+        );
+        let shapes: Vec<_> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Shape {
+                    name,
+                    path,
+                    fill,
+                    w,
+                    h,
+                    ..
+                } if name == "Logo" => Some((path, fill, *w, *h)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shapes.len(), 1, "one fill becomes one shape");
+        let (path, fill, w, h) = shapes[0];
+        assert_eq!(
+            *fill,
+            Some(Paint::Solid {
+                color: "#000000".to_owned()
+            })
+        );
+        // Every op carries the picture's own box, so the paths stay inside the
+        // frame and a rotated picture turns as one piece.
+        assert_eq!((w, h), (96.0, 96.0));
+        assert_eq!(
+            path[1],
+            ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn a_negative_source_rectangle_insets_the_metafile_inside_its_box() {
+        // `cc-os-lecture` pads its diagrams with `srcRect l="-25000" r="-25000"`.
+        // Ignoring it stretches the drawing across the whole picture box.
+        let (package, snapshot) = deck_with_cropped_master_picture(
+            triangle_emf(),
+            PictureCrop {
+                left: -25_000,
+                right: -25_000,
+                ..PictureCrop::default()
+            },
+        );
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        let path = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { name, path, .. } if name == "Logo" => Some(path),
+                _ => None,
+            })
+            .expect("the metafile paints");
+        // The frame occupies the middle 1/1.5 of the box, so the triangle's
+        // left edge sits a sixth in and its apex lands at the centre.
+        let GeometryPathCommand::Move { x, .. } = path[0] else {
+            panic!("expected a move");
+        };
+        assert!((x - 1.0 / 6.0).abs() < 1e-6, "left edge at {x}");
+        let GeometryPathCommand::Line { x, .. } = path[1] else {
+            panic!("expected a line");
+        };
+        assert!((x - 0.5).abs() < 1e-6, "apex at {x}");
+    }
+
+    #[test]
+    fn media_that_is_not_a_metafile_still_becomes_an_image() {
+        let (package, snapshot) = deck_with_master_picture(b"\x89PNG\r\n\x1a\n".to_vec());
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        assert!(primitives.iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Image { asset_id: Some(asset), .. } if asset == "ppt/media/logo.emf"
+        )));
     }
 
     #[test]

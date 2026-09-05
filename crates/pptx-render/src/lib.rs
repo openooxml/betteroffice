@@ -3,6 +3,7 @@
 mod chart;
 mod display_list;
 mod layout;
+mod metafile;
 
 pub use display_list::*;
 pub use layout::*;
