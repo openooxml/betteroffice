@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the complete load projection is intentionally co-located */
 
+import { isRawXml } from '../types/content/rawXml';
 import { emuToPixels } from '../utils/units';
 import { isWrapNone } from '../docx/wrapTypes';
 import { sdtPropsToAttrs } from '../types/sdtAttributes';
@@ -493,6 +494,44 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
   };
 }
 
+function fieldToUnits(
+  value: SimpleField | ComplexField,
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  projectionId: number
+): InlineUnit[] {
+  const result = value.structuredResult?.inline ?? [];
+  const code = value.type === 'complexField' ? value.structuredCode?.inline ?? [] : [];
+  const projectedChildren = [
+    ...code.map((child, index) => ({ child, index: -index - 1 })),
+    ...result.map((child, index) => ({ child, index })),
+  ];
+  if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+    const field = fieldPayload(value, styleFormatting);
+    return [embedUnit('field', field.payload, field.marks)];
+  }
+  const units: InlineUnit[] = [];
+  const children: Attrs[] = [];
+  projectedChildren.forEach(({ child, index }) => {
+    if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
+    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
+    const projected = child.type === 'hyperlink'
+      ? hyperlinkToUnits(child, styleFormatting, styleResolver)
+      : [embedUnit('field', nested!.payload, nested!.marks)];
+    children.push({ index, items: projected.map((unit) => unit.kind === 'text'
+      ? { kind: 'text', text: unit.text, attributes: unit.attrs }
+      : { kind: 'embed', embedKind: unit.embedKind, payload: unit.payload, attributes: unit.attrs }) });
+    for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
+    units.push(...projected);
+  });
+  const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
+  const field = fieldPayload(visible, styleFormatting);
+  field.payload.fieldData = JSON.stringify(value);
+  field.payload.resultProjection = { id: projectionId, children };
+  units.push(embedUnit('field', field.payload, field.marks));
+  return units;
+}
+
 function noteRefUnit(
   id: number,
   noteType: 'footnote' | 'endnote',
@@ -766,6 +805,11 @@ function paragraphAttrs(
 ): Attrs {
   const formatting = paragraph.formatting;
   const styleId = formatting?.styleId;
+  const directFirst = formatting?.indentFirstLine === 0 ? undefined : formatting?.indentFirstLine;
+  const firstLine = directFirst ?? paragraph.listRendering?.indentFirstLine ?? formatting?.indentFirstLine;
+  const hanging = directFirst === undefined && paragraph.listRendering?.indentFirstLine !== undefined
+    ? paragraph.listRendering.hangingIndent
+    : formatting?.hangingIndent ?? paragraph.listRendering?.hangingIndent;
   const attrs: Attrs = {
     paraId: paragraph.paraId ?? null,
     textId: paragraph.textId ?? null,
@@ -796,22 +840,20 @@ function paragraphAttrs(
     attrs.spacingExplicit = formatting?.spacingExplicit || null;
     attrs.indentLeft =
       formatting?.indentLeft ??
-      stylePpr?.indentLeft ??
       paragraph.listRendering?.indentLeft ??
+      stylePpr?.indentLeft ??
       null;
     attrs.indentRight = formatting?.indentRight ?? stylePpr?.indentRight ?? null;
     const numberingRemoved =
       formatting?.numPr?.numId === 0 && stylePpr?.numPr && stylePpr.numPr.numId !== 0;
     const styleFirstLine = numberingRemoved ? undefined : stylePpr;
     attrs.indentFirstLine =
-      formatting?.indentFirstLine ??
+      firstLine ??
       styleFirstLine?.indentFirstLine ??
-      paragraph.listRendering?.indentFirstLine ??
       null;
     attrs.hangingIndent =
-      formatting?.hangingIndent ??
+      hanging ??
       styleFirstLine?.hangingIndent ??
-      paragraph.listRendering?.hangingIndent ??
       false;
     attrs.borders = formatting?.borders ?? stylePpr?.borders ?? null;
     attrs.shading = formatting?.shading ?? stylePpr?.shading ?? null;
@@ -847,9 +889,9 @@ function paragraphAttrs(
     attrs.indentLeft = formatting?.indentLeft ?? paragraph.listRendering?.indentLeft ?? null;
     attrs.indentRight = formatting?.indentRight ?? null;
     attrs.indentFirstLine =
-      formatting?.indentFirstLine ?? paragraph.listRendering?.indentFirstLine ?? null;
+      firstLine ?? null;
     attrs.hangingIndent =
-      formatting?.hangingIndent ?? paragraph.listRendering?.hangingIndent ?? false;
+      hanging ?? false;
     attrs.borders = formatting?.borders ?? null;
     attrs.shading = formatting?.shading ?? null;
     attrs.tabs = formatting?.tabs ?? null;
@@ -938,7 +980,7 @@ function paragraphUnits(
   let boundaries: Attrs[] | undefined = [];
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
-  for (const content of paragraph.content) {
+  for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
     const commentId = activeComments.values().next().value as number | undefined;
     if (content.type === 'commentRangeStart') activeComments.add(content.id);
@@ -953,8 +995,7 @@ function paragraphUnits(
       units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      const field = fieldPayload(content, styleFormatting);
-      units.push(embedUnit('field', field.payload, field.marks));
+      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
@@ -971,7 +1012,7 @@ function paragraphUnits(
     } else if (content.type === 'mathEquation') {
       boundaries = undefined;
       units.push(embedUnit('math', mathPayload(content)));
-    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd') {
+    } else if (content.type !== 'bookmarkStart' && content.type !== 'bookmarkEnd' && content.type !== 'rawXml') {
       boundaries = undefined;
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
@@ -1376,6 +1417,7 @@ function visitStory(
   let lastKind: 'paragraph' | 'table' | 'blockSdt' | null = null;
 
   for (const block of blocks) {
+    if (isRawXml(block)) continue;
     if (block.type === 'paragraph') {
       const paragraph = paragraphUnits(block, context.styleResolver, options.extraRunFormatting);
       plan.units.push(...paragraph.units);
