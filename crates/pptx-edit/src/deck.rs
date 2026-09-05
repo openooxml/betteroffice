@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use ooxml_drawingml::{
@@ -12,6 +12,7 @@ use yrs::{
     Transact, TransactionMut, WriteTxn,
 };
 
+use crate::comments::{flavor_key, seed_comments, snapshot_comments, snapshot_flavor};
 use crate::story::{seed_plain_story, seed_story, snapshot_story, validate_story};
 use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN,
@@ -20,9 +21,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 7.0;
+const SCHEMA_VERSION: f64 = 8.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 7] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 8] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -47,10 +48,16 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
+    meta.insert(
+        &mut txn,
+        "commentFlavor",
+        flavor_key(package.comment_flavor.unwrap_or_default()),
+    );
     let order = txn.get_or_insert_array(SLIDE_ORDER);
     let slides = txn.get_or_insert_map(SLIDES);
     let shapes = txn.get_or_insert_map(SHAPES);
     let stories = txn.get_or_insert_map(STORIES);
+    let mut slide_id_by_part: HashMap<String, String> = HashMap::new();
 
     for (slide_index, slide) in package.slides.iter().enumerate() {
         let theme = slide_theme(package, slide);
@@ -78,7 +85,11 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
             )?;
             shape_order.push_back(&mut txn, shape_id.as_str());
         }
+        slide_id_by_part.insert(slide.part_path.clone(), slide_id);
     }
+    seed_comments(&mut txn, package, &|part| {
+        slide_id_by_part.get(part).cloned()
+    })?;
     Ok(())
 }
 
@@ -309,6 +320,18 @@ impl DeckSession {
         let shape_order = slide_shape_order(&slide, &txn)?;
         let shape_ids = string_array_ref(&shape_order, &txn);
         remove_shape_entries(&mut txn, &shape_ids)?;
+        let comments = required_map(&txn, crate::COMMENTS)?;
+        let comment_ids: Vec<String> = comments
+            .iter(&txn)
+            .filter_map(|(id, value)| {
+                let entry = value.cast::<MapRef>().ok()?;
+                (map_string(&entry, &txn, "slideId").as_deref() == Some(slide_id))
+                    .then(|| id.to_owned())
+            })
+            .collect();
+        for id in comment_ids {
+            comments.remove(&mut txn, &id);
+        }
         order.remove(&mut txn, index);
         slides.remove(&mut txn, slide_id);
         Ok(SlideReceipt {
@@ -728,6 +751,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     if version < 7.0 {
         migrate_doc_to_v7(doc)?;
     }
+    if version < 8.0 {
+        migrate_doc_to_v8(doc)?;
+    }
     Ok(())
 }
 
@@ -824,7 +850,35 @@ fn migrate_doc_to_v7(doc: &Doc) -> EditResult<()> {
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
+    meta.insert(&mut txn, "schemaVersion", 7.0);
+    Ok(())
+}
+
+/// Records the comment flavour and any pending source import in schema 8.
+fn migrate_doc_to_v8(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
     meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    if !meta.contains_key(&txn, "commentFlavor") {
+        if !package.comments.is_empty()
+            || package
+                .relationships
+                .values()
+                .flatten()
+                .any(|relationship| {
+                    relationship.is_type(pptx_parse::relationship_types::COMMENTS)
+                        || relationship.is_type(pptx_parse::relationship_types::MODERN_COMMENTS)
+                })
+        {
+            meta.insert(&mut txn, "commentsPendingSource", true);
+        }
+        meta.insert(
+            &mut txn,
+            "commentFlavor",
+            flavor_key(package.comment_flavor.unwrap_or_default()),
+        );
+    }
     Ok(())
 }
 
@@ -932,6 +986,8 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
         height_emu: required_i64(&meta, &txn, "heightEmu")?,
         slides: slide_snapshots,
+        comment_flavor: snapshot_flavor(&txn)?,
+        comments: snapshot_comments(&txn)?,
     })
 }
 
@@ -1025,12 +1081,12 @@ fn required_order<T: ReadTxn>(txn: &T) -> EditResult<ArrayRef> {
         .ok_or_else(|| EditError::InvalidState("missing slide order".to_owned()))
 }
 
-fn required_map<T: ReadTxn>(txn: &T, name: &str) -> EditResult<MapRef> {
+pub(crate) fn required_map<T: ReadTxn>(txn: &T, name: &str) -> EditResult<MapRef> {
     txn.get_map(name)
         .ok_or_else(|| EditError::InvalidState(format!("missing {name}")))
 }
 
-fn slide_ref<T: ReadTxn>(txn: &T, slide_id: &str) -> EditResult<MapRef> {
+pub(crate) fn slide_ref<T: ReadTxn>(txn: &T, slide_id: &str) -> EditResult<MapRef> {
     required_map(txn, SLIDES)?
         .get(txn, slide_id)
         .and_then(|value| value.cast::<MapRef>().ok())
@@ -1286,7 +1342,7 @@ fn required_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<S
         .ok_or_else(|| EditError::InvalidState(format!("missing string {key}")))
 }
 
-fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
+pub(crate) fn map_string<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<String> {
     map.get(txn, key).and_then(|value| out_string(&value))
 }
 
@@ -1306,7 +1362,7 @@ fn required_i64<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<i64>
     Ok(number as i64)
 }
 
-fn map_number<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<f64> {
+pub(crate) fn map_number<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<f64> {
     match map.get(txn, key) {
         Some(Out::Any(Any::Number(value))) if value.is_finite() => Some(value),
         Some(Out::Any(Any::BigInt(value))) => Some(value as f64),
@@ -1314,7 +1370,7 @@ fn map_number<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<f64> {
     }
 }
 
-fn map_bool<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<bool> {
+pub(crate) fn map_bool<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> Option<bool> {
     match map.get(txn, key) {
         Some(Out::Any(Any::Bool(value))) => Some(value),
         _ => None,
@@ -1376,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7() {
+    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1386,14 +1442,12 @@ mod tests {
         const V3: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
         for (update, expected_versions) in [
-            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0]),
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0]),
-            (V3, vec![4.0, 5.0, 6.0, 7.0]),
+            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0]),
         ] {
             let doc = crate::doc_with_client_id(920);
-            doc.transact_mut()
-                .apply_update(Update::decode_v1(update).unwrap())
-                .unwrap();
+            crate::hydrate_doc(&doc, update).unwrap();
             let before = snapshot_doc(&doc, &package_from_doc(&doc).unwrap()).unwrap();
             let observed = Arc::new(Mutex::new(Vec::new()));
             let events = observed.clone();
@@ -1460,14 +1514,12 @@ mod tests {
             include_bytes!("../tests/fixtures/deck-schema-v4-slide-number-fields.update.bin");
 
         for (update, oracle, versions, first_slide_num) in [
-            (V2, V4_LEGACY, vec![3.0, 4.0, 5.0, 6.0, 7.0], 1),
-            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0], 1),
-            (V4_NUMBERED, V4_NUMBERED, vec![5.0, 6.0, 7.0], 10),
+            (V2, V4_LEGACY, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 1),
+            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0], 1),
+            (V4_NUMBERED, V4_NUMBERED, vec![5.0, 6.0, 7.0, 8.0], 10),
         ] {
             let doc = crate::doc_with_client_id(9340);
-            doc.transact_mut()
-                .apply_update(Update::decode_v1(update).unwrap())
-                .unwrap();
+            crate::hydrate_doc(&doc, update).unwrap();
             let main = crate::doc_with_client_id(9341);
             main.transact_mut()
                 .apply_update(Update::decode_v1(oracle).unwrap())
@@ -1526,9 +1578,9 @@ mod tests {
         const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
         const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
         for (update, versions) in [
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0]),
-            (V5, vec![6.0, 7.0]),
-            (V6, vec![7.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            (V5, vec![6.0, 7.0, 8.0]),
+            (V6, vec![7.0, 8.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -1729,5 +1781,44 @@ mod tests {
 
     fn add_lengths(left: (u32, u32, u32), right: (u32, u32, u32)) -> (u32, u32, u32) {
         (left.0 + right.0, left.1 + right.1, left.2 + right.2)
+    }
+
+    #[test]
+    fn a_current_main_v7_snapshot_commits_only_v8_with_a_pending_comment_import() {
+        use std::sync::Mutex;
+        use yrs::Update;
+        use yrs::updates::decoder::Decode;
+
+        const V7: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v7-comments.update.bin");
+        let doc = crate::doc_with_client_id(9620);
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(V7).unwrap())
+            .unwrap();
+        let before = {
+            let txn = doc.transact();
+            let meta = required_map(&txn, META).unwrap();
+            assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(7.0));
+            assert!(meta.get(&txn, "commentFlavor").is_none());
+            meta.get(&txn, "packageJson").unwrap()
+        };
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let events = observed.clone();
+        let _subscription = doc
+            .observe_update_v1(move |txn, _| {
+                let meta = required_map(txn, META).unwrap();
+                events.lock().unwrap().push((
+                    map_number(&meta, txn, "schemaVersion").unwrap(),
+                    meta.get(txn, "packageJson").unwrap(),
+                    map_string(&meta, txn, "commentFlavor"),
+                    map_bool(&meta, txn, "commentsPendingSource"),
+                ));
+            })
+            .unwrap();
+        migrate_doc(&doc).unwrap();
+        let events = observed.lock().unwrap();
+        assert_eq!(
+            *events,
+            [(8.0, before, Some("legacy".to_owned()), Some(true))]
+        );
     }
 }

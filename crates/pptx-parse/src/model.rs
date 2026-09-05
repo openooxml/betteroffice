@@ -6,6 +6,7 @@ use ooxml_drawingml::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::comments::{Comment, CommentAuthor, CommentFlavor};
 use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
@@ -45,6 +46,12 @@ pub struct PptxPackage {
     #[serde(default)]
     pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_authors: Vec<CommentAuthor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<Comment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_flavor: Option<CommentFlavor>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,

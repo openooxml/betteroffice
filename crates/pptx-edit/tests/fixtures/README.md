@@ -59,6 +59,9 @@ normal writer produces `deck-custom-schema-v6.update.bin`. Both omit custom
 paths, which current main does not model.
 
 The migration-order tests observe separate transactions: legacy v2 commits
-3, 4, 5, 6, then 7; v5 commits 6 then 7; current main v6 commits only 7.
-Hidden keys first appear in the schema-6 transaction and survive schema 7’s
-package rewrite. Main’s migrations retain their original version numbers.
+3, 4, 5, 6, 7, then 8; v5 commits 6, 7, then 8; v6 commits 7 then 8; current
+main v7 commits only 8. Hidden keys first appear in the schema-6 transaction and
+survive schema 7’s package rewrite and schema 8’s comment metadata. Main’s
+migrations retain their original version numbers.
+
+`deck-schema-v7-comments.update.bin` is documented in `modern-comments.md`.
