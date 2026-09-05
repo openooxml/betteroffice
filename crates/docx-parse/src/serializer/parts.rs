@@ -132,11 +132,11 @@ pub struct CommentParaInfo {
     pub done: Option<bool>,
 }
 
-/// Root declarations outside the standard boilerplate, re-emitted verbatim.
+/// Root bindings and attributes outside the standard boilerplate.
 fn custom_bindings_attributes(bindings: &[crate::paragraph::RawAttribute]) -> String {
     let mut custom = String::new();
     for binding in bindings {
-        if binding.name.starts_with("xmlns:") && is_safe_attribute_name(&binding.name) {
+        if binding.name != "mc:Ignorable" && is_safe_attribute_name(&binding.name) {
             custom.push(' ');
             custom.push_str(&binding.name);
             custom.push_str("=\"");
@@ -145,6 +145,28 @@ fn custom_bindings_attributes(bindings: &[crate::paragraph::RawAttribute]) -> St
         }
     }
     custom
+}
+
+fn story_ignorable(bindings: &[crate::paragraph::RawAttribute]) -> String {
+    let mut prefixes = vec![
+        "w14", "w15", "w16se", "w16cid", "w16", "w16cex", "w16sdtdh", "wp14",
+    ];
+    for attribute in bindings
+        .iter()
+        .filter(|attribute| attribute.name == "mc:Ignorable")
+    {
+        for prefix in attribute.value.split_whitespace() {
+            if !prefixes.contains(&prefix)
+                && (is_story_root_prefix(prefix)
+                    || bindings
+                        .iter()
+                        .any(|binding| binding.name.strip_prefix("xmlns:") == Some(prefix)))
+            {
+                prefixes.push(prefix);
+            }
+        }
+    }
+    format!(" mc:Ignorable=\"{}\"", escape_xml(&prefixes.join(" ")))
 }
 
 pub fn serialize_document_body(
@@ -167,8 +189,9 @@ pub fn serialize_document_part(
 ) -> Result<String, ParseError> {
     let body_xml = serialize_document_body(body, context)?;
     let custom = custom_bindings_attributes(&body.custom_root_bindings);
+    let ignorable = story_ignorable(&body.custom_root_bindings);
     Ok(format!(
-        "{XML_DECLARATION}<w:document {DOCUMENT_NAMESPACES}{custom} mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh wp14\"><w:body>{body_xml}</w:body></w:document>"
+        "{XML_DECLARATION}<w:document {DOCUMENT_NAMESPACES}{custom}{ignorable}><w:body>{body_xml}</w:body></w:document>"
     ))
 }
 
@@ -192,8 +215,17 @@ pub fn serialize_header_footer_part(
         "w:ftr"
     };
     let custom = custom_bindings_attributes(&story.custom_root_bindings);
+    let ignorable = if story
+        .custom_root_bindings
+        .iter()
+        .any(|attribute| attribute.name == "mc:Ignorable")
+    {
+        story_ignorable(&story.custom_root_bindings)
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "{XML_DECLARATION}\n<{root} {HEADER_FOOTER_NAMESPACES}{custom}>{content}</{root}>"
+        "{XML_DECLARATION}\n<{root} {HEADER_FOOTER_NAMESPACES}{custom}{ignorable}>{content}</{root}>"
     ))
 }
 
@@ -234,7 +266,16 @@ fn serialize_notes_part(
         }
         content.push_str(" w:id=\"");
         content.push_str(&js_number(note.id));
-        content.push_str("\">");
+        content.push('"');
+        content.push_str(&custom_bindings_attributes(&note.custom_root_bindings));
+        if note
+            .custom_root_bindings
+            .iter()
+            .any(|attribute| attribute.name == "mc:Ignorable")
+        {
+            content.push_str(&story_ignorable(&note.custom_root_bindings));
+        }
+        content.push('>');
         for block in &note.content {
             content.push_str(&serialize_block_content(block, context)?);
         }
@@ -727,6 +768,7 @@ mod tests {
                 id: -1.0,
                 note_type: "separator".to_owned(),
                 content: vec![paragraph("safe <&>")],
+                custom_root_bindings: Vec::new(),
                 verbatim_xml: None,
             }],
             &mut context(),
@@ -749,6 +791,7 @@ mod tests {
             id: 4.0,
             note_type: "normal".to_owned(),
             content: Vec::new(),
+            custom_root_bindings: Vec::new(),
             verbatim_xml: Some(
                 "<w:endnote w:id=\"4\"><w:customXml><w:p/></w:customXml></w:endnote>".to_owned(),
             ),
