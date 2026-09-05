@@ -689,6 +689,12 @@ fn resolve_group_fill(children: &mut [ShapeNode], fill: Option<&ShapeFill>) {
     }
 }
 
+pub(crate) fn run_gradient_color(element: &XmlElement) -> Option<ColorValue> {
+    let mut stops = parse_gradient_fill(element).gradient?.stops;
+    stops.sort_by(|left, right| left.position.total_cmp(&right.position));
+    stops.into_iter().next().map(|stop| stop.color)
+}
+
 fn parse_gradient_fill(element: &XmlElement) -> ShapeFill {
     let linear = element.child("lin");
     let path = element.child("path");
@@ -1063,7 +1069,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .child("latin")
             .and_then(|value| value.attribute("typeface"))
             .map(str::to_owned),
-        color: element.child("solidFill").and_then(parse_color_container),
+        color: element
+            .child("solidFill")
+            .and_then(parse_color_container)
+            .or_else(|| run_gradient_color(element.child("gradFill")?)),
         language: element.attribute("lang").map(str::to_owned),
         hyperlink_relationship_id: element
             .child("hlinkClick")
@@ -1494,6 +1503,39 @@ mod tests {
         );
         let json = serde_json::to_string(&body).unwrap();
         assert_eq!(serde_json::from_str::<TextBody>(&json).unwrap(), body);
+    }
+
+    #[test]
+    fn a_run_gradient_fill_resolves_to_a_colour() {
+        for (fill, expected) in [
+            (
+                r#"<a:gradFill><a:gsLst><a:gs pos="100000"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill>"#,
+                Some("FFFFFF"),
+            ),
+            (
+                r#"<a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill>"#,
+                Some("112233"),
+            ),
+            (
+                r#"<a:gradFill><a:gsLst><a:gs pos="-1"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="NaN"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100001"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="50000"><a:srgbClr val="ABCDEF"/></a:gs></a:gsLst></a:gradFill>"#,
+                Some("ABCDEF"),
+            ),
+            ("<a:gradFill><a:gsLst/></a:gradFill>", None),
+            ("", None),
+        ] {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!("<a:rPr>{fill}</a:rPr>");
+            let root = parse_xml(xml.as_bytes(), "ppt/slides/slide1.xml", &mut budget).unwrap();
+            assert_eq!(
+                parse_run_properties(Some(&root)).color,
+                expected.map(|rgb| ColorValue {
+                    rgb: Some(rgb.to_owned()),
+                    ..ColorValue::default()
+                }),
+                "{fill}",
+            );
+        }
     }
 
     #[test]

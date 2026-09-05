@@ -1760,7 +1760,14 @@ fn positioned_runs(
             continue;
         }
         let append = output.last().is_some_and(|run| {
-            run.end == cluster.start && run.font_id == cluster.style.face.id.to_u32()
+            run.end == cluster.start
+                && run.font_id == cluster.style.face.id.to_u32()
+                && run.font_family == cluster.style.family
+                && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
+                && run.bold == cluster.style.bold
+                && run.italic == cluster.style.italic
+                && run.underline == cluster.style.underline
+                && run.color == cluster.style.color
         });
         if !append {
             output.push(PositionedTextRun {
@@ -2290,7 +2297,7 @@ fn paint(fill: &ShapeFill, theme: &Theme) -> Option<Paint> {
             "path" => GradientType::Path,
             _ => GradientType::Linear,
         };
-        let stops = gradient
+        let mut stops = gradient
             .stops
             .iter()
             .filter_map(|stop| {
@@ -2300,6 +2307,11 @@ fn paint(fill: &ShapeFill, theme: &Theme) -> Option<Paint> {
                 })
             })
             .collect::<Vec<_>>();
+        stops.sort_by(|left, right| {
+            left.position
+                .partial_cmp(&right.position)
+                .unwrap_or_else(|| left.position.total_cmp(&right.position))
+        });
         if !stops.is_empty() {
             return Some(Paint::Gradient {
                 gradient_type,
@@ -2803,6 +2815,190 @@ mod tests {
             assert_eq!(parse_align(Some(alignment)), TextAlign::Justify);
             assert!(!is_full_justification(Some(alignment)));
         }
+    }
+
+    #[test]
+    fn adjacent_runs_keep_their_own_paint_attributes() {
+        let renderer = renderer();
+        let style = ResolvedStyle {
+            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            family: "Arial".to_owned(),
+            font_size_pt: 14.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            color: "#000000".to_owned(),
+        };
+        let mut variants = vec![style.clone(); 7];
+        variants[0].color = "#A99A72".to_owned();
+        variants[1].bold = true;
+        variants[2].italic = true;
+        variants[3].underline = true;
+        variants[4].font_size_pt = 28.0;
+        variants[5].family = "Fallback".to_owned();
+        variants[6].face = renderer.resolve_face("Arial", true, false).unwrap();
+        for changed in variants {
+            let paragraph = ResolvedParagraph {
+                align: TextAlign::Left,
+                justify: false,
+                level: 0,
+                margin_left_px: 0.0,
+                runs: [style.clone(), changed.clone(), style.clone()]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, style)| ResolvedRun {
+                        text: "word ".to_owned(),
+                        start: index as u32 * 5,
+                        style,
+                    })
+                    .collect(),
+            };
+            for scale in [1.0, 0.5] {
+                let lines =
+                    layout_paragraph(&renderer.fonts, &paragraph, 10.0, 20.0, 10_000.0, scale)
+                        .unwrap();
+                assert_eq!(lines.len(), 1);
+                let runs = &lines[0].runs;
+                assert_eq!(runs.len(), 3);
+                for (index, (actual, expected)) in runs.iter().zip(&paragraph.runs).enumerate() {
+                    assert_eq!(actual.text, expected.text);
+                    assert_eq!(
+                        (actual.start, actual.end),
+                        (index as u32 * 5, index as u32 * 5 + 5)
+                    );
+                    assert_eq!(actual.color, expected.style.color);
+                    assert_eq!(actual.bold, expected.style.bold);
+                    assert_eq!(actual.italic, expected.style.italic);
+                    assert_eq!(actual.underline, expected.style.underline);
+                    assert_eq!(actual.font_id, expected.style.face.id.to_u32());
+                    assert_eq!(actual.font_family, expected.style.family);
+                    assert_eq!(
+                        actual.font_size_px,
+                        points_to_px(expected.style.font_size_pt * scale)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_adjacent_runs_keep_the_same_display_list() {
+        let renderer = renderer();
+        let style = ResolvedStyle {
+            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            family: "Arial".to_owned(),
+            font_size_pt: 14.0,
+            bold: false,
+            italic: false,
+            underline: true,
+            color: "#A99A72".to_owned(),
+        };
+        let paragraph = |parts: &[&str]| {
+            let mut start = 0;
+            ResolvedParagraph {
+                align: TextAlign::Justify,
+                justify: true,
+                level: 0,
+                margin_left_px: 0.0,
+                runs: parts
+                    .iter()
+                    .map(|text| {
+                        let run = ResolvedRun {
+                            text: (*text).to_owned(),
+                            start,
+                            style: style.clone(),
+                        };
+                        start += utf16_len(text);
+                        run
+                    })
+                    .collect(),
+            }
+        };
+        let split = paragraph(&["alpha ", "", "beta ", "gamma ", "delta"]);
+        let joined = paragraph(&["alpha beta gamma delta"]);
+        for width in [100.0, 10_000.0] {
+            let render = |paragraph| {
+                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0).unwrap()
+            };
+            assert_eq!(render(&split), render(&joined));
+        }
+    }
+
+    #[test]
+    fn gradient_stops_reach_the_display_list_in_position_order() {
+        use ooxml_drawingml::{ColorValue, GradientFill, GradientStop as ModelStop};
+
+        let stop = |position, rgb: &str, alpha| ModelStop {
+            position,
+            color: ColorValue {
+                rgb: Some(rgb.to_owned()),
+                alpha,
+                ..ColorValue::default()
+            },
+        };
+        let ordered = [
+            stop(0.0, "404040", None),
+            stop(50_000.0, "FF0000", Some(0.5)),
+            stop(50_000.0, "00FF00", None),
+            stop(100_000.0, "262626", None),
+        ];
+        for (kind, gradient_type) in [
+            ("linear", GradientType::Linear),
+            ("radial", GradientType::Radial),
+            ("rectangular", GradientType::Rectangular),
+            ("path", GradientType::Path),
+        ] {
+            for indices in [[0, 1, 2, 3], [3, 1, 0, 2]] {
+                let fill = ShapeFill {
+                    fill_type: "gradient".to_owned(),
+                    color: None,
+                    gradient: Some(GradientFill {
+                        gradient_type: kind.to_owned(),
+                        angle: Some(45.0),
+                        stops: indices.map(|index| ordered[index].clone()).to_vec(),
+                    }),
+                };
+                let source = serde_json::to_vec(&fill).unwrap();
+                assert_eq!(
+                    paint(&fill, &Theme::default()),
+                    Some(Paint::Gradient {
+                        gradient_type,
+                        angle_deg: Some(45.0),
+                        stops: [
+                            (0.0, "#404040"),
+                            (0.5, "#FF000080"),
+                            (0.5, "#00FF00"),
+                            (1.0, "#262626"),
+                        ]
+                        .map(|(position, color)| GradientStop {
+                            position,
+                            color: color.to_owned(),
+                        })
+                        .to_vec(),
+                    }),
+                    "{kind}: {indices:?}",
+                );
+                assert_eq!(serde_json::to_vec(&fill).unwrap(), source);
+            }
+        }
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/gradient-stop-order.pptx"),
+            306,
+        )
+        .unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 2)
+            .unwrap();
+        let Some(Paint::Gradient { stops, .. }) = rendered.display_list.background else {
+            panic!("expected a gradient");
+        };
+        assert_eq!(
+            stops
+                .iter()
+                .map(|stop| stop.color.as_str())
+                .collect::<Vec<_>>(),
+            ["#FF0000", "#FF00FF", "#00FF00", "#FFFF00", "#0000FF"]
+        );
     }
 
     #[test]

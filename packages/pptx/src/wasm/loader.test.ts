@@ -217,7 +217,7 @@ describe('PPTX wasm boundary', () => {
         await paintSlide(ctx, frame);
       }
 
-      expect(expected).toHaveLength(62);
+      expect(expected).toHaveLength(65);
       expect(calls).toHaveLength(expected.length);
       expect(calls).toEqual(expected);
     } finally {

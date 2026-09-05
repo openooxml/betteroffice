@@ -670,6 +670,11 @@ fn gradient_paint(
     for stop in stops {
         colors.push((stop.position.clamp(0.0, 1.0), parse_color(&stop.color)?));
     }
+    colors.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or_else(|| left.0.total_cmp(&right.0))
+    });
     let Some((_, first)) = colors.first().copied() else {
         return Err("gradient has no stops".to_string());
     };
@@ -848,6 +853,68 @@ mod tests {
 
     fn resources<'a>(fonts: &'a FontStore, images: &'a AssetMap<'a>) -> RenderResources<'a> {
         RenderResources::new(fonts, images)
+    }
+
+    #[test]
+    fn unordered_gradient_stops_render_like_stably_ordered_stops() {
+        let fonts = FontStore::new();
+        let images = AssetMap::default();
+        let ordered = [
+            (0.0, "#FF0000"),
+            (0.5, "#00FF0080"),
+            (0.5, "#FFFF00"),
+            (1.0, "#0000FF"),
+        ]
+        .map(|(position, color)| pptx_render::GradientStop {
+            position,
+            color: color.to_owned(),
+        });
+        for gradient_type in [
+            GradientType::Linear,
+            GradientType::Radial,
+            GradientType::Rectangular,
+            GradientType::Path,
+        ] {
+            let render = |stops| {
+                let mut list = empty_list(240.0, 135.0);
+                list.background = Some(SlidePaint::Gradient {
+                    gradient_type,
+                    angle_deg: Some(0.0),
+                    stops,
+                });
+                let source = list.clone();
+                let rendered = render_slide(
+                    &list,
+                    &resources(&fonts, &images),
+                    &RenderOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(list, source);
+                rendered.bytes
+            };
+            let expected = render(ordered.to_vec());
+            let actual = render([3, 1, 0, 2].map(|index| ordered[index].clone()).to_vec());
+            assert!(actual == expected, "{gradient_type:?}");
+            let pixels = Pixmap::decode_png(&actual).unwrap();
+            assert_ne!(pixels.pixel(0, 0), pixels.pixel(120, 67));
+            if gradient_type == GradientType::Linear {
+                let before = pixels.pixel(119, 67).unwrap();
+                let after = pixels.pixel(120, 67).unwrap();
+                assert!(before.green() > 250 && before.red() < 140 && before.blue() > 120);
+                assert!(after.red() > 250 && after.green() > 250 && after.blue() < 5);
+            }
+            let signed_zero = render(
+                [(0.0, "#FF0000"), (-0.0, "#0000FF"), (1.0, "#0000FF")]
+                    .map(|(position, color)| pptx_render::GradientStop {
+                        position,
+                        color: color.to_owned(),
+                    })
+                    .to_vec(),
+            );
+            let pixels = Pixmap::decode_png(&signed_zero).unwrap();
+            let blue = ColorU8::from_rgba(0, 0, 255, 255).premultiply();
+            assert!(pixels.pixels().iter().all(|pixel| *pixel == blue));
+        }
     }
 
     #[test]
