@@ -3,6 +3,7 @@ import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination'
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
 import type { Document, NoteKind, SectionProperties } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
+import { resolvedFinalSectionProperties } from './finalSection';
 
 interface ResidentRegionLayoutRetainedOutput {
   layout: Layout;
@@ -71,11 +72,9 @@ function orderedSections(document: Document | null): ResidentRegionLayoutRequest
     sectionId: section.id ?? section.properties.sectionId,
     properties: section.properties,
   }));
-  // finalSectionProperties is the body sectPr as authored; the resolved view
-  // (headers and titlePg inherited forward) is the last entry of sections.
   sections.push({
     sectionId: sections.at(-1)?.sectionId ?? body.finalSectionProperties?.sectionId,
-    properties: sections.at(-1)?.properties ?? body.finalSectionProperties ?? {},
+    properties: resolvedFinalSectionProperties(body) ?? {},
   });
   return sections;
 }
@@ -103,9 +102,7 @@ export function buildResidentRegionLayoutRequest(
     regions: {
       sections: orderedSections(document),
       settings: document?.package.settings,
-      watermark:
-        document?.package.document.sections?.at(-1)?.properties.watermark ??
-        document?.package.document.finalSectionProperties?.watermark,
+      watermark: resolvedFinalSectionProperties(document?.package.document)?.watermark,
     },
     notes: { contents },
     renderEnv,
