@@ -2193,12 +2193,11 @@ fn paint(fill: &ShapeFill, theme: &Theme) -> Option<Paint> {
                 })
             })
             .collect::<Vec<_>>();
-        // An a:gsLst may list its stops in any order, and decks do: several here put pos=100000
-        // first. The canvas backend sorts on the caller's behalf, but tiny-skia pins positions
-        // monotonically instead, which collapses a reversed pair to a flat colour. Normalising
-        // here is what makes the two backends agree, and it leaves the parsed model faithful to
-        // the document so saving does not reorder the a:gsLst.
-        stops.sort_by(|left, right| left.position.total_cmp(&right.position));
+        stops.sort_by(|left, right| {
+            left.position
+                .partial_cmp(&right.position)
+                .unwrap_or_else(|| left.position.total_cmp(&right.position))
+        });
         if !stops.is_empty() {
             return Some(Paint::Gradient {
                 gradient_type,
@@ -2704,31 +2703,78 @@ mod tests {
     #[test]
     fn gradient_stops_reach_the_display_list_in_position_order() {
         use ooxml_drawingml::{ColorValue, GradientFill, GradientStop as ModelStop};
-        let stop = |position: f64, rgb: &str| ModelStop {
+
+        let stop = |position, rgb: &str, alpha| ModelStop {
             position,
             color: ColorValue {
                 rgb: Some(rgb.to_owned()),
+                alpha,
                 ..ColorValue::default()
             },
         };
-        // Decks do write the far stop first; tiny-skia pins positions monotonically, so an
-        // unsorted pair collapses to a flat colour.
-        let fill = ShapeFill {
-            fill_type: "gradient".to_owned(),
-            color: None,
-            gradient: Some(GradientFill {
-                gradient_type: "radial".to_owned(),
-                angle: None,
-                stops: vec![stop(100_000.0, "262626"), stop(0.0, "404040")],
-            }),
+        let ordered = [
+            stop(0.0, "404040", None),
+            stop(50_000.0, "FF0000", Some(0.5)),
+            stop(50_000.0, "00FF00", None),
+            stop(100_000.0, "262626", None),
+        ];
+        for (kind, gradient_type) in [
+            ("linear", GradientType::Linear),
+            ("radial", GradientType::Radial),
+            ("rectangular", GradientType::Rectangular),
+            ("path", GradientType::Path),
+        ] {
+            for indices in [[0, 1, 2, 3], [3, 1, 0, 2]] {
+                let fill = ShapeFill {
+                    fill_type: "gradient".to_owned(),
+                    color: None,
+                    gradient: Some(GradientFill {
+                        gradient_type: kind.to_owned(),
+                        angle: Some(45.0),
+                        stops: indices.map(|index| ordered[index].clone()).to_vec(),
+                    }),
+                };
+                let source = serde_json::to_vec(&fill).unwrap();
+                assert_eq!(
+                    paint(&fill, &Theme::default()),
+                    Some(Paint::Gradient {
+                        gradient_type,
+                        angle_deg: Some(45.0),
+                        stops: [
+                            (0.0, "#404040"),
+                            (0.5, "#FF000080"),
+                            (0.5, "#00FF00"),
+                            (1.0, "#262626"),
+                        ]
+                        .map(|(position, color)| GradientStop {
+                            position,
+                            color: color.to_owned(),
+                        })
+                        .to_vec(),
+                    }),
+                    "{kind}: {indices:?}",
+                );
+                assert_eq!(serde_json::to_vec(&fill).unwrap(), source);
+            }
+        }
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/gradient-stop-order.pptx"),
+            306,
+        )
+        .unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 2)
+            .unwrap();
+        let Some(Paint::Gradient { stops, .. }) = rendered.display_list.background else {
+            panic!("expected a gradient");
         };
-        let Some(Paint::Gradient { stops, .. }) = paint(&fill, &Theme::default()) else {
-            panic!("expected a gradient paint");
-        };
-        assert_eq!(stops.len(), 2);
-        assert!(stops[0].position <= stops[1].position);
-        assert_eq!(stops[0].color, "#404040");
-        assert_eq!(stops[1].color, "#262626");
+        assert_eq!(
+            stops
+                .iter()
+                .map(|stop| stop.color.as_str())
+                .collect::<Vec<_>>(),
+            ["#FF0000", "#FF00FF", "#00FF00", "#FFFF00", "#0000FF"]
+        );
     }
 
     #[test]
