@@ -18,12 +18,14 @@ untouched comment parts byte for byte. Deleting a thread removes its known
 replies; a reply added concurrently becomes a root when its parent is absent,
 so both clients and saved files retain it.
 
-The current schema is v10. Older v1–v9 updates can be opened. Attaching the
+The current schema is v11. Older v1–v10 updates can be opened. Attaching the
 original package with `open_from_update_with_source` imports source comments,
 list styles, and explicit text overflow settings omitted by older schemas.
-Import is deterministic and runs once. Source-free loads retain their existing
-model until the package is attached. Older clients reject new-schema updates;
-collaborators must upgrade together or exchange saved PPTX files.
+Source attachment also restores run baseline formatting on surviving text while
+retaining edits and explicit zero overrides. Imported properties persist in
+subsequent updates. Source-free loads defer import until the package is attached.
+Older clients reject new-schema updates; collaborators must upgrade together or
+exchange saved PPTX files.
 
 Migrations run in version order and preserve existing content. Default text
 overflow settings and starting slide numbers remain omitted from package JSON.

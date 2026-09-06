@@ -28,6 +28,8 @@ const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const DEFAULT_INSET_HORIZONTAL_EMU: i64 = 91_440;
 const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
 const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
+/// Size a super/subscript run shapes at, relative to its own `sz`.
+const SCRIPT_SIZE_RATIO: f32 = 0.58;
 const MIN_AUTOFIT_SCALE: f32 = 0.5;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
@@ -1103,6 +1105,7 @@ struct ResolvedStyle {
     face: FontFace,
     family: String,
     font_size_pt: f32,
+    baseline_shift_px: f32,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -1270,10 +1273,23 @@ fn resolve_style(
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(DEFAULT_FONT_SIZE_PT)
         .min(4_096.0);
+    let baseline_pct = direct
+        .baseline_pct
+        .or_else(|| fallback.and_then(|value| value.baseline_pct))
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    let baseline_shift_px = points_to_px(font_size_pt) * baseline_pct / 100.0;
+    let font_size_pt = if baseline_pct == 0.0 {
+        font_size_pt
+    } else {
+        font_size_pt * SCRIPT_SIZE_RATIO
+    };
     Ok(ResolvedStyle {
         family: face.family.clone(),
         face,
         font_size_pt,
+        baseline_shift_px,
         bold,
         italic,
         underline: direct
@@ -1332,6 +1348,7 @@ fn chart_text_primitive(
         italic: false,
         underline: false,
         color: text.color.to_owned(),
+        baseline_offset_px: 0.0,
         glyphs,
     };
     let width = run.width;
@@ -1781,9 +1798,11 @@ fn positioned_runs(
         if cluster.text == "\n" {
             continue;
         }
+        let baseline_offset_px = cluster.style.baseline_shift_px * scale;
         let append = output.last().is_some_and(|run| {
             run.end == cluster.start
                 && run.font_id == cluster.style.face.id.to_u32()
+                && run.baseline_offset_px == baseline_offset_px
                 && run.font_family == cluster.style.family
                 && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
                 && run.bold == cluster.style.bold
@@ -1805,6 +1824,7 @@ fn positioned_runs(
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
                 color: cluster.style.color.clone(),
+                baseline_offset_px,
                 glyphs: Vec::new(),
             });
         }
@@ -1820,7 +1840,7 @@ fn positioned_runs(
                 x: cursor_x + glyph.x,
                 advance: glyph.advance,
                 x_offset: glyph.x_offset,
-                y_offset: baseline + glyph.y_offset,
+                y_offset: baseline - baseline_offset_px + glyph.y_offset,
             });
         }
         let advance = advances.get(index).copied().unwrap_or(cluster.width);
@@ -1903,8 +1923,9 @@ fn clusters_line_box(
             continue;
         }
         let line = style_line_box(fonts, &cluster.style, scale)?;
-        ascent = ascent.max(line.ascent);
-        descent = descent.max(line.descent);
+        let shift = cluster.style.baseline_shift_px * scale;
+        ascent = ascent.max((line.ascent + shift).max(0.0));
+        descent = descent.max((line.descent - shift).max(0.0));
         leading = leading.max(line.leading);
     }
     Ok(ooxml_text::LineBox {
@@ -2251,6 +2272,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.language.is_some() {
         target.language.clone_from(&source.language);
     }
+    if source.baseline_pct.is_some() {
+        target.baseline_pct = source.baseline_pct;
+    }
 }
 
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
@@ -2261,6 +2285,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme)),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        baseline_pct: properties.baseline_pct,
     }
 }
 
@@ -2771,6 +2796,7 @@ mod tests {
                     face,
                     family: "Arial".to_owned(),
                     font_size_pt: 18.0,
+                    baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
                     underline: false,
@@ -2917,6 +2943,7 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
@@ -2984,6 +3011,7 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
@@ -3727,6 +3755,125 @@ mod tests {
             })
             .unwrap();
         assert!(master_index < slide_index);
+    }
+
+    #[test]
+    fn a_baseline_shifted_run_is_raised_lowered_and_shrunk() {
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/text-baseline-script.pptx"),
+            289,
+        )
+        .unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Some(Primitive::TextBox { lines, .. }) =
+            rendered.display_list.primitives.iter().find(|primitive| {
+                matches!(primitive, Primitive::TextBox { lines, .. }
+                    if lines.iter().flat_map(|line| &line.runs).any(|run| run.text.starts_with("E = mc")))
+            })
+        else {
+            panic!("expected the script text box");
+        };
+        let line = lines
+            .iter()
+            .find(|line| line.runs.iter().any(|run| run.text == "E = mc"))
+            .unwrap();
+        let base = &line.runs[0];
+        let raised = &line.runs[1];
+        let plain = &line.runs[2];
+        let lowered = &line.runs[3];
+        assert_eq!(
+            [
+                base.text.as_str(),
+                raised.text.as_str(),
+                plain.text.as_str(),
+                lowered.text.as_str()
+            ],
+            ["E = mc", "2", " and H", "2"]
+        );
+        assert_eq!(base.baseline_offset_px, 0.0);
+        assert_eq!(plain.baseline_offset_px, 0.0);
+        assert_eq!(base.font_size_px, plain.font_size_px);
+
+        let em = points_to_px(17.0);
+        assert!((raised.baseline_offset_px - em * 0.30).abs() < 0.01);
+        assert!((lowered.baseline_offset_px + em * 0.25).abs() < 0.01);
+        assert!((raised.font_size_px - 13.146666).abs() < 0.01);
+        assert!((lowered.font_size_px - 13.146666).abs() < 0.01);
+        assert!(
+            (raised.glyphs[0].y_offset - (base.glyphs[0].y_offset - raised.baseline_offset_px))
+                .abs()
+                < 0.01
+        );
+        assert!(lowered.glyphs[0].y_offset > base.glyphs[0].y_offset);
+        assert!(line.baseline - raised.baseline_offset_px - raised.font_size_px >= line.y);
+    }
+
+    #[test]
+    fn baseline_cascade_keeps_zero_overrides_and_expands_line_metrics() {
+        let mut package = pptx_parse::parse_pptx(include_bytes!(
+            "../tests/fixtures/text-baseline-script.pptx"
+        ))
+        .unwrap();
+        let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[3] else {
+            panic!("shape")
+        };
+        let body = shape.text.as_mut().unwrap();
+        body.list_style = vec![pptx_parse::ParagraphProperties {
+            default_run: Some(RunProperties {
+                baseline_pct: Some(150.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        body.paragraphs[0]
+            .properties
+            .default_run
+            .as_mut()
+            .unwrap()
+            .baseline_pct = None;
+        body.paragraphs[0].runs = [None, Some(-150.0), Some(0.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, baseline)| pptx_parse::TextRun {
+                text: ["A", "B", "C"][i].into(),
+                properties: RunProperties {
+                    font_size_pt: Some(17.0),
+                    baseline_pct: baseline,
+                    ..Default::default()
+                },
+                field_id: None,
+                field_type: None,
+                line_break: false,
+            })
+            .collect();
+        let session = DeckSession::from_package(package, 331).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::TextBox { lines, .. } = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|p| matches!(p, Primitive::TextBox { object_id: 5, .. }))
+            .unwrap()
+        else {
+            panic!("text")
+        };
+        let line = &lines[0];
+        assert_eq!(line.runs.len(), 3);
+        for (run, shift, size) in [
+            (&line.runs[0], 34.0, 13.146666),
+            (&line.runs[1], -34.0, 13.146666),
+            (&line.runs[2], 0.0, 22.666666),
+        ] {
+            assert!((run.baseline_offset_px - shift).abs() < 0.001);
+            assert!((run.font_size_px - size).abs() < 0.001);
+            assert!((run.glyphs[0].y_offset - (line.baseline - shift)).abs() < 0.001);
+        }
+        assert!(line.baseline - line.y > 34.0);
+        assert!(line.y + line.height - line.baseline > 34.0);
     }
 
     #[test]

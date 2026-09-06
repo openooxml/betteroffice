@@ -68,4 +68,12 @@ migrations retain their original version numbers.
 
 `deck-schema-v8-list-style.update.bin` was generated on main `1d0f41d9` from `../../pptx-render/tests/fixtures/list-style-bullets.pptx`, using `DeckSession::open` and `encode_state_as_update_v1` with client ID 29401. It exercises schema 8 to 9 migration and source reattachment when the old model did not store list styles.
 
-`deck-schema-v9-text-overflow.update.bin` was produced on main `2c90c17f` by opening `crates/pptx-render/tests/fixtures/text-overflow.pptx` with client ID 295 and calling `encode_state_as_update_v1()`. It proves schema v10 migration preserves the old JSON until source attachment recovers explicit overflow settings.
+`deck-schema-v9-text-overflow.update.bin` was produced on main `2c90c17f` by opening `crates/pptx-render/tests/fixtures/text-overflow.pptx` with client ID 295 and calling `encode_state_as_update_v1()`. It proves schema v11 migration preserves the old JSON until source attachment recovers explicit overflow settings.
+
+`run-baseline-main-v9.update.bin` and `run-baseline-edited-main-v9.update.bin`
+were generated on main `2c90c17f` from
+`../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
+The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
+They test v9 to v10 migration, source baseline recovery, and preservation of edits.
+
+`deck-schema-v10-text-overflow.update.bin` was generated from the same deck and client ID on main `069e4d66`. It verifies the v10 baseline migration remains intact and explicit overflow settings migrate separately in v11.
