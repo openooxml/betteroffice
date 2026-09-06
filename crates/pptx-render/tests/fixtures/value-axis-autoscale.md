@@ -16,3 +16,8 @@ edge.
 After the fix the labels are `0, 2, 4, 6, 8, 10, 12, 14` at baselines `401` down
 to `127` in steps of `39.142857`, and the Q3 South bar starts at y=157.27142,
 between the tick marks for 12 (y=163.14285) and 14 (y=124).
+
+`value-axis-autoscale.before.png` and `value-axis-autoscale.after.png` rasterize
+slide 1 through `Presentation::render_png` on main `3d95068f` and on the branch.
+The centred chart title in the after image comes from the legend fix this branch
+stacks on (#316), not from this change.
