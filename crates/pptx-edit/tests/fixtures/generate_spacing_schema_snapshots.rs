@@ -5,13 +5,15 @@ use yrs::{Any, Doc, Map, Out, ReadTxn, StateVector, Transact, Update, updates::d
 
 fn main() {
     let root = PathBuf::from(env::args().nth(1).unwrap());
-    for (source, name) in [
-        ("line-spacing", "line-spacing"),
-        ("autonumber-bullets", "autonumber"),
-        ("text-baseline-script", "baseline"),
+    for (crate_name, source, name) in [
+        ("pptx-render", "line-spacing", "line-spacing"),
+        ("pptx-render", "autonumber-bullets", "autonumber"),
+        ("pptx-render", "text-baseline-script", "baseline"),
+        ("pptx-parse", "picture-fill", "picture-fill"),
     ] {
-        let bytes = fs::read(root.join(format!("crates/pptx-render/tests/fixtures/{source}.pptx")))
-            .unwrap();
+        let bytes =
+            fs::read(root.join(format!("crates/{crate_name}/tests/fixtures/{source}.pptx")))
+                .unwrap();
         let session = DeckSession::open(&bytes, 31401).unwrap();
         if name == "line-spacing" {
             let story = &session.snapshot().unwrap().slides[0].shapes[0].text_stories[0];
@@ -34,22 +36,22 @@ fn main() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(11.0)))
+            Some(Out::Any(Any::Number(12.0)))
         );
         assert!(meta.get(&txn, "baselinesPendingSource").is_none());
         let reopened = DeckSession::open_from_update(&update, 31403).unwrap();
         assert_eq!(reopened.encode_state_as_update_v1(), update);
         fs::write(
             root.join(format!(
-                "crates/pptx-edit/tests/fixtures/deck-schema-v11-{name}.update.bin"
+                "crates/pptx-edit/tests/fixtures/deck-schema-v12-{name}.update.bin"
             )),
             update,
         )
         .unwrap();
         drop(txn);
-        if name != "line-spacing" {
+        if matches!(name, "autonumber" | "baseline") {
             let mut package = serde_json::to_value(session.package()).unwrap();
-            remove_restarts(&mut package);
+            remove_post_v10_properties(&mut package);
             let package = serde_json::from_value(package).unwrap();
             let legacy = DeckSession::from_package_with_source(package, &bytes, 31404).unwrap();
             let doc = Doc::with_client_id(31405);
@@ -72,17 +74,19 @@ fn main() {
     }
 }
 
-fn remove_restarts(value: &mut serde_json::Value) {
+fn remove_post_v10_properties(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
             object.remove("restart");
+            object.remove("lineSpacing");
+            object.remove("compatLineSpacing");
             for value in object.values_mut() {
-                remove_restarts(value);
+                remove_post_v10_properties(value);
             }
         }
         serde_json::Value::Array(array) => {
             for value in array {
-                remove_restarts(value);
+                remove_post_v10_properties(value);
             }
         }
         _ => {}
