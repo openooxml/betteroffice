@@ -42,7 +42,7 @@ fn legacy_gradient_outlines_recover(old: &[u8]) {
     let txn = session.yrs_doc().transact();
     assert_eq!(
         txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion"),
-        Some(Out::Any(Any::Number(14.0)))
+        Some(Out::Any(Any::Number(16.0)))
     );
     drop(txn);
     let reopened = DeckSession::open_from_update_with_source(

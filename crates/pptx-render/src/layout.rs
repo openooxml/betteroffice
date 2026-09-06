@@ -4462,6 +4462,8 @@ mod tests {
                 picture_fill: None,
                 outline: None,
                 text: Some(TextBody {
+                    vertical_overflow: None,
+                    horizontal_overflow: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
                     compat_line_spacing: None,
@@ -4840,6 +4842,7 @@ mod tests {
         };
         let body = parsed.text.as_mut().unwrap();
         body.compat_line_spacing = compat.then_some(true);
+        body.anchor = Some("t".to_owned());
         for paragraph in &mut body.paragraphs {
             paragraph.properties.line_spacing = paragraph_spacing;
         }

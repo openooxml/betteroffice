@@ -7813,6 +7813,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                     .and_then(|legend| legend.text.as_ref()),
             ),
         },
+        fill: None,
     }
 }
 
@@ -7896,6 +7897,7 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from(axis.text.as_ref()),
+        line: None,
     }
 }
 

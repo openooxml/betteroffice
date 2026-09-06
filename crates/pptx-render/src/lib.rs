@@ -468,6 +468,42 @@ mod tests {
     }
 
     #[test]
+    fn a_chart_space_fill_grounds_the_chart_instead_of_the_default_white() {
+        let compile = |fill: &str| {
+            let json = format!(
+                r##"{{
+              "widthPx":320,"heightPx":180,
+              "shapes":[{{
+                "kind":"chart","id":4,"name":"Revenue chart",
+                "rect":{{"x":0,"y":0,"w":300,"h":150}},"rotationDeg":0,
+                "chart":{{
+                  "chartType":"column",{fill}
+                  "series":[{{"name":"North","categories":["Q1"],"values":[3],"color":"#6254E7"}}],
+                  "plotGroups":[{{"chartType":"column","axisIds":[],"varyColors":false,
+                    "showDataLabels":false,
+                    "series":[{{"name":"North","categories":["Q1"],"values":[3],"color":"#6254E7"}}]}}]
+                }}
+              }}]
+            }}"##
+            );
+            let output: serde_json::Value =
+                serde_json::from_str(&compile_json(&json).expect("compile")).expect("json");
+            output["primitives"][0]["primitives"][0]["fill"]["color"].clone()
+        };
+        assert_eq!(compile(""), "#FFFFFF");
+        assert_eq!(
+            compile(r##""fill":{"kind":"solid","color":"#01BABC"},"##),
+            "#01BABC"
+        );
+        assert_eq!(
+            compile(
+                r##""fill":{"kind":"pattern","foreground":"#01C4BF","background":"#01BABC"},"##
+            ),
+            "#01BFBD"
+        );
+    }
+
+    #[test]
     fn a_composed_chart_without_its_part_keeps_the_placeholder() {
         for kind in ["chart", "chartPlaceholder"] {
             let json = format!(

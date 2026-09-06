@@ -21,7 +21,8 @@ so both clients and saved files retain it.
 The current schema is v16. Older v1–v15 updates can be opened, and attaching the
 original package with `open_from_update_with_source` imports source comments,
 list styles, explicit numbering restarts, paragraph line spacing, picture
-fills, explicit text overflow settings, and unedited gradient outlines missing from older snapshots.
+fills, unedited gradient outlines, chart-space fills and axis lines, and explicit
+text overflow settings missing from older snapshots.
 Source attachment also restores run baseline formatting on surviving text while
 retaining edits and explicit zero overrides. Imported properties persist in
 subsequent updates, and reattaching the source is idempotent.

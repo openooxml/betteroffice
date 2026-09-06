@@ -61,49 +61,76 @@ fn overflowing_lines_respect_top_center_and_bottom_anchors() {
     }
 }
 
+fn assert_overflow_carets(rendered: &RenderedSlide, id: u32) {
+    let Primitive::TextBox {
+        shape_id,
+        story_id,
+        x,
+        y,
+        w,
+        h,
+        lines,
+        transform,
+        ..
+    } = text(rendered, id)
+    else {
+        unreachable!()
+    };
+    let line = &lines[0];
+    let outside_y = if line.y < *y {
+        line.y + 1.0
+    } else {
+        line.y + line.height - 1.0
+    };
+    assert!(outside_y < *y || outside_y > y + h);
+    for stop in &line.caret_stops {
+        let cx = x + w / 2.0;
+        let cy = y + h / 2.0;
+        let dx = (stop.x - cx) * if transform.flip_h { -1.0 } else { 1.0 };
+        let dy = (outside_y - cy) * if transform.flip_v { -1.0 } else { 1.0 };
+        let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+        let hit = rendered.hit_test(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos);
+        assert_eq!(
+            hit,
+            Some(HitTestResult::Text {
+                shape_id: shape_id.clone().unwrap(),
+                story_id: story_id.clone().unwrap(),
+                position: stop.position,
+            }),
+            "shape {id}, position {}",
+            stop.position
+        );
+    }
+}
+
 #[test]
 fn overflow_hit_testing_uses_the_original_rotation_and_flip_pivot() {
     for (index, id) in [(0, 2), (0, 4), (0, 5), (1, 2), (1, 3)] {
-        let rendered = slide(index);
-        let Primitive::TextBox {
-            shape_id,
-            story_id,
-            x,
-            y,
-            w,
-            h,
-            lines,
-            transform,
-            ..
-        } = text(&rendered, id)
-        else {
+        assert_overflow_carets(&slide(index), id);
+    }
+}
+
+#[test]
+fn overflow_hit_testing_uses_the_vertical_text_frame() {
+    for vertical in ["vert", "vert270"] {
+        let mut package = pptx_parse::parse_pptx(DECK).unwrap();
+        package.slides[0].shapes.retain(|shape| shape.id() == 2);
+        let pptx_parse::ShapeNode::Shape(shape) = &mut package.slides[0].shapes[0] else {
             unreachable!()
         };
-        let line = &lines[0];
-        let outside_y = if line.y < *y {
-            line.y + 1.0
-        } else {
-            line.y + line.height - 1.0
-        };
-        assert!(outside_y < *y || outside_y > y + h);
-        for stop in &line.caret_stops {
-            let cx = x + w / 2.0;
-            let cy = y + h / 2.0;
-            let dx = (stop.x - cx) * if transform.flip_h { -1.0 } else { 1.0 };
-            let dy = (outside_y - cy) * if transform.flip_v { -1.0 } else { 1.0 };
-            let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
-            let hit = rendered.hit_test(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos);
-            assert_eq!(
-                hit,
-                Some(HitTestResult::Text {
-                    shape_id: shape_id.clone().unwrap(),
-                    story_id: story_id.clone().unwrap(),
-                    position: stop.position,
-                }),
-                "slide {index}, shape {id}, position {}",
-                stop.position
-            );
-        }
+        shape.base.transform.width = 304_800;
+        shape.base.transform.height = 4_953_000;
+        shape.base.transform.rotation_deg = 35.0;
+        shape.base.transform.flip_h = true;
+        shape.base.transform.flip_v = true;
+        shape.text.as_mut().unwrap().vertical = Some(vertical.to_owned());
+        let session = DeckSession::from_package(package, 295).unwrap();
+        let mut renderer = SlideRenderer::new();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let rendered = renderer
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        assert_overflow_carets(&rendered, 2);
     }
 }
 

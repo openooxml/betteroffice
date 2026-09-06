@@ -10,6 +10,7 @@ fn main() {
         ("pptx-render", "autonumber-bullets", "autonumber"),
         ("pptx-render", "text-baseline-script", "baseline"),
         ("pptx-parse", "picture-fill", "picture-fill"),
+        ("pptx-render", "chart-space-fill", "chart-space-fill"),
     ] {
         let bytes =
             fs::read(root.join(format!("crates/{crate_name}/tests/fixtures/{source}.pptx")))
@@ -36,14 +37,14 @@ fn main() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(12.0)))
+            Some(Out::Any(Any::Number(13.0)))
         );
         assert!(meta.get(&txn, "baselinesPendingSource").is_none());
         let reopened = DeckSession::open_from_update(&update, 31403).unwrap();
         assert_eq!(reopened.encode_state_as_update_v1(), update);
         fs::write(
             root.join(format!(
-                "crates/pptx-edit/tests/fixtures/deck-schema-v12-{name}.update.bin"
+                "crates/pptx-edit/tests/fixtures/deck-schema-v13-{name}.update.bin"
             )),
             update,
         )
@@ -80,6 +81,7 @@ fn remove_post_v10_properties(value: &mut serde_json::Value) {
             object.remove("restart");
             object.remove("lineSpacing");
             object.remove("compatLineSpacing");
+            object.remove("pictureFill");
             for value in object.values_mut() {
                 remove_post_v10_properties(value);
             }
