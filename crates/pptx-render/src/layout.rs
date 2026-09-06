@@ -1718,13 +1718,8 @@ fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
-/// Resize a measured line box to the pitch `a:lnSpc` asks for.
-///
-/// A percentage measures the single line pitch, which is the font's own box unless the
-/// body asked for `compatLnSpc`, where PowerPoint and LibreOffice use a font-independent
-/// [`SINGLE_LINE_PITCH_EM`] cell instead. Below single the box scales whole, so the
-/// baseline keeps the font's share of it; above single the ascent and descent stay and
-/// the slack becomes leading, which sits below the descent, so only later lines move.
+/// Resize a measured line box to the pitch `a:lnSpc` asks for. Below single the box scales
+/// whole; above it the slack becomes leading under the descent, so only later lines move.
 fn spaced_line_box(
     content: ooxml_text::LineBox,
     paragraph: &ResolvedParagraph,
