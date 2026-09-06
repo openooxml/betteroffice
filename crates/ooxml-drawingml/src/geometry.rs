@@ -157,21 +157,25 @@ pub fn preset_geometry_to_path(
             "right",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "leftArrow" => arrow(
             "left",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "upArrow" => arrow(
             "up",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "downArrow" => arrow(
             "down",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "leftRightArrow" => polygon(&[
             (0.0, 0.5),
@@ -245,6 +249,10 @@ pub fn preset_geometry_to_path(
 fn shortest_side_adjustment(adjustment: Option<f64>, fallback: f64, aspect_ratio: f64) -> f64 {
     let width = width_in_shortest_sides(aspect_ratio);
     pin(adjustment, fallback, width) / width
+}
+
+fn height_in_shortest_sides(aspect_ratio: f64) -> f64 {
+    width_in_shortest_sides(1.0 / aspect_ratio)
 }
 
 fn width_in_shortest_sides(aspect_ratio: f64) -> f64 {
@@ -366,10 +374,15 @@ fn arrow(
     direction: &str,
     shaft_adjustment: Option<f64>,
     head_adjustment: Option<f64>,
+    aspect_ratio: f64,
 ) -> Vec<GeometryPathCommand> {
+    let along = match direction {
+        "up" | "down" => height_in_shortest_sides(aspect_ratio),
+        _ => width_in_shortest_sides(aspect_ratio),
+    };
     let shaft = clamp_fraction(shaft_adjustment, 0.5);
     let edge = (1.0 - shaft) / 2.0;
-    let head = clamp_fraction(head_adjustment, 0.5);
+    let head = pin(head_adjustment, 0.5, along) / along;
     polygon(&[
         (0.0, edge),
         (1.0 - head, edge),
@@ -472,6 +485,75 @@ mod tests {
             panic!("round rectangle must curve its first corner");
         };
         (rx, ry)
+    }
+
+    fn up_arrow(adj1: f64, adj2: f64, aspect_ratio: f64) -> (f64, f64) {
+        let adjustments = HashMap::from([("adj1".to_owned(), adj1), ("adj2".to_owned(), adj2)]);
+        let path = preset_geometry_to_path("upArrow", &adjustments, aspect_ratio).unwrap();
+        let GeometryPathCommand::Line { x, y } = path[1] else {
+            panic!("expected the shaft edge after the opening move");
+        };
+        (x, y)
+    }
+
+    #[test]
+    fn an_arrow_head_uses_the_shortest_side() {
+        let (edge, head) = up_arrow(0.557_13, 0.804_07, 468_000.0 / 1_078_605.0);
+        assert_close(1.0 - 2.0 * edge, 0.557_13);
+        assert_close(head, 0.804_07 / (1_078_605.0 / 468_000.0));
+    }
+
+    #[test]
+    fn a_square_arrow_reads_its_adjustments_unchanged() {
+        let (edge, head) = up_arrow(0.4, 0.7, 1.0);
+        assert_close(1.0 - 2.0 * edge, 0.4);
+        assert_close(head, 0.7);
+        let defaults = preset_geometry_to_path("upArrow", &HashMap::new(), 1.0).unwrap();
+        assert_eq!(defaults[0], GeometryPathCommand::Move { x: 0.25, y: 1.0 });
+        assert_eq!(defaults[1], GeometryPathCommand::Line { x: 0.25, y: 0.5 });
+    }
+
+    #[test]
+    fn an_arrow_head_pins_at_the_side_it_spans() {
+        for (adjustment, expected) in [(-0.5, 0.0), (1.5, 0.375), (9.0, 1.0)] {
+            let (_, head) = up_arrow(0.5, adjustment, 0.25);
+            assert_close(head, expected);
+        }
+    }
+
+    #[test]
+    fn arrow_shafts_use_the_full_cross_axis() {
+        let adjustments = HashMap::from([("adj1".to_owned(), 0.4)]);
+        for (shape, aspect, x, y) in [
+            ("upArrow", 4.0, 0.3, 1.0),
+            ("downArrow", 4.0, 0.3, 0.0),
+            ("leftArrow", 0.25, 1.0, 0.3),
+            ("rightArrow", 0.25, 0.0, 0.3),
+        ] {
+            let path = preset_geometry_to_path(shape, &adjustments, aspect).unwrap();
+            assert_eq!(path[0], GeometryPathCommand::Move { x, y }, "{shape}");
+        }
+    }
+
+    #[test]
+    fn arrow_heads_follow_the_pointing_axis() {
+        for (shape, aspect, shoulder, tip) in [
+            ("upArrow", 0.25, (0.25, 0.125), (0.5, 0.0)),
+            ("downArrow", 0.25, (0.25, 0.875), (0.5, 1.0)),
+            ("leftArrow", 4.0, (0.125, 0.25), (0.0, 0.5)),
+            ("rightArrow", 4.0, (0.875, 0.25), (1.0, 0.5)),
+        ] {
+            let path = preset_geometry_to_path(shape, &HashMap::new(), aspect).unwrap();
+            assert_eq!(
+                path[1],
+                GeometryPathCommand::Line {
+                    x: shoulder.0,
+                    y: shoulder.1,
+                },
+                "{shape}"
+            );
+            assert_eq!(path[3], GeometryPathCommand::Line { x: tip.0, y: tip.1 });
+        }
     }
 
     /// Where the leading edge stops before the point begins.
