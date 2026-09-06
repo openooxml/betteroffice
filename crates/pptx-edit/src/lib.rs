@@ -159,7 +159,7 @@ impl DeckSession {
         }
         .map_err(|error| EditError::Parse(error.to_string()))?;
         comments::import_source_comments(&session, &package)?;
-        deck::import_source_list_styles(&session.doc, &package)?;
+        deck::import_source_text_properties(&session.doc, &package)?;
         for property in [
             source_run_properties::SourceProperty::Baseline,
             source_run_properties::SourceProperty::Spacing,

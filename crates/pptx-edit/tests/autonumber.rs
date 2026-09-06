@@ -5,6 +5,7 @@ use yrs::{Any, Doc, Map, Out, ReadTxn, Transact, Update};
 
 const DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/autonumber-bullets.pptx");
 const V9: &[u8] = include_bytes!("fixtures/deck-schema-v9-autonumber.update.bin");
+const V11: &[u8] = include_bytes!("fixtures/deck-schema-v11-autonumber.update.bin");
 const V10: &[u8] = include_bytes!("fixtures/deck-schema-v10-autonumber.update.bin");
 
 fn restart_bullets(session: &DeckSession) -> Vec<Bullet> {
@@ -117,7 +118,7 @@ fn assert_migrated_restarts(legacy: &[u8]) {
     let txn = doc.transact();
     assert_eq!(
         txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion"),
-        Some(Out::Any(Any::Number(12.0)))
+        Some(Out::Any(Any::Number(13.0)))
     );
     let reopened = DeckSession::open_from_update(&update, 30013).unwrap();
     assert_eq!(reopened.encode_state_as_update_v1(), update);
@@ -134,4 +135,14 @@ fn assert_migrated_restarts(legacy: &[u8]) {
     assert_eq!(reattached.encode_state_as_update_v1(), attached_update);
     let saved = DeckSession::open(&attached.save().unwrap(), 30018).unwrap();
     assert_eq!(restart_bullets(&saved), restart_bullets(&fresh));
+}
+
+#[test]
+fn main_v11_restarts_survive_spacing_migration() {
+    assert!(String::from_utf8_lossy(V11).contains("\"restart\""));
+    let migrated = DeckSession::open_from_update(V11, 30019).unwrap();
+    let fresh = DeckSession::open(DECK, 30020).unwrap();
+    assert_eq!(restart_bullets(&migrated), restart_bullets(&fresh));
+    assert_eq!(migrated.snapshot().unwrap(), fresh.snapshot().unwrap());
+    assert_migrated_restarts(V11);
 }

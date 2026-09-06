@@ -4,11 +4,12 @@ use yrs::{Any, Map, Out, ReadTxn, Transact};
 const DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/run-spacing.pptx");
 const V10: &[u8] = include_bytes!("fixtures/run-spacing-main-v10.update.bin");
 const V11: &[u8] = include_bytes!("fixtures/run-spacing-main-v11.update.bin");
+const V12: &[u8] = include_bytes!("fixtures/run-spacing-main-v12.update.bin");
 const STORY: &str = "story:slide:0:256:shape:0:0";
 
 #[test]
-fn v10_and_v11_tracking_recovers_with_source_and_preserves_edits() {
-    for old in [V10, V11] {
+fn legacy_tracking_recovers_with_source_and_preserves_edits() {
+    for old in [V10, V11, V12] {
         let migrated = DeckSession::open_from_update_with_source(old, DECK, 32501).unwrap();
         let fresh = DeckSession::open(DECK, 32502).unwrap();
         assert_eq!(migrated.snapshot().unwrap(), fresh.snapshot().unwrap());
@@ -55,7 +56,7 @@ fn v10_and_v11_tracking_recovers_with_source_and_preserves_edits() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(12.0)))
+            Some(Out::Any(Any::Number(13.0)))
         );
         assert!(meta.get(&txn, "spacingPendingSource").is_none());
     }
