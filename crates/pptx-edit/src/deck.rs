@@ -21,10 +21,10 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 9.0;
+const SCHEMA_VERSION: f64 = 10.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 9] =
-    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 10] =
+    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -723,7 +723,7 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
+pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
     let mut package = package_from_doc(doc)?;
     let sources = source
         .slides
@@ -761,7 +761,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
         )
     {
         if let Some(source) = sources.get(path) {
-            changed |= merge_source_list_shapes(shapes, source);
+            changed |= merge_source_render_shapes(shapes, source);
         }
     }
     for master in &mut package.masters {
@@ -793,7 +793,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
     Ok(())
 }
 
-fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
+fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
     let mut changed = false;
     for source in source {
         let Some(target) = target
@@ -804,12 +804,14 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
         };
         match (target, source) {
             (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
+                changed |= target.picture_fill != source.picture_fill;
+                target.picture_fill.clone_from(&source.picture_fill);
                 if let (Some(target), Some(source)) = (&mut target.text, &source.text) {
                     changed |= merge_source_list_body(target, source);
                 }
             }
             (ShapeNode::Group(target), ShapeNode::Group(source)) => {
-                changed |= merge_source_list_shapes(&mut target.children, &source.children);
+                changed |= merge_source_render_shapes(&mut target.children, &source.children);
             }
             (ShapeNode::GraphicFrame(target), ShapeNode::GraphicFrame(source)) => {
                 if let (
@@ -893,6 +895,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 9.0 {
         migrate_doc_to_v9(doc)?;
+    }
+    if version < 10.0 {
+        migrate_doc_to_v10(doc)?;
     }
     Ok(())
 }
@@ -1035,6 +1040,22 @@ fn migrate_doc_to_v9(doc: &Doc) -> EditResult<()> {
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "schemaVersion", 9.0);
+    Ok(())
+}
+
+/// Persists picture fills in schema 10.
+fn migrate_doc_to_v10(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", 10.0);
     Ok(())
 }
 
@@ -1588,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8_then_v9() {
+    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8_then_v9_then_v10() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1598,9 +1619,9 @@ mod tests {
         const V3: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
         for (update, expected_versions) in [
-            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1670,9 +1691,19 @@ mod tests {
             include_bytes!("../tests/fixtures/deck-schema-v4-slide-number-fields.update.bin");
 
         for (update, oracle, versions, first_slide_num) in [
-            (V2, V4_LEGACY, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 1),
-            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0, 9.0], 1),
-            (V4_NUMBERED, V4_NUMBERED, vec![5.0, 6.0, 7.0, 8.0, 9.0], 10),
+            (
+                V2,
+                V4_LEGACY,
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                1,
+            ),
+            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0], 1),
+            (
+                V4_NUMBERED,
+                V4_NUMBERED,
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                10,
+            ),
         ] {
             let doc = crate::doc_with_client_id(9340);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1734,9 +1765,9 @@ mod tests {
         const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
         const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
         for (update, versions) in [
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            (V5, vec![6.0, 7.0, 8.0, 9.0]),
-            (V6, vec![7.0, 8.0, 9.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0]),
+            (V6, vec![7.0, 8.0, 9.0, 10.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -1976,7 +2007,8 @@ mod tests {
             *events,
             [
                 (8.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (9.0, before, Some("legacy".to_owned()), Some(true))
+                (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (10.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

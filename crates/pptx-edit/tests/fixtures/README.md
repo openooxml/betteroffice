@@ -67,3 +67,5 @@ migrations retain their original version numbers.
 `deck-schema-v7-comments.update.bin` is documented in `modern-comments.md`.
 
 `deck-schema-v8-list-style.update.bin` was generated on main `1d0f41d9` from `../../pptx-render/tests/fixtures/list-style-bullets.pptx`, using `DeckSession::open` and `encode_state_as_update_v1` with client ID 29401. It exercises schema 8 to 9 migration and source reattachment when the old model did not store list styles.
+
+`deck-schema-v9-picture-fill.update.bin` was generated on main `2c90c17f` from `../../pptx-parse/tests/fixtures/picture-fill.pptx` using `DeckSession::open` and `encode_state_as_update_v1` with client ID 33601. It exercises schema 9 to 10 migration and persistent picture-fill import when the source is reattached.

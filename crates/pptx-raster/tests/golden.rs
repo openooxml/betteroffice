@@ -310,8 +310,6 @@ fn golden_image() {
     );
 }
 
-/// The shape of a picture-filled `p:sp`: a cropped image masked by a two-contour
-/// path whose reverse-wound counter has to stay unpainted.
 #[test]
 fn golden_picture_fill() {
     use ooxml_drawingml::GeometryPathCommand as Cmd;

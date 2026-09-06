@@ -669,8 +669,7 @@ pub(crate) fn parse_fill_element(element: &XmlElement) -> Option<ShapeFill> {
     }
 }
 
-/// Resolves the blip behind a shape's `a:blipFill`. Tiled fills carry no payload,
-/// so they keep painting nothing rather than being stretched.
+/// Resolves a stretched shape picture fill.
 fn parse_picture_fill(element: &XmlElement, relationships: &[Relationship]) -> Option<PictureFill> {
     let fill = element
         .child_elements()

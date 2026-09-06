@@ -10,8 +10,9 @@ use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, sin
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
     Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
-    ParagraphProperties, Picture, PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties,
-    ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    ParagraphProperties, Picture, PictureCrop, PictureFill, Placeholder, PptxPackage,
+    RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit,
+    TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2426,10 +2427,14 @@ fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
 
 /// Looks up the blip behind a snapshot shape's picture fill.
 fn picture_fill<'a>(nodes: &[Option<&'a ShapeNode>]) -> Option<&'a PictureFill> {
-    nodes.iter().flatten().find_map(|node| match node {
+    match nodes
+        .iter()
+        .flatten()
+        .find(|node| node_fill(node).is_some())?
+    {
         ShapeNode::Shape(shape) => shape.picture_fill.as_deref(),
         _ => None,
-    })
+    }
 }
 
 /// Redraws a picture-filled shape as an image masked by the shape's own outline.
