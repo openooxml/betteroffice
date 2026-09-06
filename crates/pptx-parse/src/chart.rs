@@ -79,6 +79,7 @@ pub(crate) fn parse_chart_part(root: &XmlElement, theme: &Theme) -> Option<Chart
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+    use ooxml_drawingml::chart::{ChartFill, ChartLine};
 
     fn parse(xml: &str, theme: &Theme) -> Option<ChartSpace> {
         let limits = ParseLimits::default();
@@ -174,6 +175,69 @@ mod tests {
         let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].color, "#8FAADC");
         assert_eq!(points[1].color, "#848484");
+    }
+
+    #[test]
+    fn the_chart_space_fill_and_the_axis_lines_reach_the_model() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+                 <c:lineChart><c:ser><c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val></c:ser></c:lineChart>
+                 <c:catAx><c:axId val="1"/><c:spPr><a:noFill/><a:ln w="9525"><a:solidFill><a:schemeClr val="tx1"><a:lumMod val="15000"/><a:lumOff val="85000"/></a:schemeClr></a:solidFill></a:ln></c:spPr></c:catAx>
+                 <c:valAx><c:axId val="2"/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:valAx>
+               </c:plotArea></c:chart>
+               <c:spPr><a:pattFill prst="smGrid"><a:fgClr><a:srgbClr val="01C4BF"/></a:fgClr><a:bgClr><a:srgbClr val="01BABC"/></a:bgClr></a:pattFill><a:ln><a:noFill/></a:ln></c:spPr>
+               </c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        assert_eq!(
+            chart.fill,
+            Some(ChartFill::Pattern {
+                foreground: Some("#01C4BF".to_owned()),
+                background: Some("#01BABC".to_owned()),
+            })
+        );
+        let axes = chart.axis_list.as_ref().expect("both axes parse");
+        assert_eq!(
+            axes[0].line,
+            Some(ChartLine {
+                none: false,
+                color: Some("#D9D9D9".to_owned()),
+                width_emu: Some(9525.0),
+            })
+        );
+        assert_eq!(
+            axes[1].line,
+            Some(ChartLine {
+                none: true,
+                color: None,
+                width_emu: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_chart_space_without_shape_properties_leaves_the_fill_to_the_renderer() {
+        let space = |properties: &str| {
+            parse(
+                &format!(
+                    r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea>
+                         <c:lineChart><c:ser><c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val></c:ser></c:lineChart>
+                       </c:plotArea></c:chart>{properties}</c:chartSpace>"#
+                ),
+                &themed(),
+            )
+            .expect("chart parses")
+            .fill
+        };
+        assert_eq!(space(""), None);
+        assert_eq!(space("<c:spPr><a:noFill/></c:spPr>"), Some(ChartFill::None));
+        assert_eq!(
+            space(r#"<c:spPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></c:spPr>"#),
+            Some(ChartFill::Solid {
+                color: "#6254E7".to_owned()
+            })
+        );
     }
 
     #[test]

@@ -23,6 +23,12 @@
       "id": 6844325,
       "signed_at": "2026-09-05T08:05:19Z",
       "pull_request_no": 275
+    },
+    {
+      "name": "siggifly",
+      "id": 11075538,
+      "signed_at": "2026-09-06T20:02:42Z",
+      "pull_request_no": 341
     }
   ]
 }

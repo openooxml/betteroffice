@@ -122,7 +122,7 @@ function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void 
     ctx.fill();
   }
   if (shape.stroke) {
-    strokeCurrentPath(ctx, shape.stroke);
+    strokeCurrentPath(ctx, shape.stroke, shape.x, shape.y, shape.w, shape.h);
     paintLineEnds(ctx, shape);
   }
 }
@@ -157,8 +157,11 @@ function paintLineEnds(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): vo
   ];
   ctx.save();
   ctx.setLineDash([]);
-  ctx.fillStyle = stroke.color;
-  ctx.strokeStyle = stroke.color;
+  const style = stroke.paint
+    ? paintStyle(ctx, stroke.paint, shape.x, shape.y, shape.w, shape.h)
+    : stroke.color;
+  ctx.fillStyle = style;
+  ctx.strokeStyle = style;
   ctx.lineWidth = stroke.width;
   ctx.lineJoin = 'miter';
   for (const [end, from, tip] of ends) {
@@ -329,8 +332,15 @@ function buildPath(
   }
 }
 
-function strokeCurrentPath(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
-  ctx.strokeStyle = stroke.color;
+function strokeCurrentPath(
+  ctx: CanvasRenderingContext2D,
+  stroke: Stroke,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): void {
+  ctx.strokeStyle = stroke.paint ? paintStyle(ctx, stroke.paint, x, y, width, height) : stroke.color;
   ctx.lineWidth = stroke.width;
   ctx.setLineDash(stroke.dashed ? [Math.max(3, stroke.width * 2), Math.max(2, stroke.width)] : []);
   ctx.stroke();
@@ -373,7 +383,7 @@ async function paintImage(
   }
   if (image.stroke) {
     buildImageOutline(ctx, image);
-    strokeCurrentPath(ctx, image.stroke);
+    strokeCurrentPath(ctx, image.stroke, image.x, image.y, image.w, image.h);
   }
 }
 
@@ -397,11 +407,17 @@ function paintTextRun(
   const weight = run.bold ? 'bold ' : '';
   ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(run.fontFamily)}`;
   ctx.fillStyle = run.color;
+  const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   for (const chunk of positionedTextChunks(run)) {
-    ctx.fillText(chunk.text, chunk.x, baseline);
+    ctx.fillText(chunk.text, chunk.x, runBaseline);
   }
   if (run.underline) {
-    ctx.fillRect(run.x, baseline + run.fontSizePx * 0.08, run.width, Math.max(1, run.fontSizePx * 0.05));
+    ctx.fillRect(
+      run.x,
+      runBaseline + run.fontSizePx * 0.08,
+      run.width,
+      Math.max(1, run.fontSizePx * 0.05)
+    );
   }
 }
 

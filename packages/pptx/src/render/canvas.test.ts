@@ -106,6 +106,94 @@ describe('PPTX canvas replay', () => {
     expect(calls).toContain('text:Hello');
   });
 
+  test('strokes a gradient outline with a gradient sized to the shape box', async () => {
+    const gradients: Array<{ args: number[]; stops: Array<[number, string]> }> = [];
+    let strokeStyle: unknown;
+    let fillStyle: unknown;
+    const objects: unknown[] = [];
+    const ctx = new Proxy(
+      {
+        createLinearGradient: (...args: number[]) => {
+          const entry = { args, stops: [] as Array<[number, string]> };
+          gradients.push(entry);
+          const gradient = {
+            addColorStop: (position: number, color: string) => entry.stops.push([position, color]),
+          };
+          objects.push(gradient);
+          return gradient;
+        },
+      } as Record<string, unknown>,
+      {
+        get(target, property) {
+          if (property in target) return target[property as string];
+          return () => undefined;
+        },
+        set(target, property, value) {
+          if (property === 'strokeStyle') strokeStyle = value;
+          if (property === 'fillStyle') fillStyle = value;
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    const list: SlideDisplayList = {
+      contractVersion: 1,
+      width: 320,
+      height: 180,
+      primitives: [
+        {
+          kind: 'shape',
+          objectId: 1,
+          name: 'Spoke',
+          x: 20,
+          y: 40,
+          w: 200,
+          h: 0,
+          geometry: 'line',
+          path: [
+            { type: 'move', x: 0, y: 0 },
+            { type: 'line', x: 1, y: 0 },
+          ],
+          stroke: {
+            color: '#c00000',
+            width: 3,
+            paint: {
+              kind: 'gradient',
+              gradientType: 'linear',
+              angleDeg: 0,
+              stops: [
+                { position: 0, color: '#c00000' },
+                { position: 1, color: '#c2c2c2' },
+              ],
+            },
+          },
+        },
+      ],
+    };
+
+    await paintSlide(ctx, list, 1);
+    expect(gradients).toHaveLength(1);
+    expect(gradients[0]?.args).toEqual([20, 40, 220, 40]);
+    expect(gradients[0]?.stops).toEqual([
+      [0, '#c00000'],
+      [1, '#c2c2c2'],
+    ]);
+    expect(strokeStyle).toBe(objects[0]);
+    const shape = list.primitives[0];
+    if (shape?.kind !== 'shape' || !shape.stroke) throw new Error('shape');
+    shape.stroke.tailEnd = { kind: 'triangle', width: 9, length: 9 };
+    await paintSlide(ctx, list, 1);
+    expect(fillStyle).toBe(objects[2]);
+    expect(strokeStyle).toBe(objects[2]);
+    list.primitives = [{
+      kind: 'image', objectId: 2, name: 'Outline', x: 20, y: 40, w: 200, h: 0,
+      stroke: shape.stroke,
+    }];
+    await paintSlide(ctx, list, 1);
+    expect(strokeStyle).toBe(objects[3]);
+    expect(gradients[3]?.args).toEqual([20, 40, 220, 40]);
+  });
+
   test('paints chart parts clipped to the chart rectangle', async () => {
     const calls: string[] = [];
     const ctx = new Proxy(
@@ -683,6 +771,44 @@ describe('PPTX picture cropping', () => {
     expect(calls).not.toContain('clip');
   });
 
+  test('a two-contour mask keeps both contours, so a counter can be punched out', async () => {
+    const { calls, ctx } = harness();
+    const ring: GeometryPathCommand[] = [
+      { type: 'move', x: 0, y: 0 },
+      { type: 'line', x: 1, y: 0 },
+      { type: 'line', x: 1, y: 1 },
+      { type: 'line', x: 0, y: 1 },
+      { type: 'close' },
+      { type: 'move', x: 0.25, y: 0.25 },
+      { type: 'line', x: 0.25, y: 0.75 },
+      { type: 'line', x: 0.75, y: 0.75 },
+      { type: 'line', x: 0.75, y: 0.25 },
+      { type: 'close' },
+    ];
+    await paintSlide(ctx, list({ path: ring }), 1, 1, { resolveImage: async () => source });
+    expect(calls).toEqual([
+      'save',
+      'save',
+      'save',
+      'beginPath',
+      'move:10,20',
+      'line:210,20',
+      'line:210,120',
+      'line:10,120',
+      'close',
+      'move:60,45',
+      'line:60,95',
+      'line:160,95',
+      'line:160,45',
+      'close',
+      'clip',
+      'draw:0,0,400,300,10,20,200,100',
+      'restore',
+      'restore',
+      'restore',
+    ]);
+  });
+
   test('a crop that keeps nothing draws nothing', async () => {
     const { calls, ctx } = harness();
     await paintSlide(ctx, list({ crop: { left: 0.6, right: 0.6 } }), 1, 1, {
@@ -690,4 +816,34 @@ describe('PPTX picture cropping', () => {
     });
     expect(calls.some((call) => call.startsWith('draw:'))).toBe(false);
   });
+});
+
+test('paints script glyphs and underlines at their shifted baselines', async () => {
+  const text: [string, number][] = [];
+  const underlines: number[] = [];
+  const ctx = new Proxy({
+    fillText: (value: string, _x: number, y: number) => text.push([value, y]),
+    fillRect: (_x: number, y: number) => underlines.push(y),
+  } as Record<string, unknown>, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const list: SlideDisplayList = {
+    contractVersion: 1, width: 200, height: 100,
+    primitives: [{
+      kind: 'textBox', objectId: 1, x: 0, y: 0, w: 200, h: 100,
+      anchor: 'top', paragraphs: [], lines: [{
+        x: 10, y: 20, width: 60, height: 50, baseline: 50, start: 0, end: 3,
+        caretStops: [], runs: [6, -5, undefined].map((offset, i) => ({
+          text: ['up', 'down', 'base'][i], start: i, end: i + 1, x: 10 + i * 20, width: 20,
+          fontId: 1, fontFamily: 'Arial', fontSizePx: 10, bold: false, italic: false,
+          underline: true, color: '#475467', baselineOffsetPx: offset, glyphs: [],
+        })),
+      }],
+    }],
+  };
+  await paintSlide(ctx, list, 1);
+  expect(text).toEqual([['up', 44], ['down', 55], ['base', 50]]);
+  expect(underlines).toHaveLength(3);
+  [44.8, 55.8, 50.8].forEach((y, i) => expect(underlines[i]).toBeCloseTo(y));
 });

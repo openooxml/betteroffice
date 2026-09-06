@@ -184,6 +184,7 @@ fn text_style(
         color,
         font_family,
         underline,
+        baseline_pct: None,
     }
 }
 
@@ -195,6 +196,7 @@ fn text_style_patch(style: TextStyle) -> TextStylePatch {
         color: style.color,
         font_family: style.font_family,
         underline: style.underline,
+        baseline_pct: style.baseline_pct,
     }
 }
 

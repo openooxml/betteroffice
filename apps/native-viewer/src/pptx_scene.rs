@@ -473,15 +473,17 @@ impl Translator<'_> {
         let fill = fill
             .map(|paint| prepare_paint(paint, frame.rect))
             .transpose()?;
-        let stroke = stroke.map(prepare_stroke).transpose()?;
+        let stroke = stroke
+            .map(|stroke| prepare_stroke(stroke, frame.rect))
+            .transpose()?;
         let affine = frame.transform(transform, parent)?;
         if let Some(fill) = fill {
             fill.fill(&mut self.scene, affine, &path);
         }
-        if let Some((style, color)) = stroke
+        if let Some((style, paint)) = stroke
             && style.width > 0.0
         {
-            self.scene.stroke(&style, affine, color, None, &path);
+            paint.stroke(&mut self.scene, &style, affine, &path);
         }
         Ok(())
     }
@@ -501,7 +503,9 @@ impl Translator<'_> {
         if image.width == 0 || image.height == 0 {
             return Err(format!("image asset {asset_id} has no pixels"));
         }
-        let stroke = stroke.map(prepare_stroke).transpose()?;
+        let stroke = stroke
+            .map(|stroke| prepare_stroke(stroke, frame.rect))
+            .transpose()?;
         let affine = frame.transform(transform, parent)?;
         let outline = image_outline(frame, source.path)?;
         let mapping = image_mapping(frame, image.width, image.height, source.crop)?;
@@ -509,10 +513,10 @@ impl Translator<'_> {
         self.scene
             .draw_image(&ImageBrush::new(image.clone()), affine * mapping);
         self.scene.pop_layer();
-        if let Some((style, color)) = stroke
+        if let Some((style, paint)) = stroke
             && style.width > 0.0
         {
-            self.scene.stroke(&style, affine, color, None, &outline);
+            paint.stroke(&mut self.scene, &style, affine, &outline);
         }
         Ok(())
     }
@@ -584,7 +588,7 @@ impl Translator<'_> {
             font,
             font_size_px,
             x,
-            baseline: line.baseline,
+            baseline: line.baseline - finite(run.baseline_offset_px, "text baseline offset")?,
             width,
             glyphs,
             color: color(&run.color, 1.0)?,
@@ -766,6 +770,19 @@ enum PreparedPaint {
 }
 
 impl PreparedPaint {
+    fn stroke(
+        &self,
+        scene: &mut Scene,
+        style: &Stroke,
+        transform: Affine,
+        shape: &impl vello::kurbo::Shape,
+    ) {
+        match self {
+            Self::Solid(color) => scene.stroke(style, transform, *color, None, shape),
+            Self::Gradient(gradient) => scene.stroke(style, transform, gradient, None, shape),
+        }
+    }
+
     fn fill(&self, scene: &mut Scene, transform: Affine, shape: &impl vello::kurbo::Shape) {
         match self {
             Self::Solid(color) => scene.fill(Fill::NonZero, transform, *color, None, shape),
@@ -855,7 +872,7 @@ fn prepare_paint(paint: &Paint, bounds: Rect) -> Result<PreparedPaint, String> {
     }
 }
 
-fn prepare_stroke(stroke: &DisplayStroke) -> Result<(Stroke, Color), String> {
+fn prepare_stroke(stroke: &DisplayStroke, bounds: Rect) -> Result<(Stroke, PreparedPaint), String> {
     let width = nonnegative(stroke.width, "stroke width")?;
     let mut style = Stroke::new(f64::from(width));
     if stroke.dashed && width > 0.0 {
@@ -864,7 +881,23 @@ fn prepare_stroke(stroke: &DisplayStroke) -> Result<(Stroke, Color), String> {
             [f64::from((width * 2.0).max(3.0)), f64::from(width.max(2.0))],
         );
     }
-    Ok((style, color(&stroke.color, 1.0)?))
+    let paint = match &stroke.paint {
+        Some(Paint::Gradient {
+            gradient_type: GradientType::Rectangular | GradientType::Path,
+            angle_deg,
+            stops,
+        }) => prepare_paint(
+            &Paint::Gradient {
+                gradient_type: GradientType::Radial,
+                angle_deg: *angle_deg,
+                stops: stops.clone(),
+            },
+            bounds,
+        )?,
+        Some(paint) => prepare_paint(paint, bounds)?,
+        None => PreparedPaint::Solid(color(&stroke.color, 1.0)?),
+    };
+    Ok((style, paint))
 }
 
 fn build_path(commands: &[GeometryPathCommand], frame: Frame) -> Result<BezPath, String> {
@@ -1027,6 +1060,50 @@ fn positive(value: f32, label: &str) -> Result<f32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepares_gradient_outlines_in_the_primitive_bounds() {
+        for kind in [
+            GradientType::Linear,
+            GradientType::Radial,
+            GradientType::Rectangular,
+            GradientType::Path,
+        ] {
+            let stroke = DisplayStroke {
+                color: "#00FF00".into(),
+                width: 8.0,
+                dashed: true,
+                head_end: None,
+                tail_end: None,
+                paint: Some(Paint::Gradient {
+                    gradient_type: kind,
+                    angle_deg: Some(0.0),
+                    stops: vec![
+                        pptx_render::GradientStop {
+                            position: 0.0,
+                            color: "#FF0000".into(),
+                        },
+                        pptx_render::GradientStop {
+                            position: 1.0,
+                            color: "#0000FF".into(),
+                        },
+                    ],
+                }),
+            };
+            let (style, paint) =
+                prepare_stroke(&stroke, Rect::new(20.0, 40.0, 220.0, 40.0)).unwrap();
+            assert_eq!(style.width, 8.0);
+            assert_eq!(style.dash_pattern.as_slice(), &[16.0, 8.0]);
+            let PreparedPaint::Gradient(gradient) = paint else {
+                panic!("gradient")
+            };
+            assert_eq!(gradient.stops.len(), 2);
+            if let vello::peniko::GradientKind::Linear(line) = gradient.kind {
+                assert_eq!(line.start, Point::new(20.0, 40.0));
+                assert_eq!(line.end, Point::new(220.0, 40.0));
+            }
+        }
+    }
     use betteroffice_pptx::{CONTRACT_VERSION, GradientStop};
     use vello::kurbo::Point;
 
@@ -1144,6 +1221,7 @@ mod tests {
                     color: "#ff00ff".to_owned(),
                     width: 2.0,
                     dashed: false,
+                    paint: None,
                     head_end: None,
                     tail_end: None,
                 }),
@@ -1264,6 +1342,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path.bounding_box(), Rect::new(10.0, 20.0, 40.0, 60.0));
+    }
+
+    #[test]
+    fn script_underlines_use_the_glyph_baseline() {
+        let mut presentation = Presentation::open(include_bytes!(
+            "../../../crates/pptx-render/tests/fixtures/text-baseline-script.pptx"
+        ))
+        .unwrap();
+        let resources = PptxSceneResources::new(&mut presentation).unwrap();
+        let rendered = presentation.render_slide(0).unwrap();
+        let mut translator = Translator {
+            scene: Scene::new(),
+            fonts: &resources.fonts,
+            images: &resources.images,
+            skipped: SkipStats::default(),
+            summary: PptxSlideSummary::default(),
+        };
+        let mut shifted = 0;
+        for primitive in &rendered.display_list.primitives {
+            if let Primitive::TextBox { lines, .. } = primitive {
+                for line in lines {
+                    for run in &line.runs {
+                        if run.baseline_offset_px != 0.0 {
+                            let prepared = translator.prepare_text_run(line, run).unwrap();
+                            assert!((prepared.baseline - prepared.glyphs[0].y).abs() < 0.001);
+                            shifted += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(shifted, 3);
     }
 
     #[test]

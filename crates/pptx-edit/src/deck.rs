@@ -5,7 +5,7 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{PptxPackage, ShapeBase, ShapeNode, Slide};
+use pptx_parse::{ChartAxis, ChartSpace, PptxPackage, ShapeBase, ShapeNode, Slide};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -21,10 +21,25 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 9.0;
+const SCHEMA_VERSION: f64 = 15.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 9] =
-    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 15] = [
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+    9.0,
+    10.0,
+    11.0,
+    12.0,
+    13.0,
+    14.0,
+    SCHEMA_VERSION,
+];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -384,6 +399,7 @@ impl DeckSession {
             draft.style.underline.as_deref(),
             draft.style.color.as_deref(),
             draft.style.font_size_pt,
+            draft.style.baseline_pct,
         )?;
         let shape_id = self.next_id("shape");
         let story_id = format!("story:{shape_id}:0");
@@ -539,7 +555,8 @@ impl DeckSession {
                     outline.width = Some(EMU_PER_POINT);
                 }
                 outline.color = Some(color);
-            } else if outline.color.is_none() {
+                outline.gradient = None;
+            } else if outline.color.is_none() && outline.gradient.is_none() {
                 outline.color = Some(color_value("#000000")?);
             }
             if let Some(width) = stroke.width_pt {
@@ -723,7 +740,7 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
+pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
     let mut package = package_from_doc(doc)?;
     let sources = source
         .slides
@@ -761,7 +778,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
         )
     {
         if let Some(source) = sources.get(path) {
-            changed |= merge_source_list_shapes(shapes, source);
+            changed |= merge_source_render_shapes(shapes, source);
         }
     }
     for master in &mut package.masters {
@@ -779,8 +796,17 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
                 .chain(target.body.iter_mut().zip(&source.body))
                 .chain(target.other.iter_mut().zip(&source.other))
             {
-                changed |= merge_source_bullet_properties(target, source);
+                changed |= merge_source_paragraph_properties(target, source);
             }
+        }
+    }
+    for chart in &mut package.charts {
+        if let Some(source) = source
+            .charts
+            .iter()
+            .find(|source| source.part_path == chart.part_path)
+        {
+            changed |= merge_source_chart_properties(&mut chart.chart, &source.chart);
         }
     }
     if !changed {
@@ -793,7 +819,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
     Ok(())
 }
 
-fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
+fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
     let mut changed = false;
     for source in source {
         let Some(target) = target
@@ -804,12 +830,14 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
         };
         match (target, source) {
             (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
+                changed |= target.picture_fill != source.picture_fill;
+                target.picture_fill.clone_from(&source.picture_fill);
                 if let (Some(target), Some(source)) = (&mut target.text, &source.text) {
-                    changed |= merge_source_list_body(target, source);
+                    changed |= merge_source_text_body(target, source);
                 }
             }
             (ShapeNode::Group(target), ShapeNode::Group(source)) => {
-                changed |= merge_source_list_shapes(&mut target.children, &source.children);
+                changed |= merge_source_render_shapes(&mut target.children, &source.children);
             }
             (ShapeNode::GraphicFrame(target), ShapeNode::GraphicFrame(source)) => {
                 if let (
@@ -819,7 +847,7 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
                 {
                     for (target, source) in target.iter_mut().zip(source) {
                         for (target, source) in target.iter_mut().zip(source) {
-                            changed |= merge_source_list_body(target, source);
+                            changed |= merge_source_text_body(target, source);
                         }
                     }
                 }
@@ -830,29 +858,67 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
     changed
 }
 
-fn merge_source_list_body(
+/// Copies the chart-space fill and axis lines a source chart part declares.
+fn merge_source_chart_properties(target: &mut ChartSpace, source: &ChartSpace) -> bool {
+    let mut changed = target.fill != source.fill;
+    target.fill.clone_from(&source.fill);
+    let mut merge_axis = |target: Option<&mut ChartAxis>, source: Option<&ChartAxis>| {
+        if let (Some(target), Some(source)) = (target, source) {
+            changed |= target.line != source.line;
+            target.line.clone_from(&source.line);
+        }
+    };
+    if let (Some(target), Some(source)) = (&mut target.axes, &source.axes) {
+        merge_axis(target.category.as_mut(), source.category.as_ref());
+        merge_axis(target.value.as_mut(), source.value.as_ref());
+    }
+    if let (Some(target), Some(source)) = (&mut target.axis_list, &source.axis_list) {
+        for (target, source) in target.iter_mut().zip(source) {
+            merge_axis(Some(target), Some(source));
+        }
+    }
+    changed
+}
+
+fn merge_source_text_body(
     target: &mut pptx_parse::TextBody,
     source: &pptx_parse::TextBody,
 ) -> bool {
     let mut changed = target.list_style != source.list_style
-        || target.default_list_style != source.default_list_style;
+        || target.default_list_style != source.default_list_style
+        || target.compat_line_spacing != source.compat_line_spacing;
+    target.compat_line_spacing = source.compat_line_spacing;
     target.list_style.clone_from(&source.list_style);
     target
         .default_list_style
         .clone_from(&source.default_list_style);
     for (target, source) in target.paragraphs.iter_mut().zip(&source.paragraphs) {
-        changed |= merge_source_bullet_properties(&mut target.properties, &source.properties);
+        changed |= merge_source_paragraph_properties(&mut target.properties, &source.properties);
     }
     changed
 }
 
-fn merge_source_bullet_properties(
+fn merge_source_paragraph_properties(
     target: &mut pptx_parse::ParagraphProperties,
     source: &pptx_parse::ParagraphProperties,
 ) -> bool {
-    let changed = target.bullet_font != source.bullet_font
+    let mut changed = target.bullet_font != source.bullet_font
         || target.bullet_color != source.bullet_color
-        || target.bullet_size != source.bullet_size;
+        || target.bullet_size != source.bullet_size
+        || target.line_spacing != source.line_spacing;
+    target.line_spacing = source.line_spacing;
+    if let (
+        Some(pptx_parse::Bullet::AutoNumber {
+            restart: target, ..
+        }),
+        Some(pptx_parse::Bullet::AutoNumber {
+            restart: source, ..
+        }),
+    ) = (&mut target.bullet, &source.bullet)
+    {
+        changed |= *target != *source;
+        *target = *source;
+    }
     target.bullet_font.clone_from(&source.bullet_font);
     target.bullet_color.clone_from(&source.bullet_color);
     target.bullet_size.clone_from(&source.bullet_size);
@@ -893,6 +959,24 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 9.0 {
         migrate_doc_to_v9(doc)?;
+    }
+    if version < 10.0 {
+        migrate_doc_to_v10(doc)?;
+    }
+    if version < 11.0 {
+        migrate_doc_to_v11(doc)?;
+    }
+    if version < 12.0 {
+        migrate_doc_to_v12(doc)?;
+    }
+    if version < 13.0 {
+        migrate_doc_to_v13(doc)?;
+    }
+    if version < 14.0 {
+        migrate_doc_to_v14(doc)?;
+    }
+    if version < 15.0 {
+        migrate_doc_to_v15(doc)?;
     }
     Ok(())
 }
@@ -1035,6 +1119,79 @@ fn migrate_doc_to_v9(doc: &Doc) -> EditResult<()> {
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "schemaVersion", 9.0);
+    Ok(())
+}
+
+fn migrate_doc_to_v10(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(&mut txn, "baselinesPendingSource", true);
+    meta.insert(&mut txn, "schemaVersion", 10.0);
+    Ok(())
+}
+
+/// Records explicit numbering restarts in schema 11.
+fn migrate_doc_to_v11(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(&mut txn, "schemaVersion", 11.0);
+    Ok(())
+}
+
+/// Persists line spacing in schema 12.
+fn migrate_doc_to_v12(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", 12.0);
+    Ok(())
+}
+
+/// Persists picture fills in schema 13.
+fn migrate_doc_to_v13(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", 13.0);
+    Ok(())
+}
+
+/// Defers gradient-outline recovery to source attachment in schema 14.
+fn migrate_doc_to_v14(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(&mut txn, "outlineGradientsPendingSource", true);
+    meta.insert(&mut txn, "schemaVersion", 14.0);
+    Ok(())
+}
+
+/// Persists chart shape properties in schema 15.
+fn migrate_doc_to_v15(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", 15.0);
     Ok(())
 }
 
@@ -1588,7 +1745,218 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8_then_v9() {
+    fn baseline_through_chart_property_migrations_preserve_main_state() {
+        use std::sync::Mutex;
+
+        const V8: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v8-list-style.update.bin");
+        const V9: &[u8] = include_bytes!("../tests/fixtures/run-baseline-main-v9.update.bin");
+        const V10_BASELINE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v10-baseline.update.bin");
+        const V10_NUMBERING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v10-autonumber.update.bin");
+        const V11_BASELINE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v11-baseline.update.bin");
+        const V11_NUMBERING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v11-autonumber.update.bin");
+        const V11_SPACING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v11-line-spacing.update.bin");
+        const V12_BASELINE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v12-baseline.update.bin");
+        const V12_NUMBERING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v12-autonumber.update.bin");
+        const V12_SPACING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v12-line-spacing.update.bin");
+        const V12_PICTURE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v12-picture-fill.update.bin");
+        const V13_GRADIENT: &[u8] =
+            include_bytes!("../tests/fixtures/gradient-outline-main-v13.update.bin");
+        const V13_BASELINE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v13-baseline.update.bin");
+        const V13_NUMBERING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v13-autonumber.update.bin");
+        const V13_SPACING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v13-line-spacing.update.bin");
+        const V13_PICTURE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v13-picture-fill.update.bin");
+        const V13_CHART: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v13-chart-space-fill.update.bin");
+        for (update, version, expected) in [
+            (
+                V8,
+                8.0,
+                vec![
+                    (9.0, None, None),
+                    (10.0, Some(true), None),
+                    (11.0, Some(true), None),
+                    (12.0, Some(true), None),
+                    (13.0, Some(true), None),
+                    (14.0, Some(true), Some(true)),
+                    (15.0, Some(true), Some(true)),
+                ],
+            ),
+            (
+                V9,
+                9.0,
+                vec![
+                    (10.0, Some(true), None),
+                    (11.0, Some(true), None),
+                    (12.0, Some(true), None),
+                    (13.0, Some(true), None),
+                    (14.0, Some(true), Some(true)),
+                    (15.0, Some(true), Some(true)),
+                ],
+            ),
+            (
+                V10_BASELINE,
+                10.0,
+                vec![
+                    (11.0, None, None),
+                    (12.0, None, None),
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V10_NUMBERING,
+                10.0,
+                vec![
+                    (11.0, None, None),
+                    (12.0, None, None),
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V11_BASELINE,
+                11.0,
+                vec![
+                    (12.0, None, None),
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V11_NUMBERING,
+                11.0,
+                vec![
+                    (12.0, None, None),
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V11_SPACING,
+                11.0,
+                vec![
+                    (12.0, None, None),
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V12_BASELINE,
+                12.0,
+                vec![
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V12_NUMBERING,
+                12.0,
+                vec![
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V12_SPACING,
+                12.0,
+                vec![
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V12_PICTURE,
+                12.0,
+                vec![
+                    (13.0, None, None),
+                    (14.0, None, Some(true)),
+                    (15.0, None, Some(true)),
+                ],
+            ),
+            (
+                V13_GRADIENT,
+                13.0,
+                vec![(14.0, None, Some(true)), (15.0, None, Some(true))],
+            ),
+            (
+                V13_BASELINE,
+                13.0,
+                vec![(14.0, None, Some(true)), (15.0, None, Some(true))],
+            ),
+            (
+                V13_NUMBERING,
+                13.0,
+                vec![(14.0, None, Some(true)), (15.0, None, Some(true))],
+            ),
+            (
+                V13_SPACING,
+                13.0,
+                vec![(14.0, None, Some(true)), (15.0, None, Some(true))],
+            ),
+            (
+                V13_PICTURE,
+                13.0,
+                vec![(14.0, None, Some(true)), (15.0, None, Some(true))],
+            ),
+            (
+                V13_CHART,
+                13.0,
+                vec![(14.0, None, Some(true)), (15.0, None, Some(true))],
+            ),
+        ] {
+            let doc = crate::doc_with_client_id(30020);
+            crate::hydrate_doc(&doc, update).unwrap();
+            let before = {
+                let txn = doc.transact();
+                let meta = required_map(&txn, META).unwrap();
+                assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(version));
+                assert_eq!(map_bool(&meta, &txn, "baselinesPendingSource"), None);
+                assert_eq!(map_bool(&meta, &txn, "outlineGradientsPendingSource"), None);
+                meta.get(&txn, "packageJson").unwrap()
+            };
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let events = observed.clone();
+            let _subscription = doc
+                .observe_update_v1(move |txn, _| {
+                    let meta = required_map(txn, META).unwrap();
+                    assert_eq!(meta.get(txn, "packageJson"), Some(before.clone()));
+                    events.lock().unwrap().push((
+                        map_number(&meta, txn, "schemaVersion").unwrap(),
+                        map_bool(&meta, txn, "baselinesPendingSource"),
+                        map_bool(&meta, txn, "outlineGradientsPendingSource"),
+                    ));
+                })
+                .unwrap();
+            migrate_doc(&doc).unwrap();
+            assert_eq!(*observed.lock().unwrap(), expected);
+            migrate_doc(&doc).unwrap();
+            assert_eq!(*observed.lock().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn legacy_migrations_commit_each_version_through_v15() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1598,9 +1966,24 @@ mod tests {
         const V3: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
         for (update, expected_versions) in [
-            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
+            (
+                V1,
+                vec![
+                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                ],
+            ),
+            (
+                V2,
+                vec![
+                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                ],
+            ),
+            (
+                V3,
+                vec![
+                    4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                ],
+            ),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1670,9 +2053,26 @@ mod tests {
             include_bytes!("../tests/fixtures/deck-schema-v4-slide-number-fields.update.bin");
 
         for (update, oracle, versions, first_slide_num) in [
-            (V2, V4_LEGACY, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 1),
-            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0, 9.0], 1),
-            (V4_NUMBERED, V4_NUMBERED, vec![5.0, 6.0, 7.0, 8.0, 9.0], 10),
+            (
+                V2,
+                V4_LEGACY,
+                vec![
+                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                ],
+                1,
+            ),
+            (
+                V4_STYLES,
+                V4_STYLES,
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+                1,
+            ),
+            (
+                V4_NUMBERED,
+                V4_NUMBERED,
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+                10,
+            ),
         ] {
             let doc = crate::doc_with_client_id(9340);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1734,9 +2134,17 @@ mod tests {
         const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
         const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
         for (update, versions) in [
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]),
-            (V5, vec![6.0, 7.0, 8.0, 9.0]),
-            (V6, vec![7.0, 8.0, 9.0]),
+            (
+                V2,
+                vec![
+                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+                ],
+            ),
+            (
+                V5,
+                vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            ),
+            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -1976,7 +2384,13 @@ mod tests {
             *events,
             [
                 (8.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (9.0, before, Some("legacy".to_owned()), Some(true))
+                (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (10.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (11.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (12.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (13.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (14.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (15.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

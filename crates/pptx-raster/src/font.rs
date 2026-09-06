@@ -107,7 +107,14 @@ fn paint_run(
     }
 
     if run.underline {
-        paint_underline(pixmap, run, baseline, &paint, transform, clip);
+        paint_underline(
+            pixmap,
+            run,
+            baseline - run.baseline_offset_px,
+            &paint,
+            transform,
+            clip,
+        );
     }
     Ok(())
 }

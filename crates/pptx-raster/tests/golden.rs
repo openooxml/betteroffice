@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use ooxml_text::{FontId, FontStore};
 use pptx_raster::{AssetMap, Background, RenderOptions, RenderResources, render_slide};
 use pptx_render::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, Paint, PositionedGlyph,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, Paint, PositionedGlyph,
     PositionedTextLine, PositionedTextRun, Primitive, Stroke, SurfaceDisplayList, TextAnchor,
     TextParagraph, Transform,
 };
@@ -173,6 +173,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
                 italic: false,
                 underline,
                 color: "#1b2733".into(),
+                baseline_offset_px: 0.0,
                 glyphs,
             }],
             caret_stops: vec![CaretStop { position: 0, x }],
@@ -199,6 +200,7 @@ fn golden_shapes() {
                     color: "#1e3a8a".into(),
                     width: 2.0,
                     dashed: false,
+                    paint: None,
                     head_end: None,
                     tail_end: None,
                 }),
@@ -213,6 +215,7 @@ fn golden_shapes() {
                     color: "#ef4444".into(),
                     width: 3.0,
                     dashed: true,
+                    paint: None,
                     head_end: None,
                     tail_end: None,
                 }),
@@ -302,9 +305,48 @@ fn golden_image() {
                 color: "#111827".into(),
                 width: 2.0,
                 dashed: false,
+                paint: None,
                 head_end: None,
                 tail_end: None,
             }),
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_picture_fill() {
+    use ooxml_drawingml::GeometryPathCommand as Cmd;
+    check(
+        "picture-fill",
+        &slide(vec![Primitive::Image {
+            object_id: 4,
+            shape_id: Some("shape-2".into()),
+            name: "ring".into(),
+            x: 20.0,
+            y: 15.0,
+            w: 200.0,
+            h: 105.0,
+            asset_id: Some("ppt/media/image1.png".into()),
+            crop: ImageCrop {
+                left: 0.25,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            path: Some(vec![
+                Cmd::Move { x: 0.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 1.0 },
+                Cmd::Line { x: 0.0, y: 1.0 },
+                Cmd::Close,
+                Cmd::Move { x: 0.25, y: 0.25 },
+                Cmd::Line { x: 0.25, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.25 },
+                Cmd::Close,
+            ]),
+            stroke: None,
             transform: Transform::default(),
         }]),
     );
@@ -442,4 +484,32 @@ fn a_transparent_render_differs_from_the_opaque_one() {
     )
     .expect("clear");
     assert_ne!(opaque.bytes, clear.bytes);
+}
+
+#[test]
+fn shifted_underlines_follow_run_baselines() {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    let rows = [0.0, 8.0, -8.0].map(|offset| {
+        let mut primitive = text_box(10.0, 20.0, "script", 20.0, true);
+        let Primitive::TextBox { lines, .. } = &mut primitive else {
+            unreachable!()
+        };
+        lines[0].runs[0].baseline_offset_px = offset;
+        lines[0].runs[0].glyphs.clear();
+        let rendered = render_slide(
+            &slide(vec![primitive]),
+            &resources,
+            &RenderOptions::default(),
+        )
+        .unwrap();
+        let pixels = image::load_from_memory(&rendered.bytes).unwrap().to_rgba8();
+        (0..pixels.height())
+            .filter(|y| (0..pixels.width()).any(|x| pixels.get_pixel(x, *y)[0] < 200))
+            .collect::<Vec<_>>()
+    });
+    assert!(!rows[0].is_empty());
+    assert_eq!(rows[1], rows[0].iter().map(|y| y - 8).collect::<Vec<_>>());
+    assert_eq!(rows[2], rows[0].iter().map(|y| y + 8).collect::<Vec<_>>());
 }
