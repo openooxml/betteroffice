@@ -8013,6 +8013,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 width,
                 font,
                 color,
+                align: _,
             } => prims.push(Primitive::Text(TextRunPrimitive {
                 text,
                 x: px(x),
