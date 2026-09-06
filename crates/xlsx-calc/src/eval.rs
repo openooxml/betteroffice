@@ -206,7 +206,7 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Error(e) => err(*e),
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
-        Expr::Range { .. } => err(ErrorValue::Value),
+        Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
         Expr::Name { scope, name } => evaluate_defined_name(scope, name, ctx),
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
@@ -575,6 +575,12 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             start: range.start,
             rows: (range.end.row - range.start.row + 1) as usize,
             cols: (range.end.col - range.start.col + 1) as usize,
+        }),
+        Expr::ColumnRange { sheet, range } => Some(Area {
+            sheet: resolve_sheet(sheet, ctx)?,
+            start: CellRef::new(0, range.start),
+            rows: xlsx_model::addr::MAX_ROWS as usize,
+            cols: (range.end - range.start + 1) as usize,
         }),
         Expr::Name { scope, name } => {
             let key = defined_name_key(scope, name, ctx).ok()?;

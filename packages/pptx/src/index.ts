@@ -1,5 +1,7 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
+export { slideToPng } from './render/png';
+export type { SlideToPngOptions } from './render/png';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type {
   CollaborationUser,
@@ -36,11 +38,15 @@ export type {
 export type {
   CaretStop,
   ColorValue,
+  CommentFlavor,
+  CommentReceipt,
+  CommentSnapshot,
   DeckSnapshot,
   GeometryPathCommand,
   HistoryResult,
   HitTestResult,
   ImageEffect,
+  ImageCrop,
   ImagePrimitive,
   Paint,
   ParagraphAlignment,
@@ -70,6 +76,7 @@ export type {
   SlideSnapshot,
   StorySnapshot,
   Stroke,
+  StrokeEnd,
   TextBoxPrimitive,
   TextReceipt,
   TextRunSnapshot,

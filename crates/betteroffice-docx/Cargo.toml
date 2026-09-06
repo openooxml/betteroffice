@@ -25,6 +25,7 @@ serde_json = { version = "1", optional = true }
 sha2 = "0.10"
 
 [dev-dependencies]
+ooxml-fidelity = { package = "betteroffice-ooxml-fidelity", path = "../ooxml-fidelity" }
 ooxml-opc.workspace = true
 png = "0.18"
 serde_json = "1"

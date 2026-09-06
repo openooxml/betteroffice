@@ -28,6 +28,7 @@ const PPTX_SECRETS: &[&str] = &[
     "PPTX_SECRET_TEXT",
     "PPTX_SECRET_NOTES",
     "PPTX_SECRET_AUTHOR",
+    "PPTX_SECRET_MODERN_AUTHOR",
     "PPTX_SECRET_COMPANY",
     "https://secret.example/pptx",
 ];
@@ -1579,6 +1580,12 @@ fn pptx_fixture() -> Vec<u8> {
             "ppt/commentAuthors.xml",
             xml(
                 r#"<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cmAuthor id="0" name="PPTX_SECRET_AUTHOR" initials="PSA"/></p:cmAuthorLst>"#,
+            ),
+        ),
+        (
+            "ppt/authors.xml",
+            xml(
+                r#"<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main"><p188:author id="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" name="PPTX_SECRET_MODERN_AUTHOR" initials="PSM" userId="PPTX_SECRET_MODERN_AUTHOR@example.com" providerId="AD"/></p188:authorLst>"#,
             ),
         ),
         (
