@@ -35,6 +35,7 @@ const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
+const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -963,6 +964,18 @@ impl BodyCascade<'_> {
                 merge_paragraph_properties(&mut properties, source);
             }
         }
+        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
+            *restart = self
+                .primary
+                .and_then(|body| body.paragraphs.get(index))
+                .is_some_and(|paragraph| {
+                    matches!(
+                        paragraph.properties.bullet,
+                        Some(Bullet::AutoNumber { restart: true, .. })
+                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
+                    )
+                });
+        }
         properties
     }
 }
@@ -989,6 +1002,7 @@ struct TextContent {
 struct ContentParagraph {
     alignment: Option<String>,
     level: u32,
+    bullet: Option<Bullet>,
     runs: Vec<ContentRun>,
 }
 
@@ -1007,6 +1021,10 @@ fn content_from_story(story: &StorySnapshot) -> TextContent {
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.alignment.clone(),
                 level: paragraph.level,
+                bullet: paragraph
+                    .bullet_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok()),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1042,6 +1060,7 @@ fn content_from_body(
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
+                bullet: paragraph.properties.bullet.clone(),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1121,11 +1140,18 @@ fn resolve_content(
     }
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    // One counter per outline level. This lives here rather than in layout_content, which the
-    // autofit loop re-runs and would re-increment on every pass.
     let mut counters = [0_u32; 9];
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let properties = cascade.paragraph_properties(index, paragraph.level);
+        let mut properties = cascade.paragraph_properties(index, paragraph.level);
+        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
+            properties.bullet = paragraph.bullet.clone();
+            if let Some(Bullet::AutoNumber {
+                restart, start_at, ..
+            }) = &mut properties.bullet
+            {
+                *restart |= *start_at != 1;
+            }
+        }
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
@@ -2456,31 +2482,38 @@ fn is_full_justification(value: Option<&str>) -> bool {
     value == Some("just")
 }
 
-/// The marker text for one paragraph, advancing the per-level counter when it is numbered.
+/// Resolves a marker once per paragraph.
 fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
     let level = (level as usize).min(counters.len() - 1);
-    match bullet? {
-        Bullet::Character { value } if !value.trim().is_empty() => Some(value.clone()),
-        Bullet::Character { .. } | Bullet::None => None,
-        Bullet::AutoNumber { scheme, start_at } => {
-            // `start_at` applies the first time a level is numbered; after that the level simply
-            // advances, which is what lets it resume across paragraphs at another level.
+    counters[level + 1..].fill(0);
+    match bullet {
+        Some(Bullet::AutoNumber {
+            scheme,
+            start_at,
+            restart,
+        }) => {
             counters[level] = match counters[level] {
-                0 => (*start_at).max(1),
+                0 => (*start_at).clamp(1, 32_767),
+                _ if *restart => (*start_at).clamp(1, 32_767),
                 current => current.saturating_add(1),
             };
-            let value = counters[level];
-            for deeper in counters.iter_mut().skip(level + 1) {
-                *deeper = 0;
+            Some(format_autonum(counters[level], scheme))
+        }
+        _ => {
+            counters[level] = 0;
+            match bullet {
+                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
+                    Some(value.clone())
+                }
+                _ => None,
             }
-            Some(format_autonum(value, scheme))
         }
     }
 }
 
-/// `ST_TextAutonumberScheme` is a numeral style followed by a suffix, e.g. `arabicPeriod`,
-/// `alphaLcParenR`, `romanUcPeriod`. Anything unrecognised falls back to `arabicPeriod`.
+/// Formats Latin, Roman and decimal markers.
 fn format_autonum(value: u32, scheme: &str) -> String {
+    let value = value.clamp(1, MAX_AUTONUM_VALUE);
     let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
         .into_iter()
         .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
@@ -2490,7 +2523,8 @@ fn format_autonum(value: u32, scheme: &str) -> String {
         "alphaUc" => format_alpha(value, true),
         "romanLc" => format_roman(value, false),
         "romanUc" => format_roman(value, true),
-        _ => value.to_string(),
+        "arabic" => value.to_string(),
+        _ => return format!("{value}."),
     };
     match suffix {
         "ParenBoth" => format!("({body})"),
@@ -2500,7 +2534,6 @@ fn format_autonum(value: u32, scheme: &str) -> String {
     }
 }
 
-/// 1 -> a, 26 -> z, 27 -> aa, in the spreadsheet-column sense the scheme uses.
 fn format_alpha(value: u32, upper: bool) -> String {
     let base = if upper { b'A' } else { b'a' };
     let mut value = value.max(1);
@@ -2740,6 +2773,7 @@ mod tests {
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
                     start_at: 1,
+                    restart: false,
                 }),
                 level,
                 counters,
@@ -2755,28 +2789,26 @@ mod tests {
             )
         };
         assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
-        // A run of level-1 bullets between two numbered items must not disturb the level-0 count.
         assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
         assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
         assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
         assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
-        // A deeper level restarts under each new parent.
         assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
         assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
         assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
         assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
-        // Bullet::None suppresses an inherited marker.
         assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
     }
 
     #[test]
-    fn autonumber_start_at_applies_only_to_the_first_item() {
+    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
         let mut counters = [0_u32; 9];
         let number = |counters: &mut [u32; 9]| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
                     start_at: 7,
+                    restart: false,
                 }),
                 0,
                 counters,
@@ -2784,6 +2816,20 @@ mod tests {
         };
         assert_eq!(number(&mut counters).as_deref(), Some("7."));
         assert_eq!(number(&mut counters).as_deref(), Some("8."));
+        let mut counters = [0; 9];
+        let last_start = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 32_767,
+            restart: false,
+        };
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32767.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32768.")
+        );
     }
 
     #[test]
@@ -2796,8 +2842,74 @@ mod tests {
         assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
         assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
         assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
-        // An unknown scheme falls back to arabic with a period rather than drawing nothing.
         assert_eq!(format_autonum(3, "somethingElse"), "3.");
+        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
+        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
+    }
+
+    #[test]
+    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
+        let mut counters = [0; 9];
+        let number = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 1,
+            restart: false,
+        };
+        let restart = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 7,
+            restart: true,
+        };
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
+            Some("7.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("8.")
+        );
+        assert_eq!(resolve_marker(None, 0, &mut counters), None);
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "•".to_owned()
+                }),
+                0,
+                &mut counters
+            )
+            .as_deref(),
+            Some("•")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+    }
+
+    #[test]
+    fn autonumber_roman_markers_bound_untrusted_start_values() {
+        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
+        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
+        assert_eq!(
+            format_autonum(u32::MAX, "romanUcPeriod"),
+            format!("{}DCCLXVII.", "M".repeat(52))
+        );
     }
 
     fn renderer() -> SlideRenderer {
@@ -3002,7 +3114,7 @@ mod tests {
                 level: 0,
                 margin_left_px: 0.0,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
@@ -3062,7 +3174,7 @@ mod tests {
                 level: 0,
                 margin_left_px: 0.0,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: parts
                     .iter()
