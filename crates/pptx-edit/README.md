@@ -18,14 +18,13 @@ untouched comment parts byte for byte. Deleting a thread removes its known
 replies; a reply added concurrently becomes a root when its parent is absent,
 so both clients and saved files retain it.
 
-The current schema is v8. Older v1–v7 updates can be opened, and attaching the
-original package with `open_from_update_with_source` imports any source comments
+The current schema is v10. Older v1–v9 updates can be opened, and attaching the
+original package with `open_from_update_with_source` imports source comments, list styles and bitmap effects
 that the older schema did not model. Import is deterministic and runs once.
 Source-free loads defer the import until the package is attached. Older clients
 reject new-schema updates; collaborators must upgrade together or exchange
 saved PPTX files. The existing connector, slide-number, theme-formatting,
-hidden-shape and custom-geometry migrations run first, in order, and the comment
-step runs last; missing starting slide numbers default to one and stay omitted
+hidden-shape and custom-geometry migrations run first, in order, followed by comments, list styles and bitmap effects; missing starting slide numbers default to one and stay omitted
 from package JSON.
 
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
