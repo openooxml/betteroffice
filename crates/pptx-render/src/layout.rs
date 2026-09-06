@@ -30,8 +30,7 @@ const DEFAULT_INSET_HORIZONTAL_EMU: i64 = 91_440;
 const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
 const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 const MIN_AUTOFIT_SCALE: f32 = 0.5;
-/// Font-independent single line pitch `a:lnSpc` percentages measure under
-/// `compatLnSpc`, in place of the font's own ascent + descent + gap.
+/// Compatibility line pitch in ems.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
@@ -1076,7 +1075,6 @@ struct ResolvedParagraph {
     level: u32,
     margin_left_px: f32,
     line_spacing: Option<LineSpacing>,
-    /// `compatLnSpc`: a percentage measures a fixed line pitch, not the font's own box.
     compat_line_spacing: bool,
     indent_px: f32,
     bullet: Option<Bullet>,
@@ -1936,7 +1934,7 @@ fn style_line_box(
     ))
 }
 
-/// Largest run size on the line: PowerPoint bases a percentage pitch on it.
+/// Largest font size on this line.
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
@@ -1944,13 +1942,7 @@ fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
-/// Resize a measured line box to the pitch `a:lnSpc` asks for.
-///
-/// A percentage measures the single line pitch, which is the font's own box unless the
-/// body asked for `compatLnSpc`, where PowerPoint and LibreOffice use a font-independent
-/// [`SINGLE_LINE_PITCH_EM`] cell instead. Below single the box scales whole, so the
-/// baseline keeps the font's share of it; above single the ascent and descent stay and
-/// the slack becomes leading, which sits below the descent, so only later lines move.
+/// Apply paragraph spacing to a measured line box.
 fn spaced_line_box(
     content: ooxml_text::LineBox,
     paragraph: &ResolvedParagraph,
@@ -1963,28 +1955,24 @@ fn spaced_line_box(
     if content.height() <= 0.0 {
         return content;
     }
-    let (single_px, target) = match spacing {
+    let target = match spacing {
         LineSpacing::Percent { value } => {
             let single = if paragraph.compat_line_spacing {
                 SINGLE_LINE_PITCH_EM * size_px
             } else {
                 content.height()
             };
-            (single, value as f32 * single)
+            value as f32 * single
         }
-        LineSpacing::Points { value } => {
-            let exact = points_to_px(value as f32 * scale);
-            (exact, exact)
-        }
+        LineSpacing::Points { value } => points_to_px(value as f32 * scale),
     };
-    if !target.is_finite() || target <= 0.0 || single_px <= 0.0 {
+    if !target.is_finite() || target < 0.0 {
         return content;
     }
-    let single = scale_line_box(content, single_px / content.height());
-    if target >= single.height() {
+    if target >= content.height() {
         return ooxml_text::LineBox {
-            leading: target - single.ascent - single.descent,
-            ..single
+            leading: target - content.ascent - content.descent,
+            ..content
         };
     }
     scale_line_box(content, target / content.height())
@@ -2939,6 +2927,8 @@ mod tests {
                 justify: false,
                 level: 0,
                 margin_left_px: 0.0,
+                line_spacing: None,
+                compat_line_spacing: false,
                 indent_px: 0.0,
                 bullet: None,
                 bullet_style: None,
@@ -2999,6 +2989,8 @@ mod tests {
                 justify: true,
                 level: 0,
                 margin_left_px: 0.0,
+                line_spacing: None,
+                compat_line_spacing: false,
                 indent_px: 0.0,
                 bullet: None,
                 bullet_style: None,
@@ -3777,8 +3769,7 @@ mod tests {
         ));
     }
 
-    /// The demo deck's first text shape, narrowed until its text wraps, with `spacing`
-    /// on the master text styles and `compat` on the shape's own body.
+    /// Wrap the demo text with inherited spacing.
     fn wrapped_text_box(
         seed: u64,
         spacing: Option<LineSpacing>,
@@ -3879,15 +3870,12 @@ mod tests {
         };
         let size_px = points_to_px(size_pt);
 
-        // untouched, a line is as tall as the font asks; under compatLnSpc a
-        // percentage measures the font-independent 1.2 em cell instead
         assert!((pitch(&single) - single[0].height).abs() < 0.01);
         assert!((pitch(&tight) - 0.8 * 1.2 * size_px).abs() < 0.05);
         assert!((pitch(&font_based) - 0.8 * single[0].height).abs() < 0.05);
         assert!(pitch(&tight) < pitch(&single));
         assert!((pitch(&loose) - points_to_px(40.0)).abs() < 0.05);
 
-        // a sub-single line keeps the font's share of the box above the baseline
         let share = (tight[0].baseline - tight[0].y) / pitch(&tight);
         let font_share = (single[0].baseline - single[0].y) / single[0].height;
         assert!((share - font_share).abs() < 0.01);
@@ -3906,10 +3894,8 @@ mod tests {
         let pitch = lines[1].y - lines[0].y;
         assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
 
-        // a pitch above single leaves the first baseline where it was: the slack
-        // is leading below the descent, so only the lines after it move down
         let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
-        assert!((lines[0].baseline - single[0].baseline).abs() < 1.0);
+        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
     }
 
     #[test]

@@ -354,8 +354,8 @@ pub struct GroupShape {
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
-    /// `compatLnSpc` — line spacing percentages measure a fixed 1.2 em cell, not the font's box.
-    #[serde(default)]
+    /// Use a 1.2 em percentage pitch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,
     pub autofit: Option<TextAutofit>,
     pub inset_left: Option<i64>,
@@ -393,7 +393,7 @@ pub struct TextParagraph {
     pub end_properties: Option<RunProperties>,
 }
 
-/// `a:lnSpc` — percentage of the single line pitch, or an exact height in points.
+/// Paragraph line pitch.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -413,7 +413,7 @@ pub struct ParagraphProperties {
     pub margin_left: Option<i64>,
     pub indent: Option<i64>,
     pub bullet: Option<Bullet>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_spacing: Option<LineSpacing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bullet_font: Option<BulletFont>,

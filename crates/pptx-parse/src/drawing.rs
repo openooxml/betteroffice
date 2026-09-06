@@ -1041,12 +1041,19 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
 
 fn parse_line_spacing(element: &XmlElement) -> Option<LineSpacing> {
     if let Some(percent) = element.child("spcPct") {
-        return percentage_attribute(percent, "val")
-            .filter(|value| *value > 0.0)
+        let raw = percent.attribute("val")?;
+        let (raw, divisor) = raw
+            .strip_suffix('%')
+            .map_or((raw, 100_000.0), |value| (value, 100.0));
+        return raw
+            .parse::<f64>()
+            .ok()
+            .map(|value| value / divisor)
+            .filter(|value| value.is_finite() && (0.0..=132.0).contains(value))
             .map(|value| LineSpacing::Percent { value });
     }
     numeric_attribute(element.child("spcPts"), "val")
-        .filter(|value| *value > 0)
+        .filter(|value| (0..=158_400).contains(value))
         .map(|value| LineSpacing::Points {
             value: value as f64 / 100.0,
         })
@@ -1434,7 +1441,30 @@ mod tests {
             spacing(r#"<a:lnSpc><a:spcPts val="1600"/></a:lnSpc>"#),
             Some(LineSpacing::Points { value: 16.0 })
         );
-        assert_eq!(spacing(r#"<a:lnSpc><a:spcPct val="0"/></a:lnSpc>"#), None);
+        assert_eq!(
+            spacing(r#"<a:lnSpc><a:spcPct val="150000"/></a:lnSpc>"#),
+            Some(LineSpacing::Percent { value: 1.5 })
+        );
+        for (raw, value) in [("0", 0.0), ("150%", 1.5), ("13200000", 132.0)] {
+            assert_eq!(
+                spacing(&format!(r#"<a:lnSpc><a:spcPct val="{raw}"/></a:lnSpc>"#)),
+                Some(LineSpacing::Percent { value })
+            );
+        }
+        for raw in ["-1", "13200001", "NaN", "inf"] {
+            assert_eq!(
+                spacing(&format!(r#"<a:lnSpc><a:spcPct val="{raw}"/></a:lnSpc>"#)),
+                None
+            );
+        }
+        assert_eq!(
+            spacing(r#"<a:lnSpc><a:spcPts val="0"/></a:lnSpc>"#),
+            Some(LineSpacing::Points { value: 0.0 })
+        );
+        assert_eq!(
+            spacing(r#"<a:lnSpc><a:spcPts val="158401"/></a:lnSpc>"#),
+            None
+        );
         assert_eq!(spacing(""), None);
     }
 
