@@ -60,11 +60,9 @@ pub const MAX_PLOT_COORD: f64 = 1e9;
 
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
-/// Width left of the plot for the value-axis tick labels.
 const AXIS_GUTTER: f64 = 42.0;
-/// Width left of a transposed plot, whose whole category names live there
-/// instead of the short tick labels a value axis writes.
 const CATEGORY_GUTTER: f64 = 76.0;
+const AXIS_HEADER: f64 = 18.0;
 /// Width a `left` or `right` legend takes out of the plot.
 const LEGEND_COL_W: f64 = 104.0;
 /// Height one row of a `top` or `bottom` legend takes out of the plot.
@@ -849,11 +847,17 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         x + gutter
     };
-    let secondary_w = if secondary_value_axis(chart).is_some() {
+    let secondary_w = if secondary_value_axis(chart, false).is_some() {
         38.0
     } else {
         0.0
     };
+    let axis_header =
+        if has_transposed_category_title(chart) || secondary_value_axis(chart, true).is_some() {
+            AXIS_HEADER
+        } else {
+            0.0
+        };
     let band_top = if legend_position == "top" {
         legend_h
     } else {
@@ -863,9 +867,9 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let region_h = height - title_h - legend_h;
     let plot = PlotArea {
         x: plot_x,
-        y: region_y,
+        y: region_y + axis_header,
         w: (width - gutter - legend_w - 10.0 - secondary_w).max(24.0),
-        h: (height - title_h - 34.0 - legend_h).max(24.0),
+        h: (height - title_h - 34.0 - legend_h - axis_header).max(24.0),
         gutter,
     };
 
@@ -1083,9 +1087,7 @@ impl<'a> PlotFamily<'a> {
         }
     }
 
-    /// A `barDir="bar"` family plots values along x, so its value axis runs
-    /// along the bottom edge, its categories occupy the left gutter, and its
-    /// slots count up from the bottom against a screen y that counts down.
+    /// Values run horizontally.
     fn transposed(&self) -> bool {
         self.chart_type == "bar"
     }
@@ -1165,8 +1167,6 @@ fn group_category_axis<'a>(
     }
 }
 
-/// Whether any family in the chart is transposed, and so needs the wider left
-/// gutter its category names are written into.
 fn has_transposed_family(chart: &PlotChart<'_>) -> bool {
     if chart.plot_groups.is_empty() {
         return chart.chart_type == "bar";
@@ -1178,11 +1178,30 @@ fn has_transposed_family(chart: &PlotChart<'_>) -> bool {
         .any(|group| group.chart_type.unwrap_or(chart.chart_type) == "bar")
 }
 
-/// A second value axis some plot group plots against, which needs its own
-/// scale and its own labels on the far side of the plot area.
-fn secondary_value_axis<'a>(chart: &'a PlotChart<'a>) -> Option<&'a PlotAxis<'a>> {
+fn has_transposed_category_title(chart: &PlotChart<'_>) -> bool {
+    let has_title = |title: Option<&str>| title.is_some_and(|title| !title.is_empty());
+    if chart.plot_groups.is_empty() {
+        return chart.chart_type == "bar" && has_title(chart.axis_titles.category);
+    }
+    chart.plot_groups.iter().take(MAX_PLOT_GROUPS).any(|group| {
+        group.chart_type.unwrap_or(chart.chart_type) == "bar"
+            && has_title(if chart.axes.is_empty() && group.axis_ids.is_empty() {
+                chart.axis_titles.category
+            } else {
+                group_category_axis(chart, group).and_then(|axis| axis.title)
+            })
+    })
+}
+
+fn secondary_value_axis<'a>(
+    chart: &'a PlotChart<'a>,
+    transposed: bool,
+) -> Option<&'a PlotAxis<'a>> {
     let primary = primary_value_axis(chart)?;
     chart.plot_groups.iter().find_map(|group| {
+        if (group.chart_type.unwrap_or(chart.chart_type) == "bar") != transposed {
+            return None;
+        }
         let axis = group_value_axes(chart, group).1?;
         (axis.id != primary.id).then_some(axis)
     })
@@ -1348,7 +1367,6 @@ struct PlotArea {
     y: f64,
     w: f64,
     h: f64,
-    /// Width reserved left of the plot, which the labels drawn there share.
     gutter: f64,
 }
 
@@ -1602,7 +1620,6 @@ impl ValueScale {
         plot.x + self.ratio(value) * plot.w
     }
 
-    /// Where a tick sits along whichever screen axis carries the values.
     fn tick(&self, plot: PlotArea, transposed: bool, value: f64) -> f64 {
         if transposed {
             self.x(plot, value)
@@ -2034,7 +2051,6 @@ fn emit_axes<S: PlotSink + ?Sized>(
     }
 }
 
-/// `(x, baseline, width)` of an axis title written above the left gutter.
 fn left_of_plot(plot: PlotArea) -> (f64, f64, f64) {
     (
         plot.x - plot.gutter + 4.0,
@@ -2043,12 +2059,10 @@ fn left_of_plot(plot: PlotArea) -> (f64, f64, f64) {
     )
 }
 
-/// `(x, baseline, width)` of an axis title written under the plot.
 fn below_plot(plot: PlotArea) -> (f64, f64, f64) {
     (plot.x, plot.y + plot.h + 26.0, plot.w)
 }
 
-/// A gridline across the plot at `at`, perpendicular to the value axis.
 fn push_value_gridline<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     plot: PlotArea,
@@ -2255,9 +2269,7 @@ fn bar_bands(family: PlotFamily<'_>, categories: usize, extent: f64) -> BarBands
     }
 }
 
-/// Drawing position of the `index`th category, which a reversed category axis
-/// counts from the far end - and so does a transposed family, whose slots run
-/// down the screen while its category axis counts up from the bottom edge.
+/// Category slot in screen order.
 fn category_position(family: PlotFamily<'_>, index: usize, count: usize) -> usize {
     let reversed = family.category_axis.is_some_and(|axis| axis.reversed);
     if reversed != family.transposed() {
@@ -5542,6 +5554,51 @@ mod tests {
             reversed[0].1 < reversed[1].1,
             "a maxMin category axis puts the first category back on top: {reversed:?}"
         );
+    }
+
+    #[test]
+    fn horizontal_category_titles_have_their_own_header_row() {
+        let data = source(&[1.0, 2.0]);
+        for title in [None, Some("Revenue")] {
+            let chart = PlotChart {
+                chart_type: "bar",
+                title,
+                axis_titles: PlotAxisTitles {
+                    category: Some("Quarter"),
+                    value: Some("Millions"),
+                },
+                series: vec![series("North", &data)],
+                ..PlotChart::default()
+            };
+            let ops = plot_chart(&chart, rect());
+            let category = text_at(&ops, "Quarter");
+            let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
+            assert!(category.2 - CHART_LABEL_SIZE_PX >= title_bottom);
+            assert_eq!(text_at(&ops, "Millions").2, 192.0);
+        }
+    }
+
+    #[test]
+    fn secondary_horizontal_axes_reserve_space_above_the_plot() {
+        let data = source(&[1.0, 2.0]);
+        for title in [None, Some("Revenue")] {
+            let mut primary = group("bar", vec![series("North", &data)]);
+            primary.axis_ids = vec!["1"];
+            let mut secondary = group("bar", vec![series("South", &data)]);
+            secondary.axis_ids = vec!["2"];
+            let mut chart = combo_with_axes(
+                primary,
+                secondary,
+                vec![value_axis("1", 0.0, 4.0), value_axis("2", 0.0, 8.0)],
+            );
+            chart.title = title;
+            let ops = plot_chart(&chart, rect());
+            let upper_tick = text_at(&ops, "8");
+            let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
+            assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
+            assert_eq!(upper_tick.1 + 16.0, 186.0);
+            assert_eq!(text_at(&ops, "4").2, 180.0);
+        }
     }
 
     #[test]

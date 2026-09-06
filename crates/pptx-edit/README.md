@@ -13,6 +13,26 @@ stay out of local history.
 State vectors, diffs, and updates are standard Yrs v1, so any transport that
 speaks Yjs sync-v1 works.
 
+Comments use a separate shared map. Saving patches existing XML and preserves
+untouched comment parts byte for byte. Deleting a thread removes its known
+replies; a reply added concurrently becomes a root when its parent is absent,
+so both clients and saved files retain it.
+
+The current schema is v12. Older v1–v11 updates can be opened, and attaching the
+original package with `open_from_update_with_source` imports source comments,
+list styles, explicit numbering restarts, and paragraph line spacing missing
+from older snapshots.
+Source attachment also restores run baseline formatting on surviving text while
+retaining edits and explicit zero overrides. Imported properties persist in
+subsequent updates, and reattaching the source is idempotent.
+Source-free loads defer the import until the package is attached. Older clients
+reject new-schema updates; collaborators must upgrade together or exchange
+saved PPTX files. The existing connector, slide-number, theme-formatting,
+hidden-shape, custom-geometry, comment and list-style migrations run first,
+followed by the schema-10 baseline migration, schema-11 numbering migration,
+and schema-12 line-spacing migration.
+Missing starting slide numbers default to one and stay omitted from package JSON.
+
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
 `wasm` feature exposes the JavaScript surface consumed by
 [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx).

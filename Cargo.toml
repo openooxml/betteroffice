@@ -29,6 +29,7 @@ betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.1.0" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.1.0" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.1.0" }
 pptx-render = { package = "betteroffice-pptx-render", path = "crates/pptx-render", version = "0.1.0" }
+pptx-raster = { package = "betteroffice-pptx-raster", path = "crates/pptx-raster", version = "0.1.0" }
 betteroffice-pptx = { path = "crates/betteroffice-pptx", version = "0.1.0" }
 
 [profile.release]
