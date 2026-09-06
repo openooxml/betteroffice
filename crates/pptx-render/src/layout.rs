@@ -262,21 +262,15 @@ impl SlideRenderer {
         italic: bool,
     ) -> Result<FontFace, RenderError> {
         let requested = normalize_family(family);
-        let mut candidates = vec![(requested.clone(), bold)];
-        if let Some((stem, implied_bold)) = substitute_family(&requested) {
-            candidates.push((stem, implied_bold.unwrap_or(bold)));
-        }
-        for (name, bold) in candidates {
-            let styles = [
-                (bold, italic),
-                (bold, false),
-                (false, italic),
-                (false, false),
-            ];
-            for (bold, italic) in styles {
-                if let Some(face) = self.faces.get(&(name.clone(), bold, italic)) {
-                    return Ok(face.clone());
-                }
+        let styles = [
+            (bold, italic),
+            (bold, false),
+            (false, italic),
+            (false, false),
+        ];
+        for (bold, italic) in styles {
+            if let Some(face) = self.faces.get(&(requested.clone(), bold, italic)) {
+                return Ok(face.clone());
             }
         }
         self.faces
@@ -2461,38 +2455,6 @@ fn normalize_family(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-/// A normalized family with a trailing weight qualifier removed, and the weight that qualifier
-/// asks for. `calibri light` finds a registered `calibri` at regular weight and `segoe ui
-/// semibold` finds `segoe ui` at bold, so a host that registered the base family covers the
-/// whole optical range without shipping a font-name database. `None` keeps the requested weight.
-fn substitute_family(normalized: &str) -> Option<(String, Option<bool>)> {
-    // Longest first, so "semilight" is not read as "light".
-    const QUALIFIERS: [(&str, Option<bool>); 8] = [
-        ("semilight", None),
-        ("semibold", Some(true)),
-        ("display", None),
-        ("medium", None),
-        ("light", None),
-        ("black", Some(true)),
-        ("heavy", Some(true)),
-        ("thin", None),
-    ];
-    for (qualifier, weight) in QUALIFIERS {
-        let Some(stem) = normalized.strip_suffix(qualifier) else {
-            continue;
-        };
-        // Only a separate trailing word is a qualifier: "Blackadder" keeps its name.
-        if !stem.ends_with(' ') {
-            continue;
-        }
-        let stem = stem.trim_end();
-        if !stem.is_empty() {
-            return Some((stem.to_owned(), weight));
-        }
-    }
-    None
-}
-
 fn valid_color(value: &str) -> bool {
     let value = value.strip_prefix('#').unwrap_or(value);
     value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -2678,27 +2640,6 @@ mod tests {
         let stroke = stroke.as_ref().unwrap();
         assert_eq!(stroke.width, 2.0);
         assert_eq!(stroke.color, "#FF00FF");
-    }
-
-    #[test]
-    fn a_weight_qualifier_is_stripped_so_the_base_family_can_answer() {
-        // A host that registered "Calibri" covers "Calibri Light" without a font-name database.
-        assert_eq!(
-            substitute_family("calibri light"),
-            Some(("calibri".to_owned(), None))
-        );
-        assert_eq!(
-            substitute_family("segoe ui semibold"),
-            Some(("segoe ui".to_owned(), Some(true)))
-        );
-        assert_eq!(
-            substitute_family("helvetica neue black"),
-            Some(("helvetica neue".to_owned(), Some(true)))
-        );
-        // A qualifier is only a separate trailing word, and a bare qualifier is a family name.
-        assert_eq!(substitute_family("blackadder"), None);
-        assert_eq!(substitute_family("light"), None);
-        assert_eq!(substitute_family("arial"), None);
     }
 
     fn renderer() -> SlideRenderer {

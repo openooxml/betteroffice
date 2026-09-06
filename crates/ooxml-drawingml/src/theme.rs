@@ -177,14 +177,8 @@ fn get_font(font: Option<&ThemeFont>, script: &str, latin_default: &str) -> Stri
     };
     match script {
         "latin" => nonempty(Some(&font.latin)).unwrap_or_else(|| latin_default.to_owned()),
-        // A theme routinely declares `<a:ea typeface=""/>`, which asks for the latin face rather
-        // than for no face at all.
-        "ea" => nonempty(Some(&font.ea))
-            .or_else(|| nonempty(Some(&font.latin)))
-            .unwrap_or_else(|| latin_default.to_owned()),
-        "cs" => nonempty(Some(&font.cs))
-            .or_else(|| nonempty(Some(&font.latin)))
-            .unwrap_or_else(|| latin_default.to_owned()),
+        "ea" => font.ea.clone(),
+        "cs" => font.cs.clone(),
         script => font
             .fonts
             .get(script)
@@ -198,18 +192,16 @@ pub fn resolve_theme_font_ref(theme: Option<&Theme>, reference: &str) -> String 
     if reference.is_empty() {
         return "Calibri".to_owned();
     }
-    // Both dialects reach this: WordprocessingML spells a reference "majorAscii" / "minorEastAsia",
-    // DrawingML spells the same thing "+mj-lt" / "+mn-ea". Matching on substrings only ever
-    // recognised the first, so every DrawingML major reference resolved to the minor font.
     let lower = reference.trim_start_matches('+').to_ascii_lowercase();
-    let (major, script) = match lower.split_once('-') {
-        Some((slot, script)) if slot == "mj" || slot == "mn" => (slot == "mj", script),
+    let (major, script, drawingml) = match lower.split_once('-') {
+        Some((slot, script)) if slot == "mj" || slot == "mn" => (slot == "mj", script, true),
         _ => (
             lower.starts_with("major"),
             lower
                 .strip_prefix("major")
                 .or_else(|| lower.strip_prefix("minor"))
                 .unwrap_or(lower.as_str()),
+            false,
         ),
     };
     let script = match script {
@@ -217,10 +209,16 @@ pub fn resolve_theme_font_ref(theme: Option<&Theme>, reference: &str) -> String 
         "cs" | "bidi" => "cs",
         _ => "latin",
     };
-    if major {
-        get_major_font(theme, script)
+    let resolve = if major {
+        get_major_font
     } else {
-        get_minor_font(theme, script)
+        get_minor_font
+    };
+    let family = resolve(theme, script);
+    if drawingml && family.is_empty() {
+        resolve(theme, "latin")
+    } else {
+        family
     }
 }
 
@@ -261,8 +259,6 @@ fn nonempty(value: Option<&str>) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// project17's theme is the inverted case: the regular face is the major font and the light
-    /// face is the minor one, so resolving `+mj-lt` to the minor font picked the wrong metrics.
     fn inverted_theme() -> Theme {
         let mut theme = Theme::default();
         theme.font_scheme.major_font.latin = "Calibri".to_owned();
@@ -272,44 +268,71 @@ mod tests {
 
     #[test]
     fn resolves_drawingml_and_wordprocessingml_font_references() {
-        let theme = inverted_theme();
-        // DrawingML spellings: these all resolved to the minor font before.
-        assert_eq!(resolve_theme_font_ref(Some(&theme), "+mj-lt"), "Calibri");
-        assert_eq!(
-            resolve_theme_font_ref(Some(&theme), "+mn-lt"),
-            "Calibri Light"
-        );
-        assert_eq!(resolve_theme_font_ref(Some(&theme), "mj-lt"), "Calibri");
-        // WordprocessingML spellings keep working.
-        assert_eq!(
-            resolve_theme_font_ref(Some(&theme), "majorAscii"),
-            "Calibri"
-        );
-        assert_eq!(
-            resolve_theme_font_ref(Some(&theme), "minorHAnsi"),
-            "Calibri Light"
-        );
-        assert_eq!(
-            resolve_theme_font_ref(Some(&theme), "majorEastAsia"),
-            "Calibri"
-        );
-        assert_eq!(
-            resolve_theme_font_ref(Some(&theme), "minorBidi"),
-            "Calibri Light"
-        );
+        let mut theme = inverted_theme();
+        theme.font_scheme.major_font.ea = "Major East Asia".to_owned();
+        theme.font_scheme.major_font.cs = "Major Complex Script".to_owned();
+        theme.font_scheme.minor_font.ea = "Minor East Asia".to_owned();
+        theme.font_scheme.minor_font.cs = "Minor Complex Script".to_owned();
+        for (reference, expected) in [
+            ("+mj-lt", "Calibri"),
+            ("+mn-lt", "Calibri Light"),
+            ("+mj-ea", "Major East Asia"),
+            ("+mn-ea", "Minor East Asia"),
+            ("+mj-cs", "Major Complex Script"),
+            ("+mn-cs", "Minor Complex Script"),
+            ("mj-lt", "Calibri"),
+            ("majorAscii", "Calibri"),
+            ("majorHAnsi", "Calibri"),
+            ("majorEastAsia", "Major East Asia"),
+            ("majorBidi", "Major Complex Script"),
+            ("minorAscii", "Calibri Light"),
+            ("minorHAnsi", "Calibri Light"),
+            ("minorEastAsia", "Minor East Asia"),
+            ("minorBidi", "Minor Complex Script"),
+        ] {
+            assert_eq!(resolve_theme_font_ref(Some(&theme), reference), expected);
+            assert_eq!(
+                resolve_theme_font_ref(Some(&theme), &reference.to_ascii_uppercase()),
+                expected
+            );
+        }
     }
 
     #[test]
     fn an_empty_script_slot_falls_back_to_the_latin_face() {
-        // Every theme in the corpus declares <a:ea typeface=""/>, which asks for the latin face
-        // rather than for no face at all.
+        let mut theme = inverted_theme();
+        for (reference, expected) in [
+            ("+mj-ea", "Calibri"),
+            ("+mj-cs", "Calibri"),
+            ("+mn-ea", "Calibri Light"),
+            ("+mn-cs", "Calibri Light"),
+        ] {
+            assert_eq!(resolve_theme_font_ref(Some(&theme), reference), expected);
+        }
+        theme.font_scheme.major_font.latin.clear();
+        theme.font_scheme.minor_font.latin.clear();
+        for theme in [Some(&theme), None] {
+            for (reference, expected) in [
+                ("+mj-ea", "Calibri Light"),
+                ("+mj-cs", "Calibri Light"),
+                ("+mn-ea", "Calibri"),
+                ("+mn-cs", "Calibri"),
+            ] {
+                assert_eq!(resolve_theme_font_ref(theme, reference), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn wordprocessingml_empty_script_slots_stay_empty() {
         let theme = inverted_theme();
-        assert_eq!(theme.font_scheme.major_font.ea, "");
-        assert_eq!(resolve_theme_font_ref(Some(&theme), "+mj-ea"), "Calibri");
-        assert_eq!(
-            resolve_theme_font_ref(Some(&theme), "+mn-cs"),
-            "Calibri Light"
-        );
+        for reference in ["majorEastAsia", "majorBidi", "minorEastAsia", "minorBidi"] {
+            assert_eq!(resolve_theme_font_ref(Some(&theme), reference), "");
+        }
+        for script in ["ea", "cs"] {
+            assert_eq!(get_major_font(Some(&theme), script), "");
+            assert_eq!(get_minor_font(Some(&theme), script), "");
+        }
     }
 
     #[test]
