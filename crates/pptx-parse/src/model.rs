@@ -305,6 +305,9 @@ pub struct Picture {
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
+    /// Bitmap effects in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<BlipEffect>,
     /// Preset mask; defaults to the frame rectangle.
     #[serde(default = "rect_geometry", skip_serializing_if = "is_rect")]
     pub geometry: String,
@@ -324,6 +327,40 @@ fn rect_geometry() -> String {
 
 fn is_rect(geometry: &str) -> bool {
     geometry == "rect"
+}
+
+/// Bitmap effects with unresolved colours.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum BlipEffect {
+    /// `a:biLevel`: luminance below `threshold` becomes black, the rest white.
+    BiLevel { threshold: f64 },
+    /// `a:grayscl`.
+    Grayscale,
+    /// `a:duotone`: luminance interpolates between the two colours.
+    Duotone {
+        shadow: Option<ColorValue>,
+        highlight: Option<ColorValue>,
+    },
+    /// Exact colour replacement.
+    ColorChange {
+        from: Option<ColorValue>,
+        to: Option<ColorValue>,
+        #[serde(
+            default = "default_use_alpha",
+            skip_serializing_if = "use_alpha_is_default",
+            rename = "useAlpha"
+        )]
+        use_alpha: bool,
+    },
+}
+
+fn default_use_alpha() -> bool {
+    true
+}
+
+fn use_alpha_is_default(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

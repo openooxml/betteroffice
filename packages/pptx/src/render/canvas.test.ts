@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import type { GeometryPathCommand, ShapePrimitive, SlideDisplayList } from '../types';
-import { paintSlide } from './canvas';
+import type { GeometryPathCommand, ImageEffect, ShapePrimitive, SlideDisplayList } from '../types';
+import { applyImageEffects, paintSlide } from './canvas';
 
 describe('PPTX canvas replay', () => {
   test('paints shape geometry and positioned text in display-list order', async () => {
@@ -907,6 +907,217 @@ describe('PPTX shape shadows', () => {
         'main:shadow:blur(0px):108,108', 'main:stroke',
       ]);
     } finally { restore(); }
+  });
+});
+
+describe('blip colour effects', () => {
+  test('biLevel thresholds on Rec. 601 luma and leaves alpha alone', () => {
+    const data = new Uint8ClampedArray([0x03, 0xa7, 0xdf, 0x80]);
+    applyImageEffects(data, [{ kind: 'biLevel', threshold: 0.5 }]);
+    expect([...data]).toEqual([0, 0, 0, 0x80]);
+
+    const light = new Uint8ClampedArray([0x03, 0xa7, 0xdf, 0xff]);
+    applyImageEffects(light, [{ kind: 'biLevel', threshold: 0.25 }]);
+    expect([...light]).toEqual([255, 255, 255, 0xff]);
+  });
+
+  test('duotone interpolates between the two colours by luma', () => {
+    const data = new Uint8ClampedArray([0, 0, 0, 0xff, 255, 255, 255, 0xff]);
+    applyImageEffects(data, [{ kind: 'duotone', shadow: '#737373ff', highlight: '#ffffffff' }]);
+    expect([...data]).toEqual([0x73, 0x73, 0x73, 0xff, 255, 255, 255, 0xff]);
+  });
+
+  test('effects apply in list order', () => {
+    const ordered: ImageEffect[] = [
+      { kind: 'colorChange', from: '#ffffffff', to: '#ffffff00' },
+      { kind: 'duotone', shadow: '#000000ff', highlight: '#ff0000ff' },
+    ];
+    const data = new Uint8ClampedArray([255, 255, 255, 0xff]);
+    applyImageEffects(data, ordered);
+    expect(data[3]).toBe(0);
+
+    const reversed = new Uint8ClampedArray([255, 255, 255, 0xff]);
+    applyImageEffects(reversed, [...ordered].reverse());
+    expect(reversed[3]).toBe(0xff);
+  });
+});
+
+test('colour changes respect useA and preserve transparent and antialiased pixels', () => {
+  for (const useAlpha of [undefined, true, false]) {
+    const data = new Uint8ClampedArray([
+      255, 255, 255, 255, 255, 255, 255, 128, 255, 255, 255, 0, 255, 254, 255, 255,
+    ]);
+    applyImageEffects(data, [{ kind: 'colorChange', from: '#ffffffff', to: '#ff000000', useAlpha }]);
+    expect([...data]).toEqual(useAlpha === false
+      ? [255, 0, 0, 255, 255, 0, 0, 128, 255, 0, 0, 0, 255, 254, 255, 255]
+      : [255, 0, 0, 0, 255, 255, 255, 128, 255, 255, 255, 0, 255, 254, 255, 255]);
+  }
+  const data = new Uint8ClampedArray([3, 167, 223, 128]);
+  applyImageEffects(data, [{ kind: 'grayscale' }]);
+  expect([...data]).toEqual([124, 124, 124, 128]);
+});
+
+test('a duotone endpoint modulates alpha instead of replacing it', () => {
+  const data = new Uint8ClampedArray([255, 255, 255, 200, 0, 0, 0, 0]);
+  applyImageEffects(data, [{ kind: 'duotone', shadow: '#000000ff', highlight: '#ffffff80' }]);
+  // The white pixel takes half the highlight's alpha; the transparent one stays transparent.
+  expect([...data]).toEqual([255, 255, 255, 100, 0, 0, 0, 0]);
+
+  const opaque = new Uint8ClampedArray([255, 255, 255, 200]);
+  applyImageEffects(opaque, [{ kind: 'duotone', shadow: '#000000', highlight: '#ffffff' }]);
+  expect([...opaque]).toEqual([255, 255, 255, 200]);
+});
+
+test('picture effects reach canvas before cropping without changing the shared source', async () => {
+  const original = globalThis.OffscreenCanvas;
+  try {
+    for (const failure of [null, 'read', 'context'] as const) {
+      // A source of its own per case: a recoloured bitmap is cached against the source it
+      // came from, so sharing one here would answer the later cases from the first.
+      const source = { width: 4, height: 1, pixels: new Uint8ClampedArray([3, 167, 223, 128]) };
+      class Surface {
+        pixels = new Uint8ClampedArray();
+        constructor(public width: number, public height: number) {}
+        getContext() {
+          if (failure === 'context') throw new Error('context unavailable');
+          return {
+            drawImage: () => { this.pixels = source.pixels.slice(); },
+            getImageData: () => {
+              if (failure === 'read') throw new Error('tainted');
+              return { data: this.pixels };
+            },
+            putImageData: () => {},
+          };
+        }
+      }
+      globalThis.OffscreenCanvas = Surface as unknown as typeof OffscreenCanvas;
+      const draws: unknown[][] = [];
+      const ctx = new Proxy({} as CanvasRenderingContext2D, {
+        get: (_, key) => key === 'drawImage' ? (...args: unknown[]) => draws.push(args) : () => {},
+        set: () => true,
+      });
+      await paintSlide(ctx, {
+        contractVersion: 1,
+        width: 100,
+        height: 100,
+        primitives: [
+          { kind: 'image', objectId: 1, name: 'Effect', x: 10, y: 20, w: 40, h: 10,
+            assetId: 'image', crop: { left: 0.25 }, effects: [{ kind: 'biLevel', threshold: 0.25 }] },
+          { kind: 'image', objectId: 2, name: 'Control', x: 10, y: 40, w: 40, h: 10, assetId: 'image' },
+        ],
+      }, 1, 1, { resolveImage: async () => source as unknown as CanvasImageSource });
+      expect(draws).toHaveLength(2);
+      expect(draws[0].slice(1)).toEqual([1, 0, 3, 1, 10, 20, 40, 10]);
+      expect([...(draws[0][0] as typeof source).pixels]).toEqual(
+        failure ? [3, 167, 223, 128] : [255, 255, 255, 128]
+      );
+      expect(draws[1][0]).toBe(source);
+      expect([...source.pixels]).toEqual([3, 167, 223, 128]);
+    }
+  } finally {
+    if (original === undefined) Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
+    else globalThis.OffscreenCanvas = original;
+  }
+});
+
+/** Installs a fake OffscreenCanvas that records each surface's size and does no pixel work. */
+async function withSurfaces(
+  run: (surfaces: { width: number; height: number }[]) => Promise<void>
+): Promise<void> {
+  const original = globalThis.OffscreenCanvas;
+  const surfaces: { width: number; height: number }[] = [];
+  class Surface {
+    constructor(public width: number, public height: number) {
+      surfaces.push({ width, height });
+    }
+    getContext() {
+      return {
+        drawImage: () => {},
+        getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+        putImageData: () => {},
+      };
+    }
+  }
+  globalThis.OffscreenCanvas = Surface as unknown as typeof OffscreenCanvas;
+  try {
+    await run(surfaces);
+  } finally {
+    if (original === undefined) Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
+    else globalThis.OffscreenCanvas = original;
+  }
+}
+
+/** Paints one picture with `effects` from `source` and returns the canvas's drawImage calls. */
+async function paintEffect(source: object, effects: ImageEffect[]): Promise<unknown[][]> {
+  const draws: unknown[][] = [];
+  const ctx = new Proxy({} as CanvasRenderingContext2D, {
+    get: (_, key) => key === 'drawImage' ? (...args: unknown[]) => draws.push(args) : () => {},
+    set: () => true,
+  });
+  await paintSlide(ctx, {
+    contractVersion: 1,
+    width: 100,
+    height: 100,
+    primitives: [
+      { kind: 'image', objectId: 1, name: 'Effect', x: 10, y: 20, w: 40, h: 10, assetId: 'image', effects },
+    ],
+  }, 1, 1, { resolveImage: async () => source as unknown as CanvasImageSource });
+  return draws;
+}
+
+test('a recolouring is reused for the same source and effects and redone for another list', async () => {
+  await withSurfaces(async (surfaces) => {
+    const source = { width: 4, height: 1 };
+    const biLevel: ImageEffect[] = [{ kind: 'biLevel', threshold: 0.25 }];
+    const first = await paintEffect(source, biLevel);
+    const second = await paintEffect(source, biLevel);
+    expect(surfaces).toHaveLength(1);
+    expect(first[0][0]).not.toBe(source);
+    expect(second[0][0]).toBe(first[0][0]);
+    await paintEffect(source, [{ kind: 'grayscale' }]);
+    expect(surfaces).toHaveLength(2);
+    await paintEffect({ width: 4, height: 1 }, biLevel);
+    expect(surfaces).toHaveLength(3);
+  });
+});
+
+test('an oversized bitmap is recoloured within the pixel cap and drawn back at picture size', async () => {
+  await withSurfaces(async (surfaces) => {
+    const draws = await paintEffect({ width: 8192, height: 8192 }, [{ kind: 'grayscale' }]);
+    expect(surfaces).toEqual([{ width: 5792, height: 5792 }]);
+    expect(draws[0].slice(1)).toEqual([0, 0, 5792, 5792, 10, 20, 40, 10]);
+    await paintEffect({ width: 8192, height: 4096 }, [{ kind: 'grayscale' }]);
+    expect(surfaces[1]).toEqual({ width: 8192, height: 4096 });
+  });
+});
+
+test('a video frame is recoloured on every paint rather than kept', async () => {
+  await withSurfaces(async (surfaces) => {
+    const video = { videoWidth: 4, videoHeight: 1 };
+    const first = await paintEffect(video, [{ kind: 'grayscale' }]);
+    const second = await paintEffect(video, [{ kind: 'grayscale' }]);
+    expect(surfaces).toEqual([{ width: 4, height: 1 }, { width: 4, height: 1 }]);
+    expect(first[0][0]).not.toBe(video);
+    expect(second[0][0]).not.toBe(first[0][0]);
+  });
+});
+
+test('retained recolourings stay within the pixel budget, dropping the least recently used', async () => {
+  await withSurfaces(async (surfaces) => {
+    const effects: ImageEffect[] = [{ kind: 'grayscale' }];
+    const a = { width: 8192, height: 4096 };
+    const b = { width: 8192, height: 4096 };
+    const c = { width: 8192, height: 4096 };
+    for (const source of [a, b, c]) await paintEffect(source, effects);
+    expect(surfaces).toHaveLength(3);
+    await paintEffect(b, effects);
+    expect(surfaces).toHaveLength(3);
+    await paintEffect(a, effects);
+    expect(surfaces).toHaveLength(4);
+    await paintEffect(b, effects);
+    expect(surfaces).toHaveLength(4);
+    await paintEffect(c, effects);
+    expect(surfaces).toHaveLength(5);
   });
 });
 

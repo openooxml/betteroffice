@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
-use pptx_parse::{GraphicFrameData, Placeholder};
+use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
 
 pub use pptx_parse::CommentFlavor;
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,8 @@ pub struct ShapeSnapshot {
     pub outline: Option<ShapeOutline>,
     pub resolved_outline_color: Option<String>,
     pub media_part_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blip_effects: Vec<BlipEffect>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,

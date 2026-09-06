@@ -1,6 +1,7 @@
 import type {
   ChartPrimitive,
   GeometryPathCommand,
+  ImageEffect,
   ImagePrimitive,
   Paint,
   PlaceholderPrimitive,
@@ -461,11 +462,210 @@ async function paintImage(
 ): Promise<void> {
   if (image.assetId && resolver) {
     const source = await resolver(image.assetId);
-    if (source) drawCropped(ctx, source, image);
+    if (source) {
+      const recoloured = image.effects?.length ? recolourImage(source, image.effects) : source;
+      drawCropped(ctx, recoloured, image);
+    }
   }
   if (image.stroke) {
     buildImageOutline(ctx, image);
     strokeCurrentPath(ctx, image.stroke, image.x, image.y, image.w, image.h);
+  }
+}
+
+/** Matches `MAX_IMAGE_PIXELS` in pptx-raster: the most pixels one recolouring pass walks. */
+const MAX_EFFECT_PIXELS = 33_554_432;
+/** Matches `MAX_SLIDE_IMAGE_PIXELS` in pptx-raster: recoloured surfaces kept for later paints. */
+const MAX_RETAINED_EFFECT_PIXELS = 67_108_864;
+
+function imageSourceSize(source: CanvasImageSource): { width: number; height: number } | null {
+  const candidate = source as {
+    naturalWidth?: number;
+    naturalHeight?: number;
+    videoWidth?: number;
+    videoHeight?: number;
+    displayWidth?: number;
+    displayHeight?: number;
+    width?: unknown;
+    height?: unknown;
+  };
+  const width =
+    candidate.naturalWidth ??
+    candidate.videoWidth ??
+    candidate.displayWidth ??
+    (typeof candidate.width === 'number' ? candidate.width : 0);
+  const height =
+    candidate.naturalHeight ??
+    candidate.videoHeight ??
+    candidate.displayHeight ??
+    (typeof candidate.height === 'number' ? candidate.height : 0);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** The largest surface at or below the pixel cap that keeps the source's proportions. */
+function boundedSize(size: { width: number; height: number }): { width: number; height: number } {
+  const pixels = size.width * size.height;
+  if (pixels <= MAX_EFFECT_PIXELS) return size;
+  const factor = Math.sqrt(MAX_EFFECT_PIXELS / pixels);
+  return {
+    width: Math.max(1, Math.floor(size.width * factor)),
+    height: Math.max(1, Math.floor(size.height * factor)),
+  };
+}
+
+type Recolourings = Map<string, CanvasImageSource>;
+
+const recoloured = new WeakMap<object, Recolourings>();
+/** Least recently used first; holds the surfaces, never the sources they came from. */
+const retained: { entries: Recolourings; key: string; pixels: number }[] = [];
+let retainedPixels = 0;
+
+/** A video, canvas or frame may change between paints, so its recolouring is never kept. */
+function isMutableSource(source: CanvasImageSource): boolean {
+  const candidate = source as { videoWidth?: unknown; displayWidth?: unknown; getContext?: unknown };
+  return 'videoWidth' in candidate || 'displayWidth' in candidate || typeof candidate.getContext === 'function';
+}
+
+function recallRecolouring(source: object, key: string): CanvasImageSource | undefined {
+  const entries = recoloured.get(source);
+  const surface = entries?.get(key);
+  if (!entries || !surface) return undefined;
+  const index = retained.findIndex((entry) => entry.entries === entries && entry.key === key);
+  if (index >= 0) retained.push(...retained.splice(index, 1));
+  return surface;
+}
+
+function retainRecolouring(source: object, key: string, surface: CanvasImageSource, pixels: number): void {
+  let entries = recoloured.get(source);
+  if (!entries) {
+    entries = new Map();
+    recoloured.set(source, entries);
+  }
+  entries.set(key, surface);
+  retained.push({ entries, key, pixels });
+  retainedPixels += pixels;
+  while (retainedPixels > MAX_RETAINED_EFFECT_PIXELS && retained.length > 1) {
+    const oldest = retained.shift();
+    if (!oldest) break;
+    oldest.entries.delete(oldest.key);
+    retainedPixels -= oldest.pixels;
+  }
+}
+
+function offscreen(width: number, height: number): HTMLCanvasElement | OffscreenCanvas | null {
+  if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+/** Recolours readable bitmaps on a private surface, kept for later paints while the budget allows. */
+function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): CanvasImageSource {
+  const size = imageSourceSize(source);
+  if (!size) return source;
+  const key = JSON.stringify(effects);
+  const reusable = !isMutableSource(source);
+  if (reusable) {
+    const cached = recallRecolouring(source as object, key);
+    if (cached) return cached;
+  }
+  // A slide's bitmap is whatever the file carried, and every effect walks all of it, so
+  // an oversized source is recoloured at the cap and drawn back up to size.
+  const bounds = boundedSize(size);
+  try {
+    const canvas = offscreen(bounds.width, bounds.height);
+    const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!canvas || !ctx) return source;
+    ctx.drawImage(source, 0, 0, bounds.width, bounds.height);
+    const data = ctx.getImageData(0, 0, bounds.width, bounds.height);
+    applyImageEffects(data.data, effects);
+    ctx.putImageData(data, 0, 0);
+    const result = canvas as CanvasImageSource;
+    if (reusable) retainRecolouring(source as object, key, result, bounds.width * bounds.height);
+    return result;
+  } catch {
+    return source;
+  }
+}
+
+/** Rec. 601 luma, the weighting `biLevel` and `duotone` are defined against. */
+function luma(data: Uint8ClampedArray, index: number): number {
+  return 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+}
+
+function rgba(color: string): [number, number, number, number] | null {
+  const hex = color.startsWith('#') ? color.slice(1) : color;
+  const expanded = hex.length === 3 || hex.length === 4 ? [...hex].map((c) => c + c).join('') : hex;
+  if (expanded.length !== 6 && expanded.length !== 8) return null;
+  const byte = (at: number) => Number.parseInt(expanded.slice(at, at + 2), 16);
+  const channels: [number, number, number, number] = [
+    byte(0),
+    byte(2),
+    byte(4),
+    expanded.length === 8 ? byte(6) : 255,
+  ];
+  return channels.some(Number.isNaN) ? null : channels;
+}
+
+/** `getImageData` hands back straight alpha, which is what these are defined on. */
+export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[]): void {
+  for (const effect of effects) {
+    switch (effect.kind) {
+      case 'biLevel': {
+        const threshold = Math.min(Math.max(effect.threshold, 0), 1) * 255;
+        for (let index = 0; index < data.length; index += 4) {
+          const value = luma(data, index) < threshold ? 0 : 255;
+          data[index] = value;
+          data[index + 1] = value;
+          data[index + 2] = value;
+        }
+        break;
+      }
+      case 'grayscale': {
+        for (let index = 0; index < data.length; index += 4) {
+          const value = Math.round(luma(data, index));
+          data[index] = value;
+          data[index + 1] = value;
+          data[index + 2] = value;
+        }
+        break;
+      }
+      case 'duotone': {
+        const shadow = rgba(effect.shadow);
+        const highlight = rgba(effect.highlight);
+        if (!shadow || !highlight) break;
+        for (let index = 0; index < data.length; index += 4) {
+          const ratio = luma(data, index) / 255;
+          for (let channel = 0; channel < 3; channel += 1) {
+            data[index + channel] = Math.round(
+              shadow[channel] * (1 - ratio) + highlight[channel] * ratio
+            );
+          }
+          // An endpoint may be translucent. It modulates the source's own alpha rather
+          // than replacing it, or a transparent pixel would turn opaque.
+          const endpoint = shadow[3] * (1 - ratio) + highlight[3] * ratio;
+          data[index + 3] = Math.round((data[index + 3] * endpoint) / 255);
+        }
+        break;
+      }
+      case 'colorChange': {
+        const from = rgba(effect.from);
+        const to = rgba(effect.to);
+        if (!from || !to) break;
+        for (let index = 0; index < data.length; index += 4) {
+          if (data[index] !== from[0] || data[index + 1] !== from[1] || data[index + 2] !== from[2] || (effect.useAlpha !== false && data[index + 3] !== from[3])) {
+            continue;
+          }
+          data[index] = to[0];
+          data[index + 1] = to[1];
+          data[index + 2] = to[2];
+          if (effect.useAlpha !== false) data[index + 3] = to[3];
+        }
+        break;
+      }
+    }
   }
 }
 
