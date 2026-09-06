@@ -1298,10 +1298,6 @@ fn chart_text_primitive(
         .metrics(face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
-    // The geometry crate cannot measure a run, so a centred op names its box and
-    // the shaped advance decides where inside it the run starts. The box keeps
-    // the op's own origin, so a consumer that re-lays the paragraph out from
-    // `align` lands on the same place rather than centring a second time.
     let advance: f32 = shaped.iter().map(|glyph| glyph.x_advance).sum();
     let box_x = safe_geometry(text.x as f32);
     let box_w = safe_geometry(text.width as f32);

@@ -822,7 +822,6 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             let font_size_px = positive_f32(font.size_px)?;
             let font_size = positive_f32(font.size_px * 72.0 / 96.0)?;
             let text_clip = text_clip(x, y, width, font_size_px, chart_clip)?;
-            // `Align::Center` means `x` is the run's centre, not its left edge.
             let (x, align) = match align {
                 PlotTextAlign::Center => (x + width / 2.0, Align::Center),
                 PlotTextAlign::Start => (x, Align::Left),

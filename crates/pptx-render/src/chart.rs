@@ -98,6 +98,29 @@ impl PlotSink for ChartSink<'_> {
         self.remaining > 0 && self.error.is_none()
     }
 
+    fn measure_text(&mut self, text: &str, font: &PlotFont) -> Option<f64> {
+        if !self.accepts_more() {
+            return None;
+        }
+        match (self.text)(ChartText {
+            object_id: self.object_id,
+            text,
+            x: 0.0,
+            baseline_y: 0.0,
+            width: 1.0,
+            font: font.clone(),
+            color: "#000000",
+            align: PlotTextAlign::Start,
+        }) {
+            Ok(Primitive::TextBox { lines, .. }) => lines.first().map(|line| f64::from(line.width)),
+            Ok(_) => None,
+            Err(error) => {
+                self.error = Some(error);
+                None
+            }
+        }
+    }
+
     fn push_op(&mut self, op: PlotOp) -> bool {
         if self.remaining == 0 || self.error.is_some() {
             return false;
