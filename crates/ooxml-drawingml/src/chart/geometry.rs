@@ -11,6 +11,9 @@ pub const CHART_AXIS_COLOR: &str = "#666666";
 pub const CHART_GRID_COLOR: &str = "#D9D9D9";
 pub const CHART_TEXT_COLOR: &str = "#222222";
 pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
+const EMU_PER_PIXEL: f64 = 9525.0;
+/// Keeps a nonsense `a:ln/@w` from drawing a rule across the whole chart.
+const MAX_AXIS_LINE_PX: f64 = 16.0;
 pub const CHART_SERIES_COLORS: [&str; 8] = [
     "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#264478", "#9E480E",
 ];
@@ -255,6 +258,27 @@ pub struct PlotChart<'a> {
     /// Every `c:catAx`, `c:valAx`, `c:dateAx` and `c:serAx` of the plot area,
     /// in document order, so a plot group can find the axis it names.
     pub axes: Vec<PlotAxis<'a>>,
+    /// `c:chartSpace/c:spPr`: the chart's own ground.
+    pub fill: Option<PlotFill<'a>>,
+}
+
+/// The paint of a `c:spPr`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlotFill<'a> {
+    None,
+    Solid(&'a str),
+    Pattern {
+        foreground: Option<&'a str>,
+        background: Option<&'a str>,
+    },
+}
+
+/// The `a:ln` of a `c:spPr`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlotLine<'a> {
+    pub none: bool,
+    pub color: Option<&'a str>,
+    pub width_emu: Option<f64>,
 }
 
 /// Axis titles, drawn horizontally because [`PlotOp::Text`] has no rotation.
@@ -317,6 +341,8 @@ pub struct PlotAxis<'a> {
     pub hidden: bool,
     /// `c:txPr` on this axis.
     pub text: PlotTextStyle<'a>,
+    /// `c:spPr/a:ln` on this axis.
+    pub line: Option<PlotLine<'a>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -540,7 +566,22 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                         .and_then(|legend| legend.text.as_ref()),
                 ),
             },
+            fill: space.fill.as_ref().map(plot_fill_from_model),
         }
+    }
+}
+
+fn plot_fill_from_model(fill: &super::model::ChartFill) -> PlotFill<'_> {
+    match fill {
+        super::model::ChartFill::None => PlotFill::None,
+        super::model::ChartFill::Solid { color } => PlotFill::Solid(color),
+        super::model::ChartFill::Pattern {
+            foreground,
+            background,
+        } => PlotFill::Pattern {
+            foreground: foreground.as_deref(),
+            background: background.as_deref(),
+        },
     }
 }
 
@@ -576,6 +617,11 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from_model(axis.text.as_ref()),
+        line: axis.line.as_ref().map(|line| PlotLine {
+            none: line.none,
+            color: line.color.as_deref(),
+            width_emu: line.width_emu,
+        }),
     }
 }
 
@@ -803,7 +849,20 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         .over(chart_text)
         .resolve(CHART_LABEL_SIZE_PX, 400);
 
-    push_rect(ops, x, y, width, height, CHART_BACKGROUND_COLOR);
+    match chart.fill {
+        Some(PlotFill::None) => {}
+        fill => {
+            let ground = fill.and_then(plot_fill_color);
+            push_rect(
+                ops,
+                x,
+                y,
+                width,
+                height,
+                ground.as_deref().unwrap_or(CHART_BACKGROUND_COLOR),
+            );
+        }
+    }
 
     let title_h = if let Some(title) = chart.title.filter(|s| !s.is_empty()) {
         push_text_aligned(
@@ -1403,6 +1462,42 @@ fn emit_family<S: PlotSink + ?Sized>(
         "surface" => emit_surface(ops, family, plot),
         _ => emit_bar(ops, family, plot),
     }
+}
+
+/// The one colour a fill paints as, or `None` for `a:noFill` and for a fill
+/// whose colours did not resolve. A pattern averages its two: no host carries a
+/// hatch paint, and over a whole chart space the mean reads far closer than
+/// either colour on its own.
+fn plot_fill_color(fill: PlotFill<'_>) -> Option<String> {
+    match fill {
+        PlotFill::None => None,
+        PlotFill::Solid(color) => Some(color.to_owned()),
+        PlotFill::Pattern {
+            foreground,
+            background,
+        } => match (foreground, background) {
+            (Some(foreground), Some(background)) => {
+                Some(blend_hex(foreground, background).unwrap_or_else(|| foreground.to_owned()))
+            }
+            (foreground, background) => foreground.or(background).map(str::to_owned),
+        },
+    }
+}
+
+/// The midpoint of two `#RRGGBB` colours.
+fn blend_hex(first: &str, second: &str) -> Option<String> {
+    let (first, second) = (parse_hex(first)?, parse_hex(second)?);
+    let mix = |index: usize| (u16::from(first[index]) + u16::from(second[index])) / 2;
+    Some(format!("#{:02X}{:02X}{:02X}", mix(0), mix(1), mix(2)))
+}
+
+fn parse_hex(color: &str) -> Option<[u8; 3]> {
+    let hex = color.strip_prefix('#').unwrap_or(color);
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
 fn push_rect<S: PlotSink + ?Sized>(
@@ -2005,6 +2100,28 @@ fn tick_extents(mark: Option<&str>) -> Option<(f64, f64)> {
     }
 }
 
+/// The stroke of an axis' own edge line, or `None` when its `c:spPr/a:ln` is
+/// `a:noFill`. An axis that declares no outline keeps the chart default.
+fn axis_stroke<'a>(axis: Option<&'a PlotAxis<'a>>) -> Option<(&'a str, f64)> {
+    match axis.and_then(|axis| axis.line) {
+        Some(line) if line.none => None,
+        Some(line) => Some((
+            line.color.unwrap_or(CHART_AXIS_COLOR),
+            axis_line_width(line.width_emu),
+        )),
+        None => Some((CHART_AXIS_COLOR, 1.0)),
+    }
+}
+
+/// `a:ln/@w` as device pixels at the 96 DPI the plot geometry works in, never
+/// below the hairline a rasteriser would round it up to anyway.
+fn axis_line_width(width_emu: Option<f64>) -> f64 {
+    match width_emu {
+        Some(emu) if emu.is_finite() => (emu / EMU_PER_PIXEL).clamp(1.0, MAX_AXIS_LINE_PX),
+        _ => 1.0,
+    }
+}
+
 fn emit_axes<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: PlotFamily<'_>,
@@ -2076,47 +2193,42 @@ fn emit_axes<S: PlotSink + ?Sized>(
         }
     }
     if family.secondary {
-        if transposed {
-            push_line(
-                ops,
-                plot.x,
-                plot.y,
-                plot.x + plot.w,
-                plot.y,
-                CHART_AXIS_COLOR,
-                1.0,
-            );
-        } else {
-            push_line(
-                ops,
-                plot.x + plot.w,
-                plot.y,
-                plot.x + plot.w,
-                plot.y + plot.h,
-                CHART_AXIS_COLOR,
-                1.0,
-            );
+        if let Some((color, width)) = axis_stroke(axis) {
+            if transposed {
+                push_line(ops, plot.x, plot.y, plot.x + plot.w, plot.y, color, width);
+            } else {
+                push_line(
+                    ops,
+                    plot.x + plot.w,
+                    plot.y,
+                    plot.x + plot.w,
+                    plot.y + plot.h,
+                    color,
+                    width,
+                );
+            }
         }
         return;
     }
-    push_line(
-        ops,
-        plot.x,
-        plot.y,
-        plot.x,
-        plot.y + plot.h,
-        CHART_AXIS_COLOR,
-        1.0,
-    );
-    push_line(
-        ops,
-        plot.x,
-        plot.y + plot.h,
-        plot.x + plot.w,
-        plot.y + plot.h,
-        CHART_AXIS_COLOR,
-        1.0,
-    );
+    let (left, bottom) = if transposed {
+        (axis_stroke(family.category_axis), axis_stroke(axis))
+    } else {
+        (axis_stroke(axis), axis_stroke(family.category_axis))
+    };
+    if let Some((color, width)) = left {
+        push_line(ops, plot.x, plot.y, plot.x, plot.y + plot.h, color, width);
+    }
+    if let Some((color, width)) = bottom {
+        push_line(
+            ops,
+            plot.x,
+            plot.y + plot.h,
+            plot.x + plot.w,
+            plot.y + plot.h,
+            color,
+            width,
+        );
+    }
     let (value_title, category_title) = if transposed {
         (below_plot(plot), left_of_plot(plot))
     } else {
@@ -5481,6 +5593,129 @@ mod tests {
         assert_eq!(ticks(Some("none")), 0);
         assert_eq!(ticks(Some("out")), 5);
         assert_eq!(ticks(Some("cross")), 5);
+    }
+
+    #[test]
+    fn the_chart_space_fill_replaces_the_default_white_ground() {
+        let ground = |fill| {
+            let chart = PlotChart {
+                chart_type: "column",
+                fill,
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .into_iter()
+                .find_map(|op| match op {
+                    PlotOp::Rect { w, h, fill, .. } if w == 300.0 && h == 200.0 => Some(fill),
+                    _ => None,
+                })
+        };
+        assert_eq!(ground(None).as_deref(), Some(CHART_BACKGROUND_COLOR));
+        assert_eq!(
+            ground(Some(PlotFill::Solid("#123456"))).as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(
+            ground(Some(PlotFill::Pattern {
+                foreground: Some("#01C4BF"),
+                background: Some("#01BABC"),
+            }))
+            .as_deref(),
+            Some("#01BFBD")
+        );
+        assert_eq!(ground(Some(PlotFill::None)), None);
+    }
+
+    /// White series ink over a coloured chart space stays visible only if the
+    /// ground is the part's own, not the hardcoded white.
+    #[test]
+    fn a_no_fill_chart_space_paints_nothing_behind_the_series() {
+        let data = source(&[1.0, 2.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group("column", vec![series("North", &data)])],
+            fill: Some(PlotFill::None),
+            ..PlotChart::default()
+        };
+        assert!(!plot_chart(&chart, rect()).iter().any(|op| matches!(
+            op,
+            PlotOp::Rect { w, h, .. } if *w == 300.0 && *h == 200.0
+        )));
+    }
+
+    /// `(x1, y1, x2, y2, color, width)` of every non-gridline rule.
+    fn rules(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64, String, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
+                    width,
+                } if color != CHART_GRID_COLOR => Some((*x1, *y1, *x2, *y2, color.clone(), *width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_axis_line_follows_its_own_sp_pr_rather_than_the_chart_default() {
+        let data = source(&[1.0, 2.0]);
+        let edges = |value_line, category_line| {
+            let mut group = group("column", vec![series("North", &data)]);
+            group.axis_ids = vec!["1", "2"];
+            let mut value = value_axis("1", 0.0, 4.0);
+            value.line = value_line;
+            let category = PlotAxis {
+                id: Some("2"),
+                kind: PlotAxisKind::Category,
+                line: category_line,
+                ..PlotAxis::default()
+            };
+            let chart = PlotChart {
+                chart_type: "column",
+                plot_groups: vec![group],
+                axes: vec![value, category],
+                ..PlotChart::default()
+            };
+            rules(&plot_chart(&chart, rect()))
+        };
+
+        let default = edges(None, None);
+        assert_eq!(default.len(), 2);
+        assert!(
+            default
+                .iter()
+                .all(|(.., color, width)| color == CHART_AXIS_COLOR && *width == 1.0)
+        );
+
+        let suppressed = edges(
+            Some(PlotLine {
+                none: true,
+                ..PlotLine::default()
+            }),
+            Some(PlotLine {
+                color: Some("#BFBFBF"),
+                width_emu: Some(9525.0),
+                ..PlotLine::default()
+            }),
+        );
+        assert_eq!(suppressed.len(), 1);
+        let (x1, y1, x2, _, color, width) = suppressed[0].clone();
+        assert!(y1 > 0.0 && x2 > x1, "the surviving rule is the bottom one");
+        assert_eq!((color.as_str(), width), ("#BFBFBF", 1.0));
+    }
+
+    #[test]
+    fn an_axis_line_width_scales_with_its_emu_and_stays_at_least_a_hairline() {
+        assert_eq!(axis_line_width(None), 1.0);
+        assert_eq!(axis_line_width(Some(9525.0)), 1.0);
+        assert_eq!(axis_line_width(Some(3175.0)), 1.0);
+        assert_eq!(axis_line_width(Some(38100.0)), 4.0);
+        assert_eq!(axis_line_width(Some(f64::INFINITY)), 1.0);
+        assert_eq!(axis_line_width(Some(1e30)), MAX_AXIS_LINE_PX);
     }
 
     #[test]
