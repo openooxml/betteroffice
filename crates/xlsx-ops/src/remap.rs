@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use xlsx_calc::lexer::MAX_FORMULA_BYTES;
-use xlsx_calc::parse_formula;
 use xlsx_calc::parser::Expr;
+use xlsx_calc::{ColumnRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
@@ -753,7 +753,11 @@ fn rewrite_defined_name(
             }
             continue;
         }
-        let Ok(expr) = parse_formula(component) else {
+        // Whole-column names still need the token rewriter's ambiguity checks.
+        let Some(expr) = parse_formula(component)
+            .ok()
+            .filter(|expr| !contains_column_range(expr))
+        else {
             match rewrite_reference_tokens(component, op, matches_target, global, names) {
                 DefinedNameRewrite::Unchanged => {
                     rewritten.push(component.to_owned());
@@ -1254,12 +1258,24 @@ fn endpoints_share_a_sheet(first: &Endpoint<'_>, second: &Endpoint<'_>) -> bool 
 
 fn contains_unqualified_reference(expr: &Expr) -> bool {
     match expr {
-        Expr::Ref { sheet: None, .. } | Expr::Range { sheet: None, .. } => true,
+        Expr::Ref { sheet: None, .. }
+        | Expr::Range { sheet: None, .. }
+        | Expr::ColumnRange { sheet: None, .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_unqualified_reference(expr),
         Expr::Binary { lhs, rhs, .. } => {
             contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
         }
         Expr::FuncCall { args, .. } => args.iter().any(contains_unqualified_reference),
+        _ => false,
+    }
+}
+
+fn contains_column_range(expr: &Expr) -> bool {
+    match expr {
+        Expr::ColumnRange { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_column_range(expr),
+        Expr::Binary { lhs, rhs, .. } => contains_column_range(lhs) || contains_column_range(rhs),
+        Expr::FuncCall { args, .. } => args.iter().any(contains_column_range),
         _ => false,
     }
 }
@@ -1350,8 +1366,7 @@ fn split_union(source: &str) -> Option<Vec<&str>> {
     Some(components)
 }
 
-/// A whole-row (`Sheet!$1:$5`) or whole-column (`Sheet!$A:$C`) reference. Print
-/// titles are written this way and the formula lexer has no token for it.
+/// A whole-row or whole-column reference, including print titles.
 struct AxisRange<'a> {
     qualifier: &'a str,
     sheet: Option<String>,
@@ -2004,6 +2019,22 @@ fn transform(
                 Expr::Error(ErrorValue::Ref)
             }
         },
+        Expr::ColumnRange { sheet, range } if matches_target(sheet) => {
+            match remap_columns(*range, op) {
+                Remapped::Unchanged => expr.clone(),
+                Remapped::Moved(range) => {
+                    *changed = true;
+                    Expr::ColumnRange {
+                        sheet: sheet.clone(),
+                        range,
+                    }
+                }
+                Remapped::Deleted => {
+                    *changed = true;
+                    Expr::Error(ErrorValue::Ref)
+                }
+            }
+        }
         Expr::Unary { op: u, expr: e } => Expr::Unary {
             op: *u,
             expr: Box::new(transform(e, op, matches_target, changed)),
@@ -2022,6 +2053,27 @@ fn transform(
                 .collect(),
         },
         _ => expr.clone(),
+    }
+}
+
+fn remap_columns(range: ColumnRange, op: &Op) -> Remapped<ColumnRange> {
+    let axis = AxisRange {
+        qualifier: "",
+        sheet: None,
+        axis: Axis::Col,
+        start: range.start,
+        end: range.end,
+        start_absolute: range.abs_start,
+        end_absolute: range.abs_end,
+    };
+    match axis.shifted(op) {
+        Remapped::Unchanged => Remapped::Unchanged,
+        Remapped::Moved((start, end)) => Remapped::Moved(ColumnRange {
+            start,
+            end,
+            ..range
+        }),
+        Remapped::Deleted => Remapped::Deleted,
     }
 }
 
@@ -2163,6 +2215,84 @@ mod tests {
 
     fn formula(wb: &Workbook, sheet: SheetId, at: &str) -> Option<String> {
         wb.formula(sheet, r(at)).map(str::to_string)
+    }
+
+    #[test]
+    fn whole_column_formulas_survive_row_edits_and_follow_column_edits() {
+        for (op, expected) in [
+            (
+                Op::InsertRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+                "$S:V",
+            ),
+            (
+                Op::DeleteRows {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 100,
+                },
+                "$S:V",
+            ),
+            (
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 0,
+                    count: 1,
+                },
+                "$T:W",
+            ),
+            (
+                Op::InsertCols {
+                    sheet: SheetId(0),
+                    at: 19,
+                    count: 1,
+                },
+                "$S:W",
+            ),
+            (
+                Op::DeleteCols {
+                    sheet: SheetId(0),
+                    at: 19,
+                    count: 1,
+                },
+                "$S:U",
+            ),
+            (
+                Op::DeleteCols {
+                    sheet: SheetId(0),
+                    at: 18,
+                    count: 4,
+                },
+                "#REF!",
+            ),
+        ] {
+            let mut workbook = wb(&["Data", "Other"]);
+            set_formula(&mut workbook, SheetId(0), "A1", "VLOOKUP(2,$S:V,4,FALSE)");
+            set_formula(&mut workbook, SheetId(1), "A1", "VLOOKUP(2,$S:V,4,FALSE)");
+            set_formula(
+                &mut workbook,
+                SheetId(1),
+                "A2",
+                "VLOOKUP(2,Data!$S:V,4,FALSE)",
+            );
+            remap_formulas(&mut workbook, &op).unwrap();
+            assert_eq!(
+                formula(&workbook, SheetId(0), "A1").unwrap(),
+                format!("VLOOKUP(2,{expected},4,FALSE)")
+            );
+            assert_eq!(
+                formula(&workbook, SheetId(1), "A1").unwrap(),
+                "VLOOKUP(2,$S:V,4,FALSE)"
+            );
+            let qualifier = if expected == "#REF!" { "" } else { "Data!" };
+            assert_eq!(
+                formula(&workbook, SheetId(1), "A2").unwrap(),
+                format!("VLOOKUP(2,{qualifier}{expected},4,FALSE)")
+            );
+        }
     }
 
     fn charted(wb: &mut Workbook, sheet: SheetId, formulas: &[&str]) {
