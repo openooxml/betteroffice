@@ -3,10 +3,17 @@ use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 const FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/gradient-outline.pptx");
 const V10: &[u8] = include_bytes!("fixtures/gradient-outline-main-v10.update.bin");
+const V13: &[u8] = include_bytes!("fixtures/gradient-outline-main-v13.update.bin");
 
 #[test]
 fn legacy_gradient_outlines_recover_from_source_without_changing_zip_parts() {
-    let pending = DeckSession::open_from_update(V10, 32201).unwrap();
+    for old in [V10, V13] {
+        legacy_gradient_outlines_recover(old);
+    }
+}
+
+fn legacy_gradient_outlines_recover(old: &[u8]) {
+    let pending = DeckSession::open_from_update(old, 32201).unwrap();
     assert!(
         pending.snapshot().unwrap().slides[0].shapes[0]
             .outline
@@ -35,7 +42,7 @@ fn legacy_gradient_outlines_recover_from_source_without_changing_zip_parts() {
     let txn = session.yrs_doc().transact();
     assert_eq!(
         txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion"),
-        Some(Out::Any(Any::Number(11.0)))
+        Some(Out::Any(Any::Number(14.0)))
     );
     drop(txn);
     let reopened = DeckSession::open_from_update_with_source(
@@ -57,6 +64,12 @@ fn legacy_gradient_outlines_recover_from_source_without_changing_zip_parts() {
 
 #[test]
 fn legacy_gradient_recovery_preserves_colour_removal_and_geometry_edits() {
+    for old in [V10, V13] {
+        legacy_gradient_recovery_preserves_edits(old);
+    }
+}
+
+fn legacy_gradient_recovery_preserves_edits(old: &[u8]) {
     for stroke in [
         None,
         Some(ShapeStroke {
@@ -65,7 +78,7 @@ fn legacy_gradient_recovery_preserves_colour_removal_and_geometry_edits() {
         }),
         Some(ShapeStroke::default()),
     ] {
-        let old = DeckSession::open_from_update(V10, 32205).unwrap();
+        let old = DeckSession::open_from_update(old, 32205).unwrap();
         let original = old.snapshot().unwrap();
         let slide = &original.slides[0];
         let shape = &slide.shapes[0];

@@ -262,8 +262,26 @@ pub struct Shape {
     #[serde(default)]
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
+    /// The image behind an `a:blipFill`, when the fill is a stretched picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_fill: Option<Box<PictureFill>>,
     pub outline: Option<ShapeOutline>,
     pub text: Option<TextBody>,
+}
+
+/// An `a:blipFill` on a shape: the image, and the box it stretches into.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureFill {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relationship_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_part_path: Option<String>,
+    #[serde(default, skip_serializing_if = "PictureCrop::is_whole")]
+    pub crop: PictureCrop,
+    /// `a:stretch/a:fillRect` insets, in thousandths of a percent of the box.
+    #[serde(default, skip_serializing_if = "PictureCrop::is_whole")]
+    pub fill_rect: PictureCrop,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -311,6 +329,12 @@ pub struct PictureCrop {
     pub bottom: i32,
 }
 
+impl PictureCrop {
+    pub fn is_whole(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphicFrame {
@@ -354,6 +378,9 @@ pub struct GroupShape {
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
+    /// Use a 1.2 em percentage pitch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_line_spacing: Option<bool>,
     pub autofit: Option<TextAutofit>,
     pub inset_left: Option<i64>,
     pub inset_top: Option<i64>,
@@ -390,6 +417,18 @@ pub struct TextParagraph {
     pub end_properties: Option<RunProperties>,
 }
 
+/// Paragraph line pitch.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LineSpacing {
+    Percent { value: f64 },
+    Points { value: f64 },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphProperties {
@@ -398,6 +437,8 @@ pub struct ParagraphProperties {
     pub margin_left: Option<i64>,
     pub indent: Option<i64>,
     pub bullet: Option<Bullet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<LineSpacing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bullet_font: Option<BulletFont>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -436,8 +477,15 @@ pub enum BulletSize {
     rename_all_fields = "camelCase"
 )]
 pub enum Bullet {
-    Character { value: String },
-    AutoNumber { scheme: String, start_at: u32 },
+    Character {
+        value: String,
+    },
+    AutoNumber {
+        scheme: String,
+        start_at: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        restart: bool,
+    },
     None,
 }
 

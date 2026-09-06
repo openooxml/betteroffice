@@ -160,8 +160,9 @@ impl DeckSession {
         }
         .map_err(|error| EditError::Parse(error.to_string()))?;
         comments::import_source_comments(&session, &package)?;
-        deck::import_source_list_styles(&session.doc, &package)?;
+        deck::import_source_render_data(&session.doc, &package)?;
         baseline::import_source(&session, &package)?;
+        story::import_source_numbering_restarts(&session.doc, &package)?;
         outline_gradients::import_source(&session, &package)?;
         Ok(Self {
             package: Arc::new(package),

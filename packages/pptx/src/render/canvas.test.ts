@@ -771,6 +771,44 @@ describe('PPTX picture cropping', () => {
     expect(calls).not.toContain('clip');
   });
 
+  test('a two-contour mask keeps both contours, so a counter can be punched out', async () => {
+    const { calls, ctx } = harness();
+    const ring: GeometryPathCommand[] = [
+      { type: 'move', x: 0, y: 0 },
+      { type: 'line', x: 1, y: 0 },
+      { type: 'line', x: 1, y: 1 },
+      { type: 'line', x: 0, y: 1 },
+      { type: 'close' },
+      { type: 'move', x: 0.25, y: 0.25 },
+      { type: 'line', x: 0.25, y: 0.75 },
+      { type: 'line', x: 0.75, y: 0.75 },
+      { type: 'line', x: 0.75, y: 0.25 },
+      { type: 'close' },
+    ];
+    await paintSlide(ctx, list({ path: ring }), 1, 1, { resolveImage: async () => source });
+    expect(calls).toEqual([
+      'save',
+      'save',
+      'save',
+      'beginPath',
+      'move:10,20',
+      'line:210,20',
+      'line:210,120',
+      'line:10,120',
+      'close',
+      'move:60,45',
+      'line:60,95',
+      'line:160,95',
+      'line:160,45',
+      'close',
+      'clip',
+      'draw:0,0,400,300,10,20,200,100',
+      'restore',
+      'restore',
+      'restore',
+    ]);
+  });
+
   test('a crop that keeps nothing draws nothing', async () => {
     const { calls, ctx } = harness();
     await paintSlide(ctx, list({ crop: { left: 0.6, right: 0.6 } }), 1, 1, {

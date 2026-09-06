@@ -151,6 +151,70 @@ pub(crate) fn seed_plain_story(
     story
 }
 
+pub(crate) fn import_source_numbering_restarts(
+    doc: &yrs::Doc,
+    package: &pptx_parse::PptxPackage,
+) -> EditResult<()> {
+    let source = crate::doc_with_client_id(crate::BOOTSTRAP_CLIENT_ID);
+    crate::deck::seed_doc(&source, package, "")?;
+    let source_txn = source.transact();
+    let source_stories = crate::deck::required_map(&source_txn, STORIES)?;
+    let mut restarts = std::collections::HashMap::new();
+    for (_, value) in source_stories.iter(&source_txn) {
+        let Out::YText(story) = value else { continue };
+        for diff in story.diff(&source_txn, YChange::identity) {
+            let Out::YMap(map) = diff.insert else {
+                continue;
+            };
+            let (Some(id), Some(json)) = (
+                map_string(&map, &source_txn, PARA_ID),
+                map_string(&map, &source_txn, "bulletJson"),
+            ) else {
+                continue;
+            };
+            let mut bullet: pptx_parse::Bullet =
+                serde_json::from_str(&json).map_err(|error| EditError::Json(error.to_string()))?;
+            if let pptx_parse::Bullet::AutoNumber {
+                restart: restart @ true,
+                ..
+            } = &mut bullet
+            {
+                *restart = false;
+                restarts.insert(id, (bullet, json));
+            }
+        }
+    }
+    if restarts.is_empty() {
+        return Ok(());
+    }
+    let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
+    let stories = crate::deck::required_map(&txn, STORIES)?;
+    let mut updates = Vec::new();
+    for (_, value) in stories.iter(&txn) {
+        let Out::YText(story) = value else { continue };
+        for diff in story.diff(&txn, YChange::identity) {
+            let Out::YMap(map) = diff.insert else {
+                continue;
+            };
+            let Some(id) = map_string(&map, &txn, PARA_ID) else {
+                continue;
+            };
+            let Some((legacy, source)) = restarts.get(&id) else {
+                continue;
+            };
+            let current = map_string(&map, &txn, "bulletJson")
+                .and_then(|json| serde_json::from_str::<pptx_parse::Bullet>(&json).ok());
+            if current.as_ref() == Some(legacy) {
+                updates.push((map, source.clone()));
+            }
+        }
+    }
+    for (map, json) in updates {
+        map.insert(&mut txn, "bulletJson", json);
+    }
+    Ok(())
+}
+
 fn append_pilcrow(
     story: &TextRef,
     txn: &mut TransactionMut<'_>,
