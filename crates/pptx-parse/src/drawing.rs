@@ -1064,9 +1064,8 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .map(|value| value / 100.0),
         baseline_pct: element
             .attribute("baseline")
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && value.abs() <= 100_000.0)
-            .map(|value| value / 1000.0),
+            .and_then(|value| value.parse::<i32>().ok())
+            .map(|value| f64::from(value) / 1000.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
@@ -1400,6 +1399,24 @@ mod tests {
 
     #[test]
     fn a_run_baseline_reads_as_a_signed_percentage() {
+        for (value, expected) in [
+            ("150000", Some(150.0)),
+            ("-150000", Some(-150.0)),
+            ("2147483647", Some(2147483.647)),
+            ("-2147483648", Some(-2147483.648)),
+            ("2147483648", None),
+            ("-2147483649", None),
+            ("NaN", None),
+            ("inf", None),
+            ("1.5", None),
+        ] {
+            let element = XmlElement::new("a:rPr").with_attribute("baseline", value);
+            assert_eq!(
+                parse_run_properties(Some(&element)).baseline_pct,
+                expected,
+                "{value}"
+            );
+        }
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(

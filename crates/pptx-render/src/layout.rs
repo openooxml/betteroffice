@@ -1256,8 +1256,7 @@ fn resolve_style(
         .or_else(|| fallback.and_then(|value| value.baseline_pct))
         .map(|value| value as f32)
         .filter(|value| value.is_finite())
-        .unwrap_or(0.0)
-        .clamp(-100.0, 100.0);
+        .unwrap_or(0.0);
     let baseline_shift_px = points_to_px(font_size_pt) * baseline_pct / 100.0;
     let font_size_pt = if baseline_pct == 0.0 {
         font_size_pt
@@ -2851,6 +2850,7 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
@@ -2918,6 +2918,7 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
@@ -3692,8 +3693,8 @@ mod tests {
         let em = points_to_px(17.0);
         assert!((raised.baseline_offset_px - em * 0.30).abs() < 0.01);
         assert!((lowered.baseline_offset_px + em * 0.25).abs() < 0.01);
-        assert!((raised.font_size_px - base.font_size_px * SCRIPT_SIZE_RATIO).abs() < 0.01);
-        assert!((lowered.font_size_px - base.font_size_px * SCRIPT_SIZE_RATIO).abs() < 0.01);
+        assert!((raised.font_size_px - 13.146666).abs() < 0.01);
+        assert!((lowered.font_size_px - 13.146666).abs() < 0.01);
         assert!(
             (raised.glyphs[0].y_offset - (base.glyphs[0].y_offset - raised.baseline_offset_px))
                 .abs()
@@ -3701,6 +3702,72 @@ mod tests {
         );
         assert!(lowered.glyphs[0].y_offset > base.glyphs[0].y_offset);
         assert!(line.baseline - raised.baseline_offset_px - raised.font_size_px >= line.y);
+    }
+
+    #[test]
+    fn baseline_cascade_keeps_zero_overrides_and_expands_line_metrics() {
+        let mut package = pptx_parse::parse_pptx(include_bytes!(
+            "../tests/fixtures/text-baseline-script.pptx"
+        ))
+        .unwrap();
+        let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[3] else {
+            panic!("shape")
+        };
+        let body = shape.text.as_mut().unwrap();
+        body.list_style = vec![pptx_parse::ParagraphProperties {
+            default_run: Some(RunProperties {
+                baseline_pct: Some(150.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        body.paragraphs[0]
+            .properties
+            .default_run
+            .as_mut()
+            .unwrap()
+            .baseline_pct = None;
+        body.paragraphs[0].runs = [None, Some(-150.0), Some(0.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, baseline)| pptx_parse::TextRun {
+                text: ["A", "B", "C"][i].into(),
+                properties: RunProperties {
+                    font_size_pt: Some(17.0),
+                    baseline_pct: baseline,
+                    ..Default::default()
+                },
+                field_id: None,
+                field_type: None,
+                line_break: false,
+            })
+            .collect();
+        let session = DeckSession::from_package(package, 331).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::TextBox { lines, .. } = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|p| matches!(p, Primitive::TextBox { object_id: 5, .. }))
+            .unwrap()
+        else {
+            panic!("text")
+        };
+        let line = &lines[0];
+        assert_eq!(line.runs.len(), 3);
+        for (run, shift, size) in [
+            (&line.runs[0], 34.0, 13.146666),
+            (&line.runs[1], -34.0, 13.146666),
+            (&line.runs[2], 0.0, 22.666666),
+        ] {
+            assert!((run.baseline_offset_px - shift).abs() < 0.001);
+            assert!((run.font_size_px - size).abs() < 0.001);
+            assert!((run.glyphs[0].y_offset - (line.baseline - shift)).abs() < 0.001);
+        }
+        assert!(line.baseline - line.y > 34.0);
+        assert!(line.y + line.height - line.baseline > 34.0);
     }
 
     #[test]

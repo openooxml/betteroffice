@@ -47,6 +47,7 @@ pub(crate) fn validate_style_values(
     underline: Option<&str>,
     color: Option<&str>,
     font_size_pt: Option<f64>,
+    baseline_pct: Option<f64>,
 ) -> EditResult<()> {
     if let Some(font_family) = font_family {
         validate_xml_text(font_family)?;
@@ -72,6 +73,14 @@ pub(crate) fn validate_style_values(
         return Err(EditError::InvalidText(format!(
             "font size {size}pt is outside the 1-4000pt range"
         )));
+    }
+    if let Some(baseline) = baseline_pct
+        && (!baseline.is_finite()
+            || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&(baseline * 1000.0)))
+    {
+        return Err(EditError::InvalidText(
+            "baseline exceeds the signed percentage range".into(),
+        ));
     }
     Ok(())
 }
@@ -217,6 +226,7 @@ impl DeckSession {
             style.underline.as_deref(),
             style.color.as_deref(),
             style.font_size_pt,
+            style.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -274,6 +284,7 @@ impl DeckSession {
             patch.underline.as_deref(),
             patch.color.as_deref(),
             patch.font_size_pt,
+            patch.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
