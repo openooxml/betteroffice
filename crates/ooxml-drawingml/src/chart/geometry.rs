@@ -173,9 +173,7 @@ pub struct PlotStroke {
     pub width: f64,
 }
 
-/// Where a text op sits inside the `width` it is given. The geometry crate has
-/// no font metrics, so anything that has to be centred says so and the host,
-/// which has shaped the run, resolves it.
+/// Text alignment within the op's box.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlotTextAlign {
     /// `x` is the left edge of the run.
@@ -227,6 +225,10 @@ pub enum PlotOp {
 pub trait PlotSink {
     fn accepts_more(&mut self) -> bool {
         true
+    }
+
+    fn measure_text(&mut self, _text: &str, _font: &PlotFont) -> Option<f64> {
+        None
     }
 
     fn push_op(&mut self, op: PlotOp) -> bool;
@@ -886,8 +888,19 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         .as_ref()
         .and_then(|legend| legend.position)
         .unwrap_or("right");
-    let legend = legend_band(chart, legend_position, x, y, width, height, title_h);
-    // A row legend hands its width back to the plot; only a column legend takes any.
+    let legend = legend_band(
+        chart,
+        legend_position,
+        PlotRect {
+            x,
+            y,
+            w: width,
+            h: height,
+        },
+        title_h,
+        legend_style,
+        ops,
+    );
     let legend_w = match &legend {
         Some(band) if !band.horizontal => LEGEND_COL_W,
         _ => 8.0,
@@ -1571,67 +1584,167 @@ fn has_legend(chart: &PlotChart<'_>) -> bool {
         .unwrap_or(true)
 }
 
-/// The strip `plot_chart_into` hands the legend, and the edge it comes off.
 struct LegendBand {
     x: f64,
     y: f64,
     w: f64,
     h: f64,
-    /// Entries flow left to right rather than stacking down.
     horizontal: bool,
+    rows: Vec<LegendRow>,
 }
 
-/// Where `c:legendPos` puts the legend, `None` when the chart has none.
-fn legend_band(
-    chart: &PlotChart<'_>,
-    position: &str,
-    x: f64,
-    y: f64,
+#[derive(Default)]
+struct LegendRow {
+    entries: Vec<LegendEntry>,
     width: f64,
     height: f64,
+}
+
+struct LegendEntry {
+    lines: Vec<String>,
+    color: String,
+    width: f64,
+}
+
+fn legend_band<S: PlotSink + ?Sized>(
+    chart: &PlotChart<'_>,
+    position: &str,
+    rect: PlotRect,
     title_h: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
 ) -> Option<LegendBand> {
     if !has_legend(chart) {
         return None;
     }
-    Some(match position {
-        "bottom" => LegendBand {
-            x: x + 8.0,
-            y: y + height - LEGEND_ROW_H,
-            w: (width - 16.0).max(0.0),
-            h: LEGEND_ROW_H,
-            horizontal: true,
+    let PlotRect {
+        x,
+        y,
+        w: width,
+        h: height,
+    } = rect;
+    let horizontal = matches!(position, "top" | "bottom");
+    let w = if horizontal {
+        (width - 16.0).max(0.0)
+    } else {
+        LEGEND_COL_W - 12.0
+    };
+    let rows = if horizontal {
+        legend_rows(chart, w, style, ops)
+    } else {
+        Vec::new()
+    };
+    let h = if horizontal {
+        rows.iter()
+            .map(|row| row.height)
+            .sum::<f64>()
+            .max(LEGEND_ROW_H)
+    } else {
+        (height - title_h).max(0.0)
+    };
+    Some(LegendBand {
+        x: if horizontal {
+            x + 8.0
+        } else if position == "left" {
+            x + 6.0
+        } else {
+            x + width - LEGEND_COL_W + 6.0
         },
-        "top" => LegendBand {
-            x: x + 8.0,
-            y: y + title_h,
-            w: (width - 16.0).max(0.0),
-            h: LEGEND_ROW_H,
-            horizontal: true,
+        y: if position == "bottom" {
+            y + height - h
+        } else if horizontal {
+            y + title_h
+        } else {
+            y + title_h + 8.0
         },
-        "left" => LegendBand {
-            x: x + 6.0,
-            y: y + title_h + 8.0,
-            w: LEGEND_COL_W - 12.0,
-            h: (height - title_h).max(0.0),
-            horizontal: false,
-        },
-        _ => LegendBand {
-            x: x + width - LEGEND_COL_W + 6.0,
-            y: y + title_h + 8.0,
-            w: LEGEND_COL_W - 12.0,
-            h: (height - title_h).max(0.0),
-            horizontal: false,
-        },
+        w,
+        h,
+        horizontal,
+        rows,
     })
 }
 
-/// Rough advance of `label`, enough to centre a legend row. The geometry crate
-/// has no font metrics; the sans faces charts use run a little under half an em
-/// across mixed-case text, and a row that is centred approximately still beats
-/// one drawn in the opposite corner.
-fn text_advance(label: &str, size_px: f64) -> f64 {
-    label.chars().take(MAX_LABEL_CHARS).count() as f64 * size_px * 0.5
+fn legend_rows<S: PlotSink + ?Sized>(
+    chart: &PlotChart<'_>,
+    width: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> Vec<LegendRow> {
+    let lead = LEGEND_SWATCH + LEGEND_SWATCH_GAP;
+    if width <= lead {
+        return Vec::new();
+    }
+    let mut rows = vec![LegendRow::default()];
+    let line_height = legend_line_height(style);
+    for (label, color) in legend_entries(chart, &mut ScanBudget::new()) {
+        let lines = wrap_legend_label(&label, width - lead, style, ops);
+        let entry_width = lead
+            + lines
+                .iter()
+                .map(|line| legend_text_width(line, style, ops))
+                .fold(0.0, f64::max);
+        let row = rows.last().unwrap();
+        if !row.entries.is_empty() && row.width + LEGEND_ROW_GAP + entry_width > width {
+            rows.push(LegendRow::default());
+        }
+        let row = rows.last_mut().unwrap();
+        if !row.entries.is_empty() {
+            row.width += LEGEND_ROW_GAP;
+        }
+        row.width += entry_width;
+        row.height = row.height.max(line_height * lines.len() as f64);
+        row.entries.push(LegendEntry {
+            lines,
+            color,
+            width: entry_width,
+        });
+    }
+    rows
+}
+
+fn legend_line_height(style: &ResolvedText) -> f64 {
+    LEGEND_ROW_H.max(style.font.size_px * 1.25 + 8.0)
+}
+
+fn legend_text_width<S: PlotSink + ?Sized>(
+    label: &str,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> f64 {
+    ops.sink
+        .measure_text(label, &style.font)
+        .filter(|width| width.is_finite() && *width >= 0.0)
+        .unwrap_or_else(|| label.chars().count() as f64 * style.font.size_px * 0.5)
+}
+
+fn wrap_legend_label<S: PlotSink + ?Sized>(
+    label: &str,
+    width: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> Vec<String> {
+    let mut remaining: String = label.chars().take(MAX_LABEL_CHARS).collect();
+    let mut lines = Vec::new();
+    while legend_text_width(&remaining, style, ops) > width {
+        let mut end = 0;
+        for (index, ch) in remaining.char_indices() {
+            let next = index + ch.len_utf8();
+            if end > 0 && legend_text_width(&remaining[..next], style, ops) > width {
+                break;
+            }
+            end = next;
+        }
+        let split = remaining[..end]
+            .rfind(char::is_whitespace)
+            .map(|index| index + remaining[index..].chars().next().unwrap().len_utf8())
+            .unwrap_or(end);
+        lines.push(remaining[..split].to_owned());
+        remaining = remaining[split..].to_owned();
+    }
+    if !remaining.is_empty() || lines.is_empty() {
+        lines.push(remaining);
+    }
+    lines
 }
 
 fn hex(color: &str) -> String {
@@ -3557,6 +3670,19 @@ fn emit_legend<S: PlotSink + ?Sized>(
     if !has_legend(chart) || band.w <= 0.0 {
         return;
     }
+    if band.horizontal {
+        emit_legend_rows(ops, band, style);
+        return;
+    }
+    let entries = legend_entries(chart, budget);
+    for (i, (label, color)) in entries.iter().enumerate() {
+        let yy = band.y + i as f64 * 15.0;
+        push_rect(ops, band.x, yy, LEGEND_SWATCH, LEGEND_SWATCH, color);
+        push_text(ops, label, band.x + 12.0, yy + 8.0, band.w - 12.0, style);
+    }
+}
+
+fn legend_entries(chart: &PlotChart<'_>, budget: &mut ScanBudget) -> Vec<(String, String)> {
     let series: Vec<&PlotSeries<'_>> = if chart.series.is_empty() {
         chart
             .plot_groups
@@ -3574,7 +3700,7 @@ fn emit_legend<S: PlotSink + ?Sized>(
                 Some("pie") | Some("doughnut") | Some("ofPie")
             )
         });
-    let entries: Vec<(String, String)> = if pie_legend {
+    if pie_legend {
         series
             .as_slice()
             .first()
@@ -3609,55 +3735,39 @@ fn emit_legend<S: PlotSink + ?Sized>(
                 )
             })
             .collect()
-    };
-    if band.horizontal {
-        emit_legend_row(ops, &entries, band, style);
-        return;
-    }
-    for (i, (label, color)) in entries.iter().enumerate() {
-        let yy = band.y + i as f64 * 15.0;
-        push_rect(ops, band.x, yy, LEGEND_SWATCH, LEGEND_SWATCH, color);
-        push_text(ops, label, band.x + 12.0, yy + 8.0, band.w - 12.0, style);
     }
 }
 
-/// One row of legend entries, centred in `band`.
-fn emit_legend_row<S: PlotSink + ?Sized>(
+fn emit_legend_rows<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
-    entries: &[(String, String)],
     band: LegendBand,
     style: &ResolvedText,
 ) {
-    if entries.is_empty() {
-        return;
-    }
     let lead = LEGEND_SWATCH + LEGEND_SWATCH_GAP;
-    let entry_w = |label: &str| lead + text_advance(label, style.font.size_px);
-    let total = entries.iter().map(|(label, _)| entry_w(label)).sum::<f64>()
-        + LEGEND_ROW_GAP * (entries.len() - 1) as f64;
-    let swatch_y = band.y + (band.h - LEGEND_SWATCH) / 2.0;
-    // Cap height runs about 0.72 em on the sans faces charts use, so centring
-    // the row on it keeps the labels on the swatches' midline at any size.
-    let baseline = band.y + (band.h + style.font.size_px * 0.72) / 2.0;
-    // A row too wide to centre is spread evenly instead, so that an estimate
-    // that ran long cannot push entries out of the chart frame.
-    let (mut cursor, pitch) = if total <= band.w {
-        (band.x + (band.w - total) / 2.0, None)
-    } else {
-        (band.x, Some(band.w / entries.len() as f64))
-    };
-    for (label, color) in entries {
-        push_rect(ops, cursor, swatch_y, LEGEND_SWATCH, LEGEND_SWATCH, color);
-        let step = pitch.unwrap_or_else(|| entry_w(label) + LEGEND_ROW_GAP);
-        push_text(
-            ops,
-            label,
-            cursor + lead,
-            baseline,
-            (step - lead).max(1.0),
-            style,
-        );
-        cursor += step;
+    let line_height = legend_line_height(style);
+    let mut y = band.y;
+    for row in &band.rows {
+        let mut x = band.x + ((band.w - row.width) / 2.0).max(0.0);
+        let swatch_y = y + (row.height - LEGEND_SWATCH) / 2.0;
+        for entry in &row.entries {
+            push_rect(ops, x, swatch_y, LEGEND_SWATCH, LEGEND_SWATCH, &entry.color);
+            let top = y + (row.height - line_height * entry.lines.len() as f64) / 2.0;
+            for (index, line) in entry.lines.iter().enumerate() {
+                let baseline = top
+                    + index as f64 * line_height
+                    + (line_height + style.font.size_px * 0.72) / 2.0;
+                push_text(
+                    ops,
+                    line,
+                    x + lead,
+                    baseline,
+                    (entry.width - lead + LEGEND_ROW_GAP).max(1.0),
+                    style,
+                );
+            }
+            x += entry.width + LEGEND_ROW_GAP;
+        }
+        y += row.height;
     }
 }
 
@@ -6053,7 +6163,7 @@ mod tests {
     }
 
     #[test]
-    fn a_legend_row_too_wide_to_centre_stays_inside_the_frame() {
+    fn a_wrapped_legend_keeps_every_entry_inside_the_frame() {
         let data = source(&[10.0, 20.0]);
         let names = [
             "Northern region",
@@ -6069,14 +6179,61 @@ mod tests {
         let swatches = swatches(&ops);
         assert_eq!(swatches.len(), MAX_LEGEND_ENTRIES);
         assert!(
-            swatches.windows(2).all(|pair| pair[0].1 == pair[1].1),
-            "the overflow fallback is still a row: {swatches:?}"
+            swatches.windows(2).any(|pair| pair[0].1 < pair[1].1),
+            "long entries wrap onto another row: {swatches:?}"
         );
-        assert!(swatches[0].0 >= rect().x);
-        assert!(
-            swatches[MAX_LEGEND_ENTRIES - 1].0 + LEGEND_SWATCH <= rect().x + rect().w,
-            "the last swatch left the frame: {swatches:?}"
-        );
+        for (x, y) in swatches {
+            assert!(x >= rect().x && x + LEGEND_SWATCH <= rect().x + rect().w);
+            assert!(y >= rect().y && y + LEGEND_SWATCH <= rect().y + rect().h);
+        }
+    }
+
+    #[test]
+    fn top_and_bottom_bands_resize_pie_and_radar_families() {
+        let data = source(&[10.0, 20.0, 30.0]);
+        let names = ["North"];
+        for kind in ["pie", "radar"] {
+            let bounds = |position| {
+                let mut chart = legend_chart(position, &names, &data);
+                chart.chart_type = kind;
+                if position.is_none() {
+                    chart.legend.as_mut().unwrap().visible = Some(false);
+                }
+                if kind == "radar" {
+                    chart.plot_groups = vec![PlotGroup {
+                        chart_type: Some("radar"),
+                        series: chart.series.clone(),
+                        radar_style: Some("filled"),
+                        ..PlotGroup::default()
+                    }];
+                }
+                plot_chart(&chart, rect())
+                    .into_iter()
+                    .find_map(|op| match op {
+                        PlotOp::Path { commands, .. } => {
+                            let ys: Vec<_> = commands
+                                .iter()
+                                .filter_map(|command| match command {
+                                    GeometryPathCommand::Move { y, .. }
+                                    | GeometryPathCommand::Line { y, .. } => Some(*y),
+                                    _ => None,
+                                })
+                                .collect();
+                            let min = ys.iter().copied().fold(f64::INFINITY, f64::min);
+                            let max = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                            Some((min, max - min))
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let original = bounds(None);
+            let top = bounds(Some("top"));
+            let bottom = bounds(Some("bottom"));
+            assert!(top.1 < original.1, "{kind}: {top:?} vs {original:?}");
+            assert!((top.1 - bottom.1).abs() < 1e-9);
+            assert!((top.0 - bottom.0 - LEGEND_ROW_H).abs() < 1e-9);
+        }
     }
 
     #[test]

@@ -248,9 +248,11 @@ export interface StrokeEnd {
 }
 
 export interface Stroke {
+  /** Solid colour or first gradient stop. */
   color: string;
   width: number;
   dashed?: boolean;
+  paint?: Paint;
   headEnd?: StrokeEnd;
   tailEnd?: StrokeEnd;
 }

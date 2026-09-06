@@ -122,8 +122,30 @@ cargo run --locked -p betteroffice-pptx-edit --example generate_spacing_schema_s
 
 The generator asserts schema 13 and verifies that main reopens every fresh seed
 without changes. Tests observe separate baseline (10), numbering (11), spacing
-(12), picture-fill (13), and chart-properties (14) transactions. Source
-attachment restores missing properties, preserves edits, and persists them for
-source-free reopening. Released v1 and historical v2–v12 fixtures traverse every
-remaining migration in order; v13 seeds undergo only the chart-properties
-migration. Reopening is idempotent, and versions newer than 14 are rejected.
+(12), picture-fill (13), gradient-outline (14), and chart-properties (15)
+transactions. Source attachment restores missing properties, preserves edits,
+and persists them for source-free reopening. Released v1 and historical v2–v12
+fixtures traverse every remaining migration in order; v13 seeds undergo only the
+gradient-outline and chart-properties migrations. Reopening is idempotent, and
+versions newer than 15 are rejected.
+
+`gradient-outline-main-v10.update.bin` was exported by `DeckSession::open` at
+main `069e4d66bf749869ad581114dd3e4e4c721ed07f` (schema 10) from
+`crates/pptx-parse/tests/fixtures/gradient-outline.pptx`, with client ID 322.
+It remains the historical oracle that traverses the numbering, line-spacing,
+picture-fill, and gradient-outline migrations in order.
+
+`gradient-outline-main-v13.update.bin` is the same deck seeded by current main
+`9274a2ba042b4fcc05ecfad909ea0719ed8b13b1` (schema 13), using its locked
+dependencies and client ID 322. Copy `generate_gradient_schema_snapshots.rs`
+into that main checkout's `crates/pptx-edit/examples/` and run:
+
+```sh
+cargo run --locked -p betteroffice-pptx-edit --example generate_gradient_schema_snapshots -- /absolute/path/to/this/branch
+```
+
+The generator asserts schema 13 and that main reopens the seed unchanged. Both
+fixtures test the schema-14 gradient-outline migration, deferred source
+recovery, part-preserving saves, and retention of explicit outline edits; the
+v13 seed undergoes only that migration and the schema-15 chart-properties
+migration, and versions newer than 15 are rejected.

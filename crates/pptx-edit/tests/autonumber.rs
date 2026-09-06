@@ -118,7 +118,7 @@ fn assert_migrated_restarts(legacy: &[u8]) {
     let txn = doc.transact();
     assert_eq!(
         txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion"),
-        Some(Out::Any(Any::Number(14.0)))
+        Some(Out::Any(Any::Number(15.0)))
     );
     let reopened = DeckSession::open_from_update(&update, 30013).unwrap();
     assert_eq!(reopened.encode_state_as_update_v1(), update);

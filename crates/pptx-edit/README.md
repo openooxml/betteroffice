@@ -18,10 +18,11 @@ untouched comment parts byte for byte. Deleting a thread removes its known
 replies; a reply added concurrently becomes a root when its parent is absent,
 so both clients and saved files retain it.
 
-The current schema is v14. Older v1–v13 updates can be opened, and attaching the
+The current schema is v15. Older v1–v14 updates can be opened, and attaching the
 original package with `open_from_update_with_source` imports source comments,
 list styles, explicit numbering restarts, paragraph line spacing, picture
-fills, and chart-space fills and axis lines missing from older snapshots.
+fills, unedited gradient outlines, and chart-space fills and axis lines missing
+from older snapshots.
 Source attachment also restores run baseline formatting on surviving text while
 retaining edits and explicit zero overrides. Imported properties persist in
 subsequent updates, and reattaching the source is idempotent.
@@ -30,8 +31,8 @@ reject new-schema updates; collaborators must upgrade together or exchange
 saved PPTX files. The existing connector, slide-number, theme-formatting,
 hidden-shape, custom-geometry, comment and list-style migrations run first,
 followed by the schema-10 baseline migration, schema-11 numbering migration,
-schema-12 line-spacing migration, schema-13 picture-fill migration, and
-schema-14 chart-properties migration.
+schema-12 line-spacing migration, schema-13 picture-fill migration,
+schema-14 gradient-outline migration, and schema-15 chart-properties migration.
 Missing starting slide numbers default to one and stay omitted from package JSON.
 
 Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
