@@ -127,11 +127,19 @@ pub fn style_outline(
             ..ShapeOutline::default()
         });
     };
-    Some(ShapeOutline {
+    let mut resolved = ShapeOutline {
         width: outline.width.or(Some(DEFAULT_STYLE_LINE_WIDTH_EMU)),
         color: substitute_color(outline.color.as_ref(), placeholder.as_ref()),
         ..outline.clone()
-    })
+    };
+    if let Some(gradient) = &mut resolved.gradient {
+        for stop in &mut gradient.stops {
+            if let Some(color) = substitute_color(Some(&stop.color), placeholder.as_ref()) {
+                stop.color = color;
+            }
+        }
+    }
+    Some(resolved)
 }
 
 /// Applies reference modifiers before style modifiers.
@@ -176,6 +184,42 @@ mod tests {
             rgb: Some(value.to_owned()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn gradient_outline_substitutes_placeholder_colour_and_preserves_modifiers() {
+        let scheme = ThemeFormatScheme {
+            lines: vec![Some(ShapeOutline {
+                gradient: Some(GradientFill {
+                    gradient_type: "linear".into(),
+                    angle: Some(45.0),
+                    stops: vec![GradientStop {
+                        position: 0.0,
+                        color: ColorValue {
+                            theme_color: Some("phClr".into()),
+                            luminance_modulation: Some(0.5),
+                            ..Default::default()
+                        },
+                    }],
+                }),
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        let reference = StyleReference {
+            index: 1,
+            color: Some(ColorValue {
+                alpha: Some(0.25),
+                ..rgb("FF0000")
+            }),
+        };
+        let resolved = style_outline(&scheme, &reference, &Theme::default()).unwrap();
+        let gradient = resolved.gradient.unwrap();
+        assert_eq!(gradient.angle, Some(45.0));
+        assert_eq!(gradient.stops[0].color.rgb.as_deref(), Some("FF0000"));
+        assert_eq!(gradient.stops[0].color.theme_color, None);
+        assert_eq!(gradient.stops[0].color.luminance_modulation, Some(0.5));
+        assert_eq!(gradient.stops[0].color.alpha, Some(0.25));
     }
 
     fn solid(color: ColorValue) -> ShapeFill {

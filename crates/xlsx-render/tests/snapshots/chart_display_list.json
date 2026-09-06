@@ -34,7 +34,7 @@
       "y": 20.0
     },
     {
-      "align": "left",
+      "align": "center",
       "bold": true,
       "chart": true,
       "clip": {
@@ -48,7 +48,7 @@
       "fontSize": 9.75,
       "op": "text",
       "text": "Revenue",
-      "x": 18.0,
+      "x": 110.0,
       "y": 38.0
     },
     {

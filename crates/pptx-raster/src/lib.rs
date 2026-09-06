@@ -406,7 +406,7 @@ impl Painter<'_, '_> {
                 .fill_path(&path, &paint, FillRule::Winding, transform, clip);
         }
         if let Some(stroke) = stroke {
-            self.stroke_path(&path, stroke, transform, clip)?;
+            self.stroke_path(&path, stroke, [x, y, w, h], transform, clip)?;
         }
         Ok(())
     }
@@ -471,7 +471,7 @@ impl Painter<'_, '_> {
             }
         }
         if let Some(stroke) = stroke {
-            self.stroke_path(&outline, stroke, transform, clip)?;
+            self.stroke_path(&outline, stroke, [x, y, w, h], transform, clip)?;
         }
         Ok(())
     }
@@ -527,10 +527,11 @@ impl Painter<'_, '_> {
         &mut self,
         path: &Path,
         stroke: &SlideStroke,
+        bounds: [f32; 4],
         transform: Transform,
         clip: Option<&Mask>,
     ) -> Result<(), String> {
-        let Some(paint) = stroke_paint(stroke)? else {
+        let Some(paint) = stroke_paint(stroke, bounds)? else {
             return Ok(());
         };
         let (paint, stroke) = paint;
@@ -743,13 +744,21 @@ fn gradient_paint(
 
 /// The dash pattern mirrors `strokeCurrentPath` in the canvas backend, so a
 /// dashed outline breaks at the same places in both.
-fn stroke_paint(stroke: &SlideStroke) -> Result<Option<(Paint<'static>, Stroke)>, String> {
+fn stroke_paint(
+    stroke: &SlideStroke,
+    [x, y, w, h]: [f32; 4],
+) -> Result<Option<(Paint<'static>, Stroke)>, String> {
     if !stroke.width.is_finite() || stroke.width <= 0.0 {
         return Ok(None);
     }
-    let mut paint = Paint::default();
-    paint.set_color(parse_color(&stroke.color)?);
-    paint.anti_alias = true;
+    let paint = if let Some(paint) = &stroke.paint {
+        shader_paint(paint, x, y, w, h)?
+    } else {
+        let mut paint = Paint::default();
+        paint.set_color(parse_color(&stroke.color)?);
+        paint.anti_alias = true;
+        paint
+    };
     let dash = stroke.dashed.then(|| {
         StrokeDash::new(
             vec![3.0_f32.max(stroke.width * 2.0), 2.0_f32.max(stroke.width)],
@@ -851,6 +860,77 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_outlines_paint_shapes_images_and_zero_height_lines() {
+        let fonts = FontStore::new();
+        let images = AssetMap::new();
+        for kind in ["line", "rect", "image"] {
+            let mut list = empty_list(240.0, 160.0);
+            let stroke = SlideStroke {
+                color: "#00FF00".into(),
+                width: 8.0,
+                dashed: false,
+                head_end: None,
+                tail_end: None,
+                paint: Some(SlidePaint::Gradient {
+                    gradient_type: GradientType::Linear,
+                    angle_deg: Some(0.0),
+                    stops: vec![
+                        pptx_render::GradientStop {
+                            position: 0.0,
+                            color: "#FF0000".into(),
+                        },
+                        pptx_render::GradientStop {
+                            position: 1.0,
+                            color: "#0000FF".into(),
+                        },
+                    ],
+                }),
+            };
+            let h = if kind == "line" { 0.0 } else { 80.0 };
+            list.primitives.push(if kind == "image" {
+                Primitive::Image {
+                    object_id: 1,
+                    shape_id: None,
+                    name: kind.into(),
+                    x: 20.0,
+                    y: 40.0,
+                    w: 200.0,
+                    h,
+                    asset_id: None,
+                    crop: ImageCrop::default(),
+                    path: None,
+                    stroke: Some(stroke),
+                    transform: SlideTransform::default(),
+                }
+            } else {
+                Primitive::Shape {
+                    object_id: 1,
+                    shape_id: None,
+                    name: kind.into(),
+                    x: 20.0,
+                    y: 40.0,
+                    w: 200.0,
+                    h,
+                    geometry: kind.into(),
+                    adjust_values: Default::default(),
+                    path: ooxml_drawingml::preset_geometry_to_path(kind, &Default::default(), 2.5)
+                        .unwrap(),
+                    fill: None,
+                    stroke: Some(stroke),
+                    transform: SlideTransform::default(),
+                }
+            });
+            let resources = RenderResources::new(&fonts, &images);
+            let rendered = render_slide(&list, &resources, &RenderOptions::default()).unwrap();
+            let pixmap = Pixmap::decode_png(&rendered.bytes).unwrap();
+            let left = pixmap.pixel(30, 40).unwrap().demultiply();
+            let right = pixmap.pixel(210, 40).unwrap().demultiply();
+            assert!(left.red() > 225 && left.blue() < 30, "{kind}: {left:?}");
+            assert!(right.blue() > 225 && right.red() < 30, "{kind}: {right:?}");
+        }
+    }
 
     fn empty_list(width: f32, height: f32) -> SurfaceDisplayList {
         SurfaceDisplayList {
@@ -997,6 +1077,7 @@ mod tests {
                         color: "#ff00ff".into(),
                         width: 2.0,
                         dashed: false,
+                        paint: None,
                         head_end: None,
                         tail_end: None,
                     }),
