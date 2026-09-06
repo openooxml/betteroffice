@@ -693,16 +693,18 @@ describe('PPTX picture cropping', () => {
 });
 
 describe('PPTX shape shadows', () => {
-  function harness() {
+  function harness(supportsFilters = true) {
     const calls: string[] = [];
     const makeContext = (name: string) => {
       const state: Record<string, unknown> = {
-        canvas: { width: 480, height: 480 }, filter: 'none',
+        canvas: { width: 480, height: 480 }, filter: supportsFilters ? 'none' : undefined,
         getTransform: () => ({ a: 3, b: 0, c: 0, d: 3, e: 0, f: 0 }),
         fill: () => calls.push(`${name}:fill`),
         stroke: () => calls.push(`${name}:stroke`),
         fillRect: () => calls.push(`${name}:tint:${state.globalCompositeOperation}:${state.fillStyle}`),
-        drawImage: (_image: unknown, x: number, y: number) => calls.push(`${name}:shadow:${state.filter}:${x},${y}`),
+        drawImage: (_image: unknown, x: number, y: number) => calls.push(state.shadowColor
+          ? `${name}:native:${state.shadowColor},${state.shadowBlur},${state.shadowOffsetX},${state.shadowOffsetY}:${x},${y}`
+          : `${name}:shadow:${state.filter}:${x},${y}`),
       };
       const filters: unknown[] = [];
       state.save = () => filters.push(state.filter);
@@ -746,6 +748,17 @@ describe('PPTX shape shadows', () => {
         'main:shadow:blur(12px):126,126', 'main:fill', 'main:stroke',
       ]);
       expect(ctx.filter).toBe('none');
+    } finally { restore(); }
+  });
+
+  test('a context without filters paints one shadow from the combined source alpha', async () => {
+    const { calls, ctx, restore } = harness(false);
+    try {
+      await paintSlide(ctx, list({ color: '#00000066', blur: 8, dx: 6, dy: 6 }), 2, 1.5);
+      expect(calls).toEqual([
+        'mask:fill', 'mask:stroke', 'main:native:#00000066,24,-355,18:481,108',
+        'main:fill', 'main:stroke',
+      ]);
     } finally { restore(); }
   });
 

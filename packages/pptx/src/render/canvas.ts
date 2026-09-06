@@ -173,15 +173,24 @@ function paintShadowedShape(
   if (!scratch) return;
   scratch.setTransform(transform.a, transform.b, transform.c, transform.d, transform.e - left, transform.f - top);
   paintShape(scratch, { ...shape, shadow: undefined }, deviceScale);
-  scratch.setTransform(1, 0, 0, 1, 0, 0);
-  scratch.globalCompositeOperation = 'source-in';
-  scratch.fillStyle = shadow.color;
-  scratch.fillRect(0, 0, layer.width, layer.height);
   ctx.save();
   try {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.filter = `blur(${sigma}px)`;
-    ctx.drawImage(layer, left + dx, top + dy);
+    if (typeof ctx.filter === 'string') {
+      scratch.setTransform(1, 0, 0, 1, 0, 0);
+      scratch.globalCompositeOperation = 'source-in';
+      scratch.fillStyle = shadow.color;
+      scratch.fillRect(0, 0, layer.width, layer.height);
+      ctx.filter = `blur(${sigma}px)`;
+      ctx.drawImage(layer, left + dx, top + dy);
+    } else {
+      const sourceXOutsideCanvas = ctx.canvas.width + 1;
+      ctx.shadowColor = shadow.color;
+      ctx.shadowBlur = sigma * 2;
+      ctx.shadowOffsetX = left + dx - sourceXOutsideCanvas;
+      ctx.shadowOffsetY = dy;
+      ctx.drawImage(layer, sourceXOutsideCanvas, top);
+    }
   } finally {
     ctx.restore();
   }
