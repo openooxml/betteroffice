@@ -73,18 +73,6 @@ export function parsePptxJson(data: Uint8Array): string;
 
 export function rendererVersion(): string;
 
-/**
- * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
- */
-export function rezip_docx(entries: any): Uint8Array;
-
-export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
-
-/**
- * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
- */
-export function unzip_docx(data: Uint8Array): any;
-
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -140,14 +128,11 @@ export interface InitOutput {
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
-    readonly rezip_docx: (a: any) => [number, number, number, number];
-    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly unzip_docx: (a: number, b: number) => [number, number, number];
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;

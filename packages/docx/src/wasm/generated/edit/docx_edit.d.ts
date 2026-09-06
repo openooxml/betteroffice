@@ -996,13 +996,6 @@ export function range_rects_region_json(display_list: string, region: string, pa
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
- * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
- */
-export function rezip_docx(entries: any): Uint8Array;
-
-export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
-
-/**
  * Serializes an S10 request.
  */
 export function serialize_docx_s10(request_json: string): string;
@@ -1016,11 +1009,6 @@ export function serialize_docx_s11(request_json: string): string;
  * Serializes an S12 request.
  */
 export function serialize_docx_s12(request_json: string): string;
-
-/**
- * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
- */
-export function unzip_docx(data: Uint8Array): any;
 
 /**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
@@ -1164,9 +1152,6 @@ export interface InitOutput {
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
     readonly write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly rezip_docx: (a: any) => [number, number, number, number];
-    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly unzip_docx: (a: number, b: number) => [number, number, number];
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1186,11 +1171,11 @@ export interface InitOutput {
     readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
     readonly clear_measure_fonts: () => void;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __externref_drop_slice: (a: number, b: number) => void;
