@@ -10,6 +10,15 @@ pub mod relationship_types {
     pub const THEME: &str = "/theme";
     pub const IMAGE: &str = "/image";
     pub const CHART: &str = "/chart";
+
+    pub const COMMENTS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+    pub const COMMENT_AUTHORS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/commentAuthors";
+    pub const MODERN_COMMENTS: &str =
+        "http://schemas.microsoft.com/office/2018/10/relationships/comments";
+    pub const MODERN_AUTHORS: &str =
+        "http://schemas.microsoft.com/office/2018/10/relationships/authors";
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +42,10 @@ pub struct Relationship {
 impl Relationship {
     pub fn has_type(&self, suffix: &str) -> bool {
         self.relationship_type.ends_with(suffix)
+    }
+
+    pub fn is_type(&self, relationship_type: &str) -> bool {
+        self.relationship_type == relationship_type
     }
 }
 

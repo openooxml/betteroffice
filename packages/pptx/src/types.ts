@@ -6,6 +6,7 @@ export interface TextStyle {
   fontFamily?: string;
   underline?: string;
   spacingPt?: number;
+  baselinePct?: number;
 }
 
 export type TextStylePatch = TextStyle;
@@ -18,6 +19,7 @@ export interface TextStyleSnapshot {
   fontFamily: string | null;
   underline: string | null;
   spacingPt: number | null;
+  baselinePct?: number | null;
 }
 
 export interface TextRunSnapshot {
@@ -77,6 +79,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** Hides this shape and its descendants; omitted when false. */
+  hidden?: boolean;
   geometry: string;
   adjustValues: Record<string, number>;
   placeholder: unknown | null;
@@ -102,6 +106,32 @@ export interface DeckSnapshot {
   widthEmu: number;
   heightEmu: number;
   slides: SlideSnapshot[];
+  commentFlavor?: CommentFlavor;
+  comments?: CommentSnapshot[];
+}
+
+/** Legacy comments or modern threads. */
+export type CommentFlavor = 'legacy' | 'modern';
+
+export interface CommentSnapshot {
+  id: string;
+  slideId: string;
+  author: string;
+  initials: string;
+  text: string;
+  created: string | null;
+  xEmu: number;
+  yEmu: number;
+  /** Set on a reply; names the thread root. Modern decks only. */
+  parentId: string | null;
+  resolved: boolean;
+}
+
+export interface CommentReceipt {
+  commentId: string;
+  slideId: string;
+  parentId: string | null;
+  resolved: boolean;
 }
 
 export interface SlideReceipt {
@@ -213,10 +243,18 @@ export type Paint =
       stops: Array<{ position: number; color: string }>;
     };
 
+export interface StrokeEnd {
+  kind: string;
+  width: number;
+  length: number;
+}
+
 export interface Stroke {
   color: string;
   width: number;
   dashed?: boolean;
+  headEnd?: StrokeEnd;
+  tailEnd?: StrokeEnd;
 }
 
 export interface PrimitiveTransform {
@@ -245,10 +283,21 @@ export interface ShapePrimitive extends PrimitiveBase {
   stroke?: Stroke;
 }
 
+export interface ImageCrop {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+
 export interface ImagePrimitive extends PrimitiveBase {
   kind: 'image';
   name: string;
   assetId?: string;
+  /** Fraction of the source discarded per edge, from `a:srcRect`. */
+  crop?: ImageCrop;
+  /** Outline the picture is masked to, when its `spPr` gives it one. */
+  path?: GeometryPathCommand[];
   stroke?: Stroke;
 }
 
@@ -280,6 +329,7 @@ export interface PositionedTextRun {
   underline: boolean;
   color: string;
   letterSpacingPx: number;
+  baselineOffsetPx?: number;
   glyphs: PositionedGlyph[];
 }
 

@@ -223,11 +223,12 @@ function decodeS9Package(value: unknown): DocxPackage {
 function decodeS9DocumentBody(value: unknown): DocumentBody {
   const path = 'wire.document.package.document';
   const body = objectAt(value, path);
-  exactKeys(body, ['content', 'sections', 'finalSectionProperties', 'comments'], path, [
-    'sections',
-    'finalSectionProperties',
-    'comments',
-  ]);
+  exactKeys(
+    body,
+    ['content', 'sections', 'finalSectionProperties', 'customRootBindings', 'comments'],
+    path,
+    ['sections', 'finalSectionProperties', 'customRootBindings', 'comments']
+  );
   if (!Array.isArray(body.content)) throw new TypeError(`${path}.content must be an array`);
   body.content.forEach((block, index) => objectAt(block, `${path}.content[${index}]`));
   const documentBody: DocumentBody = {
@@ -259,6 +260,11 @@ function decodeS9DocumentBody(value: unknown): DocumentBody {
       body.finalSectionProperties,
       `${path}.finalSectionProperties`
     ) as unknown as NonNullable<DocumentBody['finalSectionProperties']>;
+  }
+  if (body.customRootBindings !== undefined) {
+    documentBody.customRootBindings = decodeObjectArray<
+      NonNullable<DocumentBody['customRootBindings']>[number]
+    >(body.customRootBindings, `${path}.customRootBindings`);
   }
   if (body.comments !== undefined) {
     documentBody.comments = decodeObjectArray<NonNullable<DocumentBody['comments']>[number]>(

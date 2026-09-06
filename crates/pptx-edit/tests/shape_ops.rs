@@ -379,3 +379,75 @@ fn a_deck_without_any_text_opens_and_accepts_edits() {
             .any(|shape| shape.id == receipt.shape_id)
     );
 }
+
+#[test]
+fn comments_coexist_with_chart_and_hyperlink_relationships() {
+    const CHART_DECK: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/chart-deck.pptx");
+
+    let session = DeckSession::open(CHART_DECK, 703).unwrap();
+    let context = EditCtx::local("test");
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_comment(
+            &context,
+            &slide_id,
+            "Ada Lovelace",
+            "AL",
+            "Is this series right?",
+            "2026-09-01T10:00:00.000",
+            914_400,
+            457_200,
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let parts: BTreeMap<String, Vec<u8>> = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let rels = String::from_utf8(parts["ppt/slides/_rels/slide1.xml.rels"].clone()).unwrap();
+    assert!(
+        rels.contains("../charts/chart1.xml"),
+        "chart rel was dropped"
+    );
+    assert!(
+        rels.contains("https://example.invalid"),
+        "external hyperlink rel was dropped"
+    );
+    assert!(rels.contains("../comments/comment1.xml"));
+    assert!(
+        rels.contains("Id=\"rId4\""),
+        "the comment must take a fresh id rather than reuse one: {rels}"
+    );
+    assert_eq!(
+        parts["ppt/charts/chart1.xml"],
+        chart_deck_part("ppt/charts/chart1.xml")
+    );
+
+    let reopened = DeckSession::open(&saved, 704).unwrap();
+    assert_eq!(reopened.snapshot().unwrap().comments.len(), 1);
+    assert_eq!(reopened.package().charts.len(), 2);
+
+    let first = reopened.snapshot().unwrap().slides[0].id.clone();
+    reopened.delete_slide(&context, &first).unwrap();
+    let pruned: BTreeMap<String, Vec<u8>> = ooxml_opc::unzip_parts(&reopened.save().unwrap())
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(!pruned.contains_key("ppt/comments/comment1.xml"));
+    assert!(!pruned.contains_key("ppt/charts/chart1.xml"));
+    assert!(pruned.contains_key("ppt/charts/chart2.xml"));
+    let content_types = String::from_utf8(pruned["[Content_Types].xml"].clone()).unwrap();
+    assert!(!content_types.contains("comments/comment1.xml"));
+    assert!(!content_types.contains("charts/chart1.xml"));
+}
+
+fn chart_deck_part(path: &str) -> Vec<u8> {
+    const CHART_DECK: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/chart-deck.pptx");
+    ooxml_opc::unzip_parts(CHART_DECK)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == path)
+        .map(|(_, bytes)| bytes)
+        .expect("part is in the fixture")
+}
