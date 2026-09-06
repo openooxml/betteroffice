@@ -163,9 +163,11 @@ It exercises chart fills, axis `noFill`, and explicit overflow in one document.
 `deck-schema-v14-chart-text-overflow.update.bin` is fresh output from main
 `899aac58d71952e4a73b2180e2b0bcc3c59a39c0` (schema 14).
 `deck-schema-v15-chart-text-overflow.update.bin` and
-`deck-schema-v15-text-overflow.update.bin` are fresh output from the combined
-base: that main plus `dsaad68/pr/pptx-chart-series-axis` at
-`ef7f784105f375f68880a067d4c4c6d1d56b8b21` (schema 15).
+`deck-schema-v15-text-overflow.update.bin` are fresh output from current main
+`d2aaf9cb97abe9acf087598c2b83dddcdfb40aa8` (schema 15, PR #327).
+They are byte-identical to the earlier combined base: main `899aac58` plus
+`dsaad68/pr/pptx-chart-series-axis` at
+`ef7f784105f375f68880a067d4c4c6d1d56b8b21`.
 All use client ID 29501 and the base's locked dependencies; no schema stamps
 are rewritten. The v15 writer already persists chart fills and axis lines.
 
