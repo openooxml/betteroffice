@@ -14,7 +14,7 @@ fn main_snapshots_import_blip_effects_without_losing_edits_or_source_parts() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(16.0)))
+            Some(Out::Any(Any::Number(17.0)))
         );
         drop(txn);
         let initial = migrated.snapshot().unwrap();

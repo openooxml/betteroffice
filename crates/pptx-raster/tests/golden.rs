@@ -488,6 +488,65 @@ fn a_transparent_render_differs_from_the_opaque_one() {
 }
 
 #[test]
+fn overflowing_text_escapes_its_box_but_respects_the_parent_clip() {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    for overflow in [false, true] {
+        for parent_clip in [false, true] {
+            let mut text = text_box(20.0, 20.0, "Overflowing text", 32.0, false);
+            if let Primitive::TextBox {
+                h, overflow: flag, ..
+            } = &mut text
+            {
+                *h = 8.0;
+                *flag = overflow;
+            }
+            let primitive = if parent_clip {
+                Primitive::Chart {
+                    object_id: 3,
+                    shape_id: None,
+                    name: "Clip".into(),
+                    x: 35.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 60.0,
+                    label: "".into(),
+                    primitives: vec![text],
+                    transform: Transform::default(),
+                }
+            } else {
+                text
+            };
+            let png = render_slide(
+                &slide(vec![primitive]),
+                &resources,
+                &RenderOptions::default(),
+            )
+            .unwrap();
+            let pixels = image::load_from_memory(&png.bytes).unwrap().to_rgba8();
+            let mut outside_text = 0;
+            for (x, y, pixel) in pixels.enumerate_pixels() {
+                if pixel.0 == [253, 253, 253, 255] {
+                    continue;
+                }
+                if parent_clip {
+                    assert!((35..85).contains(&x) && (10..70).contains(&y));
+                }
+                if y >= 28 {
+                    outside_text += 1;
+                }
+            }
+            if overflow {
+                assert!(outside_text > 100, "parent clip: {parent_clip}");
+            } else {
+                assert_eq!(outside_text, 0);
+            }
+        }
+    }
+}
+
+#[test]
 fn shifted_underlines_follow_run_baselines() {
     let (fonts, font) = font_store();
     let images = assets();

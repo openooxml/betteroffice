@@ -286,13 +286,24 @@ impl Painter<'_, '_> {
                 clip,
             ),
             Primitive::TextBox {
-                x, y, w, h, lines, ..
+                x,
+                y,
+                w,
+                h,
+                lines,
+                overflow,
+                ..
             } => {
                 if lines.is_empty() {
                     return Ok(());
                 }
-                let Some(inner) = self.clipped(clip, *x, *y, *w, *h, transform)? else {
-                    return Ok(());
+                let inner = if *overflow {
+                    None
+                } else {
+                    let Some(inner) = self.clipped(clip, *x, *y, *w, *h, transform)? else {
+                        return Ok(());
+                    };
+                    Some(inner)
                 };
                 font::paint_lines(
                     self.pixmap,
@@ -300,7 +311,7 @@ impl Painter<'_, '_> {
                     self.glyphs,
                     lines,
                     transform,
-                    Some(&inner),
+                    inner.as_ref().or(clip),
                 )
             }
             Primitive::Placeholder {

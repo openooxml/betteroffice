@@ -21,9 +21,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 16.0;
+const SCHEMA_VERSION: f64 = 17.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 16] = [
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 17] = [
     1.0,
     2.0,
     3.0,
@@ -39,6 +39,7 @@ const MIGRATABLE_SCHEMA_VERSIONS: [f64; 16] = [
     13.0,
     14.0,
     15.0,
+    16.0,
     SCHEMA_VERSION,
 ];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
@@ -897,7 +898,11 @@ fn merge_source_text_body(
 ) -> bool {
     let mut changed = target.list_style != source.list_style
         || target.default_list_style != source.default_list_style
-        || target.compat_line_spacing != source.compat_line_spacing;
+        || target.compat_line_spacing != source.compat_line_spacing
+        || target.vertical_overflow != source.vertical_overflow
+        || target.horizontal_overflow != source.horizontal_overflow;
+    target.vertical_overflow = source.vertical_overflow;
+    target.horizontal_overflow = source.horizontal_overflow;
     target.compat_line_spacing = source.compat_line_spacing;
     target.list_style.clone_from(&source.list_style);
     target
@@ -991,6 +996,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 16.0 {
         migrate_doc_to_v16(doc)?;
+    }
+    if version < 17.0 {
+        migrate_doc_to_v17(doc)?;
     }
     Ok(())
 }
@@ -1209,13 +1217,28 @@ fn migrate_doc_to_v15(doc: &Doc) -> EditResult<()> {
     Ok(())
 }
 
-/// Backfills bitmap effects in schema 16.
 fn migrate_doc_to_v16(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     let package = package_from_meta(&meta, &txn)?;
-    backfill_blip_effects(&mut txn, &package)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
     meta.insert(&mut txn, "schemaVersion", 16.0);
+    Ok(())
+}
+
+/// Backfills bitmap effects in schema 17.
+fn migrate_doc_to_v17(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    backfill_blip_effects(&mut txn, &package)?;
+    meta.insert(&mut txn, "schemaVersion", 17.0);
     Ok(())
 }
 
@@ -1855,7 +1878,21 @@ mod tests {
             include_bytes!("../tests/fixtures/deck-schema-v13-picture-fill.update.bin");
         const V13_CHART: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v13-chart-space-fill.update.bin");
+        const V14_COMBINED: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v14-chart-text-overflow.update.bin");
+        const V15_COMBINED: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v15-chart-text-overflow.update.bin");
         for (update, version, expected) in [
+            (
+                V14_COMBINED,
+                14.0,
+                vec![(15.0, None, None), (16.0, None, None), (17.0, None, None)],
+            ),
+            (
+                V15_COMBINED,
+                15.0,
+                vec![(16.0, None, None), (17.0, None, None)],
+            ),
             (
                 V8,
                 8.0,
@@ -1868,6 +1905,7 @@ mod tests {
                     (14.0, Some(true), Some(true)),
                     (15.0, Some(true), Some(true)),
                     (16.0, Some(true), Some(true)),
+                    (17.0, Some(true), Some(true)),
                 ],
             ),
             (
@@ -1881,6 +1919,7 @@ mod tests {
                     (14.0, Some(true), Some(true)),
                     (15.0, Some(true), Some(true)),
                     (16.0, Some(true), Some(true)),
+                    (17.0, Some(true), Some(true)),
                 ],
             ),
             (
@@ -1893,6 +1932,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1905,6 +1945,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1916,6 +1957,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1927,6 +1969,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1938,6 +1981,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1948,6 +1992,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1958,6 +2003,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1968,6 +2014,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1978,6 +2025,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1987,6 +2035,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -1996,6 +2045,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -2005,6 +2055,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -2014,6 +2065,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -2023,6 +2075,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
             (
@@ -2032,6 +2085,7 @@ mod tests {
                     (14.0, None, Some(true)),
                     (15.0, None, Some(true)),
                     (16.0, None, Some(true)),
+                    (17.0, None, Some(true)),
                 ],
             ),
         ] {
@@ -2066,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_each_version_through_v16() {
+    fn legacy_migrations_commit_each_version_through_v17() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -2080,18 +2134,20 @@ mod tests {
                 V1,
                 vec![
                     3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    17.0,
                 ],
             ),
             (
                 V2,
                 vec![
                     3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    17.0,
                 ],
             ),
             (
                 V3,
                 vec![
-                    4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
                 ],
             ),
         ] {
@@ -2168,6 +2224,7 @@ mod tests {
                 V4_LEGACY,
                 vec![
                     3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    17.0,
                 ],
                 1,
             ),
@@ -2175,7 +2232,7 @@ mod tests {
                 V4_STYLES,
                 V4_STYLES,
                 vec![
-                    5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
                 ],
                 1,
             ),
@@ -2183,7 +2240,7 @@ mod tests {
                 V4_NUMBERED,
                 V4_NUMBERED,
                 vec![
-                    5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
                 ],
                 10,
             ),
@@ -2252,15 +2309,20 @@ mod tests {
                 V2,
                 vec![
                     3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+                    17.0,
                 ],
             ),
             (
                 V5,
-                vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+                vec![
+                    6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+                ],
             ),
             (
                 V6,
-                vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
+                vec![
+                    7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+                ],
             ),
         ] {
             let doc = crate::doc_with_client_id(9430);
@@ -2508,7 +2570,8 @@ mod tests {
                 (13.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (14.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (15.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (16.0, before, Some("legacy".to_owned()), Some(true))
+                (16.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (17.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

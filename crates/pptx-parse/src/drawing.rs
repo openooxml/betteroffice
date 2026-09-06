@@ -976,6 +976,8 @@ pub(crate) fn parse_text_body(
             .and_then(|value| value.attribute("compatLnSpc"))
             .map(parse_bool),
         autofit: body_properties.and_then(parse_text_autofit),
+        vertical_overflow: parse_text_overflow(body_properties, "vertOverflow"),
+        horizontal_overflow: parse_text_overflow(body_properties, "horzOverflow"),
         inset_left: numeric_attribute(body_properties, "lIns"),
         inset_top: numeric_attribute(body_properties, "tIns"),
         inset_right: numeric_attribute(body_properties, "rIns"),
@@ -987,6 +989,15 @@ pub(crate) fn parse_text_body(
             .map(|properties| Box::new(parse_paragraph_properties(Some(properties)))),
         paragraphs,
     })
+}
+
+fn parse_text_overflow(body: Option<&XmlElement>, name: &str) -> Option<crate::TextOverflow> {
+    match body?.attribute(name)? {
+        "overflow" => Some(crate::TextOverflow::Overflow),
+        "clip" => Some(crate::TextOverflow::Clip),
+        "ellipsis" => Some(crate::TextOverflow::Ellipsis),
+        _ => None,
+    }
 }
 
 fn parse_text_autofit(body_properties: &XmlElement) -> Option<TextAutofit> {
@@ -1819,6 +1830,8 @@ mod tests {
         let json = serde_json::to_value(body).unwrap();
         assert!(json.get("listStyle").is_none());
         assert!(json.get("defaultListStyle").is_none());
+        assert!(json.get("verticalOverflow").is_none());
+        assert!(json.get("horizontalOverflow").is_none());
         assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), *body);
     }
 

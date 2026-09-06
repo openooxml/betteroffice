@@ -68,6 +68,8 @@ migrations retain their original version numbers.
 
 `deck-schema-v8-list-style.update.bin` was generated on main `1d0f41d9` from `../../pptx-render/tests/fixtures/list-style-bullets.pptx`, using `DeckSession::open` and `encode_state_as_update_v1` with client ID 29401. It exercises schema 8 to 9 migration and source reattachment when the old model did not store list styles.
 
+`deck-schema-v9-text-overflow.update.bin` was produced on main `2c90c17f` by opening `crates/pptx-render/tests/fixtures/text-overflow.pptx` with client ID 295 and calling `encode_state_as_update_v1()`. It proves schema v16 migration preserves the old JSON until source attachment recovers explicit overflow settings.
+
 `deck-schema-v9-picture-fill.update.bin` was generated on main `2c90c17f` from `../../pptx-parse/tests/fixtures/picture-fill.pptx` using `DeckSession::open` and `encode_state_as_update_v1` with client ID 33601. It remains the historical picture-fill migration oracle; current tests migrate it through schemas 10, 11, 12, and 13 and persist picture-fill data when the source is reattached.
 
 `run-baseline-main-v9.update.bin` and `run-baseline-edited-main-v9.update.bin`
@@ -75,6 +77,8 @@ were generated on main `2c90c17f` from
 `../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
 The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
 They test v9 to v10 migration, source baseline recovery, and preservation of edits.
+
+`deck-schema-v10-text-overflow.update.bin` was generated from the same deck and client ID on main `069e4d66`. It verifies the v10 baseline migration remains intact and explicit overflow settings migrate separately in v16.
 
 `deck-schema-v9-autonumber.update.bin` was generated on main `2c90c17f`
 from `../../pptx-render/tests/fixtures/autonumber-bullets.pptx`. It remains
@@ -149,3 +153,35 @@ fixtures test the schema-14 gradient-outline migration, deferred source
 recovery, part-preserving saves, and retention of explicit outline edits; the
 v13 seed undergoes only that migration and the schema-15 chart-properties
 migration, and versions newer than 15 are rejected.
+
+
+`chart-text-overflow.pptx` combines the chart-space-fill deck with the first
+clipping shape from slide 3 of `text-overflow.pptx`. The shape is appended to
+slide 1 with ID 295 and both `vertOverflow="clip"` and `horzOverflow="clip"`.
+It exercises chart fills, axis `noFill`, and explicit overflow in one document.
+
+`deck-schema-v14-chart-text-overflow.update.bin` is fresh output from main
+`899aac58d71952e4a73b2180e2b0bcc3c59a39c0` (schema 14).
+`deck-schema-v15-chart-text-overflow.update.bin` and
+`deck-schema-v15-text-overflow.update.bin` are fresh output from current main
+`d2aaf9cb97abe9acf087598c2b83dddcdfb40aa8` (schema 15, PR #327).
+They are byte-identical to the earlier combined base: main `899aac58` plus
+`dsaad68/pr/pptx-chart-series-axis` at
+`ef7f784105f375f68880a067d4c4c6d1d56b8b21`.
+All use client ID 29501 and the base's locked dependencies; no schema stamps
+are rewritten. The v15 writer already persists chart fills and axis lines.
+
+Copy `generate_overflow_schema_snapshots.rs` into the base checkout's
+`crates/pptx-edit/examples/` and run:
+
+```sh
+cargo run --locked -p betteroffice-pptx-edit --example generate_overflow_schema_snapshots -- /absolute/path/to/this/branch 15
+```
+
+Use `14` on the schema-14 main to regenerate its combined fixture. The generator
+checks the writer's version, omitted overflow properties, chart properties,
+and byte-identical reopening. Tests require separate transactions for schema
+15 then schema 16, preserve chart properties while importing overflow settings,
+retain edits, and reopen or reattach without another migration. Historical v9
+and v10 overflow fixtures and the sibling PRs' historical v11 fixtures remain
+independent migration oracles.

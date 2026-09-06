@@ -12,7 +12,7 @@ use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
     GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
     Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, TextAutofit, TextBody,
+    SlideMaster, TextAutofit, TextBody, TextOverflow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -324,11 +324,12 @@ impl RenderedSlide {
         }
         for region in self.hit_regions.iter().rev() {
             let (shape_x, shape_y) = region.local_point(x, y);
-            if !region.rect.contains(shape_x, shape_y) {
-                continue;
-            }
+            let inside_shape = region.rect.contains(shape_x, shape_y);
             if let Some(text) = &region.text {
                 let (text_x, text_y) = text.local_point(x, y);
+                if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
+                    continue;
+                }
                 if let Some(line) = nearest_line(&text.lines, text_y)
                     && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
                         (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
@@ -340,6 +341,8 @@ impl RenderedSlide {
                         position: caret.position,
                     });
                 }
+            } else if !inside_shape {
+                continue;
             }
             return Some(HitTestResult::Shape {
                 shape_id: region.shape_id.clone(),
@@ -568,6 +571,7 @@ impl<'a> LayoutBuilder<'a> {
         self.hit_regions.push(HitRegion {
             shape_id: stable_id,
             rect,
+            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
             text: text_hit,
         });
@@ -691,6 +695,7 @@ impl<'a> LayoutBuilder<'a> {
         self.hit_regions.push(HitRegion {
             shape_id: stable_id.to_owned(),
             rect,
+            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
             text: text_hit,
         });
@@ -832,10 +837,7 @@ impl<'a> LayoutBuilder<'a> {
             _ => 1.0,
         };
         let mut laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
-        if matches!(
-            autofit,
-            Some(TextAutofit::Normal { .. } | TextAutofit::Shape)
-        ) {
+        if matches!(autofit, Some(TextAutofit::Normal { .. })) {
             while laid_out.total_height > content_rect.h && scale > MIN_AUTOFIT_SCALE {
                 scale = (scale * 0.9).max(MIN_AUTOFIT_SCALE);
                 laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
@@ -855,10 +857,16 @@ impl<'a> LayoutBuilder<'a> {
             Some("b") => TextAnchor::Bottom,
             _ => TextAnchor::Top,
         };
+        let spare_height = content_rect.h - laid_out.total_height;
+        let spare_height = if cascade.clips_overflow() {
+            spare_height.max(0.0)
+        } else {
+            spare_height
+        };
         let vertical_shift = match anchor {
             TextAnchor::Top => 0.0,
-            TextAnchor::Center => ((content_rect.h - laid_out.total_height) / 2.0).max(0.0),
-            TextAnchor::Bottom => (content_rect.h - laid_out.total_height).max(0.0),
+            TextAnchor::Center => spare_height / 2.0,
+            TextAnchor::Bottom => spare_height,
         };
         for line in &mut laid_out.lines {
             shift_line(line, 0.0, vertical_shift);
@@ -884,7 +892,7 @@ impl<'a> LayoutBuilder<'a> {
                     .collect(),
             })
             .collect();
-        let overflow = laid_out.total_height > content_rect.h;
+        let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
         let story_id = content.story_id;
         let lines = laid_out.lines;
         self.primitives.push(Primitive::TextBox {
@@ -902,6 +910,7 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
         });
         Ok(TextHit {
+            overflow,
             story_id,
             rect: text_rect,
             transform: text_transform,
@@ -984,6 +993,19 @@ struct BodyCascade<'a> {
 }
 
 impl BodyCascade<'_> {
+    fn clips_overflow(&self) -> bool {
+        let vertical = cascade_value(self.primary, self.layout, self.master, |body| {
+            body.vertical_overflow
+        });
+        let horizontal = cascade_value(self.primary, self.layout, self.master, |body| {
+            body.horizontal_overflow
+        });
+        [vertical, horizontal]
+            .into_iter()
+            .flatten()
+            .any(|value| value != TextOverflow::Overflow)
+    }
+
     fn anchor(&self) -> Option<&str> {
         self.primary
             .and_then(|body| body.anchor.as_deref())
@@ -2218,6 +2240,7 @@ impl Space {
 struct HitRegion {
     shape_id: String,
     rect: PxRect,
+    hit_rect: PxRect,
     transform: Transform,
     text: Option<TextHit>,
 }
@@ -2230,6 +2253,7 @@ impl HitRegion {
 }
 
 struct TextHit {
+    overflow: bool,
     story_id: String,
     rect: PxRect,
     transform: Transform,
@@ -2845,6 +2869,31 @@ fn is_full_justification(value: Option<&str>) -> bool {
     value == Some("just")
 }
 
+fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
+    let Some(text) = text.filter(|text| text.overflow) else {
+        return rect;
+    };
+    let rect = text.rect;
+    let (mut left, mut right) = (rect.x, rect.x + rect.w);
+    let (mut top, mut bottom) = (rect.y, rect.y + rect.h);
+    for line in &text.lines {
+        left = left.min(line.x);
+        right = right.max(line.x + line.width);
+        top = top.min(line.y);
+        bottom = bottom.max(line.y + line.height);
+        for run in &line.runs {
+            left = left.min(run.x);
+            right = right.max(run.x + run.width);
+        }
+    }
+    PxRect {
+        x: left,
+        y: top,
+        w: (right - left).max(rect.w),
+        h: (bottom - top).max(rect.h),
+    }
+}
+
 /// Resolves a marker once per paragraph.
 fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
     let level = (level as usize).min(counters.len() - 1);
@@ -3130,6 +3179,55 @@ mod tests {
         let stroke = stroke.as_ref().unwrap();
         assert_eq!(stroke.width, 2.0);
         assert_eq!(stroke.color, "#FF00FF");
+    }
+
+    #[test]
+    fn overflowing_text_grows_the_hit_region_so_a_visible_glyph_stays_clickable() {
+        let rect = PxRect {
+            x: 10.0,
+            y: 100.0,
+            w: 200.0,
+            h: 20.0,
+        };
+        let line = |y: f32, height: f32| PositionedTextLine {
+            x: 10.0,
+            y,
+            width: 200.0,
+            height,
+            baseline: y + height,
+            start: 0,
+            end: 0,
+            runs: Vec::new(),
+            caret_stops: Vec::new(),
+        };
+        let text = TextHit {
+            rect,
+            transform: Transform::default(),
+            overflow: true,
+            story_id: "story".to_owned(),
+            lines: vec![line(80.0, 40.0), line(120.0, 40.0)],
+        };
+        let grown = rect_covering_text(rect, Some(&text));
+        assert_eq!(grown.y, 80.0);
+        assert_eq!(grown.y + grown.h, 160.0);
+        assert_eq!(grown.x, rect.x);
+        assert_eq!(grown.w, rect.w);
+        let fitting = TextHit {
+            rect,
+            transform: Transform::default(),
+            overflow: false,
+            story_id: "story".to_owned(),
+            lines: vec![line(104.0, 12.0)],
+        };
+        let same = rect_covering_text(rect, Some(&fitting));
+        assert_eq!((same.y, same.h), (rect.y, rect.h));
+        assert_eq!(
+            (
+                rect_covering_text(rect, None).y,
+                rect_covering_text(rect, None).h
+            ),
+            (rect.y, rect.h)
+        );
     }
 
     #[test]
@@ -4187,6 +4285,12 @@ mod tests {
                     w: 100.0,
                     h: 100.0,
                 },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
                 transform,
                 text: None,
             }],
@@ -4231,12 +4335,19 @@ mod tests {
                     w: 120.0,
                     h: 40.0,
                 },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 120.0,
+                    h: 40.0,
+                },
                 transform: Transform {
                     rotation_deg: 0.0,
                     flip_h,
                     flip_v: false,
                 },
                 text: Some(TextHit {
+                    overflow: false,
                     story_id: "story".to_owned(),
                     rect: PxRect {
                         x: 100.0,
@@ -4307,9 +4418,11 @@ mod tests {
             },
             hit_regions: vec![HitRegion {
                 shape_id: "sideways".to_owned(),
+                hit_rect: rect,
                 rect,
                 transform: shape,
                 text: Some(TextHit {
+                    overflow: false,
                     story_id: "story".to_owned(),
                     rect: TextFlow::Vert270.layout_rect(rect),
                     transform: text_transform(shape, TextFlow::Vert270),
@@ -4436,6 +4549,8 @@ mod tests {
                 picture_fill: None,
                 outline: None,
                 text: Some(TextBody {
+                    vertical_overflow: None,
+                    horizontal_overflow: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
                     compat_line_spacing: None,
@@ -4814,6 +4929,7 @@ mod tests {
         };
         let body = parsed.text.as_mut().unwrap();
         body.compat_line_spacing = compat.then_some(true);
+        body.anchor = Some("t".to_owned());
         for paragraph in &mut body.paragraphs {
             paragraph.properties.line_spacing = paragraph_spacing;
         }
@@ -4945,23 +5061,35 @@ mod tests {
                 &TextStyle::default(),
             )
             .unwrap();
-        let rendered = renderer()
-            .layout_slide(&package, &session.snapshot().unwrap(), 0)
-            .unwrap();
-        let font_size = rendered
-            .display_list
-            .primitives
-            .iter()
-            .find_map(|primitive| match primitive {
-                Primitive::TextBox {
-                    shape_id: Some(id),
-                    paragraphs,
-                    ..
-                } if id == &shape_id => Some(paragraphs[0].runs[0].font_size_pt),
-                _ => None,
-            })
-            .unwrap();
-        assert!(font_size < 40.0);
+        let snapshot = session.snapshot().unwrap();
+        let font_size = |package: &PptxPackage| {
+            renderer()
+                .layout_slide(package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        shape_id: Some(id),
+                        paragraphs,
+                        ..
+                    } if id == &shape_id => Some(paragraphs[0].runs[0].font_size_pt),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let scaled = font_size(&package);
+        let ShapeNode::Shape(parsed) = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap()
+        else {
+            panic!("expected text shape");
+        };
+        parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::None);
+        assert!(scaled < font_size(&package));
     }
 
     #[test]

@@ -142,7 +142,7 @@ fn automatic_numbers_keep_styles_and_story_geometry() {
 }
 
 #[test]
-fn automatic_numbers_are_stable_across_autofit_passes() {
+fn automatic_numbers_are_stable_with_normal_and_shape_autofit() {
     let session = DeckSession::open(DECK, 301).unwrap();
     let renderer = renderer();
     let snapshot = session.snapshot().unwrap();
@@ -156,7 +156,11 @@ fn automatic_numbers_are_stable_across_autofit_passes() {
         );
         let lines = lines(&first.display_list, id);
         assert!(lines.len() > 5);
-        assert!(lines[0].runs[0].font_size_px < 18.0);
+        if id == 20 {
+            assert!(lines[0].runs[0].font_size_px < 18.0);
+        } else {
+            assert_eq!(lines[0].runs[0].font_size_px, 18.0);
+        }
     }
     let second = renderer
         .layout_slide(session.package(), &snapshot, 1)

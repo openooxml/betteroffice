@@ -928,6 +928,93 @@ test('picture effects reach canvas before cropping without changing the shared s
   }
 });
 
+describe('PPTX text overflow', () => {
+  function harness() {
+    const calls: string[] = [];
+    const ctx = new Proxy(
+      {
+        clip: () => calls.push('clip'),
+        fillText: (t: string) => calls.push(`text:${t}`),
+        rect: () => calls.push('rect'),
+      } as Record<string, unknown>,
+      {
+        get(target, property) {
+          if (property in target) return target[property as string];
+          return () => undefined;
+        },
+        set(target, property, value) {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    return { calls, ctx };
+  }
+
+  function list(overflow: boolean): SlideDisplayList {
+    return {
+      contractVersion: 1,
+      width: 320,
+      height: 180,
+      primitives: [
+        {
+          kind: 'textBox',
+          objectId: 1,
+          x: 10,
+          y: 10,
+          w: 100,
+          h: 20,
+          anchor: 'top',
+          paragraphs: [],
+          overflow,
+          lines: [
+            {
+              x: 10,
+              y: 10,
+              width: 100,
+              height: 40,
+              baseline: 30,
+              start: 0,
+              end: 5,
+              caretStops: [],
+              runs: [
+                {
+                  text: 'spill',
+                  start: 0,
+                  end: 5,
+                  x: 10,
+                  width: 100,
+                  fontId: 0,
+                  fontFamily: 'Arial',
+                  fontSizePx: 40,
+                  bold: false,
+                  italic: false,
+                  underline: false,
+                  color: '#000000',
+                  glyphs: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as unknown as SlideDisplayList;
+  }
+
+  test('text taller than its box is not clipped to it', async () => {
+    const { calls, ctx } = harness();
+    await paintSlide(ctx, list(true), 1, 1, {});
+    expect(calls).not.toContain('clip');
+    expect(calls).toContain('text:spill');
+  });
+
+  test('text that fits is still clipped to its box', async () => {
+    const { calls, ctx } = harness();
+    await paintSlide(ctx, list(false), 1, 1, {});
+    expect(calls).toContain('clip');
+  });
+});
+
 test('paints script glyphs and underlines at their shifted baselines', async () => {
   const text: [string, number][] = [];
   const underlines: number[] = [];
