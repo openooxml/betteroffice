@@ -1813,10 +1813,7 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
     segments
 }
 
-/// Whether a source run element already carries the segment: same text and
-/// the same modeled styling once colours are resolved against the theme.
-/// Reused elements keep everything the model does not carry — hyperlinks,
-/// field bindings, strikethrough.
+/// Matches text and modeled styling against a source run.
 fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option<&Theme>) -> bool {
     if element.local_name() == "br" {
         return segment.line_break;
@@ -2095,8 +2092,7 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
     "extLst",
 ];
 
-/// Overwrites the modeled styling on a cloned source `rPr`, leaving what the
-/// model does not carry (hyperlinks, strike, language) in place.
+/// Updates modeled styling while preserving unmodeled XML.
 fn apply_run_properties(
     base: &mut XmlElement,
     properties: &RunProperties,

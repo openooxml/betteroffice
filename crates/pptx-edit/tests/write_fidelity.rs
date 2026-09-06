@@ -533,8 +533,6 @@ fn an_edit_inside_a_tracked_run_keeps_its_letter_spacing() {
 
 #[test]
 fn an_edit_across_two_tracked_runs_rebuilds_their_letter_spacing() {
-    // an edit spanning more than one source run has no rPr to rebuild onto, so
-    // the spacing has to come back out of the model or it is silently dropped
     let session = open();
     let story_id = tracked_story(&session);
     session.delete_text(&context(), &story_id, 3, 5).unwrap();

@@ -73,3 +73,9 @@ were generated on main `2c90c17f` from
 `../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
 The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
 They test v9 to v10 migration, source baseline recovery, and preservation of edits.
+
+## Run character spacing
+
+`run-spacing-main-v10.update.bin` was generated on main `069e4d66` from
+`crates/pptx-render/tests/fixtures/run-spacing.pptx` with client ID 32500.
+It exercises schema v11 source recovery, deferred attachment, and explicit zero overrides.

@@ -282,9 +282,8 @@ pub struct PositionedTextRun {
     pub italic: bool,
     pub underline: bool,
     pub color: String,
-    /// `spc` tracking already folded into the glyph positions; backends that
-    /// draw the whole run in one call need it to match those positions.
-    #[serde(default)]
+    /// Tracking between clusters in pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub letter_spacing_px: f32,
     /// Pixels this run's baseline sits above the line's; negative is subscript.
     #[serde(default, skip_serializing_if = "is_zero")]

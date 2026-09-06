@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { GeometryPathCommand, ShapePrimitive, SlideDisplayList } from '../types';
+import type { GeometryPathCommand, ShapePrimitive, SlideDisplayList, TextBoxPrimitive } from '../types';
 import { paintSlide } from './canvas';
 
 describe('PPTX canvas replay', () => {
@@ -174,6 +174,22 @@ describe('PPTX canvas replay', () => {
 
     await paintSlide(ctx, list, 1);
     expect(calls).toEqual(['text:WIDE@8px', 'text:PLAIN@0px']);
+    calls.length = 0;
+    state.fillText = (text: string, x: number) => calls.push(`text:${text}@${x}`);
+    const box = list.primitives[0] as TextBoxPrimitive;
+    box.lines[0].runs = [{
+      ...run,
+      text: 'Á B',
+      end: 4,
+      letterSpacingPx: 8,
+      glyphs: [
+        { glyphId: 1, cluster: 0, x: 10, advance: 10, xOffset: 0, yOffset: 30 },
+        { glyphId: 2, cluster: 2, x: 28, advance: 5, xOffset: 0, yOffset: 30 },
+        { glyphId: 3, cluster: 3, x: 49, advance: 10, xOffset: 0, yOffset: 30 },
+      ],
+    }];
+    await paintSlide(ctx, list, 1);
+    expect(calls).toEqual(['text:Á@10', 'text: @28', 'text:B@49']);
   });
 
   test('paints chart parts clipped to the chart rectangle', async () => {
