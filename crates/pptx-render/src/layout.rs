@@ -802,6 +802,7 @@ impl<'a> LayoutBuilder<'a> {
             .unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let top = cascade.inset_top().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let bottom = cascade.inset_bottom().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
+        let [left, top, right, bottom] = flow.layout_insets([left, top, right, bottom]);
         let content_rect = PxRect {
             x: text_rect.x + emu_to_px(left),
             y: text_rect.y + emu_to_px(top),
@@ -894,14 +895,11 @@ impl<'a> LayoutBuilder<'a> {
     }
 }
 
-/// The direction `a:bodyPr/@vert` lays a text body out in, as a quarter turn
-/// applied on top of the shape's own rotation.
+/// Text flow relative to the shape.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TextFlow {
     Horizontal,
-    /// `vert`: a quarter turn clockwise, reading top to bottom.
     Vert,
-    /// `vert270`: a quarter turn anticlockwise, reading bottom to top.
     Vert270,
 }
 
@@ -910,8 +908,6 @@ impl TextFlow {
         match vertical {
             Some("vert") => Self::Vert,
             Some("vert270") => Self::Vert270,
-            // eaVert, mongolianVert and the wordArt values stack glyphs rather
-            // than turning the box; horizontal is the closer of the two.
             _ => Self::Horizontal,
         }
     }
@@ -924,8 +920,6 @@ impl TextFlow {
         }
     }
 
-    /// Vertical flow lays its lines out in the shape box turned on its side —
-    /// about the same centre, so the quarter turn puts it back over the shape.
     fn layout_rect(self, rect: PxRect) -> PxRect {
         match self {
             Self::Horizontal => rect,
@@ -937,12 +931,24 @@ impl TextFlow {
             },
         }
     }
+
+    fn layout_insets(self, [left, top, right, bottom]: [i64; 4]) -> [i64; 4] {
+        match self {
+            Self::Horizontal => [left, top, right, bottom],
+            Self::Vert => [top, right, bottom, left],
+            Self::Vert270 => [bottom, left, top, right],
+        }
+    }
 }
 
-/// Glyphs turn with their shape but are never mirrored: PowerPoint and
-/// LibreOffice both normalise a flipped shape to `rotate * mirror-in-x` and
-/// draw the text without the mirror, which leaves a pure rotation.
+/// Removes glyph reflections and applies vertical flow.
 fn text_transform(shape: Transform, flow: TextFlow) -> Transform {
+    if flow == TextFlow::Horizontal && !shape.flip_v {
+        return Transform {
+            flip_h: false,
+            ..shape
+        };
+    }
     let rotation_deg =
         shape.rotation_deg + if shape.flip_v { 180.0 } else { 0.0 } + flow.rotation_deg();
     Transform {
@@ -2086,8 +2092,7 @@ struct HitRegion {
 }
 
 impl HitRegion {
-    /// Undoes the rotate-then-flip the shape paints with, so `rect` can be read
-    /// in its unrotated frame.
+    /// Maps slide coordinates into the shape frame.
     fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
         local_point(self.rect, self.transform, x, y)
     }
@@ -2101,8 +2106,7 @@ struct TextHit {
 }
 
 impl TextHit {
-    /// Text carries its own frame — never mirrored, and turned again under
-    /// `bodyPr/@vert` — so a caret hit cannot be read through the shape's.
+    /// Maps slide coordinates into the text frame.
     fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
         local_point(self.rect, self.transform, x, y)
     }
@@ -3631,8 +3635,6 @@ mod tests {
 
     #[test]
     fn hit_testing_flipped_text_keeps_the_upright_caret() {
-        // membership cannot catch a flip — the rect maps onto itself — so pin it
-        // on the caret, where the sign of the local point decides the answer
         let slide = |flip_h| RenderedSlide {
             display_list: SurfaceDisplayList {
                 contract_version: CONTRACT_VERSION,
@@ -3698,16 +3700,12 @@ mod tests {
             other => panic!("expected a text hit, got {other:?}"),
         };
 
-        // the glyphs are painted unmirrored, so the caret nearest the click is
-        // the same one either way
         assert_eq!(position(false), 0);
         assert_eq!(position(true), 0);
     }
 
     #[test]
     fn hit_testing_vertical_text_reads_the_caret_in_the_turned_frame() {
-        // vert270 lays the line out across the shape box turned on its side and
-        // then turns it back, so a click low in the shape is early in the line
         let shape = Transform {
             rotation_deg: 0.0,
             flip_h: false,
@@ -3785,13 +3783,9 @@ mod tests {
             flip_v: false,
         };
 
-        // `rot=180 flipV` is PowerPoint's spelling of a plain horizontal mirror:
-        // the shape reflects, the glyphs read normally
         assert_eq!(turned(180.0, false, true), upright(0.0));
-        // a bare flipH mirrors nothing about the text
         assert_eq!(turned(0.0, true, false), upright(0.0));
         assert_eq!(turned(90.0, true, false), upright(90.0));
-        // two flips are already a half turn, and the text turns with them
         assert_eq!(turned(0.0, true, true), upright(180.0));
         assert_eq!(turned(45.0, false, false), upright(45.0));
     }
@@ -3808,8 +3802,6 @@ mod tests {
             flip_h: false,
             flip_v: false,
         };
-        // the two compensating pairs a deck uses to write a horizontal label in
-        // a shape that is itself on its side
         assert_eq!(
             text_transform(shape(90.0), TextFlow::Vert270).rotation_deg,
             0.0
@@ -3825,7 +3817,6 @@ mod tests {
             w: 40.0,
             h: 240.0,
         };
-        // same centre, so the quarter turn puts the box back over the shape
         assert_eq!(
             TextFlow::Vert.layout_rect(rect),
             PxRect {
@@ -3838,9 +3829,7 @@ mod tests {
         assert_eq!(TextFlow::Horizontal.layout_rect(rect), rect);
     }
 
-    /// A non-placeholder master shape is the only way to drive `render_text_box`
-    /// from a hand-built transform: the snapshot path takes its rotation and
-    /// flips from the edit session, which has no way to set them.
+    /// Renders a synthetic master text box.
     fn text_box_on_master(
         transform: ShapeTransform,
         vertical: Option<&str>,
@@ -3940,8 +3929,6 @@ mod tests {
 
     #[test]
     fn a_vert270_label_bar_lays_its_sentence_out_on_one_line() {
-        // cisco-cloud-security/21: a 0.64 x 7.7 million EMU bar turned 90° with
-        // vert270, which is how a deck writes a horizontal label in a tall box
         let turned = ShapeTransform {
             x: 4_601_452,
             y: -2_333_065,
@@ -3966,7 +3953,6 @@ mod tests {
         assert_eq!(transform.rotation_deg, 0.0);
         assert_eq!(lines.len(), 1);
 
-        // without the vert270 the same sentence wraps down the narrow box
         let upright = text_box_on_master(turned, None, sentence);
         let Primitive::TextBox { lines, .. } = &upright else {
             unreachable!()
