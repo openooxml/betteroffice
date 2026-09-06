@@ -974,6 +974,7 @@ fn thin_header_footer(
                         story_type: part.story_type.clone(),
                         hdr_ftr_type: part.hdr_ftr_type.clone(),
                         content: Vec::new(),
+                        custom_root_bindings: part.custom_root_bindings.clone(),
                         watermark: part.watermark.clone(),
                     },
                 )
@@ -988,6 +989,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
             .iter()
             .map(|note| docx_parse::Note {
                 story_type: note.story_type.clone(),
+                custom_root_bindings: note.custom_root_bindings.clone(),
                 id: note.id,
                 note_type: note.note_type.clone(),
                 content: Vec::new(),
@@ -1018,6 +1020,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                     content: Vec::new(),
                     sections,
                     final_section_properties: package.document.final_section_properties.clone(),
+                    custom_root_bindings: package.document.custom_root_bindings.clone(),
                     comments: package.document.comments.clone(),
                 },
                 styles: package.styles.clone(),

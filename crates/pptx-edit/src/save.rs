@@ -5,25 +5,35 @@ use std::collections::HashMap;
 
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
-    Bullet, DeckWrite, InheritedTransform, ParagraphWrite, Placeholder, PptxPackage, RunProperties,
+    Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
+    DeckWrite, InheritedTransform, ParagraphWrite, Placeholder, PptxPackage, RunProperties,
     RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite, SlideLayout,
     SlideMaster, SlideWrite, TextTarget, TextWrite,
 };
 
+use crate::comments::{derived_guid, seeded_comment_id};
 use crate::deck::{seed_doc, snapshot_doc};
 use crate::{
-    BOOTSTRAP_CLIENT_ID, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
-    ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot, doc_with_client_id,
+    BOOTSTRAP_CLIENT_ID, CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult,
+    ParagraphSnapshot, ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
+    doc_with_client_id,
 };
 
-/// The parsed parts a slide's shapes may inherit geometry from.
+/// Source shapes and inherited geometry.
 struct SlideContext<'a> {
     layout: Option<&'a SlideLayout>,
     master: Option<&'a SlideMaster>,
+    source_shapes: &'a [ShapeNode],
 }
 
 impl<'a> SlideContext<'a> {
     fn new(package: &'a PptxPackage, snapshot: &SlideSnapshot) -> Self {
+        let source_shapes = snapshot
+            .source_part_path
+            .as_deref()
+            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path))
+            .map(|slide| slide.shapes.as_slice())
+            .unwrap_or_default();
         let layout = snapshot
             .layout_part_path
             .as_deref()
@@ -53,7 +63,11 @@ impl<'a> SlideContext<'a> {
                 })
             })
             .or_else(|| package.masters.first());
-        Self { layout, master }
+        Self {
+            layout,
+            master,
+            source_shapes,
+        }
     }
 }
 
@@ -104,11 +118,10 @@ fn deck_write(
             },
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
-                shapes: shape_writes(
-                    &slide.shapes,
-                    &base.shapes,
-                    &SlideContext::new(package, slide),
-                )?,
+                shapes: {
+                    let context = SlideContext::new(package, slide);
+                    shape_writes(&slide.shapes, &base.shapes, &context, context.source_shapes)?
+                },
             },
             None => SlideWrite::Add {
                 name: slide.name.clone(),
@@ -122,7 +135,215 @@ fn deck_write(
         };
         slides.push(write);
     }
-    Ok(DeckWrite { slides })
+    Ok(DeckWrite {
+        slides,
+        comments: comments_write(current, baseline, package),
+    })
+}
+
+fn comments_write(
+    current: &DeckSnapshot,
+    baseline: &DeckSnapshot,
+    package: &PptxPackage,
+) -> Option<CommentsWrite> {
+    if current.comments == baseline.comments && current.comment_flavor == baseline.comment_flavor {
+        return None;
+    }
+    let baseline_live: Vec<&CommentSnapshot> = baseline
+        .comments
+        .iter()
+        .filter(|comment| {
+            current
+                .slides
+                .iter()
+                .any(|slide| slide.id == comment.slide_id)
+        })
+        .collect();
+    if !current.comments.is_empty()
+        && current.comments.len() < baseline.comments.len()
+        && current.comment_flavor == baseline.comment_flavor
+        && current.comments.iter().eq(baseline_live)
+    {
+        return None;
+    }
+    let flavor = current.comment_flavor;
+    let live: Vec<&CommentSnapshot> = current
+        .comments
+        .iter()
+        .filter(|comment| {
+            current
+                .slides
+                .iter()
+                .any(|slide| slide.id == comment.slide_id)
+        })
+        .collect();
+
+    let source: HashMap<_, _> = package
+        .comments
+        .iter()
+        .enumerate()
+        .filter(|(_, comment)| comment.flavor == flavor)
+        .map(|(index, comment)| (seeded_comment_id(index, &comment.id), comment))
+        .collect();
+    let mut authors: Vec<CommentAuthorWrite> = if live.is_empty() || source.is_empty() {
+        Vec::new()
+    } else {
+        package
+            .comment_authors
+            .iter()
+            .map(|author| CommentAuthorWrite {
+                id: author.id.clone(),
+                name: author.name.clone(),
+                initials: author.initials.clone(),
+                last_index: author.last_index.unwrap_or_default(),
+                color_index: author.color_index.unwrap_or_default(),
+                user_id: author.user_id.clone(),
+                provider_id: author.provider_id.clone(),
+            })
+            .collect()
+    };
+    let mut per_slide: Vec<(CommentSlide, Vec<CommentWrite>)> = current
+        .slides
+        .iter()
+        .enumerate()
+        .map(|(index, slide)| {
+            let target = match slide.source_part_path.clone() {
+                Some(part_path) => CommentSlide::Existing(part_path),
+                None => CommentSlide::Added(index),
+            };
+            (target, Vec::new())
+        })
+        .collect();
+
+    for comment in live.iter().filter(|comment| comment.parent_id.is_none()) {
+        let Some(index) = current
+            .slides
+            .iter()
+            .position(|slide| slide.id == comment.slide_id)
+        else {
+            continue;
+        };
+        let mut write = preserved_comment(&mut authors, flavor, comment, &source);
+        if flavor == CommentFlavor::Modern {
+            for reply in live
+                .iter()
+                .filter(|reply| reply.parent_id.as_deref() == Some(comment.id.as_str()))
+            {
+                write
+                    .replies
+                    .push(preserved_comment(&mut authors, flavor, reply, &source));
+            }
+        }
+        if let Some((_, slide_comments)) = per_slide.get_mut(index) {
+            slide_comments.push(write);
+        }
+    }
+
+    Some(CommentsWrite {
+        flavor,
+        authors,
+        per_slide: per_slide
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let slide_id = &current.slides[index].id;
+                let unchanged = flavor == baseline.comment_flavor
+                    && current
+                        .comments
+                        .iter()
+                        .filter(|comment| &comment.slide_id == slide_id)
+                        .eq(baseline
+                            .comments
+                            .iter()
+                            .filter(|comment| &comment.slide_id == slide_id));
+                (!unchanged).then_some(entry)
+            })
+            .collect(),
+    })
+}
+
+fn preserved_comment(
+    authors: &mut Vec<CommentAuthorWrite>,
+    flavor: CommentFlavor,
+    comment: &CommentSnapshot,
+    source: &HashMap<String, &pptx_parse::Comment>,
+) -> CommentWrite {
+    let Some(original) = source.get(&comment.id) else {
+        for author in authors.iter_mut() {
+            author.last_index = source
+                .values()
+                .filter(|item| item.author_id == author.id)
+                .filter_map(|item| item.id.rsplit_once(':')?.1.parse::<u32>().ok())
+                .fold(author.last_index, u32::max);
+        }
+        return charge_author(authors, flavor, comment);
+    };
+    let index = original
+        .id
+        .rsplit_once(':')
+        .and_then(|(_, index)| index.parse().ok())
+        .unwrap_or(0);
+    let mut write = comment_write(comment, original.author_id.clone(), index);
+    write.id = original.id.clone();
+    if comment.resolved == (original.status.as_deref() == Some("resolved")) {
+        write.status = original.status.clone();
+    } else if !comment.resolved {
+        write.status = Some("active".to_owned());
+    }
+    write
+}
+
+fn charge_author(
+    authors: &mut Vec<CommentAuthorWrite>,
+    flavor: CommentFlavor,
+    comment: &CommentSnapshot,
+) -> CommentWrite {
+    let slot = match authors
+        .iter()
+        .position(|known| known.name == comment.author && known.initials == comment.initials)
+    {
+        Some(slot) => slot,
+        None => {
+            let slot = authors.len();
+            let id = match flavor {
+                CommentFlavor::Legacy => authors
+                    .iter()
+                    .filter_map(|author| author.id.parse::<u32>().ok())
+                    .max()
+                    .map_or(0, |id| id + 1)
+                    .to_string(),
+                CommentFlavor::Modern => {
+                    derived_guid(&format!("author:{}:{}", comment.author, comment.initials))
+                }
+            };
+            authors.push(CommentAuthorWrite {
+                id,
+                name: comment.author.clone(),
+                initials: comment.initials.clone(),
+                last_index: 0,
+                color_index: slot as u32,
+                user_id: None,
+                provider_id: None,
+            });
+            slot
+        }
+    };
+    authors[slot].last_index += 1;
+    comment_write(comment, authors[slot].id.clone(), authors[slot].last_index)
+}
+
+fn comment_write(comment: &CommentSnapshot, author_id: String, index: u32) -> CommentWrite {
+    CommentWrite {
+        id: derived_guid(&comment.id),
+        author_id,
+        index,
+        text: comment.text.clone(),
+        created: comment.created.clone(),
+        x_emu: comment.x_emu,
+        y_emu: comment.y_emu,
+        status: comment.resolved.then(|| "resolved".to_owned()),
+        replies: Vec::new(),
+    }
 }
 
 fn source_part_path(slide: &SlideSnapshot) -> EditResult<String> {
@@ -136,6 +357,7 @@ fn shape_writes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     context: &SlideContext<'_>,
+    source: &[ShapeNode],
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -145,17 +367,45 @@ fn shape_writes(
     for shape in current {
         let write = match baseline_shapes.get(shape.id.as_str()) {
             Some(base) if *base == shape => ShapeWrite::Keep {
-                source_index: source_index(&shape.id)?,
+                source_index: addressed_source_index(shape, source)?,
             },
-            Some(base) => ShapeWrite::Patch {
-                source_index: source_index(&shape.id)?,
-                patch: Box::new(shape_patch(shape, base, context)?),
-            },
+            Some(base) => {
+                let index = addressed_source_index(shape, source)?;
+                ShapeWrite::Patch {
+                    source_index: index,
+                    patch: Box::new(shape_patch(
+                        shape,
+                        base,
+                        context,
+                        group_children(source, index),
+                    )?),
+                }
+            }
             None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
         };
         writes.push(write);
     }
     Ok(writes)
+}
+
+/// Checks the source identity before resolving an ordinal.
+fn addressed_source_index(shape: &ShapeSnapshot, source: &[ShapeNode]) -> EditResult<usize> {
+    let index = source_index(&shape.id)?;
+    match source.get(index) {
+        Some(node) if node.id() == shape.source_id => Ok(index),
+        _ => Err(EditError::Write(format!(
+            "shape {} no longer addresses source shape {}: this update was seeded by a \
+             different parse of the file and has to be re-seeded from it",
+            shape.id, shape.source_id
+        ))),
+    }
+}
+
+fn group_children(source: &[ShapeNode], index: usize) -> &[ShapeNode] {
+    match source.get(index) {
+        Some(ShapeNode::Group(group)) => &group.children,
+        _ => &[],
+    }
 }
 
 fn source_index(shape_id: &str) -> EditResult<usize> {
@@ -171,6 +421,7 @@ fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
     context: &SlideContext<'_>,
+    source_children: &[ShapeNode],
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     let moved = (shape.x, shape.y) != (base.x, base.y);
@@ -231,7 +482,7 @@ fn shape_patch(
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, context)?;
+        patch.children = shape_writes(&shape.children, &base.children, context, source_children)?;
     }
     Ok(patch)
 }
@@ -386,6 +637,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
         text: run.text.clone(),
         properties: RunProperties {
             font_size_pt: run.style.font_size_pt,
+            baseline_pct: run.style.baseline_pct,
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),

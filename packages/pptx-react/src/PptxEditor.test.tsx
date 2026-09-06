@@ -5,7 +5,7 @@
  */
 
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
@@ -38,6 +38,113 @@ beforeAll(async () => {
 afterEach(cleanup);
 afterAll(async () => {
   if (ownsDom && GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
+});
+
+describe('PptxEditor PNG export', () => {
+  const cases = [
+    ['download', 'downloads the current slide'],
+    ['unmount', 'discards an export after the deck is closed'],
+    ['replace', 'discards an export after the deck is replaced'],
+    ['stale-error', 'does not report an old export error to the replacement deck'],
+    ['error', 'reports export errors while the deck is still open'],
+  ] as const;
+  for (const [scenario, title] of cases) {
+    it(
+      title,
+      async () => {
+        const originalCanvas = globalThis.OffscreenCanvas;
+        const originalBitmap = globalThis.createImageBitmap;
+        const downloads: string[] = [];
+        const errors: Error[] = [];
+        const clicked = spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+          this: HTMLAnchorElement
+        ) {
+          downloads.push(this.download);
+        });
+        const createUrl = spyOn(URL, 'createObjectURL').mockReturnValue('blob:slide-png');
+        const revokeUrl = spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+        let finishEncoding: ((blob: Blob) => void) | undefined;
+        let failEncoding: ((error: Error) => void) | undefined;
+        const encoded = new Promise<Blob>((resolve, reject) => {
+          finishEncoding = resolve;
+          failEncoding = reject;
+        });
+        let encoding = false;
+        class ExportCanvas {
+          getContext() {
+            return new Proxy({} as Record<string, unknown>, {
+              get(target, property) {
+                if (property in target) return target[property as string];
+                if (property === 'createLinearGradient' || property === 'createRadialGradient') {
+                  return () => ({ addColorStop() {} });
+                }
+                return () => {};
+              },
+            });
+          }
+          convertToBlob() {
+            encoding = true;
+            return encoded;
+          }
+        }
+        globalThis.OffscreenCanvas = ExportCanvas as unknown as typeof OffscreenCanvas;
+        globalThis.createImageBitmap = (() =>
+          Promise.resolve({} as ImageBitmap)) as typeof createImageBitmap;
+        try {
+          const opened: PptxEditorApi[] = [];
+          const view = render(
+            <PptxEditor
+              file={fixture}
+              fileName="report.pptx"
+              fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+              clientId={9102}
+              onReady={(api) => opened.push(api)}
+              onError={(error) => errors.push(error)}
+            />
+          );
+          await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+          if (!view.queryByTestId('pptx-export-png')) {
+            fireEvent.click(view.getByTestId('pptx-toolbar-more'));
+          }
+          fireEvent.click(view.getByTestId('pptx-export-png'));
+          await waitFor(() => expect(encoding).toBe(true));
+          if (scenario === 'unmount') view.unmount();
+          if (scenario === 'replace' || scenario === 'stale-error') {
+            view.rerender(
+              <PptxEditor
+                file={fixture.slice()}
+                fileName="replacement.pptx"
+                fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+                clientId={9102}
+                onReady={(api) => opened.push(api)}
+                onError={(error) => errors.push(error)}
+              />
+            );
+            await waitFor(() => expect(opened.length).toBe(2), { timeout: 15_000 });
+          }
+          const encodingError = new Error('PNG encoding failed');
+          await act(async () => {
+            if (scenario === 'stale-error' || scenario === 'error') {
+              failEncoding!(encodingError);
+            } else {
+              finishEncoding!(new Blob(['png'], { type: 'image/png' }));
+            }
+            await encoded.catch(() => {});
+          });
+          expect(downloads).toEqual(scenario === 'download' ? ['report-slide-1.png'] : []);
+          expect(errors).toEqual(scenario === 'error' ? [encodingError] : []);
+        } finally {
+          cleanup();
+          clicked.mockRestore();
+          createUrl.mockRestore();
+          revokeUrl.mockRestore();
+          globalThis.OffscreenCanvas = originalCanvas;
+          globalThis.createImageBitmap = originalBitmap;
+        }
+      },
+      60_000
+    );
+  }
 });
 
 describe('PptxEditor font stability', () => {

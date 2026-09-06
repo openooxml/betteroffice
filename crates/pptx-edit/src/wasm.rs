@@ -6,8 +6,8 @@ use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeRect, ShapeStroke,
-    TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeRect,
+    ShapeStroke, TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -63,6 +63,51 @@ struct SetParagraphAlignmentArgs {
     end: u32,
     #[serde(default)]
     alignment: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddCommentArgs {
+    slide_id: String,
+    author: String,
+    #[serde(default)]
+    initials: String,
+    text: String,
+    created: String,
+    #[serde(default)]
+    x_emu: i64,
+    #[serde(default)]
+    y_emu: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplyCommentArgs {
+    comment_id: String,
+    author: String,
+    #[serde(default)]
+    initials: String,
+    text: String,
+    created: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentStatusArgs {
+    comment_id: String,
+    resolved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentIdArgs {
+    comment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentFlavorArgs {
+    flavor: CommentFlavor,
 }
 
 #[derive(Deserialize)]
@@ -368,6 +413,77 @@ impl PptxDocument {
                 )
                 .map_err(js_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = addCommentJson)]
+    pub fn add_comment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: AddCommentArgs = parse_args(args)?;
+        json(
+            self.session
+                .add_comment(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.author,
+                    &args.initials,
+                    &args.text,
+                    &args.created,
+                    args.x_emu,
+                    args.y_emu,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = replyToCommentJson)]
+    pub fn reply_to_comment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ReplyCommentArgs = parse_args(args)?;
+        json(
+            self.session
+                .reply_to_comment(
+                    &local_context(),
+                    &args.comment_id,
+                    &args.author,
+                    &args.initials,
+                    &args.text,
+                    &args.created,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setCommentStatusJson)]
+    pub fn set_comment_status_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentStatusArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_comment_status(&local_context(), &args.comment_id, args.resolved)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = removeCommentJson)]
+    pub fn remove_comment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentIdArgs = parse_args(args)?;
+        json(
+            self.session
+                .remove_comment(&local_context(), &args.comment_id)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setCommentFlavorJson)]
+    pub fn set_comment_flavor_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentFlavorArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_comment_flavor(&local_context(), args.flavor)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = commentsJson)]
+    pub fn comments_json(&self) -> Result<String, JsValue> {
+        json(self.session.comments().map_err(js_error)?)
     }
 
     #[wasm_bindgen(js_name = insertParagraphBreakJson)]

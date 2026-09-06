@@ -5,12 +5,14 @@ export class PptxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    addCommentJson(args: string): string;
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
     canUndo(): boolean;
     clearUpdateObservation(): void;
+    commentsJson(): string;
     deleteSlideJson(args: string): string;
     deleteTextJson(args: string): string;
     drainUpdateEvent(): Uint8Array;
@@ -33,12 +35,16 @@ export class PptxDocument {
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     redoJson(): string;
+    removeCommentJson(args: string): string;
     removeShapeJson(args: string): string;
+    replyToCommentJson(args: string): string;
     resizeShapeJson(args: string): string;
     /**
      * Serializes the deck back to `.pptx` bytes, edits included.
      */
     saveBytes(): Uint8Array;
+    setCommentFlavorJson(args: string): string;
+    setCommentStatusJson(args: string): string;
     setParagraphAlignmentJson(args: string): string;
     setShapeAdjustJson(args: string): string;
     setShapeFillJson(args: string): string;
@@ -92,6 +98,7 @@ export interface InitOutput {
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
+    readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -99,6 +106,7 @@ export interface InitOutput {
     readonly pptxdocument_canUndo: (a: number) => number;
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
     readonly pptxdocument_clientId: (a: number) => number;
+    readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_drainUpdateEvent: (a: number) => [number, number];
@@ -115,9 +123,13 @@ export interface InitOutput {
     readonly pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
+    readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
