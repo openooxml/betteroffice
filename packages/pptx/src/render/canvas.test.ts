@@ -928,6 +928,107 @@ test('picture effects reach canvas before cropping without changing the shared s
   }
 });
 
+/** Installs a fake OffscreenCanvas that records each surface's size and does no pixel work. */
+async function withSurfaces(
+  run: (surfaces: { width: number; height: number }[]) => Promise<void>
+): Promise<void> {
+  const original = globalThis.OffscreenCanvas;
+  const surfaces: { width: number; height: number }[] = [];
+  class Surface {
+    constructor(public width: number, public height: number) {
+      surfaces.push({ width, height });
+    }
+    getContext() {
+      return {
+        drawImage: () => {},
+        getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+        putImageData: () => {},
+      };
+    }
+  }
+  globalThis.OffscreenCanvas = Surface as unknown as typeof OffscreenCanvas;
+  try {
+    await run(surfaces);
+  } finally {
+    if (original === undefined) Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
+    else globalThis.OffscreenCanvas = original;
+  }
+}
+
+/** Paints one picture with `effects` from `source` and returns the canvas's drawImage calls. */
+async function paintEffect(source: object, effects: ImageEffect[]): Promise<unknown[][]> {
+  const draws: unknown[][] = [];
+  const ctx = new Proxy({} as CanvasRenderingContext2D, {
+    get: (_, key) => key === 'drawImage' ? (...args: unknown[]) => draws.push(args) : () => {},
+    set: () => true,
+  });
+  await paintSlide(ctx, {
+    contractVersion: 1,
+    width: 100,
+    height: 100,
+    primitives: [
+      { kind: 'image', objectId: 1, name: 'Effect', x: 10, y: 20, w: 40, h: 10, assetId: 'image', effects },
+    ],
+  }, 1, 1, { resolveImage: async () => source as unknown as CanvasImageSource });
+  return draws;
+}
+
+test('a recolouring is reused for the same source and effects and redone for another list', async () => {
+  await withSurfaces(async (surfaces) => {
+    const source = { width: 4, height: 1 };
+    const biLevel: ImageEffect[] = [{ kind: 'biLevel', threshold: 0.25 }];
+    const first = await paintEffect(source, biLevel);
+    const second = await paintEffect(source, biLevel);
+    expect(surfaces).toHaveLength(1);
+    expect(first[0][0]).not.toBe(source);
+    expect(second[0][0]).toBe(first[0][0]);
+    await paintEffect(source, [{ kind: 'grayscale' }]);
+    expect(surfaces).toHaveLength(2);
+    await paintEffect({ width: 4, height: 1 }, biLevel);
+    expect(surfaces).toHaveLength(3);
+  });
+});
+
+test('an oversized bitmap is recoloured within the pixel cap and drawn back at picture size', async () => {
+  await withSurfaces(async (surfaces) => {
+    const draws = await paintEffect({ width: 8192, height: 8192 }, [{ kind: 'grayscale' }]);
+    expect(surfaces).toEqual([{ width: 5792, height: 5792 }]);
+    expect(draws[0].slice(1)).toEqual([0, 0, 5792, 5792, 10, 20, 40, 10]);
+    await paintEffect({ width: 8192, height: 4096 }, [{ kind: 'grayscale' }]);
+    expect(surfaces[1]).toEqual({ width: 8192, height: 4096 });
+  });
+});
+
+test('a video frame is recoloured on every paint rather than kept', async () => {
+  await withSurfaces(async (surfaces) => {
+    const video = { videoWidth: 4, videoHeight: 1 };
+    const first = await paintEffect(video, [{ kind: 'grayscale' }]);
+    const second = await paintEffect(video, [{ kind: 'grayscale' }]);
+    expect(surfaces).toEqual([{ width: 4, height: 1 }, { width: 4, height: 1 }]);
+    expect(first[0][0]).not.toBe(video);
+    expect(second[0][0]).not.toBe(first[0][0]);
+  });
+});
+
+test('retained recolourings stay within the pixel budget, dropping the least recently used', async () => {
+  await withSurfaces(async (surfaces) => {
+    const effects: ImageEffect[] = [{ kind: 'grayscale' }];
+    const a = { width: 8192, height: 4096 };
+    const b = { width: 8192, height: 4096 };
+    const c = { width: 8192, height: 4096 };
+    for (const source of [a, b, c]) await paintEffect(source, effects);
+    expect(surfaces).toHaveLength(3);
+    await paintEffect(b, effects);
+    expect(surfaces).toHaveLength(3);
+    await paintEffect(a, effects);
+    expect(surfaces).toHaveLength(4);
+    await paintEffect(b, effects);
+    expect(surfaces).toHaveLength(4);
+    await paintEffect(c, effects);
+    expect(surfaces).toHaveLength(5);
+  });
+});
+
 describe('PPTX text overflow', () => {
   function harness() {
     const calls: string[] = [];

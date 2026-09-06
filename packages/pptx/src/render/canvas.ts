@@ -391,8 +391,10 @@ async function paintImage(
   }
 }
 
-/** Matches `MAX_IMAGE_PIXELS` in pptx-raster, so both backends refuse the same bitmaps. */
+/** Matches `MAX_IMAGE_PIXELS` in pptx-raster: the most pixels one recolouring pass walks. */
 const MAX_EFFECT_PIXELS = 33_554_432;
+/** Matches `MAX_SLIDE_IMAGE_PIXELS` in pptx-raster: recoloured surfaces kept for later paints. */
+const MAX_RETAINED_EFFECT_PIXELS = 67_108_864;
 
 function imageSourceSize(source: CanvasImageSource): { width: number; height: number } | null {
   const candidate = source as {
@@ -429,7 +431,44 @@ function boundedSize(size: { width: number; height: number }): { width: number; 
   };
 }
 
-const recoloured = new WeakMap<object, Map<string, CanvasImageSource>>();
+type Recolourings = Map<string, CanvasImageSource>;
+
+const recoloured = new WeakMap<object, Recolourings>();
+/** Least recently used first; holds the surfaces, never the sources they came from. */
+const retained: { entries: Recolourings; key: string; pixels: number }[] = [];
+let retainedPixels = 0;
+
+/** A video, canvas or frame may change between paints, so its recolouring is never kept. */
+function isMutableSource(source: CanvasImageSource): boolean {
+  const candidate = source as { videoWidth?: unknown; displayWidth?: unknown; getContext?: unknown };
+  return 'videoWidth' in candidate || 'displayWidth' in candidate || typeof candidate.getContext === 'function';
+}
+
+function recallRecolouring(source: object, key: string): CanvasImageSource | undefined {
+  const entries = recoloured.get(source);
+  const surface = entries?.get(key);
+  if (!entries || !surface) return undefined;
+  const index = retained.findIndex((entry) => entry.entries === entries && entry.key === key);
+  if (index >= 0) retained.push(...retained.splice(index, 1));
+  return surface;
+}
+
+function retainRecolouring(source: object, key: string, surface: CanvasImageSource, pixels: number): void {
+  let entries = recoloured.get(source);
+  if (!entries) {
+    entries = new Map();
+    recoloured.set(source, entries);
+  }
+  entries.set(key, surface);
+  retained.push({ entries, key, pixels });
+  retainedPixels += pixels;
+  while (retainedPixels > MAX_RETAINED_EFFECT_PIXELS && retained.length > 1) {
+    const oldest = retained.shift();
+    if (!oldest) break;
+    oldest.entries.delete(oldest.key);
+    retainedPixels -= oldest.pixels;
+  }
+}
 
 function offscreen(width: number, height: number): HTMLCanvasElement | OffscreenCanvas | null {
   if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
@@ -440,13 +479,16 @@ function offscreen(width: number, height: number): HTMLCanvasElement | Offscreen
   return canvas;
 }
 
-/** Recolours readable bitmaps on a private surface, once per source and effect list. */
+/** Recolours readable bitmaps on a private surface, kept for later paints while the budget allows. */
 function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): CanvasImageSource {
   const size = imageSourceSize(source);
   if (!size) return source;
   const key = JSON.stringify(effects);
-  const cached = recoloured.get(source as object)?.get(key);
-  if (cached) return cached;
+  const reusable = !isMutableSource(source);
+  if (reusable) {
+    const cached = recallRecolouring(source as object, key);
+    if (cached) return cached;
+  }
   // A slide's bitmap is whatever the file carried, and every effect walks all of it, so
   // an oversized source is recoloured at the cap and drawn back up to size.
   const bounds = boundedSize(size);
@@ -459,12 +501,7 @@ function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): Canva
     applyImageEffects(data.data, effects);
     ctx.putImageData(data, 0, 0);
     const result = canvas as CanvasImageSource;
-    let entries = recoloured.get(source as object);
-    if (!entries) {
-      entries = new Map();
-      recoloured.set(source as object, entries);
-    }
-    entries.set(key, result);
+    if (reusable) retainRecolouring(source as object, key, result, bounds.width * bounds.height);
     return result;
   } catch {
     return source;
